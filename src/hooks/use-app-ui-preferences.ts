@@ -24,8 +24,20 @@ export function registerAppUiPreferenceFlusher(flush: () => void): () => void {
 export async function flushAppUiPreferenceWrites(): Promise<void> {
   // Drain player buffers into one shared IPC batch before the app write barrier.
   for (const flush of preferenceFlushers) flush();
-  await flushPendingPreferences?.();
-  await settleOptimisticQueryWrites([APP_UI_PREFERENCES_QUERY_KEY]);
+  // A patch landing mid-drain (a debounce timer or unmount flush racing the
+  // barrier) re-arms `flushPendingPreferences` — keep draining until no
+  // pending flush survives a full settle, or close/export strands it on a
+  // timer that never runs.
+  for (;;) {
+    const pending = flushPendingPreferences;
+    if (!pending) break;
+    // Sequential on purpose: the settle must observe the tail the drain
+    // just registered — `Promise.all` would race it.
+    // eslint-disable-next-line no-await-in-loop
+    await pending();
+    // eslint-disable-next-line no-await-in-loop
+    await settleOptimisticQueryWrites([APP_UI_PREFERENCES_QUERY_KEY]);
+  }
 }
 registerPendingAppWriteFlusher(flushAppUiPreferenceWrites);
 
@@ -196,6 +208,9 @@ export function useAppUiPreferences() {
 
   return {
     preferences: currentPreferences,
+    // Placeholder defaults stand in until hydration lands — controls that
+    // write whole fields should hold off so an early gesture can't flap.
+    isHydrating: preferencesQuery.isPlaceholderData,
     updatePreferences,
   };
 }

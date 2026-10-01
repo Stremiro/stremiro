@@ -210,7 +210,9 @@ export function buildStreamCacheKey(
 }
 
 export function buildMediaDetailsCacheKey(type: string, id: string): string {
-  return `${type.trim().toLowerCase()}|${id.trim()}`;
+  // Structural encoding like buildStreamCacheKey: `normalize_media_id`
+  // permits `|` in ids, so a joined key can alias distinct pairs.
+  return JSON.stringify([type.trim().toLowerCase(), id.trim()]);
 }
 
 // Watch-history delete epoch: a `saveWatchProgress` write queued before a

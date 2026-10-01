@@ -27,8 +27,10 @@ use tauri::ipc::Channel;
 use tauri::AppHandle;
 
 // Primary addon lookups get the most budget, bounded so one unhealthy source
-// cannot dominate selector open time.
-const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 14;
+// cannot dominate selector open time. Matches the resource request budget:
+// a slow-but-alive source must outlive slow international routes without
+// paying the transport-failure cooldown on every selector open.
+const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 20;
 // Lookup fallbacks are best-effort and fail fast — the first ID already
 // produced nothing usable.
 const ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS: u64 = 5;

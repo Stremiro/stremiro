@@ -42,6 +42,14 @@ export async function flushPendingPlaybackLanguagePreferences(): Promise<void> {
 }
 registerPendingAppWriteFlusher(flushPendingPlaybackLanguagePreferences);
 
+/// Drop the module snapshot when durable state changed out-of-band (backup
+/// restore): the next save must re-hydrate instead of composing a
+/// whole-snapshot write over the imported values.
+export function resetPlaybackLanguagePreferencesSnapshot() {
+  globalPlaybackPreferences = {};
+  globalPlaybackPreferencesHydrated = false;
+}
+
 interface UsePlaybackLanguagePreferencesOptions {
   mediaId?: string;
   mediaType?: 'movie' | 'series' | 'anime';

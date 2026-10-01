@@ -240,7 +240,7 @@ function AppUiPreferenceToggle({
   label: string;
   description: string;
 }) {
-  const { preferences, updatePreferences } = appUiPreferences;
+  const { preferences, updatePreferences, isHydrating } = appUiPreferences;
   const checked = preferences[field];
 
   return (
@@ -248,6 +248,7 @@ function AppUiPreferenceToggle({
       <SettingsSwitch
         ariaLabel={label}
         checked={checked}
+        disabled={isHydrating}
         onChange={() => {
           const patch: AppUiPreferencesPatch = {};
           patch[field] = !checked;

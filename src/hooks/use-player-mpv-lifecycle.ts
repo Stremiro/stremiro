@@ -319,6 +319,14 @@ export function usePlayerMpvLifecycle({
           clearInterval(positionPollTimer);
           positionPollTimer = null;
           if (isDev) console.warn('[player] position probe stopped: mpv IPC unreachable');
+          // mpv itself is unreachable — every control silently no-ops from
+          // here and the frame is frozen. A dead IPC is a player fault, not
+          // a stream fault: surface the dead end (retry re-inits mpv via a
+          // fresh resolve) without benching an innocent source. The
+          // error/resolving gates match the idle-dead verdict's.
+          if (!errorRef.current && !isResolvingRef.current) {
+            setError('The player stopped responding. Try again.');
+          }
         }
       } finally {
         positionPollInFlight = false;

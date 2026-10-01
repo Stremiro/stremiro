@@ -37,16 +37,21 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
   // left no library row, so those titles could never surface in the profile.
   // Re-marking on sight converges the stores; the remove path clears the
   // status too, so this can't re-add what was deliberately untracked.
-  const healRequestedRef = useRef(false);
+  const healInFlightRef = useRef(false);
   useEffect(() => {
-    if (healRequestedRef.current || !item || !watchStatus || !libraryRead || isInLibrary) {
+    if (healInFlightRef.current || !item || !watchStatus || !libraryRead || isInLibrary) {
       return;
     }
-    healRequestedRef.current = true;
+    healInFlightRef.current = true;
     void api
       .addToLibrary(item)
       .then(() => invalidateLibraryQueries(queryClient))
-      .catch(() => undefined);
+      .catch(() => {
+        // A transient write failure releases the guard so the next data
+        // change can retry — a latched-out heal would hide the title from
+        // the library for the rest of the mount.
+        healInFlightRef.current = false;
+      });
   }, [item, watchStatus, isInLibrary, libraryRead, queryClient]);
 
   const watchStatusMutation = useMutation<

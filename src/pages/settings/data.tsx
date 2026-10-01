@@ -4,9 +4,11 @@ import { AlertTriangle, Download, Loader2, type LucideIcon, Upload } from 'lucid
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
+import { resetPlaybackLanguagePreferencesSnapshot } from '@/hooks/use-playback-language-preferences';
 import { api, getErrorMessage } from '@/lib/api';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import {
+  ADDON_CONFIGS_QUERY_KEY,
   DATA_STATS_QUERY_KEY,
   DATA_STATS_STALE_TIME_MS,
   invalidateDataStatsQuery,
@@ -16,6 +18,9 @@ import {
   invalidateSettingsQueries,
   invalidateStoredDataQueries,
   invalidateWatchStatusQueries,
+  PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+  PROFILE_PREFERENCES_QUERY_KEY,
+  STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 import { SETTINGS_OUTLINE_BUTTON_CLASS, SettingsGroup, SettingsGroupHeader } from './chrome';
@@ -73,6 +78,23 @@ function BackupRestore() {
 
       await flushPendingAppWrites();
       const result = await api.importAppDataFromFile(selected);
+      // Whole-snapshot writers (profile, language prefs, selector prefs,
+      // the addon list) compose writes from cached/module state — reset,
+      // not just invalidate, so a settings write landing before the
+      // refetch can't re-persist pre-import values over the restore. The
+      // addon reset also gates the list editor (`isLoading` → `isWorking`)
+      // until the fresh registry lands.
+      if (result.settings_restored) {
+        resetPlaybackLanguagePreferencesSnapshot();
+        await Promise.all([
+          queryClient.resetQueries({ queryKey: PROFILE_PREFERENCES_QUERY_KEY }),
+          queryClient.resetQueries({ queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY }),
+          queryClient.resetQueries({ queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY }),
+        ]);
+      }
+      if (result.settings_restored || result.addons_imported > 0) {
+        await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
+      }
       await Promise.all([
         invalidateStoredDataQueries(queryClient),
         (result.settings_restored || result.addons_imported > 0) &&

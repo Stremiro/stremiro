@@ -26,6 +26,16 @@ const MAX_SUBTITLES_TOTAL: usize = 200;
 /// answered by the highest-priority meta addon, so the rest of the registry
 /// only joins after the primary stalls past this window or fails.
 const META_HEDGE_DELAY: Duration = Duration::from_millis(400);
+/// A ready lower-priority meta result waits this long for a still-pending
+/// higher-priority source; past the grace the ready result wins, so a dead
+/// primary holds a live fallback for at most this window instead of its full
+/// request timeout.
+const META_FALLBACK_GRACE: Duration = Duration::from_millis(2_500);
+/// Multi-source resource fan-outs grant stragglers this grace after the
+/// first source answers (success or failure), instead of stalling the
+/// merged result on a dead host's full timeout. Before the first answer the
+/// wait continues — on a slow network every source may be legitimately late.
+const RESOURCE_STRAGGLER_GRACE: Duration = Duration::from_secs(10);
 /// Failed install-time manifest fetches leave an addon unclassified; the
 /// background retry is throttled so a permanently down addon costs one
 /// bounded manifest request per cooldown window, not one per resource call.
@@ -324,6 +334,38 @@ struct CatalogWorkItem {
     extras: Vec<CatalogExtra>,
 }
 
+/// Drain a bounded fan-out stream, dropping stragglers `grace` after the
+/// first item has arrived: a dead host then stalls the merged result for
+/// the grace, not its full request timeout. With nothing arrived the wait
+/// continues past the grace — on a slow network every source may be
+/// legitimately late, and each source's own request timeout still bounds
+/// the first answer. Items still in flight at the break are cancelled
+/// (dropped futures).
+async fn collect_with_deadline<S, T>(mut outcomes: S, grace: Duration) -> Vec<T>
+where
+    S: stream::Stream<Item = T> + Unpin,
+{
+    let mut collected = Vec::new();
+    // Disarmed until the first arrival; `reset` re-arms it then.
+    let straggler_deadline = tokio::time::sleep(grace);
+    tokio::pin!(straggler_deadline);
+    loop {
+        tokio::select! {
+            next = outcomes.next() => {
+                let Some(item) = next else { break };
+                if collected.is_empty() {
+                    straggler_deadline
+                        .as_mut()
+                        .reset(tokio::time::Instant::now() + grace);
+                }
+                collected.push(item);
+            }
+            _ = &mut straggler_deadline, if !collected.is_empty() => break,
+        }
+    }
+    collected
+}
+
 /// Runs every work item through one `buffer_unordered` pool so a multi-group
 /// request (e.g. a search or browse fan-out across genres) stays inside
 /// `ADDON_RESOURCE_CONCURRENCY` instead of multiplying the cap per group.
@@ -333,19 +375,21 @@ async fn run_catalog_work_pool(
     work: Vec<CatalogWorkItem>,
     group_count: usize,
 ) -> Vec<Vec<Result<CatalogPage, String>>> {
-    let outcomes = stream::iter(work.into_iter().map(|item| async move {
-        let result = client
-            .fetch_catalog(
-                &item.addon.url,
-                &item.media_type,
-                &item.catalog_id,
-                &item.extras,
-            )
-            .await;
-        (item.group, item.order, result)
-    }))
-    .buffer_unordered(ADDON_RESOURCE_CONCURRENCY)
-    .collect::<Vec<_>>()
+    let outcomes = collect_with_deadline(
+        stream::iter(work.into_iter().map(|item| async move {
+            let result = client
+                .fetch_catalog(
+                    &item.addon.url,
+                    &item.media_type,
+                    &item.catalog_id,
+                    &item.extras,
+                )
+                .await;
+            (item.group, item.order, result)
+        }))
+        .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
+        RESOURCE_STRAGGLER_GRACE,
+    )
     .await;
 
     let mut grouped: Vec<Vec<(usize, Result<CatalogPage, String>)>> =
@@ -559,38 +603,96 @@ pub async fn fetch_meta_details(
 
     // Hedged start: the first capable source runs alone until it settles or
     // the hedge window expires, then the rest of the registry joins.
-    // `FuturesOrdered` still yields in addon order, so the first success in
-    // user order wins and drops the tail exactly as before.
-    let mut last_error: Option<String> = None;
+    let mut first_error: Option<String> = None;
     let hedged = tokio::select! {
         result = &mut first_fetch => match result {
             Ok(details) => return Ok(details),
             Err(error) => {
-                last_error = Some(error);
+                first_error = Some(error);
                 false
             }
         },
         _ = &mut hedge => true,
     };
 
-    let mut outcomes = futures_util::stream::FuturesOrdered::new();
+    // Sources race in completion order, tagged by registry rank. The first
+    // success wins once nothing better-ranked is still pending; while a
+    // better-ranked source is pending, a ready result waits out one
+    // META_FALLBACK_GRACE window — a dead primary holds a live fallback for
+    // the grace, not its full request timeout.
+    type RankedMetaFetch<'a> = std::pin::Pin<
+        Box<dyn std::future::Future<Output = (usize, Result<MediaDetails, String>)> + Send + 'a>,
+    >;
+    let mut outcomes = futures_util::stream::FuturesUnordered::<RankedMetaFetch<'_>>::new();
+    let mut pending = HashSet::new();
     if hedged {
         // Still in flight: it keeps its rank-0 slot so a slow-but-valid
-        // primary is preferred over a faster secondary.
-        outcomes.push_back(first_fetch);
+        // primary is preferred over a faster secondary inside the grace.
+        pending.insert(0);
+        outcomes.push(Box::pin(async move { (0usize, first_fetch.await) }));
     }
-    for addon in targets {
-        outcomes.push_back(make_fetch(addon));
+    for (offset, addon) in targets.enumerate() {
+        let index = offset + 1;
+        // Capture the closure by reference: each moved future needs it, and
+        // it only borrows `client` for the function's own scope.
+        let make_fetch = &make_fetch;
+        pending.insert(index);
+        outcomes.push(Box::pin(async move { (index, make_fetch(addon).await) }));
     }
 
-    while let Some(result) = outcomes.next().await {
-        match result {
-            Ok(details) => return Ok(details),
-            Err(error) => last_error = Some(error),
+    let mut best_ok: Option<(usize, MediaDetails)> = None;
+    let mut errors: Vec<(usize, String)> = Vec::new();
+    if let Some(error) = first_error {
+        errors.push((0, error));
+    }
+    let mut grace_deadline: Option<tokio::time::Instant> = None;
+
+    while !pending.is_empty() {
+        // Copy for the async-move branch so the select handler can re-arm.
+        let deadline = grace_deadline;
+        tokio::select! {
+            next = outcomes.next() => {
+                let Some((index, result)) = next else { break };
+                pending.remove(&index);
+                match result {
+                    Ok(details) => {
+                        let is_better = best_ok
+                            .as_ref()
+                            .is_none_or(|(best_index, _)| index < *best_index);
+                        if is_better {
+                            best_ok = Some((index, details));
+                            grace_deadline
+                                .get_or_insert_with(|| {
+                                    tokio::time::Instant::now() + META_FALLBACK_GRACE
+                                });
+                        }
+                    }
+                    Err(error) => errors.push((index, error)),
+                }
+                if best_ok.as_ref().is_some_and(|(best_index, _)| {
+                    !pending.iter().any(|pending_index| *pending_index < *best_index)
+                }) {
+                    break;
+                }
+            }
+            _ = async move {
+                match deadline {
+                    Some(instant) => tokio::time::sleep_until(instant).await,
+                    None => std::future::pending().await,
+                }
+            } => break,
         }
     }
 
-    Err(last_error.unwrap_or_else(|| "Metadata not found.".to_string()))
+    if let Some((_, details)) = best_ok {
+        return Ok(details);
+    }
+
+    Err(errors
+        .into_iter()
+        .min_by_key(|(index, _)| *index)
+        .map(|(_, error)| error)
+        .unwrap_or_else(|| "Metadata not found.".to_string()))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -629,16 +731,18 @@ pub async fn fetch_addon_subtitles(
         ));
     }
 
-    let mut outcomes = stream::iter(targets.into_iter().enumerate().map(|(index, addon)| {
-        let type_ = type_.to_string();
-        let id = id.to_string();
-        async move {
-            let result = client.fetch_subtitles(&addon.url, &type_, &id).await;
-            (index, addon, result)
-        }
-    }))
-    .buffer_unordered(ADDON_RESOURCE_CONCURRENCY)
-    .collect::<Vec<_>>()
+    let mut outcomes = collect_with_deadline(
+        stream::iter(targets.into_iter().enumerate().map(|(index, addon)| {
+            let type_ = type_.to_string();
+            let id = id.to_string();
+            async move {
+                let result = client.fetch_subtitles(&addon.url, &type_, &id).await;
+                (index, addon, result)
+            }
+        }))
+        .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
+        RESOURCE_STRAGGLER_GRACE,
+    )
     .await;
     outcomes.sort_by_key(|(index, _, _)| *index);
 

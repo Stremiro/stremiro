@@ -19,7 +19,16 @@ use urlencoding::encode;
 const CATALOG_MAX_BYTES: usize = 2 * 1024 * 1024;
 const META_MAX_BYTES: usize = 4 * 1024 * 1024;
 const SUBTITLE_MAX_BYTES: usize = 512 * 1024;
-const RESOURCE_TIMEOUT_SECS: u64 = 10;
+/// Per-request budget for catalog/meta/subtitle payloads. Catalog pages run
+/// ~0.5-0.7MiB decompressed, so a tight budget misreads slow international
+/// routes as dead hosts; 20s keeps genuine reachability failures bounded by
+/// the post-failure cooldown below.
+const RESOURCE_TIMEOUT_SECS: u64 = 20;
+/// Retry contract mirrored from the stream transport: one retry after a
+/// short back-off before a transport failure earns the addon cooldown, so a
+/// single hiccup can't mark a whole source down for the window.
+const RESOURCE_FETCH_ATTEMPTS: u8 = 2;
+const RESOURCE_RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
 const MAX_TRAILERS: usize = 32;
@@ -201,7 +210,10 @@ fn resource_cooldown_error() -> String {
 /// shared by all resource kinds. Deterministic failures land in a short-TTL
 /// negative cache; transport failures mark the addon's host down for
 /// `RESOURCE_FETCH_FAILURE_TTL` so a dead addon stops stalling every
-/// browse/details request — the same policy the stream transport applies.
+/// browse/details request — the same policy the stream transport applies,
+/// including its retry: a transport failure gets one back-off retry unless
+/// the attempt already burned the full request timeout (the host had its
+/// chance — a second wait would only double a dead source's stall).
 async fn cached_resource<T, Fetch, Fut, IsEmpty>(
     client: &AddonResourceClient,
     cache: &TtlCache<T>,
@@ -212,7 +224,7 @@ async fn cached_resource<T, Fetch, Fut, IsEmpty>(
 ) -> Result<T, String>
 where
     T: Clone,
-    Fetch: FnOnce() -> Fut,
+    Fetch: Fn() -> Fut,
     Fut: std::future::Future<Output = Result<T, ResourceFetchError>>,
     IsEmpty: Fn(&T) -> bool,
 {
@@ -240,26 +252,38 @@ where
             Err(resource_cooldown_error())
         } else {
             let generation = client.generation.load(Ordering::SeqCst);
-            match fetch().await {
-                Ok(value) => {
-                    // A success proves the host reachable — drop a cooldown
-                    // a concurrent same-addon fetch recorded.
-                    client.clear_fetch_failure(addon_key, generation);
-                    // A clear_cache between fetch start and store drops the
-                    // write under the entries lock, so post-change callers
-                    // never read pre-change data.
-                    cache.put(key, value.clone(), is_empty(&value), || {
-                        client.generation.load(Ordering::SeqCst) == generation
-                    });
-                    Ok(value)
+            let mut attempt = 0u8;
+            loop {
+                if attempt > 0 {
+                    tokio::time::sleep(RESOURCE_RETRY_BACKOFF).await;
                 }
-                Err(ResourceFetchError::Deterministic(error)) => {
-                    client.cache_failure(key, &error, generation);
-                    Err(error)
-                }
-                Err(ResourceFetchError::Transport(error)) => {
-                    client.note_fetch_failure(addon_key, generation);
-                    Err(error)
+                let started_at = Instant::now();
+                match fetch().await {
+                    Ok(value) => {
+                        // A success proves the host reachable — drop a cooldown
+                        // a concurrent same-addon fetch recorded.
+                        client.clear_fetch_failure(addon_key, generation);
+                        // A clear_cache between fetch start and store drops the
+                        // write under the entries lock, so post-change callers
+                        // never read pre-change data.
+                        cache.put(key, value.clone(), is_empty(&value), || {
+                            client.generation.load(Ordering::SeqCst) == generation
+                        });
+                        break Ok(value);
+                    }
+                    Err(ResourceFetchError::Deterministic(error)) => {
+                        client.cache_failure(key, &error, generation);
+                        break Err(error);
+                    }
+                    Err(ResourceFetchError::Transport(error)) => {
+                        attempt += 1;
+                        let burned_timeout =
+                            started_at.elapsed() >= Duration::from_secs(RESOURCE_TIMEOUT_SECS);
+                        if attempt >= RESOURCE_FETCH_ATTEMPTS || burned_timeout {
+                            client.note_fetch_failure(addon_key, generation);
+                            break Err(error);
+                        }
+                    }
                 }
             }
         }

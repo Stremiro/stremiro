@@ -132,13 +132,13 @@ export async function saveLastNotifiedAppUpdateVersion(
 ): Promise<string | null> {
   if (!isTauriDesktopRuntime()) return null;
 
-  try {
-    return await invoke<string | null>('save_last_notified_app_update_version', {
-      version,
-    });
-  } catch {
-    return null;
-  }
+  // Let IPC failures propagate: callers recording the result as "saved"
+  // (the optimistic cache write) must not treat a write that never landed
+  // as success — a swallowed failure would masquerade as "never notified"
+  // and re-announce the same release.
+  return invoke<string | null>('save_last_notified_app_update_version', {
+    version,
+  });
 }
 
 export async function getCurrentAppVersion(): Promise<string | null> {
@@ -155,7 +155,8 @@ async function checkForAppUpdate(): Promise<AppUpdateHandle | null> {
 
   const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
   if (!update) {
-    await saveLastNotifiedAppUpdateVersion(null);
+    // Housekeeping clear — a failed write must not fail the check itself.
+    await saveLastNotifiedAppUpdateVersion(null).catch(() => undefined);
     return null;
   }
 

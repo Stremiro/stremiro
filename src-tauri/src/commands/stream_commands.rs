@@ -41,7 +41,6 @@ pub async fn get_stream_selector_data(
     playback_state: State<'_, PlaybackStateService>,
     provider: State<'_, AddonTransport>,
     on_progress: Channel<serde_json::Value>,
-    emit_progress: Option<bool>,
     media_type: String,
     id: String,
     season: Option<u32>,
@@ -75,9 +74,7 @@ pub async fn get_stream_selector_data(
         &provider,
         &query.request(&query.id),
         &query.ranking,
-        // Tauri channels can't be Option — keepalive callers pass a channel
-        // they ignore and flip this off so snapshots aren't serialized at all.
-        emit_progress.unwrap_or(true).then_some(&on_progress),
+        Some(&on_progress),
     )
     .await
     .map(|(data, _is_final_season)| data)

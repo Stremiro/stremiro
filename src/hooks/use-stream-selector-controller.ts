@@ -114,6 +114,7 @@ export function useStreamSelectorController({
     data: addonConfigs = [],
     refetch: refetchAddonConfigs,
     isLoading: isLoadingAddonConfigs,
+    error: addonConfigsError,
   } = useAddonConfigs({ enabled: open && isOnline });
 
   const enabledAddons = useMemo(
@@ -238,9 +239,14 @@ export function useStreamSelectorController({
     [streams, effectiveFilters],
   );
 
+  // A failed addon-config read must not masquerade as "no addons enabled" —
+  // surface it as the retryable error it is once nothing is still loading.
   const fatalAddonError =
     streams.length === 0
-      ? (streamSelectorData?.fatalErrorMessage ?? streamSelectorDataError ?? null)
+      ? (streamSelectorData?.fatalErrorMessage ??
+        streamSelectorDataError ??
+        (isFetchingStreamSelectorData || isLoadingAddonConfigs ? null : addonConfigsError) ??
+        null)
       : null;
 
   // Cache snapshots do not end the query's fetch. Its fetch state also

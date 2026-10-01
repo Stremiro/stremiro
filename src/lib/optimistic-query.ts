@@ -11,6 +11,11 @@ interface RunOptimisticQueryMutationOptions<TData, TVariables> {
 
 // Serialize native writes per query key; only the newest write owns the cache.
 const writeTails = new Map<string, Promise<unknown>>();
+// Monotonic write generations per key: a refetch racing the write chain can
+// overwrite the optimistic marker with stale server data, so ownership is
+// "latest requested write" — never payload identity.
+const writeGenerations = new Map<string, number>();
+let nextWriteGeneration = 0;
 
 /** Wait for writes already queued before a backup reads or restores settings. */
 export async function settleOptimisticQueryWrites(queryKeys: readonly QueryKey[]): Promise<void> {
@@ -28,27 +33,24 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
   variables,
 }: RunOptimisticQueryMutationOptions<TData, TVariables>): Promise<TData> {
   void queryClient.cancelQueries({ queryKey, exact: true });
-  const cachedOptimisticData = queryClient.setQueryData<TData>(queryKey, optimisticData);
+  queryClient.setQueryData<TData>(queryKey, optimisticData);
 
   const queueId = JSON.stringify(queryKey);
+  const generation = ++nextWriteGeneration;
+  writeGenerations.set(queueId, generation);
+  const isNewestWrite = () => writeGenerations.get(queueId) === generation;
   const previous = writeTails.get(queueId) ?? Promise.resolve();
   const current = previous
     .catch(() => {})
     .then(async () => {
       try {
         const savedValue = await mutate(variables);
-        if (
-          writeTails.get(queueId) === current &&
-          queryClient.getQueryData<TData>(queryKey) === cachedOptimisticData
-        ) {
+        if (isNewestWrite()) {
           queryClient.setQueryData<TData>(queryKey, savedValue);
         }
         return savedValue;
       } catch (error) {
-        if (
-          writeTails.get(queueId) === current &&
-          queryClient.getQueryData<TData>(queryKey) === cachedOptimisticData
-        ) {
+        if (isNewestWrite()) {
           await queryClient.invalidateQueries({ queryKey });
         }
         throw error;
@@ -58,6 +60,7 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
   const cleanup = () => {
     if (writeTails.get(queueId) === current) {
       writeTails.delete(queueId);
+      writeGenerations.delete(queueId);
     }
   };
   void current.then(cleanup, cleanup);
