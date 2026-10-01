@@ -53,7 +53,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI2MDg0NEY4QTY2NUE5MDcKUldRSHFXV20rRVFJSmdWRFVUWUwxUzdKREZiSFJqT041N2o1TWRLSkx3YWlzMGcrQUs1ZE9PS1UK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0NjZDRDdFMzZGQjM2RTMKUldUak52czJmczFtUk0xR3p3ZWRiekRWTWZGeURqbHVaaEJNajVDOGFtSVZVOXdoWG5LVXpFZlEK",
       "endpoints": [
         "https://github.com/stremiro/stremiro/releases/latest/download/latest.json"
       ],
