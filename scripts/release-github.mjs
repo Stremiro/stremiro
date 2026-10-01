@@ -50,27 +50,34 @@ if (!['manifest', 'publish'].includes(mode)) {
   fail('Usage: bun ./scripts/release-github.mjs <manifest|publish> [--notes <file>] [--draft]');
 }
 
-// The updater downloads the `.nsis.zip` bundle, not the raw installer —
-// the .exe ships on the release for manual installs only.
+// The updater consumes whichever bundle the toolchain signed: newer CLI
+// versions sign the -setup.exe directly, older ones wrap it in a
+// -setup.nsis.zip. Prefer the zip when both exist.
 function findInstallerAssets() {
   if (!fs.existsSync(bundleDir)) {
     fail(`No NSIS bundle directory at ${bundleDir} — run bun run tauri:build first.`);
   }
   const entries = fs.readdirSync(bundleDir);
-  const updaterBundle = entries.find((name) => /-(?:x64|arm64)-setup\.nsis\.zip$/.test(name));
-  if (!updaterBundle) {
-    fail(
-      `No *-setup.nsis.zip updater bundle in ${bundleDir}. Updater artifacts require a signed build (bun run tauri:build, not :unsigned).`,
-    );
+  // Match the exact current product+version so a stale installer left in the
+  // bundle dir can never be shipped by accident.
+  const stem = `${tauriConfig.productName}_${version}_`;
+  const installer = entries.find(
+    (name) => name.startsWith(stem) && /_(?:x64|arm64)-setup\.exe$/.test(name),
+  );
+  if (!installer) {
+    fail(`No ${stem}*-setup.exe found in ${bundleDir}.`);
   }
+  const zipBundle = entries.find(
+    (name) => name.startsWith(stem) && name.endsWith('-setup.nsis.zip'),
+  );
+  const updaterBundle = zipBundle ?? installer;
   const updaterSignature = `${updaterBundle}.sig`;
   if (!entries.includes(updaterSignature)) {
-    fail(`Missing updater signature ${updaterSignature}.`);
+    fail(
+      `Missing updater signature ${updaterSignature}. Signed artifacts require a signed build (bun run tauri:build, not :unsigned).`,
+    );
   }
-  const installer = updaterBundle.replace(/\.nsis\.zip$/, '.exe');
-  const platform = updaterBundle.includes('-x64-setup.nsis.zip')
-    ? 'windows-x86_64'
-    : 'windows-aarch64';
+  const platform = installer.includes('_x64-setup.exe') ? 'windows-x86_64' : 'windows-aarch64';
   return { updaterBundle, updaterSignature, installer, platform, entries };
 }
 
@@ -113,9 +120,12 @@ function publishRelease() {
 
   writeManifest();
   const { updaterBundle, updaterSignature, installer, entries } = findInstallerAssets();
-  // Upload every bundle artifact: the updater consumes the nsis.zip pair,
-  // the raw installer (+ its sig) serves manual installs.
-  const assets = [updaterBundle, updaterSignature, installer, `${installer}.sig`, 'latest.json']
+  // Upload every bundle artifact: the updater consumes whichever bundle the
+  // manifest points at (nsis.zip when present, else the exe), and the raw
+  // installer serves manual installs.
+  const assets = [
+    ...new Set([updaterBundle, updaterSignature, installer, `${installer}.sig`, 'latest.json']),
+  ]
     .filter((name) => entries.includes(name) || name === 'latest.json')
     .map((name) => path.join(bundleDir, name));
   const notesArgs = notesPath ? ['--notes-file', notesPath] : ['--notes', `Stremiro ${tag}`];
