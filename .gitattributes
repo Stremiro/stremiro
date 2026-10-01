@@ -1,0 +1,5 @@
+# Collapse generated/binary files out of diffs and GitHub language stats
+bun.lock linguist-generated=true
+src-tauri/Cargo.lock linguist-generated=true
+*.png binary
+*.ico binary
