@@ -1,0 +1,41 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "typescript", "unicorn", "oxc", "import", "jsx-a11y"],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "warn",
+    "perf": "warn"
+  },
+  "rules": {
+    "react/exhaustive-deps": "error",
+    // React Compiler lint variants — the compiler runs in the Vite build and
+    // bails out on these deliberate patterns; the lint rules would only warn.
+    "react/incompatible-library": "off",
+    "react/preserve-manual-memoization": "off",
+    // player.tsx reads miniPositionRef.current during render to seed
+    // initialPosition — a mount-time read the rule forbids.
+    "react/refs": "off",
+    // Dep lists deliberately carry reset keys (activeStreamUrl, resetKey,
+    // nonces) and the effects they re-run intentionally set state on media
+    // change (e.g. resetStreamScopedState) — 22 deliberate sites.
+    "react/set-state-in-effect": "off",
+    // Automatic JSX runtime (react-jsx) — importing React in scope is not required.
+    "react/react-in-jsx-scope": "off",
+    // React Compiler variants of the hooks dep rules — dep lists deliberately
+    // carry reset keys (activeStreamUrl, resetKey, nonces) that re-run effects
+    // on media change.
+    "react/exhaustive-effect-dependencies": "off",
+    "react/memo-dependencies": "off",
+    // `type_` is the generated binding name for Rust's `r#type` DTO field.
+    "no-underscore-dangle": ["warn", { "allow": ["type_"] }],
+    // The global stylesheet is a deliberate side-effect import in main.tsx.
+    "import/no-unassigned-import": ["warn", { "allow": ["**/*.css"] }],
+    // Deliberate ARIA roles on custom controls: role=group is the correct APG
+    // pattern for segmented button groups, role=list/listitem wraps
+    // virtualized rows, and portaled slider/dialog/progressbar surfaces can't
+    // use the native elements. Genuine swaps (status→output, complementary→
+    // aside) were applied where the content model allows them.
+    "jsx-a11y/prefer-tag-over-role": "off"
+  },
+  "ignorePatterns": ["dist/**", "src-tauri/**", "node_modules/**"]
+}

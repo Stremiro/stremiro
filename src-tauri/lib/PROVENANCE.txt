@@ -1,0 +1,35 @@
+Native runtime pair provenance — verified 2026-09-16
+=====================================================
+
+The two DLLs in this directory are the packaged libmpv pair
+(tauri.conf.json ships lib/*.dll as resources). Assert-NativeRuntimePair in
+scripts/build-tauri.ps1 fails packaging if this pair is missing, duplicated,
+locked, or diverges from a dev-time copy at src-tauri/.
+
+libmpv-2.dll
+  Product      : mpv (libmpv client API)
+  Version      : v0.41.0-157-gdb22a4528 (embedded FileVersion/ProductVersion)
+  Architecture : x86_64 (Windows)
+  Size         : 95,792,128 bytes
+  SHA-256      : C47E0F103169C834AD686AA998E041FD6C8520937EDCDA75A5D107923F41D470
+  Source       : prebuilt Windows mpv binary; upstream https://mpv.io
+                 (exact distribution build unverified — record download URL
+                 here when the DLL is next updated)
+  License      : mpv is GPL-2.0-or-later by default (LGPL-2.1-or-later when
+                 built with --enable-libmpv-shared and no GPL components);
+                 confirm the distributed build's configure flags on update.
+  Runtime reqs : none beyond the OS (self-contained build).
+
+libmpv-wrapper.dll
+  Product      : tauri-plugin-libmpv native bridge
+  Version      : 0.3.2 (pairs with crates.io tauri-plugin-libmpv 0.3.2 and
+                 npm tauri-plugin-libmpv-api 0.3.2; no embedded version info)
+  Architecture : x86_64 (Windows)
+  Size         : 391,680 bytes
+  SHA-256      : 0D5ADEAD5F175C55E0790A80924EC0A2636F72E3675C79A6D9D9568B2ED2384A
+  Source       : https://github.com/nini22P/tauri-plugin-libmpv
+  License      : MPL-2.0 (per tauri-plugin-libmpv-api package manifest)
+
+Update procedure: replace both DLLs as a pair, re-record size/SHA-256/version
+above, and let Assert-NativeRuntimePair verify the staged set. Never ship a
+wrapper built for a different libmpv ABI than the DLL beside it.

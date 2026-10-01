@@ -1,0 +1,75 @@
+# Logs
+logs
+*.log
+
+node_modules
+dist
+*.local
+src-tauri/target
+src-tauri/.cargo
+
+# Editor directories and files
+.vscode/
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# AI / IDE agent rule directories (local only)
+.claude/
+.cursor/
+.windsurf/
+.codeium/
+.trae/
+.kilocode/
+.factory/
+.codex/
+
+# Internal workflow docs and dev artifacts — local only, never shipped
+AGENTS.md
+CLEANUP.md
+CLEANUP_LOG.md
+CODEGRAPH_RULES.md
+icon-lineup-preview.png
+
+# Bundled native runtimes (~96 MB, see src-tauri/lib/PROVENANCE.txt) —
+# restored per-machine before packaging, never committed.
+src-tauri/lib/*.dll
+
+# Parked git history (renamed .git) — restore by renaming back to .git
+.git-backup/
+
+# Local scratch and temp artifacts
+details.txt
+git_diff.txt
+*.tsbuildinfo
+
+# Local environment files
+.env
+.env.*
+!.env.example
+
+# Updater signing material must never be committed
+*.key
+*.key.pub
+*.pem
+*.pfx
+*.p12
+signing/
+tauri-updater-password.txt
+tauri-updater-password.dpapi
+src-tauri/.generated-updater-pubkey.txt
+
+# Dev-only tracking files
+new_features.md
+build-release.log
+ANIME_REWORK.MD
+
+# npm lockfile — replaced by bun.lock
+package-lock.json
+
+# CodeGraph local index — per-machine SQLite DB, never commit
+.codegraph/
