@@ -96,20 +96,31 @@ where
 /// guards logs and errors — one redaction implementation, so a renderer-side
 /// masker cannot drift and leak a user key. Output-only: renderer-supplied
 /// values are ignored on save and the masked string is never persisted.
+/// The manifest snapshot stays Rust-side: genre menus and catalog routing
+/// are computed from it here.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonConfigView {
-    #[serde(flatten)]
-    pub config: AddonConfig,
+    pub id: String,
+    pub url: String,
+    pub name: String,
+    pub enabled: bool,
     pub display_url: String,
+    /// Pinned defaults occupy fixed registry slots and can only be toggled.
+    pub pinned: bool,
 }
 
 impl AddonConfigView {
     pub(crate) fn from_config(config: AddonConfig) -> Self {
         let display_url = sanitize_addon_log(&config.url);
+        let pinned = is_pinned_default_addon_url(&config.url);
         Self {
-            config,
+            id: config.id,
+            url: config.url,
+            name: config.name,
+            enabled: config.enabled,
             display_url,
+            pinned,
         }
     }
 }
@@ -815,7 +826,7 @@ pub(crate) fn normalize_addon_url(config: &str) -> Result<Option<String>, String
     }
 
     let mut normalized = parsed.to_string();
-    if normalized.ends_with('/') {
+    if parsed.query().is_none() && normalized.ends_with('/') {
         normalized.pop();
     }
 
@@ -890,6 +901,13 @@ fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
         name: name.to_string(),
         enabled: true,
         capabilities: None,
+    })
+}
+
+/// Same URL identity `pin_default_addons` pins by.
+fn is_pinned_default_addon_url(url: &str) -> bool {
+    DEFAULT_ADDON_INSTALLS.iter().any(|(install_url, _)| {
+        normalize_addon_url(install_url).ok().flatten().as_deref() == Some(url)
     })
 }
 

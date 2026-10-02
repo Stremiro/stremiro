@@ -7,7 +7,7 @@ use super::streaming_helpers::{
 };
 use crate::providers::addons::{
     stream_episode_match_texts, AddonStream, StreamEpisodeMatch, StreamEpisodeMatchKind,
-    StreamFlags, StreamMatchSummary, StreamTitleMatch,
+    StreamFlags, StreamMatchSummary, StreamRecommendationReason, StreamTitleMatch,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -745,34 +745,41 @@ fn stream_match_summary(key: &StreamRecommendationKey) -> Option<StreamMatchSumm
     (episode.is_some() || title.is_some()).then_some(StreamMatchSummary { episode, title })
 }
 
-fn recommendation_reasons_from_key(key: &StreamRecommendationKey) -> Vec<String> {
-    let mut reasons = Vec::with_capacity(5);
+/// The selector row renders at most this many reason chips; extra kinds
+/// would only add IPC weight.
+const MAX_RECOMMENDATION_REASONS: usize = 2;
+
+fn recommendation_reasons_from_key(
+    key: &StreamRecommendationKey,
+) -> Vec<StreamRecommendationReason> {
+    use StreamRecommendationReason as Reason;
+    let mut reasons = Vec::with_capacity(6);
 
     // Episode/title match facts ship on `match_summary` — duplicating them
     // here would render the same fact twice in the selector row.
 
     match key.health {
-        3 => reasons.push("Verified source".to_string()),
-        1 => reasons.push("Recent source issues".to_string()),
-        0 => reasons.push("Source cooling down".to_string()),
+        3 => reasons.push(Reason::VerifiedSource),
+        1 => reasons.push(Reason::SourceIssues),
+        0 => reasons.push(Reason::SourceCooling),
         _ => {}
     }
 
     match key.family {
-        4 => reasons.push("Proven release group".to_string()),
-        1 => reasons.push("Release group had issues".to_string()),
-        0 => reasons.push("Release group cooling down".to_string()),
+        4 => reasons.push(Reason::ProvenReleaseGroup),
+        1 => reasons.push(Reason::ReleaseGroupIssues),
+        0 => reasons.push(Reason::ReleaseGroupCooling),
         _ => {}
     }
 
     if key.title_source_affinity > 0 {
-        reasons.push("Previously worked on this title".to_string());
+        reasons.push(Reason::TitleAffinity);
     }
 
     if key.language >= 4 {
-        reasons.push("Matches language prefs".to_string());
+        reasons.push(Reason::LanguageMatch);
     } else if key.language >= 2 {
-        reasons.push("Flexible audio/subs".to_string());
+        reasons.push(Reason::LanguageFlexible);
     }
 
     // Delivery facts ("Cached"/"HTTP") are intentionally absent: the row's
@@ -780,13 +787,13 @@ fn recommendation_reasons_from_key(key: &StreamRecommendationKey) -> Vec<String>
     // reason chips renders the same fact twice.
 
     if key.quality >= 400 {
-        reasons.push("Top quality".to_string());
+        reasons.push(Reason::TopQuality);
     } else if key.quality >= 250 {
-        reasons.push("Good quality".to_string());
+        reasons.push(Reason::GoodQuality);
     }
 
     if key.source_priority > 0 {
-        reasons.push("Preferred source".to_string());
+        reasons.push(Reason::PreferredSource);
     }
 
     // "Fallback" only when the row has nothing else going for it — a lone
@@ -795,10 +802,10 @@ fn recommendation_reasons_from_key(key: &StreamRecommendationKey) -> Vec<String>
         && key.episode_match == StreamEpisodeMatchKind::None
         && key.title_match < 2
     {
-        reasons.push("Fallback".to_string());
+        reasons.push(Reason::Fallback);
     }
 
-    reasons.truncate(3);
+    reasons.truncate(MAX_RECOMMENDATION_REASONS);
     reasons
 }
 

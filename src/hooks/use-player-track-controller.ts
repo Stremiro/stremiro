@@ -289,6 +289,7 @@ export function usePlayerTrackController({
         if (selectedId !== undefined) {
           const matched = id === 'no' ? selectedId === null : selectedId === id;
           if (matched) {
+            observedTrackIdsRef.current[type] = selectedId;
             const fresh = await refreshTracks();
             return (
               generation === trackRefreshGenerationRef.current &&
@@ -336,6 +337,10 @@ export function usePlayerTrackController({
     saveGlobalPlaybackLanguagePreferenceSelection,
   } = usePlaybackLanguagePreferences({ mediaId, mediaType });
 
+  // Same precedence as Rust `merge_playback_language_preferences` (global
+  // wins, scoped fills gaps). Folded here rather than read from the effective
+  // query alone because the global cache carries a just-saved pick before the
+  // effective query refetches; auto-apply must never revert to the old one.
   const playbackLanguagePreferences = useMemo<PlaybackLanguagePreferences>(
     () => ({
       preferredAudioLanguage:
@@ -530,6 +535,7 @@ export function usePlayerTrackController({
         if (generation !== trackRefreshGenerationRef.current) return null;
         const selectedId = await readSelectedTrackId(type).catch(() => undefined);
         if (generation !== trackRefreshGenerationRef.current) return null;
+        if (selectedId !== undefined) observedTrackIdsRef.current[type] = selectedId;
         // Refresh before persisting the selection's track-list fingerprint.
         const fresh = await refreshTracks();
         if (generation !== trackRefreshGenerationRef.current) return null;

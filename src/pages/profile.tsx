@@ -147,7 +147,11 @@ export function Profile() {
     staleTime: DATA_STATS_STALE_TIME_MS,
   });
 
-  const { data: allWatchStatuses } = useWatchStatuses();
+  const {
+    data: allWatchStatuses,
+    isError: watchStatusesError,
+    refetch: refetchWatchStatuses,
+  } = useWatchStatuses();
 
   // Backend aggregate — the collapsed history rows would undercount.
   const { data: totalWatchTimeSecs } = useTotalWatchTime();
@@ -157,6 +161,8 @@ export function Profile() {
   const [librarySort, setLibrarySort] = useState<LibrarySort>('default');
   const [librarySearch, setLibrarySearch] = useState('');
   const normalizedLibrarySearch = useNormalizedSearchQuery(librarySearch);
+  const libraryReadFailed = libraryError && library === undefined;
+  const statusFilterPending = libraryStatusFilter !== 'all' && allWatchStatuses === undefined;
 
   const handleViewModeChange = useCallback(
     (mode: 'grid' | 'list') => {
@@ -306,11 +312,11 @@ export function Profile() {
 
           <TabsContent value='library' className='space-y-4'>
             <CollectionTabContent
-              isError={libraryError && library === undefined}
-              isLoading={libraryLoading}
+              isError={libraryReadFailed || (statusFilterPending && watchStatusesError)}
+              isLoading={libraryLoading || statusFilterPending}
               items={filteredLibrary}
-              errorLabel='your library'
-              onRetry={refetchLibrary}
+              errorLabel={libraryReadFailed ? 'your library' : 'your watch statuses'}
+              onRetry={libraryReadFailed ? refetchLibrary : refetchWatchStatuses}
               viewMode={viewMode}
               getItemKey={(item) => `${item.type}:${item.id}`}
               renderItem={(item) => (

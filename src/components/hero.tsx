@@ -206,7 +206,9 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   });
 
   // The hero scrolls off under the rails — don't keep advancing (and
-  // repainting the crossfade) while nothing is watching it.
+  // repainting the crossfade) while nothing is watching it. The section only
+  // mounts once items exist, so a cold load re-runs this when they land.
+  const hasItems = items.length > 0;
   useEffect(() => {
     const node = sectionRef.current;
     if (!node) return;
@@ -216,7 +218,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
     );
     observer.observe(node);
     return () => observer.disconnect();
-  }, []);
+  }, [hasItems]);
 
   const item = items[activeIndex];
   const activeHeroItemId = item?.id;

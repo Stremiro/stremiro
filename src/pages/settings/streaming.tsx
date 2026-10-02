@@ -6,19 +6,27 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { GripVertical, Loader2, Plus, Trash2 } from 'lucide-react';
 import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { type AddonConfig, type AddonConfigInput, api, getErrorMessage } from '@/lib/api';
+import {
+  type AddonConfig,
+  type AddonConfigInput,
+  type AddonUrlInspection,
+  api,
+  getErrorMessage,
+} from '@/lib/api';
 import {
   ADDON_CONFIGS_QUERY_KEY,
+  addonUrlInspectionQueryKey,
   invalidateDiscoveryQueries,
   invalidateStreamQueries,
 } from '@/lib/query-invalidation';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
+import { useDebounce } from '@/hooks/use-debounce';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn } from '@/lib/utils';
 import {
@@ -44,59 +52,11 @@ function deriveAddonNameFromUrl(url: string): string {
   }
 }
 
-function hasAsciiPrefixIgnoreCase(value: string, prefix: string): boolean {
-  return value.length >= prefix.length && value.slice(0, prefix.length).toLowerCase() === prefix;
-}
-
-function rewriteStremioInstallReference(trimmed: string): string | null {
-  if (!hasAsciiPrefixIgnoreCase(trimmed, 'stremio://')) {
-    return trimmed.includes('://') ? trimmed : `https://${trimmed}`;
-  }
-
-  const rest = trimmed.slice('stremio://'.length);
-  if (hasAsciiPrefixIgnoreCase(rest, 'https://') || hasAsciiPrefixIgnoreCase(rest, 'http://')) {
-    return rest;
-  }
-  if (rest.includes('://')) return null;
-  return `https://${rest}`;
-}
-
-function normalizeAddonUrl(input: string): string | null {
-  const trimmed = input.trim();
-  if (!trimmed) return null;
-
-  const withScheme = rewriteStremioInstallReference(trimmed);
-  if (!withScheme) return null;
-
-  let parsed: URL;
-  try {
-    parsed = new URL(withScheme);
-  } catch {
-    return null;
-  }
-
-  if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return null;
-
-  // Rust's save path drops embedded credentials; normalize the same way so
-  // dedupe keys match what the backend actually stores. Order matches
-  // `build_manifest_url`/`strip_manifest_suffix`: trailing slashes strip
-  // BEFORE the manifest suffix so `…/manifest.json/` folds identically.
-  parsed.username = '';
-  parsed.password = '';
-  parsed.hash = '';
-  const normalizedPath = parsed.pathname.replace(/\/+$/, '').replace(/\/manifest\.json$/i, '');
-  parsed.pathname = normalizedPath || '/';
-
-  return parsed.toString().replace(/\/$/, '');
-}
-
-function isConfigureUrl(url: string): boolean {
-  try {
-    return /\/configure\/?$/i.test(new URL(url).pathname);
-  } catch {
-    return false;
-  }
-}
+// Long enough to skip per-keystroke IPC, short enough to read as live.
+const ADDON_URL_INSPECT_DEBOUNCE_MS = 150;
+const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremio:// addon URL.';
+const ADDON_URL_CONFIGURE_MESSAGE =
+  'This is a configure page — open it, finish setup, then paste the generated manifest URL.';
 
 // ── Addon rows ───────────────────────────────────────────────────────────────
 
@@ -215,13 +175,6 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
 
 // ── Main component ───────────────────────────────────────────────────────────
 
-// Mirrors the backend's DEFAULT_ADDON_INSTALLS pinning — these rows render
-// outside the sortable list and can only be toggled, not moved or removed.
-const DEFAULT_ADDON_BASE_URLS: ReadonlySet<string> = new Set([
-  'https://v3-cinemeta.strem.io',
-  'https://opensubtitles-v3.strem.io',
-]);
-
 export function StreamingSources() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
@@ -232,6 +185,7 @@ export function StreamingSources() {
   const saveMutation = useMutation({
     mutationFn: api.saveAddonConfigs,
     onSuccess: (savedConfigs) => {
+      void queryClient.cancelQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY, exact: true });
       queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, savedConfigs);
       void invalidateStreamQueries(queryClient);
       void invalidateDiscoveryQueries(queryClient);
@@ -241,27 +195,29 @@ export function StreamingSources() {
 
   const sensors = useSortableSensors();
 
-  // One URL parse per addon per list change: the previous form re-parsed
-  // every addon URL on each keystroke in the add box plus again in every
-  // toggle/drag/remove handler.
-  const normalizedAddonUrls = useMemo(() => {
-    const map = new Map<string, string | null>();
-    for (const addon of addons) {
-      map.set(addon.id, normalizeAddonUrl(addon.url));
-    }
-    return map;
-  }, [addons]);
-
-  const normalizedNewUrl = useMemo(() => normalizeAddonUrl(newUrl), [newUrl]);
-  const isConfigureCandidate = normalizedNewUrl ? isConfigureUrl(normalizedNewUrl) : false;
-  const duplicateAddon = normalizedNewUrl
-    ? addons.find((addon) => normalizedAddonUrls.get(addon.id) === normalizedNewUrl)
-    : undefined;
+  // Rust judges the add box with the normalizer the save path stores with,
+  // so validity, configure-page and duplicate verdicts can't drift from it.
+  const trimmedNewUrl = newUrl.trim();
+  const debouncedNewUrl = useDebounce(trimmedNewUrl, ADDON_URL_INSPECT_DEBOUNCE_MS);
+  const installedAddonUrls = useMemo(() => addons.map((addon) => addon.url), [addons]);
+  const inspectionQuery = useQuery({
+    queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonUrls),
+    queryFn: () => api.inspectAddonUrl(debouncedNewUrl),
+    enabled: debouncedNewUrl !== '',
+    staleTime: Infinity,
+    retry: false,
+  });
+  // A verdict only describes the text on screen; mid-debounce there is none.
+  const inspectionCurrent = trimmedNewUrl !== '' && debouncedNewUrl === trimmedNewUrl;
+  const inspection = inspectionCurrent ? inspectionQuery.data : undefined;
+  const normalizedNewUrl = inspection?.normalizedUrl;
+  const isConfigureCandidate = !!inspection?.configurePage;
+  const duplicateAddonName = inspection?.duplicateOf;
   // A failed read leaves `addons` empty; every edit saves the whole list, so
   // editing then would overwrite the stored sources.
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
   const canSubmitNewAddon =
-    !!newUrl.trim() && !!normalizedNewUrl && !isConfigureCandidate && !duplicateAddon && !isWorking;
+    !!normalizedNewUrl && !isConfigureCandidate && !duplicateAddonName && !isWorking;
 
   const handleToggle = (id: string) => {
     const updated = addons.map((a) => (a.id === id ? { ...a, enabled: !a.enabled } : a));
@@ -275,17 +231,16 @@ export function StreamingSources() {
       // built on it would whole-list overwrite the pending change.
       if (!over || active.id === over.id || isWorking) return;
 
-      // Default addons are pinned on top; only user addons below them reorder.
-      const isPinned = (url: string | null) => url !== null && DEFAULT_ADDON_BASE_URLS.has(url);
-      const rest = addons.filter((addon) => !isPinned(normalizedAddonUrls.get(addon.id) ?? null));
+      // Backend-pinned defaults stay on top; only user addons below them reorder.
+      const rest = addons.filter((addon) => !addon.pinned);
       const oldIndex = rest.findIndex((addon) => addon.id === String(active.id));
       const newIndex = rest.findIndex((addon) => addon.id === String(over.id));
       if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
 
-      const pinned = addons.filter((addon) => isPinned(normalizedAddonUrls.get(addon.id) ?? null));
+      const pinned = addons.filter((addon) => addon.pinned);
       saveMutation.mutate([...pinned, ...arrayMove(rest, oldIndex, newIndex)]);
     },
-    [addons, isWorking, normalizedAddonUrls, saveMutation],
+    [addons, isWorking, saveMutation],
   );
 
   const handleRemove = (id: string) => {
@@ -295,23 +250,29 @@ export function StreamingSources() {
     );
   };
 
-  const handleAddUrl = () => {
-    // Enter in the input bypasses the disabled button — re-check everything
-    // the gate already proved via the memoized values.
-    if (isWorking || !newUrl.trim()) return;
+  const handleAddUrl = async () => {
+    // Enter in the input bypasses the disabled button and can land
+    // mid-debounce — re-check everything, inspecting the live text if needed.
+    if (isWorking || !trimmedNewUrl) return;
 
-    if (!normalizedNewUrl) {
-      toast.error('Invalid addon URL. Please use a valid http(s) or stremio:// URL.');
+    let verdict: AddonUrlInspection;
+    try {
+      verdict = inspection ?? (await api.inspectAddonUrl(trimmedNewUrl));
+    } catch (error) {
+      toast.error(getErrorMessage(error));
       return;
     }
-    if (isConfigureCandidate) {
-      toast.error(
-        'This is a configure page — open it, finish setup, then paste the generated manifest URL.',
-      );
+    const url = verdict.normalizedUrl;
+    if (!url) {
+      toast.error(verdict.error ?? ADDON_URL_INVALID_MESSAGE);
       return;
     }
-    if (duplicateAddon) {
-      toast.error(`This addon URL is already configured as ${duplicateAddon.name}.`);
+    if (verdict.configurePage) {
+      toast.error(ADDON_URL_CONFIGURE_MESSAGE);
+      return;
+    }
+    if (verdict.duplicateOf) {
+      toast.error(`This addon URL is already configured as ${verdict.duplicateOf}.`);
       return;
     }
 
@@ -319,14 +280,14 @@ export function StreamingSources() {
     // placeholder the backend replaces with the manifest name.
     const newAddon: AddonConfigInput = {
       id: generateId(),
-      url: normalizedNewUrl,
-      name: deriveAddonNameFromUrl(normalizedNewUrl),
+      url,
+      name: deriveAddonNameFromUrl(url),
       enabled: true,
     };
     saveMutation.mutate([...addons, newAddon], {
       onSuccess: (savedConfigs) => {
         setNewUrl('');
-        newUrlInputRef.current?.focus();
+        requestAnimationFrame(() => newUrlInputRef.current?.focus());
         const added = savedConfigs.find((addon) => addon.id === newAddon.id);
         toast.success(`Added ${added?.name ?? newAddon.name}`);
       },
@@ -334,20 +295,8 @@ export function StreamingSources() {
   };
 
   const activeCount = addons.filter((a) => a.enabled).length;
-  const pinnedAddons = useMemo(
-    () =>
-      addons.filter((addon) =>
-        DEFAULT_ADDON_BASE_URLS.has(normalizedAddonUrls.get(addon.id) ?? ''),
-      ),
-    [addons, normalizedAddonUrls],
-  );
-  const userAddons = useMemo(
-    () =>
-      addons.filter(
-        (addon) => !DEFAULT_ADDON_BASE_URLS.has(normalizedAddonUrls.get(addon.id) ?? ''),
-      ),
-    [addons, normalizedAddonUrls],
-  );
+  const pinnedAddons = useMemo(() => addons.filter((addon) => addon.pinned), [addons]);
+  const userAddons = useMemo(() => addons.filter((addon) => !addon.pinned), [addons]);
 
   return (
     <SettingsGroup>
@@ -371,13 +320,15 @@ export function StreamingSources() {
             placeholder='https://addon.host/.../manifest.json'
             value={newUrl}
             onChange={(e) => setNewUrl(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleAddUrl()}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') void handleAddUrl();
+            }}
             disabled={isWorking}
             className='h-10 flex-1 rounded-xl border-white/[0.08] bg-white/[0.04] px-3.5 font-mono text-[13px] focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
           />
           <Button
             size='sm'
-            onClick={handleAddUrl}
+            onClick={() => void handleAddUrl()}
             disabled={!canSubmitNewAddon}
             className='h-10 shrink-0 gap-2 rounded-xl bg-white px-4 text-[13px] font-semibold text-black hover:bg-zinc-200'
           >
@@ -390,24 +341,32 @@ export function StreamingSources() {
           </Button>
         </div>
 
-        {newUrl.trim() ? (
+        {trimmedNewUrl ? (
           <p
             className={cn(
               'mt-2.5 text-[12px] font-medium',
-              !normalizedNewUrl
-                ? 'text-red-400'
-                : isConfigureCandidate || duplicateAddon
-                  ? 'text-amber-400'
-                  : 'text-emerald-400',
+              !inspection
+                ? inspectionCurrent && inspectionQuery.isError
+                  ? 'text-red-400'
+                  : 'text-zinc-500'
+                : !normalizedNewUrl
+                  ? 'text-red-400'
+                  : isConfigureCandidate || duplicateAddonName
+                    ? 'text-amber-400'
+                    : 'text-emerald-400',
             )}
           >
-            {!normalizedNewUrl
-              ? 'Enter a valid http(s) or stremio:// addon URL.'
-              : isConfigureCandidate
-                ? 'This is a configure page — open it, finish setup, then paste the generated manifest URL.'
-                : duplicateAddon
-                  ? `Already configured as ${duplicateAddon.name}.`
-                  : `Ready: ${normalizedNewUrl}`}
+            {!inspection
+              ? inspectionCurrent && inspectionQuery.isError
+                ? getErrorMessage(inspectionQuery.error)
+                : 'Checking…'
+              : !normalizedNewUrl
+                ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
+                : isConfigureCandidate
+                  ? ADDON_URL_CONFIGURE_MESSAGE
+                  : duplicateAddonName
+                    ? `Already configured as ${duplicateAddonName}.`
+                    : `Ready: ${normalizedNewUrl}`}
           </p>
         ) : (
           <p className='mt-2.5 text-[12px] leading-relaxed text-zinc-600'>

@@ -1,7 +1,7 @@
 use super::{
     find_preferred_position, resolve_candidate_results, resolve_ranked_best_stream_candidate,
-    CandidateProbeResult, PreferredStreamHint, ResolvedStream, StreamPoolQuery,
-    StreamResolveCandidateInput,
+    CandidateProbeResult, PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream,
+    StreamPoolQuery, StreamResolveCandidateInput,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
 use crate::providers::addons::{AddonStream, StreamEpisodeMatchKind};
@@ -327,8 +327,9 @@ async fn excluded_legacy_key_filters_matching_pool_candidate() {
     .await
     .expect_err("the excluded stream must be filtered before probing");
 
+    assert_eq!(error.kind, ResolveStreamErrorKind::Failed);
     assert_eq!(
-        error,
+        error.message,
         "Unable to resolve a playable stream from the best candidates."
     );
 }
@@ -348,11 +349,11 @@ fn resolved(url: &str) -> ResolvedStream {
     ResolvedStream {
         url: url.to_string(),
         format: "mkv".to_string(),
-        request_headers: Vec::new(),
+        mpv_http_header_fields: String::new(),
     }
 }
 
-type FakeProbeInner = Pin<Box<dyn Future<Output = Result<ResolvedStream, String>>>>;
+type FakeProbeInner = Pin<Box<dyn Future<Output = Result<ResolvedStream, ProbeError>>>>;
 
 async fn fake_probe(
     candidate: StreamResolveCandidateInput,
@@ -394,7 +395,7 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
     candidates.push_back(fake_probe(
         candidate_input("a", "s:a"),
         Duration::from_secs(1),
-        Box::pin(async { Err("boom".to_string()) }),
+        Box::pin(async { Err("boom".to_string().into()) }),
     ));
     candidates.push_back(fake_probe(
         candidate_input("b", "s:b"),
@@ -460,20 +461,42 @@ async fn candidate_results_all_failures_error() {
     candidates.push_back(fake_probe(
         candidate_input("a", "s:a"),
         Duration::from_secs(1),
-        Box::pin(async { Err("boom".to_string()) }),
+        Box::pin(async { Err("boom".to_string().into()) }),
     ));
     candidates.push_back(fake_probe(
         candidate_input("b", "s:b"),
         Duration::from_secs(1),
-        Box::pin(async { Err("gone".to_string()) }),
+        Box::pin(async { Err("gone".to_string().into()) }),
     ));
 
     let error = resolve_candidate_results(candidates, None)
         .await
         .expect_err("all probes failed");
 
-    assert!(error.contains("a: boom"));
-    assert!(error.contains("b: gone"));
+    assert_eq!(error.kind, ResolveStreamErrorKind::Failed);
+    assert!(error.message.contains("a: boom"));
+    assert!(error.message.contains("b: gone"));
+}
+
+#[tokio::test]
+async fn candidate_results_rate_limited_probe_marks_error_kind() {
+    let mut candidates = FuturesOrdered::new();
+    candidates.push_back(fake_probe(
+        candidate_input("a", "s:a"),
+        Duration::from_secs(1),
+        Box::pin(async {
+            Err(ProbeError {
+                message: "range probe returned HTTP 429".to_string(),
+                rate_limited: true,
+            })
+        }),
+    ));
+
+    let error = resolve_candidate_results(candidates, None)
+        .await
+        .expect_err("the only probe failed");
+
+    assert_eq!(error.kind, ResolveStreamErrorKind::RateLimited);
 }
 
 #[tokio::test]
@@ -498,7 +521,7 @@ async fn candidate_results_drops_queued_probe_futures_after_winner() {
         Duration::from_secs(60),
         Box::pin(async move {
             let _flag = flag;
-            std::future::pending::<Result<ResolvedStream, String>>().await
+            std::future::pending::<Result<ResolvedStream, ProbeError>>().await
         }),
     ));
 

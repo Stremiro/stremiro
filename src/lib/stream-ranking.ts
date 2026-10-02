@@ -1,3 +1,4 @@
+import { foldAsciiCase } from '@/lib/api-cache';
 import { nonBlank } from '@/lib/utils';
 
 export interface StreamRankingOptions {
@@ -51,11 +52,12 @@ export function buildStreamRankingOptions(
 }
 
 export function buildStreamRankingCacheKey(options?: StreamRankingOptions): string {
-  return [
-    options?.rankingMediaType ?? 'na',
-    options?.rankingMediaId ?? 'na',
-    options?.rankingSeason ?? 'na',
-    options?.rankingEpisode ?? 'na',
-    options?.rankingTitle?.trim().toLowerCase() ?? 'na',
-  ].join('|');
+  return JSON.stringify([
+    options?.rankingMediaType ?? null,
+    options?.rankingMediaId ?? null,
+    options?.rankingSeason ?? null,
+    options?.rankingEpisode ?? null,
+    // ASCII fold only: Rust title tokens keep non-ASCII case distinct.
+    options?.rankingTitle ? foldAsciiCase(options.rankingTitle.trim()) : null,
+  ]);
 }

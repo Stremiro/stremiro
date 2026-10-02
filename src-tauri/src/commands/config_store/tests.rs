@@ -7,23 +7,40 @@ use super::{
 };
 
 #[test]
-fn addon_config_view_flattens_and_masks_credentials() {
+fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     let view = AddonConfigView::from_config(AddonConfig {
         id: "a1".to_string(),
         url: "https://user:pass@addon.example/AbCdEfGhIjKlMnOpQrStUvWxYz012345/config?token=sekrit"
             .to_string(),
         name: "My Addon".to_string(),
         enabled: true,
-        capabilities: None,
+        capabilities: Some(crate::providers::addon_manifest::AddonManifest {
+            name: "My Addon".to_string(),
+            resources: Vec::new(),
+            catalogs: Vec::new(),
+        }),
     });
 
     let value = serde_json::to_value(&view).expect("serializable");
-    // Flattened wire shape: AddonConfig fields inline, displayUrl alongside.
     assert_eq!(value["id"], "a1");
     assert_eq!(value["enabled"], true);
+    assert_eq!(value["pinned"], false);
+    assert!(value.get("capabilities").is_none());
     let display = value["displayUrl"].as_str().expect("displayUrl present");
     assert!(!display.contains("sekrit") && !display.contains("user:pass"));
     assert!(display.contains("[redacted]"));
+
+    let cinemeta_url = normalize_addon_url(super::DEFAULT_CINEMETA_INSTALL_URL)
+        .expect("valid default")
+        .expect("non-empty default");
+    let pinned = AddonConfigView::from_config(AddonConfig {
+        id: cinemeta_url.clone(),
+        url: cinemeta_url,
+        name: "Cinemeta".to_string(),
+        enabled: false,
+        capabilities: None,
+    });
+    assert!(pinned.pinned);
 }
 
 #[test]

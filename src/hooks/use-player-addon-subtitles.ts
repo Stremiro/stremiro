@@ -61,7 +61,7 @@ export function usePlayerAddonSubtitles({
   streamLookupId,
   subTracks,
 }: UsePlayerAddonSubtitlesOptions) {
-  const [activeAddonSubtitleId, setActiveAddonSubtitleId] = useState<string | null>(null);
+  const [pickedAddonSubtitleId, setPickedAddonSubtitleId] = useState<string | null>(null);
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
@@ -85,7 +85,7 @@ export function usePlayerAddonSubtitles({
   // stream, so the active/loading keys reset with it.
   useEffect(() => {
     subtitleSessionEpochRef.current += 1;
-    setActiveAddonSubtitleId(null);
+    setPickedAddonSubtitleId(null);
     setAddonSubtitleLoadingId(null);
     return () => {
       subtitleSessionEpochRef.current += 1;
@@ -148,7 +148,7 @@ export function usePlayerAddonSubtitles({
           toast.error('Failed to load addon subtitle');
           return;
         }
-        setActiveAddonSubtitleId(subtitleKey);
+        setPickedAddonSubtitleId(subtitleKey);
         announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
       } finally {
         if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
@@ -163,9 +163,6 @@ export function usePlayerAddonSubtitles({
   // on every time update, so inline closures here would defeat the memo.
   const handleSubTrackSelect = useCallback(
     (trackType: 'sub', trackId: number | 'no', options?: { persistPreference?: boolean }) => {
-      // Embedded/Off replaces the addon pick — mpv has a single sid, so the
-      // addon row must not keep its checkmark.
-      setActiveAddonSubtitleId(null);
       const epoch = subtitleSessionEpochRef.current;
       void setTrack(trackType, trackId, options).then((applied) => {
         if (!applied || !mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
@@ -193,18 +190,23 @@ export function usePlayerAddonSubtitles({
     [handleSelectAddonSubtitle],
   );
 
-  // Keep the addon checkmark honest against mpv truth: only one sid can be
-  // selected, so when mpv's selection leaves the matching external track
-  // (embedded pick, Off, `cycle sub`) the addon row drops its check.
-  useEffect(() => {
-    if (!activeAddonSubtitleId) return;
-    const active = addonSubtitles.find((s) => addonSubtitleKey(s) === activeAddonSubtitleId);
-    if (!active) return;
-    const stillSelected = subTracks.some(
-      (track) => track.selected && isExternalSubtitleTrack(track, active),
+  // The addon checkmark is derived from mpv truth: only one sid can be
+  // selected, so the row follows the selected external track whether it got
+  // there from this menu, a restored preference, or `cycle sub`. The explicit
+  // pick only disambiguates rows that resolve to the same external track.
+  const activeAddonSubtitleId = useMemo(() => {
+    const selectedExternal = subTracks.find(
+      (track) => track.type === 'sub' && track.selected && track.external,
     );
-    if (!stillSelected) setActiveAddonSubtitleId(null);
-  }, [activeAddonSubtitleId, addonSubtitles, subTracks]);
+    if (!selectedExternal) return null;
+    const matches = addonSubtitles.filter((subtitle) =>
+      isExternalSubtitleTrack(selectedExternal, subtitle),
+    );
+    if (matches.length === 0) return null;
+    return matches.some((subtitle) => addonSubtitleKey(subtitle) === pickedAddonSubtitleId)
+      ? pickedAddonSubtitleId
+      : addonSubtitleKey(matches[0]);
+  }, [addonSubtitles, pickedAddonSubtitleId, subTracks]);
 
   return {
     activeAddonSubtitleId,

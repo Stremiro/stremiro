@@ -144,6 +144,18 @@ impl PlaybackStateService {
 
         insert_sorted_unique(&mut preferences_index, &scope_key);
 
+        // The item is written before pruning: a new key with no stored
+        // snapshot ranks as `updated_at = 0`, so pruning first would evict the
+        // pick being recorded and orphan its item outside the index.
+        store.set(
+            playback_language_preferences_item_key(&scope_key),
+            json!(PlaybackLanguagePreferencesSnapshot {
+                preferred_audio_language,
+                preferred_subtitle_language,
+                updated_at: timestamp_ms,
+            }),
+        );
+
         if preferences_index.len() > PLAYBACK_LANGUAGE_PREFERENCES_MAX_ENTRIES {
             prune_index_to_cap(
                 &store,
@@ -158,14 +170,6 @@ impl PlaybackStateService {
             );
         }
 
-        store.set(
-            playback_language_preferences_item_key(&scope_key),
-            json!(PlaybackLanguagePreferencesSnapshot {
-                preferred_audio_language,
-                preferred_subtitle_language,
-                updated_at: timestamp_ms,
-            }),
-        );
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
             json!(preferences_index),

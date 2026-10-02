@@ -52,7 +52,6 @@ pub(crate) fn test_progress() -> WatchProgress {
         title: "Test".to_string(),
         poster: None,
         backdrop: None,
-        last_stream_url: None,
         last_stream_format: None,
         last_stream_lookup_id: None,
         last_stream_key: None,
@@ -60,6 +59,8 @@ pub(crate) fn test_progress() -> WatchProgress {
         source_id: None,
         stream_family: None,
         resume_start_time: None,
+        is_watched: false,
+        has_started_watching: false,
     }
 }
 

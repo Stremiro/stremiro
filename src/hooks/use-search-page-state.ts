@@ -23,7 +23,8 @@ export function useSearchPageState() {
   const activeGenre = resolveSearchUrlGenre(searchParams.get('genre'));
 
   const [query, setQuery] = useState(urlQuery);
-  const debouncedQuery = useDebounce(query, 250);
+  const debouncedInput = useDebounce(query, 250);
+  const debouncedQuery = query.trim() ? debouncedInput : '';
 
   const trimmedQuery = query.trim();
   const trimmedDebouncedQuery = debouncedQuery.trim();
@@ -76,7 +77,7 @@ export function useSearchPageState() {
   const handleTypeChange = useCallback(
     (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
       updateSearchParams((params) => {
-        if (nextType === 'movie') params.delete('type');
+        if (nextType === 'all') params.delete('type');
         else params.set('type', nextType);
         if (clearIncompatibleGenre) params.delete('genre');
       });
@@ -113,9 +114,9 @@ export function useSearchPageState() {
     updateSearchParams((params) => params.delete('genre'));
   }, [updateSearchParams]);
 
-  const hasActiveFilters = activeType !== 'movie' || activeFeed !== 'popular' || !!activeGenre;
+  const hasActiveFilters = activeType !== 'all' || activeFeed !== 'popular' || !!activeGenre;
 
-  // Hard reset back to the default browse: movies, trending, no genre.
+  // Hard reset back to the default browse: all types, trending, no genre.
   const resetFilters = useCallback(() => {
     updateSearchParams((params) => {
       params.delete('type');

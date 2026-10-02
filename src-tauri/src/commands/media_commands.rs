@@ -7,7 +7,6 @@ use super::{
 };
 use crate::providers::{addon_resource::AddonResourceClient, push_unique, Episode, MediaDetails};
 use futures_util::stream::{self, StreamExt};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
@@ -46,34 +45,29 @@ impl From<PlaybackEpisodeMappingSnapshot> for EpisodeStreamMapping {
     }
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaScheduleEpisode {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaScheduleEpisode {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub season: u32,
     pub episode: u32,
-    pub release_date: String,
+    /// None for undated or invalid dates: the calendar skips them, but Up
+    /// Next must still see the episode so it never skips past it.
+    pub release_date: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaSchedule {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MediaSchedule {
     pub id: String,
-    #[serde(rename = "type")]
     pub type_: String,
     pub title: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub poster: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
     pub episodes: Vec<MediaScheduleEpisode>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MediaScheduleRequest {
+#[derive(Debug)]
+pub(crate) struct MediaScheduleRequest {
     pub media_type: String,
     pub id: String,
 }
@@ -91,22 +85,19 @@ pub(crate) fn build_media_schedule(mut details: MediaDetails) -> MediaSchedule {
         .take()
         .unwrap_or_default()
         .into_iter()
-        .filter_map(|episode| {
-            let release_date = schedule_episode_release_date(&episode)?;
-
-            Some(MediaScheduleEpisode {
-                id: episode.id,
-                title: episode.title,
-                season: episode.season,
-                episode: episode.episode,
-                release_date,
-            })
+        .map(|episode| MediaScheduleEpisode {
+            release_date: schedule_episode_release_date(&episode),
+            id: episode.id,
+            title: episode.title,
+            season: episode.season,
+            episode: episode.episode,
         })
         .collect::<Vec<_>>();
 
+    // Dated episodes first so duplicate ids resolve to a dated claimant.
     episodes.sort_by(|left, right| {
-        left.release_date
-            .cmp(&right.release_date)
+        (left.release_date.is_none(), &left.release_date)
+            .cmp(&(right.release_date.is_none(), &right.release_date))
             .then_with(|| left.season.cmp(&right.season))
             .then_with(|| left.episode.cmp(&right.episode))
             .then_with(|| left.id.cmp(&right.id))
@@ -219,7 +210,7 @@ pub(crate) async fn fetch_media_details_inner(
         .to_string();
     super::addon_registry::fetch_meta_details(app, client, &media_type, id, include_episodes)
         .await
-        .map(normalize_media_details)
+        .map(|details| normalize_media_details(details, id))
 }
 
 #[command]
@@ -287,10 +278,9 @@ pub async fn get_addon_subtitles(
     super::addon_registry::fetch_addon_subtitles(&app, &client, effective_type, &lookup_id).await
 }
 
-#[command]
-pub async fn get_media_schedules(
-    app: AppHandle,
-    client: State<'_, AddonResourceClient>,
+pub(crate) async fn fetch_media_schedules(
+    app: &AppHandle,
+    client: &AddonResourceClient,
     items: Vec<MediaScheduleRequest>,
 ) -> Result<Vec<MediaSchedule>, String> {
     // Dedupe fetches on the canonical key, but remember every caller's raw
@@ -328,7 +318,6 @@ pub async fn get_media_schedules(
         return Ok(Vec::new());
     }
 
-    let client = client.inner();
     let mut schedules = Vec::new();
     let mut errors = Vec::new();
 

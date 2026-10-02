@@ -308,7 +308,13 @@ fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetail
         type_: details.type_.clone(),
         description: details.description.clone(),
         rating: details.rating.clone(),
-        cast: details.cast.clone(),
+        // Cast renders only on the full details page; card/hero payloads
+        // skip it along with episodes.
+        cast: if include_episodes {
+            details.cast.clone()
+        } else {
+            None
+        },
         genres: details.genres.clone(),
         trailers: details.trailers.clone(),
         episodes: if include_episodes {
@@ -780,10 +786,10 @@ fn parse_trailers(value: Option<&Value>) -> Option<Vec<Trailer>> {
     let trailers: Vec<Trailer> = items
         .iter()
         .filter_map(|item| {
-            // Addon-controlled video tokens reach the browser `<iframe>` via
-            // the trailer URL: accept the strict 11-char YouTube token only.
-            // A raw `source` like `x&evil=` would otherwise escape the query
-            // value into extra URL parameters or attacker markup.
+            // Addon-controlled video tokens reach the browser `<iframe>` src:
+            // accept the strict 11-char YouTube token only. A raw `source`
+            // like `x&evil=` would otherwise escape into extra URL
+            // parameters or attacker markup.
             let source = json_string_field(item, "source")?;
             if !is_youtube_video_token(&source) {
                 return None;
@@ -793,11 +799,7 @@ fn parse_trailers(value: Option<&Value>) -> Option<Vec<Trailer>> {
                 return None;
             }
 
-            Some(Trailer {
-                id: source.clone(),
-                source: "youtube".to_string(),
-                url: format!("https://www.youtube.com/watch?v={source}"),
-            })
+            Some(Trailer { id: source })
         })
         .take(MAX_TRAILERS)
         .collect();

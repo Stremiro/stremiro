@@ -152,6 +152,20 @@ pub struct SearchCatalogRequest {
     skip: Option<u32>,
 }
 
+impl SearchCatalogRequest {
+    pub(crate) fn for_genre(media_type: &str, genre: String) -> Self {
+        Self {
+            query: None,
+            media_type: Some(media_type.to_string()),
+            feed: None,
+            genres: Some(vec![genre]),
+            year_from: None,
+            year_to: None,
+            skip: None,
+        }
+    }
+}
+
 #[derive(Debug)]
 struct RankedSearchItem {
     item: MediaItem,
@@ -169,7 +183,7 @@ fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
             break;
         }
 
-        let Some(genre) = normalize_non_empty(&genre) else {
+        let Some(genre) = normalize_query(&genre) else {
             continue;
         };
 
@@ -527,7 +541,7 @@ async fn fetch_registry_browse_page(
 
         super::addon_registry::merge_catalog_pages(
             super::addon_registry::fetch_catalog_pages_for_target_groups(
-                client, media_type, catalog_id, groups,
+                client, media_type, groups,
             )
             .await,
             "Failed to load catalog.",
@@ -648,14 +662,21 @@ pub async fn query_search_catalog(
     client: State<'_, AddonResourceClient>,
     request: SearchCatalogRequest,
 ) -> Result<SearchCatalogPage, String> {
+    query_search_catalog_for_request(&app, &client, request).await
+}
+
+pub(crate) async fn query_search_catalog_for_request(
+    app: &AppHandle,
+    client: &AddonResourceClient,
+    request: SearchCatalogRequest,
+) -> Result<SearchCatalogPage, String> {
     let criteria = build_search_criteria(request)?;
 
     if let Some(query) = criteria.query.as_deref() {
         // Items arrive normalized, so the scorer reads `primary_year` instead
         // of re-parsing year strings per item.
         let items =
-            fetch_query_results(&app, &client, query, criteria.media_type, &criteria.genres)
-                .await?;
+            fetch_query_results(app, client, query, criteria.media_type, &criteria.genres).await?;
         let items = rank_search_results(query, items, criteria.year_range);
 
         return Ok(SearchCatalogPage {
@@ -664,7 +685,7 @@ pub async fn query_search_catalog(
         });
     }
 
-    fetch_browse_page(&app, &client, &criteria).await
+    fetch_browse_page(app, client, &criteria).await
 }
 
 #[cfg(test)]

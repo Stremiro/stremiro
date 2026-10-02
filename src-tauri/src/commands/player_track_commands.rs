@@ -271,15 +271,10 @@ pub async fn read_player_track_list(
     observed_ids: Option<ObservedTrackIds>,
 ) -> Result<Vec<PlayerTrack>, String> {
     let window_label = window.label().to_string();
-    tokio::time::timeout(
-        super::BLOCKING_OP_TIMEOUT,
-        tauri::async_runtime::spawn_blocking(move || {
-            read_track_list(&app, &window_label, observed_ids)
-        }),
-    )
+    super::player_mpv_commands::run_mpv_op("track-list read", move || {
+        read_track_list(&app, &window_label, observed_ids)
+    })
     .await
-    .map_err(|_| "mpv track-list read timed out.".to_string())?
-    .map_err(|error| format!("mpv track-list read failed: {error}"))?
 }
 
 #[cfg(test)]

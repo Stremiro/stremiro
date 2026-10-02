@@ -2,12 +2,11 @@ import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react'
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { getErrorMessage, type AddonStream } from '@/lib/api';
+import { getErrorKind, getErrorMessage, type AddonStream } from '@/lib/api';
 import type { NextEpisodeStreamCoordinates } from '@/lib/episode-stream-target';
 import { launchResolvedStream } from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
-import { matchesAnyMarker } from '@/lib/utils';
 
 const isDev = import.meta.env.DEV;
 
@@ -40,17 +39,6 @@ interface UseSelectorResolutionArgs {
   selectorSessionKey: string;
   target: StreamSelectorTarget;
 }
-
-const UNRESOLVABLE_SOURCE_MARKERS = ['no direct playback url', 'direct-link'] as const;
-const CLOUDFLARE_MARKERS = [
-  'cloudflare',
-  'cf-ray',
-  'access denied',
-  'rate limit',
-  'too many requests',
-  '429',
-  '403 forbidden',
-] as const;
 
 function buildResolveFeedback(stream: AddonStream): ActiveResolveFeedback {
   const normalizedTitle =
@@ -249,19 +237,22 @@ export function useSelectorResolution({
       if (isDev) console.error('[player] stream resolution failed:', error);
       if (isCurrentResolve(attempt)) {
         const message = getErrorMessage(error);
-        if (matchesAnyMarker(message, UNRESOLVABLE_SOURCE_MARKERS)) {
-          toast.error('Stream needs a direct-link source', {
-            description: message,
-            duration: 6000,
-          });
-        } else if (matchesAnyMarker(message, CLOUDFLARE_MARKERS)) {
-          toast.warning('Blocked by Cloudflare / rate limit', {
-            description:
-              'The stream source is rate-limiting requests. Wait 30 s then retry, or try another stream.',
-            duration: 7000,
-          });
-        } else {
-          toast.error('Failed to resolve stream', { description: message, duration: 5000 });
+        switch (getErrorKind(error)) {
+          case 'no_direct_url':
+            toast.error('Stream needs a direct-link source', {
+              description: message,
+              duration: 6000,
+            });
+            break;
+          case 'rate_limited':
+            toast.warning('Stream source is rate-limiting', {
+              description:
+                'The stream source is rate-limiting requests. Wait 30 s then retry, or try another stream.',
+              duration: 7000,
+            });
+            break;
+          default:
+            toast.error('Failed to resolve stream', { description: message, duration: 5000 });
         }
       }
     } finally {

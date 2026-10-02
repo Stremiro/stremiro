@@ -3,7 +3,11 @@ import { useNavigate } from 'react-router';
 
 import { type DetailsHistoryRouteState, playableResumePosition } from '@/lib/history-playback';
 import { pathBelowTop, stashDetailsReturnState } from '@/lib/navigation';
-import { type PlayerRouteMediaType, resolveSafeInternalReturnPath } from '@/lib/player-navigation';
+import {
+  buildDetailsRoute,
+  type PlayerRouteMediaType,
+  resolveSafeInternalReturnPath,
+} from '@/lib/player-navigation';
 
 interface UsePlayerBackNavigationOptions {
   currentTimeRef: RefObject<number>;
@@ -13,7 +17,6 @@ interface UsePlayerBackNavigationOptions {
   /** The launch page's own origin — written onto the reopened details entry
       so Back→details→Back reaches the real origin. */
   originFrom?: string;
-  isFullscreen: boolean;
   restoreCursorVisibility: () => void;
   routeAbsoluteEpisode?: number;
   routeAbsoluteSeason?: number;
@@ -23,7 +26,6 @@ interface UsePlayerBackNavigationOptions {
       meaningful (failed, unverified, finished) — a clean exit lands quietly. */
   shouldReopenStreamSelector: () => boolean;
   startTime?: number;
-  toggleFullscreen: () => Promise<void>;
 }
 
 interface UsePlayerBackNavigationResult {
@@ -36,7 +38,6 @@ export function usePlayerBackNavigation({
   from,
   id,
   originFrom,
-  isFullscreen,
   restoreCursorVisibility,
   routeAbsoluteEpisode,
   routeAbsoluteSeason,
@@ -44,7 +45,6 @@ export function usePlayerBackNavigation({
   setShowEpisodes,
   shouldReopenStreamSelector,
   startTime,
-  toggleFullscreen,
 }: UsePlayerBackNavigationOptions): UsePlayerBackNavigationResult {
   const navigate = useNavigate();
   // Replace the player in history so Back from the destination never
@@ -54,12 +54,6 @@ export function usePlayerBackNavigation({
     setShowControls(true);
     setShowEpisodes(false);
     restoreCursorVisibility();
-    // A corner video inside a fullscreen window would hide the whole app.
-    // Fire-and-forget — awaiting the window restore would make Back laggy.
-    if (isFullscreen) {
-      void toggleFullscreen().catch(() => undefined);
-    }
-
     // The selector modal and Esc intercept swallow Back while a pick is open —
     // the route's own coordinates are the only ones a back target can carry.
     const backSeason = routeAbsoluteSeason;
@@ -71,7 +65,7 @@ export function usePlayerBackNavigation({
     const safeOriginFrom = resolveSafeInternalReturnPath(originFrom);
     const detailsTarget = safeFrom?.startsWith('/details/')
       ? safeFrom
-      : `/details/${effectiveResolveMediaType}/${id}`;
+      : buildDetailsRoute(effectiveResolveMediaType, id ?? '');
     const reopenSelectorState: DetailsHistoryRouteState = {
       reopenStreamSelector: shouldReopenStreamSelector(),
     };
@@ -113,17 +107,12 @@ export function usePlayerBackNavigation({
         navigate(safeFrom, { replace: true });
       }
     } else {
-      navigate(`/details/${effectiveResolveMediaType}/${id}`, {
-        replace: true,
-        state: reopenSelectorState,
-      });
+      navigate(detailsTarget, { replace: true, state: reopenSelectorState });
     }
   }, [
     navigate,
     routeAbsoluteSeason,
     routeAbsoluteEpisode,
-    isFullscreen,
-    toggleFullscreen,
     from,
     originFrom,
     effectiveResolveMediaType,

@@ -31,10 +31,8 @@ const META_HEDGE_DELAY: Duration = Duration::from_millis(400);
 /// primary holds a live fallback for at most this window instead of its full
 /// request timeout.
 const META_FALLBACK_GRACE: Duration = Duration::from_millis(2_500);
-/// Multi-source resource fan-outs grant stragglers this grace after the
-/// first source answers (success or failure), instead of stalling the
-/// merged result on a dead host's full timeout. Before the first answer the
-/// wait continues — on a slow network every source may be legitimately late.
+/// Grant stragglers this grace once each catalog group has a successful
+/// answer or exhausts its sources; subtitles need one successful answer.
 const RESOURCE_STRAGGLER_GRACE: Duration = Duration::from_secs(10);
 /// Failed install-time manifest fetches leave an addon unclassified; the
 /// background retry is throttled so a permanently down addon costs one
@@ -294,7 +292,18 @@ pub async fn fetch_catalog_page(
 ) -> Result<CatalogFetchPage, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
     let targets = select_catalog_targets(snapshot.as_slice(), type_, catalog_id, extras)?;
-    fetch_catalog_page_for_targets(client, targets, type_, catalog_id, extras).await
+    fetch_catalog_pages_for_target_groups(client, type_, vec![Ok((targets, extras.to_vec()))])
+        .await
+        .into_iter()
+        .next()
+        .unwrap_or_else(|| Err("Failed to load catalog.".to_string()))
+}
+
+/// What a catalog fetch needs from a selected addon — never the whole config
+/// with its capability snapshot.
+pub(crate) struct CatalogTarget {
+    url: String,
+    catalog_id: String,
 }
 
 pub(crate) fn select_catalog_targets(
@@ -302,12 +311,25 @@ pub(crate) fn select_catalog_targets(
     type_: &str,
     catalog_id: &str,
     extras: &[CatalogExtra],
-) -> Result<Vec<AddonConfig>, String> {
-    let targets: Vec<AddonConfig> = snapshot
+) -> Result<Vec<CatalogTarget>, String> {
+    let targets: Vec<CatalogTarget> = snapshot
         .iter()
         .filter(|addon| addon_allows_catalog(addon, type_, catalog_id, extras))
         .take(MAX_CATALOG_SOURCES)
-        .cloned()
+        .map(|addon| CatalogTarget {
+            url: addon.url.clone(),
+            // Fetch with the manifest's canonical catalog id so a
+            // case-insensitive routing match never emits a miscased URL path.
+            catalog_id: addon
+                .capabilities
+                .as_ref()
+                .and_then(|snapshot| {
+                    crate::providers::addon_resource::resolve_canonical_catalog_id(
+                        snapshot, type_, catalog_id,
+                    )
+                })
+                .unwrap_or_else(|| catalog_id.to_string()),
+        })
         .collect();
 
     if targets.is_empty() {
@@ -321,49 +343,70 @@ pub(crate) fn select_catalog_targets(
 
 /// A target-selection result plus the extras it was chosen for, per group,
 /// in caller order.
-type CatalogGroupSelection = Result<(Vec<AddonConfig>, Vec<CatalogExtra>), String>;
+type CatalogGroupSelection = Result<(Vec<CatalogTarget>, Vec<CatalogExtra>), String>;
 
 /// One unit of catalog work in a shared pool: `(group, order)` regroups
 /// interleaved results back into per-group, per-source order.
 struct CatalogWorkItem {
     group: usize,
     order: usize,
-    addon: AddonConfig,
+    addon_url: String,
     media_type: String,
     catalog_id: String,
     extras: Vec<CatalogExtra>,
 }
 
-/// Drain a bounded fan-out stream, dropping stragglers `grace` after the
-/// first item has arrived: a dead host then stalls the merged result for
-/// the grace, not its full request timeout. With nothing arrived the wait
-/// continues past the grace — on a slow network every source may be
-/// legitimately late, and each source's own request timeout still bounds
-/// the first answer. Items still in flight at the break are cancelled
-/// (dropped futures).
-async fn collect_with_deadline<S, T>(mut outcomes: S, grace: Duration) -> Vec<T>
+/// Arm once usable outcomes exist for the request. Fast errors or cached
+/// results in an unrelated group must not cancel its first valid answer.
+async fn collect_with_deadline<S, T>(
+    mut outcomes: S,
+    grace: Duration,
+    mut ready: impl FnMut(&T) -> bool,
+) -> Vec<T>
 where
     S: stream::Stream<Item = T> + Unpin,
 {
     let mut collected = Vec::new();
-    // Disarmed until the first arrival; `reset` re-arms it then.
+    let mut armed = false;
     let straggler_deadline = tokio::time::sleep(grace);
     tokio::pin!(straggler_deadline);
     loop {
         tokio::select! {
+            biased;
+            _ = &mut straggler_deadline, if armed => break,
             next = outcomes.next() => {
                 let Some(item) = next else { break };
-                if collected.is_empty() {
+                if !armed && ready(&item) {
+                    armed = true;
                     straggler_deadline
                         .as_mut()
                         .reset(tokio::time::Instant::now() + grace);
                 }
                 collected.push(item);
             }
-            _ = &mut straggler_deadline, if !collected.is_empty() => break,
         }
     }
     collected
+}
+
+async fn collect_catalog_outcomes<S>(
+    outcomes: S,
+    mut remaining: Vec<usize>,
+    grace: Duration,
+) -> Vec<(usize, usize, Result<CatalogPage, String>)>
+where
+    S: stream::Stream<Item = (usize, usize, Result<CatalogPage, String>)> + Unpin,
+{
+    let mut succeeded = vec![false; remaining.len()];
+    collect_with_deadline(outcomes, grace, |(group, _, result)| {
+        remaining[*group] -= 1;
+        succeeded[*group] |= result.is_ok();
+        remaining
+            .iter()
+            .zip(&succeeded)
+            .all(|(count, success)| *count == 0 || *success)
+    })
+    .await
 }
 
 /// Runs every work item through one `buffer_unordered` pool so a multi-group
@@ -372,14 +415,21 @@ where
 /// Returns each group's results in source order.
 async fn run_catalog_work_pool(
     client: &AddonResourceClient,
-    work: Vec<CatalogWorkItem>,
+    mut work: Vec<CatalogWorkItem>,
     group_count: usize,
 ) -> Vec<Vec<Result<CatalogPage, String>>> {
-    let outcomes = collect_with_deadline(
+    let mut remaining = vec![0; group_count];
+    for item in &work {
+        remaining[item.group] += 1;
+    }
+    // Start each group's primary before queuing secondary sources, while
+    // retaining the shared concurrency limit and source-order merge.
+    work.sort_by_key(|item| (item.order, item.group));
+    let outcomes = collect_catalog_outcomes(
         stream::iter(work.into_iter().map(|item| async move {
             let result = client
                 .fetch_catalog(
-                    &item.addon.url,
+                    &item.addon_url,
                     &item.media_type,
                     &item.catalog_id,
                     &item.extras,
@@ -388,6 +438,7 @@ async fn run_catalog_work_pool(
             (item.group, item.order, result)
         }))
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
+        remaining,
         RESOURCE_STRAGGLER_GRACE,
     )
     .await;
@@ -406,13 +457,12 @@ async fn run_catalog_work_pool(
         .collect()
 }
 
-/// Multi-group variant of `fetch_catalog_page_for_targets`: one bounded pool
+/// Multi-group catalog fetch: one bounded pool
 /// serves every (group × source) fetch, merged back per group in target
 /// order so per-group failures stay isolated for the caller's own merge.
 pub(crate) async fn fetch_catalog_pages_for_target_groups(
     client: &AddonResourceClient,
     type_: &str,
-    catalog_id: &str,
     groups: Vec<CatalogGroupSelection>,
 ) -> Vec<Result<CatalogFetchPage, String>> {
     let group_count = groups.len();
@@ -425,25 +475,13 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
             Ok((targets, extras)) => {
                 group_errors.push(None);
                 group_skips.push(extra_skip_value(&extras));
-                for (order, addon) in targets.into_iter().enumerate() {
-                    // Fetch with the manifest's canonical catalog id so a
-                    // case-insensitive routing match never emits a miscased
-                    // URL path upstream.
-                    let resolved_catalog_id = addon
-                        .capabilities
-                        .as_ref()
-                        .and_then(|snapshot| {
-                            crate::providers::addon_resource::resolve_canonical_catalog_id(
-                                snapshot, type_, catalog_id,
-                            )
-                        })
-                        .unwrap_or_else(|| catalog_id.to_string());
+                for (order, target) in targets.into_iter().enumerate() {
                     work.push(CatalogWorkItem {
                         group,
                         order,
-                        addon,
+                        addon_url: target.url,
                         media_type: type_.to_string(),
-                        catalog_id: resolved_catalog_id,
+                        catalog_id: target.catalog_id,
                         extras: extras.clone(),
                     });
                 }
@@ -471,25 +509,6 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
             ),
         })
         .collect()
-}
-
-pub(crate) async fn fetch_catalog_page_for_targets(
-    client: &AddonResourceClient,
-    targets: Vec<AddonConfig>,
-    type_: &str,
-    catalog_id: &str,
-    extras: &[CatalogExtra],
-) -> Result<CatalogFetchPage, String> {
-    fetch_catalog_pages_for_target_groups(
-        client,
-        type_,
-        catalog_id,
-        vec![Ok((targets, extras.to_vec()))],
-    )
-    .await
-    .into_iter()
-    .next()
-    .unwrap_or_else(|| Err("Failed to load catalog.".to_string()))
 }
 
 /// Multi-genre catalog search: every (genre × addon × catalog) fetch runs
@@ -527,7 +546,7 @@ pub async fn search_catalog_items_for_genres(
                         work.push(CatalogWorkItem {
                             group,
                             order,
-                            addon: addon.clone(),
+                            addon_url: addon.url.clone(),
                             media_type: (*media_type).to_string(),
                             catalog_id,
                             extras: extras.clone(),
@@ -742,6 +761,7 @@ pub async fn fetch_addon_subtitles(
         }))
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
         RESOURCE_STRAGGLER_GRACE,
+        |(_, _, result)| result.is_ok(),
     )
     .await;
     outcomes.sort_by_key(|(index, _, _)| *index);
@@ -778,7 +798,7 @@ pub async fn fetch_addon_subtitles(
 
 fn add_subtitle_if_unique(
     subtitles: &mut Vec<SourcedAddonSubtitle>,
-    seen: &mut HashSet<String>,
+    seen: &mut HashSet<(String, String, String, String)>,
     addon: &AddonConfig,
     item: AddonSubtitle,
 ) {
@@ -789,7 +809,7 @@ fn add_subtitle_if_unique(
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase)
         .unwrap_or_default();
-    let key = format!("{}|{}|{}|{}", addon.id, item.id, item.url, lang);
+    let key = (addon.id.clone(), item.id.clone(), item.url.clone(), lang);
     if !seen.insert(key) {
         return;
     }

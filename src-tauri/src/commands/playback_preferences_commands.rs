@@ -1,7 +1,7 @@
 use super::config_store::get_trimmed_store_string;
 use super::{
     language::{
-        build_mpv_language_selection_options, infer_track_preferred_language,
+        infer_track_preferred_language,
         normalize_language_token as normalize_backend_language_token,
         normalize_track_language_candidate,
         resolve_preferred_track_selection as resolve_track_language_selection,
@@ -14,7 +14,6 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
 use tauri::{command, AppHandle, State};
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -115,24 +114,33 @@ fn infer_selected_playback_language_preference(
     }
 }
 
+/// Sets (or clears, with `None`) one global language default; the other
+/// field keeps its stored value, so callers never compose a whole snapshot
+/// from state that may be stale after a backup restore.
 #[command]
-pub async fn save_playback_language_preferences(
+pub async fn save_playback_language_preference(
     app: AppHandle,
-    preferred_audio_language: Option<String>,
-    preferred_subtitle_language: Option<String>,
+    preference_kind: PlaybackLanguagePreferenceKind,
+    language: Option<String>,
 ) -> Result<PlaybackLanguagePreferences, String> {
-    let preferences = PlaybackLanguagePreferences {
-        preferred_audio_language: sanitize_language_pref_for_save(preferred_audio_language, false)?,
-        preferred_subtitle_language: sanitize_language_pref_for_save(
-            preferred_subtitle_language,
-            true,
-        )?,
-    };
+    let language = sanitize_language_pref_for_save(
+        language,
+        preference_kind == PlaybackLanguagePreferenceKind::Sub,
+    )?;
 
     // Store file IO is blocking: run the read-modify-write off the async
     // worker, matching the library/history command pattern.
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
+        let mut preferences = read_playback_language_preferences_from_store(&store);
+        match preference_kind {
+            PlaybackLanguagePreferenceKind::Audio => {
+                preferences.preferred_audio_language = language
+            }
+            PlaybackLanguagePreferenceKind::Sub => {
+                preferences.preferred_subtitle_language = language
+            }
+        }
         persist_playback_language_preferences(&store, &preferences)?;
         Ok(preferences)
     })
@@ -299,20 +307,6 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
 #[command]
 pub async fn get_supported_languages() -> Result<Vec<SupportedLanguageOption>, String> {
     Ok(supported_language_options())
-}
-
-/// mpv `alang`/`slang`/selection options for one init, built from the same
-/// canonical table as preference sanitization — the frontend spreads the
-/// returned map into `initialOptions` verbatim.
-#[command]
-pub async fn get_mpv_language_selection_options(
-    preferred_audio_language: Option<String>,
-    preferred_subtitle_language: Option<String>,
-) -> Result<HashMap<String, String>, String> {
-    Ok(build_mpv_language_selection_options(
-        preferred_audio_language.as_deref(),
-        preferred_subtitle_language.as_deref(),
-    ))
 }
 
 #[cfg(test)]

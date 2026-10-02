@@ -1,9 +1,4 @@
-import {
-  BEST_STREAM_CACHE_TTL_MS,
-  createRequestCache,
-  MEDIA_SCHEDULE_CACHE_TTL_MS,
-  SEARCH_CACHE_TTL_MS,
-} from '@/lib/api-cache';
+import { BEST_STREAM_CACHE_TTL_MS, createRequestCache } from '@/lib/api-cache';
 import { safeInvoke } from '@/lib/api-core';
 import { createDiscoveryApi } from '@/lib/api-discovery';
 import { createPlaybackApi } from '@/lib/api-playback';
@@ -11,7 +6,7 @@ import { createStoreApi } from '@/lib/api-store';
 import type { PlayerRouteState } from '@/lib/player-navigation';
 import type { StreamRankingOptions } from '@/lib/stream-ranking';
 
-export { getErrorMessage } from '@/lib/api-core';
+export { getErrorKind, getErrorMessage } from '@/lib/api-core';
 export { toMediaItem } from '@/lib/api-store';
 
 export interface MediaItem {
@@ -32,7 +27,7 @@ export interface Episode {
   title?: string;
   season: number;
   episode: number;
-  released?: string;
+  /** Backend-normalized local air day (`YYYY-MM-DD`). */
   releaseDate?: string;
   overview?: string;
   thumbnail?: string;
@@ -45,9 +40,8 @@ export interface Episode {
 }
 
 export interface Trailer {
+  /** Backend-validated 11-char YouTube video id. */
   id: string;
-  source: string;
-  url: string;
 }
 
 export interface MediaDetails extends MediaItem {
@@ -60,21 +54,34 @@ export interface MediaDetails extends MediaItem {
   episodes?: Episode[];
 }
 
-export interface MediaScheduleEpisode {
-  id: string;
-  title?: string;
-  season: number;
-  episode: number;
-  releaseDate: string;
+export interface CalendarRange {
+  visibleStart: string;
+  visibleEnd: string;
+  upcomingStart: string;
+  upcomingEnd: string;
 }
 
-export interface MediaSchedule {
+export interface CalendarScheduleEvent {
   id: string;
-  title: string;
+  mediaId: string;
+  mediaType: 'movie' | 'series' | 'anime';
+  title?: string;
+  seriesTitle: string;
+  season?: number;
+  episode?: number;
+  releaseDate: string;
   poster?: string;
-  type: 'movie' | 'series' | 'anime';
-  releaseDate?: string;
-  episodes: MediaScheduleEpisode[];
+  type: 'movie' | 'episode';
+}
+
+export interface CalendarSchedule {
+  trackedCount: number;
+  events: CalendarScheduleEvent[];
+}
+
+export interface UpNextCandidate {
+  row: WatchProgress;
+  releaseDate: string;
 }
 
 export interface UserList {
@@ -130,8 +137,8 @@ export interface AddonStream {
   sourceId?: string;
   /** Stable backend-derived release family used for adjacent-episode ranking. */
   streamFamily?: string;
-  /** Backend coordinator explanation for why this stream ranks where it does. */
-  recommendationReasons?: string[];
+  /** Backend coordinator ranking reasons (at most two, already distinct). */
+  recommendationReasons?: AddonStreamRecommendationReason[];
   /** Structured episode/title match tiers for the selector badges. */
   matchSummary?: AddonStreamMatchSummary;
   /** Dev-only sort-key dump for the ranking inspector — only present in debug builds. */
@@ -140,18 +147,33 @@ export interface AddonStream {
   presentation: AddonStreamPresentation;
 }
 
-export type AddonStreamEpisodeMatch = 'exact' | 'episode_range' | 'season_pack';
-export type AddonStreamTitleMatch = 'close' | 'partial';
+export type AddonStreamRecommendationReason =
+  | 'verified_source'
+  | 'source_issues'
+  | 'source_cooling'
+  | 'proven_release_group'
+  | 'release_group_issues'
+  | 'release_group_cooling'
+  | 'title_affinity'
+  | 'language_match'
+  | 'language_flexible'
+  | 'top_quality'
+  | 'good_quality'
+  | 'preferred_source'
+  | 'fallback';
 
-export interface AddonStreamMatchSummary {
+type AddonStreamEpisodeMatch = 'exact' | 'episode_range' | 'season_pack';
+type AddonStreamTitleMatch = 'close' | 'partial';
+
+interface AddonStreamMatchSummary {
   episode?: AddonStreamEpisodeMatch;
   title?: AddonStreamTitleMatch;
 }
 
 export type AddonStreamResolution = '4k' | '1080p' | '720p' | 'sd';
-export type AddonStreamDeliveryKind = 'cached' | 'http' | 'p2p';
+type AddonStreamDeliveryKind = 'cached' | 'http' | 'p2p';
 
-export interface AddonStreamPresentation {
+interface AddonStreamPresentation {
   sourceName: string;
   streamTitle: string;
   resolution: AddonStreamResolution;
@@ -166,7 +188,7 @@ export interface AddonStreamPresentation {
   isBatch: boolean;
 }
 
-export type StreamSourceHealthStatus = 'healthy' | 'degraded' | 'offline' | 'pending';
+type StreamSourceHealthStatus = 'healthy' | 'degraded' | 'offline' | 'pending';
 
 export interface StreamSourceSummary {
   id: string;
@@ -177,15 +199,20 @@ export interface StreamSourceSummary {
   errorMessage?: string;
 }
 
+export interface StreamSelectorStats {
+  resCounts: Record<AddonStreamResolution, number>;
+  playableCount: number;
+  p2pCount: number;
+  cachedCount: number;
+  batchCount: number;
+  episodeLikeCount: number;
+}
+
 export interface StreamSelectorData {
   streams: AddonStream[];
+  stats: StreamSelectorStats;
   sourceSummaries: StreamSourceSummary[];
   fatalErrorMessage?: string | null;
-  /**
-   * False on progressive channel snapshots (some sources still in flight);
-   * true on the settled command result. Missing on mocked/legacy payloads.
-   */
-  complete?: boolean;
 }
 
 export interface AddonSubtitle {
@@ -201,8 +228,8 @@ export interface AddonSubtitle {
 export interface BestResolvedStream {
   url: string;
   format: string;
-  /** Bounded addon `proxyHeaders.request` entries, in-memory only. Never persisted or routed. */
-  requestHeaders?: [string, string][];
+  /** Rust-encoded mpv headers, in-memory only. Never persisted or routed; empty clears. */
+  mpvHttpHeaderFields: string;
   /** Stable addon-instance id (`AddonConfig.id`) of the resolved winner. */
   sourceId?: string;
   sourceName?: string;
@@ -250,32 +277,16 @@ export interface RecoverPlaybackStreamOptions extends StreamRankingOptions {
   failedSourceId?: string;
   failedStreamFamily?: string;
   failedStreamKey?: string;
+  /** Streams that already failed earlier in this episode's recovery chain. */
+  excludedStreamKeys?: string[];
   outcome: Exclude<PlaybackStreamOutcomeReport['outcome'], 'verified'>;
 }
 
-export interface AddonResourceCapability {
-  name: string;
-  types: string[];
-  idPrefixes: string[];
-}
-
-export interface AddonCatalogExtra {
-  name: string;
-  isRequired: boolean;
-  options?: string[];
-}
-
-export interface AddonCatalogCapability {
-  type: string;
-  id: string;
-  extras?: AddonCatalogExtra[];
-}
-
-/** Parsed Stremio manifest snapshot used for capability routing. */
-export interface AddonManifest {
-  name: string;
-  resources: AddonResourceCapability[];
-  catalogs: AddonCatalogCapability[];
+/** Backend genre menu entries per browse tab, in manifest-declared order. */
+export interface BrowseGenres {
+  movie: string[];
+  series: string[];
+  anime: string[];
 }
 
 /** The addon-source fields the renderer supplies when saving. */
@@ -286,20 +297,28 @@ export interface AddonConfigInput {
   enabled: boolean;
 }
 
+/** Rust verdict for the add-addon box, from the save path's own normalizer. */
+export interface AddonUrlInspection {
+  normalizedUrl?: string;
+  error?: string;
+  configurePage: boolean;
+  /** Installed addon name this URL already points at. */
+  duplicateOf?: string;
+}
+
 /**
  * A user-configured addon source compatible with Stremiro's addon pipeline.
  * `displayUrl` is the credential-masked URL computed by the Rust sanitizer —
  * always present on IPC responses, absent from renderer-supplied input.
  */
 export interface AddonConfig extends AddonConfigInput {
-  capabilities?: AddonManifest;
   displayUrl: string;
+  /** Backend-pinned default: fixed slot, toggle-only. */
+  pinned: boolean;
 }
 
 const apiCaches = {
   bestStream: createRequestCache<BestResolvedStream>(BEST_STREAM_CACHE_TTL_MS),
-  mediaSchedule: createRequestCache<MediaSchedule>(MEDIA_SCHEDULE_CACHE_TTL_MS),
-  searchCatalog: createRequestCache<SearchCatalogPage>(SEARCH_CACHE_TTL_MS),
 };
 
 export interface PlaybackLanguagePreferences {
@@ -417,7 +436,7 @@ export interface SearchCatalogPage {
 
 export type HistoryPlaybackPlanReason = 'missing-episode-context';
 
-export interface HistoryPlaybackRouteState extends Omit<
+interface HistoryPlaybackRouteState extends Omit<
   PlayerRouteState,
   // Frontend-only launch fields Rust never emits: logo/opening labels are
   // player-session presentation, `requestedStreamKey`/`originFrom` come from
@@ -437,8 +456,6 @@ export interface HistoryPlaybackPlan {
 export const api = {
   ...createDiscoveryApi({
     safeInvoke,
-    mediaScheduleCache: apiCaches.mediaSchedule,
-    searchCatalogCache: apiCaches.searchCatalog,
   }),
   ...createPlaybackApi({
     safeInvoke,
@@ -490,13 +507,14 @@ export interface WatchProgress {
   /** Stable addon-instance id; rows from before instance-id plumbing omit it. */
   source_id?: string;
   stream_family?: string;
+  /** Rust read-side annotations: absent means no resume offer / false. */
   resume_start_time?: number;
+  is_watched?: boolean;
+  has_started_watching?: boolean;
 }
 
 /**
- * Per-title resume snapshot from `get_title_watch_progress`: the same
- * unique-per-title history pick and continue-watching pick as the global
- * queries, scoped to one media id so callers never pay a full-table scan.
+ * All hydrated title rows plus its resumable subset.
  */
 export interface TitleWatchProgress {
   history: WatchProgress[];

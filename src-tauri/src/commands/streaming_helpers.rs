@@ -112,12 +112,14 @@ fn derive_stream_family_normalized(
 }
 
 fn stream_delivery_kind(stream: &AddonStream) -> StreamDeliveryKind {
-    if stream.cached {
-        StreamDeliveryKind::Cached
-    } else if stream.url.as_deref().is_some_and(is_http_url) {
-        StreamDeliveryKind::Http
-    } else {
+    // The cache hint is advisory text; without a direct HTTP URL the row can
+    // only be resolved as P2P, whatever the addon claims.
+    if !stream.url.as_deref().is_some_and(is_http_url) {
         StreamDeliveryKind::PeerToPeer
+    } else if stream.cached {
+        StreamDeliveryKind::Cached
+    } else {
+        StreamDeliveryKind::Http
     }
 }
 
@@ -531,10 +533,6 @@ pub(crate) fn prepare_addon_streams(
             .as_deref()
             .and_then(|source| derive_stream_family_normalized(&stream, source));
         stream.stream_key = dedup_key;
-        // Coordinator-owned output fields: drop anything the addon payload
-        // injected so ranking, not the wire, is the sole source of them.
-        stream.recommendation_reasons = Vec::new();
-        stream.match_summary = None;
         stream.presentation = build_stream_presentation(&stream);
         prepared.push(stream);
     }

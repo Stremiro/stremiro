@@ -195,32 +195,6 @@ export function watchProgressMediaItem(item: WatchProgress): MediaItem {
   };
 }
 
-// Below this fraction a row hasn't meaningfully started — spoiler masking and
-// the furthest-watched scan share the boundary.
-const STARTED_WATCHING_RATIO = 0.05;
-
-export function hasStartedWatching(
-  item?: Pick<WatchProgress, 'position' | 'duration'> | null,
-): boolean {
-  if (!item || !Number.isFinite(item.position) || !Number.isFinite(item.duration)) {
-    return false;
-  }
-  return item.duration > 0 && item.position / item.duration > STARTED_WATCHING_RATIO;
-}
-
-// Mirrors Rust `WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO`: at/past it the
-// backend stops offering resume — the watched/unwatched boundary.
-const WATCHED_PROGRESS_RATIO = 0.95;
-
-export function isWatchedProgress(
-  item?: Pick<WatchProgress, 'position' | 'duration'> | null,
-): boolean {
-  if (!item || !Number.isFinite(item.position) || !Number.isFinite(item.duration)) {
-    return false;
-  }
-  return item.duration > 0 && item.position / item.duration >= WATCHED_PROGRESS_RATIO;
-}
-
 // Shared progress percent; invalid inputs render as 0.
 export function getWatchProgressPercent(position: number, duration: number): number {
   if (
@@ -268,7 +242,7 @@ function warmHistoryPlayerResolve(plan: HistoryPlaybackPlan): void {
   // plan.target is `/player/{type}/{id}/…` — Rust already canonicalized the
   // media type (kitsu: → anime), which the frontend mapping can't see.
   const [, , typeSegment, idSegment] = plan.target.split('/');
-  const mediaId = idSegment?.trim();
+  const mediaId = idSegment && decodeURIComponent(idSegment).trim();
   if (!mediaId) return;
 
   const mediaType = resolvePlayerRouteMediaType(typeSegment);

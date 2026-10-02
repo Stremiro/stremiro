@@ -20,8 +20,6 @@
     },
     "dialog:allow-open",
     "dialog:allow-save",
-    "libmpv:allow-destroy",
-    "libmpv:allow-set-video-margin-ratio",
     "core:window:allow-start-dragging",
     "core:window:allow-set-always-on-top",
     "core:window:allow-set-size",

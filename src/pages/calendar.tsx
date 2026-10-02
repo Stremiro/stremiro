@@ -16,7 +16,7 @@ import {
   subMonths,
 } from 'date-fns';
 import { CalendarDays, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
-import { memo, useCallback, useEffect, useEffectEvent, useMemo, useState } from 'react';
+import { memo, useCallback, useEffect, useEffectEvent, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
@@ -24,18 +24,14 @@ import { Button } from '@/components/ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useDocumentTitle } from '@/hooks/use-document-title';
-import { useLibraryItems, useWatchHistory, useWatchStatuses } from '@/hooks/use-media-library';
-import { api, type WatchProgress } from '@/lib/api';
-import { buildCalendarEvents, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
+import { useLocalDay } from '@/hooks/use-local-day';
+import { api } from '@/lib/api';
+import { toCalendarEvent, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { currentPathWithSearch } from '@/lib/navigation';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
-import {
-  MEDIA_SCHEDULES_STALE_TIME_MS,
-  mediaSchedulesQueryKey,
-  WATCH_HISTORY_VIEW_STALE_TIME_MS,
-} from '@/lib/query-invalidation';
+import { buildDetailsRoute } from '@/lib/player-navigation';
+import { CALENDAR_EVENTS_STALE_TIME_MS, calendarEventsQueryKey } from '@/lib/query-invalidation';
 import { cn, formatSeasonEpisode, parseLocalScheduleDate } from '@/lib/utils';
 
 // Day cells keep height by capping rows; the rest live behind "+N more".
@@ -59,7 +55,7 @@ function formatEventDayLabel(date: Date, today: Date): string {
 }
 
 function eventDetailsPath(event: CalendarEvent) {
-  return `/details/${resolvePlayerRouteMediaType(event.mediaType)}/${event.mediaId}`;
+  return buildDetailsRoute(event.mediaType, event.mediaId);
 }
 
 function eventDetailsState(event: CalendarEvent, from: string) {
@@ -69,7 +65,7 @@ function eventDetailsState(event: CalendarEvent, from: string) {
 export function Calendar() {
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
-  const [now, setNow] = useState(() => new Date());
+  const now = useLocalDay();
   const monthParam = searchParams.get('month');
   const defaultMonthMs = startOfMonth(now).getTime();
   const currentMonth = useMemo(
@@ -82,122 +78,7 @@ export function Calendar() {
   const from = currentPathWithSearch();
   useDocumentTitle('Calendar');
 
-  const {
-    data: library,
-    isLoading: libraryLoading,
-    isLoadingError: libraryLoadError,
-    refetch: refetchLibrary,
-  } = useLibraryItems();
-
-  const { data: allWatchStatuses } = useWatchStatuses();
-
-  const { data: watchHistory } = useWatchHistory({
-    staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS,
-  });
-
-  // Dedupe canonical identities while preserving raw request types for IPC.
-  const scheduleLookupItems = useMemo(() => {
-    const watchHistoryById = new Map<string, WatchProgress>();
-    (watchHistory ?? []).forEach((entry) => {
-      if (!entry?.id) return;
-      const existing = watchHistoryById.get(entry.id);
-      if (!existing || entry.last_watched > existing.last_watched) {
-        watchHistoryById.set(entry.id, entry);
-      }
-    });
-
-    const byKey = new Map<string, { mediaType: string; id: string }>();
-
-    for (const item of library ?? []) {
-      if (
-        (item.type !== 'movie' && item.type !== 'series') ||
-        allWatchStatuses?.[item.id] === 'dropped'
-      )
-        continue;
-      byKey.set(`${item.type}:${item.id}`, { mediaType: item.type, id: item.id });
-    }
-
-    Object.entries(allWatchStatuses ?? {}).forEach(([itemId, status]) => {
-      if (status !== 'watching') return;
-
-      const fromHistory = watchHistoryById.get(itemId);
-      if (!fromHistory) return;
-
-      if (
-        fromHistory.type_ !== 'movie' &&
-        fromHistory.type_ !== 'series' &&
-        fromHistory.type_ !== 'anime'
-      )
-        return;
-
-      const scheduleType = fromHistory.type_ === 'anime' ? 'series' : fromHistory.type_;
-      byKey.set(`${scheduleType}:${fromHistory.id}`, {
-        mediaType: fromHistory.type_,
-        id: fromHistory.id,
-      });
-    });
-
-    // Sort raw request keys once for stable query identity.
-    return Array.from(byKey.values())
-      .map((item) => ({
-        mediaType: item.mediaType,
-        id: item.id,
-        key: `${item.mediaType}:${item.id}`,
-      }))
-      .toSorted((left, right) => {
-        if (left.key === right.key) return 0;
-        return left.key < right.key ? -1 : 1;
-      })
-      .map(({ mediaType, id }) => ({ mediaType, id }));
-  }, [library, allWatchStatuses, watchHistory]);
-  const scheduleQueryKey = useMemo(
-    () => mediaSchedulesQueryKey(scheduleLookupItems),
-    [scheduleLookupItems],
-  );
-  const {
-    data: schedules = [],
-    isError: isScheduleError,
-    isLoading: isLoadingSchedules,
-    isFetching: isFetchingSchedules,
-    refetch: refetchSchedules,
-  } = useQuery({
-    queryKey: scheduleQueryKey,
-    queryFn: () => api.getMediaSchedules(scheduleLookupItems),
-    enabled: scheduleLookupItems.length > 0,
-    staleTime: MEDIA_SCHEDULES_STALE_TIME_MS,
-  });
-  const isScheduleLoading =
-    scheduleLookupItems.length > 0 && (isLoadingSchedules || isFetchingSchedules);
-
-  // Re-sync the local day at midnight and when returning to the app.
   const todayStartMs = startOfDay(now).getTime();
-
-  useEffect(() => {
-    let timer = 0;
-    const scheduleMidnight = () => {
-      timer = window.setTimeout(
-        () => {
-          setNow(new Date());
-          scheduleMidnight();
-        },
-        startOfDay(addDays(new Date(), 1)).getTime() - Date.now(),
-      );
-    };
-    const onReturnToView = () => {
-      if (document.visibilityState !== 'visible') return;
-      window.clearTimeout(timer);
-      setNow(new Date());
-      scheduleMidnight();
-    };
-    scheduleMidnight();
-    document.addEventListener('visibilitychange', onReturnToView);
-    window.addEventListener('focus', onReturnToView);
-    return () => {
-      window.clearTimeout(timer);
-      document.removeEventListener('visibilitychange', onReturnToView);
-      window.removeEventListener('focus', onReturnToView);
-    };
-  }, []);
 
   const days = useMemo(() => {
     const start = startOfWeek(startOfMonth(currentMonth));
@@ -212,15 +93,33 @@ export function Calendar() {
     addDays(new Date(todayStartMs), UPCOMING_WINDOW_DAYS - 1),
   ).getTime();
 
+  const range = useMemo(
+    () => ({
+      visibleStart: format(new Date(visibleStartMs), 'yyyy-MM-dd'),
+      visibleEnd: format(new Date(visibleEndMs), 'yyyy-MM-dd'),
+      upcomingStart: format(new Date(todayStartMs), 'yyyy-MM-dd'),
+      upcomingEnd: format(new Date(upcomingEndMs), 'yyyy-MM-dd'),
+    }),
+    [visibleStartMs, visibleEndMs, todayStartMs, upcomingEndMs],
+  );
+  const {
+    data: schedule,
+    isError: isScheduleError,
+    isLoading: isLoadingSchedules,
+    isFetching: isFetchingSchedules,
+    refetch: refetchSchedules,
+  } = useQuery({
+    queryKey: calendarEventsQueryKey(range),
+    queryFn: () => api.getCalendarEvents(range),
+    staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
+  });
   const events = useMemo(
     () =>
-      buildCalendarEvents(schedules, {
-        visibleStartMs,
-        visibleEndMs,
-        todayStartMs,
-        upcomingEndMs,
+      (schedule?.events ?? []).flatMap((event) => {
+        const calendarEvent = toCalendarEvent(event);
+        return calendarEvent ? [calendarEvent] : [];
       }),
-    [schedules, todayStartMs, visibleStartMs, visibleEndMs, upcomingEndMs],
+    [schedule],
   );
 
   const upcomingEvents = useMemo(
@@ -317,14 +216,6 @@ export function Calendar() {
     return () => window.removeEventListener('keydown', onKeyDown);
   }, []);
 
-  if (libraryLoading) {
-    return (
-      <div className='mx-auto flex min-h-[70vh] w-full max-w-7xl items-center justify-center pl-[84px] pr-4 page-enter'>
-        <Loader2 className='h-7 w-7 animate-spin text-white/35' aria-label='Loading calendar' />
-      </div>
-    );
-  }
-
   return (
     <div className='mx-auto w-full max-w-7xl pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8 pt-6 pb-16 page-enter'>
       <div className='flex flex-col md:flex-row items-start md:items-center justify-between mb-4 gap-3'>
@@ -382,15 +273,15 @@ export function Calendar() {
         </div>
       </div>
 
-      {libraryLoadError ? (
+      {isScheduleError ? (
         <RetryBanner
           className='mb-4'
-          title="Couldn't load your library"
-          message='Upcoming episodes need your library — try again.'
-          onRetry={() => void refetchLibrary()}
+          title="Couldn't load release schedules"
+          message='Upcoming episodes may be missing — try again.'
+          onRetry={() => void refetchSchedules()}
         />
       ) : (
-        scheduleLookupItems.length === 0 && (
+        schedule?.trackedCount === 0 && (
           <div className='mb-4 flex flex-col items-center rounded-xl border border-dashed border-white/[0.08] bg-white/[0.02] px-6 py-8 text-center'>
             <span className='mb-3 flex h-12 w-12 items-center justify-center rounded-2xl border border-white/[0.07] bg-white/[0.05]'>
               <CalendarDays className='h-5 w-5 text-zinc-400' />
@@ -406,20 +297,11 @@ export function Calendar() {
         )
       )}
 
-      {scheduleLookupItems.length > 0 && isLoadingSchedules && (
+      {isLoadingSchedules && (
         <div className='mb-4 flex items-center gap-2 text-xs text-zinc-400'>
           <Loader2 className='h-3.5 w-3.5 animate-spin' />
           <span>Loading release data from your library…</span>
         </div>
-      )}
-
-      {scheduleLookupItems.length > 0 && isScheduleError && !isScheduleLoading && (
-        <RetryBanner
-          className='mb-4'
-          title="Couldn't load release schedules"
-          message='Upcoming episodes may be missing — try again.'
-          onRetry={() => void refetchSchedules()}
-        />
       )}
 
       <div className='mb-4 rounded-xl border border-white/[0.06] bg-zinc-950/60 p-5 backdrop-blur-sm'>

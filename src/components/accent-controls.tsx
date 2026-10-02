@@ -132,7 +132,9 @@ export function AccentControls({
             value={accentColor}
             onChange={(e) => {
               const val = e.target.value;
-              if (ACCENT_HEX_DRAFT_PATTERN.test(val)) onAccentColorChange(val);
+              // Empty must pass too — otherwise the field can never be
+              // cleared and retyped from scratch.
+              if (val === '' || ACCENT_HEX_DRAFT_PATTERN.test(val)) onAccentColorChange(val);
             }}
             maxLength={7}
             placeholder='#ffffff'

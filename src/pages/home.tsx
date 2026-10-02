@@ -4,22 +4,17 @@ import { useMemo, useState } from 'react';
 import { Hero } from '@/components/hero';
 import { MediaRow } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
-import { useAddonConfigs } from '@/hooks/use-addon-configs';
+import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS, trendingRowQueryKey } from '@/lib/query-invalidation';
-import {
-  collectSearchGenreOptions,
-  sameSearchGenre,
-  searchGenrePath,
-  type SearchMediaType,
-} from '@/lib/search-page-state';
+import { sameSearchGenre, searchGenrePath, type SearchMediaType } from '@/lib/search-page-state';
 
 const ALL_GENRES = 'All';
 
 // Home rails use the shared browse pipeline and render only the first page.
 function fetchCatalogItems(options: {
-  mediaType: SearchMediaType;
+  mediaType: Exclude<SearchMediaType, 'all'>;
   feed?: 'featured';
   genre?: string;
 }) {
@@ -38,17 +33,15 @@ export function Home() {
 
   // Same manifest-driven genre list as the search filter: one source of
   // truth, and the rail follows whatever the metadata addon declares.
-  const { data: addonConfigs = [] } = useAddonConfigs({ enabled: isOnline });
+  const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
   const genreOptions = useMemo(
     // A manifest genre literally named "All" would render a second,
     // differently-styled tab for the same unfiltered state — drop it.
     () => [
       ALL_GENRES,
-      ...collectSearchGenreOptions(addonConfigs, 'movie').filter(
-        (option) => !sameSearchGenre(option, ALL_GENRES),
-      ),
+      ...(browseGenres?.movie ?? []).filter((option) => !sameSearchGenre(option, ALL_GENRES)),
     ],
-    [addonConfigs],
+    [browseGenres],
   );
 
   // Same key/queryFn/staleTime as the `All` movie row, so hero and row share

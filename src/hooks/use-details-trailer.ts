@@ -1,30 +1,20 @@
 import { useCallback, useState } from 'react';
-import { toast } from 'sonner';
 
 import type { MediaDetails } from '@/lib/api';
-import { resolveTrailerEmbedUrl } from '@/lib/trailer-utils';
+import { buildYouTubeEmbedUrl } from '@/lib/trailer-utils';
 
-// Trailer dialog state + opener for the details hero. The backend only
-// emits strict YouTube watch URLs, so every trailer embeds in-app — a URL
-// that fails to resolve is a data bug, not a different opening strategy.
+// Trailer dialog state + opener for the details hero. The backend ships only
+// validated YouTube ids, so the first trailer always embeds in-app.
 export function useDetailsTrailer(item: MediaDetails | undefined) {
   const [trailerOpen, setTrailerOpen] = useState(false);
   const [trailerUrl, setTrailerUrl] = useState<string | null>(null);
-  const trailers = item?.trailers;
+  const trailerId = item?.trailers?.[0]?.id;
 
   const openTrailer = useCallback(() => {
-    // First candidate that embeds wins — a dead first URL shouldn't mask the
-    // rest of the trailer list.
-    for (const trailer of trailers ?? []) {
-      const embedUrl = resolveTrailerEmbedUrl(trailer.url?.trim(), { autoplay: true });
-      if (embedUrl) {
-        setTrailerUrl(embedUrl);
-        setTrailerOpen(true);
-        return;
-      }
-    }
-    toast.error('Trailer unavailable');
-  }, [trailers]);
+    if (!trailerId) return;
+    setTrailerUrl(buildYouTubeEmbedUrl(trailerId, { autoplay: true }));
+    setTrailerOpen(true);
+  }, [trailerId]);
 
   const onTrailerOpenChange = useCallback((open: boolean) => {
     setTrailerOpen(open);

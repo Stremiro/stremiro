@@ -9,18 +9,27 @@ import { useSelectorResolution } from '@/hooks/use-selector-resolution';
 import {
   api,
   type StreamSelectorData,
+  type StreamSelectorStats,
   type StreamSelectorPreferences,
   type StreamSourceSummary,
 } from '@/lib/api';
 import { getLastUsedStreamIdentity, indexTitleWatchProgress } from '@/lib/history-playback';
 import { playerStreamRankingOptions } from '@/lib/resolve-player-stream';
 import { buildStreamRankingCacheKey } from '@/lib/stream-ranking';
-import { buildStreamSelectorStats, filterSelectorStreams } from '@/lib/stream-selector-utils';
+import { filterSelectorStreams } from '@/lib/stream-selector-utils';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { isSeriesLikeMediaType } from '@/lib/utils';
 
 // Stable fallback so `?? []` never changes memo identity across renders.
 const EMPTY_SOURCE_SUMMARIES: StreamSourceSummary[] = [];
+const EMPTY_STREAM_STATS: StreamSelectorStats = {
+  resCounts: { '4k': 0, '1080p': 0, '720p': 0, sd: 0 },
+  playableCount: 0,
+  p2pCount: 0,
+  cachedCount: 0,
+  batchCount: 0,
+  episodeLikeCount: 0,
+};
 
 interface UseStreamSelectorControllerArgs {
   open: boolean;
@@ -171,7 +180,7 @@ export function useStreamSelectorController({
     retry: 0,
   });
   const streams = useMemo(() => streamSelectorData?.streams ?? [], [streamSelectorData?.streams]);
-  const streamStats = useMemo(() => buildStreamSelectorStats(streams), [streams]);
+  const streamStats = streamSelectorData?.stats ?? EMPTY_STREAM_STATS;
 
   const addonHealthMetrics = streamSelectorData?.sourceSummaries ?? EMPTY_SOURCE_SUMMARIES;
 

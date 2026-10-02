@@ -25,7 +25,7 @@ import {
 } from '@/components/media-card';
 import { Input } from '@/components/ui/input';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
-import { useAddonConfigs } from '@/hooks/use-addon-configs';
+import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useAmbientActivity } from '@/hooks/use-ambient-activity';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useOnlineStatus } from '@/hooks/use-online-status';
@@ -35,8 +35,8 @@ import { getErrorMessage, type MediaItem } from '@/lib/api';
 import { navigateAppBack } from '@/lib/navigation';
 import { searchCatalogKey } from '@/lib/search-catalog';
 import {
-  collectSearchGenreOptions,
   sameSearchGenre,
+  searchGenreOptions,
   type SearchFeed,
   type SearchMediaType,
 } from '@/lib/search-page-state';
@@ -71,6 +71,7 @@ function getSearchGridColumnCount(viewportWidth: number, containerWidth: number)
 }
 
 const SEARCH_TYPE_OPTIONS: ReadonlyArray<{ id: SearchMediaType; label: string }> = [
+  { id: 'all', label: 'All' },
   { id: 'movie', label: 'Movies' },
   { id: 'series', label: 'Series' },
   { id: 'anime', label: 'Anime' },
@@ -83,6 +84,17 @@ const SEARCH_FEED_OPTIONS: ReadonlyArray<{ id: SearchFeed; label: string }> = [
 ];
 
 const SEARCH_SKELETON_COUNT = 21;
+const SEARCH_SKELETON_KEYS = Array.from(
+  { length: SEARCH_SKELETON_COUNT },
+  (_, index) => `search-skeleton-${index}`,
+);
+const renderSearchResult = (item: MediaItem) => (
+  <div className={SEARCH_RESULT_ITEM_CLASS_NAME}>
+    <MediaCard item={item} />
+  </div>
+);
+const estimateSearchItemHeight = (itemWidth: number) =>
+  itemWidth * 1.5 + MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX;
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-full border border-white/[0.08] bg-white/[0.04] px-5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 
@@ -168,7 +180,7 @@ const SearchResults = memo(function SearchResults({
     // next-page leaves the sentinel in view, and re-observing would refire
     // `fetchNextPage` in a loop. The explicit retry button stays the only
     // recovery while the query sits in error.
-    if (!sentinel || !hasNextPage || isError || isFetching) {
+    if (!sentinel || !isOnline || !hasNextPage || isError || isFetching) {
       return;
     }
     const observer = new IntersectionObserver(
@@ -183,7 +195,7 @@ const SearchResults = memo(function SearchResults({
     return () => observer.disconnect();
   }, [fetchNextPage, hasNextPage, isError, isFetching, isOnline, showSkeleton]);
 
-  if (!isOnline) {
+  if (!isOnline && results.length === 0) {
     return (
       <SearchPanel
         icon={<WifiOff className='h-5 w-5 text-zinc-400' />}
@@ -196,8 +208,8 @@ const SearchResults = memo(function SearchResults({
   if (showSkeleton) {
     return (
       <div aria-hidden='true' className={SEARCH_RESULTS_CLASS_NAME}>
-        {Array.from({ length: SEARCH_SKELETON_COUNT }, (_, index) => (
-          <div key={`search-skeleton-${index}`} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
+        {SEARCH_SKELETON_KEYS.map((key) => (
+          <div key={key} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
             <MediaCardSkeleton />
           </div>
         ))}
@@ -277,26 +289,31 @@ const SearchResults = memo(function SearchResults({
         isFetching && !isFetchingNextPage && 'opacity-60',
       )}
     >
+      {!isOnline && (
+        <div
+          role='status'
+          className='mb-5 flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[12.5px] text-zinc-400'
+        >
+          <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
+          You&apos;re offline. Showing cached titles until you reconnect.
+        </div>
+      )}
       <WindowVirtualizedGrid
         items={results}
-        getItemKey={(item) => searchCatalogKey(item)}
-        renderItem={(item) => (
-          <div className={SEARCH_RESULT_ITEM_CLASS_NAME}>
-            <MediaCard item={item} />
-          </div>
-        )}
-        estimateItemHeight={(itemWidth) => itemWidth * 1.5 + MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX}
+        getItemKey={searchCatalogKey}
+        renderItem={renderSearchResult}
+        estimateItemHeight={estimateSearchItemHeight}
         getColumnCount={getSearchGridColumnCount}
         gap={SEARCH_GRID_GAP_PX}
         rowGap={SEARCH_GRID_ROW_GAP_PX}
       />
       <div ref={loadMoreRef} aria-hidden='true' className='h-1' />
-      {isFetchingNextPage ? (
+      {isOnline && isFetchingNextPage ? (
         <output className='flex items-center justify-center gap-2 pb-2 pt-5 text-[12px] text-zinc-500'>
           <Loader2 className='h-3.5 w-3.5 animate-spin' />
           Loading more titles
         </output>
-      ) : isError ? (
+      ) : isOnline && isError ? (
         <div className='flex flex-col items-center gap-1.5 pt-6' role='alert'>
           <p className='text-[12px] text-zinc-500'>{getErrorMessage(errorObj)}</p>
           <button
@@ -310,7 +327,7 @@ const SearchResults = memo(function SearchResults({
             {isFetchNextPageError ? 'Retry loading more' : 'Try again'}
           </button>
         </div>
-      ) : hasNextPage ? (
+      ) : isOnline && hasNextPage ? (
         <div className='flex justify-center pt-6'>
           <button
             type='button'
@@ -368,11 +385,12 @@ export function Search() {
 
   // Genre menu entries are manifest-driven: the union of `genre` extra
   // options the enabled addons declare for the active catalog type
-  // (Cinemeta first).
-  const { data: addonConfigs = [] } = useAddonConfigs({ enabled: isOnline });
+  // (Cinemeta first), computed in Rust.
+  const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
+  // `all` unions the movie and series genre sets (dedupe inside the helper).
   const genreOptions = useMemo(
-    () => collectSearchGenreOptions(addonConfigs, activeType),
-    [addonConfigs, activeType],
+    () => searchGenreOptions(browseGenres, activeType),
+    [browseGenres, activeType],
   );
   // A deep-linked genre the manifests don't enumerate still gets an entry so
   // the active filter is never invisible.
@@ -388,8 +406,9 @@ export function Search() {
     // A genre the next type's catalogs don't offer would strand an empty grid.
     const clearIncompatibleGenre = Boolean(
       activeGenre &&
+      browseGenres &&
       nextType !== activeType &&
-      !includesGenre(collectSearchGenreOptions(addonConfigs, nextType), activeGenre),
+      !includesGenre(searchGenreOptions(browseGenres, nextType), activeGenre),
     );
     handleTypeChange(nextType, clearIncompatibleGenre);
     // A no-op re-click changes nothing — don't bounce the scroll position.
@@ -399,9 +418,10 @@ export function Search() {
   // One stable handler so `SearchResults`' memo isn't defeated by an inline
   // arrow — shared by the header Reset pill and the empty-state action.
   const handleResetFilters = useCallback(() => {
+    if (!hasActiveFilters) return;
     resetFilters();
     resetScroll();
-  }, [resetFilters]);
+  }, [hasActiveFilters, resetFilters]);
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const showSkeleton = !isError && (isLoading || (isFetching && results.length === 0));
@@ -424,15 +444,17 @@ export function Search() {
 
   return (
     <div className='page-enter pl-[60px]'>
-      <div className='w-full px-4 pb-16 pt-6 sm:px-6 lg:px-8'>
-        <div className='mx-auto w-full max-w-3xl'>
+      <div className='mx-auto w-full max-w-[1800px] px-4 pb-16 pt-8 sm:px-6 lg:px-8'>
+        <div className='mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex items-end justify-between gap-3'>
             <div className='min-w-0'>
               <h1 className='bg-linear-to-br from-white via-white to-zinc-400 bg-clip-text text-[26px] font-semibold leading-none tracking-[-0.045em] text-transparent'>
-                Search
+                {isBrowsing ? 'Discover' : 'Search'}
               </h1>
               <p className='mt-2 text-[12.5px] font-medium tracking-[-0.01em] text-zinc-500'>
-                Browse movies, series, and anime
+                {isBrowsing
+                  ? 'Find your next great watch.'
+                  : 'Movies, series, and anime. One place to explore.'}
               </p>
             </div>
             {results.length > 0 ? (
@@ -466,15 +488,27 @@ export function Search() {
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
+                if (
+                  event.defaultPrevented ||
+                  event.nativeEvent.isComposing ||
+                  event.ctrlKey ||
+                  event.altKey ||
+                  event.metaKey
+                )
+                  return;
                 // Not a form submit — Enter's only job is dismissing the
                 // software keyboard.
                 if (event.key === 'Enter') {
+                  event.preventDefault();
                   event.currentTarget.blur();
                   return;
                 }
                 // Progressive dismissal: Esc clears the text, then becomes
                 // the app-level back gesture once the box is empty.
                 if (event.key !== 'Escape') return;
+                event.preventDefault();
+                event.stopPropagation();
+                if (event.repeat) return;
                 if (query) {
                   setQuery('');
                 } else {
@@ -507,64 +541,69 @@ export function Search() {
             </div>
           </div>
 
-          <div className='mt-3 flex flex-wrap items-center justify-center gap-2'>
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type='button'
-                  title='Filter by genre'
-                  className={cn(
-                    'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
-                    activeGenre
-                      ? 'accent-lattice-soft'
-                      : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
-                  )}
+          {/* lg+ pins the type group under the search bar's midpoint while
+              genre/feed/reset flank the container edges; narrower widths fall
+              back to the centered wrapping row. */}
+          <div className='mt-3 flex flex-wrap items-center justify-center gap-2 lg:grid lg:grid-cols-[1fr_auto_1fr]'>
+            <div className='justify-self-start'>
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type='button'
+                    title='Filter by genre'
+                    className={cn(
+                      'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                      activeGenre
+                        ? 'accent-lattice-soft'
+                        : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
+                    )}
+                  >
+                    <Shapes className='h-3.5 w-3.5 opacity-70' />
+                    <span className='max-w-[120px] truncate'>{activeGenre ?? 'Genre'}</span>
+                    <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align='start'
+                  sideOffset={6}
+                  className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
                 >
-                  <Shapes className='h-3.5 w-3.5 opacity-70' />
-                  <span className='max-w-[120px] truncate'>{activeGenre ?? 'Genre'}</span>
-                  <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align='start'
-                sideOffset={6}
-                className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
-              >
-                <DropdownMenuItem
-                  onSelect={() => {
-                    // No-op when nothing's active — don't bounce the scroll.
-                    if (!activeGenre) return;
-                    clearGenre();
-                    resetScroll();
-                  }}
-                  className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                >
-                  All genres
-                  {!activeGenre ? (
-                    <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                  ) : null}
-                </DropdownMenuItem>
-                <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
-                {menuGenres.map((genre) => {
-                  const isActive = sameSearchGenre(genre, activeGenre);
-                  return (
-                    <DropdownMenuItem
-                      key={genre}
-                      onSelect={() => {
-                        handleGenreChange(genre);
-                        resetScroll();
-                      }}
-                      className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                    >
-                      <span className='truncate'>{genre}</span>
-                      {isActive ? (
-                        <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                      ) : null}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                  <DropdownMenuItem
+                    onSelect={() => {
+                      // No-op when nothing's active — don't bounce the scroll.
+                      if (!activeGenre) return;
+                      clearGenre();
+                      resetScroll();
+                    }}
+                    className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
+                  >
+                    All genres
+                    {!activeGenre ? (
+                      <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
+                    ) : null}
+                  </DropdownMenuItem>
+                  <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
+                  {menuGenres.map((genre) => {
+                    const isActive = sameSearchGenre(genre, activeGenre);
+                    return (
+                      <DropdownMenuItem
+                        key={genre}
+                        onSelect={() => {
+                          handleGenreChange(genre);
+                          resetScroll();
+                        }}
+                        className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
+                      >
+                        <span className='truncate'>{genre}</span>
+                        {isActive ? (
+                          <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
+                        ) : null}
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
 
             <div
               role='group'
@@ -592,82 +631,84 @@ export function Search() {
               ))}
             </div>
 
-            <DropdownMenu modal={false}>
-              {/* aria-disabled + guards, not `disabled`: a native-disabled
+            <div className='flex items-center gap-2 justify-self-end'>
+              <DropdownMenu modal={false}>
+                {/* aria-disabled + guards, not `disabled`: a native-disabled
                   button swallows pointer events, so the "why is it off"
                   tooltip could never appear. Radix respects defaultPrevented
                   on pointerdown/keydown, so the guards keep it closed. */}
-              <DropdownMenuTrigger asChild>
-                <button
-                  type='button'
-                  title={isBrowsing ? 'Select catalog feed' : 'Feeds apply when browsing'}
-                  aria-disabled={!isBrowsing || undefined}
-                  onPointerDown={(event) => {
-                    if (!isBrowsing) event.preventDefault();
-                  }}
-                  onKeyDown={(event) => {
-                    if (
-                      !isBrowsing &&
-                      (event.key === 'Enter' ||
-                        event.key === ' ' ||
-                        event.key === 'ArrowDown' ||
-                        event.key === 'ArrowUp')
-                    ) {
-                      event.preventDefault();
-                    }
-                  }}
-                  className={cn(
-                    'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-40',
-                    activeFeed !== 'popular'
-                      ? 'accent-lattice-soft'
-                      : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
-                  )}
-                >
-                  <TrendingUp className='h-3.5 w-3.5 opacity-70' />
-                  <span className='min-w-[52px] text-left'>{activeFeedLabel}</span>
-                  <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align='end' sideOffset={6} className='w-44'>
-                {SEARCH_FEED_OPTIONS.map((option) => {
-                  const isActive = activeFeed === option.id;
-                  return (
-                    <DropdownMenuItem
-                      key={option.id}
-                      onSelect={() => {
-                        if (isActive) return;
-                        handleFeedChange(option.id);
-                        resetScroll();
-                      }}
-                      className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                    >
-                      {option.label}
-                      {isActive ? (
-                        <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                      ) : null}
-                    </DropdownMenuItem>
-                  );
-                })}
-              </DropdownMenuContent>
-            </DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type='button'
+                    title={isBrowsing ? 'Select catalog feed' : 'Feeds apply when browsing'}
+                    aria-disabled={!isBrowsing || undefined}
+                    onPointerDown={(event) => {
+                      if (!isBrowsing) event.preventDefault();
+                    }}
+                    onKeyDown={(event) => {
+                      if (
+                        !isBrowsing &&
+                        (event.key === 'Enter' ||
+                          event.key === ' ' ||
+                          event.key === 'ArrowDown' ||
+                          event.key === 'ArrowUp')
+                      ) {
+                        event.preventDefault();
+                      }
+                    }}
+                    className={cn(
+                      'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-40',
+                      activeFeed !== 'popular'
+                        ? 'accent-lattice-soft'
+                        : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
+                    )}
+                  >
+                    <TrendingUp className='h-3.5 w-3.5 opacity-70' />
+                    <span className='min-w-[52px] text-left'>{activeFeedLabel}</span>
+                    <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align='end' sideOffset={6} className='w-44'>
+                  {SEARCH_FEED_OPTIONS.map((option) => {
+                    const isActive = activeFeed === option.id;
+                    return (
+                      <DropdownMenuItem
+                        key={option.id}
+                        onSelect={() => {
+                          if (isActive) return;
+                          handleFeedChange(option.id);
+                          resetScroll();
+                        }}
+                        className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
+                      >
+                        {option.label}
+                        {isActive ? (
+                          <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
+                        ) : null}
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
 
-            {/* Always rendered so it can't shove the facet controls left on
+              {/* Always rendered so it can't shove the facet controls left on
                 appear: idle it sits dimmed, active it matches the pills. */}
-            <button
-              type='button'
-              onClick={handleResetFilters}
-              disabled={!hasActiveFilters}
-              title='Reset all filters'
-              className={cn(
-                'flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
-                hasActiveFilters
-                  ? 'border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-white'
-                  : 'cursor-default border-transparent text-zinc-700',
-              )}
-            >
-              <RotateCcw className='h-3.5 w-3.5' />
-              Reset
-            </button>
+              <button
+                type='button'
+                onClick={handleResetFilters}
+                aria-disabled={!hasActiveFilters || undefined}
+                title='Reset all filters'
+                className={cn(
+                  'flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                  hasActiveFilters
+                    ? 'border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-white'
+                    : 'cursor-default border-transparent text-zinc-700',
+                )}
+              >
+                <RotateCcw className='h-3.5 w-3.5' />
+                Reset
+              </button>
+            </div>
           </div>
         </div>
 

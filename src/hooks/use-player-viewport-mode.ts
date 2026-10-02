@@ -1,206 +1,48 @@
-import {
-  currentMonitor,
-  getCurrentWindow,
-  PhysicalPosition,
-  PhysicalSize,
-  primaryMonitor,
-  type Window as TauriWindow,
-} from '@tauri-apps/api/window';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { getCurrentWindow, type Window as TauriWindow } from '@tauri-apps/api/window';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { toast } from 'sonner';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
-import { sleep } from '@/lib/utils';
+import {
+  enqueueViewportTransition,
+  isPlayerPip,
+  returnFromPlayerPip,
+  setPlayerPip,
+  subscribePlayerPip,
+  syncPlayerPip,
+  waitForViewportTransition,
+} from '@/lib/player-window';
+import { prefersReducedMotion, sleep } from '@/lib/utils';
 
-const NATIVE_FULLSCREEN_VERIFY_ATTEMPTS = 12;
-const NATIVE_FULLSCREEN_VERIFY_DELAY_MS = 50;
-const WINDOW_FULLSCREEN_TRANSITION_SETTLE_DELAY_MS = 80;
+const FULLSCREEN_VERIFY_ATTEMPTS = 12;
+const FULLSCREEN_VERIFY_DELAY_MS = 50;
 
-type DesktopFullscreenMode = 'manual' | 'native';
-
-interface DesktopWindowSnapshot {
-  isMaximized: boolean;
-  isResizable: boolean;
-  outerPosition: {
-    x: number;
-    y: number;
-  };
-  innerSize: {
-    width: number;
-    height: number;
-  };
-}
-
-// Module-scoped so internal player route remounts can preserve a desktop fallback
-// fullscreen window without briefly re-showing sidebar/titlebar chrome.
-const desktopViewportState: {
-  mode: DesktopFullscreenMode | null;
-  restoreSnapshot: DesktopWindowSnapshot | null;
-} = {
-  mode: null,
-  restoreSnapshot: null,
-};
-
-function toPhysicalPosition(position: { x: number; y: number }): PhysicalPosition {
-  return new PhysicalPosition(position.x, position.y);
-}
-
-function toPhysicalSize(size: { width: number; height: number }): PhysicalSize {
-  return new PhysicalSize(size.width, size.height);
-}
-
-async function measureWindowFrameInsets(appWindow: TauriWindow): Promise<{ x: number; y: number }> {
-  const [outerSize, innerSize] = await Promise.all([appWindow.outerSize(), appWindow.innerSize()]);
-
-  return {
-    x: Math.max(0, Math.round((outerSize.width - innerSize.width) / 2)),
-    y: Math.max(0, Math.round((outerSize.height - innerSize.height) / 2)),
-  };
-}
-
-async function applyMonitorBounds(
-  appWindow: TauriWindow,
-  monitor: NonNullable<Awaited<ReturnType<typeof currentMonitor>>>,
-): Promise<void> {
-  const size = toPhysicalSize(monitor.size);
-
-  await appWindow.setPosition(toPhysicalPosition(monitor.position));
-  await appWindow.setSize(size);
-  await sleep(16);
-
-  const frameInsets = await measureWindowFrameInsets(appWindow).catch(() => ({
-    x: 0,
-    y: 0,
-  }));
-  const adjustedPosition = toPhysicalPosition({
-    x: monitor.position.x - frameInsets.x,
-    y: monitor.position.y - frameInsets.y,
-  });
-
-  await appWindow.setPosition(adjustedPosition);
-  await appWindow.setSize(size);
-  await sleep(16);
-
-  const settledFrameInsets = await measureWindowFrameInsets(appWindow).catch(() => frameInsets);
-
-  if (settledFrameInsets.x !== frameInsets.x || settledFrameInsets.y !== frameInsets.y) {
-    await appWindow.setPosition(
-      toPhysicalPosition({
-        x: monitor.position.x - settledFrameInsets.x,
-        y: monitor.position.y - settledFrameInsets.y,
-      }),
-    );
-  }
-}
-
-async function waitForNativeFullscreenState(
-  appWindow: TauriWindow,
-  expected: boolean,
-): Promise<boolean> {
-  // Sequential verify-poll: each check must run after the previous delay.
+// Preserve fullscreen across episode remounts. Native fullscreen restores the
+// window placement; maximized windows must first shed their work-area frame.
+let desktopFullscreen = false;
+let restoreMaximized = false;
+async function waitForFullscreenState(appWindow: TauriWindow, expected: boolean): Promise<void> {
   /* eslint-disable no-await-in-loop */
-  for (let attempt = 0; attempt < NATIVE_FULLSCREEN_VERIFY_ATTEMPTS; attempt += 1) {
-    const isFullscreen = await appWindow.isFullscreen().catch(() => false);
-    if (isFullscreen === expected) {
-      return true;
-    }
-
-    await sleep(NATIVE_FULLSCREEN_VERIFY_DELAY_MS);
+  for (let attempt = 0; attempt < FULLSCREEN_VERIFY_ATTEMPTS; attempt += 1) {
+    if ((await appWindow.isFullscreen()) === expected) return;
+    await sleep(FULLSCREEN_VERIFY_DELAY_MS);
   }
   /* eslint-enable no-await-in-loop */
-
-  return false;
-}
-
-async function captureDesktopWindowSnapshot(
-  appWindow: TauriWindow,
-): Promise<DesktopWindowSnapshot | null> {
-  try {
-    const [isMaximized, isResizable, outerPosition, innerSize] = await Promise.all([
-      appWindow.isMaximized().catch(() => false),
-      appWindow.isResizable().catch(() => true),
-      appWindow.outerPosition(),
-      appWindow.innerSize(),
-    ]);
-
-    return {
-      isMaximized,
-      isResizable,
-      outerPosition: {
-        x: outerPosition.x,
-        y: outerPosition.y,
-      },
-      innerSize: {
-        width: innerSize.width,
-        height: innerSize.height,
-      },
-    };
-  } catch {
-    return null;
-  }
-}
-
-async function restoreDesktopWindowSnapshot(
-  appWindow: TauriWindow,
-  snapshot: DesktopWindowSnapshot,
-): Promise<void> {
-  await appWindow.setAlwaysOnTop(false).catch(() => undefined);
-  await appWindow.unmaximize().catch(() => undefined);
-  await appWindow.setResizable(true).catch(() => undefined);
-  await appWindow.setPosition(toPhysicalPosition(snapshot.outerPosition)).catch(() => undefined);
-  await appWindow.setSize(toPhysicalSize(snapshot.innerSize)).catch(() => undefined);
-
-  if (snapshot.isMaximized) {
-    await appWindow.maximize().catch(() => undefined);
-  }
-
-  await appWindow.setResizable(snapshot.isResizable).catch(() => undefined);
-  await sleep(WINDOW_FULLSCREEN_TRANSITION_SETTLE_DELAY_MS);
-}
-
-async function enterManualDesktopFullscreen(appWindow: TauriWindow): Promise<boolean> {
-  const snapshot =
-    desktopViewportState.restoreSnapshot ?? (await captureDesktopWindowSnapshot(appWindow));
-  if (!snapshot) {
-    return false;
-  }
-
-  const monitor =
-    (await currentMonitor().catch(() => null)) ?? (await primaryMonitor().catch(() => null));
-  if (!monitor) {
-    return false;
-  }
-
-  desktopViewportState.restoreSnapshot = snapshot;
-  desktopViewportState.mode = 'manual';
-
-  try {
-    if (snapshot.isMaximized) {
-      await appWindow.unmaximize().catch(() => undefined);
-    }
-
-    await appWindow.setResizable(false);
-    await appWindow.setAlwaysOnTop(true);
-    await applyMonitorBounds(appWindow, monitor);
-    await appWindow.setFocus().catch(() => undefined);
-    await sleep(WINDOW_FULLSCREEN_TRANSITION_SETTLE_DELAY_MS);
-    return true;
-  } catch {
-    await restoreDesktopWindowSnapshot(appWindow, snapshot).catch(() => undefined);
-    desktopViewportState.mode = null;
-    desktopViewportState.restoreSnapshot = null;
-    return false;
-  }
+  throw new Error('The window did not complete its fullscreen transition.');
 }
 
 interface UsePlayerViewportModeOptions {
   onBeforeEnterFullscreen?: () => Promise<void> | void;
-  /** False while the session is docked in the mini player — resize-driven
-      fullscreen syncs are skipped until the player expands again. */
+  /** Skip resize-driven IPC while the session is docked. */
   expanded?: boolean;
 }
 
 interface UsePlayerViewportModeResult {
-  cleanupViewportOnUnmount: () => void;
   isFullscreen: boolean;
+  isPip: boolean;
+  isViewportTransitioning: boolean;
+  canPip: boolean;
+  togglePip: () => Promise<void>;
+  returnFromPip: () => Promise<void>;
   prepareForInternalPlayerNavigation: () => void;
   toggleFullscreen: () => Promise<void>;
 }
@@ -215,222 +57,200 @@ export function usePlayerViewportMode(
     [isDesktopRuntime],
   );
   const [isFullscreen, setIsFullscreen] = useState(
-    () => !!document.fullscreenElement || desktopViewportState.mode !== null,
+    () => !!document.fullscreenElement || desktopFullscreen,
   );
+  const isPip = useSyncExternalStore(subscribePlayerPip, isPlayerPip);
+  const [isViewportTransitioning, setIsViewportTransitioning] = useState(false);
+  const transitionInFlightRef = useRef(false);
   const preserveViewportOnUnmountRef = useRef(false);
   const viewportCleanupHandledRef = useRef(false);
   const expandedRef = useRef(expanded);
+  const syncGenerationRef = useRef(0);
 
-  const syncFullscreenState = useCallback(async () => {
-    let nativeFullscreen = false;
-
-    if (appWindow) {
-      try {
-        nativeFullscreen = await appWindow.isFullscreen();
-      } catch {
-        nativeFullscreen = false;
-      }
-    }
-
-    if (nativeFullscreen) {
-      desktopViewportState.mode = 'native';
-    } else if (desktopViewportState.mode === 'native') {
-      desktopViewportState.mode = null;
-    }
-
-    const next =
-      nativeFullscreen || desktopViewportState.mode === 'manual' || !!document.fullscreenElement;
-    setIsFullscreen((prev) => (prev === next ? prev : next));
-  }, [appWindow]);
+  const syncFullscreenState = useCallback(
+    async (withinTransition = false) => {
+      if (viewportCleanupHandledRef.current) return;
+      const generation = ++syncGenerationRef.current;
+      // A newly mounted episode must read after the previous window operation.
+      if (!withinTransition) await waitForViewportTransition();
+      const nativeFullscreen = appWindow ? await appWindow.isFullscreen() : false;
+      if (generation !== syncGenerationRef.current || viewportCleanupHandledRef.current) return;
+      desktopFullscreen = nativeFullscreen;
+      setIsFullscreen(nativeFullscreen || !!document.fullscreenElement);
+    },
+    [appWindow],
+  );
 
   const exitFullscreenIfNeeded = useCallback(async () => {
-    const activeDesktopMode = desktopViewportState.mode;
-    let nativeFullscreen = false;
-
+    if (isPlayerPip()) await setPlayerPip(false);
+    if (document.fullscreenElement) await document.exitFullscreen();
     if (appWindow) {
-      try {
-        nativeFullscreen = await appWindow.isFullscreen();
-      } catch {
-        nativeFullscreen = false;
+      if (desktopFullscreen || (await appWindow.isFullscreen())) {
+        await appWindow.setFullscreen(false);
+        await waitForFullscreenState(appWindow, false);
+      }
+      if (restoreMaximized) {
+        await appWindow.maximize();
+        restoreMaximized = false;
       }
     }
-
-    if (!document.fullscreenElement && !nativeFullscreen && activeDesktopMode !== 'manual') {
-      desktopViewportState.mode = null;
-      setIsFullscreen(false);
-      return;
-    }
-
-    if (document.fullscreenElement) {
-      await document.exitFullscreen().catch(() => undefined);
-    }
-
-    if (nativeFullscreen && appWindow) {
-      await appWindow.setFullscreen(false).catch(() => undefined);
-
-      if (!(await waitForNativeFullscreenState(appWindow, false))) {
-        await sleep(WINDOW_FULLSCREEN_TRANSITION_SETTLE_DELAY_MS);
-      }
-
-      desktopViewportState.mode = null;
-    } else if (activeDesktopMode === 'manual' && appWindow) {
-      const snapshot = desktopViewportState.restoreSnapshot;
-
-      desktopViewportState.mode = null;
-      desktopViewportState.restoreSnapshot = null;
-
-      if (snapshot) {
-        await restoreDesktopWindowSnapshot(appWindow, snapshot);
-      } else {
-        await appWindow.setResizable(true).catch(() => undefined);
-        await appWindow.setAlwaysOnTop(false).catch(() => undefined);
-      }
-    }
-
-    await syncFullscreenState();
-  }, [appWindow, syncFullscreenState]);
+    desktopFullscreen = false;
+  }, [appWindow]);
 
   const cleanupViewportOnUnmount = useCallback(() => {
     if (viewportCleanupHandledRef.current) return;
-
     viewportCleanupHandledRef.current = true;
-    const shouldPreserveViewport = preserveViewportOnUnmountRef.current;
+    ++syncGenerationRef.current;
+    const preserveViewport = preserveViewportOnUnmountRef.current;
     preserveViewportOnUnmountRef.current = false;
-
-    if (shouldPreserveViewport) {
-      return;
+    if (!preserveViewport) {
+      void enqueueViewportTransition(exitFullscreenIfNeeded).catch(() => undefined);
     }
-
-    void exitFullscreenIfNeeded();
   }, [exitFullscreenIfNeeded]);
 
   const prepareForInternalPlayerNavigation = useCallback(() => {
     preserveViewportOnUnmountRef.current = true;
   }, []);
 
-  // Both manual-fullscreen fallbacks funnel here: enter, then reconcile
-  // React state with whatever the window actually became.
-  const enterManualFullscreenWithSync = useCallback(
-    async (window: TauriWindow) => {
-      if (!(await enterManualDesktopFullscreen(window))) {
-        desktopViewportState.mode = null;
-        desktopViewportState.restoreSnapshot = null;
-        setIsFullscreen(false);
-      }
-      await syncFullscreenState();
-    },
-    [syncFullscreenState],
-  );
+  useEffect(() => {
+    // Strict Mode replays setup after cleanup on the same hook instance.
+    viewportCleanupHandledRef.current = false;
+    return cleanupViewportOnUnmount;
+  }, [cleanupViewportOnUnmount]);
 
   const toggleFullscreen = useCallback(async () => {
+    if (transitionInFlightRef.current) return;
+    transitionInFlightRef.current = true;
     try {
-      const domFullscreen = !!document.fullscreenElement;
-
-      if (isDesktopRuntime && appWindow) {
-        // Windows-only build: entry is always the manual borderless-cover
-        // path. `isFullscreen` is still read so an out-of-band native
-        // fullscreen exits correctly.
-        const nativeFullscreen = await appWindow.isFullscreen().catch(() => false);
-        if (nativeFullscreen || desktopViewportState.mode === 'manual' || domFullscreen) {
-          await exitFullscreenIfNeeded();
-          return;
+      await enqueueViewportTransition(async () => {
+        if (viewportCleanupHandledRef.current) return;
+        ++syncGenerationRef.current;
+        const animate = !prefersReducedMotion();
+        if (animate) {
+          setIsViewportTransitioning(true);
+          await sleep(100);
         }
-
-        preserveViewportOnUnmountRef.current = false;
-        if (onBeforeEnterFullscreen) {
-          await onBeforeEnterFullscreen();
+        try {
+          if (isPlayerPip()) await setPlayerPip(false);
+          const nativeFullscreen = appWindow ? await appWindow.isFullscreen() : false;
+          if (!expandedRef.current || nativeFullscreen || document.fullscreenElement) {
+            await exitFullscreenIfNeeded();
+          } else {
+            preserveViewportOnUnmountRef.current = false;
+            await onBeforeEnterFullscreen?.();
+            setIsFullscreen(true);
+            if (appWindow) {
+              restoreMaximized ||= await appWindow.isMaximized();
+              try {
+                if (restoreMaximized) await appWindow.unmaximize();
+                // Native fullscreen removes the Windows frame, covers the
+                // monitor's client area and informs the Windows taskbar.
+                await appWindow.setFullscreen(true);
+                await waitForFullscreenState(appWindow, true);
+                desktopFullscreen = true;
+              } catch (error) {
+                await exitFullscreenIfNeeded();
+                throw error;
+              }
+            } else {
+              await document.documentElement.requestFullscreen();
+            }
+          }
+        } catch (error) {
+          toast.error('Could not change fullscreen. Please try again.');
+          throw error;
+        } finally {
+          try {
+            await syncFullscreenState(true);
+            if (animate) await sleep(60);
+          } finally {
+            if (!viewportCleanupHandledRef.current) setIsViewportTransitioning(false);
+          }
         }
-
-        setIsFullscreen(true);
-        await enterManualFullscreenWithSync(appWindow);
-        return;
-      }
-
-      if (domFullscreen) {
-        setIsFullscreen(false);
-        await exitFullscreenIfNeeded();
-        return;
-      }
-
-      preserveViewportOnUnmountRef.current = false;
-      if (onBeforeEnterFullscreen) {
-        await onBeforeEnterFullscreen();
-      }
-      setIsFullscreen(true);
-      await document.documentElement.requestFullscreen();
-    } catch {
-      await syncFullscreenState();
+      });
+    } finally {
+      transitionInFlightRef.current = false;
     }
-  }, [
-    appWindow,
-    enterManualFullscreenWithSync,
-    exitFullscreenIfNeeded,
-    isDesktopRuntime,
-    onBeforeEnterFullscreen,
-    syncFullscreenState,
-  ]);
+  }, [appWindow, exitFullscreenIfNeeded, onBeforeEnterFullscreen, syncFullscreenState]);
+
+  const togglePip = useCallback(async () => {
+    if (!appWindow || transitionInFlightRef.current) return;
+    transitionInFlightRef.current = true;
+    try {
+      await enqueueViewportTransition(async () => {
+        if (viewportCleanupHandledRef.current || !expandedRef.current) return;
+        try {
+          if (isPlayerPip()) {
+            await setPlayerPip(false);
+          } else {
+            await onBeforeEnterFullscreen?.();
+            await exitFullscreenIfNeeded();
+            await syncFullscreenState(true);
+            await setPlayerPip(true);
+          }
+        } catch (error) {
+          // Retrying return also recovers a partially applied native entry.
+          await setPlayerPip(false).catch(() => undefined);
+          toast.error('Could not change picture in picture. Please try again.');
+          throw error;
+        }
+      });
+    } finally {
+      transitionInFlightRef.current = false;
+    }
+  }, [appWindow, exitFullscreenIfNeeded, onBeforeEnterFullscreen, syncFullscreenState]);
 
   useEffect(() => {
-    const handleFullscreenChange = () => {
-      void syncFullscreenState();
+    const sync = () => {
+      void syncFullscreenState().catch(() => undefined);
     };
-
+    const syncGeneration = syncGenerationRef;
     let isActive = true;
     let disposeWindowListener: (() => void) | undefined;
-    let resizeDebounceTimer: ReturnType<typeof setTimeout> | undefined;
-    const initialSyncTimer = window.setTimeout(() => {
-      void syncFullscreenState();
-    }, 0);
-
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-
+    let resizeTimer: ReturnType<typeof setTimeout> | undefined;
+    const initialSyncTimer = window.setTimeout(sync, 0);
+    if (appWindow)
+      void waitForViewportTransition()
+        .then(syncPlayerPip)
+        .catch(() => undefined);
+    document.addEventListener('fullscreenchange', sync);
     if (appWindow) {
       void appWindow
         .onResized(() => {
-          // Docked in the mini player, the fullscreen bit can't move and the
-          // player tree isn't on screen — skip the debounced IPC entirely.
           if (!isActive || !expandedRef.current) return;
-          // Debounce so rapid resize events during fullscreen transitions
-          // don't cause flickering state updates.
-          clearTimeout(resizeDebounceTimer);
-          resizeDebounceTimer = setTimeout(() => {
-            void syncFullscreenState();
-          }, 60);
+          clearTimeout(resizeTimer);
+          resizeTimer = setTimeout(sync, 60);
         })
         .then((dispose) => {
-          if (!isActive) {
-            dispose();
-            return;
-          }
-
-          disposeWindowListener = dispose;
+          if (!isActive) dispose();
+          else disposeWindowListener = dispose;
         })
         .catch(() => undefined);
     }
-
     return () => {
       isActive = false;
+      ++syncGeneration.current;
       window.clearTimeout(initialSyncTimer);
-      clearTimeout(resizeDebounceTimer);
+      clearTimeout(resizeTimer);
       disposeWindowListener?.();
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      document.removeEventListener('fullscreenchange', sync);
     };
   }, [appWindow, syncFullscreenState]);
 
-  // Latest binding for the window-resize listener: written during render so
-  // a resize between the dock commit and the post-commit effect can't read
-  // the stale flag and fire the gated IPC while docked.
   expandedRef.current = expanded;
-
-  // The resize listener is suspended while docked; resync once on expand so
-  // a fullscreen change that happened mid-dock isn't stale.
   useEffect(() => {
-    if (expanded) void syncFullscreenState();
-  }, [expanded, syncFullscreenState]);
+    // Docking always restores the window, including an entry still in flight.
+    const ready = expanded ? Promise.resolve() : enqueueViewportTransition(exitFullscreenIfNeeded);
+    void ready.then(() => syncFullscreenState()).catch(() => undefined);
+  }, [expanded, exitFullscreenIfNeeded, syncFullscreenState]);
 
   return {
-    cleanupViewportOnUnmount,
     isFullscreen,
+    isPip,
+    isViewportTransitioning,
+    canPip: isDesktopRuntime,
+    togglePip,
+    returnFromPip: returnFromPlayerPip,
     prepareForInternalPlayerNavigation,
     toggleFullscreen,
   };

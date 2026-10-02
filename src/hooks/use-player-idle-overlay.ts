@@ -9,11 +9,12 @@ const PLAYER_IDLE_OVERLAY_DELAY_MS = 10_000;
 // the same rate-limit the controls wake path applies.
 const IDLE_POINTERMOVE_THROTTLE_MS = 300;
 
-const IDLE_ACTIVITY_EVENTS = ['pointermove', 'pointerdown', 'keydown', 'wheel', 'touchstart'];
+// React's surface click dismisses the card before this window listener runs;
+// waking on pointerdown would let the subsequent click resume playback.
+const IDLE_ACTIVITY_EVENTS = ['pointermove', 'click', 'keydown', 'wheel'];
 
 interface UsePlayerIdleOverlayOptions {
-  /** False while loading, errored, ended, or an interactive layer is open —
-      the card exists over any healthy session, playing or paused. */
+  /** True only during healthy paused playback with no interactive layer open. */
   enabled: boolean;
   mountedRef: RefObject<boolean>;
 }
@@ -70,5 +71,5 @@ export function usePlayerIdleOverlay({ enabled, mountedRef }: UsePlayerIdleOverl
     };
   }, [enabled, armIdleTimer, noteActivity]);
 
-  return { idle, wake };
+  return { idle: enabled && idle, wake };
 }

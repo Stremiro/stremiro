@@ -2,7 +2,7 @@
     control. One owner so top chrome, controls row, and selector triggers
     cannot drift. */
 export const CHROME_ICON_BUTTON_CLASS =
-  'flex h-9 w-9 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
+  'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-white/80 transition-colors hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
 
 /** Glass surface for controls-row popovers (speed, audio, subtitles); callers add width and padding. */
 export const CHROME_POPOVER_CLASS =

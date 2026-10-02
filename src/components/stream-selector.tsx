@@ -1,4 +1,4 @@
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { defaultRangeExtractor, type Range, useVirtualizer } from '@tanstack/react-virtual';
 import { ArrowUp, Globe, Magnet, Zap, type LucideIcon } from 'lucide-react';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
@@ -30,12 +30,13 @@ import { episodeProgressKey, getPlayableResumeStartTime } from '@/lib/history-pl
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import {
   buildStreamMatchBadges,
+  buildStreamReasonChips,
   buildStreamTechBadges,
   DEFAULT_FILTERS,
-  isCautionReason,
   streamMatchTier,
   type StreamMatchBadge,
   type StreamMatchTier,
+  type StreamReasonChip,
 } from '@/lib/stream-selector-utils';
 import { cn, mediaTypeLabel, nonBlank } from '@/lib/utils';
 
@@ -57,9 +58,8 @@ interface StreamItemProps {
   /** Same release family as the last-used pick (exact key absent). */
   isSameFamily: boolean;
   isResolving: boolean;
-  onRowFocus: (index: number) => void;
+  onRowFocus: (streamKey: string) => void;
   onSelect: (stream: AddonStream) => void;
-  rowIndex: number;
   /** Active sort — the card emphasizes whichever fact ordered it so the
       ranking reads on the row instead of only in the toolbar. */
   sortMode: StreamSelectorSort;
@@ -74,7 +74,7 @@ interface StreamRowModel {
   techBadges: ReturnType<typeof buildStreamTechBadges>;
   matchBadges: StreamMatchBadge[];
   matchTier: StreamMatchTier | null;
-  recommendationReasons: string[];
+  recommendationReasons: StreamReasonChip[];
   matchAria: string;
   playableAria: string;
   SourceIcon: LucideIcon;
@@ -113,11 +113,7 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
     techBadges: buildStreamTechBadges(stream),
     matchBadges,
     matchTier: streamMatchTier(stream),
-    // Deduped so each chip (and its key) is a distinct reason.
-    recommendationReasons: [...new Set(stream.recommendationReasons?.filter(Boolean) ?? [])].slice(
-      0,
-      2,
-    ),
+    recommendationReasons: buildStreamReasonChips(stream),
     matchAria:
       matchBadges.length > 0 ? `, ${matchBadges.map((badge) => badge.label).join(', ')}` : '',
     playableAria: isPlayable ? '' : ', P2P source, not playable in this build',
@@ -142,7 +138,6 @@ const StreamItem = memo(function StreamItem({
   isSameFamily,
   isResolving,
   disabled,
-  rowIndex,
   sortMode,
   tabIndex,
 }: StreamItemProps) {
@@ -195,9 +190,9 @@ const StreamItem = memo(function StreamItem({
       <button
         type='button'
         onClick={() => onSelect(stream)}
-        onFocus={() => onRowFocus(rowIndex)}
+        onFocus={() => onRowFocus(stream.streamKey)}
         aria-disabled={disabled || undefined}
-        data-row-index={rowIndex}
+        data-stream-key={stream.streamKey}
         tabIndex={tabIndex}
         aria-label={`Select ${sourceName} stream${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
         className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-0'
@@ -325,13 +320,13 @@ const StreamItem = memo(function StreamItem({
               ))}
               {recommendationReasons.map((reason) => (
                 <span
-                  key={reason}
+                  key={reason.kind}
                   className={cn(
                     'text-[10px] font-medium leading-none',
-                    isCautionReason(reason) ? 'text-amber-200/70' : 'text-zinc-500',
+                    reason.caution ? 'text-amber-200/70' : 'text-zinc-500',
                   )}
                 >
-                  {reason}
+                  {reason.label}
                 </span>
               ))}
             </div>
@@ -389,62 +384,84 @@ function StreamVirtualList({
   // would swap every row's DOM under the focused element, killing keyboard
   // nav. Filter remounts (key) still re-evaluate.
   const [isVirtualized] = useState(() => streams.length >= STREAM_LIST_VIRTUALIZE_THRESHOLD);
-  const virtualizer = useVirtualizer({
-    count: streams.length,
-    getScrollElement: () => scrollRef.current,
-    estimateSize: () => STREAM_ROW_ESTIMATE_PX,
-    overscan: 8,
-    enabled: isVirtualized,
-  });
+  const streamIndexByKey = useMemo(() => {
+    const indices = new Map<string, number>();
+    streams.forEach((stream, index) => indices.set(stream.streamKey, index));
+    return indices;
+  }, [streams]);
+  const getItemKey = useCallback((index: number) => streams[index].streamKey, [streams]);
 
   // Roving tabindex: one tab stop for the whole list; arrows move the stop.
   // Lands on the currently-playing row, else the last-used pick, else the
   // first playable row.
-  const [focusedIndex, setFocusedIndex] = useState(() => {
-    if (currentStreamKey) {
-      const active = streams.findIndex((s) => s.streamKey === currentStreamKey);
-      if (active >= 0) return active;
-    }
-    if (lastStreamKey) {
-      const lastUsed = streams.findIndex((s) => s.streamKey === lastStreamKey);
-      if (lastUsed >= 0) return lastUsed;
-    }
-    const playable = streams.findIndex((s) => s.presentation.isInstantlyPlayable);
-    return playable >= 0 ? playable : 0;
+  const [focusedStreamKey, setFocusedStreamKey] = useState(() => {
+    if (currentStreamKey && streamIndexByKey.has(currentStreamKey)) return currentStreamKey;
+    if (lastStreamKey && streamIndexByKey.has(lastStreamKey)) return lastStreamKey;
+    return (
+      streams.find((stream) => stream.presentation.isInstantlyPlayable)?.streamKey ??
+      streams[0]?.streamKey
+    );
   });
-  const handleRowFocus = useCallback((index: number) => setFocusedIndex(index), []);
+  // Progressive ranking can insert rows before the focused stream. Identity,
+  // not its old index, owns the tab stop and the next arrow-key destination.
+  const matchedFocusedIndex = streamIndexByKey.get(focusedStreamKey ?? '');
+  const focusedIndex = matchedFocusedIndex ?? 0;
+  const firstStreamKey = streams[0]?.streamKey;
+  // Keep one extra row mounted: scrolling or progressive re-ranking must not
+  // remove the focused button (or the pack picker's return-focus target).
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const indices = defaultRangeExtractor(range);
+      if (focusedIndex < range.count && !indices.includes(focusedIndex)) {
+        indices.push(focusedIndex);
+        indices.sort((left, right) => left - right);
+      }
+      return indices;
+    },
+    [focusedIndex],
+  );
+  const virtualizer = useVirtualizer({
+    count: streams.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => STREAM_ROW_ESTIMATE_PX,
+    getItemKey,
+    rangeExtractor,
+    overscan: 8,
+    enabled: isVirtualized,
+  });
 
   // Which row the open-time autofocus targeted — lets a late-resolving
   // lastStreamKey complete the deferred autofocus below.
-  const autofocusIndexRef = useRef<number | null>(null);
+  const autofocusKeyRef = useRef<string | null>(null);
 
   // Family fallback badge: only when the exact key isn't listed (sibling
   // episode / re-digested key). The badge lands on the first family member
   // in the active list order.
   const familyFallbackKey = useMemo(() => {
     if (!lastStreamFamily) return null;
-    if (lastStreamKey && streams.some((s) => s.streamKey === lastStreamKey)) return null;
+    if (lastStreamKey && streamIndexByKey.has(lastStreamKey)) return null;
     return (
       streams.find((s) => s.streamFamily && s.streamFamily === lastStreamFamily)?.streamKey ?? null
     );
-  }, [lastStreamFamily, lastStreamKey, streams]);
+  }, [lastStreamFamily, lastStreamKey, streamIndexByKey, streams]);
 
-  // Progressive arrivals can shrink the list in place — clamp the roving
-  // stop so Tab never loses the single tabIndex=0 row.
+  // A removed stream leaves the tab stop on the first remaining row.
   useEffect(() => {
-    if (focusedIndex >= streams.length) {
-      setFocusedIndex(Math.max(0, streams.length - 1));
+    if (matchedFocusedIndex === undefined) {
+      setFocusedStreamKey(firstStreamKey);
     }
-  }, [focusedIndex, streams.length]);
+  }, [firstStreamKey, matchedFocusedIndex]);
 
   // A virtual row mounts only after the scroll commit, so the frame after
   // scrollToIndex can still miss it — retry once before giving up. The
   // initial pass also scrolls the remembered row into view, which covers
   // the non-virtualized path (the virtualizer scrolls itself).
-  const scheduleRowFocus = useCallback((index: number, initial: boolean) => {
+  const scheduleRowFocus = useCallback((streamKey: string, initial: boolean) => {
     let retried = false;
     const attempt = () => {
-      const row = scrollRef.current?.querySelector<HTMLElement>(`[data-row-index="${index}"]`);
+      const row = scrollRef.current?.querySelector<HTMLElement>(
+        `[data-stream-key="${CSS.escape(streamKey)}"]`,
+      );
       if (!row) {
         if (!retried) {
           retried = true;
@@ -460,13 +477,15 @@ function StreamVirtualList({
 
   const focusRow = useCallback(
     (index: number) => {
-      setFocusedIndex(index);
+      const stream = streams[index];
+      if (!stream) return;
+      setFocusedStreamKey(stream.streamKey);
       if (isVirtualized) {
         virtualizer.scrollToIndex(index, { align: 'auto' });
       }
-      scheduleRowFocus(index, false);
+      scheduleRowFocus(stream.streamKey, false);
     },
-    [isVirtualized, scheduleRowFocus, virtualizer],
+    [isVirtualized, scheduleRowFocus, streams, virtualizer],
   );
 
   // Per-open: focus the remembered row and scroll it into view. Filter
@@ -474,7 +493,9 @@ function StreamVirtualList({
   useEffect(() => {
     if (!initialFocusPending) return;
     onInitialFocusDone();
-    autofocusIndexRef.current = focusedIndex;
+    const streamKey = streams[focusedIndex]?.streamKey;
+    if (!streamKey) return;
+    autofocusKeyRef.current = streamKey;
     if (isVirtualized) {
       virtualizer.scrollToIndex(focusedIndex, { align: 'center' });
     }
@@ -482,7 +503,7 @@ function StreamVirtualList({
     // `initialFocusPending`, which re-runs this effect and would cancel the
     // frame it just scheduled. The rAF callback is null-safe after unmount
     // and self-limits to one retry, so it needs no cancellation.
-    scheduleRowFocus(focusedIndex, true);
+    scheduleRowFocus(streamKey, true);
     // focusedIndex intentionally read once at open — later arrow moves must
     // not retrigger the auto-focus path.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -493,26 +514,22 @@ function StreamVirtualList({
   // roving stop still sits where autofocus left it: resting focus (opener
   // trigger, dialog default) is not a user claim.
   useEffect(() => {
-    const from = autofocusIndexRef.current;
+    const from = autofocusKeyRef.current;
     if (!lastStreamKey || from === null) return;
-    if (focusedIndex !== from) {
-      autofocusIndexRef.current = null;
+    if (focusedStreamKey !== from || (currentStreamKey && streamIndexByKey.has(currentStreamKey))) {
+      autofocusKeyRef.current = null;
       return;
     }
-    const lastUsed = streams.findIndex((s) => s.streamKey === lastStreamKey);
-    if (lastUsed < 0) return;
-    autofocusIndexRef.current = null;
-    if (lastUsed === from) return;
+    const lastUsed = streamIndexByKey.get(lastStreamKey);
+    if (lastUsed === undefined) return;
+    autofocusKeyRef.current = null;
+    if (lastStreamKey === from) return;
 
-    // The roving stop only moves on row focus, so `focusedIndex === from`
-    // still holds after the user tabs to a toolbar chip or the close
-    // button. Check the DOM: retarget only while focus rests on the
-    // autofocused row, the list itself, or dialog chrome above it (the
-    // open-time autofocus may still be in flight). Anything else is a
-    // claimed control — yanking it would break the interaction mid-step.
+    // Tabbing to chrome doesn't change the roving stop. Only retarget while
+    // focus still rests on the auto-focused row or the dialog container.
     const listEl = scrollRef.current;
     const active = document.activeElement;
-    const autoRow = listEl?.querySelector(`[data-row-index="${from}"]`);
+    const autoRow = listEl?.querySelector(`[data-stream-key="${CSS.escape(from)}"]`);
     const focusIsResting =
       !active ||
       active === document.body ||
@@ -520,7 +537,7 @@ function StreamVirtualList({
       active === listEl ||
       (listEl !== null && active.contains(listEl));
     if (focusIsResting) focusRow(lastUsed);
-  }, [focusRow, focusedIndex, lastStreamKey, streams]);
+  }, [currentStreamKey, focusRow, focusedStreamKey, lastStreamKey, streamIndexByKey]);
 
   const handleListKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -564,13 +581,12 @@ function StreamVirtualList({
           key={streamKey}
           stream={stream}
           onSelect={handleSelectStream}
-          onRowFocus={handleRowFocus}
+          onRowFocus={setFocusedStreamKey}
           isActive={currentStreamKey === streamKey}
           isLastUsed={lastStreamKey === streamKey}
           isSameFamily={familyFallbackKey === streamKey}
           isResolving={isAnyResolving && activeResolveKey === streamKey}
           disabled={isAnyResolving}
-          rowIndex={index}
           sortMode={sortMode}
           tabIndex={index === focusedIndex ? 0 : -1}
         />
@@ -580,7 +596,6 @@ function StreamVirtualList({
       activeResolveKey,
       currentStreamKey,
       focusedIndex,
-      handleRowFocus,
       handleSelectStream,
       isAnyResolving,
       lastStreamKey,
@@ -724,14 +739,16 @@ export function StreamSelector({
   const packReturnFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     setPackStream(null);
+    packReturnFocusRef.current = null;
   }, [open, selectorSessionKey]);
 
   const closePackPicker = useCallback(() => {
+    cancelResolve();
     setPackStream(null);
     // The picker unmounts with focus inside it — hand it back to the pack
     // row that opened it rather than dropping to <body>.
     requestAnimationFrame(() => packReturnFocusRef.current?.focus());
-  }, []);
+  }, [cancelResolve]);
 
   // `episodes` arrives (season, episode)-sorted natively — no re-sort; the
   // memo only pins a stable empty list for `undefined`.
@@ -828,7 +845,7 @@ export function StreamSelector({
         onRequestClose={handleRequestClose}
         poster={poster}
         season={displaySeason}
-        title={title}
+        title={title || 'Unknown Title'}
       />
 
       {/* Divider */}
@@ -948,6 +965,32 @@ export function StreamSelector({
   return (
     <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent
+        onKeyDown={(event) => {
+          if (
+            packStream &&
+            event.key === 'Backspace' &&
+            !event.defaultPrevented &&
+            !event.nativeEvent.isComposing &&
+            !event.ctrlKey &&
+            !event.altKey &&
+            !event.metaKey
+          ) {
+            event.preventDefault();
+            event.stopPropagation();
+            if (!event.repeat) closePackPicker();
+          }
+        }}
+        onEscapeKeyDown={(event) => {
+          if (event.repeat) {
+            event.preventDefault();
+          } else if (isAnyResolving) {
+            event.preventDefault();
+            cancelResolve();
+          } else if (packStream) {
+            event.preventDefault();
+            closePackPicker();
+          }
+        }}
         overlayClassName='bg-black/55 backdrop-blur-[2px]'
         className='sm:max-w-4xl h-[82vh] flex flex-col p-0 bg-transparent border-none shadow-none rounded-md [&>button]:hidden'
       >

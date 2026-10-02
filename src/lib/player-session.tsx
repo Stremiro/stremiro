@@ -55,8 +55,15 @@ interface PlayerSessionContextValue {
 
 const PlayerSessionContext = createContext<PlayerSessionContextValue | null>(null);
 
+// Structural tuple: addon ids carry `:` (`kitsu:1`, `tt1:2:3`), so a joined
+// string could alias two episodes onto one key and skip the remount.
 function buildSessionKey(launch: PlayerSessionLaunch): string {
-  return `${launch.type ?? 'type'}:${launch.id ?? 'id'}:${launch.season ?? 'season'}:${launch.episode ?? 'episode'}`;
+  return JSON.stringify([
+    launch.type ?? null,
+    launch.id ?? null,
+    launch.season ?? null,
+    launch.episode ?? null,
+  ]);
 }
 
 export function PlayerSessionProvider({ children }: { children: ReactNode }) {

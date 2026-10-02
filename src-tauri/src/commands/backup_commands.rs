@@ -354,15 +354,13 @@ pub(crate) async fn export_app_data(
         let service = playback_state.inner().clone();
         move || {
             // ― history (all individual entries, undeduped) ——————————————————————
-            // Backups must never carry credential-bearing stream URLs; resume re-resolves
-            // through opaque lookup identities instead.
+            // Only opaque stream-key identities may leave the app.
             // A failed history read must fail the export — silently shipping a
             // backup with zero history is only discovered on restore.
             let history: Vec<WatchProgress> = service
                 .load_resume_entries(&app)?
                 .into_iter()
                 .map(|(_, mut item)| {
-                    item.last_stream_url = None;
                     item.last_stream_key = item
                         .last_stream_key
                         .filter(|key| is_persistable_stream_key(key));
@@ -479,15 +477,18 @@ pub(crate) async fn import_app_data(
             ));
         }
 
-        import_app_data_entries(app, &service, export)
+        let result = import_app_data_entries(app, &service, export);
+        if result.as_ref().map_or(true, |result| {
+            result.addons_imported > 0 || result.settings_restored
+        }) {
+            // A later write can fail after earlier domains changed. Clear at
+            // the actual completion, including work whose caller timed out.
+            app.state::<AddonTransport>().clear_cache();
+            app.state::<AddonResourceClient>().clear_cache();
+        }
+        result
     })
     .await?;
-    if result.addons_imported > 0 || result.settings_restored {
-        // Addon set or language defaults changed: cached catalogs, metas, and
-        // ranked stream lists were built from the old ones.
-        app.state::<AddonTransport>().clear_cache();
-        app.state::<AddonResourceClient>().clear_cache();
-    }
     Ok(result)
 }
 

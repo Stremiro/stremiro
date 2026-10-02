@@ -40,13 +40,6 @@ export function nonBlank(value?: string | null): string | undefined {
   return value?.trim() || undefined;
 }
 
-/** Case-insensitive substring check against a marker list — one owner for
-    the "message contains any of" tests so sites can't drift on casing. */
-export function matchesAnyMarker(text: string, markers: readonly string[]): boolean {
-  const lowered = text.toLowerCase();
-  return markers.some((marker) => lowered.includes(marker));
-}
-
 /** Resolve after `ms` — single owner for poll/verify/settle pacing. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -164,6 +157,12 @@ export function parseLocalScheduleDate(value?: string | null): Date | null {
   }
   const parsed = parseISO(value);
   return isValid(parsed) ? parsed : null;
+}
+
+/** Aired by the given local day; undated episodes count as aired. */
+export function isAiredByLocalDay(releaseDate: string | null | undefined, localDayMs: number) {
+  const airDate = parseLocalScheduleDate(releaseDate)?.getTime();
+  return airDate === undefined || airDate <= localDayMs;
 }
 
 /** Episode air-date line: absolute for aired episodes ("Apr 7, 2013" — the

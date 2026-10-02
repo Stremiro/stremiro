@@ -1,5 +1,5 @@
 import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect } from 'react';
+import { useCallback } from 'react';
 
 import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
@@ -11,23 +11,50 @@ import {
 
 const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 
-// The persisted store is global, so the write serialization and the
-// latest-known snapshot are module-level: two mounted consumers must not
-// run interleaved saves built from divergent per-instance refs.
-let globalPlaybackPreferences: PlaybackLanguagePreferences = {};
-let globalPlaybackPreferencesHydrated = false;
+// The persisted store is global, so write serialization is module-level:
+// the query read awaits this queue so a refetch never lands over a pending
+// save with stale store values.
 let saveQueue = Promise.resolve<PlaybackLanguagePreferences | undefined>(undefined);
+const pendingLanguagePatches = new Set<PlaybackLanguagePreferences>();
 
-function enqueueSave(queryClient: QueryClient, task: () => Promise<PlaybackLanguagePreferences>) {
+function enqueueSave(
+  queryClient: QueryClient,
+  task: () => Promise<PlaybackLanguagePreferences>,
+  patch?: PlaybackLanguagePreferences,
+) {
+  if (patch) {
+    pendingLanguagePatches.add(patch);
+    void queryClient.cancelQueries({
+      queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+      exact: true,
+    });
+    queryClient.setQueryData<PlaybackLanguagePreferences>(
+      PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+      (current) => ({ ...current, ...patch }),
+    );
+  }
   const queuedSave = saveQueue.then(async () => {
     await queryClient.cancelQueries({
       queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
       exact: true,
     });
-    const savedPreferences = await task();
-    globalPlaybackPreferences = savedPreferences;
-    globalPlaybackPreferencesHydrated = true;
-    queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, savedPreferences);
+    let savedPreferences: PlaybackLanguagePreferences;
+    try {
+      savedPreferences = await task();
+    } catch (error) {
+      if (patch) pendingLanguagePatches.delete(patch);
+      void queryClient.invalidateQueries({
+        queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+        exact: true,
+      });
+      throw error;
+    }
+    if (patch) pendingLanguagePatches.delete(patch);
+    const currentPreferences = { ...savedPreferences };
+    for (const pending of pendingLanguagePatches) {
+      Object.assign(currentPreferences, pending);
+    }
+    queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, currentPreferences);
     await invalidatePlaybackLanguageQueries(queryClient);
     return savedPreferences;
   });
@@ -37,18 +64,9 @@ function enqueueSave(queryClient: QueryClient, task: () => Promise<PlaybackLangu
   return trackPendingAppWrite(queuedSave);
 }
 
-export async function flushPendingPlaybackLanguagePreferences(): Promise<void> {
+registerPendingAppWriteFlusher(async () => {
   await saveQueue;
-}
-registerPendingAppWriteFlusher(flushPendingPlaybackLanguagePreferences);
-
-/// Drop the module snapshot when durable state changed out-of-band (backup
-/// restore): the next save must re-hydrate instead of composing a
-/// whole-snapshot write over the imported values.
-export function resetPlaybackLanguagePreferencesSnapshot() {
-  globalPlaybackPreferences = {};
-  globalPlaybackPreferencesHydrated = false;
-}
+});
 
 interface UsePlaybackLanguagePreferencesOptions {
   mediaId?: string;
@@ -73,15 +91,6 @@ export function usePlaybackLanguagePreferences({
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 
-  useEffect(() => {
-    if (!fetchedGlobalPlaybackLanguagePreferences) {
-      return;
-    }
-
-    globalPlaybackPreferences = fetchedGlobalPlaybackLanguagePreferences;
-    globalPlaybackPreferencesHydrated = true;
-  }, [fetchedGlobalPlaybackLanguagePreferences]);
-
   const { data: effectivePlaybackLanguagePreferences } = useQuery({
     queryKey: effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
     queryFn: () => api.getEffectivePlaybackLanguagePreferences(mediaId, mediaType),
@@ -89,25 +98,21 @@ export function usePlaybackLanguagePreferences({
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 
-  const saveGlobalPlaybackLanguagePreferences = useCallback(
-    (patch: Partial<PlaybackLanguagePreferences>) =>
-      enqueueSave(queryClient, async () => {
-        if (!globalPlaybackPreferencesHydrated) {
-          const cached = queryClient.getQueryData<PlaybackLanguagePreferences>(
-            PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
-          );
-          globalPlaybackPreferences = cached ?? (await api.getPlaybackLanguagePreferences());
-          globalPlaybackPreferencesHydrated = true;
-        }
-
-        // Spread preserves explicit `undefined` keys, so a cleared field still writes.
-        const nextPreferences = { ...globalPlaybackPreferences, ...patch };
-
-        return api.savePlaybackLanguagePreferences(
-          nextPreferences.preferredAudioLanguage,
-          nextPreferences.preferredSubtitleLanguage,
-        );
-      }),
+  const saveGlobalPlaybackLanguagePreference = useCallback(
+    (preferenceKind: 'audio' | 'sub', language?: string) => {
+      const field =
+        preferenceKind === 'audio' ? 'preferredAudioLanguage' : 'preferredSubtitleLanguage';
+      const current = queryClient.getQueryData<PlaybackLanguagePreferences>(
+        PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+      );
+      // The cache includes queued picks, not just the last native acknowledgement.
+      if (current && current[field] === language) return;
+      return enqueueSave(
+        queryClient,
+        () => api.savePlaybackLanguagePreference(preferenceKind, language),
+        { [field]: language },
+      );
+    },
     [queryClient],
   );
 
@@ -127,7 +132,7 @@ export function usePlaybackLanguagePreferences({
     effectivePlaybackLanguagePreferences,
     globalPlaybackLanguagePreferences: fetchedGlobalPlaybackLanguagePreferences,
     isLoadingGlobalPlaybackLanguagePreferences,
-    saveGlobalPlaybackLanguagePreferences,
+    saveGlobalPlaybackLanguagePreference,
     saveGlobalPlaybackLanguagePreferenceSelection,
   };
 }

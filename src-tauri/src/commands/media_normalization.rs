@@ -1,6 +1,6 @@
 use super::{normalize_media_image_url, MEDIA_ID_MAX_CHARS, MEDIA_TITLE_MAX_CHARS};
 use crate::providers::{
-    bound_optional, extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem, Trailer,
+    bound_optional, extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem,
 };
 use regex::Regex;
 use std::sync::LazyLock;
@@ -17,9 +17,6 @@ pub(crate) const MEDIA_GENRE_MAX_CHARS: usize = 64;
 const MEDIA_DETAILS_RATING_MAX_CHARS: usize = 64;
 const MEDIA_DETAILS_CAST_MAX: usize = 64;
 const MEDIA_DETAILS_CAST_NAME_MAX_CHARS: usize = 128;
-const MEDIA_DETAILS_TRAILERS_MAX: usize = 32;
-const MEDIA_DETAILS_TRAILER_FIELD_MAX_CHARS: usize = 128;
-const MEDIA_DETAILS_TRAILER_URL_MAX_CHARS: usize = 2_048;
 const EPISODE_ID_MAX_CHARS: usize = 256;
 const EPISODE_TITLE_MAX_CHARS: usize = 512;
 const EPISODE_RELEASED_MAX_CHARS: usize = 64;
@@ -43,6 +40,36 @@ fn bound_required(value: &str, max_chars: usize) -> String {
     value.trim().chars().take(max_chars).collect()
 }
 
+// Display text only: preserve punctuation, language and emoji sequences.
+fn normalize_title(value: &str, max_chars: usize) -> String {
+    let mut title = String::with_capacity(value.len().min(max_chars));
+    let mut length = 0;
+    let mut pending_space = false;
+    for character in value.chars() {
+        if length == max_chars {
+            break;
+        }
+        if character.is_whitespace() {
+            pending_space = !title.is_empty();
+            continue;
+        }
+        if character.is_control() || character == '\u{feff}' {
+            continue;
+        }
+        if pending_space {
+            if length + 1 == max_chars {
+                break;
+            }
+            title.push(' ');
+            length += 1;
+            pending_space = false;
+        }
+        title.push(character);
+        length += 1;
+    }
+    title
+}
+
 fn bound_string_list(
     values: Option<Vec<String>>,
     max_items: usize,
@@ -59,7 +86,10 @@ fn bound_string_list(
 
 fn normalize_episode_metadata(mut episode: Episode) -> Episode {
     episode.id = bound_required(&episode.id, EPISODE_ID_MAX_CHARS);
-    episode.title = bound_optional(episode.title, EPISODE_TITLE_MAX_CHARS);
+    episode.title = episode
+        .title
+        .map(|title| normalize_title(&title, EPISODE_TITLE_MAX_CHARS))
+        .filter(|title| !title.is_empty());
     episode.released = bound_optional(episode.released, EPISODE_RELEASED_MAX_CHARS);
     episode.release_date = build_release_date(episode.released.as_deref());
     episode.overview = bound_optional(episode.overview, EPISODE_OVERVIEW_MAX_CHARS);
@@ -76,7 +106,7 @@ pub(crate) fn normalize_episode_metadata_list(episodes: Vec<Episode>) -> Vec<Epi
         .collect()
 }
 
-fn days_in_month(year: u32, month: u32) -> Option<u32> {
+pub(crate) fn days_in_month(year: u32, month: u32) -> Option<u32> {
     let days = match month {
         1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
         4 | 6 | 9 | 11 => 30,
@@ -115,7 +145,7 @@ pub(crate) fn build_release_date(value: Option<&str>) -> Option<String> {
 }
 
 pub(crate) fn normalize_media_item(mut item: MediaItem) -> MediaItem {
-    item.title = bound_required(&item.title, MEDIA_TITLE_MAX_CHARS);
+    item.title = normalize_title(&item.title, MEDIA_TITLE_MAX_CHARS);
     item.poster = item.poster.and_then(|s| normalize_media_image_url(&s));
     item.backdrop = item.backdrop.and_then(|s| normalize_media_image_url(&s));
     item.logo = item.logo.and_then(|s| normalize_media_image_url(&s));
@@ -129,18 +159,22 @@ pub(crate) fn normalize_media_item(mut item: MediaItem) -> MediaItem {
 }
 
 pub(crate) fn normalize_media_items(items: Vec<MediaItem>) -> Vec<MediaItem> {
-    items.into_iter().map(normalize_media_item).collect()
+    items
+        .into_iter()
+        .map(normalize_media_item)
+        .filter(|item| !item.title.is_empty())
+        .collect()
 }
 
-fn normalize_trailer(mut trailer: Trailer) -> Trailer {
-    trailer.id = bound_required(&trailer.id, MEDIA_DETAILS_TRAILER_FIELD_MAX_CHARS);
-    trailer.source = bound_required(&trailer.source, MEDIA_DETAILS_TRAILER_FIELD_MAX_CHARS);
-    trailer.url = bound_required(&trailer.url, MEDIA_DETAILS_TRAILER_URL_MAX_CHARS);
-    trailer
-}
-
-pub(crate) fn normalize_media_details(mut details: MediaDetails) -> MediaDetails {
-    details.title = bound_required(&details.title, MEDIA_TITLE_MAX_CHARS);
+pub(crate) fn normalize_media_details(
+    mut details: MediaDetails,
+    requested_id: &str,
+) -> MediaDetails {
+    // Addons may return an alias; persistence and navigation use the requested identity.
+    if details.id != requested_id {
+        details.id = requested_id.to_string();
+    }
+    details.title = normalize_title(&details.title, MEDIA_TITLE_MAX_CHARS);
     details.imdb_id = bound_optional(details.imdb_id, MEDIA_ID_MAX_CHARS);
     details.poster = details.poster.and_then(|s| normalize_media_image_url(&s));
     details.backdrop = details.backdrop.and_then(|s| normalize_media_image_url(&s));
@@ -154,13 +188,8 @@ pub(crate) fn normalize_media_details(mut details: MediaDetails) -> MediaDetails
         MEDIA_DETAILS_CAST_NAME_MAX_CHARS,
     );
     details.genres = bound_string_list(details.genres, MEDIA_GENRES_MAX, MEDIA_GENRE_MAX_CHARS);
-    details.trailers = details.trailers.map(|trailers| {
-        trailers
-            .into_iter()
-            .take(MEDIA_DETAILS_TRAILERS_MAX)
-            .map(normalize_trailer)
-            .collect()
-    });
+    // Trailers need no bounding here: `parse_trailers` is the only producer
+    // and already caps the list and admits strict 11-char YouTube ids only.
     details.display_year = build_display_year(details.year.as_deref());
     // A parsed meta `released` (full ISO date) wins over the year-only
     // fallback so calendar movie events land on the real day, not Jan 1.

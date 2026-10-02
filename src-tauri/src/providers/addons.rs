@@ -85,6 +85,24 @@ impl Default for StreamPresentation {
     }
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamRecommendationReason {
+    VerifiedSource,
+    SourceIssues,
+    SourceCooling,
+    ProvenReleaseGroup,
+    ReleaseGroupIssues,
+    ReleaseGroupCooling,
+    TitleAffinity,
+    LanguageMatch,
+    LanguageFlexible,
+    TopQuality,
+    GoodQuality,
+    PreferredSource,
+    Fallback,
+}
+
 /// Canonical Stremio stream object returned by any addon declaring the
 /// `stream` resource.
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -137,11 +155,14 @@ pub(crate) struct AddonStream {
     /// Canonical backend-issued identity for selection, history, and recovery flows.
     #[serde(rename = "streamKey", alias = "stream_key", default)]
     pub stream_key: String,
-    /// Short user-facing explanation from the backend coordinator for why this stream ranks here.
-    #[serde(default, alias = "recommendation_reasons")]
-    pub recommendation_reasons: Vec<String>,
+    /// Why the coordinator ranked this stream here, as structured kinds; the
+    /// UI owns the labels. Coordinator outputs below are never decoded from
+    /// addon payloads: a malformed injected value would otherwise fail the
+    /// whole stream's decode.
+    #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
+    pub recommendation_reasons: Vec<StreamRecommendationReason>,
     /// Structured episode/title match facts, set during coordinator ranking.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub match_summary: Option<StreamMatchSummary>,
     /// Dev-only dump of the full sort key, populated only in debug builds
     /// (`cfg!(debug_assertions)`) so the release payload is byte-identical.
@@ -151,7 +172,7 @@ pub(crate) struct AddonStream {
     #[serde(skip)]
     pub(crate) selection_priority: Option<(StreamEpisodeMatchKind, bool, i8, u8, u8)>,
     /// Backend-prepared presentation facts so the UI can render without reparsing raw stream text.
-    #[serde(default)]
+    #[serde(skip_deserializing)]
     pub presentation: StreamPresentation,
     /// Lazily computed lowered match text shared by every ranking layer
     /// (transport sort, presentation build, coordinator). The matchable

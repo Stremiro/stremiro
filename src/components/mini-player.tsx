@@ -31,6 +31,7 @@ import {
 } from '@/hooks/use-player-surface-layout';
 import { isEditableTarget } from '@/lib/dom';
 import type { PlaybackClock } from '@/lib/player-clock';
+import { createSubscribableStore, type SubscribableStore } from '@/lib/subscribable-store';
 import type { MiniPlayerPosition } from '@/lib/player-session';
 import { clamp, clearTimer, cn, formatTime, prefersReducedMotion } from '@/lib/utils';
 
@@ -177,30 +178,7 @@ function MiniTitle({ title, episodeLabel }: { title: string; episodeLabel?: stri
  * Scrub-preview store scoped to the mini player — only the tick leaves
  * subscribe, so a drag never re-renders the portal root.
  */
-interface SeekPreviewStore {
-  getSnapshot: () => number | null;
-  publish: (seconds: number | null) => void;
-  subscribe: (onChange: () => void) => () => void;
-}
-
-function createSeekPreviewStore(): SeekPreviewStore {
-  let value: number | null = null;
-  const listeners = new Set<() => void>();
-  return {
-    getSnapshot: () => value,
-    publish: (seconds) => {
-      if (value === seconds) return;
-      value = seconds;
-      for (const listener of listeners) listener();
-    },
-    subscribe: (onChange) => {
-      listeners.add(onChange);
-      return () => {
-        listeners.delete(onChange);
-      };
-    },
-  };
-}
+type SeekPreviewStore = SubscribableStore<number | null>;
 
 function useMiniDisplayTime(
   clock: PlaybackClock,
@@ -385,7 +363,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const reportFrameRef = useRef<number | null>(null);
   const snapFrameRef = useRef<number | null>(null);
   // External store, not state — per-pointermove publishes reach only the tick leaves.
-  const seekPreviewStore = useMemo(() => createSeekPreviewStore(), []);
+  const seekPreviewStore = useMemo(() => createSubscribableStore<number | null>(null), []);
   const [isMoving, setIsMoving] = useState(false);
   // Held during a volume drag so the collapsible rail can't shut mid-gesture.
   const [volumeSliderHeld, setVolumeSliderHeld] = useState(false);

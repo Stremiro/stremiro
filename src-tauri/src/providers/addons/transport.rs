@@ -3,7 +3,6 @@ use crate::providers::addon_resource::{build_resource_url, is_fetchable_http_url
 use crate::providers::ttl_cache::{hash_segment, InFlight, TtlCache};
 use crate::providers::{
     ensure_rustls_crypto_provider, fetch_policy, lock_or_recover, non_blank, read_bounded_body,
-    strip_manifest_suffix,
 };
 use regex::Regex;
 use reqwest::{header, Client};
@@ -58,6 +57,7 @@ pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, Stri
         .streams
         .into_iter()
         .filter_map(|item| serde_json::from_value::<AddonStream>(item).ok())
+        .take(DECODED_STREAMS_MAX)
         .map(|mut stream| {
             truncate_stream_item(&mut stream);
             stream
@@ -496,12 +496,10 @@ impl AddonTransport {
         addon_key: &str,
         start_generation: u64,
     ) -> Result<Vec<AddonStream>, String> {
-        let cfg = addon_url.trim();
-        if cfg.is_empty() {
+        let base_url = addon_url.trim();
+        if base_url.is_empty() {
             return Ok(vec![]);
         }
-
-        let base_url = strip_manifest_suffix(cfg);
 
         let url = Self::build_stream_endpoint(base_url, type_, id)?;
 
@@ -626,7 +624,6 @@ impl AddonTransport {
                 return Err(StreamFetchFailure::Fatal(e));
             }
         };
-        streams.truncate(DECODED_STREAMS_MAX);
         Self::hydrate_streams(&mut streams);
         Ok(streams)
     }

@@ -5,6 +5,7 @@ import {
   Maximize,
   Minimize,
   Pause,
+  PictureInPicture2,
   Play,
   Rewind,
   SkipForward,
@@ -107,6 +108,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
 });
 
 interface PlayerControlsRowProps {
+  onTogglePip?: () => Promise<void>;
   isPlaying: boolean;
   onTogglePlay: () => Promise<void>;
   onSeekRelative: (seconds: number) => Promise<void>;
@@ -160,6 +162,7 @@ interface PlayerControlsRowProps {
 // Memoized like the sibling selectors/panel: every prop is a primitive or a
 // stable callback, so the ~200-element controls row skips every playback tick.
 export const PlayerControlsRow = memo(function PlayerControlsRow({
+  onTogglePip,
   isPlaying,
   onTogglePlay,
   onSeekRelative,
@@ -204,8 +207,8 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   // bubbles here when the cursor leaves — the card stays visible for the drag.
   const [volumeSliderHeld, setVolumeSliderHeld] = useState(false);
   return (
-    <div className='flex items-center justify-between pt-1'>
-      <div className='flex items-center gap-1'>
+    <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 pt-1'>
+      <div className='flex min-w-0 max-w-full flex-wrap items-center gap-1'>
         {/* Rewind 10s */}
         <button
           type='button'
@@ -229,7 +232,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           onClick={() => {
             void onTogglePlay().catch(() => undefined);
           }}
-          className='flex h-11 w-11 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          className='flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
         >
           {isPlaying ? (
             <Pause className='w-[26px] h-[26px] fill-white' />
@@ -383,7 +386,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
         </Popover>
       </div>
 
-      <div className='flex items-center gap-1'>
+      <div className='ml-auto flex shrink-0 items-center gap-1'>
         {/* Episodes List Toggle */}
         {hasEpisodes && (
           <PlayerEpisodesToggleButton open={episodesOpen} onToggle={onToggleEpisodes} />
@@ -436,6 +439,17 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           onApplySubtitleScale={onApplySubtitleScale}
           onSelectTrack={onSelectSubTrack}
         />
+        {onTogglePip && (
+          <button
+            type='button'
+            className={CHROME_ICON_BUTTON_CLASS}
+            aria-label='Picture in picture'
+            title='Picture in picture'
+            onClick={() => void onTogglePip().catch(() => undefined)}
+          >
+            <PictureInPicture2 className='h-[18px] w-[18px]' />
+          </button>
+        )}
       </div>
     </div>
   );

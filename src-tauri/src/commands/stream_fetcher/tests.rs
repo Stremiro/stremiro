@@ -1,8 +1,9 @@
 use super::{
     source_health_priority_for_addon, summarize_cooldown_skipped_addon, StreamSelectorData,
-    StreamSelectorSnapshot, StreamSourceStatus, StreamSourceSummary,
+    StreamSelectorSnapshot, StreamSelectorStats, StreamSourceStatus, StreamSourceSummary,
     ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
+use crate::providers::addons::{StreamDeliveryKind, StreamResolution};
 use crate::test_helpers::{test_addon, test_stream};
 use std::collections::HashMap;
 
@@ -49,32 +50,48 @@ fn selector_snapshot_serializes_like_selector_data() {
     // The progressive channel serializes `StreamSelectorSnapshot`, a borrowed
     // mirror of `StreamSelectorData`: if the owned struct gains a field this
     // fails until the mirror picks it up, keeping the wire shape one contract.
-    let stream = test_stream();
+    let mut p2p = test_stream();
+    p2p.presentation.resolution = StreamResolution::P2160;
+    p2p.presentation.is_batch = true;
+    let mut cached = test_stream();
+    cached.presentation.is_instantly_playable = true;
+    cached.presentation.delivery_kind = StreamDeliveryKind::Cached;
+    cached.presentation.resolution = StreamResolution::P720;
+    cached.presentation.is_batch = true;
+    let mut http = test_stream();
+    http.presentation.is_instantly_playable = true;
+    http.presentation.delivery_kind = StreamDeliveryKind::Http;
+    http.presentation.resolution = StreamResolution::P1080;
     let summary = StreamSourceSummary {
         id: "addon-1".to_string(),
         name: "Example".to_string(),
         status: StreamSourceStatus::Degraded,
-        stream_count: 1,
+        stream_count: 3,
         latency_ms: Some(12),
         error_message: None,
     };
 
     for fatal_error_message in [None, Some("boom".to_string())] {
         let owned = StreamSelectorData {
-            streams: vec![stream.clone()],
+            streams: vec![p2p.clone(), cached.clone(), http.clone()],
             source_summaries: vec![summary.clone()],
             fatal_error_message,
-            complete: false,
         };
         let snapshot = StreamSelectorSnapshot {
             streams: &owned.streams,
+            stats: StreamSelectorStats::from_streams(&owned.streams),
             source_summaries: owned.source_summaries.iter().collect(),
             fatal_error_message: owned.fatal_error_message.as_deref(),
-            complete: owned.complete,
         };
+        let payload = serde_json::to_value(&owned).unwrap();
+        assert_eq!(serde_json::to_value(&snapshot).unwrap(), payload);
         assert_eq!(
-            serde_json::to_value(&snapshot).unwrap(),
-            serde_json::to_value(&owned).unwrap()
+            payload["stats"],
+            serde_json::json!({
+                "resCounts": {"4k": 0, "1080p": 1, "720p": 1, "sd": 0},
+                "playableCount": 2, "p2pCount": 1, "cachedCount": 1,
+                "batchCount": 1, "episodeLikeCount": 1,
+            })
         );
     }
 }

@@ -104,6 +104,18 @@ fn main() {
             .collect();
         staged_dll_names.sort();
         if staged_dll_names != ["libmpv-2.dll".to_string(), "libmpv-wrapper.dll".to_string()] {
+            // `lib/` stays in the repo via PROVENANCE.txt while the DLL pair
+            // is gitignored, so a fresh clone has the directory but no
+            // natives. Only packaging (release) must fail closed; check/dev
+            // tolerate the gap — mpv init reports the missing DLLs at runtime.
+            if staged_dll_names.is_empty() && std::env::var("PROFILE").as_deref() != Ok("release") {
+                println!(
+                    "cargo:warning=libmpv DLL pair missing from {}; skipping native staging (non-release build)",
+                    lib_dir.display()
+                );
+                tauri_build::build();
+                return;
+            }
             panic!(
                 "Expected exactly one libmpv-2.dll plus one libmpv-wrapper.dll in {}, found: {}",
                 lib_dir.display(),

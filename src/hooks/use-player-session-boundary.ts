@@ -16,7 +16,6 @@ interface UsePlayerSessionBoundaryArgs {
   activeStreamResetKey: string;
   backdrop?: string;
   clock: PlaybackClock;
-  duration: number;
   durationRef: RefObject<number>;
   failoverResumePositionRef: RefObject<number>;
   hasPlaybackStarted: boolean;
@@ -45,7 +44,6 @@ export function usePlayerSessionBoundary({
   stream,
   backdrop,
   clock,
-  duration,
   durationRef,
   failoverResumePositionRef,
   hasPlaybackStarted,
@@ -102,7 +100,6 @@ export function usePlayerSessionBoundary({
     streamSeason,
     streamEpisode,
     isPlaying,
-    duration,
     clock,
     durationRef,
     stream,

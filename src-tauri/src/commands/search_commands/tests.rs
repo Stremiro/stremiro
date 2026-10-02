@@ -1,7 +1,8 @@
 use super::{
     apply_browse_filters, browse_genres, browse_year_catalog, catalog_browse_extras,
-    catalog_fetch_genres, retain_search_items_matching_genres, should_continue_browse_fetch,
-    SearchFeed, SearchMediaType, SearchYearRange, CINEMETA_ANIME_GENRE,
+    catalog_fetch_genres, normalize_genres, retain_search_items_matching_genres,
+    should_continue_browse_fetch, SearchFeed, SearchMediaType, SearchYearRange,
+    CINEMETA_ANIME_GENRE,
 };
 use crate::commands::media_normalization::normalize_media_item;
 use crate::providers::MediaItem;
@@ -25,6 +26,34 @@ const NO_RANGE: SearchYearRange = SearchYearRange {
 
 fn ids(items: &[MediaItem]) -> Vec<&str> {
     items.iter().map(|item| item.id.as_str()).collect()
+}
+
+#[test]
+fn normalize_genres_owns_unicode_bound_deduplication_and_count_limit() {
+    let bounded = "😀".repeat(120);
+    let normalized = normalize_genres(Some(vec![
+        "  ".to_string(),
+        format!(" {bounded}A "),
+        format!("{bounded}B"),
+        " Action ".to_string(),
+        "ACTION".to_string(),
+        "Comedy".to_string(),
+        "Drama".to_string(),
+        "Thriller".to_string(),
+        "Mystery".to_string(),
+        "Adventure".to_string(),
+    ]));
+    assert_eq!(
+        normalized,
+        vec![
+            bounded,
+            "Action".to_string(),
+            "Comedy".to_string(),
+            "Drama".to_string(),
+            "Thriller".to_string(),
+            "Mystery".to_string()
+        ]
+    );
 }
 
 #[test]

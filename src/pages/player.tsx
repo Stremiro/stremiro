@@ -19,6 +19,7 @@ import { PlayerControlsRow, PlayerTopChrome, SPEED_OPTIONS } from '@/components/
 import { PlayerEpisodesPanel } from '@/components/player-episodes-panel';
 import { type PlayerOsdAction, PlayerOsdOverlay } from '@/components/player-osd-overlay';
 import { PlayerProgressBar } from '@/components/player-progress-bar';
+import { PlayerPipChrome } from '@/components/player-pip-chrome';
 import { PlayerShortcutsOverlay } from '@/components/player-shortcuts-overlay';
 import { PlayerStreamSelector } from '@/components/player-stream-selector';
 import {
@@ -34,6 +35,7 @@ import { Sidebar } from '@/components/sidebar';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useLocalDay } from '@/hooks/use-local-day';
 import { useTitleWatchProgress } from '@/hooks/use-media-library';
 import { useMediaSession } from '@/hooks/use-media-session';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
@@ -104,6 +106,7 @@ import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
+  isAiredByLocalDay,
   isHttpUrl,
   isSeriesLikeMediaType,
   nonBlank,
@@ -289,17 +292,27 @@ function InnerPlayer() {
 
   const handleBeforeEnterFullscreen = useCallback(() => {
     setShowEpisodes(false);
-  }, []);
+    setShowShortcuts(false);
+    restoreCursorVisibility();
+  }, [restoreCursorVisibility]);
 
   const {
-    cleanupViewportOnUnmount,
     isFullscreen,
+    isPip,
+    canPip,
+    togglePip,
+    returnFromPip,
+    isViewportTransitioning,
     prepareForInternalPlayerNavigation,
     toggleFullscreen,
   } = usePlayerViewportMode({
     onBeforeEnterFullscreen: handleBeforeEnterFullscreen,
     expanded: isExpanded,
   });
+
+  useEffect(() => {
+    pointerOverControlsRef.current = false;
+  }, [isPip]);
 
   // -- Refs --
   const forceShowTimeoutRef = useRef<TimerHandle | null>(null);
@@ -366,12 +379,14 @@ function InnerPlayer() {
     resetKey: activeStreamUrl,
     triggerOsd,
   });
-  // Idle card: a zero-input stretch over a healthy session dims the frame with
+  // Idle card: a zero-input stretch while paused dims the frame with
   // title/episode context; any input dismisses.
   const { idle: idleOverlayVisible, wake: wakePlayerIdle } = usePlayerIdleOverlay({
     enabled:
       isExpanded &&
+      !isPip &&
       hasPlaybackStarted &&
+      !isPlaying &&
       !hasEnded &&
       !isLoading &&
       !isResolving &&
@@ -694,7 +709,6 @@ function InnerPlayer() {
     stream,
     backdrop,
     clock,
-    duration,
     durationRef,
     hasPlaybackStarted,
     isDestroyedRef,
@@ -765,7 +779,6 @@ function InnerPlayer() {
     from,
     id,
     originFrom,
-    isFullscreen,
     restoreCursorVisibility,
     routeAbsoluteEpisode,
     routeAbsoluteSeason,
@@ -775,7 +788,6 @@ function InnerPlayer() {
     // unverified, ended); a clean exit out of healthy playback just minimizes.
     shouldReopenStreamSelector,
     startTime,
-    toggleFullscreen,
   });
 
   // -- Helpers --
@@ -795,6 +807,7 @@ function InnerPlayer() {
       activeStreamUrl,
       mpvSurfaceReady,
       isFullscreen,
+      isPip,
       isLoading,
       isResolving,
       showErrorOverlay,
@@ -875,17 +888,24 @@ function InnerPlayer() {
     onSavedStreamUnavailable: reopenSelectorForSavedStreamFailure,
   });
 
+  // Metadata or a first tick lifts the loading card; the startup watchdog
+  // still owns a stream that stalls before its playhead moves.
   const markPlaybackReady = useCallback(() => {
-    markPlaybackStarted();
     stopLoading(true);
     setHasPlaybackStarted(true);
-    playbackVerifiedAtRef.current = performance.now();
     setError(null);
-    // Cancel pending force-show error timers — playback is confirmed good
     clearTimer(forceShowTimeoutRef);
     showControlsWithAutoHide(PLAYBACK_READY_AUTO_HIDE_DELAY_MS);
+  }, [showControlsWithAutoHide, stopLoading]);
+
+  // Only an advancing playhead proves the stream: duration alone can precede a
+  // stall, and must neither cancel recovery nor credit the source's health.
+  const markPlaybackVerified = useCallback(() => {
+    if (playbackVerifiedAtRef.current > 0) return;
+    markPlaybackStarted();
+    playbackVerifiedAtRef.current = performance.now();
     reportStreamVerified();
-  }, [markPlaybackStarted, reportStreamVerified, showControlsWithAutoHide, stopLoading]);
+  }, [markPlaybackStarted, reportStreamVerified]);
 
   useEffect(() => {
     errorRef.current = error;
@@ -941,6 +961,14 @@ function InnerPlayer() {
       pointerOverControlsRef.current = false;
       setShowEpisodes(false);
       setShowShortcuts(false);
+      // Back abandons a pending next-episode resolve; its completion would
+      // otherwise navigate straight back into the expanded player.
+      if (nextEpisodeRequestRef.current !== null) {
+        selectorOpenRequestIdRef.current += 1;
+        nextEpisodeRequestRef.current = null;
+        setIsResolving(false);
+        setResolveStatus('');
+      }
       void flushPlaybackBeforeNavigation();
     }
   }, [flushPlaybackBeforeNavigation, isExpanded]);
@@ -977,6 +1005,7 @@ function InnerPlayer() {
     setVolume,
     isMuted,
     setIsMuted,
+    isMutedRef,
     volumeRef,
     handleVolumeChange,
     stepVolume,
@@ -989,7 +1018,7 @@ function InnerPlayer() {
     triggerOsd,
   });
 
-  const { isBuffering } = usePlayerMpvLifecycle({
+  const { isBuffering, requestPositionRefresh } = usePlayerMpvLifecycle({
     stream,
     isHistoryResume,
     // Read the live ref — a mid-init pref change still applies the newest speed.
@@ -997,6 +1026,7 @@ function InnerPlayer() {
     subtitleSettingsRef,
     playbackLanguagePreferencesRef,
     volumeRef,
+    isMutedRef,
     mountedRef,
     isDestroyedRef,
     mpvInitializedRef,
@@ -1023,6 +1053,7 @@ function InnerPlayer() {
     clearRecoveryTimers,
     prepareForStreamLoad,
     markPlaybackReady,
+    markPlaybackVerified,
     applyResumeIfReady,
     onEnded: handleEnded,
     observeTimeUpdate,
@@ -1045,9 +1076,13 @@ function InnerPlayer() {
   }, []);
 
   // mpv's frame steps pause internally; the `pause` property keeps `isPlaying` in sync.
-  const frameStep = useCallback(async (direction: 1 | -1) => {
-    await mpvCommand(direction > 0 ? 'frame-step' : 'frame-back-step');
-  }, []);
+  const frameStep = useCallback(
+    async (direction: 1 | -1) => {
+      await mpvCommand(direction > 0 ? 'frame-step' : 'frame-back-step');
+      requestPositionRefresh();
+    },
+    [requestPositionRefresh],
+  );
 
   const openStreamSelectorForEpisode = useCallback(
     (nextEpisode: Episode, options?: { pauseCurrentPlayback?: boolean }) => {
@@ -1119,17 +1154,20 @@ function InnerPlayer() {
     [openStreamSelectorForEpisode],
   );
 
+  const localDayMs = useLocalDay().getTime();
   const nextEpisode = useMemo(() => {
     const current = currentEpisode;
     if (!episodes || !current) return undefined;
     // Episodes arrive (season, episode)-sorted natively — the first match
-    // after the current one is the next episode.
-    return episodes.find(
+    // after the current one is the next episode. An unaired successor ends
+    // the run here rather than auto-playing or skipping ahead.
+    const next = episodes.find(
       (ep) =>
         ep.season > current.season ||
         (ep.season === current.season && ep.episode > current.episode),
     );
-  }, [episodes, currentEpisode]);
+    return next && isAiredByLocalDay(next.releaseDate, localDayMs) ? next : undefined;
+  }, [episodes, currentEpisode, localDayMs]);
 
   // Shared silent resolve so the EOF/tail prefetch warms the same cache key
   // the click uses.
@@ -1257,8 +1295,10 @@ function InnerPlayer() {
   const showEndCard = eofCardOpen && !nextEpisode;
   const [autoPlayNextIn, setAutoPlayNextIn] = useState<number | null>(null);
 
+  // Docked EOF never counts down: the advance would yank the user out of
+  // browsing into the expanded player with no visible cancel.
   useEffect(() => {
-    if (!appUiPreferences.autoPlayNext || !showUpNextCard) {
+    if (!appUiPreferences.autoPlayNext || !showUpNextCard || !isExpanded) {
       setAutoPlayNextIn(null);
       return;
     }
@@ -1267,7 +1307,7 @@ function InnerPlayer() {
       setAutoPlayNextIn((current) => (current === null ? current : current - 1));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [appUiPreferences.autoPlayNext, showUpNextCard]);
+  }, [appUiPreferences.autoPlayNext, isExpanded, showUpNextCard]);
 
   useEffect(() => {
     if (autoPlayNextIn !== 0) return;
@@ -1500,7 +1540,7 @@ function InnerPlayer() {
     isExpanded,
     isFullscreen,
     mountedRef,
-    navigateBack,
+    navigateBack: isPip ? returnFromPip : navigateBack,
     nudgeSubtitleDelay,
     openStreamSelector: id ? openManualStreamFallback : null,
     playNextEpisode,
@@ -1584,10 +1624,14 @@ function InnerPlayer() {
   // Paused pins the chrome — but once the idle card owns the frame both
   // dissolve; any input brings them back.
   useEffect(() => {
-    if (!idleOverlayVisible) return;
-    clearControlsAutoHide();
-    setShowControls(false);
-  }, [clearControlsAutoHide, idleOverlayVisible]);
+    if (!isExpanded) return;
+    if (idleOverlayVisible) {
+      clearControlsAutoHide();
+      setShowControls(false);
+    } else {
+      showControlsWithAutoHide();
+    }
+  }, [clearControlsAutoHide, idleOverlayVisible, isExpanded, isPlaying, showControlsWithAutoHide]);
 
   useEffect(() => {
     const container = playerContainerRef.current;
@@ -1609,13 +1653,6 @@ function InnerPlayer() {
       clearResumeRetryTimer();
     };
   }, [clearRecoveryTimers, clearResumeRetryTimer, clearUiTimers]);
-
-  // Restore or preserve viewport mode on unmount depending on the navigation path.
-  useEffect(() => {
-    return () => {
-      cleanupViewportOnUnmount();
-    };
-  }, [cleanupViewportOnUnmount]);
 
   const handlePlayerClick = useCallback(
     (event: MouseEvent<HTMLElement>) => {
@@ -1766,7 +1803,7 @@ function InnerPlayer() {
       episode: selectorStreamEpisode,
       absoluteSeason: selectorAbsoluteSeason,
       absoluteEpisode: selectorAbsoluteEpisode,
-      title: details?.title || title,
+      title: details?.title || resolveTitle,
       episodeTitle: selectorEpisode?.title,
       overview: selectorEpisode?.overview || details?.description,
       poster,
@@ -1785,7 +1822,7 @@ function InnerPlayer() {
       selectorAbsoluteSeason,
       selectorAbsoluteEpisode,
       details?.title,
-      title,
+      resolveTitle,
       selectorEpisode,
       details?.description,
       details?.episodes,
@@ -1879,6 +1916,13 @@ function InnerPlayer() {
     />
   );
 
+  useEffect(() => {
+    // Panels and recovery selectors need the full app viewport.
+    if (isPip && (showEpisodes || showShortcuts || showStreamSelector)) {
+      void returnFromPip().catch(() => undefined);
+    }
+  }, [isPip, returnFromPip, showEpisodes, showShortcuts, showStreamSelector]);
+
   if (!isExpanded) {
     // Minimized: the app route keeps rendering while mpv plays in the corner surface.
     return (
@@ -1899,7 +1943,7 @@ function InnerPlayer() {
       className={cn(
         // Mount fade covers navigation, episode swaps, and the mini→expand hop.
         'relative w-full h-screen overflow-hidden bg-transparent text-white group page-enter',
-        !isFullscreen && 'pl-[60px]',
+        !isFullscreen && !isPip && 'pl-[60px]',
       )}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
@@ -1913,10 +1957,10 @@ function InnerPlayer() {
         onClick={handlePlayerClick}
         onDoubleClick={handlePlayerDoubleClick}
       />
-      {!isFullscreen && (
+      {!isFullscreen && !isPip && (
         <DesktopTitlebar className='z-85 bg-linear-to-b from-black/70 via-black/35 to-transparent backdrop-blur-[2px]' />
       )}
-      {!isFullscreen && (
+      {!isFullscreen && !isPip && (
         <div
           data-player-interactive
           className='fixed left-0 top-0 z-70 h-screen pointer-events-auto'
@@ -1943,7 +1987,7 @@ function InnerPlayer() {
         )}
       </div>
 
-      {showErrorOverlay && (
+      {!isPip && showErrorOverlay && (
         <PlayerErrorOverlay
           message={error ?? ''}
           onRetry={handleRetryFailedStream}
@@ -1953,7 +1997,7 @@ function InnerPlayer() {
       )}
 
       {/* Loading — held mounted a beat past the flag so the card dissolves. */}
-      {loadingOverlay.mounted && !error && (
+      {!isPip && loadingOverlay.mounted && !error && (
         <PlayerLoadingOverlay
           isResolving={isResolving}
           headline={playerLoadingCopy.headline}
@@ -1966,7 +2010,7 @@ function InnerPlayer() {
       )}
 
       {/* Buffering: a bare spinner mid-playback, not the full loading card. */}
-      {bufferingOverlay.mounted && (
+      {!isPip && bufferingOverlay.mounted && (
         // The entrance fade debounces one-frame stalls; the parent holds the
         // mount a beat so recovery dissolves out.
         <div
@@ -1982,7 +2026,7 @@ function InnerPlayer() {
       )}
 
       {/* Idle card — sits under the chrome (z-40) so woken controls draw above. */}
-      {hasPlaybackStarted && (
+      {!isPip && hasPlaybackStarted && (
         <PlayerIdleOverlay
           visible={idleOverlayVisible}
           isFullscreen={isFullscreen}
@@ -1995,101 +2039,109 @@ function InnerPlayer() {
       )}
 
       {/* Controls overlay — edge scrims only; the frame itself stays clear. */}
-      <div
-        className={cn(
-          'absolute inset-0 z-40 pointer-events-none flex flex-col transition-opacity duration-300',
-          'justify-between pb-6',
-          !isFullscreen && 'pt-12',
-          isFullscreen && 'pt-6',
-          isFullscreen ? 'px-8' : 'pl-[84px] pr-6',
-          showControls || !isPlaying ? 'opacity-100' : 'opacity-0',
-        )}
-      >
+      {!isPip && (
         <div
-          aria-hidden='true'
-          className='absolute inset-x-0 top-0 h-24 bg-linear-to-b from-black/55 via-black/20 to-transparent'
-        />
-        <div
-          aria-hidden='true'
-          className='absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent'
-        />
-        <PlayerTopChrome
-          chromeRef={topChromeRef}
-          title={title}
-          season={resolvedAbsoluteSeason}
-          episode={resolvedAbsoluteEpisode}
-          episodeCountInSeason={episodeCountInSeason}
-          episodeTitle={currentEpisode?.title}
-          streamSourceName={activeStreamSourceName}
-          isFullscreen={isFullscreen}
-          onBack={navigateBack}
-          onToggleFullscreen={toggleFullscreen}
-        />
-
-        <div
-          ref={bottomChromeRef}
-          data-player-interactive
-          className='pointer-events-auto relative space-y-0'
-          onPointerEnter={() => {
-            pointerOverControlsRef.current = true;
-          }}
-          onPointerLeave={() => {
-            pointerOverControlsRef.current = false;
+          className={cn(
+            'absolute inset-0 z-40 pointer-events-none flex flex-col transition-opacity duration-300',
+            'justify-between pb-6',
+            !isFullscreen && 'pt-12',
+            isFullscreen && 'pt-6',
+            isFullscreen ? 'px-8' : 'pl-[84px] pr-6',
+            !idleOverlayVisible && (showControls || !isPlaying) ? 'opacity-100' : 'opacity-0',
+            // Keyboard focus inside hidden chrome must never sit on an invisible control.
+            'has-[:focus-visible]:opacity-100',
+          )}
+          onFocus={(event) => {
+            if (event.target.matches(':focus-visible')) showControlsWithAutoHide();
           }}
         >
-          <PlayerProgressBar
-            duration={duration}
-            clock={clock}
-            bufferedClock={bufferedClock}
-            skipSegments={skipSegments}
-            resetKey={activeStreamUrl}
-            onSeek={seek}
+          <div
+            aria-hidden='true'
+            className='absolute inset-x-0 top-0 h-24 bg-linear-to-b from-black/55 via-black/20 to-transparent'
+          />
+          <div
+            aria-hidden='true'
+            className='absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent'
+          />
+          <PlayerTopChrome
+            chromeRef={topChromeRef}
+            title={title}
+            season={resolvedAbsoluteSeason}
+            episode={resolvedAbsoluteEpisode}
+            episodeCountInSeason={episodeCountInSeason}
+            episodeTitle={currentEpisode?.title}
+            streamSourceName={activeStreamSourceName}
+            isFullscreen={isFullscreen}
+            onBack={navigateBack}
+            onToggleFullscreen={toggleFullscreen}
           />
 
-          <PlayerControlsRow
-            isPlaying={isPlaying}
-            onTogglePlay={togglePlay}
-            onSeekRelative={seekRelative}
-            volume={volume}
-            isMuted={isMuted}
-            onToggleMute={toggleMute}
-            onVolumeChange={handleVolumeChange}
-            onVolumeStep={handleVolumeStep}
-            playbackSpeed={playbackSpeed}
-            onSpeedChange={handleSpeedSelect}
-            hasEpisodes={hasEpisodes}
-            episodesOpen={showEpisodes}
-            onToggleEpisodes={toggleEpisodesPanel}
-            canChooseStream={!!id}
-            streamSelectorOpen={showStreamSelector}
-            onOpenStreamSelector={openManualStreamFallback}
-            canGoNext={!!nextEpisode}
-            onNextEpisode={playNextEpisode}
-            audioTracks={audioTracks}
-            trackSwitching={trackSwitching}
-            onSelectAudioTrack={handleAudioTrackSelect}
-            subTracks={subTracks}
-            subtitlesOff={subtitlesOff}
-            subtitleDelay={subtitleDelay}
-            subtitlePos={subtitlePos}
-            subtitleScale={subtitleScale}
-            addonSubtitles={addonSubtitles}
-            addonSubtitlesLoading={addonSubtitlesLoading}
-            addonSubtitlesError={addonSubtitlesError}
-            addonSubtitlesQueried={addonSubtitlesQueried}
-            activeAddonSubtitleId={activeAddonSubtitleId}
-            addonSubtitleLoadingId={addonSubtitleLoadingId}
-            onSubtitleMenuOpenChange={handleSubtitleMenuOpenChange}
-            onSelectAddonSubtitle={handleAddonSubtitleSelect}
-            onResetSubtitleSettings={resetSubtitleSettings}
-            onApplySubtitleDelay={applySubtitleDelay}
-            onApplySubtitlePos={applySubtitlePos}
-            onApplySubtitleScale={applySubtitleScale}
-            onSelectSubTrack={handleSubTrackSelect}
-          />
+          <div
+            ref={bottomChromeRef}
+            data-player-interactive
+            className='pointer-events-auto relative space-y-0'
+            onPointerEnter={() => {
+              pointerOverControlsRef.current = true;
+            }}
+            onPointerLeave={() => {
+              pointerOverControlsRef.current = false;
+            }}
+          >
+            <PlayerProgressBar
+              duration={duration}
+              clock={clock}
+              bufferedClock={bufferedClock}
+              skipSegments={skipSegments}
+              resetKey={activeStreamUrl}
+              onSeek={seek}
+            />
+
+            <PlayerControlsRow
+              onTogglePip={canPip ? togglePip : undefined}
+              isPlaying={isPlaying}
+              onTogglePlay={togglePlay}
+              onSeekRelative={seekRelative}
+              volume={volume}
+              isMuted={isMuted}
+              onToggleMute={toggleMute}
+              onVolumeChange={handleVolumeChange}
+              onVolumeStep={handleVolumeStep}
+              playbackSpeed={playbackSpeed}
+              onSpeedChange={handleSpeedSelect}
+              hasEpisodes={hasEpisodes}
+              episodesOpen={showEpisodes}
+              onToggleEpisodes={toggleEpisodesPanel}
+              canChooseStream={!!id}
+              streamSelectorOpen={showStreamSelector}
+              onOpenStreamSelector={openManualStreamFallback}
+              canGoNext={!!nextEpisode}
+              onNextEpisode={playNextEpisode}
+              audioTracks={audioTracks}
+              trackSwitching={trackSwitching}
+              onSelectAudioTrack={handleAudioTrackSelect}
+              subTracks={subTracks}
+              subtitlesOff={subtitlesOff}
+              subtitleDelay={subtitleDelay}
+              subtitlePos={subtitlePos}
+              subtitleScale={subtitleScale}
+              addonSubtitles={addonSubtitles}
+              addonSubtitlesLoading={addonSubtitlesLoading}
+              addonSubtitlesError={addonSubtitlesError}
+              addonSubtitlesQueried={addonSubtitlesQueried}
+              activeAddonSubtitleId={activeAddonSubtitleId}
+              addonSubtitleLoadingId={addonSubtitleLoadingId}
+              onSubtitleMenuOpenChange={handleSubtitleMenuOpenChange}
+              onSelectAddonSubtitle={handleAddonSubtitleSelect}
+              onResetSubtitleSettings={resetSubtitleSettings}
+              onApplySubtitleDelay={applySubtitleDelay}
+              onApplySubtitlePos={applySubtitlePos}
+              onApplySubtitleScale={applySubtitleScale}
+              onSelectSubTrack={handleSubTrackSelect}
+            />
+          </div>
         </div>
-      </div>
-      <PlayerPauseResumeButton visible={showPauseResume} onResume={togglePlay} />
+      )}
+      <PlayerPauseResumeButton visible={!isPip && showPauseResume} onResume={togglePlay} />
 
       <PlayerOsdOverlay
         action={osdAction}
@@ -2098,14 +2150,16 @@ function InnerPlayer() {
         isResolving={isResolving}
       />
 
-      <PlayerActionOverlays
-        clock={clock}
-        skipAction={activeSkipAction}
-        segmentStart={activeSkipSegment?.start_time}
-        segmentEnd={activeSkipSegment?.end_time}
-      />
+      {!isPip && (
+        <PlayerActionOverlays
+          clock={clock}
+          skipAction={activeSkipAction}
+          segmentStart={activeSkipSegment?.start_time}
+          segmentEnd={activeSkipSegment?.end_time}
+        />
+      )}
 
-      {showUpNextCard && nextEpisode && (
+      {!isPip && showUpNextCard && nextEpisode && (
         <PlayerUpNextCard
           episode={nextEpisode}
           thumbnail={nextEpisodeThumbnail}
@@ -2116,7 +2170,7 @@ function InnerPlayer() {
         />
       )}
 
-      {showEndCard && (
+      {!isPip && showEndCard && (
         <PlayerEndCard
           title={currentEpisodeHeading || title || ''}
           thumbnail={currentEpisode?.thumbnail ?? backdrop ?? poster ?? undefined}
@@ -2148,6 +2202,54 @@ function InnerPlayer() {
 
       {streamSelectorNode}
 
+      {isPip && (
+        <PlayerPipChrome
+          title={title}
+          episodeLabel={currentEpisodeLabel || undefined}
+          visible={showControls}
+          isPlaying={isPlaying}
+          isMuted={isMuted}
+          volume={volume}
+          clock={clock}
+          bufferedClock={bufferedClock}
+          duration={duration}
+          skipSegments={skipSegments}
+          resetKey={activeStreamUrl}
+          status={
+            isResolving
+              ? resolveStatus || 'Finding stream…'
+              : isLoading
+                ? 'Starting playback…'
+                : isBuffering
+                  ? 'Buffering…'
+                  : undefined
+          }
+          error={error}
+          ended={hasEnded && !isResolving}
+          autoPlaySecondsLeft={autoPlayNextIn}
+          canGoNext={!!nextEpisode}
+          skipAction={activeSkipAction}
+          onReturn={returnFromPip}
+          onTogglePlay={togglePlay}
+          onToggleMute={toggleMute}
+          onVolumeStep={handleVolumeStep}
+          onSeek={seek}
+          onNext={playNextEpisode}
+          onReplay={replayFromStart}
+          onRetry={handleRetryFailedStream}
+          onCancelAutoPlay={cancelAutoPlayNext}
+          onControlsHover={(hovered) => {
+            pointerOverControlsRef.current = hovered;
+          }}
+        />
+      )}
+      <div
+        aria-hidden='true'
+        className={cn(
+          'pointer-events-none absolute inset-0 z-90 bg-black/80 transition-opacity duration-150 motion-reduce:transition-none',
+          isViewportTransitioning ? 'opacity-100' : 'opacity-0',
+        )}
+      />
       {/* Expand handoff: the mini chrome lingers one beat and dissolves out. */}
       {miniExiting && miniPlayerNode(true)}
     </div>

@@ -2,17 +2,23 @@ use super::{
     normalize_media_id, normalize_opaque_field, normalize_watch_progress_type, now_unix_millis,
     playback_state::{PlaybackStateService, PlaybackStreamOutcomeKind, StreamOutcomeReport},
     probe_pool::{
-        is_probeable_stream, resolve_ranked_best_stream_candidate, PreferredStreamHint,
-        StreamPoolQuery,
+        is_probeable_stream, resolve_ranked_best_stream_candidate, retain_unexcluded_streams,
+        PreferredStreamHint, StreamPoolQuery,
     },
     stream_fetcher::{fetch_stream_selector_data, StreamRankingOverrides, StreamSelectorData},
-    stream_resolver::{missing_direct_url_message, BestResolvedStream},
+    stream_resolver::{
+        BestResolvedStream, ResolveStreamError, ResolveStreamErrorKind, MISSING_DIRECT_URL_MESSAGE,
+    },
     streaming_helpers::normalize_http_url,
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addons::AddonTransport;
 use tauri::ipc::Channel;
 use tauri::{command, AppHandle, State};
+
+/// A recovery chain fails over a handful of times at most; anything larger
+/// is malformed input.
+const RECOVERY_EXCLUDED_STREAM_KEYS_MAX: usize = 16;
 
 fn normalize_recovery_text(value: Option<String>) -> Option<String> {
     value.as_deref().and_then(normalize_opaque_field)
@@ -100,7 +106,7 @@ pub async fn resolve_best_stream(
     ranking_title: Option<String>,
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
-) -> Result<BestResolvedStream, String> {
+) -> Result<BestResolvedStream, ResolveStreamError> {
     let query = StreamPoolQuery::new(
         &media_type,
         &id,
@@ -124,7 +130,10 @@ pub async fn resolve_best_stream(
     // `prepare_addon_streams` already dropped placeholders and rows with no
     // playable source during ingress; no second filter pass is needed here.
     if streams.is_empty() {
-        return Err("No streams found for this content.".to_string());
+        return Err(ResolveStreamError::new(
+            ResolveStreamErrorKind::NoStreams,
+            "No streams found for this content.",
+        ));
     }
 
     // Best-stream plays direct http(s) only: non-http rows list in the
@@ -132,7 +141,10 @@ pub async fn resolve_best_stream(
     // guidance instead of the generic unable-to-resolve wall.
     streams.retain(is_probeable_stream);
     if streams.is_empty() {
-        return Err(missing_direct_url_message().to_string());
+        return Err(ResolveStreamError::new(
+            ResolveStreamErrorKind::NoDirectUrl,
+            MISSING_DIRECT_URL_MESSAGE,
+        ));
     }
 
     let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_opaque_field(&key));
@@ -167,6 +179,7 @@ pub async fn recover_playback_stream(
     failed_source_id: Option<String>,
     failed_stream_family: Option<String>,
     failed_stream_key: Option<String>,
+    excluded_stream_keys: Option<Vec<String>>,
     outcome: String,
     ranking_media_id: Option<String>,
     ranking_media_type: Option<String>,
@@ -199,6 +212,12 @@ pub async fn recover_playback_stream(
     let failed_source_id = normalize_recovery_text(failed_source_id);
     let failed_stream_family = normalize_recovery_text(failed_stream_family);
     let failed_stream_key = normalize_recovery_text(failed_stream_key);
+    let excluded_stream_keys: Vec<String> = excluded_stream_keys
+        .unwrap_or_default()
+        .iter()
+        .take(RECOVERY_EXCLUDED_STREAM_KEYS_MAX)
+        .filter_map(|key| normalize_opaque_field(key))
+        .collect();
     // Recovery must query the same ID space the initial resolve used: on
     // mapped titles (e.g. kitsu: -> tt…) the media id is not the id addons
     // index streams under, so fetching by `normalized_id` would find nothing.
@@ -243,7 +262,7 @@ pub async fn recover_playback_stream(
         });
     }
 
-    let streams = match query
+    let mut streams = match query
         .fetch_pool(&app, &playback_state, &addon_transport, &fetch_id)
         .await
     {
@@ -268,8 +287,9 @@ pub async fn recover_playback_stream(
     };
 
     // Streams arrived already filtered by `prepare_addon_streams` (no
-    // placeholders, playable source required), so the pool can feed the
-    // candidate fan-out directly.
+    // placeholders, playable source required); only earlier failures of this
+    // recovery chain leave before the candidate fan-out.
+    retain_unexcluded_streams(&mut streams, &excluded_stream_keys);
     if streams.is_empty() {
         log_warn(
             "stream-recovery",
@@ -294,7 +314,7 @@ pub async fn recover_playback_stream(
     {
         Ok(resolved) => Ok(Some(resolved)),
         Err(error) => {
-            let summary: String = error.chars().take(160).collect();
+            let summary: String = error.message.chars().take(160).collect();
             log_warn(
                 "stream-recovery",
                 "recover_playback_stream",

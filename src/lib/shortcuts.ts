@@ -36,3 +36,9 @@ export const BROWSE_SHORTCUTS: ShortcutRow[] = [
   { label: 'Back', keys: ['Esc', 'Backspace', 'Alt+←'] },
   { label: 'Forward', keys: ['Alt+→'] },
 ];
+
+// Page-local bindings from the Calendar page's keydown handler.
+export const CALENDAR_SHORTCUTS: ShortcutRow[] = [
+  { label: 'Previous / next month', keys: ['←', '→'] },
+  { label: 'Jump to current month', keys: ['T'] },
+];

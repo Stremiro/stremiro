@@ -77,6 +77,9 @@ export function useStreamRecovery({
   const startupWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startupWatchdogCancelledRef = useRef(false);
   const startupRecoveryAttemptedForRef = useRef<Set<string>>(new Set());
+  // Keys of streams that failed in this episode's chain: excluding only the
+  // latest would let A -> B -> A bounce past a viable third candidate.
+  const failedStreamKeysRef = useRef<Set<string>>(new Set());
   // Other callers (idle-active, force-show stage) share this recovery — a
   // watchdog verdict while one is in-flight must not error it out.
   const recoveryInFlightRef = useRef(false);
@@ -108,6 +111,7 @@ export function useStreamRecovery({
 
   useEffect(() => {
     startupRecoveryAttemptedForRef.current.clear();
+    failedStreamKeysRef.current.clear();
   }, [absoluteEpisode, absoluteSeason, mediaId, resolveSeason, resolveEpisode]);
 
   const recoverFromSlowStartup = useCallback(
@@ -133,6 +137,9 @@ export function useStreamRecovery({
       const epoch = recoveryEpochRef.current;
       const isCurrent = () => epoch === recoveryEpochRef.current && mountedRef.current;
       startupRecoveryAttemptedForRef.current.add(sourceUrl);
+      const failedStreamKey = selectedStreamKeyRef.current;
+      const excludedStreamKeys = [...failedStreamKeysRef.current];
+      if (failedStreamKey) failedStreamKeysRef.current.add(failedStreamKey);
       recoveryInFlightRef.current = true;
       setError(null);
       setIsResolving(true);
@@ -154,8 +161,9 @@ export function useStreamRecovery({
               streamUrl: sourceUrl,
               sourceId: stream.activeStreamSourceIdRef.current,
               streamFamily: stream.activeStreamFamilyRef.current,
-              streamKey: selectedStreamKeyRef.current,
+              streamKey: failedStreamKey,
             },
+            excludedStreamKeys,
             outcome,
           }),
           STREAM_RECOVERY_TIMEOUT_MS,

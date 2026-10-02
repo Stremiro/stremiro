@@ -1,40 +1,26 @@
-use super::{compare_continue_watching, sanitize_watch_progress};
+use super::{compare_continue_watching, sanitize_watch_progress, with_progress_annotations};
 use crate::commands::now_unix_millis;
 use crate::commands::WatchProgress;
 use crate::test_helpers::test_progress;
 
-fn progress_with_url(url: &str) -> WatchProgress {
+fn sample_progress() -> WatchProgress {
     WatchProgress {
         position: 60.0,
         duration: 600.0,
         last_watched: 1,
         title: "Title".to_string(),
-        last_stream_url: Some(url.to_string()),
         last_stream_lookup_id: Some("tt123".to_string()),
         ..test_progress()
     }
 }
 
 #[test]
-fn stream_urls_never_persist_but_lookup_identity_survives() {
-    for url in [
-        "https://cdn.example/video.mp4?expires=123&sig=abc",
-        "https://cdn.example/video.mp4",
-        "https://cdn.example/v.mp4#notes?token=abc",
-    ] {
-        let sanitized = sanitize_watch_progress(progress_with_url(url)).expect("valid progress");
-        assert_eq!(sanitized.last_stream_url, None);
-        assert_eq!(sanitized.last_stream_lookup_id.as_deref(), Some("tt123"));
-    }
-}
-
-#[test]
 fn sanitize_drops_empty_media_id_and_defaults_empty_title() {
-    let mut progress = progress_with_url("https://cdn.example/v.mp4");
+    let mut progress = sample_progress();
     progress.id = "   ".to_string();
     assert!(sanitize_watch_progress(progress).is_none());
 
-    let mut progress = progress_with_url("https://cdn.example/v.mp4");
+    let mut progress = sample_progress();
     progress.title = "  ".to_string();
     let sanitized = sanitize_watch_progress(progress).expect("valid progress");
     assert_eq!(sanitized.title, "Untitled");
@@ -42,7 +28,7 @@ fn sanitize_drops_empty_media_id_and_defaults_empty_title() {
 
 #[test]
 fn sanitize_drops_out_of_range_episode_coordinates() {
-    let mut progress = progress_with_url("https://cdn.example/v.mp4");
+    let mut progress = sample_progress();
     progress.type_ = "series".to_string();
     progress.season = Some(2);
     progress.episode = Some(u32::MAX);
@@ -59,17 +45,45 @@ fn sanitize_drops_out_of_range_episode_coordinates() {
 #[test]
 fn sanitize_clamps_far_future_timestamps_but_keeps_small_skew() {
     let before = now_unix_millis();
-    let mut progress = progress_with_url("https://cdn.example/v.mp4");
+    let mut progress = sample_progress();
     progress.last_watched = before.saturating_add(365 * 24 * 60 * 60 * 1000);
     let sanitized = sanitize_watch_progress(progress).expect("valid progress");
     assert!(sanitized.last_watched >= before);
     assert!(sanitized.last_watched <= now_unix_millis());
 
-    let mut progress = progress_with_url("https://cdn.example/v.mp4");
+    let mut progress = sample_progress();
     let near_future = now_unix_millis().saturating_add(60_000);
     progress.last_watched = near_future;
     let sanitized = sanitize_watch_progress(progress).expect("valid progress");
     assert_eq!(sanitized.last_watched, near_future);
+}
+
+#[test]
+fn progress_annotations_share_the_backend_thresholds_and_never_persist() {
+    let annotate = |position: f64, duration: f64| {
+        with_progress_annotations(WatchProgress {
+            position,
+            duration,
+            ..sample_progress()
+        })
+    };
+
+    let fresh = annotate(20.0, 600.0);
+    assert!(!fresh.has_started_watching && !fresh.is_watched);
+    assert_eq!(fresh.resume_start_time, Some(20.0));
+
+    let started = annotate(60.0, 600.0);
+    assert!(started.has_started_watching && !started.is_watched);
+
+    let watched = annotate(570.0, 600.0);
+    assert!(watched.has_started_watching && watched.is_watched);
+    assert_eq!(watched.resume_start_time, None);
+
+    let unknown_runtime = annotate(60.0, 0.0);
+    assert!(!unknown_runtime.has_started_watching && !unknown_runtime.is_watched);
+
+    let sanitized = sanitize_watch_progress(watched).expect("valid progress");
+    assert!(!sanitized.is_watched && !sanitized.has_started_watching);
 }
 
 #[test]

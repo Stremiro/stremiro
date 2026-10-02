@@ -1,5 +1,9 @@
-import type { AddonStream, AddonStreamResolution, StreamSelectorPreferences } from '@/lib/api';
-import { matchesAnyMarker } from '@/lib/utils';
+import type {
+  AddonStream,
+  AddonStreamRecommendationReason,
+  AddonStreamResolution,
+  StreamSelectorPreferences,
+} from '@/lib/api';
 
 export const DEFAULT_FILTERS: StreamSelectorPreferences = {
   quality: 'all',
@@ -8,40 +12,6 @@ export const DEFAULT_FILTERS: StreamSelectorPreferences = {
   sort: 'smart',
   batch: 'all',
 };
-
-export interface StreamSelectorStats {
-  resCounts: Record<AddonStreamResolution, number>;
-  playableCount: number;
-  p2pCount: number;
-  cachedCount: number;
-  batchCount: number;
-  episodeLikeCount: number;
-}
-
-export function buildStreamSelectorStats(streams: readonly AddonStream[]): StreamSelectorStats {
-  const stats: StreamSelectorStats = {
-    resCounts: { '4k': 0, '1080p': 0, '720p': 0, sd: 0 },
-    playableCount: 0,
-    p2pCount: 0,
-    cachedCount: 0,
-    batchCount: 0,
-    episodeLikeCount: 0,
-  };
-
-  for (const stream of streams) {
-    if (!stream.presentation.isInstantlyPlayable) {
-      stats.p2pCount += 1;
-      continue;
-    }
-    stats.playableCount += 1;
-    stats.resCounts[stream.presentation.resolution] += 1;
-    if (stream.presentation.deliveryKind === 'cached') stats.cachedCount += 1;
-    if (stream.presentation.isBatch) stats.batchCount += 1;
-  }
-
-  stats.episodeLikeCount = stats.playableCount - stats.batchCount;
-  return stats;
-}
 
 interface TechBadge {
   label: string;
@@ -127,12 +97,47 @@ export function streamMatchTier(stream: AddonStream): StreamMatchTier | null {
   }
 }
 
-// Recommendation reasons that carry a caution signal rather than a positive
-// one — they render amber-muted so "why it ranks" reads at a glance.
-const CAUTION_REASON_MARKERS = ['issues', 'cooling'] as const;
+export interface StreamReasonChip {
+  kind: AddonStreamRecommendationReason;
+  label: string;
+  /** Caution reasons render amber-muted so "why it ranks" reads at a glance. */
+  caution: boolean;
+}
 
-export function isCautionReason(reason: string): boolean {
-  return matchesAnyMarker(reason, CAUTION_REASON_MARKERS);
+const REASON_CHIPS: { [K in AddonStreamRecommendationReason]: StreamReasonChip & { kind: K } } = {
+  verified_source: { kind: 'verified_source', label: 'Verified source', caution: false },
+  source_issues: { kind: 'source_issues', label: 'Recent source issues', caution: true },
+  source_cooling: { kind: 'source_cooling', label: 'Source cooling down', caution: true },
+  proven_release_group: {
+    kind: 'proven_release_group',
+    label: 'Proven release group',
+    caution: false,
+  },
+  release_group_issues: {
+    kind: 'release_group_issues',
+    label: 'Release group had issues',
+    caution: true,
+  },
+  release_group_cooling: {
+    kind: 'release_group_cooling',
+    label: 'Release group cooling down',
+    caution: true,
+  },
+  title_affinity: {
+    kind: 'title_affinity',
+    label: 'Previously worked on this title',
+    caution: false,
+  },
+  language_match: { kind: 'language_match', label: 'Matches language prefs', caution: false },
+  language_flexible: { kind: 'language_flexible', label: 'Flexible audio/subs', caution: false },
+  top_quality: { kind: 'top_quality', label: 'Top quality', caution: false },
+  good_quality: { kind: 'good_quality', label: 'Good quality', caution: false },
+  preferred_source: { kind: 'preferred_source', label: 'Preferred source', caution: false },
+  fallback: { kind: 'fallback', label: 'Fallback', caution: false },
+};
+
+export function buildStreamReasonChips(stream: AddonStream): StreamReasonChip[] {
+  return (stream.recommendationReasons ?? []).map((kind) => REASON_CHIPS[kind]);
 }
 
 // Sync filter only; Rust owns smart order.

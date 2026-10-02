@@ -3,7 +3,7 @@
 // noise are normalized just enough to read cleanly inside the app's own
 // typography.
 
-export interface ReleaseNoteBlock {
+interface ReleaseNoteBlock {
   kind: 'heading' | 'bullet' | 'text';
   text: string;
   /** Append index within the parsed body — parsed blocks are immutable,

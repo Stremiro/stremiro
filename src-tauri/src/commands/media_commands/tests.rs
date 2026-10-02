@@ -18,7 +18,7 @@ fn episode(id: &str, season: u32, episode: u32, release_date: Option<&str>) -> E
 }
 
 #[test]
-fn build_media_schedule_filters_undated_episodes_and_sorts_by_release_date() {
+fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
     let schedule = build_media_schedule(MediaDetails {
         id: "tt123".to_string(),
         imdb_id: None,
@@ -41,7 +41,7 @@ fn build_media_schedule_filters_undated_episodes_and_sorts_by_release_date() {
                 ..episode("ep-2", 1, 2, Some("2025-02-12"))
             },
             episode("ep-0", 1, 0, None),
-            // An invalid matched date drops the episode rather than pinning Jan 1.
+            // An invalid matched date stays undated rather than pinning Jan 1.
             episode("ep-bad-date", 1, 3, Some("2025-02-30")),
             Episode {
                 release_date: Some("2025-01-14".to_string()),
@@ -50,12 +50,20 @@ fn build_media_schedule_filters_undated_episodes_and_sorts_by_release_date() {
         ]),
     });
 
-    assert_eq!(schedule.episodes.len(), 2);
-    assert_eq!(schedule.episodes[0].id, "ep-1");
-    assert_eq!(schedule.episodes[0].release_date, "2025-01-14");
-    assert_eq!(schedule.episodes[1].id, "ep-2");
-    let serialized = serde_json::to_value(&schedule.episodes[1]).expect("serialize episode");
-    assert!(serialized.get("thumbnail").is_none());
+    let order: Vec<_> = schedule
+        .episodes
+        .iter()
+        .map(|episode| (episode.id.as_str(), episode.release_date.as_deref()))
+        .collect();
+    assert_eq!(
+        order,
+        [
+            ("ep-1", Some("2025-01-14")),
+            ("ep-2", Some("2025-02-12")),
+            ("ep-0", None),
+            ("ep-bad-date", None),
+        ]
+    );
 }
 
 #[test]

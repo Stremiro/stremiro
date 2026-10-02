@@ -18,9 +18,9 @@ use super::{
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_manifest::snapshot_supports_request;
-use crate::providers::addons::{AddonStream, AddonTransport};
+use crate::providers::addons::{AddonStream, AddonTransport, StreamDeliveryKind, StreamResolution};
 use futures_util::stream::{self, StreamExt};
-use serde::Serialize;
+use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tauri::ipc::Channel;
@@ -70,16 +70,83 @@ pub(crate) struct StreamSourceSummary {
     pub error_message: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Clone)]
 pub(crate) struct StreamSelectorData {
     pub streams: Vec<AddonStream>,
     pub source_summaries: Vec<StreamSourceSummary>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub fatal_error_message: Option<String>,
-    /// False on progressive channel snapshots; the command result itself is
-    /// always complete. Older consumers can ignore the flag entirely.
-    pub complete: bool,
+}
+
+#[derive(Default, Serialize)]
+struct StreamResolutionCounts {
+    #[serde(rename = "4k")]
+    p2160: usize,
+    #[serde(rename = "1080p")]
+    p1080: usize,
+    #[serde(rename = "720p")]
+    p720: usize,
+    sd: usize,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamSelectorStats {
+    res_counts: StreamResolutionCounts,
+    playable_count: usize,
+    p2p_count: usize,
+    cached_count: usize,
+    batch_count: usize,
+    episode_like_count: usize,
+}
+
+impl StreamSelectorStats {
+    fn from_streams(streams: &[AddonStream]) -> Self {
+        let mut stats = Self::default();
+        for stream in streams {
+            let presentation = &stream.presentation;
+            if !presentation.is_instantly_playable {
+                stats.p2p_count += 1;
+                continue;
+            }
+            stats.playable_count += 1;
+            match presentation.resolution {
+                StreamResolution::P2160 => stats.res_counts.p2160 += 1,
+                StreamResolution::P1080 => stats.res_counts.p1080 += 1,
+                StreamResolution::P720 => stats.res_counts.p720 += 1,
+                StreamResolution::Sd => stats.res_counts.sd += 1,
+            }
+            if presentation.delivery_kind == StreamDeliveryKind::Cached {
+                stats.cached_count += 1;
+            }
+            if presentation.is_batch {
+                stats.batch_count += 1;
+            }
+        }
+        stats.episode_like_count = stats.playable_count - stats.batch_count;
+        stats
+    }
+}
+
+impl Serialize for StreamSelectorData {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Resolve callers reuse this data without serializing it; only selector
+        // payloads need counts, derived from already-prepared presentation facts.
+        let mut data = serializer.serialize_struct(
+            "StreamSelectorData",
+            if self.fatal_error_message.is_some() {
+                4
+            } else {
+                3
+            },
+        )?;
+        data.serialize_field("streams", &self.streams)?;
+        data.serialize_field("sourceSummaries", &self.source_summaries)?;
+        data.serialize_field("stats", &StreamSelectorStats::from_streams(&self.streams))?;
+        if let Some(message) = &self.fatal_error_message {
+            data.serialize_field("fatalErrorMessage", message)?;
+        }
+        data.end()
+    }
 }
 
 /// Borrowed serialize view of `StreamSelectorData` for progressive channel
@@ -89,10 +156,10 @@ pub(crate) struct StreamSelectorData {
 #[serde(rename_all = "camelCase")]
 struct StreamSelectorSnapshot<'a> {
     streams: &'a [AddonStream],
+    stats: StreamSelectorStats,
     source_summaries: Vec<&'a StreamSourceSummary>,
     #[serde(skip_serializing_if = "Option::is_none")]
     fatal_error_message: Option<&'a str>,
-    complete: bool,
 }
 
 fn send_selector_snapshot(
@@ -104,9 +171,9 @@ fn send_selector_snapshot(
     // result owns that field.
     if let Ok(payload) = serde_json::to_value(StreamSelectorSnapshot {
         streams,
+        stats: StreamSelectorStats::from_streams(streams),
         source_summaries,
         fatal_error_message: None,
-        complete: false,
     }) {
         let _ = channel.send(payload);
     }
@@ -215,22 +282,6 @@ fn stream_match_context<'a>(
         canonical_episode: ranking.episode,
         is_final_season,
     }
-}
-
-/// Snapshot of the two global language defaults. Read once on the blocking
-/// pool before fan-out so no `Store` handle is held across network awaits.
-async fn snapshot_global_language_defaults(
-    app: &AppHandle,
-) -> Result<(Option<String>, Option<String>), String> {
-    let app = app.clone();
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok((
-            get_trimmed_store_string(&store, PREFERRED_AUDIO_LANGUAGE_STORE_KEY),
-            get_trimmed_store_string(&store, PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY),
-        ))
-    })
-    .await
 }
 
 pub(crate) fn resolve_stream_ranking_scope(
@@ -353,8 +404,6 @@ async fn snapshot_selector_inputs(
     playback_state: &PlaybackStateService,
     ranking: &StreamRankingScope,
     stream_addons: &[(usize, &AddonConfig)],
-    preferred_audio_language: Option<String>,
-    preferred_subtitle_language: Option<String>,
 ) -> Result<
     (
         HashMap<String, u8>,
@@ -374,6 +423,11 @@ async fn snapshot_selector_inputs(
         .map(|(_, addon)| addon.id.clone())
         .collect();
     super::run_blocking_store_op(move || {
+        let store = super::open_store(&app_owned, super::SETTINGS_STORE_FILE)?;
+        let preferred_audio_language =
+            get_trimmed_store_string(&store, PREFERRED_AUDIO_LANGUAGE_STORE_KEY);
+        let preferred_subtitle_language =
+            get_trimmed_store_string(&store, PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY);
         let source_health = service
             .source_health_priorities_for_ids(
                 &app_owned,
@@ -586,14 +640,7 @@ pub(crate) async fn fetch_stream_selector_data(
         query.episode,
         query.absolute_episode,
     );
-    // Snapshot addon configs and language defaults on the blocking pool
-    // before fan-out — no `Store` handle is held across network awaits.
-    let (addons_snapshot, language_snapshot) = tokio::join!(
-        super::addon_registry::load_enabled_addons_snapshot(app),
-        snapshot_global_language_defaults(app)
-    );
-    let enabled_addons = addons_snapshot?;
-    let (preferred_audio_language, preferred_subtitle_language) = language_snapshot?;
+    let enabled_addons = super::addon_registry::load_enabled_addons_snapshot(app).await?;
 
     if enabled_addons.is_empty() {
         return Ok((
@@ -601,7 +648,6 @@ pub(crate) async fn fetch_stream_selector_data(
                 streams: Vec::new(),
                 source_summaries: Vec::new(),
                 fatal_error_message: None,
-                complete: true,
             },
             false,
         ));
@@ -620,15 +666,7 @@ pub(crate) async fn fetch_stream_selector_data(
         preferred_title_source_id,
         language_preferences,
         is_final_season,
-    ) = snapshot_selector_inputs(
-        app,
-        playback_state,
-        ranking,
-        &stream_addons,
-        preferred_audio_language,
-        preferred_subtitle_language,
-    )
-    .await?;
+    ) = snapshot_selector_inputs(app, playback_state, ranking, &stream_addons).await?;
 
     let stream_addons: Vec<(usize, &AddonConfig, u8)> = stream_addons
         .into_iter()
@@ -684,7 +722,6 @@ pub(crate) async fn fetch_stream_selector_data(
                 streams: Vec::new(),
                 source_summaries,
                 fatal_error_message,
-                complete: true,
             },
             is_final_season,
         ));
@@ -963,7 +1000,6 @@ async fn merge_selector_outcomes(
         },
         source_summaries,
         streams,
-        complete: true,
     })
 }
 

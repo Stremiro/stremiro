@@ -4,8 +4,8 @@ use super::stream_fetcher::{
     StreamRankingScope,
 };
 use super::stream_resolver::{
-    is_unresolvable_source_error, missing_direct_url_message, resolve_stream_inner,
-    BestResolvedStream, ResolveStreamParams, ResolvedStream,
+    resolve_stream_inner, BestResolvedStream, ProbeError, ResolveStreamError,
+    ResolveStreamErrorKind, ResolveStreamParams, ResolvedStream,
 };
 use super::streaming_helpers::{
     is_legacy_content_key, normalize_http_url, normalize_source_id, normalize_source_key,
@@ -175,48 +175,37 @@ fn build_candidate_input(stream: &AddonStream) -> Option<StreamResolveCandidateI
 }
 
 fn candidate_resolved_stream(
-    candidate: &StreamResolveCandidateInput,
+    candidate: StreamResolveCandidateInput,
     resolved: ResolvedStream,
 ) -> BestResolvedStream {
     BestResolvedStream {
         url: resolved.url,
         format: resolved.format,
-        source_id: candidate.source_id.clone(),
-        source_name: candidate.source_name.clone(),
-        stream_family: candidate.stream_family.clone(),
-        stream_key: Some(candidate.stream_key.clone()),
+        source_id: candidate.source_id,
+        source_name: candidate.source_name,
+        stream_family: candidate.stream_family,
+        stream_key: Some(candidate.stream_key),
         // Bounded at extraction; in-memory only, never logged.
-        request_headers: resolved.request_headers,
+        mpv_http_header_fields: resolved.mpv_http_header_fields,
     }
 }
 
 type CandidateProbeResult = (
     StreamResolveCandidateInput,
-    Result<Result<ResolvedStream, String>, tokio::time::error::Elapsed>,
+    Result<Result<ResolvedStream, ProbeError>, tokio::time::error::Elapsed>,
 );
 
-async fn probe_candidate(candidate: StreamResolveCandidateInput) -> CandidateProbeResult {
+async fn probe_candidate(mut candidate: StreamResolveCandidateInput) -> CandidateProbeResult {
     let result = tokio::time::timeout(
         Duration::from_secs(BEST_STREAM_CANDIDATE_TIMEOUT_SECS),
         resolve_stream_inner(ResolveStreamParams {
-            url: Some(candidate.direct_url.clone()),
-            request_headers: candidate.request_headers.clone(),
+            url: std::mem::take(&mut candidate.direct_url),
+            request_headers: std::mem::take(&mut candidate.request_headers),
         }),
     )
     .await;
 
     (candidate, result)
-}
-
-/// Callers only invoke this with a non-empty source list.
-fn unresolvable_sources_message(sources: &mut Vec<String>) -> String {
-    sources.sort();
-    sources.dedup();
-    format!(
-        "{} Affected sources: {}.",
-        missing_direct_url_message(),
-        sources.join(", ")
-    )
 }
 
 /// The caller's preferred stream identity: the exact stream key when it
@@ -247,6 +236,16 @@ fn preferred_key_matches(stream: &AddonStream, key: &str) -> bool {
     is_legacy_content_key(key) && stream_dedup_key(stream).is_some_and(|dedup| dedup == key)
 }
 
+pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded_keys: &[String]) {
+    if !excluded_keys.is_empty() {
+        streams.retain(|stream| {
+            !excluded_keys
+                .iter()
+                .any(|key| preferred_key_matches(stream, key))
+        });
+    }
+}
+
 /// Locate the preferred stream in the freshly fetched pool: exact key first,
 /// then release family, then source identity. Each fallback is weaker, so a
 /// key hit never consults the fuzzier tiers. Only probeable, non-excluded
@@ -264,6 +263,14 @@ fn find_preferred_position(
     preferred: PreferredStreamHint<'_>,
     excluded_stream_key: Option<&str>,
 ) -> Option<usize> {
+    if preferred.stream_key.is_none()
+        && preferred.stream_family.is_none()
+        && preferred.source_id.is_none()
+        && preferred.source_name.is_none()
+    {
+        return None;
+    }
+
     // One probeability pass: each tier scan below would otherwise re-run
     // `is_probeable_stream` (a URL parse) per stream per tier.
     let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
@@ -355,76 +362,44 @@ fn find_preferred_position(
     })
 }
 
-fn note_candidate_failure(
-    candidate: &StreamResolveCandidateInput,
-    error: &str,
-    unresolvable_requirement_sources: &mut Vec<String>,
-    errors: &mut Vec<String>,
-) {
-    let source_name = candidate.source_name.as_deref().unwrap_or("Unknown source");
-    if is_unresolvable_source_error(error) {
-        unresolvable_requirement_sources.push(source_name.to_string());
-    } else {
-        errors.push(format!("{source_name}: {error}"));
-    }
-}
-
 async fn resolve_candidate_results<S>(
     mut candidates: S,
     excluded_resolved_url: Option<&str>,
-) -> Result<BestResolvedStream, String>
+) -> Result<BestResolvedStream, ResolveStreamError>
 where
     S: futures_util::Stream<Item = CandidateProbeResult> + Unpin,
 {
     let mut errors = Vec::new();
-    let mut unresolvable_requirement_sources = Vec::new();
+    let mut rate_limited = false;
     while let Some((candidate, result)) = candidates.next().await {
+        let source_name = candidate.source_name.as_deref().unwrap_or("Unknown source");
         match result {
             Ok(Ok(resolved)) if excluded_resolved_url != Some(resolved.url.trim()) => {
-                return Ok(candidate_resolved_stream(&candidate, resolved));
+                return Ok(candidate_resolved_stream(candidate, resolved));
             }
             Ok(Ok(_)) => {}
-            Ok(Err(error)) => note_candidate_failure(
-                &candidate,
-                &error,
-                &mut unresolvable_requirement_sources,
-                &mut errors,
-            ),
-            Err(_) => {
-                let source_name = candidate.source_name.as_deref().unwrap_or("Unknown source");
-                errors.push(format!(
-                    "{} timed out after {}s",
-                    source_name, BEST_STREAM_CANDIDATE_TIMEOUT_SECS
-                ));
+            Ok(Err(error)) => {
+                rate_limited |= error.rate_limited;
+                errors.push(format!("{source_name}: {}", error.message));
             }
+            Err(_) => errors.push(format!(
+                "{source_name} timed out after {BEST_STREAM_CANDIDATE_TIMEOUT_SECS}s"
+            )),
         }
     }
 
-    if !unresolvable_requirement_sources.is_empty() && errors.is_empty() {
-        return Err(unresolvable_sources_message(
-            &mut unresolvable_requirement_sources,
-        ));
-    }
-
     let summary = errors.into_iter().take(3).collect::<Vec<_>>().join(" | ");
-    if !unresolvable_requirement_sources.is_empty() {
-        // The guard above already returned when only unresolvable failures
-        // exist — `errors` (and so `summary`) is non-empty past it.
-        return Err(format!(
-            "{} Also failed to resolve other candidates: {}",
-            missing_direct_url_message(),
-            summary
-        ));
-    }
-
-    Err(if summary.is_empty() {
+    let message = if summary.is_empty() {
         "Unable to resolve a playable stream from the best candidates.".to_string()
     } else {
-        format!(
-            "Unable to resolve a playable stream from the best candidates. {}",
-            summary
-        )
-    })
+        format!("Unable to resolve a playable stream from the best candidates. {summary}")
+    };
+    let kind = if rate_limited {
+        ResolveStreamErrorKind::RateLimited
+    } else {
+        ResolveStreamErrorKind::Failed
+    };
+    Err(ResolveStreamError::new(kind, message))
 }
 
 /// Fan out candidates concurrently with a shared per-candidate timeout and
@@ -437,7 +412,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
     excluded_stream_key: Option<&str>,
     excluded_resolved_url: Option<&str>,
     preferred: PreferredStreamHint<'_>,
-) -> Result<BestResolvedStream, String> {
+) -> Result<BestResolvedStream, ResolveStreamError> {
     let excluded_stream_key = excluded_stream_key.and_then(normalize_non_empty);
     let excluded_resolved_url = excluded_resolved_url.and_then(normalize_non_empty);
     let mut candidates = FuturesOrdered::new();

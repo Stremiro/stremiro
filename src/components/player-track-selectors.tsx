@@ -175,7 +175,10 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   const selectedSubLabel = selectedSubTrack
     ? subtitleTrackLabels.get(selectedSubTrack.id)
     : undefined;
-  const subStateLabel = subtitlesOff ? 'Off' : (selectedSubLabel ?? 'On');
+  // `subtitlesOff` is the user's choice (it feeds preference memory); a file
+  // with no subtitle tracks is still visibly off without recording one.
+  const subtitlesShownOff = subtitlesOff || !selectedSubTrack;
+  const subStateLabel = subtitlesShownOff ? 'Off' : (selectedSubLabel ?? 'On');
   const hasNonDefaultSettings = subtitleDelay !== 0 || subtitlePos !== 100 || subtitleScale !== 1.0;
   // Tabbed card: stream tracks and addon subtitles share one bounded list,
   // so a long addon result set never pushes the settings rows out of view.
@@ -195,7 +198,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           type='button'
           className={cn(
             'relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
-            subtitlesOff
+            subtitlesShownOff
               ? 'text-white/40 hover:text-white/70 hover:bg-white/10'
               : 'text-white/80 hover:text-white hover:bg-white/10',
           )}
@@ -357,7 +360,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
             <div className='space-y-px'>
               <TrackSelectRow
                 label='Off'
-                selected={subtitlesOff}
+                selected={subtitlesShownOff}
                 busy={trackSwitching.sub}
                 onSelect={() => onSelectTrack('sub', 'no', { persistPreference: true })}
               />

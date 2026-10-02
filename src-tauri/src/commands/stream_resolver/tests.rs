@@ -1,5 +1,6 @@
 use super::{
-    build_resolved_direct_stream, is_advisory_probe_status, proxy_header_map, sanitize_addon_log,
+    build_resolved_direct_stream, format_mpv_http_header_fields, is_advisory_probe_status,
+    proxy_header_map, sanitize_addon_log,
 };
 
 #[test]
@@ -21,16 +22,37 @@ fn resolved_headers_stay_on_first_hop_origin() {
         assert_eq!(resolved.format, "video/x-matroska");
         if keep_headers {
             assert_eq!(
-                resolved.request_headers,
-                vec![("Authorization".to_string(), "Bearer fixture".to_string())]
+                resolved.mpv_http_header_fields,
+                "Authorization: Bearer fixture"
             );
         } else {
             assert!(
-                resolved.request_headers.is_empty(),
+                resolved.mpv_http_header_fields.is_empty(),
                 "{final_url} must drop cross-origin headers"
             );
         }
     }
+}
+
+#[test]
+fn mpv_http_header_fields_escape_commas_and_backslashes() {
+    assert_eq!(format_mpv_http_header_fields(&[]), "");
+    let resolved = build_resolved_direct_stream(
+        "https://cdn.test/start",
+        "https://cdn.test/video.mkv".to_string(),
+        vec![
+            ("X-Custom".to_string(), r"one,two\three\,four".to_string()),
+            ("Authorization".to_string(), "Bearer fixture".to_string()),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        resolved.mpv_http_header_fields,
+        r"X-Custom: one\,two\\three\\\,four,Authorization: Bearer fixture"
+    );
+    let payload = serde_json::to_value(resolved).unwrap();
+    assert!(payload.get("mpvHttpHeaderFields").is_some());
+    assert!(payload.get("requestHeaders").is_none());
 }
 
 #[test]

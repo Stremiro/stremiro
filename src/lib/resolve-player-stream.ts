@@ -42,7 +42,7 @@ export interface ResolvedStreamSession {
   selectedStreamKeyRef: RefObject<string | undefined>;
   setActiveStreamUrl: (
     value: string | undefined,
-    headers?: [string, string][],
+    mpvHttpHeaderFields?: string,
     streamKey?: string,
     sourceName?: string,
   ) => void;
@@ -60,7 +60,7 @@ export function applyResolvedStreamToSession(
   session.selectedStreamKeyRef.current = nonBlank(resolved.streamKey);
   session.setActiveStreamUrl(
     resolved.url,
-    resolved.requestHeaders,
+    resolved.mpvHttpHeaderFields,
     resolved.streamKey,
     resolved.sourceName,
   );
@@ -115,9 +115,10 @@ export function recoverPlayerStream(
   request: PlayerStreamRequest & {
     outcome: Exclude<PlaybackStreamOutcome, 'verified'>;
     failed?: FailedStreamIdentity;
+    excludedStreamKeys?: string[];
   },
 ): Promise<BestResolvedStream | null> {
-  const { outcome, failed, ...coords } = request;
+  const { outcome, failed, excludedStreamKeys, ...coords } = request;
 
   return api.recoverPlaybackStream({
     mediaType: coords.mediaType,
@@ -133,6 +134,7 @@ export function recoverPlayerStream(
     failedSourceId: failed?.sourceId,
     failedStreamFamily: failed?.streamFamily,
     failedStreamKey: failed?.streamKey,
+    excludedStreamKeys,
     outcome,
     ...playerStreamRankingOptions(coords),
   });

@@ -23,6 +23,15 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+/** `kind` tag of a structured Rust command error (carried as the `cause`
+    of the Error `safeInvoke` throws). */
+export function getErrorKind(error: unknown): string | undefined {
+  const cause = error instanceof Error ? error.cause : error;
+  if (typeof cause !== 'object' || cause === null) return undefined;
+  const kind = (cause as Record<string, unknown>).kind;
+  return typeof kind === 'string' ? kind : undefined;
+}
+
 export async function safeInvoke<T>(command: string, args?: object): Promise<T> {
   // Tauri #[command] exposes Rust params to JS in camelCase by default
   // (Rust `media_type` <-> JS `mediaType`, Rust `type_` <-> JS `type`).

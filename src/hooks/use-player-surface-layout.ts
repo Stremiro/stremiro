@@ -1,5 +1,6 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
-import { setVideoMarginRatio, type VideoMarginRatio } from 'tauri-plugin-libmpv-api';
+import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
+import { setVideoMarginRatio } from '@/lib/player-mpv';
 
 // Chrome geometry shared with the mini player's drag bounds — one owner so a
 // rail/titlebar resize can't desync margins from the floating frame.
@@ -29,7 +30,7 @@ function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
  * up front so chase frames coalesce, and clears on failure so the next send
  * retries. Resolves true only on a verified fresh send — a dedup hit or a
  * reject is false, so callers never claim a paint that wasn't verified. */
-export function sendMarginRatio(
+function sendMarginRatio(
   fingerprintRef: RefObject<string | null>,
   ratio: VideoMarginRatio,
   send: (ratio: VideoMarginRatio) => Promise<void> = setVideoMarginRatio,
@@ -90,6 +91,7 @@ interface UsePlayerSurfaceLayoutArgs {
   activeStreamUrl?: string;
   mpvSurfaceReady: boolean;
   isFullscreen: boolean;
+  isPip?: boolean;
   isLoading: boolean;
   isResolving: boolean;
   showErrorOverlay: boolean;
@@ -105,6 +107,7 @@ export function usePlayerSurfaceLayout({
   activeStreamUrl,
   mpvSurfaceReady,
   isFullscreen,
+  isPip = false,
   isLoading,
   isResolving,
   showErrorOverlay,
@@ -146,7 +149,7 @@ export function usePlayerSurfaceLayout({
         return false;
       }
 
-      const shouldReserveOverlayChrome = isLoading || isResolving;
+      const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
       const shouldCollapseVideoSurface = showStreamSelector || showErrorOverlay;
       const topChromeRect = topChromeRef.current?.getBoundingClientRect();
       const bottomChromeRect = bottomChromeRef.current?.getBoundingClientRect();
@@ -165,7 +168,7 @@ export function usePlayerSurfaceLayout({
         );
       }
 
-      const baseTopInsetPx = !isFullscreen ? PLAYER_TITLEBAR_HEIGHT_PX : 0;
+      const baseTopInsetPx = !isFullscreen && !isPip ? PLAYER_TITLEBAR_HEIGHT_PX : 0;
       const topInsetPx =
         shouldReserveOverlayChrome && topChromeRect
           ? Math.max(baseTopInsetPx, topChromeRect.bottom - containerRect.top)
@@ -174,7 +177,7 @@ export function usePlayerSurfaceLayout({
         shouldReserveOverlayChrome && bottomChromeRect
           ? Math.max(0, containerRect.bottom - bottomChromeRect.top)
           : 0;
-      const leftInsetPx = !isFullscreen ? PLAYER_SIDEBAR_WIDTH_PX : 0;
+      const leftInsetPx = !isFullscreen && !isPip ? PLAYER_SIDEBAR_WIDTH_PX : 0;
 
       const nextMargins = buildVideoMarginRatio(containerRect.width, containerRect.height, {
         leftPx: leftInsetPx,
@@ -189,6 +192,7 @@ export function usePlayerSurfaceLayout({
       applyMarginRatio,
       bottomChromeRef,
       isFullscreen,
+      isPip,
       isLoading,
       isResolving,
       playerContainerRef,
@@ -254,7 +258,7 @@ export function usePlayerSurfaceLayout({
         window.cancelAnimationFrame(animationFrameId);
       }
     };
-  }, [bottomChromeRef, isMini, playerContainerRef, topChromeRef]);
+  }, [bottomChromeRef, isMini, isPip, playerContainerRef, topChromeRef]);
 
   useEffect(() => {
     marginRequestRef.current();

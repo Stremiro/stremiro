@@ -365,9 +365,9 @@ fn trailer_source_rejects_non_youtube_tokens() {
     ])))
     .expect("valid trailer list");
     assert_eq!(valid.len(), 1);
-    assert_eq!(valid[0].url, "https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+    assert_eq!(valid[0].id, "dQw4w9WgXcQ");
     // Query-smuggling, overlong, short, and non-token values drop the
-    // row instead of interpolating attacker bytes into the watch URL.
+    // row instead of interpolating attacker bytes into the embed URL.
     for source in [
         "abc&list=evil",
         "dQw4w9WgXcQextra",

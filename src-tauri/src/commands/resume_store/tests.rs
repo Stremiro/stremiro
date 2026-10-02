@@ -1,4 +1,7 @@
 use super::ResumeStore;
+use crate::commands::watch_history_commands::{
+    prepare_episode_watch_changes, validate_history_batch, WatchedEpisode,
+};
 use crate::commands::WatchProgress;
 use crate::test_helpers::test_progress;
 use rusqlite::Connection;
@@ -62,6 +65,95 @@ fn user_version(path: &std::path::Path) -> i32 {
 
 fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
     store.get_entry(key).expect("read ok").expect("row present")
+}
+
+#[test]
+fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
+    let path = TempDbPath::new("remapped-watched");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    let mut prior = sample_progress(1_000, 120.0);
+    prior.type_ = "series".to_string();
+    prior.season = Some(1);
+    prior.episode = Some(4);
+    prior.absolute_season = Some(1);
+    prior.absolute_episode = Some(14);
+    let key = "series:tt1234567:1:4";
+    store
+        .upsert_progress(key, &prior)
+        .expect("seed remapped episode");
+    let item = crate::test_helpers::test_media_item("tt1234567", "series");
+    let episodes = [
+        WatchedEpisode {
+            season: 1,
+            episode: 14,
+        },
+        WatchedEpisode {
+            season: 1,
+            episode: 15,
+        },
+    ];
+    let (writes, deletes) = prepare_episode_watch_changes(
+        &item,
+        &episodes,
+        store.load_entries().expect("read rows"),
+        true,
+        2_000,
+    );
+    assert!(deletes.is_empty());
+    assert_eq!(writes[0].0, key);
+    assert_eq!(writes[0].1.season, Some(1));
+    assert_eq!(writes[0].1.episode, Some(4));
+    assert_eq!(writes[0].1.absolute_episode, Some(14));
+    assert_eq!(writes[0].1.duration, 3600.0);
+    assert_eq!(writes[0].1.position, 3600.0);
+    assert_eq!(writes[1].1.duration, 1.0);
+    assert!(writes[0].1.last_watched < writes[1].1.last_watched);
+    store.merge_entries(writes).expect("mark watched");
+    assert_eq!(store.count_entries().expect("count rows"), 2);
+    assert!(store
+        .get_entry("series:tt1234567:1:14")
+        .expect("canonical key")
+        .is_none());
+    assert_eq!(store.total_watch_time_secs().expect("watch time"), 3601);
+
+    let (writes, deletes) = prepare_episode_watch_changes(
+        &item,
+        &episodes[..1],
+        store.load_entries().expect("read rows"),
+        false,
+        3_000,
+    );
+    assert!(writes.is_empty());
+    assert_eq!(deletes, [key]);
+    store.remove_keys(&deletes).expect("mark unwatched");
+    assert!(store.get_entry(key).expect("read removed key").is_none());
+    assert_eq!(store.count_entries().expect("only episode 15 remains"), 1);
+}
+
+#[test]
+fn undo_restores_more_than_500_rows_for_one_title_in_one_merge() {
+    let path = TempDbPath::new("large-undo");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    let rows: Vec<_> = (1..=501)
+        .map(|episode| {
+            let mut row = sample_progress(1_000 + u64::from(episode), 3600.0);
+            row.type_ = "series".to_string();
+            row.season = Some(1);
+            row.episode = Some(episode);
+            (format!("series:tt1234567:1:{episode}"), row)
+        })
+        .collect();
+    validate_history_batch(rows.iter().map(|(_, row)| row)).expect("single-title restore accepted");
+    store.merge_entries(rows.clone()).expect("seed title");
+    store
+        .remove_keys(&rows.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>())
+        .expect("remove title");
+    assert_eq!(store.count_entries().expect("empty history"), 0);
+    store.merge_entries(rows.clone()).expect("restore title");
+    assert_eq!(store.count_entries().expect("restored history"), 501);
+    let mut mixed = rows;
+    mixed[0].1.id = "another-title".to_string();
+    assert!(validate_history_batch(mixed.iter().map(|(_, row)| row)).is_err());
 }
 
 #[test]
@@ -158,22 +250,6 @@ fn stale_progress_write_does_not_regress_resume() {
     let kept = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(kept.last_watched, 2000);
     assert_eq!(kept.position, 900.0);
-}
-
-#[test]
-fn resume_store_never_persists_stream_urls() {
-    let path = TempDbPath::new("nourl");
-    let mut store = ResumeStore::open(&path).expect("fresh db opens");
-    let mut progress = sample_progress(3000, 120.0);
-    progress.last_stream_url =
-        Some("https://cdn.example/video.mp4?expires=123&sig=abc".to_string());
-    progress.last_stream_lookup_id = Some("tt1234567".to_string());
-    store
-        .upsert_progress("movie:tt1234567", &progress)
-        .expect("write ok");
-    let kept = read_entry(&mut store, "movie:tt1234567");
-    assert_eq!(kept.last_stream_url, None);
-    assert_eq!(kept.last_stream_lookup_id.as_deref(), Some("tt1234567"));
 }
 
 #[test]

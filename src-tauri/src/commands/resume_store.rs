@@ -13,7 +13,7 @@ const RESUME_DB_SCHEMA_VERSION: i32 = 3;
 const MAX_RESUME_ROWS_PER_TITLE: i64 = 12;
 /// Global bound so the resume table cannot grow without limit. Matches the
 /// backup import's history cap so a full restore is never silently truncated.
-const MAX_RESUME_TOTAL_ENTRIES: i64 = 10_000;
+pub(super) const MAX_RESUME_TOTAL_ENTRIES: i64 = 10_000;
 
 pub(crate) struct ResumeStore {
     connection: Connection,
@@ -420,7 +420,7 @@ const WATCH_PROGRESS_SELECT: &str = "\
     SELECT history_key, media_id, media_type, season, episode, \
     absolute_season, absolute_episode, stream_season, stream_episode, \
     position, duration, last_watched, title, poster, backdrop, \
-    last_stream_url, last_stream_format, last_stream_lookup_id, \
+    last_stream_format, last_stream_lookup_id, \
     last_stream_key, source_name, stream_family, source_id \
     FROM watch_progress";
 
@@ -443,11 +443,10 @@ fn upsert_progress_stmt(
     key: &str,
     progress: &WatchProgress,
 ) -> Result<(), String> {
-    // Store-enforced invariant: stream URLs are credential-bearing and
-    // short-lived, so the resume table never persists them even if a caller
-    // bypasses `sanitize_watch_progress`. Resume re-resolves through opaque
-    // lookup/key/source identities. The key column gets the same treatment:
-    // only opaque hash identities persist — the `h:`/`uh:` content keys and
+    // Stream URLs are credential-bearing and short-lived: `WatchProgress` has
+    // no URL field, and the legacy `last_stream_url` column is always rewritten
+    // to NULL. Resume re-resolves through opaque lookup/key/source identities.
+    // The key column follows the same rule: only opaque hash identities persist — the `h:`/`uh:` content keys and
     // the `s:` prepared selector key (SHA-256 over content key + source +
     // transport, no credential material). Legacy `u:` keys embed the
     // normalized URL verbatim and stay excluded.
@@ -489,7 +488,7 @@ fn upsert_progress_stmt(
 }
 
 /// Rows of one title that aren't watched marks — the completion ratio is the
-/// one `playable_resume_start_time` and the frontend's `isWatchedProgress` use.
+/// one `playable_resume_start_time` and the `is_watched` annotation use.
 const IN_PROGRESS_TITLE_ROWS: &str = "
     FROM watch_progress
     WHERE media_type = ?1 AND media_id = ?2
@@ -607,14 +606,15 @@ fn read_watch_progress_row(row: &Row<'_>) -> rusqlite::Result<(String, WatchProg
         title: row.get(12)?,
         poster: row.get(13)?,
         backdrop: row.get(14)?,
-        last_stream_url: row.get(15)?,
-        last_stream_format: row.get(16)?,
-        last_stream_lookup_id: row.get(17)?,
-        last_stream_key: row.get(18)?,
-        source_name: row.get(19)?,
-        stream_family: row.get(20)?,
-        source_id: row.get(21)?,
+        last_stream_format: row.get(15)?,
+        last_stream_lookup_id: row.get(16)?,
+        last_stream_key: row.get(17)?,
+        source_name: row.get(18)?,
+        stream_family: row.get(19)?,
+        source_id: row.get(20)?,
         resume_start_time: None,
+        is_watched: false,
+        has_started_watching: false,
     };
 
     Ok((history_key, progress))

@@ -198,6 +198,9 @@ fn build_player_route(
     absolute_season: Option<u32>,
     absolute_episode: Option<u32>,
 ) -> String {
+    // Media ids are opaque addon strings: encode so `/`, `?` or `#` stay
+    // inside the one route segment.
+    let media_id = urlencoding::encode(media_id);
     match (absolute_season, absolute_episode) {
         (Some(season), Some(episode)) => {
             format!(
@@ -213,7 +216,11 @@ fn build_player_route(
 }
 
 fn build_details_target(media_type: HistoryPlaybackMediaType, media_id: &str) -> String {
-    format!("/details/{}/{}", media_type.as_str(), media_id)
+    format!(
+        "/details/{}/{}",
+        media_type.as_str(),
+        urlencoding::encode(media_id)
+    )
 }
 
 fn build_details_plan(item: &WatchProgress, from: Option<String>) -> HistoryPlaybackPlan {

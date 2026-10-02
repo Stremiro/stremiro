@@ -26,11 +26,13 @@ function EpisodeCardInner({
   onPlay,
   onToggleWatched,
 }: EpisodeCardProps) {
-  const [imageFailed, setImageFailed] = useState(false);
-  const thumbnail = imageFailed ? undefined : episode.thumbnail;
+  // Latch only the URL that failed — a refetch supplying a corrected
+  // thumbnail for the same episode retries it instead of staying on the
+  // episode-number fallback for the rest of the mount.
+  const [failedThumbnail, setFailedThumbnail] = useState<string | null>(null);
+  const thumbnail = episode.thumbnail === failedThumbnail ? undefined : episode.thumbnail;
   const title = getEpisodeTitle(isSpoiler ? undefined : episode.title, episode.episode);
-  // `releaseDate` is the backend-normalized air date (from `released`).
-  const airDate = formatAirDate(episode.releaseDate ?? episode.released);
+  const airDate = formatAirDate(episode.releaseDate);
 
   return (
     <div className='group relative'>
@@ -55,7 +57,7 @@ function EpisodeCardInner({
                 : 'group-hover:scale-[1.02] group-hover:brightness-110',
             )}
             loading='lazy'
-            onError={() => setImageFailed(true)}
+            onError={() => setFailedThumbnail(episode.thumbnail ?? null)}
           />
         ) : (
           <div className='absolute inset-0 flex items-center justify-center bg-linear-to-br from-zinc-800 to-zinc-900 text-xl font-bold text-white/20 transition-colors duration-200 group-hover:text-white/30'>

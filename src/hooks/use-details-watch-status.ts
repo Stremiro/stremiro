@@ -1,5 +1,4 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { useEffect, useRef } from 'react';
 
 import { useIsItemInLibrary, useItemWatchStatus } from '@/hooks/use-media-library';
 import {
@@ -31,44 +30,17 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
   const queryClient = useQueryClient();
   const itemId = item?.id;
   const { data: watchStatus = null } = useItemWatchStatus(itemId);
-  const { data: isInLibrary = false, isFetched: libraryRead } = useIsItemInLibrary(itemId);
-
-  // Self-heal the legacy gap: statuses written without status⇒library sync
-  // left no library row, so those titles could never surface in the profile.
-  // Re-marking on sight converges the stores; the remove path clears the
-  // status too, so this can't re-add what was deliberately untracked.
-  const healInFlightRef = useRef(false);
-  useEffect(() => {
-    if (healInFlightRef.current || !item || !watchStatus || !libraryRead || isInLibrary) {
-      return;
-    }
-    healInFlightRef.current = true;
-    void api
-      .addToLibrary(item)
-      .then(() => invalidateLibraryQueries(queryClient))
-      .catch(() => {
-        // A transient write failure releases the guard so the next data
-        // change can retry — a latched-out heal would hide the title from
-        // the library for the rest of the mount.
-        healInFlightRef.current = false;
-      });
-  }, [item, watchStatus, isInLibrary, libraryRead, queryClient]);
+  const { data: isInLibrary = false } = useIsItemInLibrary(itemId);
 
   const watchStatusMutation = useMutation<
-    WatchStatus | null,
+    MediaItem | null,
     unknown,
     WatchStatus | null,
     WatchStatusMutationContext
   >({
-    mutationFn: async (status) => {
-      if (!itemId) return status;
-      await api.setWatchStatus(itemId, status);
-      // Best-effort on top of the status write; settle-time invalidation
-      // converges the cache either way.
-      if (status !== null && item && !isInLibrary) {
-        void api.addToLibrary(item).catch(() => undefined);
-      }
-      return status;
+    mutationFn: (status) => {
+      if (!item) throw new Error('Media item unavailable');
+      return api.setWatchStatus(item, status);
     },
     onMutate: async (status) => {
       if (!itemId) return {};
@@ -106,7 +78,13 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
       }
       notifyAction('Failed to update status', { tone: 'error' });
     },
-    onSuccess: (status) => {
+    onSuccess: (savedItem, status) => {
+      if (savedItem) {
+        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) => [
+          ...(old ?? []).filter((entry) => entry.id !== savedItem.id),
+          savedItem,
+        ]);
+      }
       if (status === null) {
         notifyAction('Status cleared', { detail: item?.title, thumb: item?.poster });
         return;

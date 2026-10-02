@@ -1,14 +1,16 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
+import { format } from 'date-fns';
 import { toast } from 'sonner';
+import { useLocalDay } from '@/hooks/use-local-day';
 import {
   api,
   type Episode,
   type MediaItem,
-  type MediaSchedule,
   type TitleWatchProgress,
   toMediaItem,
   type UserList,
+  type UpNextCandidate,
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
@@ -23,14 +25,14 @@ import {
   LIBRARY_QUERY_KEY,
   LISTS_QUERY_KEY,
   LISTS_VIEW_STALE_TIME_MS,
-  MEDIA_ROW_STALE_TIME_MS,
   titleWatchProgressQueryKey,
   TOTAL_WATCH_TIME_QUERY_KEY,
+  UP_NEXT_ENTRIES_QUERY_KEY,
   WATCH_HISTORY_QUERY_KEY,
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { buildUpNextEntries, isRecentUpNextSource, pickUpNextSources } from '@/lib/up-next';
+import { buildUpNextEntries } from '@/lib/up-next';
 import { formatEpisodeHeading } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
@@ -255,8 +257,7 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
 
       if (isInLibrary) {
         // Status is a library attribute: `remove_from_library` clears it in
-        // the same blocking op, so a removed title can't leave a row the
-        // details self-heal would resurrect.
+        // the same blocking op, so a removed title can't leave an invisible row.
         await api.removeFromLibrary(item.id);
         return 'removed' as const;
       }
@@ -344,6 +345,10 @@ function useRemoveTitleWatchHistory({
 }: UseRemoveTitleWatchHistoryOptions) {
   const queryClient = useQueryClient();
   const withoutTitle = (rows?: WatchProgress[]) => rows?.filter((entry) => entry.id !== itemId);
+  const restore = (current: WatchProgress[] | undefined, removed: WatchProgress[]) =>
+    current?.some((entry) => entry.id === itemId)
+      ? current
+      : [...(current ?? []), ...removed].toSorted((a, b) => b.last_watched - a.last_watched);
 
   return useMutation({
     mutationFn: async () => {
@@ -368,11 +373,12 @@ function useRemoveTitleWatchHistory({
         queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
       queryClient.setQueryData<WatchProgress[]>(CONTINUE_WATCHING_QUERY_KEY, withoutTitle);
       queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, withoutTitle);
-      return { previousContinueWatching, previousWatchHistory };
+      return {
+        removedContinueWatching: previousContinueWatching?.filter((entry) => entry.id === itemId),
+        removedWatchHistory: previousWatchHistory?.filter((entry) => entry.id === itemId),
+      };
     },
     onSuccess: (removedRows) => {
-      void invalidatePlaybackHistoryQueriesForTitle(queryClient, itemId);
-
       toast.success(toastTitle, {
         description: itemTitle,
         duration: WATCH_HISTORY_UNDO_DURATION_MS,
@@ -385,20 +391,21 @@ function useRemoveTitleWatchHistory({
       });
     },
     onError: (error, _variables, context) => {
-      if (context?.previousContinueWatching !== undefined) {
-        queryClient.setQueryData<WatchProgress[]>(
-          CONTINUE_WATCHING_QUERY_KEY,
-          context.previousContinueWatching,
+      const removedContinueWatching = context?.removedContinueWatching;
+      const removedWatchHistory = context?.removedWatchHistory;
+      if (removedContinueWatching !== undefined) {
+        queryClient.setQueryData<WatchProgress[]>(CONTINUE_WATCHING_QUERY_KEY, (current) =>
+          restore(current, removedContinueWatching),
         );
       }
-      if (context?.previousWatchHistory !== undefined) {
-        queryClient.setQueryData<WatchProgress[]>(
-          WATCH_HISTORY_QUERY_KEY,
-          context.previousWatchHistory,
+      if (removedWatchHistory !== undefined) {
+        queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (current) =>
+          restore(current, removedWatchHistory),
         );
       }
       toast.error(error instanceof Error ? error.message : errorTitle);
     },
+    onSettled: () => invalidatePlaybackHistoryQueriesForTitle(queryClient, itemId),
   });
 }
 
@@ -424,12 +431,9 @@ interface UseToggleEpisodeWatchedOptions {
   item?: MediaItem | null;
 }
 
-interface ToggleEpisodeWatchedVariables {
-  episode: Episode;
-  markWatched: boolean;
-  /** The stored progress row — the optimistic filter removes it before
-      `mutationFn` could look it up, and the delete needs its raw coordinates. */
-  storedRow?: WatchProgress;
+interface EpisodesWatchedVariables {
+  episodes: readonly Episode[];
+  watched: boolean;
 }
 
 function watchProgressRowMatchesEpisode(row: WatchProgress, episode: Episode): boolean {
@@ -437,96 +441,51 @@ function watchProgressRowMatchesEpisode(row: WatchProgress, episode: Episode): b
   return season === episode.season && rowEpisode === episode.episode;
 }
 
-// The optimistic row (onMutate) and the persisted row (mutationFn) must be
-// byte-identical — one builder keeps the shape and duration math from drifting.
-function buildCompletedProgressRow(
-  item: MediaItem,
-  episode: Episode,
-  prior: WatchProgress | undefined,
-): WatchProgress {
-  // Preserve the real duration when known — a fabricated one inflates
-  // hours-watched. Unknown duration writes a 1s complete row: ratio 1.0
-  // reads as watched and earns no resume offer.
-  const duration = prior && prior.duration > 0 ? prior.duration : Math.max(prior?.position ?? 0, 1);
-  return {
-    ...prior,
-    id: item.id,
-    type_: item.type,
-    season: episode.season,
-    episode: episode.episode,
-    position: duration,
-    duration,
-    last_watched: Date.now(),
-    title: item.title,
-    poster: item.poster,
-    backdrop: item.backdrop,
-  };
-}
-
-// Per-episode watched toggle. Watched writes an EOF-shaped row; unwatched
-// deletes on the stored row's own coordinates — `build_history_key` uses raw
-// `season`/`episode`, which differ from absolute coords on remapped anime.
-export function useToggleEpisodeWatched({ item }: UseToggleEpisodeWatchedOptions) {
+// Mutation variables paint instant watched checks; only Rust creates durable
+// completion rows, chooses runtimes and stamps recency.
+function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAction: boolean) {
   const queryClient = useQueryClient();
-  const itemId = item?.id;
-  const progressKey = titleWatchProgressQueryKey(itemId);
-
+  const progressKey = titleWatchProgressQueryKey(item?.id);
   return useMutation<
-    void,
+    TitleWatchProgress,
     unknown,
-    ToggleEpisodeWatchedVariables,
+    EpisodesWatchedVariables,
     { previous?: TitleWatchProgress }
   >({
-    mutationFn: async ({ episode, markWatched, storedRow }) => {
-      if (!item) {
-        throw new Error('Media item unavailable');
-      }
-
-      if (!markWatched) {
-        await api.removeFromWatchHistory(
-          item.id,
-          item.type,
-          storedRow?.season ?? episode.season,
-          storedRow?.episode ?? episode.episode,
-        );
-        return;
-      }
-
-      await api.saveWatchProgress(buildCompletedProgressRow(item, episode, storedRow));
+    mutationFn: ({ episodes, watched }) => {
+      if (!item) throw new Error('Media item unavailable');
+      return api.setEpisodesWatched(item, episodes, watched);
     },
-    onMutate: async ({ episode, markWatched }) => {
-      if (!itemId || !item) return {};
-      // const binding so the narrowed non-null item flows into the updater.
-      const currentItem = item;
+    onMutate: async ({ episodes, watched }) => {
       await queryClient.cancelQueries({ queryKey: progressKey });
       const previous = queryClient.getQueryData<TitleWatchProgress>(progressKey);
-
+      const keep = (row: WatchProgress) =>
+        !episodes.some((episode) => watchProgressRowMatchesEpisode(row, episode));
       queryClient.setQueryData<TitleWatchProgress>(progressKey, (old) => {
         if (!old) return old;
-        const matches = (row: WatchProgress) => watchProgressRowMatchesEpisode(row, episode);
-        if (!markWatched) {
-          return {
-            history: old.history.filter((row) => !matches(row)),
-            continueWatching: old.continueWatching.filter((row) => !matches(row)),
-          };
-        }
-        const prior = old.history.find(matches);
-        const row = buildCompletedProgressRow(currentItem, episode, prior);
         return {
-          history: old.history.some(matches)
-            ? old.history.map((existing) => (matches(existing) ? row : existing))
-            : [row, ...old.history],
-          continueWatching: old.continueWatching.filter((existing) => !matches(existing)),
+          history: watched ? old.history : old.history.filter(keep),
+          continueWatching: old.continueWatching.filter(keep),
         };
       });
-
       return { previous };
     },
-    onSuccess: (_data, { episode, markWatched }) => {
-      notifyAction(markWatched ? 'Marked as watched' : 'Marked as unwatched', {
-        detail: formatEpisodeHeading(episode.season, episode.episode, episode.title),
-        thumb: item?.poster,
-      });
+    onSuccess: (progress, { episodes, watched }) => {
+      queryClient.setQueryData<TitleWatchProgress>(progressKey, progress);
+      const episode = episodes[0];
+      notifyAction(
+        seasonAction
+          ? 'Season marked as watched'
+          : watched
+            ? 'Marked as watched'
+            : 'Marked as unwatched',
+        {
+          detail: seasonAction
+            ? `${episodes.length} episode${episodes.length === 1 ? '' : 's'}`
+            : episode && formatEpisodeHeading(episode.season, episode.episode, episode.title),
+          thumb: item?.poster,
+        },
+      );
     },
     onError: (error, _variables, context) => {
       if (context?.previous !== undefined) {
@@ -537,103 +496,40 @@ export function useToggleEpisodeWatched({ item }: UseToggleEpisodeWatchedOptions
         detail: error instanceof Error ? error.message : undefined,
       });
     },
-    onSettled: () => {
-      void invalidatePlaybackHistoryQueriesForTitle(queryClient, itemId);
-    },
+    onSettled: () => invalidatePlaybackHistoryQueriesForTitle(queryClient, item?.id),
   });
 }
 
-// Next aired episode for recently finished series. Schedules ride the shared
-// calendar cache; derive rows from current history so cached schedules cannot
-// retain an old title, artwork, timestamp, or preferred release family.
+export function useToggleEpisodeWatched({ item }: UseToggleEpisodeWatchedOptions) {
+  return useEpisodesWatchedMutation(item, false);
+}
+
+export function useMarkSeasonWatched({ item }: UseToggleEpisodeWatchedOptions) {
+  return useEpisodesWatchedMutation(item, true);
+}
+
+// Rust returns only the next aired episode for each eligible title.
 export function useUpNextEntries(
   continueWatching: readonly WatchProgress[],
   options?: SharedCollectionQueryOptions,
 ) {
-  const { data: history, dataUpdatedAt: historyUpdatedAt } = useWatchHistory(options);
-  const { data: statuses } = useWatchStatuses(options);
-  const sources = useMemo(
-    () => pickUpNextSources(history, continueWatching, statuses),
-    [history, continueWatching, statuses],
-  );
-  const scheduleRequests = useMemo(
-    () =>
-      sources
-        .filter((row) => isRecentUpNextSource(row, historyUpdatedAt))
-        .map((row) => ({ mediaType: row.type_, id: row.id })),
-    [sources, historyUpdatedAt],
-  );
+  const localToday = format(useLocalDay(), 'yyyy-MM-dd');
   const selectEntries = useCallback(
-    (schedules: MediaSchedule[]) => {
-      const now = Date.now();
+    (candidates: UpNextCandidate[]) => {
+      const resumable = new Set(continueWatching.map((row) => row.id));
       return buildUpNextEntries(
-        sources.filter((row) => isRecentUpNextSource(row, now)),
-        schedules,
-        now,
+        candidates.filter(({ row }) => !resumable.has(row.id)),
+        Date.now(),
       );
     },
-    [sources],
+    [continueWatching],
   );
 
   return useQuery({
-    // Schedules depend on title identity; episode progress only changes select.
-    queryKey: [...CONTINUE_WATCHING_QUERY_KEY, 'up-next', scheduleRequests],
-    queryFn: () => api.getMediaSchedules(scheduleRequests),
+    queryKey: [...UP_NEXT_ENTRIES_QUERY_KEY, localToday],
+    queryFn: () => api.getUpNextEntries(localToday),
     select: selectEntries,
-    enabled: (options?.enabled ?? true) && scheduleRequests.length > 0,
-    staleTime: MEDIA_ROW_STALE_TIME_MS,
-  });
-}
-
-export interface SeasonWatchedTarget {
-  episode: Episode;
-  storedRow?: WatchProgress;
-}
-
-// Mirrors `MAX_WATCH_PROGRESS_BATCH_ROWS` in watch_history_commands.rs.
-const WATCH_PROGRESS_BATCH_MAX_ROWS = 500;
-
-// Season-level "mark watched": EOF-shaped rows in bounded batch writes. Stamps
-// ascend in episode order so recency-ordered surfaces read the last episode
-// as the latest watch.
-export function useMarkSeasonWatched({ item }: UseToggleEpisodeWatchedOptions) {
-  const queryClient = useQueryClient();
-
-  return useMutation({
-    mutationFn: async (targets: readonly SeasonWatchedTarget[]) => {
-      if (!item) {
-        throw new Error('Media item unavailable');
-      }
-      const oldestStamp = Date.now() - targets.length;
-      const rows = targets.map(({ episode, storedRow }, index) => ({
-        ...buildCompletedProgressRow(item, episode, storedRow),
-        last_watched: oldestStamp + index + 1,
-      }));
-      const batches = Array.from(
-        { length: Math.ceil(rows.length / WATCH_PROGRESS_BATCH_MAX_ROWS) },
-        (_, index) =>
-          rows.slice(
-            index * WATCH_PROGRESS_BATCH_MAX_ROWS,
-            (index + 1) * WATCH_PROGRESS_BATCH_MAX_ROWS,
-          ),
-      );
-      await Promise.all(batches.map((batch) => api.saveWatchProgressBatch(batch)));
-    },
-    onSuccess: (_data, targets) => {
-      notifyAction('Season marked as watched', {
-        detail: `${targets.length} episode${targets.length === 1 ? '' : 's'}`,
-        thumb: item?.poster,
-      });
-    },
-    onError: (error) => {
-      notifyAction('Failed to update watch history', {
-        tone: 'error',
-        detail: error instanceof Error ? error.message : undefined,
-      });
-    },
-    onSettled: () => {
-      void invalidatePlaybackHistoryQueriesForTitle(queryClient, item?.id);
-    },
+    ...resolveSharedCollectionQueryOptions(options, WATCH_HISTORY_STALE_TIME_MS),
   });
 }
 

@@ -1,13 +1,55 @@
 use super::{
     add_subtitle_if_unique, addon_allows_catalog, addon_allows_subtitles,
-    catalog_fetch_page_from_source, catalog_page_next_skip, extra_skip_value, merge_catalog_pages,
-    searchable_catalog_ids, CatalogFetchPage, SourcedAddonSubtitle,
+    catalog_fetch_page_from_source, catalog_page_next_skip, collect_catalog_outcomes,
+    collect_with_deadline, extra_skip_value, merge_catalog_pages, searchable_catalog_ids,
+    CatalogFetchPage, SourcedAddonSubtitle,
 };
-use crate::commands::config_store::AddonConfig;
+use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
 use crate::providers::addon_resource::{AddonSubtitle, CatalogExtra, CatalogPage};
 use crate::test_helpers::{cinemeta_addon, classified_cinemeta_addon, test_media_item};
+use futures_util::StreamExt;
 use std::collections::HashSet;
+use std::time::Duration;
+
+#[tokio::test]
+async fn resource_grace_waits_for_success_after_fast_failure() {
+    let outcomes = futures_util::stream::iter([Err(()), Ok(())]).then(|result| async move {
+        if result.is_ok() {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        result
+    });
+    futures_util::pin_mut!(outcomes);
+    let collected = collect_with_deadline(outcomes, Duration::from_millis(10), Result::is_ok).await;
+    assert_eq!(collected, vec![Err(()), Ok(())]);
+}
+
+#[tokio::test]
+async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
+    let outcomes = futures_util::stream::iter([
+        (0, 0, Ok(CatalogPage::default())),
+        (2, 0, Err("offline".to_string())),
+        (1, 0, Ok(CatalogPage::default())),
+    ])
+    .then(|outcome| async move {
+        if outcome.0 == 1 {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+        }
+        outcome
+    })
+    .chain(futures_util::stream::pending());
+    futures_util::pin_mut!(outcomes);
+    let collected = tokio::time::timeout(
+        Duration::from_secs(2),
+        collect_catalog_outcomes(outcomes, vec![2, 1, 1], Duration::from_millis(10)),
+    )
+    .await
+    .expect("answered groups must still bound a pending secondary source");
+    assert_eq!(collected.len(), 3);
+    assert_eq!(collected[2].0, 1);
+    assert!(collected[2].2.is_ok());
+}
 
 #[test]
 fn classified_search_uses_only_declared_search_catalogs() {
@@ -225,6 +267,39 @@ fn subtitle_merge_dedupes_by_source_identity() {
     assert_eq!(subtitles[0].source_id, addon.id);
     assert_eq!(subtitles[0].source_name, addon.name);
     assert_eq!(subtitles[0].lang.as_deref(), Some("eng"));
+}
+
+#[test]
+fn subtitle_merge_preserves_delimiter_containing_identities() {
+    let identities = [("source|variant", "entry"), ("source", "variant|entry")];
+    let addons = resolve_addon_configs(Some(
+        identities
+            .iter()
+            .enumerate()
+            .map(|(index, (source_id, _))| AddonConfig {
+                id: (*source_id).to_string(),
+                url: format!("https://subtitles-addon.test/{index}"),
+                ..subtitle_addon()
+            })
+            .collect(),
+    ));
+    let mut subtitles = Vec::new();
+    let mut seen = HashSet::new();
+    for (source_id, subtitle_id) in identities {
+        let addon = addons.iter().find(|addon| addon.id == source_id).unwrap();
+        add_subtitle_if_unique(
+            &mut subtitles,
+            &mut seen,
+            addon,
+            AddonSubtitle {
+                id: subtitle_id.to_string(),
+                url: "https://subtitles-addon.test/file.srt".to_string(),
+                lang: Some("eng".to_string()),
+                label: None,
+            },
+        );
+    }
+    assert_eq!(subtitles.len(), 2);
 }
 
 #[test]

@@ -123,8 +123,8 @@ function LanguageSelector({
 // ── Playback language config ─────────────────────────────────────────────────
 
 // Selections persist on pick — the write queue in the hook serializes rapid
-// changes and merges each patch into the latest snapshot, so the two
-// selectors can be toggled back-to-back without clobbering each other.
+// changes and Rust updates only the picked field, so the two selectors can
+// be toggled back-to-back without clobbering each other.
 function PlaybackLanguageConfig() {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const pendingSavesRef = useRef(0);
@@ -132,7 +132,7 @@ function PlaybackLanguageConfig() {
   const {
     globalPlaybackLanguagePreferences,
     isLoadingGlobalPlaybackLanguagePreferences,
-    saveGlobalPlaybackLanguagePreferences,
+    saveGlobalPlaybackLanguagePreference,
   } = usePlaybackLanguagePreferences();
   // The closed set lives in Rust; the query is effectively static per run.
   const { data: languageOptions } = useQuery({
@@ -151,14 +151,8 @@ function PlaybackLanguageConfig() {
 
   const handleLanguageChange = (kind: 'audio' | 'subtitle', value: string) => {
     const next = normalizeLanguageToken(value) || undefined;
-    const current =
-      normalizeLanguageToken(
-        kind === 'audio'
-          ? globalPlaybackLanguagePreferences?.preferredAudioLanguage
-          : globalPlaybackLanguagePreferences?.preferredSubtitleLanguage,
-      ) || undefined;
-    // Picking the already-active value is a no-op — skip the write entirely.
-    if (next === current) return;
+    const save = saveGlobalPlaybackLanguagePreference(kind === 'audio' ? 'audio' : 'sub', next);
+    if (!save) return;
 
     pendingSavesRef.current += 1;
     setSaveState('saving');
@@ -167,9 +161,7 @@ function PlaybackLanguageConfig() {
       savedResetTimerRef.current = null;
     }
 
-    void saveGlobalPlaybackLanguagePreferences(
-      kind === 'audio' ? { preferredAudioLanguage: next } : { preferredSubtitleLanguage: next },
-    )
+    void save
       .then(() => {
         pendingSavesRef.current -= 1;
         if (pendingSavesRef.current > 0) return;
@@ -262,8 +254,6 @@ function AppUiPreferenceToggle({
 // ── Main export ──────────────────────────────────────────────────────────────
 
 export function PlaybackSettings() {
-  // One hook instance for the whole group: each mount carries its own
-  // write-coalescing buffer, so four toggles would flush four IPC writes.
   const appUiPreferences = useAppUiPreferences();
 
   return (

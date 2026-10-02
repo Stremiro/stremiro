@@ -7,7 +7,8 @@ use super::{
     DEFAULT_STREAM_FAMILY_PRIORITY,
 };
 use crate::providers::addons::{
-    detect_stream_flags, AddonStream, StreamEpisodeMatchKind, StreamResolution,
+    detect_stream_flags, AddonStream, StreamEpisodeMatchKind, StreamRecommendationReason,
+    StreamResolution,
 };
 use crate::test_helpers::test_stream;
 use std::collections::HashMap;
@@ -15,7 +16,7 @@ use std::collections::HashMap;
 fn recommendation_reasons(
     stream: &AddonStream,
     inputs: &StreamRecommendationInputs<'_>,
-) -> Vec<String> {
+) -> Vec<StreamRecommendationReason> {
     // Single predicate pass shared with the sort key: the previous form
     // re-ran every relevance predicate once for the key and again here.
     let reference = build_reference_title(inputs.match_context.title);
@@ -406,16 +407,10 @@ fn recommendation_reasons_include_title_source_and_language_context() {
         ),
     );
 
-    assert!(reasons
-        .iter()
-        .any(|reason| reason.contains("Previously worked on this title")));
+    assert!(reasons.contains(&StreamRecommendationReason::TitleAffinity));
     assert!(
-        reasons
-            .iter()
-            .any(|reason| reason.contains("language prefs"))
-            || reasons
-                .iter()
-                .any(|reason| reason.contains("Flexible audio/subs"))
+        reasons.contains(&StreamRecommendationReason::LanguageMatch)
+            || reasons.contains(&StreamRecommendationReason::LanguageFlexible)
     );
 }
 

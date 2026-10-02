@@ -24,8 +24,14 @@ export function usePlayerVolumeControls({
   triggerOsd,
 }: UsePlayerVolumeControlsArgs) {
   const [volume, setVolume] = useState(() => playerVolume);
-  const [isMuted, setIsMuted] = useState(false);
+  const [isMuted, setIsMutedState] = useState(false);
   const volumeRef = useRef(volume);
+  // mpv re-inits (stream swap, recovery) read this so a muted session stays muted.
+  const isMutedRef = useRef(false);
+  const setIsMuted = useCallback((muted: boolean) => {
+    isMutedRef.current = muted;
+    setIsMutedState(muted);
+  }, []);
 
   useEffect(() => {
     const nextVolume = playerVolume;
@@ -54,7 +60,7 @@ export function usePlayerVolumeControls({
         await setMpvProperty('mute', false);
       }
     },
-    [isMuted, scheduleMpvSet, scheduleVolumePersist, triggerOsd],
+    [isMuted, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd],
   );
 
   // Relative changes use the live ref so rapid inputs accumulate.
@@ -91,13 +97,14 @@ export function usePlayerVolumeControls({
       triggerOsd({ kind: 'volume', level: restored });
     }
     await setMpvProperty('mute', newMute);
-  }, [handleVolumeChange, isMuted, scheduleMpvSet, scheduleVolumePersist, triggerOsd]);
+  }, [handleVolumeChange, isMuted, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd]);
 
   return {
     volume,
     setVolume,
     isMuted,
     setIsMuted,
+    isMutedRef,
     volumeRef,
     handleVolumeChange,
     stepVolume,

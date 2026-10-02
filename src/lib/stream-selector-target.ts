@@ -17,7 +17,8 @@ export interface StreamSelectorTarget {
   episode?: number;
   absoluteSeason?: number;
   absoluteEpisode?: number;
-  title: string;
+  /** Raw title: it feeds the ranking key, so display fallbacks stay out. */
+  title?: string;
   /** The target episode's own name — rendered under the title in the header. */
   episodeTitle?: string;
   overview?: string;

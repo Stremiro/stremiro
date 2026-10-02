@@ -12,8 +12,9 @@ const WATCH_PROGRESS_MIN_SAVE_INTERVAL_MS: u64 = 15_000;
 const WATCH_PROGRESS_NEAR_COMPLETION_RATIO: f64 = 0.97;
 const WATCH_PROGRESS_NEAR_COMPLETION_REMAINING_SECS: f64 = 30.0;
 const WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS: f64 = 60.0;
-const WATCH_PROGRESS_MIN_RESUME_POSITION_SECS: f64 = 5.0;
+pub(super) const WATCH_PROGRESS_MIN_RESUME_POSITION_SECS: f64 = 5.0;
 pub(super) const WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO: f64 = 0.95;
+const WATCH_PROGRESS_STARTED_RATIO: f64 = 0.05;
 const WATCH_PROGRESS_LOW_CONFIDENCE_EARLY_POSITION_SECS: f64 = 90.0;
 const WATCH_PROGRESS_LOW_CONFIDENCE_PROGRESS_RATIO: f64 = 0.08;
 const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
@@ -36,6 +37,8 @@ const STREAM_FAMILY_MAX_CHARS: usize = 512;
 /// this, so larger values are corrupt input, not data. `0` stays valid —
 /// specials and the `series:{id}:0:0` movie-fallback key both use it.
 const EPISODE_COORDINATE_MAX: u32 = 100_000;
+/// No real title runs a week; larger finite values are corrupt input.
+const WATCH_PROGRESS_MAX_SECS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
 
 pub(crate) fn normalize_episode_coordinate(value: Option<u32>) -> Option<u32> {
     value.filter(|coordinate| *coordinate <= EPISODE_COORDINATE_MAX)
@@ -73,6 +76,8 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     progress.id = normalize_media_id(&progress.id)?;
     progress.type_ = normalize_watch_progress_type(&progress.type_)?.to_string();
     progress.resume_start_time = None;
+    progress.is_watched = false;
+    progress.has_started_watching = false;
 
     // A far-future timestamp would permanently win recency guards and freeze
     // out every later save; clamp to backend now instead of dropping the row.
@@ -94,12 +99,15 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     hydrate_watch_progress_coordinates(&mut progress);
     // Non-finite floats (NaN, ±inf) serialize to JSON null and silently drop
     // the row on read; clamp rather than persist a value that can't round-trip.
+    // A finite but absurd value would overflow the hours-watched sum.
     if !progress.position.is_finite() || progress.position < 0.0 {
         progress.position = 0.0;
     }
+    progress.position = progress.position.min(WATCH_PROGRESS_MAX_SECS);
     if !progress.duration.is_finite() || progress.duration < 0.0 {
         progress.duration = 0.0;
     }
+    progress.duration = progress.duration.min(WATCH_PROGRESS_MAX_SECS);
     if progress.duration > 0.0 && progress.position > progress.duration {
         progress.position = progress.duration;
     }
@@ -112,7 +120,6 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     progress.backdrop = progress
         .backdrop
         .and_then(|s| normalize_media_image_url(&s));
-    progress.last_stream_url = None;
     progress.last_stream_format =
         bound_optional(progress.last_stream_format, STREAM_FORMAT_MAX_CHARS);
     progress.last_stream_lookup_id =
@@ -160,10 +167,14 @@ pub(crate) fn should_skip_watch_progress_save(
         return false;
     }
 
-    let existing_near_completion = is_near_completion_watch_progress(existing);
-    let incoming_near_completion = is_near_completion_watch_progress(incoming);
+    let existing_near_completion =
+        is_near_completion_watch_progress(existing.position, existing.duration);
+    let incoming_near_completion =
+        is_near_completion_watch_progress(incoming.position, incoming.duration);
 
-    if incoming_near_completion && !existing_near_completion {
+    if (incoming_near_completion && !existing_near_completion)
+        || is_watched_progress(existing) != is_watched_progress(incoming)
+    {
         return false;
     }
 
@@ -176,17 +187,17 @@ pub(crate) fn should_skip_watch_progress_save(
         && duration_delta < WATCH_PROGRESS_DURATION_SAVE_DELTA_SECS
 }
 
-fn is_near_completion_watch_progress(item: &WatchProgress) -> bool {
-    if item.duration < WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS || item.position <= 0.0 {
+pub(super) fn is_near_completion_watch_progress(position: f64, duration: f64) -> bool {
+    if !position.is_finite()
+        || !duration.is_finite()
+        || duration < WATCH_PROGRESS_NEAR_COMPLETION_MIN_DURATION_SECS
+        || position <= 0.0
+    {
         return false;
     }
 
-    let remaining = (item.duration - item.position).max(0.0);
-    let progress_ratio = if item.duration > 0.0 {
-        item.position / item.duration
-    } else {
-        0.0
-    };
+    let remaining = (duration - position).max(0.0);
+    let progress_ratio = position / duration;
 
     remaining <= WATCH_PROGRESS_NEAR_COMPLETION_REMAINING_SECS
         || progress_ratio >= WATCH_PROGRESS_NEAR_COMPLETION_RATIO
@@ -376,8 +387,72 @@ pub(crate) fn playable_resume_start_time(item: &WatchProgress) -> Option<f64> {
     Some(item.position)
 }
 
-pub(crate) fn with_resume_start_time(mut item: WatchProgress) -> WatchProgress {
+fn is_watched_progress(item: &WatchProgress) -> bool {
+    item.position.is_finite()
+        && item.duration.is_finite()
+        && item.duration > 0.0
+        && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
+}
+
+/// Keep the latest title metadata and recency, but advance from the furthest
+/// watched canonical episode so rewatches cannot suggest an already seen one.
+pub(crate) fn choose_up_next_source(
+    items: Vec<WatchProgress>,
+    source_health_priorities: &HashMap<String, u8>,
+) -> Option<WatchProgress> {
+    if items.iter().any(is_continue_watching_candidate) {
+        return None;
+    }
+    let latest = items
+        .iter()
+        .min_by_key(|item| std::cmp::Reverse(item.last_watched))?;
+    if !is_series_like_watch_progress(latest) {
+        return None;
+    }
+    let specials = watch_progress_absolute_season(latest)? == 0;
+    let furthest = items
+        .iter()
+        .filter(|item| is_watched_progress(item))
+        .filter_map(|item| {
+            let season = watch_progress_absolute_season(item)?;
+            let episode = watch_progress_absolute_episode(item)?;
+            ((season == 0) == specials).then_some((season, episode))
+        })
+        .max()?;
+    let mut source = choose_latest_entry(items, Some(source_health_priorities))?;
+    if !is_watched_progress(&source) {
+        return None;
+    }
+    source.season = Some(furthest.0);
+    source.episode = Some(furthest.1);
+    source.absolute_season = source.season;
+    source.absolute_episode = source.episode;
+    // Exact stream identities belong to the watched episode, never its successor.
+    source.stream_season = None;
+    source.stream_episode = None;
+    source.last_stream_lookup_id = None;
+    source.last_stream_key = None;
+    source.last_stream_format = None;
+    source.resume_start_time = None;
+    Some(source)
+}
+
+/// Below this fraction a row hasn't meaningfully started: spoiler masking and
+/// the furthest-watched scan share the boundary.
+fn has_started_watching_progress(item: &WatchProgress) -> bool {
+    item.position.is_finite()
+        && item.duration.is_finite()
+        && item.duration > 0.0
+        && item.position / item.duration > WATCH_PROGRESS_STARTED_RATIO
+}
+
+/// The one read-side annotation pass: resume offer, watched mark, and
+/// started flag come from the same policy the backend decides with, so the UI
+/// never re-derives thresholds.
+pub(crate) fn with_progress_annotations(mut item: WatchProgress) -> WatchProgress {
     item.resume_start_time = playable_resume_start_time(&item);
+    item.is_watched = is_watched_progress(&item);
+    item.has_started_watching = has_started_watching_progress(&item);
     item
 }
 

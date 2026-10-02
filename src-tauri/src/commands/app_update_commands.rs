@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tauri::{command, AppHandle, Emitter, State};
+use tauri::{command, AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
 /// In-flight update download shared by the check/install commands; owned
@@ -192,6 +192,20 @@ pub async fn install_app_update(
             // measures install-time silence from here, not from the last
             // downloaded byte.
             install_phase_clock.store(crate::commands::now_unix_millis(), Ordering::Relaxed);
+            // On Windows the process exits inside `download_and_install`, so
+            // RunEvent::Exit may never run — retry any failed durable-store
+            // saves here while the app is still alive.
+            if let Some(registry) = finish_app.try_state::<crate::commands::DurableStoreRegistry>()
+            {
+                if let Err(error) = registry.flush_dirty() {
+                    crate::operational_log::log_warn(
+                        "update",
+                        "durable-store-flush",
+                        "failed",
+                        &[crate::operational_log::field("error", error)],
+                    );
+                }
+            }
             emit_progress(&finish_app, AppUpdateProgress::Installing);
         },
     );

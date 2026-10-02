@@ -12,15 +12,17 @@ import {
   type WatchProgress,
 } from '@/lib/api';
 import { prefetchDetailsRouteData, prefetchFullDetailsData } from '@/lib/details-prefetch';
-import { warmPlayerChunk } from '@/lib/player-session';
+import { usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
 import { applyHistoryPlaybackPlan, watchProgressCoordinates } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
+  buildDetailsRoute,
   launchResolvedStream,
   type PlayerRouteMediaType,
   resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
 import { formatSeasonEpisode } from '@/lib/utils';
+import { useDebounce } from '@/hooks/use-debounce';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
 type EpisodeSelectionReason = 'no-history' | HistoryPlaybackPlanReason;
@@ -51,7 +53,7 @@ function getPrimaryPlaybackLabel(
 
   if (surface === 'details') {
     if (item.type === 'movie') {
-      return hasResumePath ? 'Continue' : 'Play';
+      return hasResumePath ? 'Continue' : 'Start Watching';
     }
 
     // Episode resumes name their target — "Continue S2:E4" beats a bare
@@ -87,10 +89,17 @@ export function useMediaPrimaryPlayback({
 }: UseMediaPrimaryPlaybackOptions) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { session, presentation } = usePlayerSession();
+  const playbackType: PlayerRouteMediaType = resolvePlayerRouteMediaType(item?.type);
+  const activeSession =
+    presentation === 'mini' && session?.id === item?.id && session?.type === playbackType
+      ? session
+      : null;
   const [isResolvingPrimaryAction, setIsResolvingPrimaryAction] = useState(false);
+  const delayedResolving = useDebounce(isResolvingPrimaryAction, 180);
+  const showResolvingFeedback = isResolvingPrimaryAction && delayedResolving;
   const isMountedRef = useMountedRef();
   const primaryActionInFlightRef = useRef(false);
-  const playbackType: PlayerRouteMediaType = resolvePlayerRouteMediaType(item?.type);
   const itemId = item?.id;
   const itemType = item?.type;
 
@@ -103,7 +112,7 @@ export function useMediaPrimaryPlayback({
       mediaId: itemId,
       mediaType: itemType,
     });
-    navigate(`/details/${playbackType}/${itemId}`, { state: { from } });
+    navigate(buildDetailsRoute(playbackType, itemId), { state: { from } });
   }, [from, itemId, itemType, navigate, playbackType, queryClient]);
 
   const runActionWithFeedback = useCallback(
@@ -140,8 +149,12 @@ export function useMediaPrimaryPlayback({
     if (!item || primaryActionInFlightRef.current) {
       return;
     }
+    if (activeSession) {
+      navigate(activeSession.playerPath, { state: activeSession.state });
+      return;
+    }
 
-    // Every path below ends in a player mount — start the lazy chunk fetch
+    // Most paths below end in a player mount — start the lazy chunk fetch
     // while history/episode resolution runs.
     warmPlayerChunk();
     primaryActionInFlightRef.current = true;
@@ -232,6 +245,7 @@ export function useMediaPrimaryPlayback({
       primaryActionInFlightRef.current = false;
     }
   }, [
+    activeSession,
     from,
     handleHistoryPlaybackPlan,
     historyEntry,
@@ -248,18 +262,32 @@ export function useMediaPrimaryPlayback({
   ]);
 
   const { season: resumeSeason, episode: resumeEpisode } = watchProgressCoordinates(historyEntry);
-  const resumeDetail = formatSeasonEpisode(resumeSeason, resumeEpisode) || undefined;
+  const resumeDetail =
+    formatSeasonEpisode(
+      activeSession
+        ? activeSession.season === undefined
+          ? undefined
+          : Number(activeSession.season)
+        : resumeSeason,
+      activeSession
+        ? activeSession.episode === undefined
+          ? undefined
+          : Number(activeSession.episode)
+        : resumeEpisode,
+    ) || undefined;
   const primaryActionLabel = getPrimaryPlaybackLabel(
     surface,
-    isResolvingPrimaryAction,
+    showResolvingFeedback,
     item,
-    Boolean(historyEntry),
+    Boolean(activeSession || historyEntry),
     resumeDetail,
   );
 
   return {
     handlePrimaryAction,
     isResolvingPrimaryAction,
+    showResolvingFeedback,
+    canReturnToActivePlayer: Boolean(activeSession),
     primaryActionLabel,
   };
 }

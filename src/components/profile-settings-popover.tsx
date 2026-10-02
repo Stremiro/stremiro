@@ -124,11 +124,12 @@ export function ProfileSettingsPopover({
             <Input
               id='profile-display-name'
               value={draftName}
-              onChange={(e) => setDraftName(e.target.value)}
+              // Code-point cap matching Rust's char limit; `maxLength` counts
+              // UTF-16 units and would cut emoji names short.
+              onChange={(e) => setDraftName(Array.from(e.target.value).slice(0, 32).join(''))}
               onKeyDown={(e) => {
                 if (e.key === 'Enter') void handleSave();
               }}
-              maxLength={32}
               placeholder='Enter your name…'
               className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
             />

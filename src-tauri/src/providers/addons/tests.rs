@@ -584,6 +584,18 @@ fn build_stream_endpoint_preserves_config_and_encodes_id() {
         url,
         "https://example.com/stremio/v1/stream/movie/tt1234567%3A1%3A2.json?token=abc"
     );
+    for token in ["abc/", "abc/manifest.json"] {
+        let url = AddonTransport::build_stream_endpoint(
+            &format!("https://example.com/stremio/v1/manifest.json?token={token}"),
+            "movie",
+            "tt1234567",
+        )
+        .expect("configured manifest endpoint");
+        assert_eq!(
+            url,
+            format!("https://example.com/stremio/v1/stream/movie/tt1234567.json?token={token}")
+        );
+    }
 }
 
 #[test]

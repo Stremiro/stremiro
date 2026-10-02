@@ -1,14 +1,9 @@
 const API_CACHE_MAX_ENTRIES = 200;
 
 export const BEST_STREAM_CACHE_TTL_MS = 1000 * 60 * 8;
-export const MEDIA_SCHEDULE_CACHE_TTL_MS = 1000 * 60 * 30;
-export const SEARCH_CACHE_TTL_MS = 1000 * 60 * 2;
 
-// Mirrors the Rust `normalize_query` bound (MAX_SEARCH_QUERY_CHARS) and
-// `MAX_GENRE_FILTERS` cap: canonicalizing here means the sent payload is
-// already exactly what the backend ranks against.
+// UI query keys use the Rust `normalize_query` bound.
 const SEARCH_QUERY_MAX_CHARS = 120;
-const SEARCH_GENRE_MAX_COUNT = 6;
 
 // Canonical search text shared by cache keys and the IPC payload so the two
 // can never drift. The bound counts Unicode scalars like Rust `chars()`
@@ -16,35 +11,19 @@ const SEARCH_GENRE_MAX_COUNT = 6;
 export function canonicalizeSearchText(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
-  return Array.from(trimmed).slice(0, SEARCH_QUERY_MAX_CHARS).join('');
+  if (trimmed.length <= SEARCH_QUERY_MAX_CHARS) return trimmed;
+  let end = 0;
+  let characters = 0;
+  for (const character of trimmed) {
+    end += character.length;
+    if (++characters === SEARCH_QUERY_MAX_CHARS) break;
+  }
+  return trimmed.slice(0, end);
 }
 
 // ASCII-only fold matching the backend's `to_ascii_lowercase`/`eq_ignore_ascii_case`.
 export function foldAsciiCase(value: string): string {
   return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
-}
-
-// Canonical genre list: per-genre text canonicalization plus the backend's
-// case-insensitive dedupe and count cap, so the sent list is the effective
-// filter rather than a superset of it.
-export function canonicalizeSearchGenres(
-  genres: readonly string[] | undefined,
-): string[] | undefined {
-  if (!genres?.length) return undefined;
-
-  const seen = new Set<string>();
-  const normalized: string[] = [];
-  for (const genre of genres) {
-    if (normalized.length >= SEARCH_GENRE_MAX_COUNT) break;
-    const canonical = canonicalizeSearchText(genre);
-    if (!canonical) continue;
-    const dedupeKey = foldAsciiCase(canonical);
-    if (seen.has(dedupeKey)) continue;
-    seen.add(dedupeKey);
-    normalized.push(canonical);
-  }
-
-  return normalized.length > 0 ? normalized : undefined;
 }
 
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
@@ -53,14 +32,11 @@ export interface RequestCache<T> {
   ttlMs: number;
   values: Map<string, TimedCacheEntry<T>>;
   inFlight: Map<string, Promise<T>>;
-  generation: number;
   clear: () => void;
 }
 
 export interface ApiCacheGroups {
   bestStream: { clear: () => void };
-  mediaSchedule: { clear: () => void };
-  searchCatalog: { clear: () => void };
 }
 
 export function createRequestCache<T>(ttlMs: number): RequestCache<T> {
@@ -71,10 +47,8 @@ export function createRequestCache<T>(ttlMs: number): RequestCache<T> {
     ttlMs,
     values,
     inFlight,
-    generation: 0,
     clear: () => {
-      // Generation first so late in-flight responses cannot repopulate.
-      cache.generation += 1;
+      // Dropping in-flight ownership stops late responses from repopulating.
       values.clear();
       inFlight.clear();
     },
@@ -97,7 +71,7 @@ function pruneTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>) {
   }
 }
 
-export function setTimedCache<T>(
+function setTimedCache<T>(
   cache: Map<string, TimedCacheEntry<T>>,
   key: string,
   value: T,
@@ -109,10 +83,7 @@ export function setTimedCache<T>(
 
 // Miss is `undefined`, not a falsy check, so a valid falsy payload
 // (e.g. `false`, `0`, `''`) is served from cache instead of re-fetched.
-export function getTimedCache<T>(
-  cache: Map<string, TimedCacheEntry<T>>,
-  key: string,
-): T | undefined {
+function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
   const now = Date.now();
   const cached = cache.get(key);
   if (!cached) return undefined;
@@ -139,11 +110,11 @@ export function runCachedRequest<T>(
     return inFlight;
   }
 
-  const startGeneration = cache.generation;
   const request = load()
     .then((result) => {
-      // Cleared generation revokes repopulation; mirrors backend guard.
-      if (cache.generation === startGeneration) {
+      // Only the key's current owner publishes: a clear or a prime since this
+      // request started revokes it, so a late response cannot overwrite either.
+      if (cache.inFlight.get(cacheKey) === request) {
         setTimedCache(cache.values, cacheKey, result, cache.ttlMs);
       }
       return result;
@@ -158,14 +129,10 @@ export function runCachedRequest<T>(
   return request;
 }
 
-function clearCacheGroups(...caches: Array<{ clear: () => void }>) {
-  for (const cache of caches) {
-    cache.clear();
-  }
-}
-
-function clearStreamingCaches(caches: ApiCacheGroups) {
-  clearCacheGroups(caches.bestStream);
+/** Seeds a known result and revokes any older in-flight publisher for the key. */
+export function primeCachedRequest<T>(cache: RequestCache<T>, cacheKey: string, value: T): void {
+  cache.inFlight.delete(cacheKey);
+  setTimedCache(cache.values, cacheKey, value, cache.ttlMs);
 }
 
 // Streaming writes always clear the best-stream cache — re-ranks and
@@ -176,19 +143,13 @@ export function withStreamingCacheClear<T>(
   request: Promise<T>,
 ): Promise<T> {
   return request.then((result) => {
-    clearStreamingCaches(caches);
+    clearProviderDataCaches(caches);
     return result;
   });
 }
 
-function clearSearchCaches(caches: ApiCacheGroups) {
-  clearCacheGroups(caches.searchCatalog);
-}
-
 export function clearProviderDataCaches(caches: ApiCacheGroups) {
-  clearStreamingCaches(caches);
-  clearCacheGroups(caches.mediaSchedule);
-  clearSearchCaches(caches);
+  caches.bestStream.clear();
 }
 
 export function buildStreamCacheKey(
@@ -207,12 +168,6 @@ export function buildStreamCacheKey(
     episode ?? null,
     absoluteEpisode ?? null,
   ]);
-}
-
-export function buildMediaDetailsCacheKey(type: string, id: string): string {
-  // Structural encoding like buildStreamCacheKey: `normalize_media_id`
-  // permits `|` in ids, so a joined key can alias distinct pairs.
-  return JSON.stringify([type.trim().toLowerCase(), id.trim()]);
 }
 
 // Watch-history delete epoch: a `saveWatchProgress` write queued before a

@@ -8,9 +8,11 @@ const pendingAppWriteFlushers = new Set<() => Promise<unknown>>();
 // owner unmounts. The barrier snapshots the set when it runs, so a settled
 // failure is dropped by the cleanup and never vetoes a later close.
 const activeAppWrites = new Set<Promise<unknown>>();
+const activeBarriers = new Set<Set<Promise<unknown>>>();
 
 export function trackPendingAppWrite<T>(write: Promise<T>): Promise<T> {
   activeAppWrites.add(write);
+  for (const barrier of activeBarriers) barrier.add(write);
   const cleanup = () => {
     activeAppWrites.delete(write);
   };
@@ -37,10 +39,31 @@ export async function settlePendingAppWrites(writes: Iterable<Promise<unknown>>)
   }
 }
 
-registerPendingAppWriteFlusher(() => settlePendingAppWrites(activeAppWrites));
-
 export async function flushPendingAppWrites(): Promise<void> {
-  await settlePendingAppWrites(
-    Array.from(pendingAppWriteFlushers, (flush) => Promise.resolve().then(flush)),
+  const captured = new Set(activeAppWrites);
+  activeBarriers.add(captured);
+  captured.add(
+    settlePendingAppWrites(
+      Array.from(pendingAppWriteFlushers, (flush) => Promise.resolve().then(flush)),
+    ),
   );
+  let failed = false;
+  let failure: unknown;
+  try {
+    // Keep writes captured even if they settle while another owner flushes.
+    while (captured.size > 0) {
+      const batch = Array.from(captured);
+      captured.clear();
+      try {
+        // eslint-disable-next-line no-await-in-loop -- Capture writes added during the preceding settle.
+        await settlePendingAppWrites(batch);
+      } catch (error) {
+        if (!failed) failure = error;
+        failed = true;
+      }
+    }
+    if (failed) throw failure;
+  } finally {
+    activeBarriers.delete(captured);
+  }
 }

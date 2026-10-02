@@ -35,14 +35,17 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { warmPlayerChunk } from '@/lib/player-session';
-import { resolvePlayerRouteMediaType, type PlayerRouteMediaType } from '@/lib/player-navigation';
+import {
+  buildDetailsRoute,
+  resolvePlayerRouteMediaType,
+  type PlayerRouteMediaType,
+} from '@/lib/player-navigation';
 import {
   detailsCardQueryKey,
   DETAILS_GC_TIME_MS,
   DETAILS_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
 import { searchGenrePath } from '@/lib/search-page-state';
-import { extractYouTubeVideoId } from '@/lib/trailer-utils';
 import {
   clamp,
   cn,
@@ -150,7 +153,7 @@ function MediaCardPoster({
   progress,
   subtitle,
 }: MediaCardPosterProps) {
-  const detailsPath = `/details/${detailsRouteType}/${item.id}`;
+  const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
   // Resume cards play on click — say so, with the episode and time left.
   const anchorLabel = onPlay
     ? [`Resume ${item.title}`, subtitle, metaLine].filter(Boolean).join(', ')
@@ -175,18 +178,25 @@ function MediaCardPoster({
       >
         <div className='relative rounded-lg bg-zinc-900'>
           <div className='relative aspect-2/3 rounded-lg overflow-hidden bg-zinc-900'>
+            <div
+              aria-hidden='true'
+              className='absolute inset-0 flex items-center justify-center bg-linear-to-br from-zinc-900 to-zinc-950 px-4 text-center'
+            >
+              <span
+                dir='auto'
+                className='line-clamp-3 text-sm font-medium leading-relaxed text-zinc-500'
+              >
+                {item.title}
+              </span>
+            </div>
             {isHttpUrl(item.poster) ? (
               <RemoteImage
                 src={item.poster}
                 alt={item.title}
-                className='object-cover w-full h-full'
+                className='relative object-cover w-full h-full bg-zinc-900'
                 loading='lazy'
               />
-            ) : (
-              <div className='flex items-center justify-center w-full h-full text-zinc-600 text-xs p-2 text-center'>
-                <span className='line-clamp-2'>{item.title}</span>
-              </div>
-            )}
+            ) : null}
 
             {subtitle && (
               <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
@@ -210,7 +220,11 @@ function MediaCardPoster({
       </a>
 
       <div className='mt-1.5 px-0.5 space-y-1'>
-        <p className='line-clamp-1 text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100'>
+        <p
+          dir='auto'
+          title={item.title}
+          className='line-clamp-2 min-h-[2.5em] [overflow-wrap:anywhere] text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100'
+        >
           {item.title}
         </p>
         {metaLine ? (
@@ -297,7 +311,7 @@ function MediaCardOverlay({
   // Where the user expanded the card — read once at mount so the overlay
   // holds no location subscription.
   const [from] = useState(currentPathWithSearch);
-  const detailsPath = `/details/${detailsRouteType}/${item.id}`;
+  const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
 
   // The id guard avoids a doomed IPC (Rust rejects empty ids). Card payload
   // only: hover needs rating/backdrop/trailer, never the episode array.
@@ -348,7 +362,7 @@ function MediaCardOverlay({
   // YouTube draws title/channel chrome before play, on pause, and on end.
   // The preview stays hidden until PLAYING, then auto-resumes so that chrome
   // never paints. No playlist loop — it summons prev/next overlays.
-  const trailerVideoId = extractYouTubeVideoId(details?.trailers?.[0]?.url);
+  const trailerVideoId = details?.trailers?.[0]?.id;
   // Opt-out pref + OS reduced-motion both keep the embed from ever mounting —
   // reduced-motion can't reach inside a YouTube iframe, so the only fix is
   // not creating it. Skipping the arm timer also avoids the iframe's whole
@@ -918,7 +932,10 @@ export function MediaCardSkeleton() {
   return (
     <div className='space-y-1.5'>
       <div className='aspect-2/3 animate-pulse rounded-lg border border-white/5 bg-zinc-900/50' />
-      <div className='h-3.5 w-3/4 animate-pulse rounded-md bg-zinc-900/40' />
+      <div className='h-8 space-y-1'>
+        <div className='h-3.5 w-3/4 animate-pulse rounded-md bg-zinc-900/40' />
+        <div className='h-3.5 w-1/2 animate-pulse rounded-md bg-zinc-900/30' />
+      </div>
       <div className='h-3 w-1/3 animate-pulse rounded-md bg-zinc-900/30' />
     </div>
   );

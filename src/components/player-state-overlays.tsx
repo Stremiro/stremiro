@@ -166,8 +166,8 @@ interface PlayerIdleOverlayProps {
   overview?: string;
 }
 
-// Idle "you're watching" card for long zero-input stretches during healthy
-// playback. Timing and dismissal live in usePlayerIdleOverlay; this is purely
+// Idle "you're watching" card for long zero-input stretches while paused.
+// Timing and dismissal live in usePlayerIdleOverlay; this is purely
 // presentational. Rows stagger on the container's ease for one reveal.
 export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
   visible,

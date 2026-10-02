@@ -5,6 +5,12 @@ let previewProfilePreferences = {
     username: 'Guest User',
     accentColor: '#ffffff',
     accentIntensity: 100,
+    accentTargets: {
+      navigation: true,
+      actions: true,
+      progress: true,
+      artwork: true,
+    },
   },
   viewMode: 'grid',
 };
@@ -27,14 +33,6 @@ let previewStreamSelectorPreferences = {
   batch: 'all',
 };
 
-const EMPTY_MEDIA_SCHEDULE = {
-  id: 'mock-id',
-  title: 'Browser Preview',
-  type: 'series',
-  releaseDate: undefined,
-  episodes: [],
-};
-
 const EMPTY_SEARCH_CATALOG_PAGE = {
   items: [],
   nextSkip: null,
@@ -43,8 +41,14 @@ const EMPTY_SEARCH_CATALOG_PAGE = {
 const EMPTY_STREAM_SELECTOR_DATA = {
   streams: [],
   sourceSummaries: [],
-  fatalErrorMessage: null,
-  complete: true,
+  stats: {
+    resCounts: { '4k': 0, '1080p': 0, '720p': 0, sd: 0 },
+    playableCount: 0,
+    p2pCount: 0,
+    cachedCount: 0,
+    batchCount: 0,
+    episodeLikeCount: 0,
+  },
 };
 
 const EMPTY_DATA_STATS = {
@@ -149,7 +153,7 @@ export async function handlePreviewInvoke<T>(
     case 'get_profile_preferences':
       return previewProfilePreferences as T;
     case 'save_profile_preferences':
-      // The only caller (`useLocalProfile`) sanitizes the profile before invoking.
+      // The desktop command sanitizes the profile; preview stores it as sent.
       previewProfilePreferences = {
         profile:
           typeof args?.profile === 'object' && args.profile !== null
@@ -199,10 +203,15 @@ export async function handlePreviewInvoke<T>(
       return { segments: [] } as T;
     case 'get_watch_history':
     case 'get_continue_watching':
+    case 'get_up_next_entries':
     case 'get_library':
     case 'get_lists':
+    case 'query_similar_titles':
       return [] as T;
+    case 'get_calendar_events':
+      return { trackedCount: 0, events: [] } as T;
     case 'get_title_watch_progress':
+    case 'set_episodes_watched':
       return { history: [], continueWatching: [] } as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
@@ -215,52 +224,30 @@ export async function handlePreviewInvoke<T>(
         year: '2026',
         episodes: [],
       } as T;
-    case 'get_media_schedules': {
-      const items = Array.isArray(args?.items) ? args.items : [];
-
-      // The base schedule shape must be spread per item; the list is
-      // request-bounded so the allocation cost is trivial.
-      // eslint-disable-next-line oxc/no-map-spread
-      return items.map((item, index) => {
-        const scheduleRequest =
-          typeof item === 'object' && item !== null ? (item as Record<string, unknown>) : {};
-        const mediaType =
-          typeof scheduleRequest.mediaType === 'string' && scheduleRequest.mediaType.trim()
-            ? scheduleRequest.mediaType.trim()
-            : EMPTY_MEDIA_SCHEDULE.type;
-        const id =
-          typeof scheduleRequest.id === 'string' && scheduleRequest.id.trim()
-            ? scheduleRequest.id.trim()
-            : `${EMPTY_MEDIA_SCHEDULE.id}-${index + 1}`;
-
-        return {
-          ...EMPTY_MEDIA_SCHEDULE,
-          id,
-          title: `Browser Preview ${index + 1}`,
-          type: mediaType,
-        };
-      }) as T;
-    }
     case 'get_playback_language_preferences':
     case 'get_effective_playback_language_preferences':
       return {} as T;
-    case 'save_playback_language_preferences':
-      return {
-        preferredAudioLanguage:
-          typeof args?.preferredAudioLanguage === 'string'
-            ? (args.preferredAudioLanguage as string)
-            : undefined,
-        preferredSubtitleLanguage:
-          typeof args?.preferredSubtitleLanguage === 'string'
-            ? (args.preferredSubtitleLanguage as string)
-            : undefined,
-      } as T;
+    case 'save_playback_language_preference': {
+      const language = typeof args?.language === 'string' ? args.language : undefined;
+      return (
+        args?.preferenceKind === 'audio'
+          ? { preferredAudioLanguage: language }
+          : { preferredSubtitleLanguage: language }
+      ) as T;
+    }
     case 'resolve_preferred_track_selection':
       return {
         selectedMatches: false,
       } as T;
     case 'get_addon_configs':
       return [] as T;
+    case 'inspect_addon_url':
+      return {
+        configurePage: false,
+        error: 'Addon URLs are validated by the desktop app.',
+      } as T;
+    case 'get_browse_genres':
+      return { movie: [], series: [], anime: [] } as T;
     case 'get_all_watch_statuses':
       return {} as T;
     case 'get_watch_progress':
@@ -302,7 +289,7 @@ export async function handlePreviewInvoke<T>(
         return {
           kind: 'details',
           reason: 'missing-episode-context',
-          target: `/details/${mediaType}/${mediaId}`,
+          target: `/details/${mediaType}/${encodeURIComponent(mediaId)}`,
           state: { from, season: absoluteSeason },
         } as T;
       }
@@ -312,8 +299,8 @@ export async function handlePreviewInvoke<T>(
       // identity is available.
       const target =
         typeof absoluteSeason === 'number' && typeof absoluteEpisode === 'number'
-          ? `/player/${mediaType}/${mediaId}/${absoluteSeason}/${absoluteEpisode}`
-          : `/player/${mediaType}/${mediaId}`;
+          ? `/player/${mediaType}/${encodeURIComponent(mediaId)}/${absoluteSeason}/${absoluteEpisode}`
+          : `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
 
       return {
         kind: 'player',
@@ -354,8 +341,6 @@ export async function handlePreviewInvoke<T>(
       return undefined as T;
     case 'get_supported_languages':
       return PREVIEW_SUPPORTED_LANGUAGES as T;
-    case 'get_mpv_language_selection_options':
-      return {} as T;
     default:
       throw new Error(
         `Command "${command}" is unavailable in browser preview. Run the Tauri desktop app for this path.`,

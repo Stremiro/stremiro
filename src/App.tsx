@@ -13,6 +13,8 @@ import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
 import { PlayerHost, PlayerRouteRegistrar, PlayerSessionProvider } from '@/lib/player-session';
 import { routeChunks, warmRouteChunks } from '@/lib/route-chunks';
+import { mpvDestroy } from '@/lib/player-mpv';
+import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
 import { Layout } from './components/layout';
 import { Home } from './pages/home';
 
@@ -234,9 +236,11 @@ function AppUpdateManager() {
   return null;
 }
 
-// Waits out queued preference/progress writes before the native close is
-// honored — the Tauri API awaits this handler and destroys the window only
-// when it returns unprevented, so a failed flush vetoes once and can retry.
+// The close barrier owns saving and teardown; failed saves leave playback intact.
+// Every awaited step is bounded: a wedged native op or viewport transition must
+// not trap the window open (the OS reclaims a stuck mpv core at process exit).
+const CLOSE_BARRIER_STEP_TIMEOUT_MS = 8_000;
+
 function AppCloseManager() {
   const isDesktopRuntime = isTauriDesktopRuntime();
 
@@ -244,15 +248,43 @@ function AppCloseManager() {
     if (!isDesktopRuntime) return;
 
     let isActive = true;
+    let closing = false;
     let unlisten: (() => void) | undefined;
+
+    const withTimeout = <T,>(step: Promise<T>) =>
+      Promise.race([
+        step.then(
+          () => true,
+          () => true,
+        ),
+        new Promise<boolean>((resolve) =>
+          window.setTimeout(() => resolve(false), CLOSE_BARRIER_STEP_TIMEOUT_MS),
+        ),
+      ]);
 
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
+        if (closing) {
+          event.preventDefault();
+          return;
+        }
+        closing = true;
         try {
+          const transitionSettled = await withTimeout(waitForViewportTransition());
+          if (transitionSettled && isPlayerPip()) {
+            event.preventDefault();
+            await withTimeout(returnFromPlayerPip());
+            return;
+          }
           await flushPendingAppWrites();
+          // A failed native teardown still closes: vetoing here would wedge the
+          // window open behind an unkillable mpv call, and exit reclaims it.
+          await mpvDestroy().catch(() => undefined);
         } catch {
           event.preventDefault();
-          toast.error('Could not save playback or settings. Try closing again.');
+          toast.error('Could not finish saving or stopping playback. Try closing again.');
+        } finally {
+          closing = false;
         }
       })
       .then((dispose) => {

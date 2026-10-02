@@ -55,6 +55,12 @@ export function resolvePlayerRouteMediaType(
   return normalizedType === 'movie' ? 'movie' : 'series';
 }
 
+/** Details path for an opaque addon id; the id is encoded so `/`, `?` or `#`
+    stay inside its route segment (React Router decodes params). */
+export function buildDetailsRoute(mediaType: string | null | undefined, mediaId: string): string {
+  return `/details/${resolvePlayerRouteMediaType(mediaType)}/${encodeURIComponent(mediaId)}`;
+}
+
 /// Details navigation with the caller's path as `from` — one shape so
 /// click sites can't drift.
 export function navigateToDetails(
@@ -62,7 +68,7 @@ export function navigateToDetails(
   mediaType: string | null | undefined,
   mediaId: string,
 ): void {
-  navigate(`/details/${resolvePlayerRouteMediaType(mediaType)}/${mediaId}`, {
+  navigate(buildDetailsRoute(mediaType, mediaId), {
     state: { from: currentPathWithSearch() },
   });
 }
@@ -154,10 +160,9 @@ function buildPlayerRoute(
   // Prefer canonical coordinates; fall back to stream S/E so callers can still deep-link.
   const season = normalizeRouteNumber(absoluteSeason) ?? normalizeRouteNumber(streamSeason);
   const episode = normalizeRouteNumber(absoluteEpisode) ?? normalizeRouteNumber(streamEpisode);
+  const base = `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
 
-  return season !== undefined && episode !== undefined
-    ? `/player/${mediaType}/${mediaId}/${season}/${episode}`
-    : `/player/${mediaType}/${mediaId}`;
+  return season !== undefined && episode !== undefined ? `${base}/${season}/${episode}` : base;
 }
 
 // The player owns one history slot: hops inside it (episode advance, in-player

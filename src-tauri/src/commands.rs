@@ -5,6 +5,8 @@ use tauri::{command, AppHandle, State};
 mod addon_registry;
 pub(crate) mod app_update_commands;
 pub(crate) mod backup_commands;
+pub(crate) mod browse_genre_commands;
+pub(crate) mod calendar_commands;
 pub(crate) mod config_commands;
 pub(crate) mod config_store;
 mod durable_store;
@@ -23,9 +25,11 @@ pub(crate) mod playback_state;
 pub(crate) mod playback_state_commands;
 pub(crate) mod player_mpv_commands;
 pub(crate) mod player_track_commands;
+pub(crate) mod player_window_commands;
 mod probe_pool;
 mod resume_store;
 pub(crate) mod search_commands;
+pub(crate) mod similar_titles_commands;
 mod startup_validation;
 mod store_helpers;
 pub(crate) mod stream_commands;
@@ -35,6 +39,7 @@ mod stream_resolver;
 mod streaming_helpers;
 #[cfg(test)]
 mod tests;
+pub(crate) mod up_next_commands;
 pub(crate) mod watch_history_commands;
 pub(crate) mod watch_status_commands;
 
@@ -47,32 +52,40 @@ use playback_state::PlaybackStateService;
 /// racing a status clear, or a backup import racing a progress tick). One
 /// lock covers every store — ops are milliseconds and a single lock cannot
 /// deadlock.
-static STORE_OP_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static STORE_OP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Run a closure that performs blocking SQLite/store/filesystem work on the
-/// dedicated blocking pool instead of an async runtime worker. `Send + 'static`
-/// inputs cross the boundary by value; the closure itself runs synchronously
-/// off-thread and returns its result. Bounded by a timeout so a wedged store
-/// never blocks navigation or shutdown; callers treat a timeout as
-/// best-effort failure and proceed.
 /// Shared budget for blocking hops off the async runtime (store ops, native
-/// plugin IPC, user-path file IO): a wedged callee must fail instead of
-/// pinning its IPC promise and blocking-pool thread forever.
+/// plugin IPC, user-path file IO). A timeout releases the caller; blocking
+/// work already executing cannot be cancelled and retains its store guard.
 pub(crate) const BLOCKING_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Serialize store work without blocking a worker while it waits in the queue.
 pub(crate) async fn run_blocking_store_op<T, F>(operation: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    let join_handle = tauri::async_runtime::spawn_blocking(move || {
-        let _guard = crate::providers::lock_or_recover(&STORE_OP_LOCK);
-        operation()
-    });
-    let join_result = tokio::time::timeout(BLOCKING_OP_TIMEOUT, join_handle)
+    let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
+    // Wait before entering the blocking pool so expired store waiters never
+    // submit a mutation after their caller has received a failure.
+    let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
         .map_err(|_| "Background persistence timed out.".to_string())?;
-    join_result.map_err(|error| format!("Background persistence task failed: {}", error))?
+    let mut task = tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        operation()
+    });
+    match tokio::time::timeout_at(deadline, &mut task).await {
+        Ok(result) => {
+            result.map_err(|error| format!("Background persistence task failed: {}", error))?
+        }
+        Err(_) => {
+            // Abort also cancels work still queued in the blocking pool.
+            // Already-running work keeps its guard until it finishes.
+            task.abort();
+            Err("Background persistence timed out.".to_string())
+        }
+    }
 }
 
 pub(crate) use durable_store::{
@@ -108,11 +121,6 @@ pub struct WatchProgress {
     pub poster: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backdrop: Option<String>,
-    /// Credential-bearing and short-lived: never accepted from IPC, never
-    /// serialized to the webview, never written to durable state. The field
-    /// only exists so the positional SQLite read can drop legacy values.
-    #[serde(skip)]
-    pub last_stream_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_stream_format: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +138,12 @@ pub struct WatchProgress {
     pub stream_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_start_time: Option<f64>,
+    /// Read-side annotations like `resume_start_time`: derived from
+    /// position/duration on the way out, never persisted or trusted inbound.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_watched: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub has_started_watching: bool,
 }
 
 const LIBRARY_INDEX_KEY: &str = "library_index";

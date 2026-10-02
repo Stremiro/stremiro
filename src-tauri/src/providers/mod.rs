@@ -25,7 +25,15 @@ pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
 /// rather than persisting whitespace. Shared by media normalization,
 /// watch-progress persistence, and track-language candidate bounding.
 pub(crate) fn bound_optional(value: Option<String>, max_chars: usize) -> Option<String> {
-    value.and_then(|value| trim_to_max(&value, max_chars))
+    value.and_then(|value| {
+        // Byte length bounds char count, so an already-trimmed short value
+        // is its own result — keep the owned buffer.
+        if !value.is_empty() && value.len() <= max_chars && value.trim().len() == value.len() {
+            Some(value)
+        } else {
+            trim_to_max(&value, max_chars)
+        }
+    })
 }
 
 /// Whitespace-only text counts as missing. Single owner for the trim-gate
@@ -200,9 +208,8 @@ pub(crate) struct MediaDetails {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub(crate) struct Trailer {
+    /// Strict 11-char YouTube video id; the frontend builds the embed URL.
     pub id: String,
-    pub source: String,
-    pub url: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -212,7 +219,9 @@ pub(crate) struct Episode {
     pub title: Option<String>,
     pub season: u32,
     pub episode: u32,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Raw addon air date; only `release_date` (its normalized local day)
+    /// crosses IPC.
+    #[serde(default, skip_serializing)]
     pub released: Option<String>,
     #[serde(rename = "releaseDate", skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,

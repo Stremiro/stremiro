@@ -2,50 +2,8 @@ import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type WatchProgress } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
-import { MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import type { PlaybackClock } from '@/lib/player-clock';
-
-const NEAR_COMPLETION_MIN_DURATION_SECS = 60;
-const NEAR_COMPLETION_REMAINING_SECS = 30;
-const NEAR_COMPLETION_PROGRESS_RATIO = 0.97;
-
-function buildWatchProgressFingerprint(progress: WatchProgress): string {
-  // Identity plus 1s-rounded position only: URLs never persist; title/artwork
-  // must not force writes.
-  return JSON.stringify([
-    progress.id,
-    progress.type_,
-    progress.absolute_season ?? '',
-    progress.absolute_episode ?? '',
-    progress.stream_season ?? '',
-    progress.stream_episode ?? '',
-    progress.last_stream_format ?? '',
-    progress.last_stream_lookup_id ?? '',
-    progress.last_stream_key ?? '',
-    progress.source_id ?? '',
-    progress.source_name ?? '',
-    progress.stream_family ?? '',
-    Math.round(progress.position),
-    Math.round(progress.duration),
-  ]);
-}
-
-function hasPersistableProgress(currentTime: number): boolean {
-  return Number.isFinite(currentTime) && currentTime >= MIN_RESUME_POSITION_SECS;
-}
-
-function shouldFlushNearCompletion(currentTime: number, duration: number): boolean {
-  if (!Number.isFinite(currentTime) || !Number.isFinite(duration)) return false;
-  if (duration < NEAR_COMPLETION_MIN_DURATION_SECS || currentTime <= 0) return false;
-
-  const remaining = Math.max(0, duration - currentTime);
-  const progressRatio = currentTime / duration;
-
-  return (
-    remaining <= NEAR_COMPLETION_REMAINING_SECS || progressRatio >= NEAR_COMPLETION_PROGRESS_RATIO
-  );
-}
 
 interface UsePlaybackProgressPersistenceArgs {
   mediaId?: string;
@@ -58,7 +16,6 @@ interface UsePlaybackProgressPersistenceArgs {
   streamSeason?: number;
   streamEpisode?: number;
   isPlaying: boolean;
-  duration: number;
   clock: PlaybackClock;
   durationRef: RefObject<number>;
   stream: PlayerStreamSession;
@@ -75,13 +32,11 @@ export function usePlaybackProgressPersistence({
   streamSeason,
   streamEpisode,
   isPlaying,
-  duration,
   clock,
   durationRef,
   stream,
 }: UsePlaybackProgressPersistenceArgs) {
   const {
-    activeStreamUrl,
     activeStreamFormatRef,
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,
@@ -90,15 +45,11 @@ export function usePlaybackProgressPersistence({
     selectedStreamKeyRef,
   } = stream;
   const lastPlayingStateRef = useRef(isPlaying);
-  const nearCompletionSavedRef = useRef(false);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const lastPersistedFingerprintRef = useRef<string | null>(null);
   const currentTimeRef = clock.ref;
 
   const buildWatchProgressPayload = useCallback((): WatchProgress | null => {
     if (!mediaType || !mediaId || mediaId === 'local') return null;
-    // Drop startup stubs so continue-watching never regresses to ~0.
-    if (!hasPersistableProgress(currentTimeRef.current)) return null;
 
     return {
       id: mediaId,
@@ -146,25 +97,20 @@ export function usePlaybackProgressPersistence({
   // Returns the raw chained operation so lifecycle callers (native close,
   // updater install, backup) can observe a failed final save; the queue
   // itself still swallows so later saves keep serializing. The backend owns
-  // write coalescing (`should_skip_watch_progress_save`).
+  // the startup-stub gate and write coalescing (`should_skip_watch_progress_save`).
   const persistProgress = useCallback((): Promise<void> => {
     const payload = buildWatchProgressPayload();
-    // Nothing new to write — still hand back the tail so a close waits on
+    // Nothing to write — still hand back the tail so a close waits on
     // whatever an earlier trigger already queued.
     if (!payload) return saveQueueRef.current;
 
-    const fingerprint = buildWatchProgressFingerprint(payload);
-    // The queue serializes saves, so the fingerprint check inside it drops the
-    // duplicates overlapping triggers (pause, exit, stream swap) enqueue. The
-    // epoch snapshot fences deletes: a remove/clear issued while this write is
-    // queued must not let it resurrect the row — the backend generation guard
-    // only covers saves already in flight.
+    // The epoch snapshot fences deletes: a remove/clear issued while this
+    // write is queued must not let it resurrect the row — the backend
+    // generation guard only covers saves already in flight.
     const enqueuedEpoch = getWatchProgressEpoch();
     const operation = saveQueueRef.current.then(async () => {
       if (getWatchProgressEpoch() !== enqueuedEpoch) return;
-      if (lastPersistedFingerprintRef.current === fingerprint) return;
       await api.saveWatchProgress(payload);
-      lastPersistedFingerprintRef.current = fingerprint;
     });
     saveQueueRef.current = operation.catch(() => {
       if (import.meta.env.DEV) console.warn('[player] watch progress persist failed');
@@ -186,7 +132,8 @@ export function usePlaybackProgressPersistence({
 
   useEffect(() => {
     if (!isPlaying) return;
-    // 15s matches the backend coalescing window.
+    // A playing tick moves the position well past Rust's coalescing delta,
+    // so every interval save lands; stalled ticks coalesce in Rust.
     const interval = window.setInterval(() => {
       void saveProgress();
     }, 15_000);
@@ -225,25 +172,6 @@ export function usePlaybackProgressPersistence({
       void saveProgress();
     }
   }, [saveProgress, isPlaying]);
-
-  useEffect(() => {
-    nearCompletionSavedRef.current = false;
-  }, [activeStreamUrl, mediaId, absoluteSeason, absoluteEpisode]);
-
-  useEffect(() => {
-    if (!isPlaying || nearCompletionSavedRef.current) return;
-    // Subscribed to the clock instead of per-tick props: the check runs on
-    // each published position without re-rendering the player tree.
-    const flushIfNearCompletion = () => {
-      if (nearCompletionSavedRef.current) return;
-      if (!shouldFlushNearCompletion(clock.getSnapshot(), duration)) return;
-
-      nearCompletionSavedRef.current = true;
-      void saveProgress();
-    };
-    flushIfNearCompletion();
-    return clock.subscribe(flushIfNearCompletion);
-  }, [clock, duration, saveProgress, isPlaying]);
 
   // Exit flushes are owned by the session boundary (reads the latest save via
   // ref) — an unmount effect here would re-fire on every identity change.

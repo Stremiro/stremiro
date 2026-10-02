@@ -11,31 +11,17 @@ import {
 import { useDebounce } from '@/hooks/use-debounce';
 import {
   api,
-  type StreamSelectorBatch,
   type StreamSelectorPreferences,
   type StreamSelectorPreferencesState,
-  type StreamSelectorQuality,
-  type StreamSelectorSort,
-  type StreamSelectorSource,
 } from '@/lib/api';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { STREAM_SELECTOR_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
 
-const QUALITY_FILTER_VALUES: ReadonlySet<StreamSelectorQuality> = new Set([
-  'all',
-  '4k',
-  '1080p',
-  '720p',
-  'sd',
-]);
-const SOURCE_FILTER_VALUES: ReadonlySet<StreamSelectorSource> = new Set(['all', 'cached']);
-const SORT_MODE_VALUES: ReadonlySet<StreamSelectorSort> = new Set(['smart', 'quality', 'seeds']);
-const BATCH_FILTER_VALUES: ReadonlySet<StreamSelectorBatch> = new Set(['all', 'episodes', 'packs']);
 const STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS = 200;
 let streamSelectorPreferencesSaveQueue = Promise.resolve<void>(undefined);
 
-export function flushPendingStreamSelectorPreferences(): Promise<void> {
+function flushPendingStreamSelectorPreferences(): Promise<void> {
   return streamSelectorPreferencesSaveQueue;
 }
 registerPendingAppWriteFlusher(flushPendingStreamSelectorPreferences);
@@ -59,43 +45,6 @@ function areStreamSelectorPreferencesEqual(
   right: StreamSelectorPreferences,
 ): boolean {
   return buildStreamSelectorPreferencesKey(left) === buildStreamSelectorPreferencesKey(right);
-}
-
-function normalizeStoredFilters(
-  candidate: unknown,
-  defaults: StreamSelectorPreferences,
-): StreamSelectorPreferences {
-  if (!candidate || typeof candidate !== 'object') {
-    return defaults;
-  }
-
-  const stored = candidate as Partial<Record<keyof StreamSelectorPreferences, unknown>>;
-  const quality = QUALITY_FILTER_VALUES.has(stored.quality as StreamSelectorQuality)
-    ? (stored.quality as StreamSelectorQuality)
-    : defaults.quality;
-  const source = SOURCE_FILTER_VALUES.has(stored.source as StreamSelectorSource)
-    ? (stored.source as StreamSelectorSource)
-    : defaults.source;
-  const sort = SORT_MODE_VALUES.has(stored.sort as StreamSelectorSort)
-    ? (stored.sort as StreamSelectorSort)
-    : defaults.sort;
-  const storedBatch = BATCH_FILTER_VALUES.has(stored.batch as StreamSelectorBatch)
-    ? (stored.batch as StreamSelectorBatch)
-    : defaults.batch;
-  // Keep the stored batch even when this session hides the control (movies);
-  // forcing `all` would persist over a series `episodes` preference.
-  const addon =
-    typeof stored.addon === 'string' && stored.addon.trim().length > 0
-      ? stored.addon.trim()
-      : defaults.addon;
-
-  return {
-    quality,
-    source,
-    addon,
-    sort,
-    batch: storedBatch,
-  };
 }
 
 export function useSelectorPreferencesState({
@@ -145,14 +94,13 @@ export function useSelectorPreferencesState({
     gcTime: Infinity,
   });
 
-  const persistedStreamSelectorPreferences =
+  // Rust sanitizes stored preferences on read and save, so the snapshot is
+  // used as-is. The stored batch survives sessions that hide the control
+  // (movies) so it never overwrites a series `episodes` preference.
+  const normalizedPersistedFilters =
     streamSelectorPreferencesQuery.isSuccess && streamSelectorPreferencesQuery.data.initialized
       ? streamSelectorPreferencesQuery.data.preferences
       : defaultFilters;
-  const normalizedPersistedFilters = useMemo(
-    () => normalizeStoredFilters(persistedStreamSelectorPreferences, defaultFilters),
-    [defaultFilters, persistedStreamSelectorPreferences],
-  );
 
   useEffect(() => {
     persistedFiltersRef.current = normalizedPersistedFilters;
@@ -219,7 +167,7 @@ export function useSelectorPreferencesState({
         // the stored batch — same policy reset/hydration apply.
         nextFilters = {
           ...nextFilters,
-          batch: normalizeStoredFilters(stored.preferences, defaultFilters).batch,
+          batch: stored.preferences.batch,
         };
       }
       if (!areStreamSelectorPreferencesEqual(nextFilters, latestFiltersRef.current)) {

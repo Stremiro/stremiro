@@ -10,7 +10,7 @@ import { nonBlank } from '@/lib/utils';
  */
 export interface PlayerStreamSession extends ResolvedStreamSession {
   activeStreamUrl?: string;
-  activeStreamHeaders?: [string, string][];
+  activeStreamMpvHttpHeaderFields?: string;
   activeStreamKey?: string;
   /** Resolved winner's source name, or the route-carried pick pre-resolve —
       the reactive counterpart of `activeStreamSourceNameRef` for render. */
@@ -35,7 +35,7 @@ interface UsePlayerStreamSessionArgs {
 // from inspection/serialization surfaces entirely.
 interface StreamSecrets {
   url?: string;
-  headers?: [string, string][];
+  mpvHttpHeaderFields?: string;
   routeSeed: string;
 }
 
@@ -58,7 +58,7 @@ export function usePlayerStreamSession({
 }: UsePlayerStreamSessionArgs): PlayerStreamSession {
   // Routes carry identities only (URLs stripped); the seed is lookup identity
   // plus episode coordinates so advancing drops the previous episode's secrets.
-  const routeSeed = [
+  const routeSeed = JSON.stringify([
     routeFormat ?? '',
     routeSourceId?.trim() ?? '',
     routeSourceName?.trim() ?? '',
@@ -68,7 +68,7 @@ export function usePlayerStreamSession({
     mediaId ?? '',
     season ?? '',
     episode ?? '',
-  ].join('|');
+  ]);
   const routeSeedRef = useRef(routeSeed);
   const secretsRef = useRef<StreamSecrets | null>(null);
   const [sessionStreamOverride, setSessionStreamOverride] = useState<SessionStreamOverride | null>(
@@ -82,7 +82,7 @@ export function usePlayerStreamSession({
   const activeSecrets =
     activeOverride && heldSecrets && heldSecrets.routeSeed === routeSeed ? heldSecrets : null;
   const activeStreamUrl = activeSecrets?.url;
-  const activeStreamHeaders = activeSecrets?.headers;
+  const activeStreamMpvHttpHeaderFields = activeSecrets?.mpvHttpHeaderFields;
   // Winner key from the last resolve/recovery; falls back to the route-carried
   // selector pick on a fresh session.
   const activeStreamKey = activeOverride?.streamKey ?? routeSelectedStreamKey?.trim();
@@ -111,12 +111,16 @@ export function usePlayerStreamSession({
   const setActiveStreamUrl = useCallback(
     (
       nextUrl?: string,
-      nextHeaders?: [string, string][],
+      nextMpvHttpHeaderFields?: string,
       nextStreamKey?: string,
       nextSourceName?: string,
     ) => {
       const seed = routeSeedRef.current;
-      secretsRef.current = { url: nextUrl, headers: nextHeaders, routeSeed: seed };
+      secretsRef.current = {
+        url: nextUrl,
+        mpvHttpHeaderFields: nextMpvHttpHeaderFields,
+        routeSeed: seed,
+      };
       // Fresh object every call — recovery can re-resolve under the same seed
       // with a different URL and consumers must still re-render.
       setSessionStreamOverride({
@@ -157,7 +161,7 @@ export function usePlayerStreamSession({
   return useMemo(
     () => ({
       activeStreamUrl,
-      activeStreamHeaders,
+      activeStreamMpvHttpHeaderFields,
       activeStreamKey,
       activeStreamSourceName,
       setActiveStreamUrl,
@@ -171,7 +175,7 @@ export function usePlayerStreamSession({
     }),
     [
       activeStreamUrl,
-      activeStreamHeaders,
+      activeStreamMpvHttpHeaderFields,
       activeStreamKey,
       activeStreamSourceName,
       setActiveStreamUrl,

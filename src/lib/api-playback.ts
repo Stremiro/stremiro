@@ -13,18 +13,20 @@ import type {
   TitleWatchProgress,
   TrackLanguageCandidate,
   TrackLanguageSelectionResolution,
+  UpNextCandidate,
   WatchProgress,
 } from '@/lib/api';
 import {
   type ApiCacheGroups,
   buildStreamCacheKey,
   bumpWatchProgressEpoch,
+  primeCachedRequest,
   type RequestCache,
   runCachedRequest,
-  setTimedCache,
   withStreamingCacheClear,
 } from '@/lib/api-cache';
 import type { InvokeApi } from '@/lib/api-core';
+import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { buildStreamRankingCacheKey, type StreamRankingOptions } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
@@ -135,14 +137,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         }),
       );
     },
-    /**
-     * Seed a caller-resolved stream under the exact key the player's
-     * re-resolve computes, so navigation never pays a second resolve+probe.
-     * `preferredStreamKey` must be the resolved winner's key (not the
-     * originally requested pick) and the options must match what the player
-     * passes — the cache key covers every preferred hint, so a mismatch
-     * silently misses.
-     */
+    /** Seeds a resolved stream under the exact request key the player replays;
+        the key covers every preferred hint, so mismatched options miss. */
     primeBestStream: (
       type: string,
       id: string,
@@ -160,7 +156,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         absoluteEpisode,
         options,
       );
-      setTimedCache(caches.bestStream.values, cacheKey, result, caches.bestStream.ttlMs);
+      primeCachedRequest(caches.bestStream, cacheKey, result);
     },
     recoverPlaybackStream: ({
       mediaType,
@@ -174,6 +170,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       failedSourceId,
       failedStreamFamily,
       failedStreamKey,
+      excludedStreamKeys,
       outcome,
       ...rankingOptions
     }: RecoverPlaybackStreamOptions) => {
@@ -197,20 +194,19 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
           failedSourceId,
           failedStreamFamily,
           failedStreamKey,
+          excludedStreamKeys,
           outcome,
           ...rankingOptions,
         }),
       );
     },
-    savePlaybackLanguagePreferences: (
-      preferredAudioLanguage?: string,
-      preferredSubtitleLanguage?: string,
-    ) =>
+    /** Sets one global language default; `undefined` clears it. */
+    savePlaybackLanguagePreference: (preferenceKind: 'audio' | 'sub', language?: string) =>
       withStreamingCacheClear(
         caches,
-        safeInvoke<PlaybackLanguagePreferences>('save_playback_language_preferences', {
-          preferredAudioLanguage,
-          preferredSubtitleLanguage,
+        safeInvoke<PlaybackLanguagePreferences>('save_playback_language_preference', {
+          preferenceKind,
+          language,
         }),
       ),
     getPlaybackLanguagePreferences: () =>
@@ -250,33 +246,31 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       subtitleTrack?: TrackLanguageCandidate,
       subtitlesOff?: boolean,
     ) =>
-      safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
-        mediaId,
-        mediaType,
-        audioTrack,
-        subtitleTrack,
-        subtitlesOff,
-      }),
+      // Learned per-title picks feed ranking when no global default is set.
+      withStreamingCacheClear(
+        caches,
+        safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
+          mediaId,
+          mediaType,
+          audioTrack,
+          subtitleTrack,
+          subtitlesOff,
+        }),
+      ),
     getSupportedLanguages: () => safeInvoke<SupportedLanguage[]>('get_supported_languages'),
-    getMpvLanguageSelectionOptions: (
-      preferredAudioLanguage?: string,
-      preferredSubtitleLanguage?: string,
-    ) =>
-      safeInvoke<Record<string, string>>('get_mpv_language_selection_options', {
-        preferredAudioLanguage,
-        preferredSubtitleLanguage,
-      }),
     // Backend cooldowns change on every report: drop cached rankings so the
     // next selector fetch re-ranks instead of re-serving the just-failed
     // source from TTL cache.
     reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
       withStreamingCacheClear(caches, safeInvoke<void>('report_playback_stream_outcome', report)),
     saveWatchProgress: (progress: WatchProgress) =>
-      safeInvoke<void>('save_watch_progress', { progress }),
+      trackPendingAppWrite(safeInvoke<void>('save_watch_progress', { progress })),
     saveWatchProgressBatch: (rows: WatchProgress[]) =>
-      safeInvoke<void>('save_watch_progress_batch', { rows }),
+      trackPendingAppWrite(safeInvoke<void>('save_watch_progress_batch', { rows })),
     getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
     getContinueWatching: () => safeInvoke<WatchProgress[]>('get_continue_watching'),
+    getUpNextEntries: (localToday: string) =>
+      safeInvoke<UpNextCandidate[]>('get_up_next_entries', { localToday }),
     getTitleWatchProgress: (id: string) =>
       safeInvoke<TitleWatchProgress>('get_title_watch_progress', { id }),
     getTotalWatchTimeSecs: () => safeInvoke<number>('get_total_watch_time_secs'),
@@ -290,16 +284,13 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         episode,
       }),
     // Bump before the IPC lands: a progress save queued across this delete
-    // must not resurrect the row when it flushes.
-    removeFromWatchHistory: (id: string, type: string, season?: number, episode?: number) => {
-      bumpWatchProgressEpoch();
-      return safeInvoke<void>('remove_from_watch_history', { id, type, season, episode });
-    },
-    // The delete returns the rows it removed — the Undo snapshot needs no
-    // second read and no key-tuple dedupe mirror.
+    // must not resurrect the row when it flushes. The delete returns the rows
+    // it removed — the Undo snapshot needs no second read or dedupe mirror.
     removeAllFromWatchHistory: (id: string, type: string) => {
       bumpWatchProgressEpoch();
-      return safeInvoke<WatchProgress[]>('remove_all_from_watch_history', { id, type });
+      return trackPendingAppWrite(
+        safeInvoke<WatchProgress[]>('remove_all_from_watch_history', { id, type }),
+      );
     },
     getSkipTimes: (
       mediaType: string,

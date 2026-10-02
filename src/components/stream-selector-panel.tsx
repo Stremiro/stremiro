@@ -33,12 +33,12 @@ import {
   type StreamSelectorQuality,
   type StreamSelectorSort,
   type StreamSelectorSource,
+  type StreamSelectorStats,
   type StreamSourceSummary,
   type WatchProgress,
 } from '@/lib/api';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
-import { getWatchProgressPercent, isWatchedProgress } from '@/lib/history-playback';
-import type { StreamSelectorStats } from '@/lib/stream-selector-utils';
+import { getWatchProgressPercent } from '@/lib/history-playback';
 import { cn, formatAirDate, formatSeasonEpisode, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
@@ -712,6 +712,8 @@ export function StreamResolveFeedbackToast({
           <button
             type='button'
             onClick={onCancel}
+            title='Cancel opening stream (Esc)'
+            aria-keyshortcuts='Escape'
             className='pointer-events-auto shrink-0 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/50 transition-colors hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
           >
             Cancel
@@ -857,13 +859,6 @@ export function StreamPackEpisodeList({
   // Arrow nav steps over header rows — they never hold the roving stop.
   const handleListKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // Backspace is the picker's back-chord — mirrors the header button.
-      if (event.key === 'Backspace') {
-        event.preventDefault();
-        event.stopPropagation();
-        onBack();
-        return;
-      }
       const count = rows.length;
       if (count === 0) return;
       const step = (distance: number, direction: 1 | -1): number => {
@@ -905,7 +900,7 @@ export function StreamPackEpisodeList({
       event.stopPropagation();
       if (next >= 0 && next !== focusedIndex) focusRow(next);
     },
-    [firstEpisodeIndex, focusRow, focusedIndex, lastEpisodeIndex, onBack, rows],
+    [firstEpisodeIndex, focusRow, focusedIndex, lastEpisodeIndex, rows],
   );
 
   // Land on the target episode once — the same "current row" anchor the
@@ -961,7 +956,7 @@ export function StreamPackEpisodeList({
     const progressPercent = watchEntry
       ? getWatchProgressPercent(watchEntry.position, watchEntry.duration)
       : 0;
-    const airDate = formatAirDate(ep.releaseDate ?? ep.released);
+    const airDate = formatAirDate(ep.releaseDate);
 
     return (
       <div role='listitem'>
@@ -1015,7 +1010,7 @@ export function StreamPackEpisodeList({
                   Current
                 </span>
               )}
-              {isWatchedProgress(watchEntry) && (
+              {watchEntry?.is_watched && (
                 <Check
                   className='h-3 w-3 shrink-0 text-emerald-400/80'
                   strokeWidth={3}
@@ -1045,6 +1040,8 @@ export function StreamPackEpisodeList({
             type='button'
             onClick={onBack}
             aria-label='Back to streams'
+            title='Back to streams (Esc / Backspace)'
+            aria-keyshortcuts='Escape Backspace'
             className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-black/40 text-white/70 transition-colors hover:bg-black/60 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
           >
             <ChevronLeft className='h-4 w-4' strokeWidth={2.25} />

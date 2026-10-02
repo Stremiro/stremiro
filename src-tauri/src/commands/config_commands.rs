@@ -223,14 +223,18 @@ pub(super) fn apply_manifest_snapshot(config: &mut AddonConfig, snapshot: AddonM
     false
 }
 
-async fn classify_missing_addon_capabilities(configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
+// New installs must validate before success; background retries retain offline sources.
+pub(super) async fn classify_missing_addon_capabilities(
+    configs: Vec<AddonConfig>,
+    require_valid_manifest: bool,
+) -> Result<Vec<AddonConfig>, String> {
     let mut classified = configs;
 
     let pending: Vec<usize> = classified
         .iter()
         .enumerate()
         .filter(|(_, config)| {
-            config.enabled
+            (require_valid_manifest || config.enabled)
                 && config
                     .capabilities
                     .as_ref()
@@ -240,19 +244,19 @@ async fn classify_missing_addon_capabilities(configs: Vec<AddonConfig>) -> Vec<A
         .collect();
 
     if pending.is_empty() {
-        return classified;
+        return Ok(classified);
     }
 
     // Shared pool (see `CLASSIFY_CLIENT`): cloned per task, never rebuilt
     // per burst, so keep-alive/TLS sessions survive across settings opens.
     let client = CLASSIFY_CLIENT.clone();
 
-    let snapshots: Vec<(usize, Option<AddonManifest>)> = stream::iter(pending)
+    let snapshots: Vec<(usize, Result<AddonManifest, String>)> = stream::iter(pending)
         .map(|index| {
             let url = classified[index].url.clone();
             let client = client.clone();
             async move {
-                let snapshot = fetch_addon_manifest_snapshot(&client, &url).await.ok();
+                let snapshot = fetch_addon_manifest_snapshot(&client, &url).await;
                 (index, snapshot)
             }
         })
@@ -261,12 +265,22 @@ async fn classify_missing_addon_capabilities(configs: Vec<AddonConfig>) -> Vec<A
         .await;
 
     for (index, snapshot) in snapshots {
-        if let Some(snapshot) = snapshot {
-            apply_manifest_snapshot(&mut classified[index], snapshot);
+        match snapshot {
+            Ok(snapshot) => {
+                if !apply_manifest_snapshot(&mut classified[index], snapshot)
+                    && require_valid_manifest
+                {
+                    return Err(
+                        "Addon manifest does not declare any resources or catalogs.".to_string()
+                    );
+                }
+            }
+            Err(error) if require_valid_manifest => return Err(error),
+            Err(_) => {}
         }
     }
 
-    classified
+    Ok(classified)
 }
 
 /// Reports whether a config gained a snapshot: a still-unreachable addon would
@@ -309,7 +323,7 @@ pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Res
         return Ok(());
     }
 
-    let classified = classify_missing_addon_capabilities(current).await;
+    let classified = classify_missing_addon_capabilities(current, false).await?;
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut latest = load_addon_configs(&store);
@@ -330,6 +344,71 @@ pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, S
             .into_iter()
             .map(AddonConfigView::from_config)
             .collect())
+    })
+    .await
+}
+
+/// Pasted install URLs are short; anything longer is junk, not an addon.
+const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
+
+/// Add-box verdict, built from the same normalizer the save path stores
+/// with, so a URL the UI accepts can't be rejected or duplicated at save.
+#[derive(Debug, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonUrlInspection {
+    /// The URL `save_addon_configs` would store; absent when invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub normalized_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// A `/configure` page, not a manifest: the user must finish setup first.
+    pub configure_page: bool,
+    /// Name of the installed addon this URL already points at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duplicate_of: Option<String>,
+}
+
+fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlInspection {
+    if url.chars().count() > MAX_ADDON_URL_INPUT_CHARS {
+        return AddonUrlInspection {
+            error: Some("Addon URL is too long.".to_string()),
+            ..AddonUrlInspection::default()
+        };
+    }
+    let normalized_url = match normalize_addon_url(url) {
+        Ok(Some(normalized_url)) => normalized_url,
+        Ok(None) => return AddonUrlInspection::default(),
+        Err(error) => {
+            return AddonUrlInspection {
+                error: Some(error),
+                ..AddonUrlInspection::default()
+            }
+        }
+    };
+    let configure_page = reqwest::Url::parse(&normalized_url).is_ok_and(|parsed| {
+        parsed
+            .path()
+            .trim_end_matches('/')
+            .to_ascii_lowercase()
+            .ends_with("/configure")
+    });
+    let duplicate_of = installed
+        .iter()
+        .find(|addon| addon.url == normalized_url)
+        .map(|addon| addon.name.clone());
+    AddonUrlInspection {
+        normalized_url: Some(normalized_url),
+        error: None,
+        configure_page,
+        duplicate_of,
+    }
+}
+
+#[command]
+pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlInspection, String> {
+    super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+        Ok(inspect_addon_url_against(&url, &load_addon_configs(&store)))
     })
     .await
 }
@@ -398,7 +477,7 @@ pub async fn save_addon_configs(
         .collect();
     merge_classified_capabilities(
         &mut normalized,
-        classify_missing_addon_capabilities(new_configs).await,
+        classify_missing_addon_capabilities(new_configs, true).await?,
     );
     if normalized == stored {
         // A normalized-identical save skips the store rewrite and the cache
@@ -446,4 +525,47 @@ pub async fn save_addon_configs(
         .into_iter()
         .map(AddonConfigView::from_config)
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::test_addon;
+
+    #[test]
+    fn addon_url_inspection_matches_the_save_normalizer() {
+        let installed = [AddonConfig {
+            url: "https://addon.example/abc".to_string(),
+            ..test_addon("addon-1", "Torrent Source")
+        }];
+
+        assert_eq!(
+            inspect_addon_url_against("   ", &installed),
+            AddonUrlInspection::default()
+        );
+        assert!(inspect_addon_url_against("ftp://addon.example", &installed)
+            .error
+            .is_some());
+
+        let duplicate =
+            inspect_addon_url_against("stremio://addon.example/abc/manifest.json/", &installed);
+        assert_eq!(
+            duplicate.normalized_url.as_deref(),
+            Some("https://addon.example/abc")
+        );
+        assert_eq!(duplicate.duplicate_of.as_deref(), Some("Torrent Source"));
+        assert!(!duplicate.configure_page);
+
+        let configure = inspect_addon_url_against("https://addon.example/Configure/", &installed);
+        assert!(configure.configure_page);
+        assert_eq!(configure.duplicate_of, None);
+
+        let too_long = format!(
+            "https://addon.example/{}",
+            "a".repeat(MAX_ADDON_URL_INPUT_CHARS)
+        );
+        assert!(inspect_addon_url_against(&too_long, &installed)
+            .error
+            .is_some());
+    }
 }

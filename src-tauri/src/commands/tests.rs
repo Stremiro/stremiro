@@ -2,7 +2,7 @@ use super::backup_commands::{
     normalize_backup_path, prepare_import_lists, validate_backup_size, validate_import_capacity,
     MAX_BACKUP_PATH_LEN, MAX_IMPORT_BYTES,
 };
-use super::config_commands::apply_manifest_snapshot;
+use super::config_commands::{apply_manifest_snapshot, classify_missing_addon_capabilities};
 use super::config_store::{normalize_addon_url, resolve_addon_configs, AddonConfig};
 use super::history_helpers::{
     choose_entry, is_continue_watching_candidate, sanitize_watch_progress, HistoryEntryQuery,
@@ -13,7 +13,8 @@ use super::streaming_helpers::{
     is_placeholder_no_stream, merge_unique_streams, normalize_source_id, prepare_addon_streams,
     stream_quality_score, stream_resolution_priority, stream_source_priority,
 };
-use super::watch_history_commands::build_title_watch_history_rows;
+use super::up_next_commands::build_up_next_entries;
+use super::watch_history_commands::{build_title_watch_history_rows, build_up_next_sources};
 use super::*;
 use crate::providers::addons::{
     detect_stream_flags, AddonStream, BehaviorHints, StreamDeliveryKind, StreamResolution,
@@ -51,6 +52,194 @@ fn series_episode_progress(
     progress.position = position;
     progress.duration = duration;
     progress
+}
+
+#[test]
+fn up_next_rewatch_advances_from_furthest_canonical_episode_with_latest_metadata() {
+    let mut latest = series_episode_progress(500, 1, 3, 1_200.0, 1_200.0);
+    latest.title = "Updated title".to_string();
+    latest.poster = Some("latest-poster".to_string());
+    latest.stream_family = Some("preferred-release".to_string());
+    latest.last_stream_key = Some("episode-3-key".to_string());
+    let mut remapped = series_episode_progress(300, 1, 100, 1_200.0, 1_200.0);
+    remapped.absolute_season = Some(2);
+    remapped.absolute_episode = Some(12);
+
+    let sources = build_up_next_sources(
+        vec![latest, remapped],
+        &HashMap::new(),
+        &HashMap::new(),
+        600,
+    );
+    assert_eq!(sources.len(), 1);
+    let source = &sources[0];
+    assert_eq!(
+        (source.absolute_season, source.absolute_episode),
+        (Some(2), Some(12))
+    );
+    assert_eq!(source.last_watched, 500);
+    assert_eq!(source.title, "Updated title");
+    assert_eq!(source.poster.as_deref(), Some("latest-poster"));
+    assert_eq!(source.stream_family.as_deref(), Some("preferred-release"));
+    assert_eq!(source.last_stream_key, None);
+    assert_eq!(source.last_stream_lookup_id, None);
+
+    let mut latest = series_episode_progress(500, 1, 3, 1_200.0, 1_200.0);
+    latest.source_id = Some("cooling-source".to_string());
+    latest.stream_family = Some("cooling-release".to_string());
+    let mut donor = series_episode_progress(300, 1, 103, 1_200.0, 1_200.0);
+    donor.absolute_episode = Some(3);
+    donor.source_id = Some("healthy-source".to_string());
+    donor.stream_family = Some("healthy-release".to_string());
+    let priorities = HashMap::from([
+        ("cooling-source".to_string(), 0),
+        ("healthy-source".to_string(), 3),
+    ]);
+    let sources = build_up_next_sources(vec![latest, donor], &HashMap::new(), &priorities, 600);
+    assert_eq!(sources[0].source_id.as_deref(), Some("healthy-source"));
+    assert_eq!(sources[0].stream_family.as_deref(), Some("healthy-release"));
+    assert_eq!(sources[0].last_watched, 500);
+}
+
+#[test]
+fn up_next_excludes_resumable_titles_and_keeps_specials_separate() {
+    let finished = series_episode_progress(500, 1, 3, 1_200.0, 1_200.0);
+    let resumable = series_episode_progress(300, 2, 5, 600.0, 1_200.0);
+    assert!(build_up_next_sources(
+        vec![finished, resumable],
+        &HashMap::new(),
+        &HashMap::new(),
+        600
+    )
+    .is_empty());
+
+    for (season, episode) in [(0, 2), (1, 3)] {
+        let latest = series_episode_progress(500, season, episode, 1_200.0, 1_200.0);
+        let other =
+            series_episode_progress(300, if season == 0 { 5 } else { 0 }, 99, 1_200.0, 1_200.0);
+        let sources =
+            build_up_next_sources(vec![latest, other], &HashMap::new(), &HashMap::new(), 600);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(
+            (sources[0].season, sources[0].episode),
+            (Some(season), Some(episode))
+        );
+    }
+}
+
+#[test]
+fn up_next_filters_before_recency_cap_and_rejects_stale_or_unfinished_sources() {
+    let now = 1000 * 60 * 60 * 24 * 100;
+    let mut rows: Vec<_> = (0..15)
+        .map(|index| {
+            let mut row = series_episode_progress(now - index, 1, 1, 1_200.0, 1_200.0);
+            row.id = format!("tt{index}");
+            row
+        })
+        .collect();
+    rows[1].position = 0.0;
+    let mut stale = series_episode_progress(1, 1, 1, 1_200.0, 1_200.0);
+    stale.id = "tt-stale".to_string();
+    rows.push(stale);
+    let statuses = HashMap::from([("tt0".to_string(), "dropped".to_string())]);
+    let sources = build_up_next_sources(rows, &statuses, &HashMap::new(), now);
+    assert_eq!(sources.len(), 12);
+    assert_eq!(sources[0].id, "tt2");
+    assert_eq!(sources[11].id, "tt13");
+}
+
+fn up_next_schedule(episodes: &[(u32, u32, &str)]) -> media_commands::MediaSchedule {
+    media_commands::MediaSchedule {
+        id: "tt7654321".to_string(),
+        type_: "series".to_string(),
+        title: "Schedule title".to_string(),
+        poster: None,
+        release_date: None,
+        episodes: episodes
+            .iter()
+            .enumerate()
+            .map(
+                |(index, &(season, episode, date))| media_commands::MediaScheduleEpisode {
+                    id: index.to_string(),
+                    title: None,
+                    season,
+                    episode,
+                    release_date: (!date.is_empty()).then(|| date.to_string()),
+                },
+            )
+            .collect(),
+    }
+}
+
+#[test]
+fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
+    let mut source = series_episode_progress(500, 1, 100, 1_200.0, 1_200.0);
+    source.absolute_season = Some(2);
+    source.absolute_episode = Some(12);
+    source.last_stream_key = Some("old-episode".into());
+    source.last_stream_lookup_id = Some("old-lookup".into());
+    source.stream_season = Some(1);
+    source.stream_episode = Some(100);
+    source.stream_family = Some("preferred-family".into());
+    source.resume_start_time = Some(1_100.0);
+    let entries = build_up_next_entries(
+        vec![source],
+        vec![up_next_schedule(&[
+            (3, 1, "2026-01-01"),
+            (0, 40, "2026-01-01"),
+            (2, 13, "2026-01-03"),
+            (2, 13, "2026-01-02"),
+        ])],
+        "2026-01-03",
+    );
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry.release_date, "2026-01-03");
+    assert_eq!((entry.row.season, entry.row.episode), (Some(2), Some(13)));
+    assert_eq!(
+        (entry.row.absolute_season, entry.row.absolute_episode),
+        (Some(2), Some(13))
+    );
+    assert_eq!((entry.row.position, entry.row.duration), (0.0, 0.0));
+    assert_eq!(entry.row.last_stream_key, None);
+    assert_eq!(entry.row.last_stream_lookup_id, None);
+    assert_eq!(entry.row.stream_season, None);
+    assert_eq!(entry.row.stream_episode, None);
+    assert_eq!(entry.row.resume_start_time, None);
+    assert_eq!(entry.row.stream_family.as_deref(), Some("preferred-family"));
+    assert_eq!(entry.row.last_watched, 500);
+    assert_eq!(entry.row.title, "Example");
+    let wire = serde_json::to_value(entry).unwrap();
+    assert!(wire.get("episodes").is_none());
+    assert_eq!(wire["releaseDate"], "2026-01-03");
+}
+
+#[test]
+fn up_next_does_not_skip_unaired_or_invalid_successor_and_keeps_specials() {
+    for next_date in ["2026-01-04", "2026-02-30", "", "2026-01-01junk"] {
+        let source = series_episode_progress(500, 1, 3, 1_200.0, 1_200.0);
+        assert!(build_up_next_entries(
+            vec![source],
+            vec![up_next_schedule(
+                &[(1, 5, "2026-01-01"), (1, 4, next_date),]
+            )],
+            "2026-01-03"
+        )
+        .is_empty());
+    }
+    let source = series_episode_progress(500, 0, 3, 1_200.0, 1_200.0);
+    let entries = build_up_next_entries(
+        vec![source],
+        vec![up_next_schedule(&[
+            (1, 1, "2026-01-01"),
+            (0, 4, "2026-01-03"),
+        ])],
+        "2026-01-03",
+    );
+    assert_eq!(
+        (entries[0].row.season, entries[0].row.episode),
+        (Some(0), Some(4))
+    );
 }
 
 fn mk_stream(
@@ -268,10 +457,30 @@ fn prepare_addon_streams_uses_generic_cached_label() {
         None,
     );
     stream.cached = true;
+    let mut hash_only = mk_stream(
+        Some("Release ⚡"),
+        Some("1080p"),
+        None,
+        Some("abc123"),
+        None,
+    );
+    hash_only.cached = true;
 
-    let prepared = prepare_addon_streams(vec![stream], "CaseTest", "addon-casetest");
-    assert_eq!(prepared.len(), 1);
-    assert_eq!(prepared[0].presentation.delivery_label.as_str(), "Cached");
+    let prepared = prepare_addon_streams(vec![stream, hash_only], "CaseTest", "addon-casetest");
+    assert_eq!(prepared.len(), 2);
+    let cached = prepared
+        .iter()
+        .find(|stream| stream.url.is_some())
+        .expect("direct row");
+    assert_eq!(cached.presentation.delivery_label.as_str(), "Cached");
+    assert!(cached.presentation.is_instantly_playable);
+    // A cache hint without a direct URL is still P2P-only.
+    let hash_only = prepared
+        .iter()
+        .find(|stream| stream.url.is_none())
+        .expect("hash row");
+    assert_eq!(hash_only.presentation.delivery_label.as_str(), "P2P");
+    assert!(!hash_only.presentation.is_instantly_playable);
 }
 
 #[test]
@@ -1004,6 +1213,43 @@ fn apply_manifest_snapshot_rejects_unclassified_without_touching_name() {
     assert!(addon.capabilities.is_none());
 }
 
+#[tokio::test]
+async fn new_addon_validation_reports_failure_without_rejecting_installed_offline_sources() {
+    let addon = AddonConfig {
+        url: "http://127.0.0.1:0/config?token=private-value".to_string(),
+        name: "127.0.0.1:0".to_string(),
+        capabilities: None,
+        ..cinemeta_addon()
+    };
+    let error = classify_missing_addon_capabilities(vec![addon.clone()], true)
+        .await
+        .expect_err("a new unreachable addon must not report a successful installation");
+    assert!(error.contains("Failed to reach addon"));
+    assert!(!error.contains("private-value"));
+    assert_eq!(
+        classify_missing_addon_capabilities(vec![addon.clone()], false)
+            .await
+            .expect("installed offline sources remain usable settings entries"),
+        vec![addon.clone()]
+    );
+
+    let disabled = AddonConfig {
+        enabled: false,
+        ..addon
+    };
+    assert!(
+        classify_missing_addon_capabilities(vec![disabled.clone()], true)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        classify_missing_addon_capabilities(vec![disabled.clone()], false)
+            .await
+            .expect("disabled installed sources do not need manifest access"),
+        vec![disabled]
+    );
+}
+
 /// Table-driven `normalize_addon_url` cases: `Ok(Some(url))` expects a
 /// normalized value, `Err(needle)` expects a rejection containing it. Each
 /// row keeps its own named `#[test]`, and the input is echoed in assert
@@ -1043,6 +1289,14 @@ addon_url_tests! {
         (
             "https://example-addon.test/path/manifest.json?foo=bar#fragment",
             Ok(Some("https://example-addon.test/path?foo=bar"))
+        ),
+        (
+            "https://example-addon.test/path/manifest.json?config=abc/",
+            Ok(Some("https://example-addon.test/path?config=abc/"))
+        ),
+        (
+            "https://example-addon.test/manifest.json?config=abc/",
+            Ok(Some("https://example-addon.test/?config=abc/"))
         ),
     ];
     normalize_addon_url_accepts_stremio_install_references: [
@@ -1165,7 +1419,6 @@ fn choose_watch_history_entry_prefers_playable_resume_metadata() {
     playable.position = 512.0;
     playable.duration = 1_440.0;
     playable.last_stream_lookup_id = Some("tt1234567".to_string());
-    playable.last_stream_url = Some("magnet:?xt=urn:btih:resume42".to_string());
     playable.last_stream_format = Some("video/mp4".to_string());
 
     let chosen = choose_entry(vec![latest, playable], HistoryEntryQuery::Latest, None)
@@ -1179,7 +1432,6 @@ fn choose_watch_history_entry_prefers_playable_resume_metadata() {
     assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt1234567"));
     // Stream URLs are credential-bearing and short-lived: donor URLs merge
     // position and identity metadata only, never the URL itself.
-    assert_eq!(chosen.last_stream_url, None);
 }
 
 #[test]
@@ -1189,7 +1441,6 @@ fn choose_watch_history_entry_hydrates_lookup_from_imdb_id_for_series() {
     latest.episode = Some(1);
     latest.position = 180.0;
     latest.duration = 1_200.0;
-    latest.last_stream_url = Some("https://cdn.example/video.m3u8".to_string());
 
     let chosen =
         choose_entry(vec![latest], HistoryEntryQuery::Latest, None).expect("history entry");
@@ -1209,7 +1460,6 @@ fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
     other_episode.position = 420.0;
     other_episode.duration = 1_440.0;
     other_episode.last_stream_lookup_id = Some("tt-other-episode".to_string());
-    other_episode.last_stream_url = Some("magnet:?xt=urn:btih:other11".to_string());
 
     let mut same_episode = mk_watch_progress("kitsu:42", "anime", 240);
     same_episode.season = Some(1);
@@ -1217,7 +1467,6 @@ fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
     same_episode.position = 512.0;
     same_episode.duration = 1_440.0;
     same_episode.last_stream_lookup_id = Some("tt-correct-episode".to_string());
-    same_episode.last_stream_url = Some("magnet:?xt=urn:btih:same12".to_string());
 
     let chosen = choose_entry(
         vec![latest, other_episode, same_episode],
@@ -1231,7 +1480,6 @@ fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
         chosen.last_stream_lookup_id.as_deref(),
         Some("tt-correct-episode")
     );
-    assert_eq!(chosen.last_stream_url, None);
 }
 
 #[test]
@@ -1246,7 +1494,6 @@ fn choose_watch_history_entry_avoids_cooldown_source_backfill_for_same_episode()
     cooldown_source.position = 900.0;
     cooldown_source.duration = 2_400.0;
     cooldown_source.last_stream_lookup_id = Some("cooldown-lookup".to_string());
-    cooldown_source.last_stream_url = Some("https://bad.example/episode-4.m3u8".to_string());
     cooldown_source.source_name = Some("Bad CDN".to_string());
     cooldown_source.source_id = Some("bad-cdn-id".to_string());
 
@@ -1277,7 +1524,6 @@ fn choose_watch_history_entry_avoids_cooldown_source_backfill_for_same_episode()
     // Donor merge carries the winning instance id, not just its label.
     assert_eq!(chosen.source_id.as_deref(), Some("good-cdn-id"));
     assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt7654321"));
-    assert_eq!(chosen.last_stream_url, None);
 }
 
 #[test]
@@ -1292,7 +1538,6 @@ fn choose_watch_history_entry_does_not_borrow_resume_time_from_other_episode() {
     other_episode.position = 420.0;
     other_episode.duration = 1_440.0;
     other_episode.last_stream_lookup_id = Some("tt-other-episode".to_string());
-    other_episode.last_stream_url = Some("magnet:?xt=urn:btih:other11".to_string());
 
     let chosen = choose_entry(vec![latest, other_episode], HistoryEntryQuery::Latest, None)
         .expect("history entry");
@@ -1303,7 +1548,6 @@ fn choose_watch_history_entry_does_not_borrow_resume_time_from_other_episode() {
         chosen.last_stream_lookup_id.as_deref(),
         Some("tt-other-episode")
     );
-    assert_eq!(chosen.last_stream_url, None);
 }
 
 #[test]
@@ -1320,7 +1564,6 @@ fn choose_watch_history_entry_requires_resume_threshold_before_treating_position
     same_episode.position = 420.0;
     same_episode.duration = 1_200.0;
     same_episode.last_stream_lookup_id = Some("tt7654321".to_string());
-    same_episode.last_stream_url = Some("https://cdn.example/episode-2.m3u8".to_string());
 
     let chosen = choose_entry(vec![latest, same_episode], HistoryEntryQuery::Latest, None)
         .expect("history entry");
@@ -1335,7 +1578,6 @@ fn choose_continue_watching_entry_prefers_resumable_episode_over_newer_zero_prog
 
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
-    resumable_episode.last_stream_url = Some("https://cdn.example/episode-4.m3u8".to_string());
 
     let chosen = choose_entry(
         vec![newer_zero_progress, resumable_episode],
@@ -1354,7 +1596,6 @@ fn choose_continue_watching_entry_prefers_older_resume_over_newer_same_episode_s
 
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
-    resumable_episode.last_stream_url = Some("https://cdn.example/episode-4.m3u8".to_string());
 
     let chosen = choose_entry(
         vec![startup_stub, resumable_episode],
@@ -1527,7 +1768,6 @@ fn choose_exact_watch_progress_entry_ignores_newer_same_episode_startup_stub() {
 
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
-    resumable_episode.last_stream_url = Some("https://cdn.example/episode-4.m3u8".to_string());
 
     let chosen = choose_entry(
         vec![startup_stub, resumable_episode],
@@ -1937,4 +2177,21 @@ fn backup_validate_backup_size_bounds_payloads() {
     assert!(validate_backup_size(MAX_IMPORT_BYTES).is_ok());
     let error = validate_backup_size(MAX_IMPORT_BYTES + 1).expect_err("over the cap");
     assert!(error.contains(&MAX_IMPORT_BYTES.to_string()));
+}
+
+#[tokio::test]
+async fn cancelled_queued_store_operation_does_not_run() {
+    let guard = STORE_OP_LOCK.lock().await;
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let operation = run_blocking_store_op(move || {
+        let _ = sender.send(());
+        Ok(())
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(20), operation)
+            .await
+            .is_err()
+    );
+    drop(guard);
+    assert!(receiver.await.is_err());
 }

@@ -13,7 +13,7 @@ import { cn } from '@/lib/utils';
 // update in place instead of stacking a second toast.
 export const APP_UPDATE_TOAST_ID = 'app-update-toast';
 
-export function dismissAppUpdateToast() {
+function dismissAppUpdateToast() {
   toast.dismiss(APP_UPDATE_TOAST_ID);
 }
 

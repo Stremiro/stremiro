@@ -108,7 +108,8 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   // silently filter rows the user can't see or clear. The text itself is kept
   // so it returns with the field on a searchable season.
   const searchVisible = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
-  const effectiveEpisodeSearch = searchVisible ? debouncedEpisodeSearch : '';
+  const effectiveEpisodeSearch =
+    searchVisible && episodeSearch.trim() ? debouncedEpisodeSearch : '';
   const visibleEpisodes = useMemo(
     () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
     [effectiveEpisodeSearch, seasonEpisodes],
@@ -123,6 +124,15 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     enabled: shouldVirtualize,
   });
 
+  // A new filter result starts at the top — clamp both scroll surfaces so a
+  // stale offset can't leave a short filtered list scrolled past its end.
+  // Declared before the scroll-to-current effect: both run on mount (the
+  // panel mounts on its first open) and this reset must not wipe the centering.
+  useEffect(() => {
+    scrollViewportRef.current?.scrollTo({ top: 0 });
+    if (shouldVirtualize) episodeVirtualizer.scrollToOffset(0);
+  }, [effectiveEpisodeSearch, selectedSeason, shouldVirtualize, episodeVirtualizer]);
+
   // Opening mid-season lands on context, not episode 1: center the playing
   // row once per open, then leave scroll ownership to the user.
   const didScrollToCurrentRef = useRef(false);
@@ -131,7 +141,9 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       didScrollToCurrentRef.current = false;
       return;
     }
-    if (didScrollToCurrentRef.current) return;
+    // An empty list is still loading; consuming the once-per-open flag on it
+    // would skip the centering when the episodes arrive.
+    if (didScrollToCurrentRef.current || visibleEpisodes.length === 0) return;
     didScrollToCurrentRef.current = true;
 
     const index = visibleEpisodes.findIndex((ep) =>
@@ -149,17 +161,10 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       ?.scrollIntoView({ block: 'center' });
   }, [open, visibleEpisodes, shouldVirtualize, episodeVirtualizer, currentSeason, currentEpisode]);
 
-  // A new filter result starts at the top — clamp both scroll surfaces so a
-  // stale offset can't leave a short filtered list scrolled past its end.
-  useEffect(() => {
-    scrollViewportRef.current?.scrollTo({ top: 0 });
-    if (shouldVirtualize) episodeVirtualizer.scrollToOffset(0);
-  }, [effectiveEpisodeSearch, selectedSeason, shouldVirtualize, episodeVirtualizer]);
-
   const renderEpisode = useCallback(
     (ep: Episode) => {
       const isCurrent = episodeMatchesCoordinates(ep, currentSeason, currentEpisode);
-      const airDate = formatAirDate(ep.releaseDate ?? ep.released);
+      const airDate = formatAirDate(ep.releaseDate);
       // Same bar/badge vocabulary as the details episode cards — the accent
       // bar lives on the thumbnail's bottom edge, the Resume pill marks the
       // Continue target (never the already-marked Now Playing row).

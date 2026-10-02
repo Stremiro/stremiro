@@ -271,6 +271,16 @@ export function usePlayerResumeController({
       startTime,
     );
     const mediaChanged = nextMediaKey !== resumeMediaKeyRef.current;
+    const streamKept = activeStreamUrlRef.current === activeStreamUrl;
+    // Start over relaunching the still-loaded stream (same session, same
+    // winner) reloads nothing, so the sub-threshold sentinel must rewind here.
+    const restartLoadedStream =
+      mediaChanged &&
+      streamKept &&
+      !!activeStreamUrl &&
+      normalizedStartTime > 0 &&
+      normalizedStartTime < MIN_RESUME_POSITION_SECS &&
+      currentTimeRef.current >= MIN_RESUME_POSITION_SECS;
 
     resumeSessionKeyRef.current = nextResumeSessionKey;
     resumeMediaKeyRef.current = nextMediaKey;
@@ -307,6 +317,14 @@ export function usePlayerResumeController({
     resumePausePendingRef.current = false;
     resumeOsdShownRef.current = false;
     clearResumeRetryTimer();
+
+    if (restartLoadedStream) {
+      resumeAppliedRef.current = true;
+      void mpvCommand('seek', ['0', 'absolute'])
+        .then(() => setMpvProperty('pause', false))
+        .catch(() => undefined);
+      return;
+    }
 
     if (
       resumeTimeRef.current >= MIN_RESUME_POSITION_SECS &&

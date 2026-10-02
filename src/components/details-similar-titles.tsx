@@ -1,17 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useMemo, useRef, useState } from 'react';
-import { useAddonConfigs } from '@/hooks/use-addon-configs';
+import { useEffect, useRef, useState } from 'react';
 import { useOnlineStatus } from '@/hooks/use-online-status';
-import type { MediaItem } from '@/lib/api';
+import { api, type MediaItem } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS, trendingRowQueryKey } from '@/lib/query-invalidation';
-import { collectSearchGenreOptions } from '@/lib/search-page-state';
-import {
-  fetchSimilarTitles,
-  MIN_SIMILAR_TITLES,
-  similarTitlesMediaType,
-  similarTitlesSeedGenres,
-  similarTitlesSourceKey,
-} from '@/lib/similar-titles';
 import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
@@ -19,6 +10,8 @@ import { RetryBanner } from './retry-banner';
 // Starts the catalog fetch a screen early, so the rail is usually ready
 // before it scrolls into view.
 const PREFETCH_ROOT_MARGIN = '600px';
+/** Fewer matches than this reads as filler — the rail hides instead. */
+const MIN_SIMILAR_TITLES = 4;
 
 interface DetailsSimilarTitlesProps {
   item: MediaItem;
@@ -29,15 +22,6 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
   const anchorRef = useRef<HTMLDivElement>(null);
   const [nearViewport, setNearViewport] = useState(false);
   const isOnline = useOnlineStatus();
-  const { data: addonConfigs } = useAddonConfigs({ enabled: isOnline });
-  const mediaType = similarTitlesMediaType(item);
-  const seedGenres = useMemo(
-    () =>
-      addonConfigs
-        ? similarTitlesSeedGenres(item.genres, collectSearchGenreOptions(addonConfigs, mediaType))
-        : [],
-    [addonConfigs, item.genres, mediaType],
-  );
 
   useEffect(() => {
     const anchor = anchorRef.current;
@@ -52,7 +36,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
     return () => observer.disconnect();
   }, [nearViewport]);
 
-  const queryEnabled = isOnline && nearViewport && seedGenres.length > 0;
+  const queryEnabled = isOnline && nearViewport && (item.genres?.length ?? 0) > 0;
   const {
     data: titles,
     isLoading,
@@ -60,16 +44,16 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
     refetch,
   } = useQuery({
     // Under the `trending` prefix so invalidateDiscoveryQueries covers it.
-    // The source key refreshes the rail when full metadata (year/genres)
-    // lands after a placeholder item.
+    // Year and genres are in the key so the rail refreshes when full
+    // metadata lands after a placeholder item.
     queryKey: trendingRowQueryKey(
       'similar',
-      mediaType,
+      item.type,
       item.id,
-      similarTitlesSourceKey(item),
-      ...seedGenres,
+      item.year ?? '',
+      ...(item.genres ?? []),
     ),
-    queryFn: () => fetchSimilarTitles(item, mediaType, seedGenres),
+    queryFn: () => api.querySimilarTitles(item),
     enabled: queryEnabled,
     staleTime: MEDIA_ROW_STALE_TIME_MS,
   });
@@ -86,7 +70,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
           title='More like this'
           contentInsetsClassName={contentInsetsClassName}
           sectionClassName='pt-10 animate-in fade-in duration-500 motion-reduce:animate-none'
-          railId={`similar:${mediaType}:${item.id}`}
+          railId={`similar:${item.type}:${item.id}`}
           items={titles ?? []}
           isLoading={showSkeleton}
           skeletonCount={6}

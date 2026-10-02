@@ -151,22 +151,23 @@ export function useDetailsEpisodePane({
   // key flip when metadata lands) and matches the identity the progress
   // reads/writes use.
   const currentEpisodeSeasonKey = `${effectiveRouteId || 'unknown'}:${selectedSeason ?? 'none'}`;
-  const defaultEpisodePageIndex =
-    resumeEpisodeForSelectedSeason !== null && resumeEpisodeForSelectedSeason > 0
-      ? Math.floor((resumeEpisodeForSelectedSeason - 1) / EPISODE_DISPLAY_PAGE_SIZE)
-      : 0;
-  const requestedEpisodePageIndex = hasEpisodeSearch
-    ? 0
-    : ((episodePageOverride?.key === currentEpisodeSeasonKey
-        ? episodePageOverride.page
-        : undefined) ??
-      episodePageMemory.get(currentEpisodeSeasonKey) ??
-      defaultEpisodePageIndex);
-
+  const episodePageKey = hasEpisodeSearch
+    ? JSON.stringify([currentEpisodeSeasonKey, effectiveEpisodeSearch])
+    : currentEpisodeSeasonKey;
   const seasonEpisodes =
     selectedSeason === null
       ? EMPTY_EPISODES
       : (episodesBySeason.get(selectedSeason) ?? EMPTY_EPISODES);
+  const resumeEpisodeIndex = seasonEpisodes.findIndex(
+    (episode) => episode.episode === resumeEpisodeForSelectedSeason,
+  );
+  const defaultEpisodePageIndex =
+    resumeEpisodeIndex >= 0 ? Math.floor(resumeEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : 0;
+  const requestedEpisodePageIndex =
+    (episodePageOverride?.key === episodePageKey ? episodePageOverride.page : undefined) ??
+    (hasEpisodeSearch
+      ? 0
+      : (episodePageMemory.get(currentEpisodeSeasonKey) ?? defaultEpisodePageIndex));
 
   const searchFilteredEpisodes = useMemo(
     () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
@@ -185,10 +186,16 @@ export function useDetailsEpisodePane({
       const nextPage = Math.max(0, Math.min(activeEpisodePageIndex + delta, totalEpisodePages - 1));
       if (nextPage === activeEpisodePageIndex) return;
 
-      rememberEpisodePage(currentEpisodeSeasonKey, nextPage);
-      setEpisodePageOverride({ key: currentEpisodeSeasonKey, page: nextPage });
+      if (!hasEpisodeSearch) rememberEpisodePage(currentEpisodeSeasonKey, nextPage);
+      setEpisodePageOverride({ key: episodePageKey, page: nextPage });
     },
-    [activeEpisodePageIndex, currentEpisodeSeasonKey, totalEpisodePages],
+    [
+      activeEpisodePageIndex,
+      currentEpisodeSeasonKey,
+      episodePageKey,
+      hasEpisodeSearch,
+      totalEpisodePages,
+    ],
   );
 
   const visibleEpisodes = useMemo(() => {

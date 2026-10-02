@@ -1,8 +1,31 @@
 use super::{
     build_display_year, build_release_date, extract_primary_year, normalize_episode_metadata_list,
-    normalize_media_details, normalize_media_item,
+    normalize_media_details, normalize_media_item, normalize_title,
 };
-use crate::providers::{Episode, MediaDetails, MediaItem, Trailer};
+use crate::providers::{Episode, MediaDetails, MediaItem};
+
+#[test]
+fn title_cleanup_preserves_names_and_bounds_visible_characters() {
+    for (input, expected) in [
+        (" \u{feff}The\t  Office\r\n", "The Office"),
+        (
+            "Spider-Man:\u{a0} Across  the Spider-Verse",
+            "Spider-Man: Across the Spider-Verse",
+        ),
+        (
+            "Amélie — 千と千尋の神隠し 👩‍🚀",
+            "Amélie — 千と千尋の神隠し 👩‍🚀",
+        ),
+        ("1917 (2019)", "1917 (2019)"),
+        ("A\0B\u{7}C", "ABC"),
+        (" \u{feff}\t\0 ", ""),
+    ] {
+        assert_eq!(normalize_title(input, 512), expected);
+    }
+    assert_eq!(normalize_title("🙂🙂🙂", 2), "🙂🙂");
+    assert_eq!(normalize_title("A  B", 2), "A");
+    assert_eq!(normalize_title("A  B", 3), "A B");
+}
 
 #[test]
 fn extract_primary_year_reads_first_valid_year() {
@@ -57,7 +80,7 @@ fn normalize_media_item_sets_display_year() {
 fn normalize_media_details_normalizes_years_and_episodes() {
     let details = MediaDetails {
         id: "tt123".to_string(),
-        imdb_id: None,
+        imdb_id: Some("tt123".to_string()),
         title: "Attack on Titan".to_string(),
         poster: None,
         backdrop: None,
@@ -101,8 +124,10 @@ fn normalize_media_details_normalizes_years_and_episodes() {
         ]),
     };
 
-    let normalized = normalize_media_details(details);
+    let normalized = normalize_media_details(details, "kitsu:123");
 
+    assert_eq!(normalized.id, "kitsu:123");
+    assert_eq!(normalized.imdb_id.as_deref(), Some("tt123"));
     assert_eq!(normalized.display_year.as_deref(), Some("2013"));
     assert_eq!(normalized.release_date.as_deref(), Some("2013-04-07"));
     assert_eq!(
@@ -191,13 +216,13 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
     // A full `released` stamp keeps its exact day; without it the year-only
     // fallback still produces a schedulable Jan 1 date.
     assert_eq!(
-        normalize_media_details(details(Some("2024-07-18T00:00:00.000Z")))
+        normalize_media_details(details(Some("2024-07-18T00:00:00.000Z")), "tt1")
             .release_date
             .as_deref(),
         Some("2024-07-18")
     );
     assert_eq!(
-        normalize_media_details(details(None))
+        normalize_media_details(details(None), "tt1")
             .release_date
             .as_deref(),
         Some("2024-01-01")
@@ -268,25 +293,15 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         rating: Some("r".repeat(500)),
         cast: Some((0..200).map(|index| format!("actor-{index}")).collect()),
         genres: None,
-        trailers: Some(
-            (0..64)
-                .map(|index| Trailer {
-                    id: format!("tr-{index}"),
-                    source: "youtube".to_string(),
-                    url: format!("https://youtube.test/{}", "u".repeat(4_096)),
-                })
-                .collect(),
-        ),
+        trailers: None,
         episodes: Some((1..=2).map(episode).collect()),
     };
 
-    let normalized = normalize_media_details(details);
+    let normalized = normalize_media_details(details, "tt123");
 
     assert_eq!(normalized.imdb_id.as_deref().map(str::len), Some(256));
     assert_eq!(normalized.rating.as_deref().map(str::len), Some(64));
     assert_eq!(normalized.cast.as_ref().map(Vec::len), Some(64));
-    assert_eq!(normalized.trailers.as_ref().map(Vec::len), Some(32));
-    assert_eq!(normalized.trailers.as_ref().unwrap()[0].url.len(), 2_048);
     let episodes = normalized.episodes.expect("episodes");
     assert_eq!(episodes.len(), 2);
     assert_eq!(episodes[0].id.len(), 256);

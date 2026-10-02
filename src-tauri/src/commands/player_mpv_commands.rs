@@ -2,14 +2,15 @@
 //! let any in-webview script issue the full mpv command language (`run`/`subprocess`,
 //! `screenshot`/`screenshot-to-file` file writes, `loadfile` of arbitrary targets) and init mpv with
 //! unconstrained options (`script`, `include`, `wid`). These commands expose
-//! only the verbs, properties, and init-option keys the player UI uses;
-//! destroy and video-margin stay on the plugin's permissions since they
-//! carry no OS-level surface.
+//! only the verbs and properties the player UI uses, bound to the invoking window.
 
+use super::history_helpers::is_near_completion_watch_progress;
+use super::language::build_mpv_language_selection_options;
 use serde::Serialize;
 use serde_json::Value;
+use std::sync::{Arc, LazyLock};
 use tauri::{command, AppHandle, Window};
-use tauri_plugin_libmpv::{MpvConfig, MpvExt};
+use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
 
 /// mpv verbs the UI is allowed to issue.
 const MPV_COMMANDS: &[&str] = &[
@@ -49,49 +50,160 @@ const MPV_READABLE_PROPERTIES: &[&str] = &[
 /// `get_property` formats the wrapper accepts.
 const MPV_PROPERTY_FORMATS: &[&str] = &["flag", "int64", "double", "string", "none", "native"];
 
-/// `initial_options` keys accepted at init — the set `buildPlayerMpvConfig`
-/// emits (player, cache, and language-selection options). An allowlist, not a
-/// denylist: `script`, `include`, or a caller-supplied `wid` must never cross
-/// from the webview.
-const MPV_INIT_OPTION_KEYS: &[&str] = &[
-    "vo",
-    "hwdec",
-    "gpu-api",
-    "gpu-context",
-    "keep-open",
-    "volume",
-    "pause",
-    "osc",
-    "osd-level",
-    "input-default-bindings",
-    "input-builtin-bindings",
-    "load-scripts",
-    "load-stats-overlay",
-    "load-console",
-    "load-commands",
-    "load-select",
-    "load-positioning",
-    "load-context-menu",
-    "load-auto-profiles",
-    "resume-playback",
-    "save-position-on-quit",
-    "ytdl",
-    "msg-level",
-    "cache",
-    "cache-secs",
-    "demuxer-max-bytes",
-    "demuxer-max-back-bytes",
-    "track-auto-selection",
-    "aid",
-    "alang",
-    "sid",
-    "slang",
-    "subs-fallback",
-];
-
 const MPV_COMMAND_MAX_ARGS: usize = 8;
 const MPV_ARG_MAX_CHARS: usize = 4096;
-const MPV_OBSERVED_PROPERTIES_MAX: usize = 64;
+static MPV_OP_GATE: LazyLock<Arc<tokio::sync::Mutex<()>>> =
+    LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+
+pub(crate) async fn run_mpv_op<T, F>(label: &'static str, operation: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let deadline = tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT;
+    let permit = tokio::time::timeout_at(deadline, Arc::clone(&MPV_OP_GATE).lock_owned())
+        .await
+        .map_err(|_| format!("mpv {label} timed out."))?;
+    let mut task = tauri::async_runtime::spawn_blocking(move || {
+        // A wedged native call retains the gate: later requests wait without
+        // occupying more blocking threads, even after the caller times out.
+        let _permit = permit;
+        operation()
+    });
+    match tokio::time::timeout_at(deadline, &mut task).await {
+        Ok(result) => result.map_err(|error| format!("mpv {label} failed: {error}"))?,
+        Err(_) => {
+            // Cancel queued work; running native work still owns the plugin
+            // mutex until it finishes, just as with the bounded store path.
+            task.abort();
+            Err(format!("mpv {label} timed out."))
+        }
+    }
+}
+
+fn validate_video_margins(ratio: &VideoMarginRatio) -> Result<(), String> {
+    if [ratio.left, ratio.right, ratio.top, ratio.bottom]
+        .into_iter()
+        .flatten()
+        .any(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+    {
+        return Err("mpv video margins must be finite ratios between 0 and 1".to_string());
+    }
+    Ok(())
+}
+
+#[command]
+pub async fn player_mpv_destroy(app: AppHandle, window: Window) -> Result<(), String> {
+    run_mpv_op("destroy", move || {
+        app.mpv()
+            .destroy(window.label())
+            .map_err(|error| format!("mpv destroy failed: {error}"))
+    })
+    .await
+}
+
+#[command]
+pub async fn player_mpv_set_video_margin_ratio(
+    app: AppHandle,
+    window: Window,
+    ratio: VideoMarginRatio,
+) -> Result<(), String> {
+    validate_video_margins(&ratio)?;
+    run_mpv_op("video margins", move || {
+        app.mpv()
+            .set_video_margin_ratio(ratio, window.label())
+            .map_err(|error| format!("mpv video margins failed: {error}"))
+    })
+    .await
+}
+
+/// Every option here must be verified against the bundled mpv build: the
+/// wrapper DLL wedges instead of erroring on unknown options. The plugin
+/// rejects structurally malformed config before the FFI call, but only
+/// verified names are safe to add.
+fn build_player_mpv_config(
+    initial_volume: f64,
+    initial_muted: bool,
+    start_paused: bool,
+    preferred_audio_language: Option<&str>,
+    preferred_subtitle_language: Option<&str>,
+) -> MpvConfig {
+    let mut config = MpvConfig {
+        initial_options: [
+            ("vo", "gpu-next"),
+            ("hwdec", "auto-safe"),
+            ("gpu-api", "d3d11"),
+            ("gpu-context", "d3d11"),
+            ("keep-open", "yes"),
+            ("osc", "no"),
+            ("osd-level", "0"),
+            ("input-default-bindings", "no"),
+            ("input-builtin-bindings", "no"),
+            ("load-scripts", "no"),
+            ("load-stats-overlay", "no"),
+            ("load-console", "no"),
+            ("load-commands", "no"),
+            ("load-select", "no"),
+            ("load-positioning", "no"),
+            ("load-context-menu", "no"),
+            ("load-auto-profiles", "no"),
+            ("resume-playback", "no"),
+            ("save-position-on-quit", "no"),
+            ("ytdl", "no"),
+            ("msg-level", "all=warn"),
+            ("cache", "auto"),
+            ("demuxer-max-bytes", "96MiB"),
+            ("demuxer-max-back-bytes", "24MiB"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), Value::String(value.to_string())))
+        .collect(),
+        // Per-frame position/cache events stay off; the lifecycle polls them.
+        observed_properties: [
+            ("pause", "flag"),
+            ("duration", "double"),
+            ("volume", "double"),
+            ("mute", "flag"),
+            ("eof-reached", "flag"),
+            ("idle-active", "flag"),
+            ("speed", "double"),
+            ("core-idle", "flag"),
+            ("paused-for-cache", "flag"),
+            ("current-tracks/audio/id", "int64"),
+            ("current-tracks/sub/id", "int64"),
+        ]
+        .into_iter()
+        .map(|(name, format)| (name.to_string(), format.to_string()))
+        .collect(),
+    };
+    // Webview input: a non-finite or out-of-range level would fail init outright.
+    let initial_volume = if initial_volume.is_finite() {
+        initial_volume.clamp(0.0, 100.0)
+    } else {
+        100.0
+    };
+    config.initial_options.insert(
+        "volume".to_string(),
+        Value::String(initial_volume.to_string()),
+    );
+    config.initial_options.insert(
+        "mute".to_string(),
+        Value::String(if initial_muted { "yes" } else { "no" }.to_string()),
+    );
+    config.initial_options.insert(
+        "pause".to_string(),
+        Value::String(if start_paused { "yes" } else { "no" }.to_string()),
+    );
+    config
+        .initial_options
+        .insert("cache-secs".to_string(), Value::from(12));
+    config.initial_options.extend(
+        build_mpv_language_selection_options(preferred_audio_language, preferred_subtitle_language)
+            .into_iter()
+            .map(|(key, value)| (key, Value::String(value))),
+    );
+    config
+}
 
 fn is_scalar_arg(value: &Value) -> bool {
     match value {
@@ -140,9 +252,12 @@ pub async fn player_mpv_command(
     if name == "set" && args.len() < 2 {
         return Err("mpv 'set' requires a property and value".to_string());
     }
-    app.mpv()
-        .command(&name, &args, window.label())
-        .map_err(|error| format!("mpv command '{name}' failed: {error}"))
+    run_mpv_op("command", move || {
+        app.mpv()
+            .command(&name, &args, window.label())
+            .map_err(|error| format!("mpv command '{name}' failed: {error}"))
+    })
+    .await
 }
 
 #[command]
@@ -160,9 +275,25 @@ pub async fn player_mpv_set_property(
             "mpv property '{name}' received an unsupported value"
         ));
     }
-    app.mpv()
-        .set_property(&name, &value, window.label())
-        .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+    run_mpv_op("set", move || {
+        app.mpv()
+            .set_property(&name, &value, window.label())
+            .or_else(|_| {
+                // Some mpv builds reject set_property; keep compatibility inside
+                // the validated native command rather than retrying over IPC.
+                let text = value
+                    .as_str()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| value.to_string());
+                app.mpv().command(
+                    "set",
+                    &vec![Value::String(name.clone()), Value::String(text)],
+                    window.label(),
+                )
+            })
+            .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+    })
+    .await
 }
 
 #[command]
@@ -177,9 +308,12 @@ pub async fn player_mpv_get_property(
     {
         return Err(format!("mpv property '{name}' is not readable"));
     }
-    app.mpv()
-        .get_property(name, format, window.label())
-        .map_err(|error| format!("mpv get failed: {error}"))
+    run_mpv_op("get", move || {
+        app.mpv()
+            .get_property(name, format, window.label())
+            .map_err(|error| format!("mpv get failed: {error}"))
+    })
+    .await
 }
 
 #[derive(Serialize)]
@@ -187,12 +321,19 @@ pub async fn player_mpv_get_property(
 pub struct PlaybackPositionProbe {
     time_pos: Option<f64>,
     buffered_ahead: Option<f64>,
+    near_completion: bool,
 }
 
-fn read_playback_position(get_property: impl Fn(&str) -> Option<Value>) -> PlaybackPositionProbe {
+fn read_playback_position(
+    duration_secs: f64,
+    get_property: impl Fn(&str) -> Option<Value>,
+) -> PlaybackPositionProbe {
+    let time_pos = get_property("time-pos").and_then(|value| value.as_f64());
     PlaybackPositionProbe {
-        time_pos: get_property("time-pos").and_then(|value| value.as_f64()),
+        time_pos,
         buffered_ahead: get_property("demuxer-cache-time").and_then(|value| value.as_f64()),
+        near_completion: time_pos
+            .is_some_and(|position| is_near_completion_watch_progress(position, duration_secs)),
     }
 }
 
@@ -200,55 +341,43 @@ fn read_playback_position(get_property: impl Fn(&str) -> Option<Value>) -> Playb
 pub async fn player_mpv_get_playback_position(
     app: AppHandle,
     window: Window,
+    duration_secs: f64,
 ) -> Result<PlaybackPositionProbe, String> {
     // One IPC per poll; synchronous native reads stay off the async executor.
-    // The timeout keeps a wedged plugin from pinning this polling IPC (and a
-    // blocking-pool thread) forever.
-    tokio::time::timeout(
-        super::BLOCKING_OP_TIMEOUT,
-        tauri::async_runtime::spawn_blocking(move || {
-            read_playback_position(|name| {
-                app.mpv()
-                    .get_property(name.to_string(), "double".to_string(), window.label())
-                    .ok()
-            })
-        }),
-    )
+    // A timeout releases IPC; an already-running native call cannot be stopped.
+    run_mpv_op("position probe", move || {
+        Ok(read_playback_position(duration_secs, |name| {
+            app.mpv()
+                .get_property(name.to_string(), "double".to_string(), window.label())
+                .ok()
+        }))
+    })
     .await
-    .map_err(|_| "mpv position probe timed out.".to_string())?
-    .map_err(|error| format!("mpv position probe failed: {error}"))
 }
 
 #[command]
 pub async fn player_mpv_init(
     app: AppHandle,
     window: Window,
-    mpv_config: MpvConfig,
+    initial_volume: f64,
+    initial_muted: bool,
+    start_paused: bool,
+    preferred_audio_language: Option<String>,
+    preferred_subtitle_language: Option<String>,
 ) -> Result<String, String> {
-    if let Some(key) = mpv_config
-        .initial_options
-        .keys()
-        .find(|key| !MPV_INIT_OPTION_KEYS.contains(&key.as_str()))
-    {
-        return Err(format!("mpv init option '{key}' is not allowed"));
-    }
-    if mpv_config
-        .initial_options
-        .values()
-        .any(|value| !is_scalar_arg(value))
-    {
-        return Err("mpv init options must be scalar values".to_string());
-    }
-    if mpv_config.observed_properties.len() > MPV_OBSERVED_PROPERTIES_MAX
-        || mpv_config.observed_properties.iter().any(|(name, format)| {
-            name.len() > 256 || !MPV_PROPERTY_FORMATS.contains(&format.as_str())
-        })
-    {
-        return Err("mpv observed properties are not allowed".to_string());
-    }
-    app.mpv()
-        .init(mpv_config, window.label())
-        .map_err(|error| format!("mpv init failed: {error}"))
+    let mpv_config = build_player_mpv_config(
+        initial_volume,
+        initial_muted,
+        start_paused,
+        preferred_audio_language.as_deref(),
+        preferred_subtitle_language.as_deref(),
+    );
+    run_mpv_op("init", move || {
+        app.mpv()
+            .init(mpv_config, window.label())
+            .map_err(|error| format!("mpv init failed: {error}"))
+    })
+    .await
 }
 
 #[cfg(test)]

@@ -123,7 +123,11 @@ impl SkipTimesProvider {
         super::ensure_rustls_crypto_provider();
         Self {
             client: Client::builder()
-                .user_agent("Stremiro/0.4 (+https://github.com/stremiro/stremiro)")
+                .user_agent(concat!(
+                    "Stremiro/",
+                    env!("CARGO_PKG_VERSION"),
+                    " (+https://github.com/stremiro/stremiro)"
+                ))
                 .redirect(super::fetch_policy::ssrf_redirect_policy())
                 .connect_timeout(Duration::from_secs(8))
                 .timeout(Duration::from_secs(15))

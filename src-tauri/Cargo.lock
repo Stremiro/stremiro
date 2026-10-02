@@ -3683,7 +3683,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "stremiro"
-version = "0.5.1-alpha"
+version = "0.6.0-alpha"
 dependencies = [
  "futures-util",
  "regex",
@@ -4079,10 +4079,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-libmpv"
 version = "0.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "447798aec64877a1e476c2ebc2360a8374740ccf32fdc31949e4942e3fef903e"
 dependencies = [
- "base64 0.22.1",
  "indexmap 2.14.2",
  "libc",
  "libloading 0.8.9",

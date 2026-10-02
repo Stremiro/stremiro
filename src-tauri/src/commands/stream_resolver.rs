@@ -1,4 +1,4 @@
-use super::streaming_helpers::{infer_stream_mime, normalize_http_url};
+use super::streaming_helpers::infer_stream_mime;
 use crate::providers::addons::sanitize_addon_log;
 use crate::providers::fetch_policy::MAX_REDIRECT_HOPS;
 use serde::Serialize;
@@ -28,9 +28,9 @@ static REDIRECT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 pub struct ResolvedStream {
     pub url: String,
     pub format: String,
-    /// Bounded `proxyHeaders.request` entries for header-gated CDN playback.
+    /// mpv string-list encoding of the final origin's bounded request headers.
     /// Secrets: never log or persist. Serialized for in-memory player use only.
-    pub request_headers: Vec<(String, String)>,
+    pub mpv_http_header_fields: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,9 +50,67 @@ pub struct BestResolvedStream {
     /// failover this names the actual stream, not the requested one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_key: Option<String>,
-    /// Bounded `proxyHeaders.request` entries for header-gated CDN playback.
+    /// mpv string-list encoding of the final origin's bounded request headers.
     /// Secrets: never log or persist. Serialized for in-memory player use only.
-    pub request_headers: Vec<(String, String)>,
+    pub mpv_http_header_fields: String,
+}
+
+/// Why `resolve_best_stream` produced no winner. The frontend picks its
+/// guidance from `kind`; `message` is display text only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ResolveStreamErrorKind {
+    NoStreams,
+    NoDirectUrl,
+    RateLimited,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ResolveStreamError {
+    pub kind: ResolveStreamErrorKind,
+    pub message: String,
+}
+
+impl ResolveStreamError {
+    pub(crate) fn new(kind: ResolveStreamErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for ResolveStreamError {
+    fn from(message: String) -> Self {
+        Self::new(ResolveStreamErrorKind::Failed, message)
+    }
+}
+
+/// One candidate probe failure. `rate_limited` is set from the HTTP status
+/// where the probe saw one, so callers never sniff the message text.
+#[derive(Debug)]
+pub(crate) struct ProbeError {
+    pub message: String,
+    pub rate_limited: bool,
+}
+
+impl ProbeError {
+    fn status(message: String, status: u16) -> Self {
+        Self {
+            message,
+            rate_limited: status == reqwest::StatusCode::TOO_MANY_REQUESTS.as_u16(),
+        }
+    }
+}
+
+impl From<String> for ProbeError {
+    fn from(message: String) -> Self {
+        Self {
+            message,
+            rate_limited: false,
+        }
+    }
 }
 
 /// Probing is advisory: these statuses mean the server refuses the probe
@@ -114,13 +172,8 @@ async fn follow_redirect_hop(
     loop {
         if !current.status().is_redirection() {
             let status = current.status();
-            if status.is_success() || status == reqwest::StatusCode::PARTIAL_CONTENT {
-                // Only the landed URL is needed downstream: drop the response
-                // (headers + unread body) so the pooled connection can be
-                // reused instead of forcing a fresh TLS handshake per probe.
-                let landed = current.url().to_string();
-                drop(current);
-                return Ok(ProbeLanding::Landed(landed));
+            if status.is_success() {
+                return Ok(ProbeLanding::Landed(current.url().to_string()));
             }
             return Ok(ProbeLanding::TerminalStatus(status.as_u16()));
         }
@@ -135,8 +188,6 @@ async fn follow_redirect_hop(
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
-        // Drop headers + unread body before the next hop so the pooled
-        // connection is reusable.
         drop(current);
         let Some(location) = location else {
             return Ok(ProbeLanding::DeadEnd);
@@ -170,12 +221,14 @@ async fn follow_redirect_hop(
 async fn resolve_final_direct_url(
     direct_url: &str,
     request_headers: &[(String, String)],
-) -> Result<String, String> {
+) -> Result<String, ProbeError> {
     // Validate before any network probe: the shared client would otherwise
     // issue a HEAD/GET to a private/userinfo target before the landed-URL
     // recheck runs. Same gate as subtitles/external URLs.
     if !crate::providers::addon_resource::is_fetchable_http_url(direct_url) {
-        return Err("Direct stream URL is blocked by fetch policy.".to_string());
+        return Err("Direct stream URL is blocked by fetch policy."
+            .to_string()
+            .into());
     }
     let client = &*REDIRECT_CLIENT;
     // Header-gated CDNs answer probes only with their required headers: send
@@ -201,30 +254,34 @@ async fn resolve_final_direct_url(
                 ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
                     Ok(direct_url.to_string())
                 }
-                ProbeLanding::TerminalStatus(status) => {
-                    Err(format!("HEAD redirect chain ended with HTTP {status}"))
-                }
-                ProbeLanding::DeadEnd => {
-                    Err("HEAD redirect chain had no followable target.".to_string())
-                }
+                ProbeLanding::TerminalStatus(status) => Err(ProbeError::status(
+                    format!("HEAD redirect chain ended with HTTP {status}"),
+                    status,
+                )),
+                ProbeLanding::DeadEnd => Err("HEAD redirect chain had no followable target."
+                    .to_string()
+                    .into()),
             };
         }
         Ok(resp) if resp.status().is_success() => {
             return Ok(initial.to_string());
         }
-        Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => {
-            // HEAD-only advisory (auth/405/416): the range GET below still
-            // runs authoritatively, but its error context starts here.
-            format!("HEAD probe returned HTTP {}", resp.status().as_u16())
-        }
-        Ok(resp) => format!("HEAD probe returned HTTP {}", resp.status().as_u16()),
+        // A HEAD-only advisory (auth/405/416) or hard status: the range GET
+        // below still runs authoritatively, but its error context starts here.
+        Ok(resp) => ProbeError::status(
+            format!("HEAD probe returned HTTP {}", resp.status().as_u16()),
+            resp.status().as_u16(),
+        ),
         // reqwest errors embed the full request URL, which may carry a
         // signed token: redact before surfacing via IPC.
         Err(error) => format!(
             "HEAD probe failed: {}",
             sanitize_addon_log(&error.to_string())
-        ),
+        )
+        .into(),
     };
+    let head_rate_limited = head_error.rate_limited;
+    let head_error = head_error.message;
 
     match client
         .get(direct_url)
@@ -243,22 +300,17 @@ async fn resolve_final_direct_url(
                 ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
                     Ok(direct_url.to_string())
                 }
-                ProbeLanding::TerminalStatus(status) => Err(format!(
-                    "{}; redirect chain ended with HTTP {}",
-                    head_error, status
+                ProbeLanding::TerminalStatus(status) => Err(ProbeError::status(
+                    format!("{head_error}; redirect chain ended with HTTP {status}"),
+                    status,
                 )),
-                ProbeLanding::DeadEnd => Err(format!(
-                    "{}; redirect chain had no followable target",
-                    head_error
-                )),
+                ProbeLanding::DeadEnd => Err(ProbeError {
+                    message: format!("{head_error}; redirect chain had no followable target"),
+                    rate_limited: head_rate_limited,
+                }),
             }
         }
-        Ok(resp)
-            if resp.status().is_success()
-                || resp.status() == reqwest::StatusCode::PARTIAL_CONTENT =>
-        {
-            Ok(initial.to_string())
-        }
+        Ok(resp) if resp.status().is_success() => Ok(initial.to_string()),
         // The range GET is authoritative: it exercises the real resource
         // path, so only its own advisory statuses pass through. A HEAD-only
         // advisory never overrides a hard GET failure; dead links still
@@ -268,17 +320,33 @@ async fn resolve_final_direct_url(
             // range-incompatible direct stream: let libmpv attempt it.
             Ok(direct_url.to_string())
         }
-        Ok(resp) => Err(format!(
-            "{}; range probe returned HTTP {}",
-            head_error,
-            resp.status().as_u16()
-        )),
-        Err(error) => Err(format!(
-            "{}; range probe failed: {}",
-            head_error,
-            sanitize_addon_log(&error.to_string())
-        )),
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            Err(ProbeError::status(
+                format!("{head_error}; range probe returned HTTP {status}"),
+                status,
+            ))
+        }
+        Err(error) => Err(ProbeError {
+            message: format!(
+                "{}; range probe failed: {}",
+                head_error,
+                sanitize_addon_log(&error.to_string())
+            ),
+            rate_limited: head_rate_limited,
+        }),
     }
+}
+
+fn format_mpv_http_header_fields(headers: &[(String, String)]) -> String {
+    // Ingress already trims, validates, and bounds these headers. mpv's
+    // string-list uses comma separators and backslash escaping.
+    let escape = |value: &str| value.replace('\\', "\\\\").replace(',', "\\,");
+    headers
+        .iter()
+        .map(|(name, value)| format!("{}: {}", escape(name), escape(value)))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 fn build_resolved_direct_stream(
@@ -299,47 +367,35 @@ fn build_resolved_direct_stream(
     Ok(ResolvedStream {
         format: infer_stream_mime(&final_url).to_string(),
         url: final_url,
-        request_headers,
+        mpv_http_header_fields: format_mpv_http_header_fields(&request_headers),
     })
 }
 
-/// Matches resolver failures where the addon did not supply a playable URL.
-/// Callers use this to aggregate per-source diagnostics instead of treating
-/// each one as an unexpected error.
-pub(crate) fn is_unresolvable_source_error(message: &str) -> bool {
-    let lower = message.to_ascii_lowercase();
-    lower.contains("no direct playback url") || lower.contains("direct-link")
-}
-
-pub(crate) fn missing_direct_url_message() -> &'static str {
-    "This stream has no direct playback URL. Use a source addon that returns direct-link streams for this content."
-}
+pub(crate) const MISSING_DIRECT_URL_MESSAGE: &str = "This stream has no direct playback URL. Use a source addon that returns direct-link streams for this content.";
 
 pub(crate) struct ResolveStreamParams {
-    pub(crate) url: Option<String>,
+    /// Canonical `http(s)` URL that already passed the fetchable-URL gate
+    /// (`build_candidate_input`); the probe re-checks it before any request.
+    pub(crate) url: String,
     /// Bounded `proxyHeaders.request` entries from the addon's behavior
     /// hints. Secrets: never log or persist.
     pub(crate) request_headers: Vec<(String, String)>,
 }
 
-/// Resolve an addon-supplied stream to a playable URL.
-///
-/// Addons are the sole source of playback URLs: a direct `http(s)` URL is
-/// followed through redirects and returned, while anything else (info hashes,
-/// magnet links, or missing URLs) is reported explicitly so the caller can
-/// try the next candidate or tell the user to use a direct-link addon.
+/// Resolve an addon-supplied direct stream URL to its playable landing URL,
+/// following redirects under the fetch policy.
 pub(crate) async fn resolve_stream_inner(
     params: ResolveStreamParams,
-) -> Result<ResolvedStream, String> {
-    if let Some(direct_url) = params.url.and_then(|value| normalize_http_url(&value)) {
-        let final_url = resolve_final_direct_url(&direct_url, &params.request_headers)
-            .await
-            .map_err(|error| format!("Direct stream validation failed: {}", error))?;
+) -> Result<ResolvedStream, ProbeError> {
+    let final_url = resolve_final_direct_url(&params.url, &params.request_headers)
+        .await
+        .map_err(|error| ProbeError {
+            message: format!("Direct stream validation failed: {}", error.message),
+            rate_limited: error.rate_limited,
+        })?;
 
-        return build_resolved_direct_stream(&direct_url, final_url, params.request_headers);
-    }
-
-    Err(missing_direct_url_message().to_string())
+    build_resolved_direct_stream(&params.url, final_url, params.request_headers)
+        .map_err(ProbeError::from)
 }
 
 #[cfg(test)]

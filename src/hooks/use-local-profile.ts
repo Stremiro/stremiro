@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useMemo } from 'react';
+import { useCallback } from 'react';
 
 import {
   type AccentTargets,
@@ -11,7 +11,6 @@ import {
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 import { registerPendingAppWriteFlusher, settlePendingAppWrites } from '@/lib/pending-app-writes';
 import { PROFILE_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
-import { HEX_COLOR_PATTERN } from '@/lib/utils';
 
 export type { AccentTargets, LocalProfile, ProfileViewMode };
 
@@ -19,14 +18,9 @@ export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets'>> & 
   accentTargets?: Partial<AccentTargets>;
 };
 
-const PROFILE_NAME_MAX_LENGTH = 32;
-const PROFILE_ACCENT_INTENSITY_DEFAULT = 100;
-// Mirrors Rust `normalize_profile_avatar` (prefix allowlist + size cap).
-const PROFILE_AVATAR_MAX_LENGTH = 512 * 1024;
-const PROFILE_AVATAR_PATTERN = /^data:image\/(?:webp|png|jpeg);base64,[A-Za-z0-9+/=]+$/;
 const pendingProfileWrites = new Set<Promise<void>>();
 
-export async function flushPendingProfilePreferences(): Promise<void> {
+async function flushPendingProfilePreferences(): Promise<void> {
   await settlePendingAppWrites(pendingProfileWrites);
 }
 registerPendingAppWriteFlusher(flushPendingProfilePreferences);
@@ -41,7 +35,7 @@ const DEFAULT_ACCENT_TARGETS: AccentTargets = {
 const DEFAULT_PROFILE: LocalProfile = {
   username: 'Guest User',
   accentColor: '#ffffff',
-  accentIntensity: PROFILE_ACCENT_INTENSITY_DEFAULT,
+  accentIntensity: 100,
   accentTargets: DEFAULT_ACCENT_TARGETS,
 };
 
@@ -50,74 +44,9 @@ const DEFAULT_PROFILE_PREFERENCES: ProfilePreferences = {
   viewMode: 'grid',
 };
 
-function sanitizeProfile(value: unknown): LocalProfile {
-  const raw =
-    typeof value === 'object' && value !== null
-      ? (value as Partial<Record<keyof LocalProfile, unknown>>)
-      : {};
-
-  const username =
-    typeof raw.username === 'string' && raw.username.trim().length > 0
-      ? raw.username.trim().slice(0, PROFILE_NAME_MAX_LENGTH)
-      : DEFAULT_PROFILE.username;
-  const avatar =
-    typeof raw.avatar === 'string' &&
-    raw.avatar.length <= PROFILE_AVATAR_MAX_LENGTH &&
-    PROFILE_AVATAR_PATTERN.test(raw.avatar)
-      ? raw.avatar
-      : undefined;
-
-  return {
-    username,
-    ...sanitizeProfileAccent(raw),
-    ...(avatar ? { avatar } : {}),
-  };
-}
-
-function sanitizeProfileAccent(raw: Partial<Record<keyof LocalProfile, unknown>>) {
-  return {
-    accentColor:
-      typeof raw.accentColor === 'string' && HEX_COLOR_PATTERN.test(raw.accentColor.trim())
-        ? raw.accentColor.trim().toLowerCase()
-        : DEFAULT_PROFILE.accentColor,
-    accentIntensity:
-      typeof raw.accentIntensity === 'number' && Number.isFinite(raw.accentIntensity)
-        ? Math.max(0, Math.min(100, Math.round(raw.accentIntensity)))
-        : DEFAULT_PROFILE.accentIntensity,
-    accentTargets: sanitizeAccentTargets(raw.accentTargets),
-  };
-}
-
-function sanitizeAccentTargets(value: unknown): AccentTargets {
-  const raw =
-    typeof value === 'object' && value !== null
-      ? (value as Partial<Record<keyof AccentTargets, unknown>>)
-      : {};
-  return {
-    navigation: typeof raw.navigation === 'boolean' ? raw.navigation : true,
-    actions: typeof raw.actions === 'boolean' ? raw.actions : true,
-    progress: typeof raw.progress === 'boolean' ? raw.progress : true,
-    artwork: typeof raw.artwork === 'boolean' ? raw.artwork : true,
-  };
-}
-
-function sanitizeViewMode(value: unknown): ProfileViewMode {
-  return value === 'list' ? 'list' : 'grid';
-}
-
-function sanitizeProfilePreferences(value: unknown): ProfilePreferences {
-  const raw =
-    typeof value === 'object' && value !== null
-      ? (value as Partial<Record<keyof ProfilePreferences, unknown>>)
-      : {};
-
-  return {
-    profile: sanitizeProfile(raw.profile),
-    viewMode: sanitizeViewMode(raw.viewMode),
-  };
-}
-
-function useProfilePreferencesQuery<T>(select?: (preferences: ProfilePreferences) => T) {
+function useProfilePreferencesQuery<T = ProfilePreferences>(
+  select?: (preferences: ProfilePreferences) => T,
+) {
   return useQuery({
     queryKey: PROFILE_PREFERENCES_QUERY_KEY,
     queryFn: api.getProfilePreferences,
@@ -128,8 +57,11 @@ function useProfilePreferencesQuery<T>(select?: (preferences: ProfilePreferences
   });
 }
 
-const selectProfileAccent = (preferences: ProfilePreferences) =>
-  sanitizeProfileAccent(preferences.profile ?? {});
+const selectProfileAccent = ({ profile }: ProfilePreferences) => ({
+  accentColor: profile.accentColor,
+  accentIntensity: profile.accentIntensity,
+  accentTargets: profile.accentTargets,
+});
 
 const FALLBACK_PROFILE_ACCENT: ReturnType<typeof selectProfileAccent> = {
   accentColor: DEFAULT_PROFILE.accentColor,
@@ -145,7 +77,7 @@ export function useProfileAccent(): ReturnType<typeof selectProfileAccent> {
 }
 
 const selectProfileAvatar = (preferences: ProfilePreferences) => {
-  const { username, avatar } = sanitizeProfile(preferences.profile);
+  const { username, avatar } = preferences.profile;
   return { username, avatar };
 };
 
@@ -165,12 +97,7 @@ export function useLocalProfile() {
   });
   const { mutateAsync: saveProfilePrefs } = savePreferencesMutation;
 
-  // Memoized: a fresh preferences/profile object per render defeats memo()
-  // on consumers like MediaCard (onToggleLibrary) and profile consumers.
-  const currentPreferences = useMemo(
-    () => sanitizeProfilePreferences(profilePreferencesQuery.data ?? DEFAULT_PROFILE_PREFERENCES),
-    [profilePreferencesQuery.data],
-  );
+  const currentPreferences = profilePreferencesQuery.data ?? DEFAULT_PROFILE_PREFERENCES;
 
   const persistPreferences = useCallback(
     (update: (preferences: ProfilePreferences) => ProfilePreferences) => {
@@ -181,16 +108,16 @@ export function useLocalProfile() {
           queryKey: PROFILE_PREFERENCES_QUERY_KEY,
           queryFn: api.getProfilePreferences,
         });
-        const latest = sanitizeProfilePreferences(
-          queryClient.getQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY),
-        );
-        const sanitized = sanitizeProfilePreferences(update(latest));
+        const latest =
+          queryClient.getQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY) ??
+          DEFAULT_PROFILE_PREFERENCES;
+        const preferences = update(latest);
         await runOptimisticQueryMutation({
           mutate: saveProfilePrefs,
-          optimisticData: sanitized,
+          optimisticData: preferences,
           queryClient,
           queryKey: PROFILE_PREFERENCES_QUERY_KEY,
-          variables: sanitized,
+          variables: preferences,
         });
       })();
       // Track hydration too: a backup can start before the IPC write is queued.

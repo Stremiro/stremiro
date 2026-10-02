@@ -14,6 +14,10 @@ app bundles no content sources of its own.
 
 Streams resolve only from addon-supplied direct http(s) sources.
 
+The Rust libmpv plugin uses a local 0.3.2 safety patch in
+`src-tauri/vendor/tauri-plugin-libmpv`; see `PATCHES.md` there for provenance
+and lifecycle fixes. The JavaScript package and native DLL ABI remain 0.3.2.
+
 ## Development
 
 Requires [Bun](https://bun.sh) and the pinned Rust toolchain

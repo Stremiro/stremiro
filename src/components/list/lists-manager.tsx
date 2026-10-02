@@ -29,7 +29,7 @@ import {
   Tv,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useMemo, useState } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
@@ -405,20 +405,33 @@ function ListItemsView({ list }: { list: UserList }) {
 
   const sensors = useSortableSensors();
 
+  // The newest issued order owns cache writes and failure reverts: two
+  // in-flight saves can settle out of order, and a superseded response must
+  // neither roll the cache back nor stomp a newer drag's display order.
+  const latestReorderIdsRef = useRef<string[] | null>(null);
+
   const reorderItems = useMutation({
     mutationFn: (newIds: string[]) => api.reorderListItems(list.id, newIds),
     onSuccess: (_data, newIds) => {
       // Collapsing a list unmounts this view, and `orderedIds` re-initializes
       // from `list.item_ids` — mirror the saved order into the cached lists
       // so a collapse/re-expand doesn't snap back to the pre-drag order.
-      queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
-        lists?.map((entry) => (entry.id === list.id ? { ...entry, item_ids: newIds } : entry)),
-      );
+      if (latestReorderIdsRef.current === newIds) {
+        queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
+          lists?.map((entry) => (entry.id === list.id ? { ...entry, item_ids: newIds } : entry)),
+        );
+      }
       void invalidateListQueries(queryClient);
     },
-    onError: () => {
-      // Revert display order to whatever the server currently has
-      setOrderedIds(list.item_ids);
+    onError: (_error, newIds) => {
+      // Revert display order to the freshest persisted order, read from the
+      // cache rather than the render-stale `list` prop.
+      if (latestReorderIdsRef.current === newIds) {
+        const persisted = queryClient
+          .getQueryData<UserList[]>(LISTS_QUERY_KEY)
+          ?.find((entry) => entry.id === list.id)?.item_ids;
+        setOrderedIds(persisted ?? list.item_ids);
+      }
       void invalidateListQueries(queryClient);
       toast.error('Failed to save order');
     },
@@ -455,6 +468,7 @@ function ListItemsView({ list }: { list: UserList }) {
 
       const next = arrayMove(current, oldIndex, newIndex);
       setOrderedIds(next);
+      latestReorderIdsRef.current = next;
       reorderItems.mutate(next);
     },
     [list.id, orderedIds, reorderItems],
@@ -699,6 +713,10 @@ export function ListsManager() {
       setDeleteTarget(list);
       return;
     }
+    // Empty lists delete without the dialog — gate repeat clicks on the
+    // in-flight delete for this list, or a double-click issues a second
+    // request that fails after the first already removed it.
+    if (deleteList.isPending && deleteList.variables === list.id) return;
     deleteList.mutate(list.id);
   };
 
