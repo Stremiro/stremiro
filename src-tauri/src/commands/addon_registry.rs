@@ -2,6 +2,7 @@ use super::config_store::{
     addon_configs_generation, load_addon_configs, AddonConfig, DEFAULT_CINEMETA_INSTALL_URL,
     DEFAULT_OPENSUBTITLES_INSTALL_URL,
 };
+use super::media_normalization::{normalize_media_details, normalize_media_item};
 use super::SETTINGS_STORE_FILE;
 use crate::providers::addon_manifest::snapshot_is_classified;
 use crate::providers::addon_resource::{
@@ -433,6 +434,7 @@ async fn run_catalog_work_pool(
                     &item.media_type,
                     &item.catalog_id,
                     &item.extras,
+                    normalize_media_item,
                 )
                 .await;
             (item.group, item.order, result)
@@ -586,16 +588,12 @@ pub async fn fetch_meta_details(
     client: &AddonResourceClient,
     type_: &str,
     id: &str,
-    include_episodes: bool,
-) -> Result<MediaDetails, String> {
-    let mut targets = load_enabled_addons_snapshot(app)
-        .await?
+) -> Result<Arc<MediaDetails>, String> {
+    let snapshot = load_enabled_addons_snapshot(app).await?;
+    let mut targets = snapshot
         .iter()
         .filter(|addon| addon_allows_meta(addon, type_, id))
-        .take(MAX_CATALOG_SOURCES)
-        .cloned()
-        .collect::<Vec<_>>()
-        .into_iter();
+        .take(MAX_CATALOG_SOURCES);
 
     let Some(first) = targets.next() else {
         return Err(format!(
@@ -604,19 +602,17 @@ pub async fn fetch_meta_details(
     };
 
     type MetaFetch<'a> = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<MediaDetails, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<Arc<MediaDetails>, String>> + Send + 'a>,
     >;
-    let make_fetch = |addon: AddonConfig| -> MetaFetch<'_> {
-        let type_ = type_.to_string();
-        let id = id.to_string();
-        Box::pin(async move {
-            client
-                .fetch_meta(&addon.url, &type_, &id, include_episodes)
-                .await
-        })
+    let make_fetch = |url| -> MetaFetch<'_> {
+        Box::pin(client.fetch_meta(url, type_, id, |details| {
+            // Keep the addon's identity in the shared payload; request aliases are applied after it.
+            let addon_id = details.id.clone();
+            normalize_media_details(details, &addon_id)
+        }))
     };
 
-    let mut first_fetch = make_fetch(first);
+    let mut first_fetch = make_fetch(first.url.as_str());
     let hedge = tokio::time::sleep(META_HEDGE_DELAY);
     tokio::pin!(hedge);
 
@@ -640,7 +636,11 @@ pub async fn fetch_meta_details(
     // META_FALLBACK_GRACE window — a dead primary holds a live fallback for
     // the grace, not its full request timeout.
     type RankedMetaFetch<'a> = std::pin::Pin<
-        Box<dyn std::future::Future<Output = (usize, Result<MediaDetails, String>)> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = (usize, Result<Arc<MediaDetails>, String>)>
+                + Send
+                + 'a,
+        >,
     >;
     let mut outcomes = futures_util::stream::FuturesUnordered::<RankedMetaFetch<'_>>::new();
     let mut pending = HashSet::new();
@@ -656,10 +656,12 @@ pub async fn fetch_meta_details(
         // it only borrows `client` for the function's own scope.
         let make_fetch = &make_fetch;
         pending.insert(index);
-        outcomes.push(Box::pin(async move { (index, make_fetch(addon).await) }));
+        outcomes.push(Box::pin(async move {
+            (index, make_fetch(addon.url.as_str()).await)
+        }));
     }
 
-    let mut best_ok: Option<(usize, MediaDetails)> = None;
+    let mut best_ok: Option<(usize, Arc<MediaDetails>)> = None;
     let mut errors: Vec<(usize, String)> = Vec::new();
     if let Some(error) = first_error {
         errors.push((0, error));
@@ -670,6 +672,9 @@ pub async fn fetch_meta_details(
         // Copy for the async-move branch so the select handler can re-arm.
         let deadline = grace_deadline;
         tokio::select! {
+            // A result landing as the grace expires must win: the deadline
+            // only matters when nothing better is ready.
+            biased;
             next = outcomes.next() => {
                 let Some((index, result)) = next else { break };
                 pending.remove(&index);
@@ -736,30 +741,26 @@ pub async fn fetch_addon_subtitles(
     type_: &str,
     id: &str,
 ) -> Result<Vec<SourcedAddonSubtitle>, String> {
-    let targets: Vec<AddonConfig> = load_enabled_addons_snapshot(app)
-        .await?
+    let snapshot = load_enabled_addons_snapshot(app).await?;
+    let requests: Vec<_> = snapshot
         .iter()
         .filter(|addon| addon_allows_subtitles(addon, type_, id))
         .take(MAX_SUBTITLE_SOURCES)
-        .cloned()
+        .enumerate()
+        .map(|(index, addon)| async move {
+            let result = client.fetch_subtitles(&addon.url, type_, id).await;
+            (index, addon, result)
+        })
         .collect();
 
-    if targets.is_empty() {
+    if requests.is_empty() {
         return Err(format!(
             "No enabled addon declares subtitle support for {type_}/{id}. Ensure OpenSubtitles ({DEFAULT_OPENSUBTITLES_INSTALL_URL}) or another subtitle addon is enabled in Settings → Streaming."
         ));
     }
 
     let mut outcomes = collect_with_deadline(
-        stream::iter(targets.into_iter().enumerate().map(|(index, addon)| {
-            let type_ = type_.to_string();
-            let id = id.to_string();
-            async move {
-                let result = client.fetch_subtitles(&addon.url, &type_, &id).await;
-                (index, addon, result)
-            }
-        }))
-        .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
+        stream::iter(requests).buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
         RESOURCE_STRAGGLER_GRACE,
         |(_, _, result)| result.is_ok(),
     )
@@ -776,7 +777,7 @@ pub async fn fetch_addon_subtitles(
             Ok(items) => {
                 had_success = true;
                 for item in items.into_iter().take(MAX_SUBTITLES_PER_ADDON) {
-                    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, item);
+                    add_subtitle_if_unique(&mut subtitles, &mut seen, addon, item);
                     if subtitles.len() >= MAX_SUBTITLES_TOTAL {
                         break;
                     }

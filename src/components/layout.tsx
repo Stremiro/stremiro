@@ -1,13 +1,76 @@
-import { useLayoutEffect } from 'react';
-import { Outlet } from 'react-router';
+import { Component, useLayoutEffect, type ReactNode } from 'react';
+import { Outlet, useLocation } from 'react-router';
+import { Button } from '@/components/ui/button';
 import { useBrowseHotkeys } from '@/hooks/use-browse-hotkeys';
 import { useProfileAccent } from '@/hooks/use-local-profile';
+import { navigateApp } from '@/lib/navigation';
 import { clamp, getAccentTextColor, hexToRgbTriplet } from '@/lib/utils';
 import { DesktopTitlebar } from './desktop-titlebar';
 import { Sidebar } from './sidebar';
 
 // Soft neutral rendered in place of the accent on surfaces the user opted out.
 const NEUTRAL_ACCENT = '#d4d4d8';
+
+// A route render crash must not unmount the tree above it — PlayerHost and
+// the docked mini player live outside the outlet. Contain the failure to
+// the page; navigation resets the boundary via the location key.
+class RouteErrorBoundary extends Component<
+  { resetKey: string; children: ReactNode },
+  { hasError: boolean; resetKey: string }
+> {
+  state = { hasError: false, resetKey: this.props.resetKey };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { hasError: boolean; resetKey: string },
+  ) {
+    if (props.resetKey === state.resetKey) return null;
+    return { resetKey: props.resetKey, hasError: false };
+  }
+
+  componentDidCatch(error: unknown) {
+    if (import.meta.env.DEV) console.error('[route] render error', error);
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          role='alert'
+          className='flex min-h-[60vh] w-full flex-col items-center justify-center gap-4 px-6 text-center'
+        >
+          <div className='flex flex-col items-center gap-1.5'>
+            <p className='text-lg font-semibold text-white'>This page couldn't be displayed.</p>
+            <p className='text-sm text-white/50'>
+              Playback and the rest of the app are unaffected.
+            </p>
+          </div>
+          <div className='flex items-center gap-3'>
+            <Button onClick={() => this.setState({ hasError: false })}>Try again</Button>
+            <Button variant='outline' onClick={() => navigateApp('/')}>
+              Go home
+            </Button>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
+
+function RouteOutlet() {
+  const { key } = useLocation();
+  return (
+    <RouteErrorBoundary resetKey={key}>
+      <Outlet />
+    </RouteErrorBoundary>
+  );
+}
 
 export function Layout() {
   const { accentColor: accent, accentIntensity, accentTargets } = useProfileAccent();
@@ -67,21 +130,23 @@ export function Layout() {
           ambient-activity cue can drift them independently — the top-left
           shimmers while the bottom-right marches like a loading bar. */}
         <div
-          className='ambient-dots-tl absolute inset-0'
+          // Slack past the viewport lets the composited drift translate land
+          // without exposing an unpainted edge (see ambient-dots keyframes).
+          className='ambient-dots-tl absolute -inset-2'
           style={{
-            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 1px, transparent 1.8px)`,
-            backgroundSize: '7px 7px',
-            maskImage: 'radial-gradient(55% 42% at 12% 0%, black 0%, transparent 68%)',
-            WebkitMaskImage: 'radial-gradient(55% 42% at 12% 0%, black 0%, transparent 68%)',
+            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.008 * var(--app-glow))) 1px, transparent 1.9px)`,
+            backgroundSize: '8px 8px',
+            maskImage: 'radial-gradient(38% 28% at 8% 0%, black 0%, transparent 55%)',
+            WebkitMaskImage: 'radial-gradient(38% 28% at 8% 0%, black 0%, transparent 55%)',
           }}
         />
         <div
-          className='ambient-dots-br absolute inset-0'
+          className='ambient-dots-br absolute inset-y-0 -inset-x-7'
           style={{
-            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 1px, transparent 1.8px)`,
-            backgroundSize: '7px 7px',
-            maskImage: 'radial-gradient(26% 18% at 98% 118%, black 0%, transparent 46%)',
-            WebkitMaskImage: 'radial-gradient(26% 18% at 98% 118%, black 0%, transparent 46%)',
+            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.008 * var(--app-glow))) 1px, transparent 1.9px)`,
+            backgroundSize: '8px 8px',
+            maskImage: 'radial-gradient(18% 12% at 99% 121%, black 0%, transparent 40%)',
+            WebkitMaskImage: 'radial-gradient(18% 12% at 99% 121%, black 0%, transparent 40%)',
           }}
         />
       </div>
@@ -101,7 +166,7 @@ export function Layout() {
           {/* Route pushes land keyboard focus here (see RouteScrollManager). */}
           <main id='app-main' tabIndex={-1} className='flex-1'>
             <div className='min-h-full'>
-              <Outlet />
+              <RouteOutlet />
             </div>
           </main>
         </div>

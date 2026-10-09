@@ -15,7 +15,7 @@ export function SettingsGroup({
   return (
     <section
       className={cn(
-        'overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.025]',
+        'overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.015]',
         className,
       )}
     >
@@ -34,11 +34,11 @@ export function SettingsGroupHeader({
   title: string;
 }) {
   return (
-    <div className='flex items-start justify-between gap-4 border-b border-white/[0.06] px-5 py-4'>
-      <div className='min-w-0'>
-        <h3 className='text-[15px] font-semibold tracking-tight text-white'>{title}</h3>
+    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4'>
+      <div className='min-w-0 flex-1 basis-48'>
+        <h2 className='text-[15px] font-medium tracking-tight text-white'>{title}</h2>
         {description ? (
-          <p className='mt-1 text-[13px] leading-relaxed text-zinc-500'>{description}</p>
+          <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>{description}</p>
         ) : null}
       </div>
       {action ? <div className='shrink-0'>{action}</div> : null}
@@ -62,11 +62,11 @@ export function SettingsRow({
   label: string;
 }) {
   return (
-    <label className={cn('flex items-center justify-between gap-6 cursor-pointer', className)}>
+    <label className={cn('flex items-center justify-between gap-4 cursor-pointer', className)}>
       <div className='min-w-0'>
         <span className='block text-[14px] font-medium text-zinc-100'>{label}</span>
         {description ? (
-          <span className='mt-0.5 block text-[12.5px] leading-relaxed text-zinc-500'>
+          <span className='mt-1 block text-[12.5px] leading-relaxed text-zinc-400'>
             {description}
           </span>
         ) : null}
@@ -97,7 +97,7 @@ export function SettingsSwitch({
       disabled={disabled}
       onClick={onChange}
       className={cn(
-        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/20',
+        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
         !checked && 'bg-zinc-800',
         disabled && 'cursor-not-allowed opacity-50',
       )}
@@ -105,7 +105,7 @@ export function SettingsSwitch({
     >
       <span
         className={cn(
-          'inline-block h-[18px] w-[18px] rounded-full transition-[translate,background-color] duration-200',
+          'inline-block h-[18px] w-[18px] rounded-full transition-[translate,background-color] duration-150 motion-reduce:transition-none',
           checked ? 'translate-x-[22px] bg-(--on-accent-act)' : 'translate-x-0.5 bg-zinc-400',
         )}
       />

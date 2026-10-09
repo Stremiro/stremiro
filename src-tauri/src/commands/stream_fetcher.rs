@@ -10,7 +10,7 @@ use super::stream_coordinator::{
 };
 use super::streaming_helpers::{
     build_addon_source_priority_map, build_stream_query_ids, merge_unique_streams,
-    normalize_source_id, normalize_source_key, prepare_addon_streams,
+    normalize_source_id, normalize_source_key, prepare_addon_streams, push_bounded_error,
 };
 use super::{
     normalize_media_id, normalize_non_empty, normalize_stream_media_type,
@@ -316,7 +316,7 @@ async fn fetch_prepared_streams_for_addon(
     provider: &AddonTransport,
     effective_type: &str,
     query_ids: &[String],
-    addon: &AddonFetchTarget,
+    addon: &AddonConfig,
 ) -> Result<Vec<AddonStream>, String> {
     let source_name = addon.name.as_str();
     let mut last_error: Option<String> = None;
@@ -383,6 +383,12 @@ async fn fetch_prepared_streams_for_addon(
                         field("timeout_secs", timeout_secs),
                     ],
                 );
+                if index == 0 {
+                    // The cooldown just recorded rejects every remaining
+                    // query id at the contract gate, and its message would
+                    // replace the timeout error — return the real failure.
+                    return Err(error);
+                }
                 last_error = Some(error);
             }
         }
@@ -502,42 +508,27 @@ impl SelectorFetchContext<'_> {
     }
 }
 
-/// The three `AddonConfig` fields the async fan-out needs — cloning the
-/// full config would drag the manifest capability snapshot into every
-/// per-addon future.
-struct AddonFetchTarget {
-    id: String,
-    name: String,
-    url: String,
-}
-
 async fn fetch_addon_stream_outcome(
     provider: &AddonTransport,
     effective_type: &str,
     query_ids: &[String],
-    addon: AddonFetchTarget,
+    addon: &AddonConfig,
 ) -> AddonStreamFetchOutcome {
     let started_at = Instant::now();
-    let result =
-        fetch_prepared_streams_for_addon(provider, effective_type, query_ids, &addon).await;
+    let result = fetch_prepared_streams_for_addon(provider, effective_type, query_ids, addon).await;
     // Exact cast: `min` caps the u128 at u64::MAX, so `as` cannot wrap.
     let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
-    match result {
-        Ok(streams) => AddonStreamFetchOutcome {
-            id: addon.id,
-            name: addon.name,
-            streams,
-            latency_ms,
-            error_message: None,
-        },
-        Err(error_message) => AddonStreamFetchOutcome {
-            id: addon.id,
-            name: addon.name,
-            streams: Vec::new(),
-            latency_ms,
-            error_message: Some(error_message),
-        },
+    let (streams, error_message) = match result {
+        Ok(streams) => (streams, None),
+        Err(error) => (Vec::new(), Some(error)),
+    };
+    AddonStreamFetchOutcome {
+        id: addon.id.clone(),
+        name: addon.name.clone(),
+        streams,
+        latency_ms,
+        error_message,
     }
 }
 
@@ -623,6 +614,9 @@ async fn ensure_stream_family_priorities(
 /// snapshot computed — `StreamPoolQuery::fetch_pool` reuses it for the
 /// episode-conflict retain so the pool gate and the ranker read one source
 /// of truth.
+///
+/// `fetch_budget` bounds the whole fan-out; `None` keeps the full per-addon
+/// budgets (selector and party matching, vs bounded resolve/recovery).
 pub(crate) async fn fetch_stream_selector_data(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -630,6 +624,7 @@ pub(crate) async fn fetch_stream_selector_data(
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
     progress: Option<&Channel<serde_json::Value>>,
+    fetch_budget: Option<Duration>,
 ) -> Result<(StreamSelectorData, bool), String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
 
@@ -688,22 +683,15 @@ pub(crate) async fn fetch_stream_selector_data(
         })
         .collect();
 
-    let prioritized_addons: Vec<(usize, AddonFetchTarget)> = stream_addons
+    // One "can query" view — the fetch targets and the source-priority map
+    // both derive from it, so the cooldown predicate runs once per addon.
+    let active_stream_addons: Vec<(usize, &AddonConfig)> = stream_addons
         .iter()
         .filter(|(_, _, priority)| *priority > ACTIVE_SOURCE_COOLDOWN_PRIORITY)
-        .map(|(index, addon, _)| {
-            (
-                *index,
-                AddonFetchTarget {
-                    id: addon.id.clone(),
-                    name: addon.name.clone(),
-                    url: addon.url.clone(),
-                },
-            )
-        })
+        .map(|(index, addon, _)| (*index, *addon))
         .collect();
 
-    if prioritized_addons.is_empty() {
+    if active_stream_addons.is_empty() {
         // Metadata-only addons (e.g. pinned Cinemeta) are not stream sources —
         // listing them as "offline" is noise. An empty stream-addon set
         // surfaces as empty streams with no fatal error so the UI can prompt.
@@ -734,10 +722,7 @@ pub(crate) async fn fetch_stream_selector_data(
         query,
         ranking,
         addon_source_priorities: build_addon_source_priority_map(
-            stream_addons
-                .iter()
-                .filter(|(_, _, priority)| *priority > ACTIVE_SOURCE_COOLDOWN_PRIORITY)
-                .map(|(_, addon, _)| *addon),
+            active_stream_addons.iter().map(|(_, addon)| *addon),
         ),
         source_health_priorities,
         preferred_title_source_id,
@@ -748,10 +733,11 @@ pub(crate) async fn fetch_stream_selector_data(
     let (outcomes, stream_family_priorities, signal_cache) = run_progressive_fetch(
         &ctx,
         &stream_addons,
-        prioritized_addons,
+        &active_stream_addons,
         &query_ids,
         effective_type,
         progress,
+        fetch_budget,
     )
     .await;
 
@@ -775,10 +761,11 @@ pub(crate) async fn fetch_stream_selector_data(
 async fn run_progressive_fetch(
     ctx: &SelectorFetchContext<'_>,
     stream_addons: &[(usize, &AddonConfig, u8)],
-    prioritized_addons: Vec<(usize, AddonFetchTarget)>,
+    prioritized_addons: &[(usize, &AddonConfig)],
     query_ids: &[String],
     effective_type: &str,
     progress: Option<&Channel<serde_json::Value>>,
+    fetch_budget: Option<Duration>,
 ) -> (
     BTreeMap<usize, AddonStreamFetchOutcome>,
     HashMap<String, u8>,
@@ -822,28 +809,19 @@ async fn run_progressive_fetch(
     }
 
     let provider = ctx.provider;
-    // Arc shares across the fan-out: N addon futures would otherwise each
-    // deep-copy the same id list and media type.
-    let query_ids: std::sync::Arc<[String]> = query_ids.into();
-    let effective_type: std::sync::Arc<str> = effective_type.into();
-    let mut pending = stream::iter(prioritized_addons.into_iter().map(|(index, addon)| {
-        let query_ids = query_ids.clone();
-        let effective_type = effective_type.clone();
-
-        async move {
-            (
-                index,
-                fetch_addon_stream_outcome(provider, &effective_type, &query_ids, addon).await,
-            )
-        }
+    // Index iteration keeps this borrowed future factory Send without boxing.
+    let mut pending = stream::iter((0..prioritized_addons.len()).map(|position| async move {
+        let (index, addon) = prioritized_addons[position];
+        (
+            index,
+            fetch_addon_stream_outcome(provider, effective_type, query_ids, addon).await,
+        )
     }))
     .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
 
-    // Progressive selector opens drive their own UI cadence and keep the
-    // full wait; non-progressive callers (resolve/recovery) hit the deadline.
-    let fetch_deadline = progress
-        .is_none()
-        .then(|| tokio::time::Instant::now() + RESOLVE_FETCH_DEADLINE);
+    // No budget keeps the full wait (selector/party); resolve/recovery bound
+    // the fan-out so one hung addon cannot outlive their caller.
+    let fetch_deadline = fetch_budget.map(|budget| tokio::time::Instant::now() + budget);
 
     loop {
         let next = match fetch_deadline {
@@ -947,10 +925,8 @@ async fn merge_selector_outcomes(
         };
 
         let summary = summarize_addon_outcome(&outcome);
-        if fatal_errors.len() < 3 {
-            if let Some(error_message) = outcome.error_message.as_ref() {
-                fatal_errors.push(error_message.clone());
-            }
+        if let Some(error_message) = outcome.error_message.as_ref() {
+            push_bounded_error(&mut fatal_errors, error_message.clone());
         }
 
         merge_unique_streams(&mut merged, &mut seen, outcome.streams);
@@ -1010,8 +986,16 @@ pub(crate) async fn fetch_ranked_streams(
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
 ) -> Result<(Vec<AddonStream>, bool), String> {
-    let (data, is_final_season) =
-        fetch_stream_selector_data(app, playback_state, provider, query, ranking, None).await?;
+    let (data, is_final_season) = fetch_stream_selector_data(
+        app,
+        playback_state,
+        provider,
+        query,
+        ranking,
+        None,
+        Some(RESOLVE_FETCH_DEADLINE),
+    )
+    .await?;
 
     if data.streams.is_empty() {
         if let Some(error) = data.fatal_error_message {

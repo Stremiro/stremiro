@@ -29,6 +29,7 @@ interface MediaRowProps {
       query key (e.g. the home hero) must pass its own value so the pair
       can't drift into two refetch cadences for one entry. */
   staleTime?: number;
+  enabled?: boolean;
   genreFilter?: GenreFilterConfig;
 }
 
@@ -38,10 +39,12 @@ export function MediaRow({
   queryKey,
   queryFn,
   staleTime = MEDIA_ROW_STALE_TIME_MS,
+  enabled = true,
   genreFilter,
 }: MediaRowProps) {
   const {
     data = EMPTY_ITEMS,
+    isFetching,
     isLoading,
     isPlaceholderData,
     error,
@@ -50,9 +53,10 @@ export function MediaRow({
     queryKey,
     queryFn,
     staleTime,
+    enabled,
     // Genre switches swap the query key — keep the previous rail visible
     // while the new catalog fetches instead of flashing a skeleton row.
-    placeholderData: keepPreviousData,
+    placeholderData: enabled ? keepPreviousData : undefined,
   });
 
   const genreTabs = genreFilter ? (
@@ -66,7 +70,7 @@ export function MediaRow({
             onClick={() => genreFilter.onChange(genre)}
             aria-pressed={isActive}
             className={cn(
-              'relative flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
+              'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
               isActive ? 'text-white' : 'text-zinc-500 hover:text-zinc-200',
             )}
           >
@@ -92,7 +96,7 @@ export function MediaRow({
       <div
         className={cn(
           HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
-          'pt-4 flex items-center gap-3 text-[13px] text-zinc-600',
+          'pt-4 flex items-center gap-3 text-[13px] text-zinc-400',
         )}
       >
         {notice}
@@ -100,19 +104,26 @@ export function MediaRow({
     </section>
   );
 
+  if (!enabled && data.length === 0) {
+    return genreFilter ? renderNotice(<p>Reconnect to browse this catalog.</p>) : null;
+  }
+
   // A failed refetch can still hold placeholder data — keep the stale rail
   // (and the genre tabs, the user's way back to working content) instead of
   // deleting the row. Only a failure with nothing to show gets a retry row.
   if (error && data.length === 0) {
     return renderNotice(
       <>
-        <p>Couldn't load this row.</p>
+        <p role='alert'>Couldn't load this row.</p>
         <button
           type='button'
-          className='rounded-xs text-xs font-medium text-zinc-500 hover:text-zinc-200 transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
-          onClick={() => void refetch()}
+          className='h-9 shrink-0 rounded-md border border-white/[0.08] px-3 text-xs font-medium text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-wait aria-disabled:opacity-50'
+          aria-disabled={isFetching || undefined}
+          onClick={() => {
+            if (!isFetching) void refetch();
+          }}
         >
-          Retry →
+          Retry
         </button>
       </>,
     );
@@ -153,6 +164,7 @@ export function MediaRow({
       railId={`media-row:${queryKey.join(':')}`}
       items={data}
       isLoading={isLoading}
+      isPlaceholderData={isPlaceholderData}
       getItemKey={mediaCardRailKey}
       renderItem={renderMediaCardRailItem}
       headerContent={genreTabs}

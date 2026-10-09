@@ -1,7 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 import { Loader2 } from 'lucide-react';
 import { useEffect, useEffectEvent, useState } from 'react';
-import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -12,6 +11,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { api, type UserList } from '@/lib/api';
+import { notifyAction } from '@/lib/notify';
 import { invalidateListQueries } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 
@@ -57,22 +57,10 @@ function ListEditorDialog({
     syncInitialState(initialIcon, initialName);
   }, [initialIcon, initialName, open]);
 
-  const handleOpenChange = (nextOpen: boolean) => {
-    if (!nextOpen) {
-      setName(initialName);
-      setSelectedIcon(initialIcon);
-    }
-
-    onOpenChange(nextOpen);
-  };
-
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
 
-    const trimmedName = name.trim();
-    if (!submitReady({ icon: selectedIcon, trimmedName })) {
-      return;
-    }
+    if (!canSubmit || isPending) return;
 
     onSubmit({ icon: selectedIcon, name: trimmedName });
   };
@@ -81,7 +69,7 @@ function ListEditorDialog({
   const canSubmit = submitReady({ icon: selectedIcon, trimmedName });
 
   return (
-    <Dialog open={open} onOpenChange={handleOpenChange}>
+    <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='sm:max-w-sm bg-zinc-950 border-zinc-800 text-zinc-200'>
         <DialogHeader>
           <DialogTitle className='text-white font-bold'>{title}</DialogTitle>
@@ -102,10 +90,10 @@ function ListEditorDialog({
                   aria-pressed={selectedIcon === id}
                   onClick={() => setSelectedIcon(id)}
                   className={cn(
-                    'h-9 w-9 rounded-lg flex items-center justify-center transition-all duration-150',
+                    'aspect-square w-full rounded-md flex items-center justify-center transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
                     selectedIcon === id
-                      ? 'bg-white/15 ring-1 ring-white/40 scale-110 text-white'
-                      : 'bg-zinc-900 hover:bg-zinc-800 hover:scale-105 text-zinc-500 hover:text-zinc-300',
+                      ? 'bg-white/15 ring-1 ring-white/30 text-white'
+                      : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200',
                   )}
                 >
                   <ListIcon iconId={id} size={16} />
@@ -144,7 +132,7 @@ function ListEditorDialog({
             <Button
               type='button'
               variant='ghost'
-              onClick={() => handleOpenChange(false)}
+              onClick={() => onOpenChange(false)}
               className='text-zinc-400 hover:text-white hover:bg-white/5'
             >
               Cancel
@@ -154,7 +142,8 @@ function ListEditorDialog({
               disabled={!canSubmit || isPending}
               className='bg-white text-black hover:bg-zinc-200 font-semibold'
             >
-              {isPending ? <Loader2 className='w-4 h-4 animate-spin' /> : submitLabel}
+              {isPending && <Loader2 className='w-4 h-4 animate-spin' />}
+              {submitLabel}
             </Button>
           </DialogFooter>
         </form>
@@ -176,11 +165,11 @@ export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDi
     mutationFn: ({ icon, name }: { icon: string; name: string }) => api.createList(name, icon),
     onSuccess: (newList) => {
       void invalidateListQueries(queryClient);
-      toast.success(`"${newList.name}" created`);
+      notifyAction('List created', { detail: newList.name });
       onCreated?.(newList);
       onOpenChange(false);
     },
-    onError: () => toast.error('Failed to create list'),
+    onError: () => notifyAction('Failed to create list', { tone: 'error' }),
   });
 
   return (
@@ -201,11 +190,10 @@ export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDi
 interface RenameListDialogProps {
   list: UserList;
   onOpenChange: (open: boolean) => void;
-  onRenamed?: () => void;
   open: boolean;
 }
 
-export function RenameListDialog({ list, open, onOpenChange, onRenamed }: RenameListDialogProps) {
+export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogProps) {
   const queryClient = useQueryClient();
 
   const renameList = useMutation({
@@ -213,11 +201,10 @@ export function RenameListDialog({ list, open, onOpenChange, onRenamed }: Rename
       api.renameList(list.id, name, icon),
     onSuccess: (_result, variables) => {
       void invalidateListQueries(queryClient);
-      toast.success(`List renamed to "${variables.name}"`);
-      onRenamed?.();
+      notifyAction('List renamed', { detail: variables.name });
       onOpenChange(false);
     },
-    onError: () => toast.error('Failed to rename list'),
+    onError: () => notifyAction('Failed to rename list', { tone: 'error' }),
   });
 
   return (

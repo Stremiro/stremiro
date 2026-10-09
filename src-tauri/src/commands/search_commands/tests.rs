@@ -1,12 +1,139 @@
 use super::{
     apply_browse_filters, browse_genres, browse_year_catalog, catalog_browse_extras,
-    catalog_fetch_genres, normalize_genres, retain_search_items_matching_genres,
-    should_continue_browse_fetch, SearchFeed, SearchMediaType, SearchYearRange,
-    CINEMETA_ANIME_GENRE,
+    catalog_fetch_genres, normalize_genres, rank_search_results,
+    retain_search_items_matching_genres, should_continue_browse_fetch, SearchFeed, SearchMediaType,
+    SearchYearRange, CINEMETA_ANIME_GENRE,
 };
 use crate::commands::media_normalization::normalize_media_item;
 use crate::providers::MediaItem;
 use crate::test_helpers::test_media_item;
+
+#[test]
+fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
+    let page = |ids: &[&str], next_skip| {
+        Ok(super::SearchCatalogPage {
+            items: ids.iter().map(|id| test_media_item(id, "movie")).collect(),
+            next_skip,
+            all_cursors: None,
+        })
+    };
+    let merged = super::merge_all_browse_pages(
+        super::AllBrowseCursors {
+            movie: Some(0),
+            series: Some(100),
+        },
+        Some(page(&["m1", "m2", "m3"], Some(100))),
+        Some(page(&["s1"], Some(100))),
+    )
+    .unwrap();
+    assert_eq!(ids(&merged.items), ["m1", "s1", "m2", "m3"]);
+    assert_eq!(
+        serde_json::to_value(&merged).unwrap()["allCursors"],
+        serde_json::json!({"movie": 100})
+    );
+    assert_eq!(merged.next_skip, None);
+}
+
+#[test]
+fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
+    let cursors = super::AllBrowseCursors {
+        movie: Some(0),
+        series: Some(100),
+    };
+    let merged = super::merge_all_browse_pages(
+        cursors,
+        Some(Err("movie offline".into())),
+        Some(Ok(super::SearchCatalogPage {
+            items: vec![],
+            next_skip: None,
+            all_cursors: None,
+        })),
+    )
+    .unwrap();
+    assert!(merged.items.is_empty());
+    assert_eq!(
+        merged.all_cursors,
+        Some(super::AllBrowseCursors {
+            movie: Some(0),
+            series: None
+        })
+    );
+    assert_eq!(
+        super::merge_all_browse_pages(
+            cursors,
+            Some(Err("first".into())),
+            Some(Err("second".into()))
+        )
+        .unwrap_err(),
+        "first"
+    );
+    assert_eq!(
+        super::merge_all_browse_pages(
+            merged.all_cursors.unwrap(),
+            Some(Err("retry failed".into())),
+            None
+        )
+        .unwrap_err(),
+        "retry failed"
+    );
+    let merged = super::merge_all_browse_pages(
+        super::AllBrowseCursors {
+            movie: None,
+            series: Some(100),
+        },
+        None,
+        Some(Ok(super::SearchCatalogPage {
+            items: vec![test_media_item("s", "series")],
+            next_skip: Some(200),
+            all_cursors: None,
+        })),
+    )
+    .unwrap();
+    assert_eq!(
+        merged.all_cursors,
+        Some(super::AllBrowseCursors {
+            movie: None,
+            series: Some(200)
+        })
+    );
+}
+
+#[test]
+fn all_browse_wire_cursors_are_typed_and_cannot_mix_request_modes() {
+    let request = |value| serde_json::from_value::<super::SearchCatalogRequest>(value).unwrap();
+    let criteria = super::build_search_criteria(request(serde_json::json!({
+        "allCursors": {"movie": 0}, "feed": "featured", "genres": [" Drama "],
+        "yearFrom": 2026, "yearTo": 2026,
+    })))
+    .unwrap();
+    assert_eq!(criteria.all_cursors.unwrap().movie, Some(0));
+    assert_eq!(criteria.feed, SearchFeed::Featured);
+    assert_eq!(criteria.genres, ["Drama"]);
+    assert_eq!(criteria.year_range.single_year(), Some(2026));
+    for extra in [
+        serde_json::json!({"query":"test"}),
+        serde_json::json!({"mediaType":"movie"}),
+        serde_json::json!({"skip":0}),
+    ] {
+        let mut value = serde_json::json!({"allCursors":{"movie":0,"series":0}});
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(super::build_search_criteria(request(value)).is_err());
+    }
+    for cursor in [
+        serde_json::json!(-1),
+        serde_json::json!(4_294_967_296_u64),
+        serde_json::json!("0"),
+    ] {
+        assert!(serde_json::from_value::<super::SearchCatalogRequest>(
+            serde_json::json!({"allCursors":{"movie":cursor}})
+        )
+        .is_err());
+    }
+    assert!(super::build_search_criteria(request(serde_json::json!({}))).is_err());
+}
 
 // Mirrors production: year filters and ordering read `primary_year`,
 // which normalization computes from the raw year string.
@@ -26,6 +153,50 @@ const NO_RANGE: SearchYearRange = SearchYearRange {
 
 fn ids(items: &[MediaItem]) -> Vec<&str> {
     items.iter().map(|item| item.id.as_str()).collect()
+}
+
+#[test]
+fn cached_empty_titles_are_filtered_only_after_duplicate_selection() {
+    let empty = build_item("tt1", "\u{feff}\0", Some("2024"));
+    let fallback = build_item("tt1", "Fallback", Some("2024"));
+    let visible = build_item("tt2", "Visible", Some("2024"));
+    let merged = crate::commands::addon_registry::merge_catalog_items(
+        vec![Ok(vec![empty]), Ok(vec![fallback, visible])],
+        "empty",
+    )
+    .unwrap();
+    assert_eq!(ids(&super::retain_titled_catalog_items(merged)), ["tt2"]);
+}
+
+#[test]
+fn search_ranking_preserves_score_year_ties_and_year_filter_policy() {
+    let items = vec![
+        build_item("first", "Match", Some("2024")),
+        build_item("partial", "Match sequel", Some("2026")),
+        build_item("older", "Match", Some("2020")),
+        build_item("second", "Match", Some("2024")),
+        build_item("unknown", "Match", None),
+    ];
+    assert_eq!(
+        ids(&rank_search_results("match", items.clone(), NO_RANGE)),
+        ["first", "second", "older", "unknown", "partial"]
+    );
+    for (year_from, expected) in [
+        (None, vec!["first", "second", "older", "unknown"]),
+        (Some(2021), vec!["first", "second"]),
+    ] {
+        assert_eq!(
+            ids(&rank_search_results(
+                "match",
+                items.clone(),
+                SearchYearRange {
+                    year_from,
+                    year_to: Some(2024)
+                },
+            )),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -65,7 +236,7 @@ fn apply_browse_filters_enforces_requested_genres_provider_independently() {
     let unlabeled = build_item("tt3", "Mystery", Some("2024"));
 
     let kept = apply_browse_filters(
-        vec![horror, horror_comedy, unlabeled],
+        vec![horror, horror_comedy, unlabeled.clone()],
         SearchMediaType::Movie,
         &["Horror".to_string()],
         NO_RANGE,
@@ -74,11 +245,12 @@ fn apply_browse_filters_enforces_requested_genres_provider_independently() {
 
     let mut animated = build_item("tt4", "Anime", Some("2024"));
     animated.genres = Some(vec!["Animation".to_string(), "Action".to_string()]);
-    let live_action = build_item("tt5", "Live Action", Some("2024"));
+    let mut live_action = build_item("tt5", "Live Action", Some("2024"));
+    live_action.genres = Some(vec!["Action".to_string()]);
     // Animation is also a real movie/series catalog genre — it enforces
     // like any other; the anime paths' marker gate sits on top, not here.
     let kept_animation_only = apply_browse_filters(
-        vec![animated, live_action],
+        vec![animated, live_action, unlabeled],
         SearchMediaType::Movie,
         &["Animation".to_string()],
         NO_RANGE,
@@ -152,23 +324,6 @@ fn catalog_fetch_genres_does_not_union_animation_with_extra_anime_filters() {
         catalog_fetch_genres(SearchMediaType::Movie, &["Action".to_string()]),
         vec!["Action"]
     );
-}
-
-#[test]
-fn apply_browse_filters_requires_declared_animation_genre() {
-    let mut animated = build_item("tt1", "Anime Show", Some("2024"));
-    animated.genres = Some(vec!["Animation".to_string(), "Action".to_string()]);
-    let live_action = build_item("tt2", "Action Show", Some("2024"));
-    let mut action_only = build_item("tt3", "Action Live", Some("2024"));
-    action_only.genres = Some(vec!["Action".to_string()]);
-
-    let kept = apply_browse_filters(
-        vec![animated, live_action, action_only],
-        SearchMediaType::Movie,
-        &["Animation".to_string()],
-        NO_RANGE,
-    );
-    assert_eq!(ids(&kept), vec!["tt1"]);
 }
 
 #[test]

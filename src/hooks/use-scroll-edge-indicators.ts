@@ -18,8 +18,9 @@ const INITIAL_SCROLL_EDGE_STATE: ScrollEdgeState = {
 
 /**
  * Edge-state tracker for a horizontally scrolling container — owns the
- * rAF-coalesced scroll listener, window-resize resync, and a ResizeObserver
- * on the container box. Attach via the returned `bind` callback ref so a
+ * rAF-coalesced scroll listener and a ResizeObserver on the container box
+ * (a viewport resize that matters resizes the container). Attach via the
+ * returned `bind` callback ref so a
  * scroller that mounts late still subscribes. Call `syncScrollState` after
  * content changes — ResizeObserver watches the container's box, not its
  * scrollWidth. `positionRef` mirrors the last scrollLeft so an unmount
@@ -75,6 +76,7 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
     // Scroll events outpace frames — coalesce to one state read per frame.
     let scrollFrame: number | null = null;
     const handleScroll = () => {
+      if (positionRef) positionRef.current = node.scrollLeft;
       if (scrollFrame !== null) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = null;
@@ -85,17 +87,15 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
       typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncScrollState);
 
     node.addEventListener('scroll', handleScroll, { passive: true });
-    window.addEventListener('resize', syncScrollState);
     resizeObserver?.observe(node);
 
     return () => {
       window.cancelAnimationFrame(initialSyncFrame);
       if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
       node.removeEventListener('scroll', handleScroll);
-      window.removeEventListener('resize', syncScrollState);
       resizeObserver?.disconnect();
     };
-  }, [node, syncScrollState]);
+  }, [node, positionRef, syncScrollState]);
 
   return { bind, syncScrollState, ...edges };
 }

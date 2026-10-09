@@ -5,6 +5,7 @@ import { lazy, type ReactNode, Suspense, useEffect, useLayoutEffect, useRef } fr
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router';
 import { toast } from 'sonner';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
+import { PartySidebar } from '@/components/party-badge';
 import { Toaster } from '@/components/ui/sonner';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { isTauriDesktopRuntime, runScheduledAppUpdateCheck } from '@/lib/app-updater';
@@ -12,9 +13,11 @@ import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
 import { PlayerHost, PlayerRouteRegistrar, PlayerSessionProvider } from '@/lib/player-session';
+import { PartyProvider } from '@/lib/party-session';
 import { routeChunks, warmRouteChunks } from '@/lib/route-chunks';
 import { mpvDestroy } from '@/lib/player-mpv';
 import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
+import { boundedMapSet, withTimeout } from '@/lib/utils';
 import { Layout } from './components/layout';
 import { Home } from './pages/home';
 
@@ -24,14 +27,16 @@ const Settings = lazy(() =>
   routeChunks.settings().then((module) => ({ default: module.Settings })),
 );
 const Profile = lazy(() => routeChunks.profile().then((module) => ({ default: module.Profile })));
+const Party = lazy(() => routeChunks.party().then((module) => ({ default: module.Party })));
 const Calendar = lazy(() =>
   routeChunks.calendar().then((module) => ({ default: module.Calendar })),
 );
 
 function ContentRouteLoader() {
   return (
-    <div className='flex min-h-[60vh] w-full items-center justify-center'>
+    <div role='status' className='flex min-h-[60vh] w-full items-center justify-center'>
       <Loader2 className='h-7 w-7 animate-spin text-white/35' />
+      <span className='sr-only'>Loading page</span>
     </div>
   );
 }
@@ -55,16 +60,8 @@ function AppNavigationBinder() {
 
 const MAX_SAVED_SCROLL_POSITIONS = 40;
 
-// delete+set keeps recency order: plain set leaves a revisited entry at its
-// first-seen slot, so the cap would evict live positions (e.g. '/' after
-// every return) before stale ones.
 function rememberScrollPosition(map: Map<string, number>, key: string, position: number) {
-  map.delete(key);
-  map.set(key, position);
-  if (map.size > MAX_SAVED_SCROLL_POSITIONS) {
-    const oldest = map.keys().next().value;
-    if (oldest !== undefined) map.delete(oldest);
-  }
+  boundedMapSet(map, key, position, MAX_SAVED_SCROLL_POSITIONS);
 }
 
 // The window scroller is shared across routes: PUSH lands at the top, POP
@@ -179,25 +176,24 @@ function AppUpdateManager() {
     let disposed = false;
     let playbackRetryTimer: number | null = null;
 
+    // Defer the announce while the expanded player is up: the card would sit
+    // on top of the video and its install path cuts playback.
+    const deferDuringPlayback = () => {
+      if (!window.location.pathname.startsWith('/player')) return false;
+      playbackRetryTimer ??= window.setTimeout(() => {
+        playbackRetryTimer = null;
+        void announceAvailableUpdate();
+      }, UPDATE_PLAYBACK_RETRY_MS);
+      return true;
+    };
+
     const announceAvailableUpdate = async () => {
-      // Defer the whole announce while the expanded player is up: the
-      // persistent card would sit on top of the video, and its "Update &
-      // restart" would cut playback. Not marking notified here keeps the
-      // release eligible for the retry once /player is left.
-      if (window.location.pathname.startsWith('/player')) {
-        playbackRetryTimer ??= window.setTimeout(() => {
-          playbackRetryTimer = null;
-          void announceAvailableUpdate();
-        }, UPDATE_PLAYBACK_RETRY_MS);
-        return;
-      }
+      if (disposed || deferDuringPlayback()) return;
 
       try {
         const update = await runScheduledAppUpdateCheck(queryClient);
-        if (!update || disposed) return;
-
-        await markUpdateNotified(update.version).catch(() => undefined);
-        if (disposed) return;
+        // Navigation may change while the check is in flight.
+        if (!update || disposed || deferDuringPlayback()) return;
 
         // Persistent card: it reads live update state and morphs
         // announce → progress → error in place under one toast id.
@@ -209,6 +205,8 @@ function AppUpdateManager() {
             unstyled: true,
           },
         );
+
+        await markUpdateNotified(update.version).catch(() => undefined);
       } catch {
         // Automatic checks stay silent; the updates card surfaces the error.
       }
@@ -249,18 +247,18 @@ function AppCloseManager() {
 
     let isActive = true;
     let closing = false;
+    let saveFailureVetoed = false;
     let unlisten: (() => void) | undefined;
 
-    const withTimeout = <T,>(step: Promise<T>) =>
-      Promise.race([
+    const settleCloseStep = <T,>(step: Promise<T>) =>
+      withTimeout(
         step.then(
           () => true,
           () => true,
         ),
-        new Promise<boolean>((resolve) =>
-          window.setTimeout(() => resolve(false), CLOSE_BARRIER_STEP_TIMEOUT_MS),
-        ),
-      ]);
+        CLOSE_BARRIER_STEP_TIMEOUT_MS,
+        () => false,
+      );
 
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
@@ -270,19 +268,28 @@ function AppCloseManager() {
         }
         closing = true;
         try {
-          const transitionSettled = await withTimeout(waitForViewportTransition());
+          const transitionSettled = await settleCloseStep(waitForViewportTransition());
           if (transitionSettled && isPlayerPip()) {
             event.preventDefault();
-            await withTimeout(returnFromPlayerPip());
+            await settleCloseStep(returnFromPlayerPip());
             return;
           }
-          await flushPendingAppWrites();
+          await withTimeout(flushPendingAppWrites(), CLOSE_BARRIER_STEP_TIMEOUT_MS, () => {
+            throw new Error('Pending writes did not settle.');
+          });
           // A failed native teardown still closes: vetoing here would wedge the
           // window open behind an unkillable mpv call, and exit reclaims it.
           await mpvDestroy().catch(() => undefined);
         } catch {
-          event.preventDefault();
-          toast.error('Could not finish saving or stopping playback. Try closing again.');
+          // Veto once so the save can be retried; a persistent failure must not
+          // trap the window open, so the next close quits anyway.
+          if (!saveFailureVetoed) {
+            saveFailureVetoed = true;
+            event.preventDefault();
+            toast.error('Could not save playback progress.', {
+              description: 'Close again to quit anyway.',
+            });
+          }
         } finally {
           closing = false;
         }
@@ -344,75 +351,86 @@ function App() {
 
   return (
     <PlayerSessionProvider>
-      <Routes>
-        <Route element={<Layout />}>
-          <Route path='/' element={<Home />} />
-          <Route
-            path='/search'
-            element={
-              <RouteSuspense>
-                <Search />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/details/:type/:id'
-            element={
-              <RouteSuspense>
-                <Details />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/settings'
-            element={
-              <RouteSuspense>
-                <Settings />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/profile'
-            element={
-              <RouteSuspense>
-                <Profile />
-              </RouteSuspense>
-            }
-          />
-          {/* /library is a deep link into Profile's library tab — render it
+      <PartyProvider>
+        <Routes>
+          <Route element={<Layout />}>
+            <Route path='/' element={<Home />} />
+            <Route
+              path='/search'
+              element={
+                <RouteSuspense>
+                  <Search />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/details/:type/:id'
+              element={
+                <RouteSuspense>
+                  <Details />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/settings'
+              element={
+                <RouteSuspense>
+                  <Settings />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/profile'
+              element={
+                <RouteSuspense>
+                  <Profile />
+                </RouteSuspense>
+              }
+            />
+            {/* /library is a deep link into Profile's library tab — render it
               directly so the path survives (Profile reads pathname for its
               initial tab and the sidebar highlights both paths). */}
-          <Route
-            path='/library'
-            element={
-              <RouteSuspense>
-                <Profile />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/calendar'
-            element={
-              <RouteSuspense>
-                <Calendar />
-              </RouteSuspense>
-            }
-          />
-          {/* Unknown paths land on Home — a stray deep link should never
+            <Route
+              path='/library'
+              element={
+                <RouteSuspense>
+                  <Profile />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/calendar'
+              element={
+                <RouteSuspense>
+                  <Calendar />
+                </RouteSuspense>
+              }
+            />
+            <Route
+              path='/party'
+              element={
+                <RouteSuspense>
+                  <Party />
+                </RouteSuspense>
+              }
+            />
+            {/* Unknown paths land on Home — a stray deep link should never
               render a blank shell. */}
-          <Route path='*' element={<Navigate to='/' replace />} />
-        </Route>
-        <Route path='/player/:type/:id' element={<PlayerRouteRegistrar />} />
-        <Route path='/player/:type/:id/:season/:episode' element={<PlayerRouteRegistrar />} />
-      </Routes>
-      {/* Root-level playback session: survives outlet route changes so leaving
+            <Route path='*' element={<Navigate to='/' replace />} />
+          </Route>
+          <Route path='/player/:type/:id' element={<PlayerRouteRegistrar />} />
+          <Route path='/player/:type/:id/:season/:episode' element={<PlayerRouteRegistrar />} />
+        </Routes>
+        {/* Root-level playback session: survives outlet route changes so leaving
           /player minimizes into the mini player instead of tearing mpv down. */}
-      <PlayerHost />
-      <AppNavigationBinder />
-      <RouteScrollManager />
-      <AppCloseManager />
-      <AppUpdateManager />
-      <Toaster />
+        <PlayerHost />
+        <PartySidebar />
+        <AppNavigationBinder />
+        <RouteScrollManager />
+        <AppCloseManager />
+        <AppUpdateManager />
+        <Toaster />
+      </PartyProvider>
     </PlayerSessionProvider>
   );
 }

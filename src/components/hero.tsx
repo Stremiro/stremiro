@@ -9,7 +9,9 @@ import {
   useLatestWatchHistoryEntry,
   useToggleLibraryItem,
 } from '@/hooks/use-media-library';
+import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
+import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { api, type MediaItem } from '@/lib/api';
 import {
   DETAILS_GC_TIME_MS,
@@ -18,9 +20,10 @@ import {
 } from '@/lib/query-invalidation';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { currentPathWithSearch } from '@/lib/navigation';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { buildDetailsRoute, resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
+  clearTimer,
   cn,
   isHttpUrl,
   mediaTypeLabel,
@@ -52,7 +55,7 @@ function HeroCarouselIndicators({ activeIndex, itemCount, onSelect }: HeroCarous
   const goToNext = () => onSelect((activeIndex + 1) % itemCount);
   const progressPercent = ((activeIndex + 1) / itemCount) * 100;
   const arrowButtonClassName =
-    'flex h-6 w-6 items-center justify-center rounded-full text-white/45 transition-colors duration-200 hover:bg-white/10 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
+    'flex h-8 w-8 items-center justify-center rounded-md text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
 
   return (
     <div
@@ -94,14 +97,7 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
   const transitionTimeoutRef = useRef<number | null>(null);
   const activeIndex = itemCount > 0 ? currentIndex % itemCount : 0;
 
-  const clearTransitionTimeout = useCallback(() => {
-    if (transitionTimeoutRef.current === null) {
-      return;
-    }
-
-    window.clearTimeout(transitionTimeoutRef.current);
-    transitionTimeoutRef.current = null;
-  }, []);
+  const clearTransitionTimeout = useCallback(() => clearTimer(transitionTimeoutRef), []);
 
   const queueTransition = useCallback(
     (nextIndex: number) => {
@@ -110,6 +106,11 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
       }
 
       clearTransitionTimeout();
+      if (prefersReducedMotion()) {
+        setCurrentIndex(nextIndex);
+        setIsTransitioning(false);
+        return;
+      }
       setIsTransitioning(true);
       transitionTimeoutRef.current = window.setTimeout(() => {
         setCurrentIndex(nextIndex);
@@ -193,16 +194,16 @@ interface HeroProps {
 
 export const Hero = memo(function Hero({ items }: HeroProps) {
   const queryClient = useQueryClient();
-  const [isPaused, setIsPaused] = useState(false);
+  const [isHovered, setIsHovered] = useState(false);
+  const [hasFocus, setHasFocus] = useState(false);
   const [isOffscreen, setIsOffscreen] = useState(false);
   const from = currentPathWithSearch();
   const sectionRef = useRef<HTMLElement | null>(null);
-  const scrollFrameRef = useRef<number | null>(null);
   const { activeIndex, handleSelect, isTransitioning } = useHeroCarouselState({
     itemCount: items.length,
     // Offscreen slides rotate state nobody can see; reduced-motion users get
     // manual control only. Both hold the rotation without touching arrows.
-    isPaused: isPaused || isOffscreen || prefersReducedMotion(),
+    isPaused: isHovered || hasFocus || isOffscreen || prefersReducedMotion(),
   });
 
   // The hero scrolls off under the rails — don't keep advancing (and
@@ -223,6 +224,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const item = items[activeIndex];
   const activeHeroItemId = item?.id;
   const activeHeroDetailsType = resolvePlayerRouteMediaType(item?.type);
+  const [logoUrl, onLogoError] = useFailedSrc(isHttpUrl(item?.logo) ? item?.logo : null);
 
   const { data: heroDetails } = useQuery({
     // Card payload (rating/backdrop, no episodes): the hero never renders
@@ -237,35 +239,14 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
     gcTime: DETAILS_GC_TIME_MS,
   });
 
-  useEffect(() => {
-    const handleScroll = () => {
-      if (scrollFrameRef.current !== null) {
-        return;
-      }
-
-      scrollFrameRef.current = window.requestAnimationFrame(() => {
-        // Direct style write keeps React out of the scroll path — a setState
-        // here would re-render the whole hero on every scroll frame.
-        sectionRef.current?.style.setProperty(
-          '--hero-scroll-opacity',
-          String(Math.min(window.scrollY / 600, 0.9)),
-        );
-        scrollFrameRef.current = null;
-      });
-    };
-
-    handleScroll();
-    window.addEventListener('scroll', handleScroll, { passive: true });
-
-    return () => {
-      window.removeEventListener('scroll', handleScroll);
-
-      if (scrollFrameRef.current !== null) {
-        window.cancelAnimationFrame(scrollFrameRef.current);
-        scrollFrameRef.current = null;
-      }
-    };
-  }, []);
+  useRafScrollListener(() => {
+    // Direct style write keeps React out of the scroll path — a setState
+    // here would re-render the whole hero on every scroll frame.
+    sectionRef.current?.style.setProperty(
+      '--hero-scroll-opacity',
+      String(Math.min(window.scrollY / 600, 0.9)),
+    );
+  });
 
   useEffect(() => {
     if (items.length <= 1) {
@@ -320,20 +301,20 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const backdropUrl = item.backdrop || item.poster;
   const typeLabel = mediaTypeLabel(item.type);
   const genrePills = primaryGenrePills(item.genres, heroDetails?.genres);
+  const detailsPath = buildDetailsRoute(item.type, item.id);
+  const prefetchActiveDetails = () =>
+    prefetchDetailsRouteData(queryClient, { mediaId: item.id, mediaType: item.type });
 
   return (
     <section
       ref={sectionRef}
       className='relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden group'
       aria-label='Featured titles'
-      onPointerEnter={() => setIsPaused(true)}
-      onPointerLeave={() => setIsPaused(false)}
-      onFocusCapture={() => setIsPaused(true)}
+      onPointerEnter={() => setIsHovered(true)}
+      onPointerLeave={() => setIsHovered(false)}
+      onFocusCapture={() => setHasFocus(true)}
       onBlurCapture={(e) => {
-        // Stay paused while focus moves between controls inside the hero.
-        if (!(e.relatedTarget instanceof Node) || !e.currentTarget.contains(e.relatedTarget)) {
-          setIsPaused(false);
-        }
+        setHasFocus(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget));
       }}
     >
       {/* Scroll dim — opacity-only, no backdrop blur: a fullscreen
@@ -422,33 +403,37 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
             >
               {/* Left: logo, meta pills, actions */}
               <div className='flex min-w-0 max-w-2xl flex-col items-start text-left'>
-                {isHttpUrl(item.logo) ? (
-                  <RemoteImage
-                    src={item.logo}
-                    alt={item.title}
-                    className='mb-5 max-h-[150px] max-w-[min(90%,440px)] object-contain object-left drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in duration-700 md:max-h-[185px]'
-                  />
-                ) : (
-                  <h1 className='mb-4 max-w-2xl text-4xl font-bold leading-[1.02] tracking-[-0.03em] text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.6)] animate-in fade-in duration-700 md:text-6xl'>
-                    {item.title}
-                  </h1>
-                )}
-
-                <div className='flex items-center flex-wrap gap-1.5 animate-in fade-in duration-700 delay-100'>
-                  {item.displayYear && (
-                    <span className='accent-lattice-soft rounded-md border px-2.5 py-1 text-[12px] font-medium backdrop-blur-md'>
-                      {item.displayYear}
-                    </span>
+                <Link
+                  to={detailsPath}
+                  state={{ from }}
+                  onFocus={prefetchActiveDetails}
+                  onPointerEnter={prefetchActiveDetails}
+                  className={cn(
+                    'block rounded-md transition-opacity duration-150 hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 focus-visible:ring-offset-4 focus-visible:ring-offset-black/40',
+                    logoUrl ? 'mb-5 max-w-[min(90%,440px)]' : 'mb-4 max-w-2xl',
                   )}
-                  <span className='accent-lattice-soft rounded-md border px-2.5 py-1 text-[12px] font-medium backdrop-blur-md'>
-                    {typeLabel}
-                  </span>
-                  {/* Rating arrives over IPC after the slide has painted —
-                      keeping it last means a late resolve fades a pill in at
-                      the row's edge instead of shoving year/type sideways. */}
+                >
+                  {logoUrl ? (
+                    <RemoteImage
+                      src={logoUrl}
+                      alt={item.title}
+                      onError={onLogoError}
+                      className='block max-h-[150px] max-w-full object-contain object-left drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in duration-700 md:max-h-[185px]'
+                    />
+                  ) : (
+                    <h1 className='text-4xl font-bold leading-[1.02] tracking-[-0.03em] text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.6)] animate-in fade-in duration-700 md:text-6xl'>
+                      {item.title}
+                    </h1>
+                  )}
+                </Link>
+
+                <div className='flex items-center flex-wrap gap-x-3 gap-y-1.5 text-[12px] font-medium text-white/75 animate-in fade-in duration-700 delay-100'>
+                  {item.displayYear && <span>{item.displayYear}</span>}
+                  <span>{typeLabel}</span>
+                  {/* A late rating stays at the row's edge without shifting year/type. */}
                   {heroRating && (
-                    <span className='flex items-center gap-1.5 rounded-md border border-white/10 bg-black/45 px-2.5 py-1 text-[12px] font-semibold text-white backdrop-blur-md animate-in fade-in duration-300'>
-                      <Star className='rating-star h-3 w-3 fill-amber-400 text-amber-400 drop-shadow-[0_0_6px_rgba(251,191,36,0.35)]' />
+                    <span className='flex items-center gap-1.5 font-semibold text-white animate-in fade-in duration-300'>
+                      <Star className='rating-star h-3 w-3 fill-amber-400 text-amber-400' />
                       {heroRating}
                     </span>
                   )}
@@ -461,14 +446,15 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   </p>
                 )}
 
-                <div className='mt-6 flex items-center gap-2.5 animate-in fade-in duration-700 delay-200'>
+                <div className='mt-5 flex items-center gap-2 animate-in fade-in duration-700 delay-200'>
                   <Button
                     size='sm'
                     onClick={() => void primaryPlayback.handlePrimaryAction()}
                     aria-disabled={primaryPlayback.isResolvingPrimaryAction || undefined}
-                    className='h-11 gap-2 rounded-full bg-white px-7 text-[14px] font-semibold text-black transition-all duration-200 hover:bg-zinc-200 active:scale-[0.98] aria-disabled:cursor-wait aria-disabled:opacity-80'
+                    aria-busy={primaryPlayback.isResolvingPrimaryAction || undefined}
+                    className='h-11 min-w-[108px] gap-2 rounded-lg bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-wait aria-disabled:opacity-80'
                   >
-                    {primaryPlayback.isResolvingPrimaryAction ? (
+                    {primaryPlayback.showResolvingFeedback ? (
                       <Loader2 className='h-4 w-4 animate-spin' />
                     ) : (
                       <Play className='h-4 w-4 fill-current' />
@@ -480,11 +466,12 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     variant='ghost'
                     aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
                     title={isInLibrary ? 'Remove from library' : 'Add to library'}
+                    aria-pressed={isInLibrary}
                     className={cn(
-                      'h-11 w-11 rounded-full border backdrop-blur-md transition-all duration-200 active:scale-95',
+                      'h-11 w-11 shrink-0 rounded-lg border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-wait',
                       isInLibrary
-                        ? 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200/80 hover:bg-emerald-500/[0.10] hover:text-emerald-200'
-                        : 'border-white/20 bg-white/10 text-white hover:bg-white/20',
+                        ? 'border-white/30 bg-white/15 text-white hover:bg-white/20 hover:text-white'
+                        : 'border-white/20 bg-black/25 text-white/80 hover:border-white/35 hover:bg-white/10 hover:text-white',
                     )}
                     // Guard, not `disabled`: disabling the focused button
                     // blurs it, which unpauses the carousel mid-click.

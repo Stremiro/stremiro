@@ -74,7 +74,6 @@ export function usePlayerSessionBoundary({
     notifyObservedTrackSelection,
     subTracks,
     trackSwitching,
-    subtitlesOff,
     playbackLanguagePreferences,
     refreshTracks,
     selectAddonSubtitle,
@@ -184,7 +183,6 @@ export function usePlayerSessionBoundary({
     selectAddonSubtitle,
     setTrack,
     subTracks,
-    subtitlesOff,
     trackSwitching,
   };
 }

@@ -1,6 +1,6 @@
 use super::{
-    insert_sorted_unique, load_index, playback_title_scope_key, PlaybackStateService,
-    PlaybackStreamOutcomeKind, PLAYBACK_STATE_STORE_FILE,
+    evict_least_active, insert_sorted_unique, load_advisory_index, playback_title_scope_key,
+    PlaybackStateService, PlaybackStreamOutcomeKind, PLAYBACK_STATE_STORE_FILE,
 };
 use crate::commands::stream_coordinator::{
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
@@ -11,7 +11,7 @@ use crate::commands::streaming_helpers::{
 use crate::commands::{now_unix_millis, DurableStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tauri::AppHandle;
 
 pub(super) const PLAYBACK_SOURCE_HEALTH_INDEX_KEY: &str = "playback_source_health_index";
@@ -43,6 +43,12 @@ pub(super) struct PlaybackSourceHealthSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlaybackStreamFamilySnapshot {
+    /// Owning `type:id` scope: `|` is legal inside a media id, so the
+    /// `{scope}|{family}` snapshot key's prefix alone cannot prove title
+    /// ownership. `None` on snapshots written before this field — they keep
+    /// working by prefix.
+    #[serde(default)]
+    pub scope_key: Option<String>,
     /// Instance id of the addon that produced the last verified outcome;
     /// `None` on snapshots written before instance-id health keys.
     #[serde(default)]
@@ -89,9 +95,7 @@ pub(super) fn load_playback_stream_family_snapshot(
     store: &DurableStore,
     key: &str,
 ) -> Option<PlaybackStreamFamilySnapshot> {
-    store
-        .get(playback_stream_family_item_key(key))
-        .and_then(|value| serde_json::from_value::<PlaybackStreamFamilySnapshot>(value).ok())
+    store.get_typed(playback_stream_family_item_key(key))
 }
 
 fn playback_snapshot_belongs_to_scope(snapshot_key: &str, scope_key: &str) -> bool {
@@ -132,12 +136,22 @@ pub(super) fn preferred_title_source_id_from_success(
     scope_key: &str,
     now_ms: u64,
 ) -> Option<String> {
-    let stream_family_index = load_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY);
+    let stream_family_index = load_advisory_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY);
 
     stream_family_index
         .into_iter()
         .filter(|snapshot_key| playback_snapshot_belongs_to_scope(snapshot_key, scope_key))
-        .filter_map(|snapshot_key| load_playback_stream_family_snapshot(store, &snapshot_key))
+        .filter_map(|snapshot_key| {
+            let snapshot = load_playback_stream_family_snapshot(store, &snapshot_key)?;
+            // A `|` in the media id can make a foreign scope's key satisfy
+            // the prefix check; the body-written scope is authoritative,
+            // and legacy snapshots predating it pass.
+            snapshot
+                .scope_key
+                .as_deref()
+                .is_none_or(|scope| scope == scope_key)
+                .then_some(snapshot)
+        })
         .filter_map(|snapshot| recent_successful_source(snapshot, now_ms))
         .max_by_key(|(_, last_success_at)| *last_success_at)
         .map(|(source_id, _)| source_id)
@@ -147,9 +161,7 @@ pub(super) fn load_source_health_snapshot(
     store: &DurableStore,
     key: &str,
 ) -> Option<PlaybackSourceHealthSnapshot> {
-    store
-        .get(playback_source_health_item_key(key))
-        .and_then(|value| serde_json::from_value::<PlaybackSourceHealthSnapshot>(value).ok())
+    store.get_typed(playback_source_health_item_key(key))
 }
 
 pub(super) fn score_source_health_priority(
@@ -259,6 +271,45 @@ pub(super) fn accepts_outcome(
         .is_none_or(|latest| timestamp_ms >= latest)
 }
 
+/// Shared upsert skeleton for the outcome-driven snapshot indexes: the
+/// recency guard runs before any mutation, then index insert → item write →
+/// prune → index write so a new key can't evict itself and the index never
+/// names a missing item. `apply_outcome` owns the per-snapshot field writes.
+#[allow(clippy::too_many_arguments)]
+fn upsert_outcome_snapshot<S: Default + Serialize>(
+    store: &DurableStore,
+    key: &str,
+    timestamp_ms: u64,
+    allow_prune: bool,
+    load_snapshot: impl Fn(&DurableStore, &str) -> Option<S>,
+    outcome_times: impl Fn(&S) -> (Option<u64>, Option<u64>),
+    apply_outcome: impl FnOnce(&mut S),
+    item_key: impl Fn(&str) -> String,
+    index_key: &str,
+    max_entries: usize,
+    prune_index: impl Fn(&DurableStore, &mut Vec<String>),
+) -> Result<(), String> {
+    let mut snapshot = load_snapshot(store, key).unwrap_or_default();
+    let (last_success_at, last_failure_at) = outcome_times(&snapshot);
+    if !accepts_outcome(last_success_at, last_failure_at, timestamp_ms) {
+        return Ok(());
+    }
+
+    let mut index = load_advisory_index(store, index_key);
+    apply_outcome(&mut snapshot);
+    insert_sorted_unique(&mut index, key);
+
+    store.set(item_key(key), json!(snapshot));
+    // The count cap is a hard bound: IPC-supplied identities could otherwise
+    // grow the index between the cadence-gated sweeps.
+    if allow_prune || index.len() > max_entries {
+        prune_index(store, &mut index);
+    }
+    store.set(index_key, json!(index));
+
+    Ok(())
+}
+
 pub(super) fn upsert_source_health_snapshot(
     store: &DurableStore,
     health_key: &str,
@@ -266,54 +317,42 @@ pub(super) fn upsert_source_health_snapshot(
     timestamp_ms: u64,
     allow_prune: bool,
 ) -> Result<(), String> {
-    let mut snapshot = load_source_health_snapshot(store, health_key).unwrap_or_default();
-
-    if !accepts_outcome(
-        snapshot.last_success_at,
-        snapshot.last_failure_at,
+    upsert_outcome_snapshot(
+        store,
+        health_key,
         timestamp_ms,
-    ) {
-        return Ok(());
-    }
-
-    let mut source_health_index = load_index(store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY);
-
-    match outcome {
-        PlaybackStreamOutcomeKind::Verified => {
-            snapshot.last_success_at = Some(timestamp_ms);
-            snapshot.last_failure_at = None;
-            snapshot.consecutive_failures = 0;
-            snapshot.cooldown_until = None;
-        }
-        _ => {
-            snapshot.last_failure_at = Some(timestamp_ms);
-            snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
-            // A single blip must not bench a whole source: the fetcher skips
-            // score-0 sources entirely, so cooldown requires a repeat
-            // failure. The first failure still demotes ranking above.
-            snapshot.cooldown_until = (snapshot.consecutive_failures >= 2).then(|| {
-                timestamp_ms.saturating_add(match outcome {
-                    PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 12,
-                    PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 15,
-                    PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
-                    // The outer `_` arm already excludes Verified.
-                    PlaybackStreamOutcomeKind::Verified => unreachable!(),
-                })
-            });
-        }
-    }
-
-    insert_sorted_unique(&mut source_health_index, health_key);
-
-    store.set(playback_source_health_item_key(health_key), json!(snapshot));
-    // The count cap is a hard bound: IPC-supplied identities could otherwise
-    // grow the index between the cadence-gated sweeps.
-    if allow_prune || source_health_index.len() > SOURCE_HEALTH_INDEX_MAX_ENTRIES {
-        prune_stale_source_health_entries(store, &mut source_health_index);
-    }
-    store.set(PLAYBACK_SOURCE_HEALTH_INDEX_KEY, json!(source_health_index));
-
-    Ok(())
+        allow_prune,
+        load_source_health_snapshot,
+        |snapshot| (snapshot.last_success_at, snapshot.last_failure_at),
+        |snapshot| match outcome {
+            PlaybackStreamOutcomeKind::Verified => {
+                snapshot.last_success_at = Some(timestamp_ms);
+                snapshot.last_failure_at = None;
+                snapshot.consecutive_failures = 0;
+                snapshot.cooldown_until = None;
+            }
+            _ => {
+                snapshot.last_failure_at = Some(timestamp_ms);
+                snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
+                // A single blip must not bench a whole source: the fetcher skips
+                // score-0 sources entirely, so cooldown requires a repeat
+                // failure. The first failure still demotes ranking above.
+                snapshot.cooldown_until = (snapshot.consecutive_failures >= 2).then(|| {
+                    timestamp_ms.saturating_add(match outcome {
+                        PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 12,
+                        PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 15,
+                        PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
+                        // The outer `_` arm already excludes Verified.
+                        PlaybackStreamOutcomeKind::Verified => unreachable!(),
+                    })
+                });
+            }
+        },
+        playback_source_health_item_key,
+        PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+        SOURCE_HEALTH_INDEX_MAX_ENTRIES,
+        prune_stale_source_health_entries,
+    )
 }
 
 /// Failed outcomes must not erase the family's verified attribution; a
@@ -340,60 +379,52 @@ pub(super) fn upsert_stream_family_snapshot(
     allow_prune: bool,
 ) -> Result<(), String> {
     let snapshot_key = playback_stream_family_snapshot_key(scope_key, stream_family);
-    let mut snapshot =
-        load_playback_stream_family_snapshot(store, &snapshot_key).unwrap_or_default();
-
-    if !accepts_outcome(
-        snapshot.last_success_at,
-        snapshot.last_failure_at,
+    upsert_outcome_snapshot(
+        store,
+        &snapshot_key,
         report.timestamp_ms,
-    ) {
-        return Ok(());
-    }
+        allow_prune,
+        load_playback_stream_family_snapshot,
+        |snapshot| (snapshot.last_success_at, snapshot.last_failure_at),
+        |snapshot| {
+            // `|` is legal inside a media id, so the body records the owning
+            // scope — key-prefix checks alone cannot prove this snapshot's
+            // title.
+            snapshot.scope_key = Some(scope_key.to_string());
+            update_verified_family_source_id(snapshot, resolved_source_id, report.outcome);
 
-    let mut stream_family_index = load_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY);
-    update_verified_family_source_id(&mut snapshot, resolved_source_id, report.outcome);
-
-    match report.outcome {
-        PlaybackStreamOutcomeKind::Verified => {
-            snapshot.last_success_at = Some(report.timestamp_ms);
-            snapshot.last_success_season = report.season;
-            snapshot.last_success_episode = report.episode;
-            snapshot.last_failure_at = None;
-            snapshot.last_failure_season = None;
-            snapshot.last_failure_episode = None;
-            snapshot.consecutive_failures = 0;
-            snapshot.cooldown_until = None;
-        }
-        _ => {
-            snapshot.last_failure_at = Some(report.timestamp_ms);
-            snapshot.last_failure_season = report.season;
-            snapshot.last_failure_episode = report.episode;
-            snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
-            snapshot.cooldown_until =
-                Some(report.timestamp_ms.saturating_add(match report.outcome {
-                    PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 10,
-                    PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 12,
-                    PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
-                    // The outer `_` arm already excludes Verified.
-                    PlaybackStreamOutcomeKind::Verified => unreachable!(),
-                }));
-        }
-    }
-
-    insert_sorted_unique(&mut stream_family_index, &snapshot_key);
-
-    store.set(
-        playback_stream_family_item_key(&snapshot_key),
-        json!(snapshot),
-    );
-    // Same hard bound as the source-health index above.
-    if allow_prune || stream_family_index.len() > STREAM_FAMILY_INDEX_MAX_ENTRIES {
-        prune_stale_stream_family_entries(store, &mut stream_family_index);
-    }
-    store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(stream_family_index));
-
-    Ok(())
+            match report.outcome {
+                PlaybackStreamOutcomeKind::Verified => {
+                    snapshot.last_success_at = Some(report.timestamp_ms);
+                    snapshot.last_success_season = report.season;
+                    snapshot.last_success_episode = report.episode;
+                    snapshot.last_failure_at = None;
+                    snapshot.last_failure_season = None;
+                    snapshot.last_failure_episode = None;
+                    snapshot.consecutive_failures = 0;
+                    snapshot.cooldown_until = None;
+                }
+                _ => {
+                    snapshot.last_failure_at = Some(report.timestamp_ms);
+                    snapshot.last_failure_season = report.season;
+                    snapshot.last_failure_episode = report.episode;
+                    snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
+                    snapshot.cooldown_until =
+                        Some(report.timestamp_ms.saturating_add(match report.outcome {
+                            PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 10,
+                            PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 12,
+                            PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
+                            // The outer `_` arm already excludes Verified.
+                            PlaybackStreamOutcomeKind::Verified => unreachable!(),
+                        }));
+                }
+            }
+        },
+        playback_stream_family_item_key,
+        PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+        STREAM_FAMILY_INDEX_MAX_ENTRIES,
+        prune_stale_stream_family_entries,
+    )
 }
 
 /// Activity timestamps shared by the recency-pruned snapshot indexes.
@@ -454,16 +485,8 @@ fn prune_by_recency(
     // Index order is key-sorted, so truncation would evict arbitrarily; drop
     // the least recently active entries instead.
     if survivors.len() > max_entries {
-        survivors.sort_by_key(|(_, last_activity)| *last_activity);
-        let evicted: HashSet<String> = survivors
-            .iter()
-            .take(survivors.len() - max_entries)
-            .map(|(key, _)| key.clone())
-            .collect();
-        for key in &evicted {
-            store.delete(item_key(key));
-        }
-        index.retain(|key| !evicted.contains(key));
+        let overflow = survivors.len() - max_entries;
+        evict_least_active(store, index, survivors, overflow, item_key);
     }
 }
 
@@ -504,6 +527,28 @@ fn prune_stale_stream_family_entries(store: &DurableStore, stream_family_index: 
         },
         playback_stream_family_item_key,
     );
+}
+
+/// Batch score lookup shared by the source-health and stream-family read
+/// paths: normalize, dedupe (the map doubles as the seen-set), then one
+/// snapshot load + score per unique key under a single store handle.
+fn scored_priorities<'a>(
+    items: impl IntoIterator<Item = Option<&'a str>>,
+    normalize: impl Fn(&'a str) -> Option<String>,
+    load_and_score: impl Fn(&str) -> u8,
+) -> HashMap<String, u8> {
+    let mut priorities = HashMap::new();
+    for item in items {
+        let Some(key) = item.and_then(&normalize) else {
+            continue;
+        };
+        if priorities.contains_key(&key) {
+            continue;
+        }
+        let score = load_and_score(&key);
+        priorities.insert(key, score);
+    }
+    priorities
 }
 
 impl PlaybackStateService {
@@ -584,24 +629,15 @@ impl PlaybackStateService {
     ) -> Result<HashMap<String, u8>, String> {
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
         let now_ms = now_unix_millis();
-        let mut priorities = HashMap::new();
 
-        for source_id in source_ids {
-            let Some(source_id) = source_id.and_then(normalize_source_id) else {
-                continue;
-            };
-            if priorities.contains_key(&source_id) {
-                continue;
-            }
-
-            let snapshot = load_source_health_snapshot(&store, &source_health_key(&source_id));
-            priorities.insert(
-                source_id,
-                score_source_health_priority(snapshot.as_ref(), now_ms),
-            );
-        }
-
-        Ok(priorities)
+        Ok(scored_priorities(
+            source_ids,
+            normalize_source_id,
+            |source_id| {
+                let snapshot = load_source_health_snapshot(&store, &source_health_key(source_id));
+                score_source_health_priority(snapshot.as_ref(), now_ms)
+            },
+        ))
     }
 
     /// Single-open batch variant for stream families: one store handle
@@ -621,26 +657,16 @@ impl PlaybackStateService {
         };
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
         let now_ms = now_unix_millis();
-        let mut priorities = HashMap::new();
 
-        for stream_family in stream_families {
-            let Some(stream_family) = normalize_source_key(stream_family) else {
-                continue;
-            };
-            // `priorities` holds the same normalized keyspace — no second set.
-            if priorities.contains_key(&stream_family) {
-                continue;
-            }
-
-            let snapshot_key = playback_stream_family_snapshot_key(&scope_key, &stream_family);
-            let snapshot = load_playback_stream_family_snapshot(&store, &snapshot_key);
-            priorities.insert(
-                stream_family,
-                score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms),
-            );
-        }
-
-        Ok(priorities)
+        Ok(scored_priorities(
+            stream_families.into_iter().map(Some),
+            normalize_source_key,
+            |stream_family| {
+                let snapshot_key = playback_stream_family_snapshot_key(&scope_key, stream_family);
+                let snapshot = load_playback_stream_family_snapshot(&store, &snapshot_key);
+                score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
+            },
+        ))
     }
 
     /// Single-open read of the title scope's preferred source: the last

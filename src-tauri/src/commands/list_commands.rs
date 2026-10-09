@@ -1,12 +1,13 @@
 use super::list_helpers::{
-    list_item_store_key, list_meta_key, load_lists_order, normalize_list_icon, normalize_list_id,
-    normalize_list_name, reorder_known_ids, UserList, UserListWithItems, LISTS_ORDER_KEY,
-    LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
+    list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
+    normalize_list_id, normalize_list_name, reorder_known_ids, UserList, UserListWithItems,
+    LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::store_helpers::normalize_library_item;
-use super::{normalize_media_id, LISTS_STORE_FILE};
+use super::{normalize_media_id, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
+use std::collections::HashSet;
 use tauri::{command, AppHandle};
 
 #[command]
@@ -37,7 +38,7 @@ pub async fn create_list(
         }
         order.push(id.clone());
 
-        store.set(list_meta_key(&id), json!(list.clone()));
+        store.set(list_meta_key(&id), json!(list));
         store.set(LISTS_ORDER_KEY, json!(order));
         store.save()?;
 
@@ -93,10 +94,7 @@ pub async fn rename_list(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        let mut list = store
-            .get(list_meta_key(&list_id))
-            .and_then(|value| serde_json::from_value::<UserList>(value).ok())
-            .ok_or_else(|| "List not found".to_string())?;
+        let mut list = load_list(&store, &list_id)?;
 
         list.name =
             normalize_list_name(&name).ok_or_else(|| "List name is required.".to_string())?;
@@ -118,10 +116,7 @@ pub async fn add_to_list(app: AppHandle, list_id: String, item: MediaItem) -> Re
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        let mut list = store
-            .get(list_meta_key(&list_id))
-            .and_then(|value| serde_json::from_value::<UserList>(value).ok())
-            .ok_or_else(|| "List not found".to_string())?;
+        let mut list = load_list(&store, &list_id)?;
         let item = normalize_library_item(item).ok_or_else(|| {
             "Invalid media item. Missing required id, title, or type.".to_string()
         })?;
@@ -156,10 +151,7 @@ pub async fn remove_from_list(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        let mut list = store
-            .get(list_meta_key(&list_id))
-            .and_then(|value| serde_json::from_value::<UserList>(value).ok())
-            .ok_or_else(|| "List not found".to_string())?;
+        let mut list = load_list(&store, &list_id)?;
 
         list.item_ids.retain(|id| id != &item_id);
         store.delete(list_item_store_key(&list_id, &item_id));
@@ -175,90 +167,71 @@ pub async fn remove_from_list(
 pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
+        read_lists(&store)
+    })
+    .await
+}
 
-        let order = load_lists_order(&store)?;
-        let mut result: Vec<UserListWithItems> = Vec::with_capacity(order.len());
-        let mut surviving_ids: Vec<String> = Vec::with_capacity(order.len());
-        let mut modified = false;
+pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>, String> {
+    let order = load_lists_order(store)?;
+    let mut result: Vec<UserListWithItems> = Vec::with_capacity(order.len());
+    let mut surviving_ids: Vec<String> = Vec::with_capacity(order.len());
+    let mut modified = false;
 
-        for list_id in &order {
-            if let Some(meta_val) = store.get(list_meta_key(list_id)) {
-                if let Ok(list) = serde_json::from_value::<UserList>(meta_val) {
-                    surviving_ids.push(list_id.clone());
-                    let mut items: Vec<MediaItem> = Vec::with_capacity(list.item_ids.len());
-                    let mut cleaned_item_ids: Vec<String> = Vec::with_capacity(list.item_ids.len());
-
-                    for item_id in &list.item_ids {
-                        let Some(item_val) = store.get(list_item_store_key(list_id, item_id))
-                        else {
-                            modified = true;
-                            continue;
-                        };
-                        let Ok(item) = serde_json::from_value::<MediaItem>(item_val) else {
-                            modified = true;
-                            store.delete(list_item_store_key(list_id, item_id));
-                            continue;
-                        };
-                        let Some(item) = normalize_library_item(item) else {
-                            modified = true;
-                            store.delete(list_item_store_key(list_id, item_id));
-                            continue;
-                        };
-
-                        // Re-key drifted rows: the normalized id is the
-                        // identity every list op (`add`/`remove`/`reorder`)
-                        // addresses, so a raw key that differs would leave
-                        // the item un-removable.
-                        if item.id != *item_id {
-                            modified = true;
-                            store.set(list_item_store_key(list_id, &item.id), json!(&item));
-                            store.delete(list_item_store_key(list_id, item_id));
-                        }
-
-                        cleaned_item_ids.push(item.id.clone());
-                        items.push(item);
-                    }
-
-                    // The order entry owns the list identity — a meta `id`
-                    // that drifted would un-key every list op, so rewrite it
-                    // alongside any item-id cleanup.
-                    if cleaned_item_ids != list.item_ids || list.id != *list_id {
-                        modified = true;
-                        let repaired = UserList {
-                            id: list_id.clone(),
-                            name: list.name.clone(),
-                            icon: list.icon.clone(),
-                            item_ids: cleaned_item_ids.clone(),
-                        };
-                        store.set(list_meta_key(list_id), json!(repaired));
-                    }
-
-                    result.push(UserListWithItems {
-                        id: list_id.clone(),
-                        name: list.name,
-                        icon: list.icon,
-                        item_ids: cleaned_item_ids,
-                        items,
-                    });
-                }
+    for list_id in &order {
+        let Some(mut list) = store.get_typed::<UserList>(list_meta_key(list_id)) else {
+            continue;
+        };
+        surviving_ids.push(list_id.clone());
+        let mut seen = HashSet::with_capacity(list.item_ids.len());
+        // Read every original row before repairing keys. Swapped ids must
+        // not overwrite an unread row; colliding ids keep the first valid
+        // item, matching backup import's dedupe policy.
+        let items: Vec<MediaItem> = list
+            .item_ids
+            .iter()
+            .filter_map(|id| store.get_typed::<MediaItem>(list_item_store_key(list_id, id)))
+            .filter_map(normalize_library_item)
+            .filter(|item| seen.insert(item.id.clone()))
+            .collect();
+        let cleaned_item_ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+        if cleaned_item_ids != list.item_ids {
+            // Delete all old keys before any insert: a later old-key delete
+            // could otherwise erase an earlier repaired row.
+            for id in &list.item_ids {
+                store.delete(list_item_store_key(list_id, id));
+            }
+            for item in &items {
+                store.set(list_item_store_key(list_id, &item.id), json!(item));
             }
         }
 
-        // Ghost order entries (missing or unparseable meta) never surface in
-        // the result — prune them from the index so they stop costing a
-        // store probe on every read.
-        if surviving_ids.len() != order.len() {
+        // The order entry owns the list identity all mutations address.
+        if cleaned_item_ids != list.item_ids || list.id != *list_id {
             modified = true;
-            store.set(LISTS_ORDER_KEY, json!(surviving_ids));
+            list.id = list_id.clone();
+            list.item_ids = cleaned_item_ids;
+            store.set(list_meta_key(list_id), json!(list));
         }
 
-        if modified {
-            store.save()?;
-        }
+        result.push(UserListWithItems {
+            id: list.id,
+            name: list.name,
+            icon: list.icon,
+            item_ids: list.item_ids,
+            items,
+        });
+    }
 
-        Ok(result)
-    })
-    .await
+    // Ghost order entries never surface in the result.
+    if surviving_ids.len() != order.len() {
+        modified = true;
+        store.set(LISTS_ORDER_KEY, json!(surviving_ids));
+    }
+    if modified {
+        store.save()?;
+    }
+    Ok(result)
 }
 
 #[command]
@@ -279,10 +252,7 @@ pub async fn reorder_list_items(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        let mut list = store
-            .get(list_meta_key(&list_id))
-            .and_then(|value| serde_json::from_value::<UserList>(value).ok())
-            .ok_or_else(|| "List not found".to_string())?;
+        let mut list = load_list(&store, &list_id)?;
 
         list.item_ids = reorder_known_ids(&list.item_ids, item_ids);
 

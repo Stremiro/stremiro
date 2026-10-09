@@ -1,7 +1,9 @@
 use super::history_helpers::{
     build_history_key, choose_entry, choose_up_next_source, compare_continue_watching,
-    hydrate_watch_progress_lookup_id, normalize_episode_coordinate, sanitize_watch_progress,
-    with_progress_annotations, HistoryEntryQuery, WATCH_PROGRESS_MIN_RESUME_POSITION_SECS,
+    hydrate_watch_progress_lookup_id, is_continue_watching_candidate,
+    is_series_like_watch_progress, normalize_episode_coordinate, sanitize_watch_progress,
+    watch_progress_absolute_episode, watch_progress_absolute_season, with_progress_annotations,
+    HistoryEntryQuery, WATCH_PROGRESS_MIN_RESUME_POSITION_SECS,
 };
 use super::playback_state::PlaybackStateService;
 use super::store_helpers::load_watch_statuses_map;
@@ -69,8 +71,7 @@ where
     .await
 }
 
-/// One grouping pass for every title-scoped history view: unique-history and
-/// continue-watching both fan rows out by title before the per-title choose
+/// History and Up Next fan rows out by title before the per-title choose
 /// runs. Groups come back in first-seen order — the loader's deterministic
 /// `ORDER BY last_watched DESC, history_key DESC` — so downstream stable
 /// sorts keep that order on recency ties instead of riding HashMap
@@ -125,17 +126,44 @@ pub(crate) fn build_title_watch_history_rows(items: Vec<WatchProgress>) -> Vec<W
     items
 }
 
-/// Continue-watching picks rows by resume state alone — the chooser never
-/// consulted source health (its donor scan was a self-merge no-op) — so the
-/// entries build takes no health map and the global query skips the read.
-fn build_continue_watching_entries(items: Vec<WatchProgress>) -> Vec<WatchProgress> {
-    let mut list = group_watch_progress_by_title(items)
+pub(super) fn build_continue_watching_entries(items: Vec<WatchProgress>) -> Vec<WatchProgress> {
+    let mut list: Vec<_> = group_watch_progress_by_title(items)
         .into_iter()
-        .filter_map(|items| choose_entry(items, HistoryEntryQuery::ContinueWatching, None))
-        .collect::<Vec<_>>();
-
+        .filter_map(|items| {
+            items
+                .into_iter()
+                .filter(is_continue_watching_candidate)
+                .min_by(compare_continue_watching)
+        })
+        .collect();
+    for item in &mut list {
+        hydrate_watch_progress_lookup_id(item);
+    }
     list.sort_by(compare_continue_watching);
+    list
+}
 
+/// Title reads retain history: borrow the rows and copy only selected resume
+/// entries instead of copying every episode's metadata.
+fn build_title_continue_watching_entries(items: &[WatchProgress]) -> Vec<WatchProgress> {
+    // Every row has the queried media id; persisted kinds are movie/series.
+    let mut seen_types = HashSet::new();
+    let mut list = Vec::new();
+    for item in items {
+        if !seen_types.insert(item.type_.as_str()) {
+            continue;
+        }
+        if let Some(chosen) = items
+            .iter()
+            .filter(|row| row.type_ == item.type_ && is_continue_watching_candidate(row))
+            .min_by(|left, right| compare_continue_watching(left, right))
+        {
+            let mut chosen = chosen.clone();
+            hydrate_watch_progress_lookup_id(&mut chosen);
+            list.push(chosen);
+        }
+    }
+    list.sort_by(compare_continue_watching);
     list
 }
 
@@ -233,18 +261,12 @@ pub async fn save_watch_progress(
         ) {
             return Ok(false);
         }
-        // Re-check after the read: a clear that landed between capture and
-        // the DB read must still win over this write. The guarded save
-        // re-checks under the resume lock and before the health-file write
-        // so neither store can resurrect cleared rows.
-        if service.history_generation() != start_generation {
-            return Ok(false);
-        }
+        // The guarded save re-checks this generation under the resume lock.
         service.track_progress_guarded(
             &app_for_persisted,
             &persisted_key,
             &persisted_progress,
-            Some(start_generation),
+            start_generation,
         )
     })
     .await?;
@@ -395,6 +417,79 @@ pub(crate) async fn load_up_next_sources(
 pub struct TitleWatchProgress {
     pub history: Vec<WatchProgress>,
     pub continue_watching: Vec<WatchProgress>,
+    /// Per-episode rows keyed `id:season:episode` — the details/player/selector
+    /// progress lookups share it instead of re-folding `history` per surface.
+    pub episode_progress: HashMap<String, WatchProgress>,
+    /// Furthest canonical episode per season for spoiler masking: the highest
+    /// started episode, seeded by the latest series row's coordinates so its
+    /// resume target counts even before it accrues watch time.
+    pub watched_episode_ceiling: HashMap<u32, u32>,
+}
+
+/// Canonical coordinates claim `id:season:episode` keys first so a remapped
+/// row can never shadow a canonical claimant; raw stream coordinates then
+/// fill only unclaimed slots — the same pick
+/// `matches_exact_watch_progress_episode` encodes. Series rows only, keyed by
+/// each row's own id (every row carries the queried media id).
+fn build_title_episode_progress(history: &[WatchProgress]) -> HashMap<String, WatchProgress> {
+    let mut progress = HashMap::new();
+    for canonical in [true, false] {
+        for row in history.iter().filter(|row| row.type_ == "series") {
+            let coordinates = if canonical {
+                watch_progress_absolute_season(row).zip(watch_progress_absolute_episode(row))
+            } else {
+                row.season.zip(row.episode)
+            };
+            if let Some((season, episode)) = coordinates {
+                progress
+                    .entry(format!("{}:{}:{}", row.id, season, episode))
+                    .or_insert_with(|| row.clone());
+            }
+        }
+    }
+    progress
+}
+
+fn build_watched_episode_ceiling(history: &[WatchProgress]) -> HashMap<u32, u32> {
+    let mut ceiling = HashMap::new();
+    for row in history.iter().filter(|row| row.has_started_watching) {
+        if let (Some(season), Some(episode)) = (
+            watch_progress_absolute_season(row),
+            watch_progress_absolute_episode(row),
+        ) {
+            ceiling
+                .entry(season)
+                .and_modify(|max: &mut u32| *max = (*max).max(episode))
+                .or_insert(episode);
+        }
+    }
+    if let Some(latest) = history
+        .iter()
+        .find(|row| is_series_like_watch_progress(row))
+    {
+        if let (Some(season), Some(episode)) = (
+            watch_progress_absolute_season(latest),
+            watch_progress_absolute_episode(latest),
+        ) {
+            ceiling
+                .entry(season)
+                .and_modify(|max| *max = (*max).max(episode))
+                .or_insert(episode);
+        }
+    }
+    ceiling
+}
+
+pub(super) fn build_title_watch_progress(items: Vec<WatchProgress>) -> TitleWatchProgress {
+    let continue_watching =
+        annotate_watch_progress_list(build_title_continue_watching_entries(&items));
+    let history = annotate_watch_progress_list(build_title_watch_history_rows(items));
+    TitleWatchProgress {
+        episode_progress: build_title_episode_progress(&history),
+        watched_episode_ceiling: build_watched_episode_ceiling(&history),
+        history,
+        continue_watching,
+    }
 }
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
@@ -417,8 +512,8 @@ pub(super) fn prepare_episode_watch_changes(
     for (key, row) in existing {
         stamp = stamp.max(row.last_watched);
         if let (Some(season), Some(episode)) = (
-            row.absolute_season.or(row.season),
-            row.absolute_episode.or(row.episode),
+            watch_progress_absolute_season(&row),
+            watch_progress_absolute_episode(&row),
         ) {
             by_episode
                 .entry((season, episode))
@@ -524,10 +619,7 @@ pub async fn set_episodes_watched(
             .into_iter()
             .map(|(_, row)| row)
             .collect::<Vec<_>>();
-        Ok(TitleWatchProgress {
-            history: annotate_watch_progress_list(build_title_watch_history_rows(rows.clone())),
-            continue_watching: annotate_watch_progress_list(build_continue_watching_entries(rows)),
-        })
+        Ok(build_title_watch_progress(rows))
     })
     .await
 }
@@ -546,10 +638,7 @@ pub async fn get_title_watch_progress(
     })
     .await?;
 
-    Ok(TitleWatchProgress {
-        history: annotate_watch_progress_list(build_title_watch_history_rows(items.clone())),
-        continue_watching: annotate_watch_progress_list(build_continue_watching_entries(items)),
-    })
+    Ok(build_title_watch_progress(items))
 }
 
 #[command]
@@ -570,11 +659,27 @@ pub async fn get_watch_progress(
 
     let title_media_id = id.clone();
     let title_type = normalized_type.clone();
-    let (items, source_health_priorities) =
-        load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
-            service.load_resume_entries_for_title(app, &title_type, &title_media_id)
-        })
-        .await?;
+    // The donor merge that reads source-health priorities only runs for
+    // series-like rows (choose_latest_entry early-returns otherwise), so a
+    // movie resume lookup skips the batch health read entirely.
+    let (items, source_health_priorities) = if normalized_type == "series" {
+        let (items, priorities) =
+            load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
+                service.load_resume_entries_for_title(app, &title_type, &title_media_id)
+            })
+            .await?;
+        (items, Some(priorities))
+    } else {
+        let title_media_id = id.clone();
+        let title_type = normalized_type.clone();
+        (
+            load_resume_rows(&app, playback_state.inner(), move |service, app| {
+                service.load_resume_entries_for_title(app, &title_type, &title_media_id)
+            })
+            .await?,
+            None,
+        )
+    };
 
     Ok(choose_entry(
         items,
@@ -584,14 +689,13 @@ pub async fn get_watch_progress(
             season,
             episode,
         },
-        Some(&source_health_priorities),
+        source_health_priorities.as_ref(),
     )
     .map(with_progress_annotations))
 }
 
-/// "Hours watched" sums the raw per-episode rows — the collapsed history
-/// queries would undercount. The aggregate runs in SQL so the stat costs one
-/// query, not a full-table decode on every profile mount.
+/// Sum saved progress across canonical episodes in SQL; collapsed title
+/// history would omit episodes, and decoding all rows is unnecessary.
 #[command]
 pub async fn get_total_watch_time_secs(
     app: AppHandle,

@@ -37,7 +37,10 @@ export function SearchInput({
         onKeyDown={(e) => {
           // Progressive dismissal: Esc clears the text, then blurs the field
           // so page-level Esc (back) becomes the next step.
-          if (e.key !== 'Escape') return;
+          if (e.key !== 'Escape' || e.defaultPrevented || e.nativeEvent.isComposing) return;
+          e.preventDefault();
+          e.stopPropagation();
+          if (e.repeat) return;
           if (value) {
             onValueChange('');
           } else {
@@ -55,7 +58,7 @@ export function SearchInput({
           }}
           aria-label={clearLabel}
           title={clearLabel}
-          className='absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-zinc-600 transition-colors hover:text-white'
+          className='absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-zinc-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
         >
           <X className='w-3.5 h-3.5' />
         </button>

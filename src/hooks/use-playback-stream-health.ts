@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type PlaybackStreamOutcome } from '@/lib/api';
 import { invalidateStreamQueries } from '@/lib/query-invalidation';
-import { nonBlank } from '@/lib/utils';
+import { isLocalMediaId, nonBlank } from '@/lib/utils';
 
 interface UsePlaybackStreamHealthArgs {
   mediaId?: string;
@@ -54,7 +54,7 @@ export function usePlaybackStreamHealth({
       const normalizedMediaType = nonBlank(mediaType);
       const normalizedStreamUrl = nonBlank(streamUrl) || nonBlank(activeStreamUrl);
 
-      if (!normalizedMediaId || !normalizedMediaType || normalizedMediaId === 'local') {
+      if (!normalizedMediaId || !normalizedMediaType || isLocalMediaId(normalizedMediaId)) {
         return;
       }
       if (!normalizedStreamUrl) {

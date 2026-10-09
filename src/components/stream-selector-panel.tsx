@@ -25,6 +25,7 @@ import { RemoteImage } from '@/components/remote-image';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
+import { useFailedSrc } from '@/hooks/use-failed-src';
 import {
   type AddonStream,
   type Episode,
@@ -37,12 +38,13 @@ import {
   type StreamSourceSummary,
   type WatchProgress,
 } from '@/lib/api';
+import { whenRowMounted } from '@/lib/dom';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
 import { cn, formatAirDate, formatSeasonEpisode, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
-  'px-2.5 py-1.5 rounded-md text-[11px] font-semibold transition-all leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
+  'h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
 const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 hover:text-zinc-200';
 
 // Filters use the app accent; only sort modes carry per-mode color
@@ -143,8 +145,6 @@ interface StreamSelectorHeaderProps {
   title: string;
 }
 
-// Eyebrow/kicker convention shared with the player overlays: tiny uppercase,
-// wide-tracked, quiet — the S/E or media-type tag above the title.
 const HEADER_KICKER_CLASS =
   'text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/40';
 
@@ -160,6 +160,7 @@ export function StreamSelectorHeader({
   season,
   title,
 }: StreamSelectorHeaderProps) {
+  const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
   const kicker = formatSeasonEpisode(season, episode) || mediaLabel;
   return (
     <div className='relative h-56 shrink-0 overflow-hidden'>
@@ -190,14 +191,13 @@ export function StreamSelectorHeader({
           )}
           <div className='flex flex-col gap-1.5 min-w-0'>
             <p className={HEADER_KICKER_CLASS}>{kicker}</p>
-            {/* Logo is the title treatment (same convention as
-                hero/details/player); text stays as the a11y + fallback. */}
-            {isHttpUrl(logo) ? (
+            {logoSrc ? (
               <>
                 <RemoteImage
-                  src={logo}
+                  src={logoSrc}
                   className='max-h-12 w-auto max-w-72 object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)]'
-                  alt={title}
+                  alt=''
+                  onError={onLogoError}
                 />
                 <DialogTitle className='sr-only'>{title}</DialogTitle>
               </>
@@ -268,13 +268,16 @@ export function StreamListLoadingState({
       {chips}
       <div className='mb-3 flex items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2'>
         <Loader2 className='h-3.5 w-3.5 animate-spin text-white/35' />
-        <p className='text-[11px] font-semibold uppercase tracking-widest text-white/30'>
+        <p
+          role='status'
+          className='text-[11px] font-semibold uppercase tracking-widest text-white/30'
+        >
           {sourceCount > 0
             ? `Searching ${sourceCount} source${sourceCount === 1 ? '' : 's'}…`
             : 'Preparing sources…'}
         </p>
       </div>
-      <div role='list' className='space-y-1.5' aria-busy='true'>
+      <div aria-hidden='true' className='min-h-0 flex-1 space-y-1.5 overflow-hidden'>
         {Array.from({ length: 6 }, (_, i) => (
           <StreamRowSkeleton key={i} />
         ))}
@@ -329,15 +332,15 @@ function StreamListMessage({
   title: string;
 }) {
   return (
-    <div className='flex h-full min-h-0 flex-col px-3 pt-3'>
+    <div className='flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain px-3 py-3'>
       {chips}
       <div
         role={role}
-        className='flex flex-1 flex-col items-center justify-center gap-2 text-muted-foreground text-center'
+        className='flex flex-1 shrink-0 flex-col items-center justify-center gap-2 text-muted-foreground text-center'
       >
         {icon}
         <p className='text-sm'>{title}</p>
-        <p className='text-xs text-zinc-500 leading-relaxed max-w-sm'>{body}</p>
+        <p className='text-xs text-zinc-500 leading-relaxed max-w-sm break-words'>{body}</p>
         {action}
       </div>
     </div>
@@ -398,18 +401,16 @@ export function StreamListEmptyState({
 
 export function StreamListFilteredEmptyState({ onClearFilters }: { onClearFilters: () => void }) {
   return (
-    <div className='flex flex-1 flex-col items-center justify-center py-10 gap-1.5 text-muted-foreground'>
-      <FileVideo className='w-8 h-8 opacity-15' />
-      <p className='text-sm font-medium text-zinc-400'>No streams match these filters</p>
-      <p className='text-xs text-zinc-600'>Try a different quality, source, or addon.</p>
-      <button
-        type='button'
-        onClick={onClearFilters}
-        className='text-xs text-zinc-500 hover:text-white transition-colors mt-1 underline underline-offset-2'
-      >
-        Clear filters
-      </button>
-    </div>
+    <StreamListMessage
+      icon={<FileVideo className='w-8 h-8 opacity-15' />}
+      title='No streams match these filters'
+      body='Try another filter or clear filters to see all streams.'
+      action={
+        <Button variant='outline' size='sm' onClick={onClearFilters}>
+          Clear filters
+        </Button>
+      }
+    />
   );
 }
 
@@ -554,8 +555,6 @@ export function StreamFilterToolbar({
 }: StreamFilterToolbarProps) {
   return (
     <div className='bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'>
-      {/* One stable row: the control groups scroll horizontally, so the
-          stream count and Reset stay pinned at the right. */}
       <div className='flex items-center gap-2'>
         {/* Right-edge fade: overflow dims into the pinned block instead of
             hard-cutting a label. */}
@@ -611,9 +610,6 @@ export function StreamFilterToolbar({
 
           <SegmentDivider />
 
-          {/* Each sort mode's active state carries the color its vocabulary
-              owns elsewhere: accent=smart, violet=quality (the 4K badge),
-              emerald=seeds (health/cached). */}
           <SegmentGroup
             label='Sort order'
             value={sortMode}
@@ -641,15 +637,16 @@ export function StreamFilterToolbar({
               : `${filteredCount} / ${totalCount}`}
             {stats.p2pCount > 0 && ` · ${stats.playableCount} playable`}
           </span>
-          {hasActiveFilter && (
-            <button
-              type='button'
-              onClick={onResetFilters}
-              className='h-7 rounded-md px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-red-400 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
-            >
-              Reset
-            </button>
-          )}
+          <button
+            type='button'
+            aria-disabled={!hasActiveFilter || undefined}
+            onClick={() => {
+              if (hasActiveFilter) onResetFilters();
+            }}
+            className='h-7 rounded-md px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30 aria-disabled:pointer-events-none aria-disabled:opacity-40'
+          >
+            Reset
+          </button>
         </div>
       </div>
     </div>
@@ -714,7 +711,7 @@ export function StreamResolveFeedbackToast({
             onClick={onCancel}
             title='Cancel opening stream (Esc)'
             aria-keyshortcuts='Escape'
-            className='pointer-events-auto shrink-0 rounded-md border border-white/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-white/50 transition-colors hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
+            className='pointer-events-auto h-7 shrink-0 rounded-md border border-white/10 px-2 text-[10px] font-semibold uppercase tracking-wider text-white/50 transition-colors duration-150 hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
           >
             Cancel
           </button>
@@ -831,29 +828,25 @@ export function StreamPackEpisodeList({
     targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex),
   );
 
+  // A virtual row mounts only after the scroll commit — retry one frame
+  // before giving up, for both the initial anchor and keyboard navigation.
+  const scheduleRowFocus = useCallback((index: number, preventScroll: boolean) => {
+    whenRowMounted(
+      () => listRef.current,
+      `[data-pack-row="${index}"]`,
+      (row) => row.focus({ preventScroll }),
+    );
+  }, []);
+
   const focusRow = useCallback(
     (index: number) => {
       setFocusedIndex(index);
       if (isVirtualized) {
         virtualizer.scrollToIndex(index, { align: 'auto' });
       }
-      // A virtual row mounts only after the scroll commit — retry one frame
-      // before giving up, same as the stream list's focus scheduling.
-      let retried = false;
-      const attempt = () => {
-        const row = listRef.current?.querySelector<HTMLElement>(`[data-pack-row="${index}"]`);
-        if (!row) {
-          if (!retried) {
-            retried = true;
-            requestAnimationFrame(attempt);
-          }
-          return;
-        }
-        row.focus({ preventScroll: isVirtualized });
-      };
-      requestAnimationFrame(attempt);
+      scheduleRowFocus(index, isVirtualized);
     },
-    [isVirtualized, virtualizer],
+    [isVirtualized, scheduleRowFocus, virtualizer],
   );
 
   // Arrow nav steps over header rows — they never hold the roving stop.
@@ -916,21 +909,7 @@ export function StreamPackEpisodeList({
         ?.querySelector<HTMLElement>(`[data-pack-row="${anchor}"]`)
         ?.scrollIntoView({ block: 'center' });
     }
-    // A virtual row mounts only after the scroll commit — retry one frame,
-    // same as the stream list's focus scheduling.
-    let retried = false;
-    const attempt = () => {
-      const row = listRef.current?.querySelector<HTMLElement>(`[data-pack-row="${anchor}"]`);
-      if (!row) {
-        if (!retried) {
-          retried = true;
-          requestAnimationFrame(attempt);
-        }
-        return;
-      }
-      row.focus({ preventScroll: true });
-    };
-    requestAnimationFrame(attempt);
+    scheduleRowFocus(anchor, true);
     // Mount-only anchor — later list changes must not re-scroll/refocus.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -1051,7 +1030,10 @@ export function StreamPackEpisodeList({
               <span className='h-1 w-1 rounded-full bg-amber-400/80' />
               Season pack
             </p>
-            <p className='mt-1.5 truncate text-[13px] font-semibold leading-tight text-zinc-100'>
+            <p
+              className='mt-1.5 truncate text-[13px] font-semibold leading-tight text-zinc-100'
+              title={packTitle}
+            >
               {packTitle}
             </p>
             {packMeta && (

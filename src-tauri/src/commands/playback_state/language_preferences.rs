@@ -1,5 +1,5 @@
 use super::{
-    insert_sorted_unique, load_index, playback_title_scope_key, prune_index_to_cap,
+    insert_sorted_unique, load_advisory_index, playback_title_scope_key, prune_index_to_cap,
     PlaybackStateService, PLAYBACK_STATE_STORE_FILE,
 };
 use crate::commands::playback_preferences_commands::sanitize_language_pref;
@@ -33,9 +33,21 @@ pub(super) fn load_playback_language_preferences_snapshot(
     store: &DurableStore,
     key: &str,
 ) -> Option<PlaybackLanguagePreferencesSnapshot> {
-    store
-        .get(playback_language_preferences_item_key(key))
-        .and_then(|value| serde_json::from_value::<PlaybackLanguagePreferencesSnapshot>(value).ok())
+    store.get_typed(playback_language_preferences_item_key(key))
+}
+
+fn prune_language_preferences_index(store: &DurableStore, index: &mut Vec<String>) {
+    prune_index_to_cap(
+        store,
+        index,
+        PLAYBACK_LANGUAGE_PREFERENCES_MAX_ENTRIES,
+        |store, key| {
+            load_playback_language_preferences_snapshot(store, key)
+                .map(|snapshot| snapshot.updated_at)
+                .unwrap_or(0)
+        },
+        playback_language_preferences_item_key,
+    );
 }
 
 pub(super) fn merge_playback_language_preferences(
@@ -121,7 +133,8 @@ impl PlaybackStateService {
         // outcome write, and the write-back below would then drop that
         // sibling's entry — orphaning an item that `clear` only reaches via
         // the index.
-        let mut preferences_index = load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
+        let mut preferences_index =
+            load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
 
         if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
             // Nothing stored for this title: clearing is already a no-op, so
@@ -156,19 +169,9 @@ impl PlaybackStateService {
             }),
         );
 
-        if preferences_index.len() > PLAYBACK_LANGUAGE_PREFERENCES_MAX_ENTRIES {
-            prune_index_to_cap(
-                &store,
-                &mut preferences_index,
-                PLAYBACK_LANGUAGE_PREFERENCES_MAX_ENTRIES,
-                |store, key| {
-                    load_playback_language_preferences_snapshot(store, key)
-                        .map(|snapshot| snapshot.updated_at)
-                        .unwrap_or(0)
-                },
-                playback_language_preferences_item_key,
-            );
-        }
+        // `prune_index_to_cap` early-returns under the cap; the item write
+        // above must still land first so the new pick can't evict itself.
+        prune_language_preferences_index(&store, &mut preferences_index);
 
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
@@ -185,13 +188,15 @@ impl PlaybackStateService {
         app: &AppHandle,
     ) -> Result<BTreeMap<String, PlaybackLanguagePreferencesSnapshot>, String> {
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
-        Ok(load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)
-            .into_iter()
-            .filter_map(|key| {
-                let snapshot = load_playback_language_preferences_snapshot(&store, &key)?;
-                Some((key, snapshot))
-            })
-            .collect())
+        Ok(
+            load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)
+                .into_iter()
+                .filter_map(|key| {
+                    let snapshot = load_playback_language_preferences_snapshot(&store, &key)?;
+                    Some((key, snapshot))
+                })
+                .collect(),
+        )
     }
 
     /// Backup restore: fills titles with no learned preference yet — a pick
@@ -208,7 +213,8 @@ impl PlaybackStateService {
         }
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
         let _state_file_guard = self.lock_state_file_write();
-        let mut preferences_index = load_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
+        let mut preferences_index =
+            load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
         let now = crate::commands::now_unix_millis();
         let mut imported = 0usize;
 
@@ -246,17 +252,7 @@ impl PlaybackStateService {
         if imported == 0 {
             return Ok(0);
         }
-        prune_index_to_cap(
-            &store,
-            &mut preferences_index,
-            PLAYBACK_LANGUAGE_PREFERENCES_MAX_ENTRIES,
-            |store, key| {
-                load_playback_language_preferences_snapshot(store, key)
-                    .map(|snapshot| snapshot.updated_at)
-                    .unwrap_or(0)
-            },
-            playback_language_preferences_item_key,
-        );
+        prune_language_preferences_index(&store, &mut preferences_index);
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
             json!(preferences_index),

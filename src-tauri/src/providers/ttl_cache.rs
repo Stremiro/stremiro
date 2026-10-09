@@ -1,12 +1,12 @@
-use super::lock_or_recover;
+use super::{lock_or_recover, FETCH_ATTEMPTS, FETCH_RETRY_BACKOFF};
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Single owner for "hash a possibly credential-bearing URL into a stable
-/// key segment": callers format it with their own prefix, so secrets never
-/// appear in cache keys or logs.
+/// Hash a possibly credential-bearing URL into a stable key segment, so
+/// secrets never appear in cache keys or logs.
 pub(crate) fn hash_segment(value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -19,9 +19,8 @@ struct TtlEntry<V> {
 }
 
 /// Bounded TTL map shared by the stream transport and the resource client.
-/// Hits clone the stored value — cheap next to the network round-trip they
-/// replace. Eviction: expire-on-read and insert, then soonest-expiring
-/// victims so the entry that triggered the fetch stays.
+/// Eviction: expire-on-read/insert, then soonest-expiring victims so the
+/// entry that triggered the fetch stays.
 pub(crate) struct TtlCache<V> {
     entries: Mutex<HashMap<String, TtlEntry<V>>>,
     max_entries: usize,
@@ -50,12 +49,10 @@ impl<V: Clone> TtlCache<V> {
         }
     }
 
-    /// `is_empty` picks the shorter TTL: successful-but-empty answers are
-    /// still cached (a stream-less title must not re-fan-out per request),
-    /// but newly indexed content surfaces within seconds, not minutes.
-    /// `still_fresh` runs under the entries lock: a `clear_cache` between
-    /// fetch start and store bumps the generation, so a superseded write
-    /// drops here instead of repopulating cleared state.
+    /// `is_empty` picks the shorter TTL: empty answers are still cached (a
+    /// stream-less title must not re-fan-out per request) but newly indexed
+    /// content surfaces fast. `still_fresh` runs under the entries lock so a
+    /// superseded write (post-`clear_cache`) is dropped, not stored.
     pub(crate) fn put(&self, key: &str, value: V, is_empty: bool, still_fresh: impl Fn() -> bool) {
         let mut entries = lock_or_recover(&self.entries);
         if !still_fresh() {
@@ -97,12 +94,10 @@ impl<V: Clone> TtlCache<V> {
     }
 }
 
-/// Single-flight registry keyed identically to its sibling cache:
-/// concurrent callers for one key wait on the leader's lock and re-read the
-/// cache instead of duplicating the request. Orphaned entries (a dropped
-/// fetch future holds only the map's Arc) sweep on insert once past the
-/// hygiene bound; `release` removes the key once no waiter can still join —
-/// the map's Arc plus the caller's means the last holder always cleans up.
+/// Single-flight registry keyed identically to its sibling cache: callers
+/// for one key wait on the leader and re-read the cache. Orphaned entries
+/// (dropped fetch futures) sweep on insert past the hygiene bound;
+/// `release` removes the key once the caller is provably the last holder.
 pub(crate) struct InFlight {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sweep_at: usize,
@@ -129,10 +124,9 @@ impl InFlight {
         locks.entry(key.to_string()).or_default().clone()
     }
 
-    /// Removes the key only while this caller is provably the last holder:
-    /// the map lookup, the identity check, and the removal all happen under
-    /// the map mutex, so a `claim` cannot slip a new waiter in between, and
-    /// a stale releaser can't evict a replacement lock parked at its old key.
+    /// Removes the key only while this caller is provably the last holder —
+    /// all under the map mutex, so a `claim` can't slip a waiter in between
+    /// and a stale releaser can't evict a replacement lock.
     pub(crate) fn release(&self, key: &str, key_lock: &Arc<tokio::sync::Mutex<()>>) {
         let mut locks = lock_or_recover(&self.locks);
         let last_holder = matches!(locks.get(key), Some(mapped) if Arc::ptr_eq(mapped, key_lock))
@@ -140,6 +134,208 @@ impl InFlight {
         if last_holder {
             locks.remove(key);
         }
+    }
+}
+
+/// Per-addon transport-failure cooldown shared by the stream transport and
+/// the resource client: a host that exhausted its retries is presumed down,
+/// so sibling fetches fail fast for `ttl`. Session-local — a dead host is
+/// not a persisted condition. Writes are generation-checked so a fetch
+/// started before a `clear_cache` can neither reinstall a wiped cooldown
+/// nor wipe one recorded in the new generation; the failures mutex is taken
+/// before the generation read so ordering vs. the clear's bump is unambiguous.
+pub(crate) struct FetchFailureCooldown {
+    failures: Mutex<HashMap<String, Instant>>,
+    ttl: Duration,
+    sweep_at: usize,
+}
+
+impl FetchFailureCooldown {
+    /// `sweep_at` bounds map growth like the in-flight map: expired entries
+    /// drop on read, and a full sweep runs on insert past the bound.
+    pub(crate) fn new(ttl: Duration, sweep_at: usize) -> Self {
+        Self {
+            failures: Mutex::new(HashMap::new()),
+            ttl,
+            sweep_at,
+        }
+    }
+
+    /// True while `key` is inside its cooldown window; expired entries drop
+    /// on read.
+    pub(crate) fn cooling_down(&self, key: &str) -> bool {
+        let mut failures = lock_or_recover(&self.failures);
+        match failures.get(key) {
+            Some(until) if *until > Instant::now() => true,
+            Some(_) => {
+                failures.remove(key);
+                false
+            }
+            None => false,
+        }
+    }
+
+    /// Record a transport-exhaustion failure for `key`. Only retry-exhausted
+    /// or timed-out fetches reach this — status/size/parse errors are
+    /// content-scoped and belong to the per-key negative cache.
+    pub(crate) fn note(&self, key: &str, generation: &AtomicU64, expected: u64) {
+        let mut failures = lock_or_recover(&self.failures);
+        if generation.load(Ordering::SeqCst) != expected {
+            return;
+        }
+        failures.insert(key.to_string(), Instant::now() + self.ttl);
+        if failures.len() > self.sweep_at {
+            let now = Instant::now();
+            failures.retain(|_, until| *until > now);
+        }
+    }
+
+    /// Drop `key`'s cooldown after a successful fetch (the host proved
+    /// reachable), unless a `clear_cache` landed meanwhile.
+    pub(crate) fn clear_for_success(&self, key: &str, generation: &AtomicU64, expected: u64) {
+        let mut failures = lock_or_recover(&self.failures);
+        if generation.load(Ordering::SeqCst) == expected {
+            failures.remove(key);
+        }
+    }
+
+    /// `clear_cache` wipe — a config change may fix the dead host.
+    pub(crate) fn clear(&self) {
+        lock_or_recover(&self.failures).clear();
+    }
+}
+
+/// How one addon fetch attempt ended: `Retryable` is a transient transport
+/// error (send/connect/timeout/mid-stream read) that earns the shared
+/// back-off retry and, on exhaustion, the per-addon cooldown; `Fatal` is
+/// deterministic per request (status, size cap, decode, absent meta) and
+/// lands in the short-TTL negative cache — a content-level failure must not
+/// mark the whole addon dead.
+pub(crate) enum FetchFailure {
+    Retryable(String),
+    Fatal(String),
+}
+
+/// The fetch contract the stream transport and resource client both run:
+/// cache hit → negative-cache hit → per-addon cooldown → claim the key's
+/// in-flight lock → re-check all three under it (the leader may have stored
+/// while this caller waited) → `fetch`, retrying `Retryable` outcomes with
+/// the shared back-off. Every writeback is generation-checked, so a
+/// `clear_cache` landing mid-fetch revokes it. `request_timeout` feeds the
+/// burned-timeout check (an attempt that ate the whole budget skips its
+/// retry); `cooldown_message` is the fast-fail text served in the window.
+pub(crate) struct FetchContract<'a> {
+    pub failure_cache: &'a TtlCache<String>,
+    pub fetch_failures: &'a FetchFailureCooldown,
+    pub in_flight: &'a InFlight,
+    pub generation: &'a AtomicU64,
+    pub request_timeout: Duration,
+    pub cooldown_message: &'a str,
+}
+
+impl FetchContract<'_> {
+    /// Deterministic per-request failure write with the same generation
+    /// guard as the value caches: a `clear_cache` mid-fetch revokes it.
+    /// `run` owns failure writes; sibling-provider tests reach it directly.
+    pub(super) fn cache_failure(&self, key: &str, error: &str, generation: u64) {
+        let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
+        if !still_fresh() {
+            return;
+        }
+        self.failure_cache
+            .put(key, error.to_string(), true, still_fresh);
+    }
+
+    pub(crate) async fn run<T, Fetch, Fut>(
+        &self,
+        cache: &TtlCache<T>,
+        key: &str,
+        addon_key: &str,
+        is_empty: impl Fn(&T) -> bool,
+        fetch: Fetch,
+    ) -> Result<T, String>
+    where
+        T: Clone,
+        Fetch: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FetchFailure>>,
+    {
+        if let Some(cached) = cache.get(key) {
+            return Ok(cached);
+        }
+        if let Some(error) = self.failure_cache.get(key) {
+            return Err(error);
+        }
+        // Inside the failure window the fetch would only re-pay
+        // connect/timeout to fail again.
+        if self.fetch_failures.cooling_down(addon_key) {
+            return Err(self.cooldown_message.to_string());
+        }
+
+        // Single-flight: a concurrent call may already be fetching this key.
+        // Wait, then re-read the leader's cached result instead of
+        // duplicating the request.
+        let key_lock = self.in_flight.claim(key);
+        let result = {
+            let _fetch_permit = key_lock.lock().await;
+            // The leader stored while this caller waited — take its result,
+            // or fail fast on the failure it just recorded instead of
+            // re-running the same doomed fetch.
+            if let Some(cached) = cache.get(key) {
+                Ok(cached)
+            } else if let Some(error) = self.failure_cache.get(key) {
+                Err(error)
+            } else if self.fetch_failures.cooling_down(addon_key) {
+                Err(self.cooldown_message.to_string())
+            } else {
+                // A `clear_cache` after this point revokes this fetch's
+                // right to write back (all writebacks below are
+                // generation-checked).
+                let generation = self.generation.load(Ordering::SeqCst);
+                let mut attempt = 0u8;
+                loop {
+                    if attempt > 0 {
+                        tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
+                    }
+                    let started_at = Instant::now();
+                    match fetch().await {
+                        Ok(value) => {
+                            // A success proves the host reachable — drop a
+                            // cooldown a concurrent same-addon fetch recorded.
+                            self.fetch_failures.clear_for_success(
+                                addon_key,
+                                self.generation,
+                                generation,
+                            );
+                            // A clear_cache between fetch start and store
+                            // drops the write under the entries lock, so
+                            // post-change callers never read pre-change data.
+                            cache.put(key, value.clone(), is_empty(&value), || {
+                                self.generation.load(Ordering::SeqCst) == generation
+                            });
+                            break Ok(value);
+                        }
+                        Err(FetchFailure::Fatal(error)) => {
+                            self.cache_failure(key, &error, generation);
+                            break Err(error);
+                        }
+                        Err(FetchFailure::Retryable(error)) => {
+                            attempt += 1;
+                            let burned_timeout = started_at.elapsed() >= self.request_timeout;
+                            if attempt >= FETCH_ATTEMPTS || burned_timeout {
+                                // Retries exhausted: cool the addon down so
+                                // the next open fails fast (generation-
+                                // checked like the cache writes above).
+                                self.fetch_failures
+                                    .note(addon_key, self.generation, generation);
+                                break Err(error);
+                            }
+                        }
+                    }
+                }
+            }
+        };
+        self.in_flight.release(key, &key_lock);
+        result
     }
 }
 

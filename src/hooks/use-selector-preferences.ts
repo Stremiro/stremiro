@@ -21,11 +21,6 @@ import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
 const STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS = 200;
 let streamSelectorPreferencesSaveQueue = Promise.resolve<void>(undefined);
 
-function flushPendingStreamSelectorPreferences(): Promise<void> {
-  return streamSelectorPreferencesSaveQueue;
-}
-registerPendingAppWriteFlusher(flushPendingStreamSelectorPreferences);
-
 interface UseSelectorPreferencesStateArgs {
   episode?: number;
   isSeriesLike: boolean;
@@ -76,7 +71,6 @@ export function useSelectorPreferencesState({
     setFiltersState(next);
   }, []);
   const latestFiltersRef = useRef(filters);
-  const persistedFiltersRef = useRef(filters);
   // Raw (unswallowed) save operation: the module queue only stores the
   // recovered tail, so lifecycle flushes observe failures through this.
   const lastPersistOperationRef = useRef<Promise<void> | null>(null);
@@ -101,10 +95,6 @@ export function useSelectorPreferencesState({
     streamSelectorPreferencesQuery.isSuccess && streamSelectorPreferencesQuery.data.initialized
       ? streamSelectorPreferencesQuery.data.preferences
       : defaultFilters;
-
-  useEffect(() => {
-    persistedFiltersRef.current = normalizedPersistedFilters;
-  }, [normalizedPersistedFilters]);
 
   const persistStreamSelectorPreferences = useEffectEvent(
     (nextFilters: StreamSelectorPreferences): Promise<void> => {
@@ -176,11 +166,8 @@ export function useSelectorPreferencesState({
         setFiltersState(nextFilters);
       }
       await persistStreamSelectorPreferences(latestFiltersRef.current);
-      return;
     }
-    // No pending edit — the recovered queue tail covers in-flight work, and
-    // tracked raw operations still surface a failure through the barrier.
-    await streamSelectorPreferencesSaveQueue;
+    // No pending edit: tracked raw operations already cover in-flight work.
   });
 
   useEffect(() => registerPendingAppWriteFlusher(flushPendingSelectorPreferences), []);
@@ -222,28 +209,32 @@ export function useSelectorPreferencesState({
     streamSelectorPreferencesQuery.isSuccess,
   ]);
 
+  // Latest-render binding lets the close cleanup compare against the
+  // freshest persisted snapshot without a shadow ref.
+  const flushOnClose = useEffectEvent(() => {
+    if (!hasHydratedFiltersRef.current) {
+      return;
+    }
+
+    const latestFilters = latestFiltersRef.current;
+    if (
+      userEditedFiltersRef.current &&
+      !areStreamSelectorPreferencesEqual(latestFilters, normalizedPersistedFilters)
+    ) {
+      void persistStreamSelectorPreferences(latestFilters);
+    }
+
+    openSessionKeyRef.current = null;
+    hasHydratedFiltersRef.current = false;
+    userEditedFiltersRef.current = false;
+  });
+
   useEffect(() => {
     if (!open) {
       return;
     }
 
-    return () => {
-      if (!hasHydratedFiltersRef.current) {
-        return;
-      }
-
-      const latestFilters = latestFiltersRef.current;
-      if (
-        userEditedFiltersRef.current &&
-        !areStreamSelectorPreferencesEqual(latestFilters, persistedFiltersRef.current)
-      ) {
-        void persistStreamSelectorPreferences(latestFilters);
-      }
-
-      openSessionKeyRef.current = null;
-      hasHydratedFiltersRef.current = false;
-      userEditedFiltersRef.current = false;
-    };
+    return flushOnClose;
   }, [open]);
 
   useEffect(() => {
@@ -278,12 +269,12 @@ export function useSelectorPreferencesState({
     });
   }, [defaultFilters, setFilters, showBatchFilter]);
 
-  const hasVisibleFilter = showBatchFilter
-    ? !areStreamSelectorPreferencesEqual(filters, defaultFilters)
-    : filters.quality !== defaultFilters.quality ||
-      filters.source !== defaultFilters.source ||
-      filters.addon !== defaultFilters.addon ||
-      filters.sort !== defaultFilters.sort;
+  // Equality is the single field list — masking `batch` keeps the hidden
+  // movie control's value out of the comparison without hand-listing fields.
+  const hasVisibleFilter = !areStreamSelectorPreferencesEqual(
+    showBatchFilter ? filters : { ...filters, batch: defaultFilters.batch },
+    defaultFilters,
+  );
 
   return {
     batchFilter: filters.batch,

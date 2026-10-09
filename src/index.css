@@ -64,25 +64,6 @@
     --accent-prog-rgb: 255 255 255;
     --accent-art: #ffffff;
     --accent-art-rgb: 255 255 255;
-    --background: 0 0% 0%;
-    --foreground: 240 10% 3.9%;
-    --card: 0 0% 100%;
-    --card-foreground: 240 10% 3.9%;
-    --popover: 0 0% 100%;
-    --popover-foreground: 240 10% 3.9%;
-    --primary: 240 5.9% 10%;
-    --primary-foreground: 0 0% 98%;
-    --secondary: 240 4.8% 95.9%;
-    --secondary-foreground: 240 5.9% 10%;
-    --muted: 240 4.8% 95.9%;
-    --muted-foreground: 240 3.8% 46.1%;
-    --accent: 240 4.8% 95.9%;
-    --accent-foreground: 240 5.9% 10%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 0 0% 98%;
-    --border: 240 5.9% 90%;
-    --input: 240 5.9% 90%;
-    --ring: 240 5.9% 10%;
     --radius: 0.5rem;
   }
 
@@ -255,22 +236,6 @@
     }
   }
 
-  /* Single-beat entrance for the paused-state center button. */
-  @keyframes pause-pop {
-    0% {
-      scale: 0.55;
-      opacity: 0;
-    }
-    55% {
-      scale: 1.08;
-      opacity: 1;
-    }
-    100% {
-      scale: 1;
-      opacity: 1;
-    }
-  }
-
   /* Barely-there breathing for the rating star: transform/opacity only. */
   @keyframes rating-star-shimmer {
     0%,
@@ -349,17 +314,20 @@
   /* Ambient activity: while a page flags work on html[data-ambient-active]
      (see useAmbientActivity) the accent dot fields drift — the top-left
      shimmers diagonally, the bottom-right marches horizontally with a soft
-     pulse, reading as a quiet loading bar. Shifts are whole 7px tiles, so
-     every loop is seamless. */
+     pulse, reading as a quiet loading bar. The fields translate a layer
+     oversized past the viewport edge (see layout.tsx): transform stays
+     compositor-side, unlike a background-position drift that repaints two
+     full-viewport layers every frame. Shifts are whole 8px tiles, so every
+     loop is seamless. */
   @keyframes ambient-dots-drift {
     to {
-      background-position: 7px 7px;
+      transform: translate(8px, 8px);
     }
   }
 
   @keyframes ambient-dots-march {
     to {
-      background-position: 21px 0;
+      transform: translateX(24px);
     }
   }
 
@@ -429,7 +397,6 @@
   .rating-star {
     animation: rating-star-shimmer 3.2s ease-in-out infinite;
     transform-origin: center;
-    will-change: transform, opacity;
   }
 
   /* Film grain that dithers large gradients so they never band. */

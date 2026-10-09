@@ -2,12 +2,13 @@ import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-quer
 import { useCallback } from 'react';
 
 import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
-import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
+import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import {
   effectivePlaybackLanguagePreferencesQueryKey,
   invalidatePlaybackLanguageQueries,
   PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
+import { isLocalMediaId } from '@/lib/utils';
 
 const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 
@@ -64,10 +65,6 @@ function enqueueSave(
   return trackPendingAppWrite(queuedSave);
 }
 
-registerPendingAppWriteFlusher(async () => {
-  await saveQueue;
-});
-
 interface UsePlaybackLanguagePreferencesOptions {
   mediaId?: string;
   mediaType?: 'movie' | 'series' | 'anime';
@@ -93,8 +90,8 @@ export function usePlaybackLanguagePreferences({
 
   const { data: effectivePlaybackLanguagePreferences } = useQuery({
     queryKey: effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
-    queryFn: () => api.getEffectivePlaybackLanguagePreferences(mediaId, mediaType),
-    enabled: !!mediaId && mediaId !== 'local',
+    queryFn: () => api.getEffectivePlaybackLanguagePreferences(mediaType, mediaId),
+    enabled: !!mediaId && !isLocalMediaId(mediaId),
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 

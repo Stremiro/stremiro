@@ -120,44 +120,12 @@ export function episodeProgressKey(id: string, season: number, episode: number):
   return `${id}:${season}:${episode}`;
 }
 
-interface TitleProgressIndex {
-  /** Per-episode rows keyed under both normalized and raw coordinates. */
-  episodeProgressMap: Map<string, WatchProgress>;
-  movieProgress: WatchProgress | null;
-  /** First series-like row — history arrives sorted by `last_watched` DESC. */
-  latestSeriesProgress: WatchProgress | null;
-}
-
-// One fold over a title's watch rows feeding details and the episodes panel —
-// single owner so map/key semantics can't drift between surfaces.
-export function indexTitleWatchProgress(history: WatchProgress[] | undefined): TitleProgressIndex {
-  const episodeProgressMap = new Map<string, WatchProgress>();
-  let movieProgress: WatchProgress | null = null;
-  let latestSeriesProgress: WatchProgress | null = null;
-  if (history?.length) {
-    // Rows arrive `last_watched` DESC; the map resolves a key to the newest
-    // claimant — the same pick the backend's latest-match + donor merge makes.
-    for (const entry of history) {
-      if (entry.type_ === 'movie' && !movieProgress) movieProgress = entry;
-      if (isSeriesLikeMediaType(entry.type_) && !latestSeriesProgress) {
-        latestSeriesProgress = entry;
-      }
-      if (entry.type_ !== 'series') continue;
-      const { season, episode } = watchProgressCoordinates(entry);
-      if (season === undefined || episode === undefined) continue;
-      const key = episodeProgressKey(entry.id, season, episode);
-      if (!episodeProgressMap.has(key)) episodeProgressMap.set(key, entry);
-    }
-    // Raw-coordinate keys fill only unclaimed slots: a row's stream S/E can
-    // collide with another episode's canonical key and must never shadow it.
-    for (const entry of history) {
-      if (entry.type_ !== 'series') continue;
-      if (entry.season == null || entry.episode == null) continue;
-      const key = episodeProgressKey(entry.id, entry.season, entry.episode);
-      if (!episodeProgressMap.has(key)) episodeProgressMap.set(key, entry);
-    }
-  }
-  return { episodeProgressMap, movieProgress, latestSeriesProgress };
+// Backend-folded `id:season:episode` lookups arrive as a Record — adapt the
+// wire shape to the Map the details/player/selector lookups use.
+export function titleEpisodeProgressMap(
+  episodeProgress: Record<string, WatchProgress> | undefined,
+): Map<string, WatchProgress> {
+  return new Map(Object.entries(episodeProgress ?? {}));
 }
 
 // "Last used" stream identity for the selector badge: exact canonical coords

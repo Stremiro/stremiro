@@ -36,6 +36,9 @@ const ANIME_CATEGORY_GENRE: &str = "animation";
 /// Genre menu entries per browse tab, in manifest-declared order.
 #[derive(Debug, Serialize, PartialEq, Eq)]
 pub struct BrowseGenres {
+    /// `all`-tab union of the movie and series sets, first spelling wins —
+    /// the frontend renders it directly rather than re-folding per type.
+    pub all: Vec<String>,
     pub movie: Vec<String>,
     pub series: Vec<String>,
     pub anime: Vec<String>,
@@ -88,14 +91,23 @@ fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<Str
 }
 
 pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
+    let movie = collect_catalog_genres(addons, "movie");
     let series = collect_catalog_genres(addons, "series");
+    let mut seen = HashSet::new();
+    let all = movie
+        .iter()
+        .chain(&series)
+        .filter(|genre| seen.insert(genre.to_ascii_lowercase()))
+        .cloned()
+        .collect();
     let anime = series
         .iter()
         .filter(|genre| !genre.eq_ignore_ascii_case(ANIME_CATEGORY_GENRE))
         .cloned()
         .collect();
     BrowseGenres {
-        movie: collect_catalog_genres(addons, "movie"),
+        all,
+        movie,
         series,
         anime,
     }
@@ -161,6 +173,7 @@ mod tests {
         ]);
         assert_eq!(genres.movie, ["Drama", "Comedy", "Horror"]);
         assert_eq!(genres.series, ["Animation", "Drama"]);
+        assert_eq!(genres.all, ["Drama", "Comedy", "Horror", "Animation"]);
         assert_eq!(genres.anime, ["Drama"]);
     }
 
@@ -168,6 +181,10 @@ mod tests {
     fn unclassified_registry_falls_back_to_cinemeta_lists() {
         let genres = build_browse_genres(&[]);
         assert_eq!(genres.movie.len(), MOVIE_GENRE_FALLBACK.len());
+        assert_eq!(
+            genres.all.len(),
+            MOVIE_GENRE_FALLBACK.len() + SERIES_ONLY_GENRES.len()
+        );
         assert!(genres.series.iter().any(|genre| genre == "Reality-TV"));
         assert!(!genres.movie.iter().any(|genre| genre == "Reality-TV"));
         assert!(!genres.anime.iter().any(|genre| genre == "Animation"));

@@ -1,7 +1,7 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useCallback, useEffect, useRef } from 'react';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
-import { clamp, cn, prefersReducedMotion } from '@/lib/utils';
+import { clamp, cn, scrollBehavior } from '@/lib/utils';
 
 export interface LocalSeasonEntry {
   number: number;
@@ -14,6 +14,9 @@ interface SeasonSwitcherProps {
   activeSeason: number | null;
   onLocalSeason: (season: number) => void;
 }
+
+const SCROLL_BUTTON_CLASS =
+  'pointer-events-auto flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-black/50 text-white/70 backdrop-blur-xs transition-colors duration-150 hover:bg-black/70 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
 export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: SeasonSwitcherProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -39,7 +42,7 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
 
     const timer = window.setTimeout(() => {
       itemRefs.current.get(activeSeason)?.scrollIntoView({
-        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+        behavior: scrollBehavior(),
         block: 'nearest',
         inline: 'center',
       });
@@ -63,17 +66,9 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
   const scroll = useCallback((direction: 'left' | 'right') => {
     scrollRef.current?.scrollBy({
       left: direction === 'left' ? -320 : 320,
-      behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+      behavior: scrollBehavior(),
     });
   }, []);
-
-  const getItemRef = useCallback(
-    (seasonNumber: number) => (node: HTMLButtonElement | null) => {
-      if (node) itemRefs.current.set(seasonNumber, node);
-      else itemRefs.current.delete(seasonNumber);
-    },
-    [],
-  );
 
   if (!hasMultipleSeasons) return null;
 
@@ -104,7 +99,10 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
           return (
             <button
               key={season.number}
-              ref={getItemRef(season.number)}
+              ref={(node) => {
+                if (node) itemRefs.current.set(season.number, node);
+                else itemRefs.current.delete(season.number);
+              }}
               type='button'
               role='tab'
               id={`season-tab-${season.number}`}
@@ -112,10 +110,10 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
               aria-selected={isActive}
               tabIndex={isActive ? 0 : -1}
               className={cn(
-                'flex shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 py-1.5 text-[13px] transition-all duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
+                'flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
                 isActive
-                  ? 'font-semibold text-(--on-accent-nav) shadow-xs'
-                  : 'font-medium text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+                  ? 'text-(--on-accent-nav)'
+                  : 'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
               )}
               style={isActive ? { backgroundColor: 'var(--accent-nav)' } : undefined}
               onClick={() => onLocalSeason(season.number)}
@@ -125,7 +123,7 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
                 <span
                   className={cn(
                     'text-[11px] tabular-nums',
-                    isActive ? 'opacity-60' : 'text-zinc-600',
+                    isActive ? 'opacity-60' : 'text-zinc-500',
                   )}
                 >
                   {season.episodeCount}
@@ -141,10 +139,10 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
           <button
             type='button'
             onClick={() => scroll('left')}
-            className='pointer-events-auto ml-1 flex h-6 w-6 items-center justify-center rounded-md border border-white/10 bg-black/50 text-white/70 backdrop-blur-xs transition-colors hover:bg-black/70 hover:text-white focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40'
+            className={`${SCROLL_BUTTON_CLASS} ml-1`}
             aria-label='Scroll seasons left'
           >
-            <ChevronLeft className='h-3.5 w-3.5' />
+            <ChevronLeft className='h-4 w-4' />
           </button>
         </div>
       )}
@@ -154,10 +152,10 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
           <button
             type='button'
             onClick={() => scroll('right')}
-            className='pointer-events-auto mr-1 flex h-6 w-6 items-center justify-center rounded-md border border-white/10 bg-black/50 text-white/70 backdrop-blur-xs transition-colors hover:bg-black/70 hover:text-white focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40'
+            className={`${SCROLL_BUTTON_CLASS} mr-1`}
             aria-label='Scroll seasons right'
           >
-            <ChevronRight className='h-3.5 w-3.5' />
+            <ChevronRight className='h-4 w-4' />
           </button>
         </div>
       )}

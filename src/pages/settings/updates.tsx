@@ -11,7 +11,7 @@ import {
   appUpdateProgressPercent,
   formatAppUpdateProgress,
 } from '@/lib/app-updater';
-import { cn } from '@/lib/utils';
+import { cn, parseLocalScheduleDate } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
@@ -21,10 +21,8 @@ import {
 
 function formatReleaseDate(date: string | null | undefined): string | null {
   if (!date) return null;
-  // The backend emits ISO dates ("2026-09-15"); anchor to local noon so a
-  // timezone shift can never roll the label back a day.
-  const parsed = new Date(`${date.slice(0, 10)}T12:00:00`);
-  return Number.isNaN(parsed.getTime()) ? date : format(parsed, 'MMM d, yyyy');
+  const parsed = parseLocalScheduleDate(date);
+  return parsed ? format(parsed, 'MMM d, yyyy') : date;
 }
 
 export function UpdatesSection() {
@@ -229,7 +227,7 @@ export function UpdatesSection() {
             <button
               type='button'
               onClick={handleOpenRelease}
-              className='ml-auto inline-flex items-center gap-1 text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-200'
+              className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
             >
               View release on GitHub
               <ArrowUpRight className='h-3.5 w-3.5' />

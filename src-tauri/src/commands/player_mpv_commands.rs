@@ -213,6 +213,17 @@ fn is_scalar_arg(value: &Value) -> bool {
     }
 }
 
+fn is_mpv_property_value(name: &str, value: &Value) -> bool {
+    if name == "http-header-fields" {
+        // mpv escaping can double the bounded addon header blob's byte length.
+        return value.as_str().is_some_and(|text| {
+            text.len() <= 2 * crate::providers::addons::MAX_PROXY_HEADERS_BYTES
+                && !text.contains(['\r', '\n'])
+        });
+    }
+    is_scalar_arg(value)
+}
+
 fn is_http_url(value: Option<&str>) -> bool {
     value.is_some_and(|url| url.starts_with("https://") || url.starts_with("http://"))
 }
@@ -221,7 +232,16 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
     if !MPV_COMMANDS.contains(&name) {
         return Err(format!("mpv command '{name}' is not allowed"));
     }
-    if args.len() > MPV_COMMAND_MAX_ARGS || args.iter().any(|arg| !is_scalar_arg(arg)) {
+    let first = args.first().and_then(Value::as_str);
+    if args.len() > MPV_COMMAND_MAX_ARGS
+        || args.iter().enumerate().any(|(index, arg)| {
+            if index == 1 && matches!(name, "set" | "cycle") {
+                !is_mpv_property_value(first.unwrap_or_default(), arg)
+            } else {
+                !is_scalar_arg(arg)
+            }
+        })
+    {
         return Err(format!(
             "mpv command '{name}' received unsupported arguments"
         ));
@@ -229,10 +249,12 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
 
     // Verbs whose first argument is a load target or property name need the
     // tighter checks; the rest take bounded scalars only.
-    let first = args.first().and_then(Value::as_str);
     match name {
-        "loadfile" | "sub-add" if !is_http_url(first) => {
-            Err(format!("mpv '{name}' requires an http(s) url"))
+        "loadfile" if !is_http_url(first) => Err(format!("mpv '{name}' requires an http(s) url")),
+        "sub-add"
+            if !first.is_some_and(crate::providers::addon_resource::is_fetchable_http_url) =>
+        {
+            Err("mpv 'sub-add' requires a subtitle URL allowed by fetch policy".to_string())
         }
         "set" | "cycle" if !first.is_some_and(|p| MPV_SETTABLE_PROPERTIES.contains(&p)) => {
             Err(format!("mpv '{name}' property is not allowed"))
@@ -267,31 +289,67 @@ pub async fn player_mpv_set_property(
     name: String,
     value: Value,
 ) -> Result<(), String> {
-    if !MPV_SETTABLE_PROPERTIES.contains(&name.as_str()) {
-        return Err(format!("mpv property '{name}' is not writable"));
+    player_mpv_set_properties(app, window, vec![(name, value)]).await
+}
+
+fn validate_mpv_properties(properties: &[(String, Value)]) -> Result<(), String> {
+    if properties.len() > MPV_SETTABLE_PROPERTIES.len() {
+        return Err("mpv property batch is too large".to_string());
     }
-    if !is_scalar_arg(&value) {
-        return Err(format!(
-            "mpv property '{name}' received an unsupported value"
-        ));
+    for (name, value) in properties {
+        if !MPV_SETTABLE_PROPERTIES.contains(&name.as_str()) {
+            return Err(format!("mpv property '{name}' is not writable"));
+        }
+        if !is_mpv_property_value(name, value) {
+            return Err(format!(
+                "mpv property '{name}' received an unsupported value"
+            ));
+        }
     }
+    Ok(())
+}
+
+fn apply_mpv_properties(
+    properties: &[(String, Value)],
+    mut set_property: impl FnMut(&str, &Value) -> Result<(), String>,
+) -> Result<(), String> {
+    let mut first_error = None;
+    // Independent display writes still run when one property is unsupported.
+    for (name, value) in properties {
+        let result = set_property(name, value);
+        if first_error.is_none() {
+            first_error = result.err();
+        }
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+#[command]
+pub async fn player_mpv_set_properties(
+    app: AppHandle,
+    window: Window,
+    properties: Vec<(String, Value)>,
+) -> Result<(), String> {
+    validate_mpv_properties(&properties)?;
     run_mpv_op("set", move || {
-        app.mpv()
-            .set_property(&name, &value, window.label())
-            .or_else(|_| {
-                // Some mpv builds reject set_property; keep compatibility inside
-                // the validated native command rather than retrying over IPC.
-                let text = value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string());
-                app.mpv().command(
-                    "set",
-                    &vec![Value::String(name.clone()), Value::String(text)],
-                    window.label(),
-                )
-            })
-            .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+        apply_mpv_properties(&properties, |name, value| {
+            app.mpv()
+                .set_property(name, value, window.label())
+                .or_else(|_| {
+                    // Some mpv builds reject set_property; keep compatibility inside
+                    // the validated native command rather than retrying over IPC.
+                    let text = value
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| value.to_string());
+                    app.mpv().command(
+                        "set",
+                        &vec![Value::String(name.to_string()), Value::String(text)],
+                        window.label(),
+                    )
+                })
+                .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+        })
     })
     .await
 }

@@ -1,13 +1,13 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { LocalSeasonEntry } from '@/components/details-season-switcher';
-import { useDebounce } from '@/hooks/use-debounce';
 import { type Episode, type MediaDetails } from '@/lib/api';
 import {
-  EPISODE_SEARCH_DEBOUNCE_MS,
   EPISODE_SEARCH_MIN_COUNT,
   filterEpisodesBySearchQuery,
+  useEffectiveEpisodeSearch,
 } from '@/lib/episode-search';
+import { boundedMapSet, clamp } from '@/lib/utils';
 
 const EPISODE_DISPLAY_PAGE_SIZE = 8;
 const EMPTY_EPISODES: Episode[] = [];
@@ -20,13 +20,7 @@ const EPISODE_PAGE_MEMORY_MAX = 256;
 const episodePageMemory = new Map<string, number>();
 
 function rememberEpisodePage(key: string, page: number): void {
-  // Re-set refreshes recency; evict the oldest key at capacity.
-  episodePageMemory.delete(key);
-  episodePageMemory.set(key, page);
-  if (episodePageMemory.size > EPISODE_PAGE_MEMORY_MAX) {
-    const oldest = episodePageMemory.keys().next().value;
-    if (oldest !== undefined) episodePageMemory.delete(oldest);
-  }
+  boundedMapSet(episodePageMemory, key, page, EPISODE_PAGE_MEMORY_MAX);
 }
 
 function formatSeasonShortLabel(seasonNumber: number): string {
@@ -86,7 +80,25 @@ export function useDetailsEpisodePane({
   } | null>(null);
   const userSelectedSeason =
     userSeasonSelection?.key === locationKey ? userSeasonSelection.season : null;
-  const [episodeSearch, setEpisodeSearch] = useState('');
+  // Keyed like the season pick above: a fresh navigation to the same title
+  // must not inherit the previous visit's search text.
+  const [episodeSearchState, setEpisodeSearchState] = useState<{
+    key: string;
+    value: string;
+  } | null>(null);
+  const episodeSearch = episodeSearchState?.key === locationKey ? episodeSearchState.value : '';
+  const setEpisodeSearch = useCallback(
+    (value: React.SetStateAction<string>) =>
+      setEpisodeSearchState((previous) => {
+        const current = previous?.key === locationKey ? previous.value : '';
+        const next = typeof value === 'function' ? value(current) : value;
+        if (current === next && (previous === null || previous.key === locationKey)) {
+          return previous;
+        }
+        return { key: locationKey, value: next };
+      }),
+    [locationKey],
+  );
   // Render trigger only — `episodePageMemory` owns persistence; the override
   // exists so a page change re-renders before the map read below. Keyed so a
   // stale override can't leak onto a different title/season.
@@ -95,11 +107,7 @@ export function useDetailsEpisodePane({
     page: number;
   } | null>(null);
 
-  const debouncedEpisodeSearch = useDebounce(episodeSearch.trim(), EPISODE_SEARCH_DEBOUNCE_MS);
-  // A cleared field must take effect immediately — otherwise the stale
-  // debounced query keeps filtering the freshly selected season's rows for
-  // up to a debounce window (a blank grid with no empty-state message).
-  const effectiveEpisodeSearch = episodeSearch.trim() ? debouncedEpisodeSearch : '';
+  const effectiveEpisodeSearch = useEffectiveEpisodeSearch(episodeSearch);
   const selectedSeasonHint =
     userSelectedSeason ??
     locationSeason ??
@@ -183,7 +191,7 @@ export function useDetailsEpisodePane({
   const changeEpisodePage = useCallback(
     (direction: 'previous' | 'next') => {
       const delta = direction === 'previous' ? -1 : 1;
-      const nextPage = Math.max(0, Math.min(activeEpisodePageIndex + delta, totalEpisodePages - 1));
+      const nextPage = clamp(activeEpisodePageIndex + delta, 0, totalEpisodePages - 1);
       if (nextPage === activeEpisodePageIndex) return;
 
       if (!hasEpisodeSearch) rememberEpisodePage(currentEpisodeSeasonKey, nextPage);
@@ -227,7 +235,7 @@ export function useDetailsEpisodePane({
       );
       setEpisodeSearch('');
     },
-    [locationKey],
+    [locationKey, setEpisodeSearch],
   );
 
   return {

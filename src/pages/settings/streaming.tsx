@@ -10,15 +10,10 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { GripVertical, Loader2, Plus, Trash2 } from 'lucide-react';
 import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import {
-  type AddonConfig,
-  type AddonConfigInput,
-  type AddonUrlInspection,
-  api,
-  getErrorMessage,
-} from '@/lib/api';
+import { type AddonConfig, api, getErrorMessage } from '@/lib/api';
 import {
   ADDON_CONFIGS_QUERY_KEY,
   addonUrlInspectionQueryKey,
@@ -29,36 +24,13 @@ import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn } from '@/lib/utils';
-import {
-  SETTINGS_OUTLINE_BUTTON_CLASS,
-  SettingsBody,
-  SettingsGroup,
-  SettingsGroupHeader,
-  SettingsSwitch,
-} from './chrome';
-
-// ── Helpers ──────────────────────────────────────────────────────────────────
-
-// `crypto.randomUUID` is guaranteed in the Tauri/localhost secure context.
-function generateId(): string {
-  return `addon-${crypto.randomUUID()}`;
-}
-
-function deriveAddonNameFromUrl(url: string): string {
-  try {
-    return new URL(url).host || 'Custom Addon';
-  } catch {
-    return 'Custom Addon';
-  }
-}
+import { SettingsBody, SettingsGroup, SettingsGroupHeader, SettingsSwitch } from './chrome';
 
 // Long enough to skip per-keystroke IPC, short enough to read as live.
 const ADDON_URL_INSPECT_DEBOUNCE_MS = 150;
 const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremio:// addon URL.';
 const ADDON_URL_CONFIGURE_MESSAGE =
   'This is a configure page — open it, finish setup, then paste the generated manifest URL.';
-
-// ── Addon rows ───────────────────────────────────────────────────────────────
 
 interface AddonRowProps {
   addon: AddonConfig;
@@ -77,7 +49,9 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
       {handle}
       <div className={cn('min-w-0 flex-1 transition-opacity', !addon.enabled && 'opacity-45')}>
         <div className='flex items-center gap-2'>
-          <span className='truncate text-[13.5px] font-medium text-zinc-100'>{addon.name}</span>
+          <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
+            {addon.name}
+          </span>
           {pinned ? (
             <span className='shrink-0 rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-px text-[9.5px] font-bold uppercase tracking-wider text-zinc-400'>
               Default
@@ -86,6 +60,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
         </div>
         <p
           data-selectable='true'
+          title={addon.displayUrl}
           className='mt-1 truncate font-mono text-[11.5px] leading-none text-zinc-500'
         >
           {addon.displayUrl}
@@ -100,7 +75,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
             aria-label={`Remove ${addon.name}`}
             onClick={() => onRemove(addon.id)}
             disabled={isWorking}
-            className='flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 opacity-100 transition-all hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100'
+            className='flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 opacity-100 transition-colors hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
           >
             <Trash2 className='h-4 w-4' />
           </button>
@@ -142,8 +117,8 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
             {...attributes}
             {...listeners}
             disabled={props.isWorking}
-            className='-m-1 cursor-grab touch-none rounded-md p-1 text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-30'
-            aria-label='Drag to reorder'
+            className='-ml-2 flex h-8 w-8 shrink-0 items-center justify-center cursor-grab touch-none rounded-md text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-30'
+            aria-label={`Reorder ${props.addon.name}`}
           >
             <GripVertical className='h-4 w-4 shrink-0' />
           </button>
@@ -162,7 +137,7 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
         pinned
         handle={
           <span
-            className='-m-1 cursor-default p-1 text-zinc-600'
+            className='-ml-2 flex h-8 w-8 shrink-0 items-center justify-center cursor-default text-zinc-600'
             title={`${props.addon.name} is a default addon and cannot be moved`}
           >
             <GripVertical className='h-4 w-4 shrink-0 opacity-30' />
@@ -173,8 +148,6 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
   );
 }
 
-// ── Main component ───────────────────────────────────────────────────────────
-
 export function StreamingSources() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
@@ -183,7 +156,7 @@ export function StreamingSources() {
   const { data: addons = [], isLoading, isLoadingError, isRefetching, refetch } = useAddonConfigs();
 
   const saveMutation = useMutation({
-    mutationFn: api.saveAddonConfigs,
+    mutationFn: api.updateAddonConfigs,
     onSuccess: (savedConfigs) => {
       void queryClient.cancelQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY, exact: true });
       queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, savedConfigs);
@@ -213,22 +186,19 @@ export function StreamingSources() {
   const normalizedNewUrl = inspection?.normalizedUrl;
   const isConfigureCandidate = !!inspection?.configurePage;
   const duplicateAddonName = inspection?.duplicateOf;
-  // A failed read leaves `addons` empty; every edit saves the whole list, so
-  // editing then would overwrite the stored sources.
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
   const canSubmitNewAddon =
     !!normalizedNewUrl && !isConfigureCandidate && !duplicateAddonName && !isWorking;
 
   const handleToggle = (id: string) => {
-    const updated = addons.map((a) => (a.id === id ? { ...a, enabled: !a.enabled } : a));
-    saveMutation.mutate(updated);
+    if (isWorking) return;
+    const addon = addons.find((config) => config.id === id);
+    if (addon) saveMutation.mutate({ kind: 'setEnabled', id, enabled: !addon.enabled });
   };
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
       const { active, over } = event;
-      // A toggle/remove save in flight means `addons` is stale — a reorder
-      // built on it would whole-list overwrite the pending change.
       if (!over || active.id === over.id || isWorking) return;
 
       // Backend-pinned defaults stay on top; only user addons below them reorder.
@@ -237,61 +207,39 @@ export function StreamingSources() {
       const newIndex = rest.findIndex((addon) => addon.id === String(over.id));
       if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
 
-      const pinned = addons.filter((addon) => addon.pinned);
-      saveMutation.mutate([...pinned, ...arrayMove(rest, oldIndex, newIndex)]);
+      saveMutation.mutate({
+        kind: 'reorder',
+        ids: arrayMove(rest, oldIndex, newIndex).map((addon) => addon.id),
+      });
     },
     [addons, isWorking, saveMutation],
   );
 
   const handleRemove = (id: string) => {
+    if (isWorking) return;
     saveMutation.mutate(
-      addons.filter((a) => a.id !== id),
+      { kind: 'remove', id },
       { onSuccess: () => toast.success('Addon removed') },
     );
   };
 
-  const handleAddUrl = async () => {
-    // Enter in the input bypasses the disabled button and can land
-    // mid-debounce — re-check everything, inspecting the live text if needed.
+  const handleAddUrl = () => {
+    // Enter bypasses the disabled button and can land mid-debounce; Rust
+    // re-judges validity, configure pages and duplicates at commit.
     if (isWorking || !trimmedNewUrl) return;
 
-    let verdict: AddonUrlInspection;
-    try {
-      verdict = inspection ?? (await api.inspectAddonUrl(trimmedNewUrl));
-    } catch (error) {
-      toast.error(getErrorMessage(error));
-      return;
-    }
-    const url = verdict.normalizedUrl;
-    if (!url) {
-      toast.error(verdict.error ?? ADDON_URL_INVALID_MESSAGE);
-      return;
-    }
-    if (verdict.configurePage) {
-      toast.error(ADDON_URL_CONFIGURE_MESSAGE);
-      return;
-    }
-    if (verdict.duplicateOf) {
-      toast.error(`This addon URL is already configured as ${verdict.duplicateOf}.`);
-      return;
-    }
-
-    // One save classifies the URL server-side — the host label is a
-    // placeholder the backend replaces with the manifest name.
-    const newAddon: AddonConfigInput = {
-      id: generateId(),
-      url,
-      name: deriveAddonNameFromUrl(url),
-      enabled: true,
-    };
-    saveMutation.mutate([...addons, newAddon], {
-      onSuccess: (savedConfigs) => {
-        setNewUrl('');
-        requestAnimationFrame(() => newUrlInputRef.current?.focus());
-        const added = savedConfigs.find((addon) => addon.id === newAddon.id);
-        toast.success(`Added ${added?.name ?? newAddon.name}`);
+    const knownIds = new Set(addons.map((addon) => addon.id));
+    saveMutation.mutate(
+      { kind: 'add', url: trimmedNewUrl },
+      {
+        onSuccess: (savedConfigs) => {
+          setNewUrl('');
+          requestAnimationFrame(() => newUrlInputRef.current?.focus());
+          const added = savedConfigs.find((addon) => !knownIds.has(addon.id));
+          toast.success(`Added ${added?.name ?? 'Addon'}`);
+        },
       },
-    });
+    );
   };
 
   const activeCount = addons.filter((a) => a.enabled).length;
@@ -305,7 +253,7 @@ export function StreamingSources() {
         description='Cinemeta (metadata) and OpenSubtitles (subtitles) are pinned defaults. Drag other addons to set stream priority.'
         action={
           addons.length > 0 ? (
-            <span className='rounded-md bg-white/[0.05] px-2 py-1 text-[11px] font-semibold tabular-nums text-zinc-400'>
+            <span className='text-[12px] tabular-nums text-zinc-400'>
               {activeCount}/{addons.length} active
             </span>
           ) : undefined
@@ -317,20 +265,22 @@ export function StreamingSources() {
           <Input
             ref={newUrlInputRef}
             aria-label='Addon manifest URL'
+            aria-describedby='addon-url-hint'
+            aria-invalid={!!trimmedNewUrl && !!inspection && !normalizedNewUrl}
             placeholder='https://addon.host/.../manifest.json'
             value={newUrl}
             onChange={(e) => setNewUrl(e.target.value)}
             onKeyDown={(e) => {
-              if (e.key === 'Enter') void handleAddUrl();
+              if (e.key === 'Enter') handleAddUrl();
             }}
             disabled={isWorking}
-            className='h-10 flex-1 rounded-xl border-white/[0.08] bg-white/[0.04] px-3.5 font-mono text-[13px] focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
+            className='h-10 flex-1 rounded-lg border-white/[0.08] bg-white/[0.04] px-3.5 font-mono text-[13px] focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
           />
           <Button
             size='sm'
-            onClick={() => void handleAddUrl()}
+            onClick={handleAddUrl}
             disabled={!canSubmitNewAddon}
-            className='h-10 shrink-0 gap-2 rounded-xl bg-white px-4 text-[13px] font-semibold text-black hover:bg-zinc-200'
+            className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[13px] font-medium text-black hover:bg-zinc-200'
           >
             {saveMutation.isPending ? (
               <Loader2 className='h-4 w-4 animate-spin' />
@@ -343,8 +293,9 @@ export function StreamingSources() {
 
         {trimmedNewUrl ? (
           <p
+            id='addon-url-hint'
             className={cn(
-              'mt-2.5 text-[12px] font-medium',
+              'mt-2.5 text-[12px] leading-relaxed [overflow-wrap:anywhere]',
               !inspection
                 ? inspectionCurrent && inspectionQuery.isError
                   ? 'text-red-400'
@@ -369,7 +320,7 @@ export function StreamingSources() {
                     : `Ready: ${normalizedNewUrl}`}
           </p>
         ) : (
-          <p className='mt-2.5 text-[12px] leading-relaxed text-zinc-600'>
+          <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
             Paste a Stremio{' '}
             <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
               manifest.json
@@ -389,18 +340,12 @@ export function StreamingSources() {
           Loading sources…
         </SettingsBody>
       ) : isLoadingError ? (
-        <SettingsBody className='flex items-center justify-between gap-3 text-[13px] text-zinc-400'>
-          <span role='alert'>Couldn't load your sources.</span>
-          <Button
-            variant='outline'
-            size='sm'
-            className={SETTINGS_OUTLINE_BUTTON_CLASS}
-            disabled={isRefetching}
-            onClick={() => void refetch()}
-          >
-            {isRefetching && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
-            Retry
-          </Button>
+        <SettingsBody>
+          <RetryBanner
+            message="Couldn't load your sources."
+            onRetry={() => void refetch()}
+            isRetrying={isRefetching}
+          />
         </SettingsBody>
       ) : (
         // No empty state: the backend always pins the default addons, so a

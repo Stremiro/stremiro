@@ -1,14 +1,14 @@
 use super::{
     build_reference_title, canonicalize_language_prefs, is_neutral_title_extra,
-    is_title_boundary_token, recommendation_reasons_from_key, sort_streams_by_recommendation,
-    stream_episode_relevance_priority, stream_language_preference_priority,
-    stream_recommendation_key, tokenize_title_words, StreamMatchContext,
-    StreamRecommendationInputs, StreamSignalCache, DEFAULT_SOURCE_HEALTH_PRIORITY,
-    DEFAULT_STREAM_FAMILY_PRIORITY,
+    is_title_boundary_token, normalize_token_text, recommendation_reasons_from_key,
+    sort_streams_by_recommendation, stream_episode_relevance_priority,
+    stream_language_preference_priority, stream_recommendation_key, tokenize_title_words,
+    StreamMatchContext, StreamRecommendationInputs, StreamRecommendationKey, StreamSignalCache,
+    DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
 use crate::providers::addons::{
-    detect_stream_flags, AddonStream, StreamEpisodeMatchKind, StreamRecommendationReason,
-    StreamResolution,
+    detect_stream_flags, AddonStream, SelectionPriority, StreamEpisodeMatchKind,
+    StreamRecommendationReason, StreamResolution,
 };
 use crate::test_helpers::test_stream;
 use std::collections::HashMap;
@@ -31,7 +31,9 @@ fn recommendation_reasons(
         language_prefs,
         &mut StreamSignalCache::default(),
     );
-    recommendation_reasons_from_key(&key)
+    let mut reasons = Vec::new();
+    recommendation_reasons_from_key(&key, &mut reasons);
+    reasons
 }
 
 fn build_stream(
@@ -318,12 +320,9 @@ fn sorts_prefers_language_matching_stream_when_other_inputs_are_tied() {
 
 #[test]
 fn sorts_prefers_language_match_over_health_family_affinity_quality() {
-    let addon_priorities = HashMap::from([("alpha".to_string(), 1), ("beta".to_string(), 1)]);
-    let source_health = HashMap::from([("alpha".to_string(), 2), ("beta".to_string(), 3)]);
-    let stream_family_priorities = HashMap::from([
-        ("alpha|release:test".to_string(), 2),
-        ("beta|release:test".to_string(), 4),
-    ]);
+    let (addon_priorities, mut source_health, mut stream_family_priorities) = tied_priorities();
+    source_health.insert("beta".to_string(), 3);
+    stream_family_priorities.insert("beta|release:test".to_string(), 4);
     let title_affinity = Some("beta");
 
     let mut english = sort_stream("alpha");
@@ -383,13 +382,37 @@ fn language_priority_ignores_unspecified_dub_for_english_pref() {
 }
 
 #[test]
+fn language_priority_tracks_independent_memberships_without_double_counting() {
+    for (haystack, audio, subtitle, expected) in [
+        ("eng eng english en", "en", "fr", 4),
+        ("english japanese", "en", "ja", 6),
+        ("jpn", "en", "ja", 3),
+        ("german subtitle", "en", "ja", 1),
+        ("dual audio", "en", "ja", 3),
+        ("multi audio", "en", "ja", 3),
+        ("multi sub", "en", "ja", 1),
+        ("dubbed", "en", "off", 2),
+        ("english", "en", " OFF ", 4),
+        ("en dubbed", "en", "off", 6),
+        ("german", "unknown", "unknown", 0),
+        ("english", "en", "", 4),
+        ("eng", " EN ", "English", 6),
+    ] {
+        assert_eq!(
+            stream_language_preference_priority(
+                haystack,
+                canonicalize_language_prefs(Some(audio), Some(subtitle)),
+                detect_stream_flags(haystack),
+            ),
+            expected,
+            "{haystack}, audio={audio}, subtitle={subtitle}"
+        );
+    }
+}
+
+#[test]
 fn recommendation_reasons_include_title_source_and_language_context() {
-    let addon_priorities = HashMap::from([("alpha".to_string(), 1)]);
-    let source_health = HashMap::from([("alpha".to_string(), DEFAULT_SOURCE_HEALTH_PRIORITY)]);
-    let stream_family_priorities = HashMap::from([(
-        "alpha|release:test".to_string(),
-        DEFAULT_STREAM_FAMILY_PRIORITY,
-    )]);
+    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
     let title_affinity = Some("alpha");
     let mut stream = sort_stream("alpha");
     stream.name = Some("[JA] Dual Audio 1080p".to_string());
@@ -412,6 +435,90 @@ fn recommendation_reasons_include_title_source_and_language_context() {
         reasons.contains(&StreamRecommendationReason::LanguageMatch)
             || reasons.contains(&StreamRecommendationReason::LanguageFlexible)
     );
+}
+
+#[test]
+fn recommendation_reasons_preserve_order_cap_and_fallback() {
+    use StreamRecommendationReason as Reason;
+    let baseline = StreamRecommendationKey {
+        episode_match: StreamEpisodeMatchKind::None,
+        season_claim_verified: false,
+        title_match: 0,
+        viability: 0,
+        language: 0,
+        health: 2,
+        family: 2,
+        title_source_affinity: 0,
+        quality: 0,
+        language_bonus: 0,
+        source_priority: 0,
+        oversize: std::cmp::Reverse(false),
+        seeders: 0,
+        size_bytes: 0,
+    };
+    let mut reasons = Vec::with_capacity(8);
+    reasons.push(Reason::Fallback);
+    let allocation = reasons.as_ptr();
+    for ((health, family, affinity, language, quality, source_priority), expected) in [
+        (
+            (3, 4, 1, 4, 400, 1),
+            vec![Reason::VerifiedSource, Reason::ProvenReleaseGroup],
+        ),
+        (
+            (1, 1, 1, 4, 400, 1),
+            vec![Reason::SourceIssues, Reason::ReleaseGroupIssues],
+        ),
+        (
+            (0, 0, 1, 4, 400, 1),
+            vec![Reason::SourceCooling, Reason::ReleaseGroupCooling],
+        ),
+        (
+            (2, 2, 1, 4, 400, 1),
+            vec![Reason::TitleAffinity, Reason::LanguageMatch],
+        ),
+        (
+            (2, 2, 0, 2, 250, 1),
+            vec![Reason::LanguageFlexible, Reason::GoodQuality],
+        ),
+        (
+            (2, 2, 0, 0, 400, 1),
+            vec![Reason::TopQuality, Reason::PreferredSource],
+        ),
+        (
+            (2, 2, 0, 0, 250, 1),
+            vec![Reason::GoodQuality, Reason::PreferredSource],
+        ),
+        ((2, 2, 0, 1, 249, 1), vec![Reason::PreferredSource]),
+        ((2, 2, 0, 1, 249, 0), vec![Reason::Fallback]),
+    ] {
+        let key = StreamRecommendationKey {
+            health,
+            family,
+            title_source_affinity: affinity,
+            language,
+            quality,
+            source_priority,
+            ..baseline
+        };
+        recommendation_reasons_from_key(&key, &mut reasons);
+        assert_eq!(reasons, expected);
+        assert_eq!(reasons.capacity(), 8);
+        assert_eq!(reasons.as_ptr(), allocation);
+    }
+    for key in [
+        StreamRecommendationKey {
+            title_match: 2,
+            ..baseline
+        },
+        StreamRecommendationKey {
+            episode_match: StreamEpisodeMatchKind::Exact,
+            ..baseline
+        },
+    ] {
+        recommendation_reasons_from_key(&key, &mut reasons);
+        assert!(reasons.is_empty());
+        assert_eq!(reasons.as_ptr(), allocation);
+    }
 }
 
 #[test]
@@ -576,61 +683,31 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
     streams.reserve(126);
     let capacity = streams.capacity();
 
-    // Pass 1 (tied family): the stable sort keeps declaration order.
-    sort_streams_by_recommendation(
-        &mut streams,
-        recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &family_priorities,
-            None,
-            episode_match_context("One Piece", 1, 8),
-            None,
-            None,
-        ),
-        &mut signals,
-    );
-    assert_eq!(streams[0].source_name.as_deref(), Some("alpha"));
-
-    // Pass 2 (beta's family turned proven mid-fetch): the re-read family
-    // signal is the only key field that can move — beta takes first place.
-    family_priorities.insert("beta|release:test".to_string(), 4);
-    sort_streams_by_recommendation(
-        &mut streams,
-        recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &family_priorities,
-            None,
-            episode_match_context("One Piece", 1, 8),
-            None,
-            None,
-        ),
-        &mut signals,
-    );
-    assert_eq!(streams[0].source_name.as_deref(), Some("beta"));
-
-    // Pass 3: stripping beta's family and size must NOT re-run the battery —
-    // a recompute would lose its family edge and its size tiebreak, handing
-    // first place back to alpha. The memo holds because the cache is scoped
-    // to this fetch's fixed inputs.
-    streams[0].stream_family = None;
-    streams[0].size_bytes = Some(1);
-    sort_streams_by_recommendation(
-        &mut streams,
-        recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &family_priorities,
-            None,
-            episode_match_context("One Piece", 1, 8),
-            None,
-            None,
-        ),
-        &mut signals,
-    );
-    assert_eq!(streams[0].source_name.as_deref(), Some("beta"));
-    assert_eq!(streams.capacity(), capacity);
+    for (pass, expected_source) in ["alpha", "beta", "beta"].into_iter().enumerate() {
+        if pass == 1 {
+            // Only the growing family priority changes the tied order.
+            family_priorities.insert("beta|release:test".to_string(), 4);
+        } else if pass == 2 {
+            // A recompute would lose beta's family edge and size tiebreak.
+            streams[0].stream_family = None;
+            streams[0].size_bytes = Some(1);
+        }
+        sort_streams_by_recommendation(
+            &mut streams,
+            recommendation_inputs(
+                &addon_priorities,
+                &source_health,
+                &family_priorities,
+                None,
+                episode_match_context("One Piece", 1, 8),
+                None,
+                None,
+            ),
+            &mut signals,
+        );
+        assert_eq!(streams[0].source_name.as_deref(), Some(expected_source));
+        assert_eq!(streams.capacity(), capacity);
+    }
 }
 
 #[test]
@@ -658,12 +735,49 @@ fn sort_assigns_selection_priority_from_key() {
 
     assert_eq!(
         streams[0].selection_priority,
-        Some((StreamEpisodeMatchKind::Exact, true, 4, 1, 6))
+        Some(SelectionPriority {
+            episode_match: StreamEpisodeMatchKind::Exact,
+            season_claim_verified: true,
+            title_match: 4,
+            viability: 1,
+            language: 6,
+        })
     );
     assert_eq!(
         streams[1].selection_priority,
-        Some((StreamEpisodeMatchKind::None, false, 4, 1, 0))
+        Some(SelectionPriority {
+            episode_match: StreamEpisodeMatchKind::None,
+            season_claim_verified: false,
+            title_match: 4,
+            viability: 1,
+            language: 0,
+        })
     );
+}
+
+#[test]
+fn title_tokenization_preserves_ascii_rules_boundaries_and_word_limit() {
+    for (input, stop_at_boundary, expected) in [
+        ("A SHOW_É One / 2 | S01E05 bonus", true, "show one 2"),
+        (
+            "A SHOW_É One / 2 | S01E05 bonus",
+            false,
+            "show one 2 s01e05 bonus",
+        ),
+        ("ep A 1", true, ""),
+        (
+            "one two three four five six seven eight nine ten eleven twelve thirteen",
+            false,
+            "one two three four five six seven eight nine ten eleven twelve",
+        ),
+    ] {
+        assert_eq!(
+            tokenize_title_words(&normalize_token_text(input), stop_at_boundary)
+                .collect::<Vec<_>>(),
+            expected.split_whitespace().collect::<Vec<_>>(),
+            "{input}, stop_at_boundary={stop_at_boundary}"
+        );
+    }
 }
 
 #[test]
@@ -727,9 +841,9 @@ fn release_tag_spellings_never_count_as_title_extras() {
         "jap",
     ];
     for spelling in FLAG_SPELLINGS {
-        for word in tokenize_title_words(spelling, false) {
+        for word in tokenize_title_words(&normalize_token_text(spelling), false) {
             assert!(
-                is_title_boundary_token(&word) || is_neutral_title_extra(&word, "series"),
+                is_title_boundary_token(word) || is_neutral_title_extra(word, "series"),
                 "flag spelling `{spelling}` tokenizes to `{word}`, which counts as a title extra"
             );
         }

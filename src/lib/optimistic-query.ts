@@ -17,11 +17,15 @@ const writeTails = new Map<string, Promise<unknown>>();
 const writeGenerations = new Map<string, number>();
 let nextWriteGeneration = 0;
 
-/** Buffered edits take cache ownership before their native write is queued. */
-export function claimOptimisticQueryWrite(queryKey: QueryKey): number {
+function bumpWriteGeneration(queryKey: QueryKey): number {
   const generation = ++nextWriteGeneration;
   writeGenerations.set(JSON.stringify(queryKey), generation);
   return generation;
+}
+
+/** Buffered edits take cache ownership before their native write is queued. */
+export function claimOptimisticQueryWrite(queryKey: QueryKey): void {
+  bumpWriteGeneration(queryKey);
 }
 
 /** Wait for writes already queued before a backup reads or restores settings. */
@@ -43,7 +47,7 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
   queryClient.setQueryData<TData>(queryKey, optimisticData);
 
   const queueId = JSON.stringify(queryKey);
-  const generation = claimOptimisticQueryWrite(queryKey);
+  const generation = bumpWriteGeneration(queryKey);
   const isNewestWrite = () => writeGenerations.get(queueId) === generation;
   const previous = writeTails.get(queueId) ?? Promise.resolve();
   const current = previous

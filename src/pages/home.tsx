@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { WifiOff } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Hero } from '@/components/hero';
+import { HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from '@/components/horizontal-media-rail';
 import { MediaRow } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
@@ -9,6 +10,7 @@ import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS, trendingRowQueryKey } from '@/lib/query-invalidation';
 import { sameSearchGenre, searchGenrePath, type SearchMediaType } from '@/lib/search-page-state';
+import { cn } from '@/lib/utils';
 
 const ALL_GENRES = 'All';
 
@@ -56,38 +58,41 @@ export function Home() {
   // Stable slice so Hero's memo holds across unrelated home re-renders.
   const heroSlice = useMemo(() => (heroItems ?? []).slice(0, 5), [heroItems]);
 
-  if (!isOnline) {
-    return (
-      <div className='flex flex-col items-center justify-center min-h-[80vh] space-y-6 text-center page-enter'>
-        <div className='rounded-full bg-zinc-800/50 p-6'>
-          <WifiOff className='h-12 w-12 text-zinc-500' />
-        </div>
-        <div className='space-y-2'>
-          <h1 className='text-[22px] font-medium tracking-[-0.02em] text-white'>You are offline</h1>
-          <p className='text-muted-foreground max-w-sm mx-auto'>
-            Connect to the internet to browse content.
-          </p>
-        </div>
-      </div>
-    );
-  }
-
   const activeGenre = genre === ALL_GENRES ? undefined : genre;
+  const showHero = isOnline && (isHeroPending || heroSlice.length > 0);
 
   return (
     <div className='flex flex-col min-h-screen pb-20 relative page-enter'>
-      {(isHeroPending || heroSlice.length > 0) && <Hero items={heroSlice} />}
+      {showHero && <Hero items={heroSlice} />}
 
       {/* Rails overlap the hero's bottom dissolve; the wash ramps across the
           overlap, then stays solid. Mid-stops keep the ramp smooth enough
           that it can't band on 8-bit panels (see the ambient layer). */}
       <div
-        className='relative z-10 -mt-32 md:-mt-40 pt-32 md:pt-40 space-y-2'
-        style={{
-          background:
-            'linear-gradient(to bottom, transparent 0, rgb(0 0 0 / 0.18) 36px, rgb(0 0 0 / 0.45) 80px, rgb(0 0 0 / 0.78) 112px, black 140px)',
-        }}
+        className={cn(
+          'relative z-10 space-y-2',
+          showHero ? '-mt-32 md:-mt-40 pt-32 md:pt-40' : 'pt-6',
+        )}
+        style={
+          showHero
+            ? {
+                background:
+                  'linear-gradient(to bottom, transparent 0, rgb(0 0 0 / 0.18) 36px, rgb(0 0 0 / 0.45) 80px, rgb(0 0 0 / 0.78) 112px, black 140px)',
+              }
+            : undefined
+        }
       >
+        {!isOnline && (
+          <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
+            <div
+              role='status'
+              className='mb-4 flex items-start gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[13px] text-zinc-400'
+            >
+              <WifiOff aria-hidden='true' className='mt-0.5 h-4 w-4 shrink-0 text-zinc-500' />
+              <p>You're offline. Reconnect to refresh titles or find streams.</p>
+            </div>
+          </div>
+        )}
         <ResumeSection />
 
         <MediaRow
@@ -96,6 +101,7 @@ export function Home() {
           queryKey={trendingRowQueryKey('movies', genre)}
           queryFn={() => fetchCatalogItems({ mediaType: 'movie', genre: activeGenre })}
           staleTime={MEDIA_ROW_STALE_TIME_MS}
+          enabled={isOnline}
           genreFilter={{
             options: genreOptions,
             allOption: ALL_GENRES,
@@ -109,6 +115,7 @@ export function Home() {
           titleHref='/search?type=series'
           queryKey={trendingRowQueryKey('series', 'All')}
           queryFn={() => fetchCatalogItems({ mediaType: 'series' })}
+          enabled={isOnline}
         />
 
         {/* The anime catalog is provider "Animation" series, which also
@@ -118,6 +125,7 @@ export function Home() {
           titleHref='/search?type=anime'
           queryKey={trendingRowQueryKey('anime', 'All')}
           queryFn={() => fetchCatalogItems({ mediaType: 'anime' })}
+          enabled={isOnline}
         />
 
         <MediaRow
@@ -126,6 +134,7 @@ export function Home() {
           // Under the `trending` prefix so invalidateDiscoveryQueries covers it.
           queryKey={trendingRowQueryKey('top-rated', 'movies')}
           queryFn={() => fetchCatalogItems({ mediaType: 'movie', feed: 'featured' })}
+          enabled={isOnline}
         />
       </div>
     </div>

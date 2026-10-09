@@ -1,13 +1,12 @@
 use super::config_store::{
-    apply_app_ui_preferences_patch, load_addon_configs, load_app_ui_preferences,
-    load_last_notified_app_update_version, load_profile_preferences,
-    load_stream_selector_preferences_state, normalize_addon_url, resolve_addon_configs,
-    sanitize_profile_preferences, sanitize_stream_selector_preferences,
-    save_addon_configs_to_store, save_app_ui_preferences_to_store,
-    save_last_notified_app_update_version_to_store, save_profile_preferences_to_store,
-    save_stream_selector_preferences_to_store, AddonConfig, AddonConfigView, AppUiPreferences,
-    AppUiPreferencesPatch, LocalProfile, ProfilePreferences, ProfileViewMode,
-    StreamSelectorPreferences,
+    apply_app_ui_preferences_patch, apply_profile_preferences_patch, is_pinned_default_addon_url,
+    load_addon_configs, load_app_ui_preferences, load_last_notified_app_update_version,
+    load_profile_preferences, load_stream_selector_preferences_state, normalize_addon_url,
+    resolve_addon_configs, sanitize_stream_selector_preferences, save_addon_configs_to_store,
+    save_app_ui_preferences_to_store, save_last_notified_app_update_version_to_store,
+    save_profile_preferences_to_store, save_stream_selector_preferences_to_store, AddonConfig,
+    AddonConfigView, AppUiPreferences, AppUiPreferencesPatch, ProfilePreferences,
+    ProfilePreferencesPatch, StreamSelectorPreferences,
 };
 use super::DurableStore;
 use crate::providers::addon_manifest::{
@@ -17,7 +16,8 @@ use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
 use crate::providers::{build_provider_http_client, trim_to_max};
 use futures_util::stream::{self, StreamExt};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::LazyLock;
 use tauri::{command, AppHandle, State};
 
@@ -28,15 +28,14 @@ const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
 /// unclassified addon needed fetching.
 static CLASSIFY_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_provider_http_client(Some(ADDON_CLASSIFY_CONCURRENCY)));
-/// IPC bound: each saved addon triggers manifest classification fetches, so reject
-/// oversized batches before allocating per-config state (mirrors import bounds).
+/// Registry and reorder-payload bound, shared with backup import.
 const MAX_ADDON_CONFIGS: usize = 32;
 /// Bound client-supplied addon identity fields so an oversized IPC payload
 /// can't persist unbounded strings.
 const MAX_ADDON_FIELD_CHARS: usize = 256;
 
 /// Backup restore: appends addons whose URL isn't installed yet, under the
-/// same URL normalization and field bounds as `save_addon_configs`. Imported
+/// same URL normalization and field bounds as `update_addon_configs`. Imported
 /// capability snapshots are dropped — never trusted from outside a server-side
 /// fetch — so the background classifier re-fetches them. Returns the number
 /// of addons added; the caller owns `store.save()`.
@@ -146,12 +145,11 @@ pub async fn get_profile_preferences(app: AppHandle) -> Result<ProfilePreference
 #[command]
 pub async fn save_profile_preferences(
     app: AppHandle,
-    profile: LocalProfile,
-    view_mode: ProfileViewMode,
+    patch: ProfilePreferencesPatch,
 ) -> Result<ProfilePreferences, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let preferences = sanitize_profile_preferences(ProfilePreferences { profile, view_mode });
+        let preferences = apply_profile_preferences_patch(load_profile_preferences(&store), patch);
 
         save_profile_preferences_to_store(&store, &preferences);
         store.save()?;
@@ -287,7 +285,7 @@ pub(super) async fn classify_missing_addon_capabilities(
 /// otherwise force a store write plus generation bump on every retry cycle,
 /// invalidating the enabled-registry memo for zero change.
 fn merge_classified_capabilities(latest: &mut [AddonConfig], classified: Vec<AddonConfig>) -> bool {
-    let snapshots: std::collections::HashMap<String, AddonManifest> = classified
+    let mut snapshots: std::collections::HashMap<String, AddonManifest> = classified
         .into_iter()
         .filter_map(|config| config.capabilities.map(|snapshot| (config.url, snapshot)))
         .collect();
@@ -295,7 +293,7 @@ fn merge_classified_capabilities(latest: &mut [AddonConfig], classified: Vec<Add
     let mut changed = false;
     for config in latest {
         if config.capabilities.is_none() {
-            if let Some(snapshot) = snapshots.get(&config.url).cloned() {
+            if let Some(snapshot) = snapshots.remove(&config.url) {
                 changed |= apply_manifest_snapshot(config, snapshot);
             }
         }
@@ -356,7 +354,7 @@ const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
 #[derive(Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonUrlInspection {
-    /// The URL `save_addon_configs` would store; absent when invalid.
+    /// The URL `update_addon_configs` would store; absent when invalid.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub normalized_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -413,115 +411,134 @@ pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlIn
     .await
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum AddonConfigsOp {
+    Add { url: String },
+    Remove { id: String },
+    SetEnabled { id: String, enabled: bool },
+    Reorder { ids: Vec<String> },
+}
+
+fn apply_addon_configs_op(
+    mut configs: Vec<AddonConfig>,
+    op: AddonConfigsOp,
+    new_addon_id: &str,
+) -> Result<Vec<AddonConfig>, String> {
+    match op {
+        AddonConfigsOp::Add { url } => {
+            let verdict = inspect_addon_url_against(&url, &configs);
+            if let Some(error) = verdict.error {
+                return Err(error);
+            }
+            let url = verdict
+                .normalized_url
+                .ok_or_else(|| "Enter a valid http(s) or stremio:// addon URL.".to_string())?;
+            if verdict.configure_page {
+                return Err("This is a configure page — open it, finish setup, then paste the generated manifest URL.".to_string());
+            }
+            if let Some(name) = verdict.duplicate_of {
+                return Err(format!("This addon URL is already configured as {name}."));
+            }
+            if configs.len() >= MAX_ADDON_CONFIGS {
+                return Err(format!(
+                    "Too many addon configs. Maximum is {MAX_ADDON_CONFIGS}."
+                ));
+            }
+            configs.push(AddonConfig {
+                id: new_addon_id.to_string(),
+                url,
+                name: String::new(),
+                enabled: true,
+                capabilities: None,
+            });
+            configs = resolve_addon_configs(Some(configs));
+        }
+        AddonConfigsOp::Remove { id } => {
+            configs.retain(|config| config.id != id || is_pinned_default_addon_url(&config.url));
+        }
+        AddonConfigsOp::SetEnabled { id, enabled } => {
+            if let Some(config) = configs.iter_mut().find(|config| config.id == id) {
+                config.enabled = enabled;
+            }
+        }
+        AddonConfigsOp::Reorder { ids } => {
+            if ids.len() > MAX_ADDON_CONFIGS {
+                return Err(format!(
+                    "Too many addon ids. Maximum is {MAX_ADDON_CONFIGS}."
+                ));
+            }
+            let (pinned, user): (Vec<_>, Vec<_>) = configs
+                .into_iter()
+                .partition(|config| is_pinned_default_addon_url(&config.url));
+            let current = user
+                .iter()
+                .map(|config| config.id.clone())
+                .collect::<Vec<_>>();
+            let mut by_id: HashMap<_, _> = user
+                .into_iter()
+                .map(|config| (config.id.clone(), config))
+                .collect();
+            configs = pinned;
+            configs.extend(
+                super::list_helpers::reorder_known_ids(&current, ids)
+                    .into_iter()
+                    .filter_map(|id| by_id.remove(&id)),
+            );
+        }
+    }
+    Ok(configs)
+}
+
 #[command]
-pub async fn save_addon_configs(
+pub async fn update_addon_configs(
     app: AppHandle,
     provider: State<'_, AddonTransport>,
     client: State<'_, AddonResourceClient>,
-    configs: Vec<AddonConfig>,
+    op: AddonConfigsOp,
 ) -> Result<Vec<AddonConfigView>, String> {
-    if configs.len() > MAX_ADDON_CONFIGS {
-        return Err(format!(
-            "Too many addon configs ({}). Maximum is {}.",
-            configs.len(),
-            MAX_ADDON_CONFIGS
-        ));
-    }
-
-    let (mut normalized, stored) = super::run_blocking_store_op({
-        let app = app.clone();
-        move || {
-            let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-
-            let stored = load_addon_configs(&store);
-            let mut normalized = Vec::with_capacity(configs.len());
-            for mut config in configs {
-                config.id =
-                    trim_to_max(&config.id, MAX_ADDON_FIELD_CHARS).unwrap_or_default();
-                config.name =
-                    trim_to_max(&config.name, MAX_ADDON_FIELD_CHARS).unwrap_or_default();
-                let url = normalize_addon_url(&config.url)?.ok_or_else(|| {
-                    format!(
-                        "Invalid URL for addon '{}'. Please provide a valid http(s) or stremio:// URL.",
-                        config.name
-                    )
-                })?;
-                config.url = url;
-                // Capability snapshots are only trusted when fetched
-                // server-side: a client-supplied manifest would bypass the
-                // fetch-time body/field bounds, so always restore the stored
-                // snapshot for this URL and let unclassified entries
-                // re-fetch below. A newly added addon's client snapshot is
-                // dropped on purpose — one bounded re-fetch is the price of
-                // never trusting renderer-supplied capability data.
-                config.capabilities = stored
-                    .iter()
-                    .find(|existing| existing.url == config.url)
-                    .and_then(|existing| existing.capabilities.clone());
-                normalized.push(config);
+    let new_addon_id = if matches!(op, AddonConfigsOp::Add { .. }) {
+        format!("addon-{}", uuid::Uuid::new_v4())
+    } else {
+        String::new()
+    };
+    let classified = if matches!(op, AddonConfigsOp::Add { .. }) {
+        let candidate = super::run_blocking_store_op({
+            let app = app.clone();
+            let op = op.clone();
+            let new_addon_id = new_addon_id.clone();
+            move || {
+                let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+                let mut updated =
+                    apply_addon_configs_op(load_addon_configs(&store), op, &new_addon_id)?;
+                Ok::<_, String>(updated.pop().into_iter().collect())
             }
+        })
+        .await?;
+        classify_missing_addon_capabilities(candidate, true).await?
+    } else {
+        Vec::new()
+    };
 
-            Ok::<_, String>((resolve_addon_configs(Some(normalized)), stored))
-        }
-    })
-    .await?;
-
-    // Inline classification covers new URLs only: stored-but-unclassified
-    // addons are owned by the throttled background classifier that runs off
-    // every resource request — re-fetching their manifests here would stall
-    // every settings save on a dead host for the full request timeout each.
-    let new_configs: Vec<AddonConfig> = normalized
-        .iter()
-        .filter(|config| !stored.iter().any(|existing| existing.url == config.url))
-        .cloned()
-        .collect();
-    merge_classified_capabilities(
-        &mut normalized,
-        classify_missing_addon_capabilities(new_configs, true).await?,
-    );
-    if normalized == stored {
-        // A normalized-identical save skips the store rewrite and the cache
-        // clear: dropping the transport/resource caches here would re-fan-out
-        // every in-flight stream and meta fetch for a change that changed
-        // nothing. Capability snapshots still classify above, so a genuine
-        // capability diff lands in `normalized` and takes the save path.
-        return Ok(normalized
-            .into_iter()
-            .map(AddonConfigView::from_config)
-            .collect());
-    }
-    let merged = super::run_blocking_store_op({
-        let app = app.clone();
-        move || {
-            let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-            // The classifier or a racing save may have committed fresher
-            // capability snapshots since the first op's `stored` read —
-            // adopt the latest stored snapshot per URL instead of writing
-            // the stale-restored one back. The config list itself stays
-            // caller-owned: adds/removes/order are the user's intent.
-            let latest = load_addon_configs(&store);
-            let merged: Vec<AddonConfig> = normalized
-                .into_iter()
-                .map(|mut config| {
-                    if let Some(snapshot) = latest
-                        .iter()
-                        .find(|existing| existing.url == config.url)
-                        .and_then(|existing| existing.capabilities.clone())
-                    {
-                        config.capabilities = Some(snapshot);
-                    }
-                    config
-                })
-                .collect();
-            save_addon_configs_to_store(&store, &merged);
+    // Manifest IO stays off the store gate; only the delta is reapplied at commit.
+    let (updated, changed) = super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+        let latest = load_addon_configs(&store);
+        let mut updated = apply_addon_configs_op(latest.clone(), op, &new_addon_id)?;
+        merge_classified_capabilities(&mut updated, classified);
+        let changed = updated != latest;
+        if changed {
+            save_addon_configs_to_store(&store, &updated);
             store.save()?;
-            Ok::<_, String>(merged)
         }
+        Ok::<_, String>((updated, changed))
     })
     .await?;
-    provider.clear_cache();
-    client.clear_cache();
-    Ok(merged
+    if changed {
+        provider.clear_cache();
+        client.clear_cache();
+    }
+    Ok(updated
         .into_iter()
         .map(AddonConfigView::from_config)
         .collect())
@@ -531,6 +548,156 @@ pub async fn save_addon_configs(
 mod tests {
     use super::*;
     use crate::test_helpers::test_addon;
+
+    fn installed() -> Vec<AddonConfig> {
+        resolve_addon_configs(Some(
+            ["a", "b", "c"]
+                .into_iter()
+                .map(|id| AddonConfig {
+                    url: format!("https://addon.example/{id}"),
+                    ..test_addon(id, id)
+                })
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn addon_add_rejects_normalized_duplicates_and_invalid_install_urls() {
+        for url in [
+            "stremio://addon.example/a/manifest.json/",
+            "https://addon.example/configure",
+            "ftp://addon.example",
+            "",
+        ] {
+            assert!(apply_addon_configs_op(
+                installed(),
+                AddonConfigsOp::Add { url: url.into() },
+                "new"
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn addon_remove_and_toggle_target_ids_and_preserve_pinned_defaults() {
+        let current = installed();
+        let pinned_id = current[0].id.clone();
+        let mut latest = current.clone();
+        for id in [pinned_id.clone(), "b".into()] {
+            latest = apply_addon_configs_op(
+                latest,
+                AddonConfigsOp::SetEnabled { id, enabled: false },
+                "",
+            )
+            .unwrap();
+        }
+        assert!(!latest[0].enabled);
+        assert!(
+            !latest
+                .iter()
+                .find(|config| config.id == "b")
+                .unwrap()
+                .enabled
+        );
+        latest =
+            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: pinned_id }, "").unwrap();
+        assert_eq!(latest.len(), current.len());
+        latest =
+            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: "b".into() }, "").unwrap();
+        assert!(!latest.iter().any(|config| config.id == "b"));
+        assert!(!latest[0].enabled);
+    }
+
+    #[test]
+    fn addon_reorder_keeps_pinned_first_and_appends_missing_ids() {
+        let current = installed();
+        let mut expected: Vec<_> = current.iter().map(|config| config.id.clone()).collect();
+        expected[2..].rotate_right(1);
+        let reordered = apply_addon_configs_op(
+            current.clone(),
+            AddonConfigsOp::Reorder {
+                ids: vec![
+                    "unknown".into(),
+                    current[0].id.clone(),
+                    "c".into(),
+                    "c".into(),
+                ],
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(
+            reordered
+                .iter()
+                .map(|config| config.id.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(&reordered[..2], &current[..2]);
+    }
+
+    #[test]
+    fn addon_add_on_latest_preserves_concurrent_toggle_and_remove() {
+        let latest = apply_addon_configs_op(
+            installed(),
+            AddonConfigsOp::SetEnabled {
+                id: "a".into(),
+                enabled: false,
+            },
+            "",
+        )
+        .unwrap();
+        let latest =
+            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: "b".into() }, "").unwrap();
+        let updated = apply_addon_configs_op(
+            latest.clone(),
+            AddonConfigsOp::Add {
+                url: "stremio://new.example/manifest.json/".into(),
+            },
+            "new",
+        )
+        .unwrap();
+        assert_eq!(&updated[..latest.len()], latest.as_slice());
+        let added = updated.last().unwrap();
+        assert_eq!(
+            (&*added.id, &*added.url, &*added.name),
+            ("new", "https://new.example", "new.example")
+        );
+        assert!(added.enabled);
+        assert!(added.capabilities.is_none());
+    }
+
+    #[test]
+    fn addon_mutation_noops_preserve_the_latest_snapshot() {
+        let current = installed();
+        for op in [
+            AddonConfigsOp::Remove {
+                id: "missing".into(),
+            },
+            AddonConfigsOp::SetEnabled {
+                id: "a".into(),
+                enabled: true,
+            },
+            AddonConfigsOp::SetEnabled {
+                id: "missing".into(),
+                enabled: false,
+            },
+            AddonConfigsOp::Reorder {
+                ids: vec!["unknown".into()],
+            },
+        ] {
+            assert_eq!(
+                apply_addon_configs_op(current.clone(), op, "").unwrap(),
+                current
+            );
+        }
+        let op: AddonConfigsOp =
+            serde_json::from_str(r#"{"kind":"setEnabled","id":"a","enabled":false}"#).unwrap();
+        assert!(matches!(
+            op,
+            AddonConfigsOp::SetEnabled { enabled: false, .. }
+        ));
+    }
 
     #[test]
     fn addon_url_inspection_matches_the_save_normalizer() {

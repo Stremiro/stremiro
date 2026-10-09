@@ -1,6 +1,6 @@
 import { type RefObject, useEffect, useEffectEvent } from 'react';
 
-import { isEditableTarget, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
+import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 
 const PLAYER_SHORTCUT_CONTROL_SELECTOR =
   'button, a, [role="button"], [role="menu"], [role="menuitem"], [data-player-interactive]';
@@ -134,6 +134,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     // The mini player hands the keyboard back to the page — space/arrows
     // must not control video while the user browses.
     if (!isExpanded) return;
+    if (document.querySelector(OPEN_DIALOG_SELECTOR)) return;
     // Child-handled keys, IME composition, and modifier chords are never
     // media shortcuts.
     if (e.defaultPrevented || e.isComposing || e.ctrlKey || e.altKey || e.metaKey) return;

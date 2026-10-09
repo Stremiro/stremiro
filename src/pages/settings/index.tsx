@@ -102,14 +102,14 @@ export function Settings() {
           {currentVersion ? (
             <span
               data-selectable='true'
-              className='mb-0.5 shrink-0 rounded-md border border-white/[0.07] bg-white/[0.03] px-2 py-1 font-mono text-[11px] tabular-nums text-zinc-500'
+              className='mb-0.5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-500'
             >
               v{currentVersion}
             </span>
           ) : null}
         </header>
 
-        <div className='mt-6 grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]'>
+        <div className='mt-6 grid gap-6 lg:grid-cols-[192px_minmax(0,1fr)]'>
           <nav
             aria-label='Settings sections'
             className='scrollbar-hide -mx-1 flex gap-1 overflow-x-auto px-1 lg:mx-0 lg:flex-col lg:gap-0.5 lg:self-start lg:overflow-visible lg:px-0 lg:sticky lg:top-14'
@@ -122,11 +122,16 @@ export function Settings() {
                   type='button'
                   onClick={() => handleSectionChange(item.id)}
                   aria-current={isActive ? 'page' : undefined}
+                  aria-label={
+                    item.id === 'updates' && isUpdateAvailable
+                      ? 'Updates, update available'
+                      : undefined
+                  }
                   style={
                     isActive ? { backgroundColor: 'rgb(var(--accent-nav-rgb) / 0.09)' } : undefined
                   }
                   className={cn(
-                    'group relative flex shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 lg:w-full',
+                    'group relative flex min-h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 lg:w-full',
                     isActive
                       ? 'text-white'
                       : 'text-zinc-500 hover:bg-white/[0.05] hover:text-zinc-200',
@@ -149,7 +154,7 @@ export function Settings() {
                   {item.id === 'updates' && isUpdateAvailable ? (
                     <span
                       aria-hidden='true'
-                      className='ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]'
+                      className='ml-auto h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400'
                     />
                   ) : null}
                 </button>

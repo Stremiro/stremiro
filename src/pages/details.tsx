@@ -25,6 +25,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useDetailsStreamSelector } from '@/hooks/use-details-stream-selector';
 import { useDetailsTrailer } from '@/hooks/use-details-trailer';
@@ -49,7 +50,7 @@ import {
   episodeProgressKey,
   getPlayableResumeStartTime,
   getWatchProgressPercent,
-  indexTitleWatchProgress,
+  titleEpisodeProgressMap,
   watchProgressCoordinates,
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
@@ -61,7 +62,14 @@ import {
   WATCH_HISTORY_VIEW_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
 import { searchGenrePath } from '@/lib/search-page-state';
-import { cn, isSeriesLikeMediaType, isAiredByLocalDay, prefersReducedMotion } from '@/lib/utils';
+import {
+  cn,
+  isSeriesLikeMediaType,
+  isAiredByLocalDay,
+  mediaTypeLabel,
+  scrollBehavior,
+  SIDEBAR_PAGE_COLUMN_INSETS,
+} from '@/lib/utils';
 
 const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8].map((index) => (
   <div
@@ -71,11 +79,12 @@ const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8].map((index) => (
 ));
 
 const ICON_ACTION_CLASS =
-  'flex h-11 w-11 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.06] text-white/70 backdrop-blur-xs transition-all duration-200 hover:border-white/[0.2] hover:bg-white/[0.1] hover:text-white active:scale-95';
+  'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.06] text-white/70 transition-colors duration-150 hover:border-white/[0.2] hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-wait';
 
-// Separate left/right padding: a combined `lg:px-8` would override
-// `lg:pl-[92px]` under tailwind-merge and pull the column under the sidebar.
-const DETAILS_COLUMN_CLASS = 'mx-auto w-full max-w-6xl pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
+const EPISODE_PAGE_BUTTON_CLASS =
+  'flex h-9 w-9 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35';
+
+const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-6xl ${SIDEBAR_PAGE_COLUMN_INSETS}`;
 
 const WATCH_STATUS_ORDER: WatchStatus[] = ['plan_to_watch', 'watching', 'watched', 'dropped'];
 
@@ -95,17 +104,13 @@ function DetailsContent() {
   const baseRouteId = id || '';
   const location = useLocation();
   const queryClient = useQueryClient();
-  // Narrow observer: unrelated preference writes (volume drags, subtitle
-  // nudges) no longer re-render the whole details page.
+  // Playback preference writes must not re-render the whole page.
   const spoilerProtection = useSpoilerProtection();
-
-  // Esc→back is owned by the global browse hotkey layer (`useBrowseHotkeys`
-  // in Layout) — it keeps this page's capture-phase dialog/popper yield and
-  // deep-link guard, and additionally yields to a focused expanded card.
 
   const {
     data: item,
     isLoading,
+    isFetching,
     isPlaceholderData,
     error,
   } = useQuery({
@@ -121,14 +126,10 @@ function DetailsContent() {
     gcTime: DETAILS_GC_TIME_MS,
   });
 
-  // The frameless window hides document.title, but it still feeds the OS
-  // taskbar tooltip and accessibility tree.
+  // The OS taskbar still uses this in the frameless window.
   useDocumentTitle(item?.title);
 
-  // One indexed per-title read instead of the two full-history scans that
-  // `useWatchHistory` + `useContinueWatching` each pay on mount.
-  // The route id is stable from mount — keying on it lets the local history
-  // read overlap the addon details fetch instead of serializing behind it.
+  // The route id lets history load without waiting for addon metadata.
   const {
     data: titleProgress,
     isLoading: isLoadingWatchHistory,
@@ -139,8 +140,18 @@ function DetailsContent() {
   const watchHistory = titleProgress?.history;
   const continueWatching = titleProgress?.continueWatching;
 
-  const { episodeProgressMap, movieProgress, latestSeriesProgress } = useMemo(
-    () => indexTitleWatchProgress(watchHistory),
+  const episodeProgressMap = useMemo(
+    () => titleEpisodeProgressMap(titleProgress?.episodeProgress),
+    [titleProgress?.episodeProgress],
+  );
+  // Rows arrive `last_watched` DESC — the first row of each kind is its
+  // latest. The backend bakes the per-episode index; these stay thin picks.
+  const movieProgress = useMemo(
+    () => watchHistory?.find((entry) => entry.type_ === 'movie') ?? null,
+    [watchHistory],
+  );
+  const latestSeriesProgress = useMemo(
+    () => watchHistory?.find((entry) => isSeriesLikeMediaType(entry.type_)) ?? null,
     [watchHistory],
   );
   const latestSeriesProgressCoords = useMemo(
@@ -186,14 +197,13 @@ function DetailsContent() {
       : null;
 
   const { trailerOpen, trailerUrl, openTrailer, onTrailerOpenChange } = useDetailsTrailer(item);
-  // Broken-artwork fallbacks: state resets on remount via the route-keyed
-  // wrapper, so a failed logo/backdrop on one title can't stick to the next.
-  const [backdropFailed, setBackdropFailed] = useState(false);
-  const [logoFailed, setLogoFailed] = useState(false);
-  // Fade-on-load for the same artwork: a decoded image reveals instead of
-  // popping, which keeps the hero paint calm on slow connections.
-  const [backdropLoaded, setBackdropLoaded] = useState(false);
-  const [logoLoaded, setLogoLoaded] = useState(false);
+  // A corrected artwork URL from a refetch must retry without a route remount.
+  const backdropUrl = item?.backdrop || item?.poster;
+  const logoUrl = item?.logo;
+  const [backdropSrc, onBackdropError] = useFailedSrc(backdropUrl);
+  const [logoSrc, onLogoError] = useFailedSrc(logoUrl);
+  const [loadedBackdrop, setLoadedBackdrop] = useState<string | null>(null);
+  const [loadedLogo, setLoadedLogo] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
   const [castExpanded, setCastExpanded] = useState(false);
@@ -250,29 +260,28 @@ function DetailsContent() {
     isPending: episodeWatchedPending,
     variables: episodeWatchedVariables,
   } = useToggleEpisodeWatched({ item });
+  const pendingWatchedMutation = episodeWatchedPending
+    ? episodeWatchedVariables
+    : markSeasonWatched.isPending
+      ? markSeasonWatched.variables
+      : undefined;
+  const pendingEpisodeKeys = useMemo(
+    () =>
+      new Set(
+        pendingWatchedMutation?.episodes.map((ep) =>
+          episodeProgressKey(baseRouteId, ep.season, ep.episode),
+        ),
+      ),
+    [baseRouteId, pendingWatchedMutation],
+  );
   const optimisticEpisodeWatched = useCallback(
-    (ep: Episode) => {
-      const pending = episodeWatchedPending
-        ? episodeWatchedVariables
-        : markSeasonWatched.isPending
-          ? markSeasonWatched.variables
-          : undefined;
-      return pending?.episodes.some(
-        (target) => target.season === ep.season && target.episode === ep.episode,
-      )
-        ? pending.watched
-        : undefined;
-    },
-    [
-      episodeWatchedPending,
-      episodeWatchedVariables,
-      markSeasonWatched.isPending,
-      markSeasonWatched.variables,
-    ],
+    (ep: Episode) =>
+      pendingEpisodeKeys.has(episodeProgressKey(baseRouteId, ep.season, ep.episode))
+        ? pendingWatchedMutation?.watched
+        : undefined,
+    [baseRouteId, pendingEpisodeKeys, pendingWatchedMutation?.watched],
   );
 
-  // Selected-season tally for the "· N watched" hint, plus the aired unwatched
-  // episodes "Mark season watched" writes — read from the map the cards use.
   const { seasonWatchedCount, seasonWatchTargets } = useMemo(() => {
     const targets: Episode[] = [];
     let watched = 0;
@@ -305,38 +314,12 @@ function DetailsContent() {
   });
 
   // Spoiler protection: episodes past the furthest watched one get blurred
-  // thumbnails and hidden descriptions.
-  const maxWatchedEpisodeInSeason = useMemo(() => {
-    if (!spoilerProtection || selectedSeason === null) return null;
-
-    const resumeEpisode =
-      latestSeriesProgressCoords.season === selectedSeason
-        ? latestSeriesProgressCoords.episode
-        : undefined;
-    let max: number | null = typeof resumeEpisode === 'number' ? resumeEpisode : null;
-
-    // Iterate the rows, not the map — every entry sits under both canonical
-    // and raw keys, so map.values() would score each row twice.
-    for (const entry of watchHistory ?? []) {
-      const { season: entrySeason, episode: entryEpisode } = watchProgressCoordinates(entry);
-      if (entrySeason !== selectedSeason || entryEpisode === undefined) continue;
-      if (!entry.has_started_watching) continue;
-      if (max === null || entryEpisode > max) max = entryEpisode;
-    }
-
-    return max;
-  }, [spoilerProtection, selectedSeason, watchHistory, latestSeriesProgressCoords]);
-
-  const isEpisodeSpoiler = useCallback(
-    (ep: Episode): boolean => {
-      if (!spoilerProtection || maxWatchedEpisodeInSeason === null || !item) return false;
-      const prog = episodeProgressMap.get(episodeProgressKey(baseRouteId, ep.season, ep.episode));
-      // Episodes the user has started watching are never considered spoilers
-      if (prog?.has_started_watching) return false;
-      return ep.episode > maxWatchedEpisodeInSeason;
-    },
-    [spoilerProtection, maxWatchedEpisodeInSeason, episodeProgressMap, baseRouteId, item],
-  );
+  // thumbnails and hidden descriptions. The backend folds the ceiling into
+  // the payload (canonical coords, started rows plus the latest-row seed).
+  const maxWatchedEpisodeInSeason =
+    spoilerProtection && selectedSeason !== null
+      ? (titleProgress?.watchedEpisodeCeiling[selectedSeason] ?? null)
+      : null;
 
   const handleWatchEpisode = useCallback(
     (ep: Episode) => {
@@ -379,7 +362,6 @@ function DetailsContent() {
 
   const progress = item?.type === 'movie' ? movieProgress : null;
 
-  // A resume offer exists exactly when the backend computed a start time.
   const movieCanResume = getPlayableResumeStartTime(progress) !== undefined;
   const primaryPlaybackHistoryEntry =
     item?.type === 'movie'
@@ -391,9 +373,7 @@ function DetailsContent() {
         : null;
 
   const scrollToEpisodes = useCallback(() => {
-    document
-      .getElementById('episodes-section')
-      ?.scrollIntoView({ behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+    document.getElementById('episodes-section')?.scrollIntoView({ behavior: scrollBehavior() });
   }, []);
 
   const primaryPlayback = useMediaPrimaryPlayback({
@@ -454,7 +434,7 @@ function DetailsContent() {
   }, [handleWatchMovie, item, openEpisodeStreamSelector, primaryPlaybackHistoryEntry]);
 
   const handleRetryDetails = () => {
-    if (!baseRouteId) return;
+    if (!baseRouteId || isFetching) return;
     void queryClient.invalidateQueries({ queryKey: detailsQueryKey(baseRouteType, baseRouteId) });
   };
 
@@ -482,7 +462,7 @@ function DetailsContent() {
       centeredResumeLandingRef.current = landingKey;
       resumeEpisodeRef.current?.scrollIntoView({
         block: 'center',
-        behavior: prefersReducedMotion() ? 'auto' : 'smooth',
+        behavior: scrollBehavior(),
       });
     }, 80);
 
@@ -500,13 +480,25 @@ function DetailsContent() {
 
   if (error && !item) {
     return (
-      <div className='min-h-screen bg-background flex flex-col items-center justify-center gap-3 px-6 text-center'>
+      <div
+        role='alert'
+        className={`${DETAILS_COLUMN_CLASS} min-h-[75vh] flex flex-col items-center justify-center gap-3 text-center`}
+      >
         <Clapperboard className='w-10 h-10 text-zinc-600 opacity-40' />
         <p className='text-lg font-semibold text-white'>Couldn&apos;t load this title</p>
         <p className='text-sm text-zinc-500 max-w-sm leading-relaxed'>
           The details request failed — check your connection, then try again.
         </p>
-        <Button variant='outline' onClick={handleRetryDetails} className='mt-1'>
+        <Button
+          variant='outline'
+          onClick={handleRetryDetails}
+          aria-disabled={isFetching || undefined}
+          aria-busy={isFetching}
+          className='mt-1 h-9 rounded-md px-4 aria-disabled:cursor-wait aria-disabled:opacity-50'
+        >
+          <RotateCcw
+            className={cn('h-4 w-4', isFetching && 'animate-spin motion-reduce:animate-none')}
+          />
           Retry
         </Button>
       </div>
@@ -515,90 +507,90 @@ function DetailsContent() {
 
   if (!item) {
     return (
-      <div className='min-h-screen bg-background flex flex-col items-center justify-center gap-4'>
-        <p className='text-xl font-bold text-white'>Title not found</p>
+      <div
+        className={`${DETAILS_COLUMN_CLASS} min-h-[75vh] flex flex-col items-center justify-center gap-3 text-center`}
+      >
+        <p className='text-lg font-semibold text-white'>Title not found</p>
         <p className='text-sm text-zinc-500 max-w-sm text-center'>
           This title may have been removed or the link is incomplete.
         </p>
-        <Button variant='outline' asChild>
-          <Link to='/'>Back to Home</Link>
+        <Button variant='outline' className='mt-1 h-9 rounded-md px-4' asChild>
+          <Link to='/'>Back to home</Link>
         </Button>
       </div>
     );
   }
 
-  const backdropUrl = item.backdrop || item.poster;
-
   return (
     <div className='relative pb-20'>
-      {/* Hero Section - Immersive */}
       <div className='relative flex min-h-[70vh] w-full items-end pb-24 pt-32 -mt-8'>
-        {/* Backdrop */}
-        {backdropUrl && !backdropFailed && (
+        {backdropSrc && (
           <div className='absolute inset-0 z-0'>
             <div className='absolute inset-0 bg-linear-to-t from-background via-background/70 to-background/10 z-10' />
             <div className='absolute inset-0 bg-linear-to-r from-background/80 via-background/20 to-transparent z-10' />
             <RemoteImage
-              src={backdropUrl}
+              key={backdropSrc}
+              src={backdropSrc}
               alt=''
               className={cn(
                 'w-full h-full object-cover transition-opacity duration-700 ease-out',
-                backdropLoaded ? 'opacity-100' : 'opacity-0',
+                loadedBackdrop === backdropSrc ? 'opacity-100' : 'opacity-0',
               )}
               loading='eager'
               fetchPriority='high'
-              onLoad={() => setBackdropLoaded(true)}
-              onError={() => setBackdropFailed(true)}
+              onLoad={() => setLoadedBackdrop(backdropSrc)}
+              onError={onBackdropError}
               style={{ objectPosition: 'center 20%' }}
             />
           </div>
         )}
 
-        {/* Content */}
         <div className={`${DETAILS_COLUMN_CLASS} relative z-20 flex flex-col`}>
           <div className='flex flex-col gap-6 w-full max-w-4xl'>
             {error && (
               <RetryBanner
                 message="Couldn't refresh this title. Showing the saved details."
                 onRetry={handleRetryDetails}
+                isRetrying={isFetching}
               />
             )}
-            {/* Info */}
             <div className='space-y-6 w-full'>
               <div>
-                {item.logo && !logoFailed ? (
-                  <RemoteImage
-                    src={item.logo}
-                    alt={item.title}
-                    className={cn(
-                      'h-24 md:h-32 object-contain origin-left mb-6 drop-shadow-2xl transition-opacity duration-500 ease-out',
-                      logoLoaded ? 'opacity-100' : 'opacity-0',
-                    )}
-                    onLoad={() => setLogoLoaded(true)}
-                    onError={() => setLogoFailed(true)}
-                  />
+                {logoSrc ? (
+                  <>
+                    <h1 className='sr-only'>{item.title}</h1>
+                    <RemoteImage
+                      key={logoSrc}
+                      src={logoSrc}
+                      alt=''
+                      className={cn(
+                        'h-24 max-w-full md:h-32 object-contain object-left mb-6 drop-shadow-2xl transition-opacity duration-500 ease-out',
+                        loadedLogo === logoSrc ? 'opacity-100' : 'opacity-0',
+                      )}
+                      onLoad={() => setLoadedLogo(logoSrc)}
+                      onError={onLogoError}
+                    />
+                  </>
                 ) : (
-                  <h1 className='text-5xl md:text-7xl lg:text-8xl font-serif font-bold tracking-tight text-white mb-6 leading-[1.1] drop-shadow-2xl'>
+                  <h1 className='mb-5 wrap-break-word text-[32px] font-semibold leading-[1.1] tracking-[-0.035em] text-white drop-shadow-lg sm:text-5xl lg:text-6xl'>
                     {item.title}
                   </h1>
                 )}
 
-                {/* Metadata Row */}
                 <div className='flex flex-wrap items-center gap-x-3 gap-y-2 text-sm font-medium text-white/85'>
-                  <span className='tabular-nums'>{item.displayYear ?? 'Unknown'}</span>
-
-                  <span aria-hidden='true' className='text-white/25'>
-                    ·
-                  </span>
-                  {item.type === 'series' ? (
-                    <span>
-                      {hasEpisodesSection && seasonCount > 0
-                        ? `${seasonCount} Season${seasonCount === 1 ? '' : 's'}`
-                        : 'TV Series'}
-                    </span>
-                  ) : (
-                    <span>Movie</span>
+                  {item.displayYear && (
+                    <>
+                      <span className='tabular-nums'>{item.displayYear}</span>
+                      <span aria-hidden='true' className='text-white/25'>
+                        ·
+                      </span>
+                    </>
                   )}
+                  <span>
+                    {isSeriesLikeMediaType(item.type) && hasEpisodesSection && seasonCount > 0
+                      ? `${seasonCount} Season${seasonCount === 1 ? '' : 's'}`
+                      : mediaTypeLabel(item.type)}
+                  </span>
 
                   {item.genres && item.genres.length > 0 && (
                     <>
@@ -611,7 +603,7 @@ function DetailsContent() {
                             key={genre}
                             to={searchGenrePath(baseRouteType, genre)}
                             title={`Browse ${genre}`}
-                            className='rounded-md border border-white/10 bg-white/[0.05] px-2.5 py-[7px] text-[11px] font-semibold uppercase leading-none tracking-[0.1em] text-white/70 backdrop-blur-xs transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white'
+                            className='rounded-md border border-white/10 bg-white/[0.05] px-2.5 py-1.5 text-[12px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
                           >
                             {genre}
                           </Link>
@@ -626,7 +618,7 @@ function DetailsContent() {
                         ·
                       </span>
                       <div className='flex items-baseline gap-1.5'>
-                        <Star className='rating-star h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400 drop-shadow-[0_0_6px_rgba(251,191,36,0.35)]' />
+                        <Star className='rating-star h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400' />
                         <span className='text-[15px] font-semibold tabular-nums text-white'>
                           {item.rating}
                         </span>
@@ -639,9 +631,10 @@ function DetailsContent() {
 
               <div>
                 <p
+                  id='details-description'
                   ref={descriptionRef}
                   className={cn(
-                    'text-base md:text-[17px] text-white/70 max-w-2xl leading-relaxed font-normal drop-shadow-md',
+                    'text-[14px] md:text-[15px] text-white/75 max-w-2xl leading-relaxed font-normal',
                     !descriptionExpanded && 'line-clamp-3 md:line-clamp-4',
                   )}
                 >
@@ -652,17 +645,18 @@ function DetailsContent() {
                     type='button'
                     onClick={() => setDescriptionExpanded((v) => !v)}
                     aria-expanded={descriptionExpanded}
-                    className='mt-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-white/55 transition-colors duration-150 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 rounded-xs'
+                    aria-controls='details-description'
+                    className='mt-1 inline-flex min-h-8 items-center rounded-md px-1 text-[13px] font-medium text-white/65 transition-colors duration-150 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
                   >
                     {descriptionExpanded ? 'Show less' : 'Read more'}
                   </button>
                 )}
               </div>
 
-              <div className='flex flex-wrap items-center gap-3 pt-4'>
+              <div className='flex flex-wrap items-center gap-2.5 pt-2'>
                 <button
                   type='button'
-                  className='group aria-disabled:cursor-wait'
+                  className='group rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black aria-disabled:cursor-wait'
                   aria-disabled={primaryActionPending || undefined}
                   aria-busy={primaryActionPending || undefined}
                   onClick={() => {
@@ -671,7 +665,7 @@ function DetailsContent() {
                     else void primaryPlayback.handlePrimaryAction();
                   }}
                 >
-                  <span className='flex h-11 min-w-44 items-center justify-center gap-2.5 rounded-lg bg-white px-6 text-black shadow-xs transition-colors duration-200 group-hover:bg-zinc-200 group-aria-disabled:opacity-80 md:px-7'>
+                  <span className='flex h-11 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black transition-colors duration-150 group-hover:bg-zinc-200 group-aria-disabled:opacity-80'>
                     {historyPending ||
                     episodeActionPending ||
                     primaryPlayback.showResolvingFeedback ? (
@@ -695,11 +689,13 @@ function DetailsContent() {
                   <button
                     type='button'
                     aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
+                    aria-pressed={isInLibrary}
+                    aria-busy={toggleLibrary.isPending || undefined}
                     title={isInLibrary ? 'In library' : 'Add to library'}
                     className={cn(
                       ICON_ACTION_CLASS,
                       isInLibrary &&
-                        'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200/80 hover:border-emerald-500/20 hover:bg-emerald-500/[0.10] hover:text-emerald-200',
+                        'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                     )}
                     aria-disabled={toggleLibrary.isPending || undefined}
                     onClick={() => {
@@ -750,12 +746,12 @@ function DetailsContent() {
               <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
                 <span
                   id='details-watch-status-label'
-                  className='text-[12px] font-semibold uppercase tracking-[0.14em] text-white/70 [text-shadow:0_1px_8px_rgba(0,0,0,0.65)]'
+                  className='text-[12px] font-medium text-white/65'
                 >
                   My status
                 </span>
                 <div
-                  className='inline-flex items-center gap-0.5 rounded-[10px] border border-white/10 bg-black/35 p-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)] backdrop-blur-md'
+                  className='inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-1 scrollbar-hide'
                   role='group'
                   aria-labelledby='details-watch-status-label'
                 >
@@ -777,9 +773,9 @@ function DetailsContent() {
                           }
                         }}
                         className={cn(
-                          'flex h-8 items-center gap-2 rounded-[7px] border px-3 text-[13px] font-medium transition-[color,background-color,border-color,scale] duration-150 active:scale-[0.97] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
+                          'flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
                           isActive
-                            ? cn(colors.bg, colors.text, colors.border, 'shadow-xs')
+                            ? cn(colors.bg, colors.text, colors.border)
                             : 'border-transparent text-white/70 hover:bg-white/[0.08] hover:text-white',
                           watchStatusMutation.isPending && 'cursor-wait',
                         )}
@@ -788,7 +784,7 @@ function DetailsContent() {
                           aria-hidden='true'
                           className={cn(
                             'h-1.5 w-1.5 rounded-full bg-current transition-opacity',
-                            isActive ? 'shadow-[0_0_8px_currentColor]' : 'opacity-50',
+                            !isActive && 'opacity-50',
                           )}
                         />
                         {WATCH_STATUS_LABELS[status]}
@@ -813,9 +809,9 @@ function DetailsContent() {
                         type='button'
                         onClick={() => setCastExpanded((v) => !v)}
                         aria-expanded={castExpanded}
-                        className='ml-1 italic text-zinc-500 transition-colors hover:text-zinc-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 rounded-xs'
+                        className='ml-1 inline-flex min-h-8 items-center rounded-md px-1 text-white/65 transition-colors duration-150 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
                       >
-                        {castExpanded ? 'show less' : `and ${item.cast.length - 5} more`}
+                        {castExpanded ? 'Show less' : `+${item.cast.length - 5} more`}
                       </button>
                     )}
                   </div>
@@ -826,22 +822,22 @@ function DetailsContent() {
         </div>
       </div>
 
-      {/* Episodes Section */}
       {hasEpisodesSection && (
         <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} py-8`}>
-          <div className='w-full flex flex-col gap-6 animate-in fade-in duration-300'>
-            {/* Season Selector */}
+          <div className='w-full flex flex-col gap-4 animate-in fade-in duration-300'>
+            <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>Episodes</h2>
             {localSeasonEntries.length > 1 && (
               <div className='w-full'>
                 <SeasonSwitcher
                   localSeasons={localSeasonEntries}
-                  activeSeason={selectedSeason ?? null}
+                  activeSeason={selectedSeason}
                   onLocalSeason={selectSeason}
                 />
               </div>
             )}
             <div
               id='details-episodes-panel'
+              className='min-w-0 space-y-3'
               // Panel semantics only exist while the season tablist renders.
               role={localSeasonEntries.length > 1 ? 'tabpanel' : undefined}
               aria-labelledby={
@@ -850,140 +846,143 @@ function DetailsContent() {
                   : undefined
               }
             >
-              {/* `hasEpisodesSection` only mounts when `item.episodes` is
-                  non-empty, so a selected season always has rows — the only
-                  in-flight state left is the progress-read skeleton. */}
-              <>
-                {/* Episode search bar */}
-                {shouldShowEpisodeSearch && (
-                  <SearchInput
-                    placeholder='Search episodes…'
-                    aria-label='Search episodes'
-                    value={episodeSearch}
-                    onValueChange={setEpisodeSearch}
-                    clearLabel='Clear episode search'
-                    className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-600 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
-                  />
-                )}
-                <div className='flex items-center justify-between gap-4'>
-                  <div className='flex min-w-0 items-center gap-3'>
-                    <p
-                      aria-live='polite'
-                      className='text-[12px] font-medium tabular-nums text-zinc-500'
-                    >
-                      {episodeRangeLabel}
-                      {visibleEpisodeStart > 0 && (
-                        <span className='text-zinc-600'>{` of ${totalEpisodeCount}`}</span>
-                      )}
-                      {seasonWatchedCount > 0 && (
-                        <span className='text-zinc-600'>{` · ${seasonWatchedCount} watched`}</span>
-                      )}
-                    </p>
-                    {!shouldShowEpisodeProgressSkeleton &&
-                      (seasonWatchTargets.length > 1 || markSeasonWatched.isPending) && (
-                        <button
-                          type='button'
-                          aria-disabled={
-                            markSeasonWatched.isPending || episodeWatchedPending || undefined
+              {shouldShowEpisodeSearch && (
+                <SearchInput
+                  placeholder='Search episodes…'
+                  aria-label='Search episodes'
+                  value={episodeSearch}
+                  onValueChange={setEpisodeSearch}
+                  clearLabel='Clear episode search'
+                  className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-500 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
+                />
+              )}
+              <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
+                <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
+                  <p
+                    aria-live='polite'
+                    className='text-[12px] font-medium tabular-nums text-zinc-400'
+                  >
+                    {episodeRangeLabel}
+                    {visibleEpisodeStart > 0 && (
+                      <span className='text-zinc-500'>{` of ${totalEpisodeCount}`}</span>
+                    )}
+                    {seasonWatchedCount > 0 && (
+                      <span className='text-zinc-500'>{` · ${seasonWatchedCount} watched`}</span>
+                    )}
+                  </p>
+                  {!shouldShowEpisodeProgressSkeleton &&
+                    (seasonWatchTargets.length > 1 || markSeasonWatched.isPending) && (
+                      <button
+                        type='button'
+                        aria-disabled={
+                          markSeasonWatched.isPending || episodeWatchedPending || undefined
+                        }
+                        onClick={() => {
+                          if (!markSeasonWatched.isPending && !episodeWatchedPending) {
+                            markSeasonWatched.mutate({
+                              episodes: seasonWatchTargets,
+                              watched: true,
+                            });
                           }
-                          onClick={() => {
-                            if (!markSeasonWatched.isPending && !episodeWatchedPending) {
-                              markSeasonWatched.mutate({
-                                episodes: seasonWatchTargets,
-                                watched: true,
-                              });
-                            }
-                          }}
-                          className='flex h-7 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
-                        >
-                          {markSeasonWatched.isPending ? (
-                            <Loader2 className='h-3.5 w-3.5 animate-spin' />
-                          ) : (
-                            <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
-                          )}
-                          Mark season watched
-                        </button>
-                      )}
-                  </div>
+                        }}
+                        className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-wait'
+                      >
+                        {markSeasonWatched.isPending ? (
+                          <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                        ) : (
+                          <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
+                        )}
+                        Mark season watched
+                      </button>
+                    )}
+                </div>
 
-                  {totalEpisodePages > 1 && (
-                    <div className='flex items-center gap-2'>
-                      <button
-                        type='button'
-                        // aria-disabled, not disabled: paging to the edge
-                        // disables the focused button and drops focus to
-                        // <body>, ending keyboard navigation mid-row.
-                        aria-disabled={!hasPreviousEpisodes || undefined}
-                        onClick={() => {
-                          if (hasPreviousEpisodes) changeEpisodePage('previous');
-                        }}
-                        className='flex h-8 w-8 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-35'
-                        aria-label='Show previous episodes'
-                      >
-                        <ChevronLeft className='h-4 w-4' />
-                      </button>
-                      <div className='min-w-[64px] text-center text-[11px] text-zinc-500 tabular-nums'>
-                        {activeEpisodePageIndex + 1} / {totalEpisodePages}
-                      </div>
-                      <button
-                        type='button'
-                        aria-disabled={!hasMoreEpisodes || undefined}
-                        onClick={() => {
-                          if (hasMoreEpisodes) changeEpisodePage('next');
-                        }}
-                        className='flex h-8 w-8 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-35'
-                        aria-label='Show next episodes'
-                      >
-                        <ChevronRight className='h-4 w-4' />
-                      </button>
+                {totalEpisodePages > 1 && (
+                  <div
+                    className='ml-auto flex shrink-0 items-center gap-2'
+                    role='group'
+                    aria-label='Episode pages'
+                  >
+                    <button
+                      type='button'
+                      // aria-disabled, not disabled: paging to the edge
+                      // disables the focused button and drops focus to
+                      // <body>, ending keyboard navigation mid-row.
+                      aria-disabled={!hasPreviousEpisodes || undefined}
+                      onClick={() => {
+                        if (hasPreviousEpisodes) changeEpisodePage('previous');
+                      }}
+                      className={EPISODE_PAGE_BUTTON_CLASS}
+                      aria-label='Show previous episodes'
+                    >
+                      <ChevronLeft className='h-4 w-4' />
+                    </button>
+                    <div className='min-w-[64px] text-center text-[12px] text-zinc-400 tabular-nums'>
+                      {activeEpisodePageIndex + 1} / {totalEpisodePages}
                     </div>
-                  )}
-                </div>
+                    <button
+                      type='button'
+                      aria-disabled={!hasMoreEpisodes || undefined}
+                      onClick={() => {
+                        if (hasMoreEpisodes) changeEpisodePage('next');
+                      }}
+                      className={EPISODE_PAGE_BUTTON_CLASS}
+                      aria-label='Show next episodes'
+                    >
+                      <ChevronRight className='h-4 w-4' />
+                    </button>
+                  </div>
+                )}
+              </div>
 
-                <div className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'>
-                  {shouldShowEpisodeProgressSkeleton ? (
-                    EPISODE_SKELETON_TILES
-                  ) : visibleEpisodes.length === 0 && episodeSearch.trim() ? (
-                    <p className='col-span-full py-14 text-center text-sm text-zinc-600'>
-                      No episodes match &ldquo;
-                      <span className='text-zinc-400'>{episodeSearch}</span>&rdquo;
-                    </p>
-                  ) : (
-                    visibleEpisodes.map((ep) => {
-                      const epProgress = episodeProgressMap.get(
-                        episodeProgressKey(baseRouteId, ep.season, ep.episode),
-                      );
-                      const optimisticWatched = optimisticEpisodeWatched(ep);
-                      const progressPercent =
-                        optimisticWatched !== undefined
-                          ? optimisticWatched
-                            ? 100
-                            : 0
-                          : getWatchProgressPercent(
-                              epProgress?.position ?? 0,
-                              epProgress?.duration ?? 0,
-                            );
-                      const isResumeEp =
-                        seriesCanResume &&
-                        episodeMatchesCoordinates(ep, seriesResumeSeason, seriesResumeEpisode);
+              <div className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'>
+                {shouldShowEpisodeProgressSkeleton ? (
+                  EPISODE_SKELETON_TILES
+                ) : visibleEpisodes.length === 0 && episodeSearch.trim() ? (
+                  <p className='col-span-full py-14 text-center text-sm text-zinc-400'>
+                    No episodes match &ldquo;
+                    {episodeSearch}&rdquo;
+                  </p>
+                ) : (
+                  visibleEpisodes.map((ep) => {
+                    const epProgress = episodeProgressMap.get(
+                      episodeProgressKey(baseRouteId, ep.season, ep.episode),
+                    );
+                    const optimisticWatched = optimisticEpisodeWatched(ep);
+                    const progressPercent =
+                      optimisticWatched !== undefined
+                        ? optimisticWatched
+                          ? 100
+                          : 0
+                        : getWatchProgressPercent(
+                            epProgress?.position ?? 0,
+                            epProgress?.duration ?? 0,
+                          );
+                    const isResumeEp =
+                      seriesCanResume &&
+                      episodeMatchesCoordinates(ep, seriesResumeSeason, seriesResumeEpisode);
 
-                      return (
-                        <EpisodeCard
-                          key={ep.id}
-                          episode={ep}
-                          isResume={isResumeEp}
-                          isSpoiler={isEpisodeSpoiler(ep)}
-                          isWatched={optimisticWatched ?? !!epProgress?.is_watched}
-                          progressPercent={progressPercent}
-                          resumeRef={isResumeEp ? resumeEpisodeRef : undefined}
-                          onPlay={handleWatchEpisode}
-                          onToggleWatched={handleToggleEpisodeWatched}
-                        />
-                      );
-                    })
-                  )}
-                </div>
-              </>
+                    return (
+                      <EpisodeCard
+                        key={ep.id}
+                        episode={ep}
+                        isResume={isResumeEp}
+                        isSpoiler={
+                          maxWatchedEpisodeInSeason !== null &&
+                          !epProgress?.has_started_watching &&
+                          ep.episode > maxWatchedEpisodeInSeason
+                        }
+                        isWatched={optimisticWatched ?? !!epProgress?.is_watched}
+                        isWatchedPending={episodeWatchedPending || markSeasonWatched.isPending}
+                        progressPercent={progressPercent}
+                        resumeRef={isResumeEp ? resumeEpisodeRef : undefined}
+                        onPlay={handleWatchEpisode}
+                        onToggleWatched={handleToggleEpisodeWatched}
+                      />
+                    );
+                  })
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -1025,7 +1024,6 @@ function DetailsContent() {
 function DetailsSkeleton() {
   return (
     <div className='min-h-screen bg-background'>
-      {/* Shimmer in the hero backdrop area */}
       <div className='relative h-[70vh] w-full -mt-8 overflow-hidden'>
         <div className='absolute inset-0 bg-zinc-950' />
         <div className='absolute inset-0 bg-linear-to-t from-background via-background/60 to-transparent' />
@@ -1034,7 +1032,7 @@ function DetailsSkeleton() {
 
       <div className={`${DETAILS_COLUMN_CLASS} -mt-56 relative z-10`}>
         <div className='flex flex-col gap-6 w-full max-w-4xl animate-pulse'>
-          <Skeleton className='h-10 w-72 bg-zinc-800/60' />
+          <Skeleton className='h-10 w-72 max-w-full bg-zinc-800/60' />
           <div className='flex gap-3'>
             <Skeleton className='h-5 w-14 bg-zinc-800/50' />
             <Skeleton className='h-5 w-20 bg-zinc-800/50' />

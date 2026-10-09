@@ -124,6 +124,37 @@ fn object_resource_without_prefixes_inherits_manifest_prefixes() {
 }
 
 #[test]
+fn object_resource_null_types_and_prefixes_inherit_from_manifest() {
+    let snapshot = parse(
+        r#"{
+                "name": "Nulls",
+                "resources": [
+                    {"name": "stream", "types": null, "idPrefixes": null}
+                ],
+                "types": ["movie"],
+                "idPrefixes": ["tt"],
+                "catalogs": []
+            }"#,
+    );
+
+    // `null` behaves like an absent key: `types` inherits (the resource
+    // stays alive) and `idPrefixes` inherits rather than opting out.
+    assert_eq!(snapshot.resources[0].types, vec!["movie"]);
+    assert!(snapshot_supports_request(
+        &snapshot,
+        "stream",
+        "movie",
+        "tt0944947"
+    ));
+    assert!(!snapshot_supports_request(
+        &snapshot,
+        "stream",
+        "movie",
+        "kitsu:48316"
+    ));
+}
+
+#[test]
 fn object_resource_explicit_empty_prefixes_matches_all_ids() {
     let snapshot = parse(
         r#"{

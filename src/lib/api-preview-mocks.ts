@@ -1,6 +1,8 @@
+import type { ProfilePreferences, ProfilePreferencesPatch } from '@/lib/api';
+
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
-let previewProfilePreferences = {
+let previewProfilePreferences: ProfilePreferences = {
   profile: {
     username: 'Guest User',
     accentColor: '#ffffff',
@@ -53,12 +55,44 @@ const EMPTY_STREAM_SELECTOR_DATA = {
 
 const EMPTY_DATA_STATS = {
   history_count: 0,
+  history_title_count: 0,
   library_count: 0,
   lists_count: 0,
   watch_statuses_count: 0,
 };
 
 // Mirrors the backend's closed language set so preview renders the real options.
+// Mirrors MOVIE_GENRE_FALLBACK/SERIES_ONLY_GENRES in browse_genre_commands.rs —
+// the backend never returns empty genre lists, so neither should preview.
+const PREVIEW_MOVIE_GENRES = [
+  'Action',
+  'Adventure',
+  'Animation',
+  'Biography',
+  'Comedy',
+  'Crime',
+  'Documentary',
+  'Drama',
+  'Family',
+  'Fantasy',
+  'History',
+  'Horror',
+  'Mystery',
+  'Romance',
+  'Sci-Fi',
+  'Sport',
+  'Thriller',
+  'War',
+  'Western',
+];
+const PREVIEW_SERIES_GENRES = [...PREVIEW_MOVIE_GENRES, 'Game-Show', 'Reality-TV', 'Talk-Show'];
+const PREVIEW_BROWSE_GENRES = {
+  all: PREVIEW_SERIES_GENRES,
+  movie: PREVIEW_MOVIE_GENRES,
+  series: PREVIEW_SERIES_GENRES,
+  anime: PREVIEW_SERIES_GENRES.filter((genre) => genre.toLowerCase() !== 'animation'),
+};
+
 const PREVIEW_SUPPORTED_LANGUAGES = [
   { code: 'en', label: 'English' },
   { code: 'ja', label: 'Japanese' },
@@ -152,49 +186,53 @@ export async function handlePreviewInvoke<T>(
     }
     case 'get_profile_preferences':
       return previewProfilePreferences as T;
-    case 'save_profile_preferences':
-      // The desktop command sanitizes the profile; preview stores it as sent.
+    case 'save_profile_preferences': {
+      const patch = (args?.patch ?? {}) as Omit<ProfilePreferencesPatch, 'avatar'> & {
+        avatar?: string | null;
+      };
+      const { viewMode, avatar, ...profile } = patch;
+      // Preview only displays edits; persistence and validation belong to Rust.
       previewProfilePreferences = {
-        profile:
-          typeof args?.profile === 'object' && args.profile !== null
-            ? (args.profile as typeof previewProfilePreferences.profile)
-            : previewProfilePreferences.profile,
-        viewMode: args?.viewMode === 'list' ? 'list' : 'grid',
+        profile: {
+          ...previewProfilePreferences.profile,
+          ...profile,
+          avatar:
+            'avatar' in patch ? (avatar ?? undefined) : previewProfilePreferences.profile.avatar,
+          accentTargets: {
+            ...previewProfilePreferences.profile.accentTargets,
+            ...profile.accentTargets,
+          },
+        },
+        viewMode: viewMode ?? previewProfilePreferences.viewMode,
       };
       return previewProfilePreferences as T;
+    }
     case 'get_stream_selector_preferences':
       return {
         preferences: previewStreamSelectorPreferences,
         initialized: true,
       } as T;
     case 'save_stream_selector_preferences': {
-      const preferences =
-        typeof args?.preferences === 'object' && args.preferences !== null ? args.preferences : {};
+      const preferences = (
+        typeof args?.preferences === 'object' && args.preferences !== null ? args.preferences : {}
+      ) as Record<string, unknown>;
       previewStreamSelectorPreferences = {
         quality:
-          typeof (preferences as { quality?: unknown }).quality === 'string'
-            ? ((preferences as { quality: string })
-                .quality as typeof previewStreamSelectorPreferences.quality)
+          typeof preferences.quality === 'string'
+            ? preferences.quality
             : previewStreamSelectorPreferences.quality,
         source:
-          typeof (preferences as { source?: unknown }).source === 'string'
-            ? ((preferences as { source: string })
-                .source as typeof previewStreamSelectorPreferences.source)
+          typeof preferences.source === 'string'
+            ? preferences.source
             : previewStreamSelectorPreferences.source,
-        addon:
-          typeof (preferences as { addon?: unknown }).addon === 'string' &&
-          (preferences as { addon: string }).addon.trim()
-            ? (preferences as { addon: string }).addon.trim()
-            : 'all',
+        addon: typeof preferences.addon === 'string' ? preferences.addon.trim() || 'all' : 'all',
         sort:
-          typeof (preferences as { sort?: unknown }).sort === 'string'
-            ? ((preferences as { sort: string })
-                .sort as typeof previewStreamSelectorPreferences.sort)
+          typeof preferences.sort === 'string'
+            ? preferences.sort
             : previewStreamSelectorPreferences.sort,
         batch:
-          typeof (preferences as { batch?: unknown }).batch === 'string'
-            ? ((preferences as { batch: string })
-                .batch as typeof previewStreamSelectorPreferences.batch)
+          typeof preferences.batch === 'string'
+            ? preferences.batch
             : previewStreamSelectorPreferences.batch,
       };
       return previewStreamSelectorPreferences as T;
@@ -212,7 +250,12 @@ export async function handlePreviewInvoke<T>(
       return { trackedCount: 0, events: [] } as T;
     case 'get_title_watch_progress':
     case 'set_episodes_watched':
-      return { history: [], continueWatching: [] } as T;
+      return {
+        history: [],
+        continueWatching: [],
+        episodeProgress: {},
+        watchedEpisodeCeiling: {},
+      } as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
     case 'get_media_details':
@@ -240,6 +283,7 @@ export async function handlePreviewInvoke<T>(
         selectedMatches: false,
       } as T;
     case 'get_addon_configs':
+    case 'update_addon_configs':
       return [] as T;
     case 'inspect_addon_url':
       return {
@@ -247,7 +291,7 @@ export async function handlePreviewInvoke<T>(
         error: 'Addon URLs are validated by the desktop app.',
       } as T;
     case 'get_browse_genres':
-      return { movie: [], series: [], anime: [] } as T;
+      return PREVIEW_BROWSE_GENRES as T;
     case 'get_all_watch_statuses':
       return {} as T;
     case 'get_watch_progress':

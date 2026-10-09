@@ -64,7 +64,7 @@ export function ProfileAvatar({
     <Avatar className={className}>
       {avatar ? <AvatarImage src={avatar} alt='' draggable={false} /> : null}
       <AvatarFallback className={fallbackClassName} style={fallbackStyle}>
-        {name.charAt(0).toUpperCase()}
+        {Array.from(name)[0]?.toUpperCase()}
       </AvatarFallback>
     </Avatar>
   );

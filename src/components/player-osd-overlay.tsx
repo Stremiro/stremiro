@@ -1,9 +1,28 @@
-import { FastForward, Gauge, History, Music, Rewind, SkipForward, Subtitles } from 'lucide-react';
+import {
+  FastForward,
+  Gauge,
+  History,
+  type LucideIcon,
+  Music,
+  Rewind,
+  SkipForward,
+  Subtitles,
+  Users,
+} from 'lucide-react';
 import { memo } from 'react';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
-export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' | 'skip';
+export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' | 'skip' | 'party';
+
+const MESSAGE_ICONS: Record<PlayerOsdMessageIcon, LucideIcon> = {
+  history: History,
+  subtitles: Subtitles,
+  gauge: Gauge,
+  audio: Music,
+  skip: SkipForward,
+  party: Users,
+};
 
 export type PlayerOsdAction =
   | { kind: 'seek'; direction?: 'forward' | 'backward'; seconds?: number; target?: number }
@@ -21,8 +40,7 @@ interface PlayerOsdOverlayProps {
   isResolving: boolean;
 }
 
-// Memoized: the player re-renders per time-pos tick, and every prop here is
-// stable between OSD events. The live region stays mounted while idle —
+// Memoized: props stay stable between OSD events. The live region stays mounted while idle —
 // remounting the node between announcements can drop screen-reader output.
 export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
   action,
@@ -31,6 +49,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
   isResolving,
 }: PlayerOsdOverlayProps) {
   const suppressed = isLoading || isResolving;
+  const MessageIcon = action?.kind === 'message' && action.icon ? MESSAGE_ICONS[action.icon] : null;
 
   return (
     <div
@@ -82,22 +101,12 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
 
       {action?.kind === 'message' && !suppressed && (
         <div className='flex items-center gap-2.5 rounded-full border border-white/10 bg-black/55 px-4 py-2 shadow-xl backdrop-blur-2xl'>
-          {action.icon === 'history' && (
-            <History className='h-3.5 w-3.5 text-white/60' strokeWidth={2.25} />
+          {MessageIcon && (
+            <MessageIcon className='h-3.5 w-3.5 shrink-0 text-white/60' strokeWidth={2.25} />
           )}
-          {action.icon === 'subtitles' && (
-            <Subtitles className='h-3.5 w-3.5 text-white/60' strokeWidth={2.25} />
-          )}
-          {action.icon === 'gauge' && (
-            <Gauge className='h-3.5 w-3.5 text-white/60' strokeWidth={2.25} />
-          )}
-          {action.icon === 'audio' && (
-            <Music className='h-3.5 w-3.5 text-white/60' strokeWidth={2.25} />
-          )}
-          {action.icon === 'skip' && (
-            <SkipForward className='h-3.5 w-3.5 text-white/60' strokeWidth={2.25} />
-          )}
-          <span className='text-[13px] font-medium tracking-wide text-white/90'>{action.text}</span>
+          <span className='max-w-[min(70vw,560px)] truncate text-[13px] font-medium tracking-wide text-white/90'>
+            {action.text}
+          </span>
         </div>
       )}
     </div>

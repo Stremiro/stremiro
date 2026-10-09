@@ -137,7 +137,9 @@ const REASON_CHIPS: { [K in AddonStreamRecommendationReason]: StreamReasonChip &
 };
 
 export function buildStreamReasonChips(stream: AddonStream): StreamReasonChip[] {
-  return (stream.recommendationReasons ?? []).map((kind) => REASON_CHIPS[kind]);
+  // The wire can carry a reason newer than this build's map — drop unknowns
+  // instead of rendering a hole in the chip row.
+  return (stream.recommendationReasons ?? []).flatMap((kind) => REASON_CHIPS[kind] ?? []);
 }
 
 // Sync filter only; Rust owns smart order.

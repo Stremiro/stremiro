@@ -13,7 +13,8 @@ import {
   type StreamSelectorPreferences,
   type StreamSourceSummary,
 } from '@/lib/api';
-import { getLastUsedStreamIdentity, indexTitleWatchProgress } from '@/lib/history-playback';
+import { getLastUsedStreamIdentity, titleEpisodeProgressMap } from '@/lib/history-playback';
+import { streamSelectorQueryKey } from '@/lib/query-invalidation';
 import { playerStreamRankingOptions } from '@/lib/resolve-player-stream';
 import { buildStreamRankingCacheKey } from '@/lib/stream-ranking';
 import { filterSelectorStreams } from '@/lib/stream-selector-utils';
@@ -126,22 +127,19 @@ export function useStreamSelectorController({
     error: addonConfigsError,
   } = useAddonConfigs({ enabled: open && isOnline });
 
-  const enabledAddons = useMemo(
-    () => addonConfigs.filter((addon) => addon.enabled && addon.url.trim().length > 0),
-    [addonConfigs],
+  const hasEnabledAddons = addonConfigs.some(
+    (addon) => addon.enabled && addon.url.trim().length > 0,
   );
 
   // Ranking inputs are part of the key so titles/episodes never share pages.
-  const streamSelectorQueryKey = [
-    'streams',
-    'selector',
+  const selectorQueryKey = streamSelectorQueryKey(
     type,
     lookupId,
     season,
     episode,
     absoluteEpisode,
     buildStreamRankingCacheKey(rankingOptions),
-  ] as const;
+  );
   // Channels can't be cancelled — an abandoned invoke keeps emitting
   // snapshots into the same query key. A per-fetch generation drops them.
   const selectorFetchGenerationRef = useRef(0);
@@ -151,7 +149,7 @@ export function useStreamSelectorController({
     isFetching: isFetchingStreamSelectorData,
     refetch: refetchStreamSelectorData,
   } = useQuery({
-    queryKey: streamSelectorQueryKey,
+    queryKey: selectorQueryKey,
     queryFn: ({ signal }) => {
       // The backend emits a merged+ranked snapshot per addon — write each
       // into the cache so rows appear progressively. The invoke result stays
@@ -162,7 +160,7 @@ export function useStreamSelectorController({
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       onProgress.onmessage = (snapshot) => {
         if (!signal.aborted && generation === selectorFetchGenerationRef.current) {
-          queryClient.setQueryData(streamSelectorQueryKey, snapshot);
+          queryClient.setQueryData(selectorQueryKey, snapshot);
         }
       };
       return api.getStreamSelectorData(
@@ -237,9 +235,9 @@ export function useStreamSelectorController({
   );
   // Per-episode watch rows — the pack picker reads resume points and
   // progress from the same snapshot as the badge.
-  const { episodeProgressMap } = useMemo(
-    () => indexTitleWatchProgress(titleProgress?.history),
-    [titleProgress?.history],
+  const episodeProgressMap = useMemo(
+    () => titleEpisodeProgressMap(titleProgress?.episodeProgress),
+    [titleProgress?.episodeProgress],
   );
   // Filter/sort run synchronously so clicks feel instant; Rust stays the
   // ranking authority for `smart` order.
@@ -302,7 +300,7 @@ export function useStreamSelectorController({
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
-    enabledAddons,
+    hasEnabledAddons,
     episodeProgressMap,
     fatalAddonError,
     lastStreamKey,

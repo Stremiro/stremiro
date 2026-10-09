@@ -1,6 +1,10 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
-import { useIsItemInLibrary, useItemWatchStatus } from '@/hooks/use-media-library';
+import {
+  setCachedWatchStatus,
+  useIsItemInLibrary,
+  useItemWatchStatus,
+} from '@/hooks/use-media-library';
 import {
   api,
   type MediaItem,
@@ -47,12 +51,7 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
       await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
       const previousStatuses =
         queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY);
-      queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (old) => {
-        const next = { ...old };
-        if (status === null) delete next[itemId];
-        else next[itemId] = status;
-        return next;
-      });
+      setCachedWatchStatus(queryClient, itemId, status);
 
       // Mirror the track into the library cache so the profile reflects it
       // before the refetch lands.

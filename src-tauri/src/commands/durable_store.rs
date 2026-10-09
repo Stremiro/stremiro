@@ -1,6 +1,6 @@
 //! App-owned durable JSON stores: shared in-memory maps committed
 //! atomically on `save`/exit; file locations and `{key: value}` schema
-//! unchanged from the previous plugin backend.
+//! unchanged from the previous `tauri-plugin-store` backend.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -76,7 +76,7 @@ impl DurableStoreRegistry {
     /// First open reads the file under the registry lock; a missing file
     /// starts empty, invalid data errors and is never cached so a later
     /// open retries the real disk state.
-    fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
+    pub(super) fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
         let mut stores = lock_or_recover(&self.stores);
         if let Some(store) = stores.get(&path) {
             return Ok(store.clone());
@@ -144,6 +144,16 @@ impl DurableStore {
             .entries
             .get(key.as_ref())
             .cloned()
+    }
+
+    /// Typed read sharing the drop-on-malformed policy every snapshot/item
+    /// loader uses: a corrupt value reads as absent rather than erroring.
+    pub(crate) fn get_typed<T: serde::de::DeserializeOwned>(
+        &self,
+        key: impl AsRef<str>,
+    ) -> Option<T> {
+        self.get(key)
+            .and_then(|value| serde_json::from_value(value).ok())
     }
 
     pub(crate) fn set(&self, key: impl Into<String>, value: Value) {

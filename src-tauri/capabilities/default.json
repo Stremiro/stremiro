@@ -5,33 +5,19 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "deep-link:allow-get-current",
     {
       "identifier": "opener:allow-open-url",
-      "allow": [
-        { "url": "https://github.com/*" },
-        { "url": "https://*.github.com/*" },
-        { "url": "https://youtube.com/*" },
-        { "url": "https://*.youtube.com/*" },
-        { "url": "https://youtu.be/*" },
-        { "url": "https://*.youtu.be/*" },
-        { "url": "https://youtube-nocookie.com/*" },
-        { "url": "https://*.youtube-nocookie.com/*" }
-      ]
+      "allow": [{ "url": "https://github.com/*" }, { "url": "https://*.github.com/*" }]
     },
     "dialog:allow-open",
     "dialog:allow-save",
     "core:window:allow-start-dragging",
-    "core:window:allow-set-always-on-top",
-    "core:window:allow-set-size",
-    "core:window:allow-set-position",
     "core:window:allow-minimize",
     "core:window:allow-maximize",
     "core:window:allow-unmaximize",
     "core:window:allow-toggle-maximize",
     "core:window:allow-set-fullscreen",
-    "core:window:allow-set-focus",
-    "core:window:allow-set-resizable",
-    "core:window:allow-close",
-    "core:window:allow-destroy"
+    "core:window:allow-close"
   ]
 }

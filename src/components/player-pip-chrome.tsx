@@ -51,6 +51,9 @@ interface PlayerPipChromeProps {
 export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChromeProps) {
   const { title, episodeLabel, visible, status, error, ended, onReturn } = props;
   const [snapping, setSnapping] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const chromeVisible = visible || !props.isPlaying || !!status || !!error || ended || focused;
+  const volumeIsSilent = props.isMuted || props.volume === 0;
   const returnToApp = () => void onReturn().catch(() => undefined);
   const snapToCorner = () => {
     if (snapping) return;
@@ -86,9 +89,17 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         </div>
       )}
       <div
+        onFocus={() => setFocused(true)}
+        onBlur={(event) => {
+          if (
+            !(event.relatedTarget instanceof Node) ||
+            !event.currentTarget.contains(event.relatedTarget)
+          )
+            setFocused(false);
+        }}
         className={cn(
-          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-200 motion-reduce:transition-none focus-within:opacity-100',
-          visible || !props.isPlaying || status || error || ended ? 'opacity-100' : 'opacity-0',
+          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-200 motion-reduce:transition-none',
+          chromeVisible ? 'opacity-100' : 'opacity-0',
         )}
       >
         <div
@@ -139,6 +150,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
           onPointerLeave={() => props.onControlsHover(false)}
         >
           <PlayerProgressBar
+            active={chromeVisible}
             duration={props.duration}
             clock={props.clock}
             bufferedClock={props.bufferedClock}
@@ -185,10 +197,10 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             <button
               type='button'
               className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
-              aria-label={props.isMuted ? 'Unmute' : 'Mute'}
+              aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
               aria-keyshortcuts='m'
               title={
-                props.isMuted
+                volumeIsSilent
                   ? 'Unmute (M)'
                   : `Volume ${Math.round(props.volume)}% · scroll to adjust`
               }
@@ -199,11 +211,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                 props.onVolumeStep(event.deltaY < 0 ? 5 : -5);
               }}
             >
-              <PlayerVolumeIcon
-                muted={props.isMuted || props.volume === 0}
-                volume={props.volume}
-                className='h-4 w-4'
-              />
+              <PlayerVolumeIcon muted={volumeIsSilent} volume={props.volume} className='h-4 w-4' />
             </button>
             {props.canGoNext && (
               <button

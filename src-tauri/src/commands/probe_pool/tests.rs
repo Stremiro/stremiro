@@ -1,10 +1,10 @@
 use super::{
-    find_preferred_position, resolve_candidate_results, resolve_ranked_best_stream_candidate,
-    CandidateProbeResult, PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream,
-    StreamPoolQuery, StreamResolveCandidateInput,
+    build_candidate_input, find_preferred_position, resolve_candidate_results,
+    resolve_ranked_best_stream_candidate, CandidateProbeResult, PreferredStreamHint, ProbeError,
+    ResolveStreamErrorKind, ResolvedStream, StreamPoolQuery, StreamResolveCandidateInput,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
-use crate::providers::addons::{AddonStream, StreamEpisodeMatchKind};
+use crate::providers::addons::{AddonStream, SelectionPriority, StreamEpisodeMatchKind};
 use crate::test_helpers::test_stream;
 use futures_util::stream::FuturesOrdered;
 use std::future::Future;
@@ -21,6 +21,55 @@ fn probeable_stream(stream_key: &str, info_hash: Option<&str>) -> AddonStream {
         info_hash: info_hash.map(str::to_string),
         stream_key: stream_key.to_string(),
         ..test_stream()
+    }
+}
+
+#[test]
+fn candidate_input_moves_identity_and_preserves_probe_fields() {
+    let mut stream = probeable_stream("s:prepared", Some("ABC123"));
+    stream.url = Some("HTTPS://CDN.EXAMPLE/file.mkv".to_string());
+    stream.file_idx = Some(7);
+    stream.source_id = Some("addon-instance".to_string());
+    stream.source_name = Some("Addon Name".to_string());
+    stream.stream_family = Some("release:group".to_string());
+    stream.behavior_hints = Some(
+        serde_json::from_value(serde_json::json!({
+            "proxyHeaders": {"request": {"Referer": "https://site.example/"}}
+        }))
+        .unwrap(),
+    );
+    let identity = [
+        stream.source_id.as_ref().unwrap().as_ptr(),
+        stream.source_name.as_ref().unwrap().as_ptr(),
+        stream.stream_family.as_ref().unwrap().as_ptr(),
+        stream.stream_key.as_ptr(),
+    ];
+
+    let candidate = build_candidate_input(stream).unwrap();
+    assert_eq!(
+        [
+            candidate.source_id.as_ref().unwrap().as_ptr(),
+            candidate.source_name.as_ref().unwrap().as_ptr(),
+            candidate.stream_family.as_ref().unwrap().as_ptr(),
+            candidate.stream_key.as_ptr(),
+        ],
+        identity
+    );
+    assert_eq!(candidate.direct_url, "https://cdn.example/file.mkv");
+    assert_eq!(candidate.content_key.as_deref(), Some("h:abc123:7"));
+    assert_eq!(
+        candidate.request_headers,
+        vec![("Referer".to_string(), "https://site.example/".to_string())]
+    );
+
+    for url in [
+        "http://127.0.0.1/video",
+        "https://user:secret@cdn.example/video",
+        "magnet:?xt=urn:btih:ABC123",
+    ] {
+        let mut stream = probeable_stream("s:rejected", None);
+        stream.url = Some(url.to_string());
+        assert!(build_candidate_input(stream).is_none(), "{url}");
     }
 }
 
@@ -198,9 +247,21 @@ fn preferred_position_family_tier_requires_same_source_id() {
 #[test]
 fn preferred_position_family_hint_cannot_drop_below_best_episode_match() {
     let mut streams = pair();
-    streams[0].selection_priority = Some((StreamEpisodeMatchKind::Exact, true, 4, 1, 0));
+    streams[0].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 1,
+        language: 0,
+    });
     streams[1].stream_family = Some("alpha|release:x".to_string());
-    streams[1].selection_priority = Some((StreamEpisodeMatchKind::None, false, 4, 1, 0));
+    streams[1].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::None,
+        season_claim_verified: false,
+        title_match: 4,
+        viability: 1,
+        language: 0,
+    });
 
     let mut preferred = hint("s:rotted");
     preferred.stream_family = Some("alpha|release:x");
@@ -211,9 +272,21 @@ fn preferred_position_family_hint_cannot_drop_below_best_episode_match() {
 #[test]
 fn preferred_position_source_hint_cannot_drop_below_best_language_match() {
     let mut streams = pair();
-    streams[0].selection_priority = Some((StreamEpisodeMatchKind::Exact, true, 4, 1, 6));
+    streams[0].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 1,
+        language: 6,
+    });
     streams[1].source_id = Some("addon-a".to_string());
-    streams[1].selection_priority = Some((StreamEpisodeMatchKind::Exact, true, 4, 1, 0));
+    streams[1].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 1,
+        language: 0,
+    });
 
     let mut preferred = hint("s:rotted");
     preferred.source_id = Some("addon-a");
@@ -224,7 +297,13 @@ fn preferred_position_source_hint_cannot_drop_below_best_language_match() {
 #[test]
 fn preferred_position_family_hint_allowed_at_equal_priority() {
     let mut streams = pair();
-    let priority = (StreamEpisodeMatchKind::Exact, true, 4, 1, 6);
+    let priority = SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 1,
+        language: 6,
+    };
     streams[0].selection_priority = Some(priority);
     streams[1].stream_family = Some("alpha|release:x".to_string());
     streams[1].selection_priority = Some(priority);
@@ -238,8 +317,20 @@ fn preferred_position_family_hint_allowed_at_equal_priority() {
 #[test]
 fn preferred_position_exact_key_honored_below_best_priority() {
     let mut streams = pair();
-    streams[0].selection_priority = Some((StreamEpisodeMatchKind::Exact, true, 4, 1, 6));
-    streams[1].selection_priority = Some((StreamEpisodeMatchKind::None, false, 0, 1, 0));
+    streams[0].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 1,
+        language: 6,
+    });
+    streams[1].selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::None,
+        season_claim_verified: false,
+        title_match: 0,
+        viability: 1,
+        language: 0,
+    });
 
     assert_eq!(
         find_preferred_position(&streams, hint("s:bbbb"), None),
@@ -340,6 +431,7 @@ fn candidate_input(source_name: &str, stream_key: &str) -> StreamResolveCandidat
         source_name: Some(source_name.to_string()),
         stream_family: None,
         stream_key: stream_key.to_string(),
+        content_key: None,
         direct_url: format!("https://cdn.example/{stream_key}.mkv"),
         request_headers: Vec::new(),
     }
@@ -367,8 +459,10 @@ async fn fake_probe(
 #[tokio::test]
 async fn candidate_results_consume_in_rank_order() {
     let mut candidates = FuturesOrdered::new();
+    let mut ranked_first = candidate_input("slow-a", "s:rank-order-a");
+    ranked_first.content_key = Some("h:rank-order:0".to_string());
     candidates.push_back(fake_probe(
-        candidate_input("slow-a", "s:a"),
+        ranked_first,
         Duration::from_secs(1),
         Box::pin(async {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -386,73 +480,54 @@ async fn candidate_results_consume_in_rank_order() {
         .expect("first-ranked probe wins");
 
     assert_eq!(winner.url, "https://cdn.example/a.mkv");
-    assert_eq!(winner.stream_key.as_deref(), Some("s:a"));
+    assert_eq!(winner.stream_key.as_deref(), Some("s:rank-order-a"));
+    // The winner's provider-independent identity stays resolvable by its key.
+    assert_eq!(
+        crate::commands::resolved_content_key("s:rank-order-a").as_deref(),
+        Some("h:rank-order:0")
+    );
 }
 
 #[tokio::test]
 async fn candidate_results_failed_first_rank_passes_to_next() {
-    let mut candidates = FuturesOrdered::new();
-    candidates.push_back(fake_probe(
-        candidate_input("a", "s:a"),
-        Duration::from_secs(1),
-        Box::pin(async { Err("boom".to_string().into()) }),
-    ));
-    candidates.push_back(fake_probe(
-        candidate_input("b", "s:b"),
-        Duration::from_secs(1),
-        Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
-    ));
+    let cases: [(&str, Duration, FakeProbeInner, Option<&str>); 3] = [
+        (
+            "a",
+            Duration::from_secs(1),
+            Box::pin(async { Err("boom".to_string().into()) }),
+            None,
+        ),
+        (
+            "slow-a",
+            Duration::from_millis(1),
+            Box::pin(async {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+                Ok(resolved("https://cdn.example/a.mkv"))
+            }),
+            None,
+        ),
+        (
+            "a",
+            Duration::from_secs(1),
+            Box::pin(async { Ok(resolved("https://cdn.example/excluded.mkv")) }),
+            Some("https://cdn.example/excluded.mkv"),
+        ),
+    ];
+    for (source, timeout, inner, excluded_url) in cases {
+        let mut candidates = FuturesOrdered::new();
+        candidates.push_back(fake_probe(candidate_input(source, "s:a"), timeout, inner));
+        candidates.push_back(fake_probe(
+            candidate_input("b", "s:b"),
+            Duration::from_secs(1),
+            Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
+        ));
 
-    let winner = resolve_candidate_results(candidates, None)
-        .await
-        .expect("next-ranked probe wins");
+        let winner = resolve_candidate_results(candidates, excluded_url)
+            .await
+            .expect("next-ranked probe wins");
 
-    assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
-}
-
-#[tokio::test]
-async fn candidate_results_timed_out_first_rank_passes_to_next() {
-    let mut candidates = FuturesOrdered::new();
-    candidates.push_back(fake_probe(
-        candidate_input("slow-a", "s:a"),
-        Duration::from_millis(1),
-        Box::pin(async {
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            Ok(resolved("https://cdn.example/a.mkv"))
-        }),
-    ));
-    candidates.push_back(fake_probe(
-        candidate_input("b", "s:b"),
-        Duration::from_secs(1),
-        Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
-    ));
-
-    let winner = resolve_candidate_results(candidates, None)
-        .await
-        .expect("next-ranked probe wins");
-
-    assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
-}
-
-#[tokio::test]
-async fn candidate_results_excluded_resolved_url_passes_to_next() {
-    let mut candidates = FuturesOrdered::new();
-    candidates.push_back(fake_probe(
-        candidate_input("a", "s:a"),
-        Duration::from_secs(1),
-        Box::pin(async { Ok(resolved("https://cdn.example/excluded.mkv")) }),
-    ));
-    candidates.push_back(fake_probe(
-        candidate_input("b", "s:b"),
-        Duration::from_secs(1),
-        Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
-    ));
-
-    let winner = resolve_candidate_results(candidates, Some("https://cdn.example/excluded.mkv"))
-        .await
-        .expect("next-ranked probe wins");
-
-    assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
+        assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
+    }
 }
 
 #[tokio::test]

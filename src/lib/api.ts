@@ -39,16 +39,12 @@ export interface Episode {
   streamEpisode?: number;
 }
 
-export interface Trailer {
-  /** Backend-validated 11-char YouTube video id. */
-  id: string;
-}
-
 export interface MediaDetails extends MediaItem {
   imdbId?: string;
   rating?: string;
   cast?: string[];
-  trailers?: Trailer[];
+  /** Backend-validated 11-char YouTube video ids. */
+  trailers?: { id: string }[];
   /** Backend-ordered by (season, episode); coordinate ties preserve addon
       order. */
   episodes?: Episode[];
@@ -82,6 +78,8 @@ export interface CalendarSchedule {
 export interface UpNextCandidate {
   row: WatchProgress;
   releaseDate: string;
+  /** Aired within the past week and after the last watched timestamp. */
+  isNewEpisode: boolean;
 }
 
 export interface UserList {
@@ -282,20 +280,20 @@ export interface RecoverPlaybackStreamOptions extends StreamRankingOptions {
   outcome: Exclude<PlaybackStreamOutcomeReport['outcome'], 'verified'>;
 }
 
-/** Backend genre menu entries per browse tab, in manifest-declared order. */
+/** Backend genre menu entries per browse tab, in manifest-declared order.
+    `all` is the movie+series union folded the same way as `sameSearchGenre`. */
 export interface BrowseGenres {
+  all: string[];
   movie: string[];
   series: string[];
   anime: string[];
 }
 
-/** The addon-source fields the renderer supplies when saving. */
-export interface AddonConfigInput {
-  id: string;
-  url: string;
-  name: string;
-  enabled: boolean;
-}
+export type AddonConfigsOp =
+  | { kind: 'add'; url: string }
+  | { kind: 'remove'; id: string }
+  | { kind: 'setEnabled'; id: string; enabled: boolean }
+  | { kind: 'reorder'; ids: string[] };
 
 /** Rust verdict for the add-addon box, from the save path's own normalizer. */
 export interface AddonUrlInspection {
@@ -311,7 +309,11 @@ export interface AddonUrlInspection {
  * `displayUrl` is the credential-masked URL computed by the Rust sanitizer —
  * always present on IPC responses, absent from renderer-supplied input.
  */
-export interface AddonConfig extends AddonConfigInput {
+export interface AddonConfig {
+  id: string;
+  url: string;
+  name: string;
+  enabled: boolean;
   displayUrl: string;
   /** Backend-pinned default: fixed slot, toggle-only. */
   pinned: boolean;
@@ -354,6 +356,12 @@ export interface ProfilePreferences {
   profile: LocalProfile;
   viewMode: ProfileViewMode;
 }
+
+export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets'>> & {
+  accentTargets?: Partial<AccentTargets>;
+};
+
+export type ProfilePreferencesPatch = LocalProfileUpdate & { viewMode?: ProfileViewMode };
 
 export interface AppUiPreferences {
   playerVolume: number;
@@ -419,6 +427,11 @@ export interface TrackLanguageSelectionResolution {
   matchedTrackId?: number;
 }
 
+export interface AllBrowseCursors {
+  movie?: number;
+  series?: number;
+}
+
 export interface SearchCatalogQuery {
   query?: string;
   mediaType?: 'movie' | 'series' | 'anime';
@@ -427,11 +440,13 @@ export interface SearchCatalogQuery {
   yearFrom?: number;
   yearTo?: number;
   skip?: number;
+  allCursors?: AllBrowseCursors;
 }
 
 export interface SearchCatalogPage {
   items: MediaItem[];
   nextSkip?: number | null;
+  allCursors?: AllBrowseCursors;
 }
 
 export type HistoryPlaybackPlanReason = 'missing-episode-context';
@@ -469,6 +484,7 @@ export const api = {
 
 export interface DataStats {
   history_count: number;
+  history_title_count: number;
   library_count: number;
   lists_count: number;
   watch_statuses_count: number;
@@ -519,6 +535,10 @@ export interface WatchProgress {
 export interface TitleWatchProgress {
   history: WatchProgress[];
   continueWatching: WatchProgress[];
+  /** Per-episode rows keyed `id:season:episode` (canonical coords claim first). */
+  episodeProgress: Record<string, WatchProgress>;
+  /** Furthest started episode per season — spoiler-mask ceiling. */
+  watchedEpisodeCeiling: Record<string, number>;
 }
 
 /**

@@ -1,5 +1,5 @@
 use super::{
-    insert_sorted_unique, load_index, prune_index_to_cap, PlaybackStateService,
+    load_advisory_index, merge_sorted_unique, prune_index_to_cap, PlaybackStateService,
     PLAYBACK_STATE_STORE_FILE,
 };
 use crate::commands::episode_navigation::build_source_episode_coordinates;
@@ -10,7 +10,7 @@ use crate::providers::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use tauri::AppHandle;
 
@@ -69,22 +69,22 @@ pub(super) fn playback_episode_mapping_digest_item_key(scope_key: &str) -> Strin
     )
 }
 
-/// Scope (`{type}:{id}`) of a `{type}:{id}:{season}:{episode}` snapshot key:
-/// strip the two trailing coordinate segments since media ids may contain
-/// `:` themselves.
-fn episode_mapping_scope_key(snapshot_key: &str) -> Option<&str> {
-    snapshot_key
-        .rfind(':')
-        .and_then(|end| snapshot_key[..end].rfind(':'))
-        .map(|split| &snapshot_key[..split])
-}
-
-/// Canonical season of a mapping-index key, read from the right because
-/// media ids may themselves contain `:`.
-fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
+/// Split `{scope}:{season}:{episode}` into `(scope, season)` reading from
+/// the right — media ids may themselves contain `:`.
+fn split_episode_snapshot_key(key: &str) -> Option<(&str, &str)> {
     let episode_split = key.rfind(':')?;
     let season_split = key[..episode_split].rfind(':')?;
-    key[season_split + 1..episode_split].parse::<u32>().ok()
+    Some((&key[..season_split], &key[season_split + 1..episode_split]))
+}
+
+/// Scope (`{type}:{id}`) of a `{type}:{id}:{season}:{episode}` snapshot key.
+fn episode_mapping_scope_key(snapshot_key: &str) -> Option<&str> {
+    split_episode_snapshot_key(snapshot_key).map(|(scope, _)| scope)
+}
+
+/// Canonical season of a mapping-index key.
+fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
+    split_episode_snapshot_key(key)?.1.parse::<u32>().ok()
 }
 
 /// Highest canonical season the title's cached episode mappings cover. The
@@ -98,14 +98,10 @@ pub(super) fn max_mapped_canonical_season(
     media_type: &str,
     media_id: &str,
 ) -> Option<u32> {
-    let canonical_type = normalize_watch_progress_type(media_type)?;
-    let normalized_id = normalize_media_id(media_id)?;
-    // The trailing `:` guards the prefix: `series:tt1:` must not match
-    // `series:tt12345:…`.
-    let scope_prefix = format!("{canonical_type}:{normalized_id}:");
+    let scope_key = super::playback_title_scope_key(Some(media_type), Some(media_id))?;
     index_keys
         .iter()
-        .filter(|key| key.starts_with(&scope_prefix))
+        .filter(|key| episode_mapping_scope_key(key) == Some(scope_key.as_str()))
         .filter_map(|key| mapping_index_key_canonical_season(key))
         .max()
 }
@@ -121,11 +117,11 @@ pub(super) struct EpisodeMappingDigestRecord {
 
 /// Reads both the current record shape and legacy bare-u64 digests (seen_at
 /// 0 keeps those prune-able until the next open rewrites the record).
-fn read_episode_mapping_digest(value: &serde_json::Value) -> Option<(u64, u64)> {
+fn read_episode_mapping_digest(value: serde_json::Value) -> Option<(u64, u64)> {
     if let Some(digest) = value.as_u64() {
         return Some((digest, 0));
     }
-    serde_json::from_value::<EpisodeMappingDigestRecord>(value.clone())
+    serde_json::from_value::<EpisodeMappingDigestRecord>(value)
         .ok()
         .map(|record| (record.digest, record.seen_at))
 }
@@ -165,7 +161,7 @@ pub(super) fn stored_episode_mapping_digest_matches(
 ) -> bool {
     let matches = store
         .get(digest_key)
-        .and_then(|value| read_episode_mapping_digest(&value))
+        .and_then(read_episode_mapping_digest)
         .is_some_and(|(stored_digest, _)| stored_digest == digest);
     if matches {
         store.set(
@@ -193,7 +189,7 @@ pub(super) fn collect_episode_mapping_writes(
     snapshots: &[PlaybackEpisodeMappingSnapshot],
     episode_mapping_index: &mut Vec<String>,
 ) -> (Vec<(String, PlaybackEpisodeMappingSnapshot)>, bool) {
-    let mut changed = false;
+    let mut snapshot_keys = Vec::with_capacity(episodes.len().min(snapshots.len()));
     let mut pending_writes = Vec::new();
 
     for (episode, next_snapshot) in episodes.iter().zip(snapshots.iter()) {
@@ -209,11 +205,10 @@ pub(super) fn collect_episode_mapping_writes(
         if needs_write {
             pending_writes.push((snapshot_key.clone(), next_snapshot.clone()));
         }
-        if insert_sorted_unique(episode_mapping_index, &snapshot_key) {
-            changed = true;
-        }
+        snapshot_keys.push(snapshot_key);
     }
 
+    let changed = merge_sorted_unique(episode_mapping_index, snapshot_keys);
     (pending_writes, changed)
 }
 
@@ -234,6 +229,19 @@ pub(super) fn prune_episode_mapping_index(
     }
 
     let pre_prune = episode_mapping_index.clone();
+    let mut scope_seen_at = HashMap::new();
+    for scope in pre_prune
+        .iter()
+        .filter_map(|key| episode_mapping_scope_key(key))
+    {
+        scope_seen_at.entry(scope).or_insert_with(|| {
+            store
+                .get(playback_episode_mapping_digest_item_key(scope))
+                .and_then(read_episode_mapping_digest)
+                .map(|(_, seen_at)| seen_at)
+                .unwrap_or(0)
+        });
+    }
     prune_index_to_cap(
         store,
         episode_mapping_index,
@@ -246,9 +254,8 @@ pub(super) fn prune_episode_mapping_index(
             // for the cap also rides the scope digest's `seen_at` — an
             // actively opened title must not evict on its first-write age.
             let scope_seen = episode_mapping_scope_key(key)
-                .and_then(|scope| store.get(playback_episode_mapping_digest_item_key(scope)))
-                .and_then(|value| read_episode_mapping_digest(&value))
-                .map(|(_, seen_at)| seen_at)
+                .and_then(|scope| scope_seen_at.get(scope))
+                .copied()
                 .unwrap_or(0);
             item_updated.max(scope_seen)
         },
@@ -286,9 +293,7 @@ pub(super) fn load_playback_episode_mapping_snapshot(
     store: &DurableStore,
     key: &str,
 ) -> Option<PlaybackEpisodeMappingSnapshot> {
-    store
-        .get(playback_episode_mapping_item_key(key))
-        .and_then(|value| serde_json::from_value::<PlaybackEpisodeMappingSnapshot>(value).ok())
+    store.get_typed(playback_episode_mapping_item_key(key))
 }
 
 fn episode_mapping_snapshot_matches(
@@ -379,7 +384,8 @@ impl PlaybackStateService {
             return Ok(Some(snapshots));
         }
 
-        let mut episode_mapping_index = load_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
+        let mut episode_mapping_index =
+            load_advisory_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
         let (pending_writes, mut changed) = collect_episode_mapping_writes(
             &store,
             media_type,
@@ -469,9 +475,15 @@ impl PlaybackStateService {
             return false;
         };
         let Ok(store) = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE) else {
+            crate::operational_log::log_warn(
+                "playback-state",
+                "episode_is_final_season",
+                "degraded",
+                &[crate::operational_log::field("media_id", media_id)],
+            );
             return false;
         };
-        let index = load_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
+        let index = load_advisory_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
         max_mapped_canonical_season(&index, media_type, media_id)
             .is_some_and(|max_season| season >= max_season)
     }

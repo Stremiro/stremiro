@@ -1,13 +1,18 @@
 use super::{
     addon_registry::SourcedAddonSubtitle,
     episode_navigation::{build_source_episode_coordinates, SourceEpisodeCoordinates},
-    media_normalization::{build_release_date, normalize_media_details},
+    media_normalization::with_requested_media_id,
     normalize_media_id, normalize_stream_media_type, normalize_watch_progress_type,
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
+    streaming_helpers::push_bounded_error,
 };
-use crate::providers::{addon_resource::AddonResourceClient, push_unique, Episode, MediaDetails};
+use crate::providers::{
+    addon_resource::{meta_for_shape, AddonResourceClient},
+    push_unique, Episode, MediaDetails,
+};
 use futures_util::stream::{self, StreamExt};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 use tauri::{command, AppHandle, State};
 
@@ -21,29 +26,6 @@ const MEDIA_SCHEDULE_MAX_ITEMS: usize = 200;
 // provider client timeout) serialize into minutes of fetch time. On expiry
 // the results already collected are returned instead of failing the page.
 const MEDIA_SCHEDULE_FETCH_DEADLINE: Duration = Duration::from_secs(90);
-
-// Internal-only: the history-playback planner consumes this in-process; no
-// command returns it, so it carries no IPC derives.
-#[derive(Debug)]
-pub struct EpisodeStreamMapping {
-    pub lookup_id: String,
-    pub canonical_season: u32,
-    pub canonical_episode: u32,
-    pub source_season: u32,
-    pub source_episode: u32,
-}
-
-impl From<PlaybackEpisodeMappingSnapshot> for EpisodeStreamMapping {
-    fn from(value: PlaybackEpisodeMappingSnapshot) -> Self {
-        Self {
-            lookup_id: value.source_lookup_id,
-            canonical_season: value.canonical_season,
-            canonical_episode: value.canonical_episode,
-            source_season: value.source_season,
-            source_episode: value.source_episode,
-        }
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MediaScheduleEpisode {
@@ -72,23 +54,21 @@ pub(crate) struct MediaScheduleRequest {
     pub id: String,
 }
 
-fn schedule_episode_release_date(episode: &Episode) -> Option<String> {
-    episode
-        .release_date
-        .clone()
-        .or_else(|| build_release_date(episode.released.as_deref()))
-}
-
-pub(crate) fn build_media_schedule(mut details: MediaDetails) -> MediaSchedule {
+pub(crate) fn build_media_schedule(
+    details: &MediaDetails,
+    requested_id: &str,
+    include_episodes: bool,
+) -> MediaSchedule {
     let mut episodes = details
         .episodes
-        .take()
-        .unwrap_or_default()
+        .as_deref()
+        .filter(|_| include_episodes)
         .into_iter()
+        .flatten()
         .map(|episode| MediaScheduleEpisode {
-            release_date: schedule_episode_release_date(&episode),
-            id: episode.id,
-            title: episode.title,
+            release_date: episode.release_date.clone(),
+            id: episode.id.clone(),
+            title: episode.title.clone(),
             season: episode.season,
             episode: episode.episode,
         })
@@ -104,11 +84,11 @@ pub(crate) fn build_media_schedule(mut details: MediaDetails) -> MediaSchedule {
     });
 
     MediaSchedule {
-        id: details.id,
-        type_: details.type_,
-        title: details.title,
-        poster: details.poster,
-        release_date: details.release_date,
+        id: requested_id.to_string(),
+        type_: details.type_.clone(),
+        title: details.title.clone(),
+        poster: details.poster.clone(),
+        release_date: details.release_date.clone(),
         episodes,
     }
 }
@@ -121,9 +101,8 @@ async fn fetch_media_schedule_inner(
 ) -> Result<MediaSchedule, String> {
     let include_episodes = media_type != "movie";
 
-    Ok(build_media_schedule(
-        fetch_media_details_inner(app, client, media_type, id, include_episodes).await?,
-    ))
+    let details = fetch_media_details_shared_inner(app, client, media_type, id).await?;
+    Ok(build_media_schedule(&details, id, include_episodes))
 }
 
 fn source_coordinates_from_mapping(
@@ -196,6 +175,20 @@ pub(crate) async fn cache_and_enrich_episode_targets(
     .await
 }
 
+async fn fetch_media_details_shared_inner(
+    app: &AppHandle,
+    client: &AddonResourceClient,
+    media_type: &str,
+    id: &str,
+) -> Result<Arc<MediaDetails>, String> {
+    // Same canonical fold as watch progress: Cinemeta serves anime under
+    // `series`, so one mapping owns both.
+    let media_type = normalize_watch_progress_type(media_type)
+        .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?
+        .to_string();
+    super::addon_registry::fetch_meta_details(app, client, &media_type, id).await
+}
+
 pub(crate) async fn fetch_media_details_inner(
     app: &AppHandle,
     client: &AddonResourceClient,
@@ -203,14 +196,11 @@ pub(crate) async fn fetch_media_details_inner(
     id: &str,
     include_episodes: bool,
 ) -> Result<MediaDetails, String> {
-    // Same canonical fold as watch progress: Cinemeta serves anime under
-    // `series`, so one mapping owns both.
-    let media_type = normalize_watch_progress_type(media_type)
-        .ok_or_else(|| "Invalid media type. Expected movie or series.".to_string())?
-        .to_string();
-    super::addon_registry::fetch_meta_details(app, client, &media_type, id, include_episodes)
-        .await
-        .map(|details| normalize_media_details(details, id))
+    let details = fetch_media_details_shared_inner(app, client, media_type, id).await?;
+    Ok(with_requested_media_id(
+        meta_for_shape(&details, include_episodes),
+        id,
+    ))
 }
 
 #[command]
@@ -268,14 +258,32 @@ pub async fn get_addon_subtitles(
         .to_string();
     // Subtitle IDs follow stream IDs; anime resolves through series episodes.
     let effective_type = super::media_type::addon_episode_lookup_type(&media_type);
-    let lookup_id = match (season, episode) {
-        (Some(season), Some(episode)) if effective_type != "movie" => {
+    let lookup_id = subtitle_lookup_id(effective_type, id, season, episode);
+
+    super::addon_registry::fetch_addon_subtitles(&app, &client, effective_type, &lookup_id).await
+}
+
+fn subtitle_lookup_id(
+    media_type: &str,
+    id: String,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> String {
+    // A single colon can be a namespace (kitsu:48316); only two numeric
+    // trailing fields identify an already-scoped episode lookup.
+    let episode_scoped = id.rsplit_once(':').is_some_and(|(prefix, episode)| {
+        prefix.rsplit_once(':').is_some_and(|(_, season)| {
+            [season, episode]
+                .iter()
+                .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
+        })
+    });
+    match (season, episode) {
+        (Some(season), Some(episode)) if media_type != "movie" && !episode_scoped => {
             format!("{id}:{season}:{episode}")
         }
         _ => id,
-    };
-
-    super::addon_registry::fetch_addon_subtitles(&app, &client, effective_type, &lookup_id).await
+    }
 }
 
 pub(crate) async fn fetch_media_schedules(
@@ -324,11 +332,8 @@ pub(crate) async fn fetch_media_schedules(
     // Sequential bursts of MEDIA_SCHEDULE_MAX_ITEMS serve the whole
     // request while keeping instantaneous fan-out bounded — the constants
     // above own the rationale.
-    let mut requests = normalized_requests.into_iter();
-    while requests.len() > 0 {
-        let chunk: Vec<_> = requests.by_ref().take(MEDIA_SCHEDULE_MAX_ITEMS).collect();
-
-        let mut pending = stream::iter(chunk.into_iter().enumerate().map(
+    for chunk in normalized_requests.chunks(MEDIA_SCHEDULE_MAX_ITEMS) {
+        let mut pending = stream::iter(chunk.iter().cloned().enumerate().map(
             |(index, (request_types, media_type, id))| {
                 let app = app.clone();
                 async move {
@@ -349,9 +354,10 @@ pub(crate) async fn fetch_media_schedules(
         loop {
             tokio::select! {
                 _ = &mut deadline => {
-                    if errors.len() < 3 {
-                        errors.push("Schedule metadata requests timed out. Please try again.".to_string());
-                    }
+                    push_bounded_error(
+                        &mut errors,
+                        "Schedule metadata requests timed out. Please try again.",
+                    );
                     break;
                 },
                 next = pending.next() => {
@@ -379,9 +385,7 @@ pub(crate) async fn fetch_media_schedules(
                     }
                 }
                 Err(error) => {
-                    if errors.len() < 3 {
-                        errors.push(error);
-                    }
+                    push_bounded_error(&mut errors, error);
                 }
             }
         }
@@ -402,7 +406,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
     id: &str,
     canonical_season: u32,
     canonical_episode: u32,
-) -> Result<Option<EpisodeStreamMapping>, String> {
+) -> Result<Option<PlaybackEpisodeMappingSnapshot>, String> {
     let id = normalize_media_id(id).ok_or_else(|| "Media ID is required.".to_string())?;
     let media_type = normalize_stream_media_type(media_type, Some(&id))
         .ok_or_else(|| "Invalid media type for episode mapping lookup.".to_string())?
@@ -430,7 +434,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
         .await?
     };
     if let Some(mapping) = cached {
-        return Ok(Some(mapping.into()));
+        return Ok(Some(mapping));
     }
 
     let mut details = fetch_media_details_inner(&app, client, &media_type, &id, true).await?;
@@ -461,7 +465,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
                     && snapshot.canonical_episode == canonical_episode
             })
         }) {
-            return Ok(Some(mapping.into()));
+            return Ok(Some(mapping));
         }
     }
 

@@ -1,21 +1,21 @@
 import { ArrowLeft, Loader2, Play, RotateCcw, X } from 'lucide-react';
 import { memo } from 'react';
 import { RemoteImage } from '@/components/remote-image';
+import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
-import { cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
+import { clamp, cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
 
 // Presentational player states, memoized like PlayerActionOverlays: props are
 // primitives or stable callbacks so unchanged overlays skip the commit.
 
 const ERROR_SECONDARY_BUTTON_CLASS =
   'rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
-/** Up Next and End cards share one floating slot above the expanded chrome. */
+/** The expanded player's action lane owns placement above its measured chrome. */
 const EOF_CARD_SLOT_CLASS =
-  'animate-in fade-in slide-in-from-bottom-4 zoom-in-95 duration-300 absolute right-6 bottom-28 z-45 flex items-center';
+  'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in zoom-in-95 duration-200 motion-reduce:animate-none';
 const EOF_GLASS_CLASS =
   'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60 backdrop-blur-xl';
-const EOF_EYEBROW_CLASS =
-  'text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/40';
+const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
 
 function EofCardThumbnail({ src }: { src: string }) {
   return (
@@ -167,8 +167,7 @@ interface PlayerIdleOverlayProps {
 }
 
 // Idle "you're watching" card for long zero-input stretches while paused.
-// Timing and dismissal live in usePlayerIdleOverlay; this is purely
-// presentational. Rows stagger on the container's ease for one reveal.
+// Timing and dismissal live in usePlayerIdleOverlay.
 export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
   visible,
   isFullscreen,
@@ -178,86 +177,57 @@ export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
   episodeTitle,
   overview,
 }: PlayerIdleOverlayProps) {
-  const row = (delay: string) =>
-    cn(
-      'transition-[opacity,translate] duration-500 ease-out motion-reduce:transition-opacity',
-      visible ? 'translate-y-0 opacity-100' : 'translate-y-2 opacity-0',
-      visible && delay,
-    );
+  const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
   return (
     <div
       aria-hidden={!visible}
       className={cn(
-        'pointer-events-none absolute inset-0 z-30 transition-[opacity,visibility] duration-700 ease-out',
+        'pointer-events-none absolute inset-0 z-30 transition-[opacity,visibility] duration-300 ease-out motion-reduce:transition-none',
         visible ? 'visible opacity-100' : 'invisible opacity-0',
       )}
     >
-      {/* Slight even dim plus a lower-third pool so the card text stays
-          legible without washing the frame out. */}
-      <div className='absolute inset-0 bg-black/35' />
-      <div className='absolute inset-x-0 bottom-0 h-3/5 bg-linear-to-t from-black/70 via-black/25 to-transparent' />
+      <div className='absolute inset-0 bg-black/25' />
+      <div className='absolute inset-0 bg-linear-to-r from-black/75 via-black/30 to-transparent' />
+      <div className='absolute inset-x-0 bottom-0 h-1/2 bg-linear-to-t from-black/65 to-transparent' />
 
       <div
         className={cn(
-          'absolute bottom-32 max-w-3xl',
+          'absolute bottom-[clamp(2rem,14vh,8rem)] right-8 max-h-[calc(100%-6rem)] max-w-2xl overflow-hidden',
           // Clears the docked sidebar the same way the chrome overlay does.
           isFullscreen ? 'left-10' : 'left-[96px]',
         )}
+        style={{ fontFamily: '"Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif' }}
       >
-        <p
-          className={cn(
-            'text-xs font-semibold uppercase tracking-[0.24em] text-white/50',
-            row('delay-100'),
-          )}
-        >
+        <p className='text-[15px] font-medium leading-6 tracking-normal text-white/85'>
           You're watching
         </p>
-        {isHttpUrl(logo) ? (
+        {logoSrc ? (
           <RemoteImage
-            src={logo}
+            src={logoSrc}
             alt={title ?? ''}
             loading='lazy'
-            className={cn(
-              'mt-6 max-h-40 w-auto max-w-lg object-contain object-left drop-shadow-[0_10px_40px_rgba(0,0,0,0.75)]',
-              row('delay-150'),
-            )}
+            onError={onLogoError}
+            className='mt-4 max-h-28 w-auto max-w-full object-contain object-left drop-shadow-[0_2px_12px_rgba(0,0,0,0.5)]'
           />
         ) : (
           title && (
-            <h2
-              className={cn(
-                'mt-6 text-5xl font-bold leading-[1.04] tracking-[-0.025em] text-white drop-shadow-[0_10px_40px_rgba(0,0,0,0.75)] md:text-6xl',
-                row('delay-150'),
-              )}
-            >
+            <h2 className='mt-3 line-clamp-2 wrap-anywhere text-[clamp(1.75rem,3.6vw,3rem)] font-semibold leading-tight tracking-tight text-white'>
               {title}
             </h2>
           )
         )}
         {episodeLabel && (
-          <p
-            className={cn(
-              'mt-6 text-sm font-semibold uppercase tracking-[0.2em] text-white/55',
-              row('delay-200'),
-            )}
-          >
+          <p className='mt-5 text-sm font-medium leading-5 tracking-normal text-white/75'>
             {episodeLabel}
           </p>
         )}
         {episodeTitle && (
-          <h3
-            className={cn('mt-2 text-2xl font-semibold leading-snug text-white', row('delay-300'))}
-          >
+          <h3 className='mt-1 line-clamp-2 wrap-anywhere text-xl font-semibold leading-snug text-white'>
             {episodeTitle}
           </h3>
         )}
         {overview && (
-          <p
-            className={cn(
-              'mt-3 line-clamp-3 max-w-xl text-sm leading-relaxed text-white/60',
-              row('delay-500'),
-            )}
-          >
+          <p className='mt-4 line-clamp-3 max-w-xl wrap-anywhere text-[15px] leading-6 text-white/80'>
             {overview}
           </p>
         )}
@@ -271,33 +241,34 @@ interface PlayerPauseResumeButtonProps {
   onResume: () => Promise<void>;
 }
 
-// Paused-state center resume — bare icon flash, no chrome: keyframe pop on
-// pause, transition out on resume.
+// Only healthy paused playback shows this; segment/EOF actions use the toolbar.
 export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
   visible,
   onResume,
 }: PlayerPauseResumeButtonProps) {
   return (
-    <div className='pointer-events-none absolute inset-0 z-45 flex items-center justify-center'>
+    <div
+      aria-hidden={!visible}
+      className='pointer-events-none absolute inset-0 z-45 flex items-center justify-center'
+    >
       <button
         type='button'
         aria-label='Resume playback'
+        aria-keyshortcuts='Space k'
+        title='Resume playback (Space or K)'
         tabIndex={visible ? 0 : -1}
         onClick={(e) => {
           e.stopPropagation();
           void onResume().catch(() => undefined);
         }}
         className={cn(
-          'flex h-20 w-20 items-center justify-center rounded-full outline-hidden text-white',
-          'transition-[opacity,scale] duration-200 ease-out',
-          'hover:scale-105 active:scale-95 focus-visible:scale-105',
-          visible
-            ? 'pointer-events-auto scale-100 opacity-100 animate-[pause-pop_320ms_cubic-bezier(0.34,1.3,0.5,1)] motion-reduce:animate-none'
-            : 'pointer-events-none scale-90 opacity-0',
+          'flex h-20 w-20 items-center justify-center bg-transparent text-white/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60',
+          'transition-[opacity,color] duration-150 ease-out motion-reduce:transition-none',
+          visible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
         )}
       >
         <Play
-          className='ml-1 h-16 w-16 fill-white drop-shadow-[0_6px_28px_rgba(0,0,0,0.75)]'
+          className='ml-1 h-12 w-12 fill-current drop-shadow-[0_2px_12px_rgba(0,0,0,0.6)]'
           strokeWidth={1.5}
         />
       </button>
@@ -331,19 +302,20 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
 }: PlayerUpNextCardProps) {
   const countingDown = autoPlaySecondsLeft !== null;
   const ringProgress = countingDown
-    ? Math.min(1, Math.max(0, autoPlaySecondsLeft / autoPlayDurationSeconds))
+    ? clamp(autoPlaySecondsLeft / autoPlayDurationSeconds, 0, 1)
     : 0;
   return (
     <div data-player-interactive className={cn(EOF_CARD_SLOT_CLASS, 'gap-2')}>
       <button
         type='button'
+        aria-keyshortcuts='n'
         onClick={(e) => {
           e.stopPropagation();
           onPlayNext();
         }}
         className={cn(
           EOF_GLASS_CLASS,
-          'group/upnext flex items-center gap-3 rounded-2xl p-2.5 pr-4 text-left transition-colors hover:bg-zinc-900/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
+          'group/upnext flex min-w-0 max-w-md items-center gap-3 rounded-2xl p-3 text-left transition-colors hover:bg-zinc-900/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
         )}
       >
         {thumbnail && <EofCardThumbnail src={thumbnail} />}
@@ -353,14 +325,14 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
             {formatSeasonEpisode(episode.season, episode.episode)}
             {episode.title ? ` · ${episode.title}` : ''}
           </p>
-          <p className='mt-0.5 text-[11px] leading-none text-white/45'>
+          <p className='mt-1 text-xs leading-snug text-white/65'>
             {countingDown ? (
               <>
                 Playing in <span aria-hidden='true'>{autoPlaySecondsLeft}s</span>
                 <span className='sr-only'>— press N or click to play now</span>
               </>
             ) : (
-              'Press N or click to play'
+              'Play next episode'
             )}
           </p>
         </div>
@@ -441,7 +413,7 @@ export const PlayerEndCard = memo(function PlayerEndCard({
             e.stopPropagation();
             onReplay();
           }}
-          className='flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/10 bg-black/70 py-1.5 pl-1.5 pr-2.5 text-left backdrop-blur-md transition-colors duration-200 hover:bg-black/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          className='flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 text-left backdrop-blur-md transition-colors duration-200 hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
         >
           {thumbnail && (
             <RemoteImage
@@ -450,13 +422,8 @@ export const PlayerEndCard = memo(function PlayerEndCard({
               className='h-7 w-12 shrink-0 rounded object-cover'
             />
           )}
-          <span className='min-w-0 flex-1'>
-            <span className='block text-[8.5px] font-semibold uppercase tracking-[0.18em] leading-none text-white/40'>
-              Finished
-            </span>
-            <span className='mt-0.5 block truncate text-[11px] font-medium leading-tight text-white/90'>
-              Watch again
-            </span>
+          <span className='min-w-0 flex-1 truncate text-xs font-medium text-white'>
+            Watch again
           </span>
           <RotateCcw className='ml-0.5 h-3.5 w-3.5 shrink-0 text-white/90' />
         </button>
@@ -468,7 +435,7 @@ export const PlayerEndCard = memo(function PlayerEndCard({
             e.stopPropagation();
             onBackToTitle();
           }}
-          className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-black/70 text-white/60 backdrop-blur-md transition-colors duration-200 hover:bg-black/80 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          className='flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-black/80 text-white/80 backdrop-blur-md transition-colors duration-200 hover:bg-black/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
         >
           <ArrowLeft className='h-3.5 w-3.5' />
         </button>
@@ -479,24 +446,27 @@ export const PlayerEndCard = memo(function PlayerEndCard({
   return (
     <div
       data-player-interactive
-      className={cn(EOF_CARD_SLOT_CLASS, EOF_GLASS_CLASS, 'gap-3 rounded-2xl p-2.5 pr-3')}
+      className={cn(EOF_CARD_SLOT_CLASS, EOF_GLASS_CLASS, 'w-[420px] gap-3 rounded-2xl p-4')}
     >
       {thumbnail && <EofCardThumbnail src={thumbnail} />}
-      <div className='min-w-0'>
-        <p className={EOF_EYEBROW_CLASS}>Finished</p>
-        <p className='mt-1 max-w-56 truncate text-sm font-semibold leading-snug text-white'>
+      <div className='min-w-0 flex-1'>
+        <p className={EOF_EYEBROW_CLASS}>Playback finished</p>
+        <p
+          className='mt-1.5 line-clamp-2 text-sm font-semibold leading-snug text-white'
+          title={title}
+        >
           {title}
         </p>
-        <div className='mt-2 flex items-center gap-1.5'>
+        <div className='mt-3 flex flex-wrap items-center gap-2'>
           <button
             type='button'
             onClick={(e) => {
               e.stopPropagation();
               onReplay();
             }}
-            className='flex items-center gap-1.5 rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-black/40'
+            className='flex min-h-9 items-center gap-2 rounded-lg bg-white px-3 py-2 text-xs font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950'
           >
-            <RotateCcw className='h-3 w-3' />
+            <RotateCcw className='h-3.5 w-3.5' />
             Watch again
           </button>
           <button
@@ -505,7 +475,7 @@ export const PlayerEndCard = memo(function PlayerEndCard({
               e.stopPropagation();
               onBackToTitle();
             }}
-            className='rounded-lg border border-white/20 bg-white/5 px-3 py-1.5 text-xs font-medium text-white/80 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+            className='min-h-9 rounded-lg px-3 py-2 text-xs font-medium text-white/75 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
           >
             Back to title
           </button>

@@ -3,19 +3,9 @@ pub(crate) fn field(name: &'static str, value: impl ToString) -> (&'static str, 
 }
 
 fn normalize_field_value(value: &str) -> String {
-    let collapsed = value
-        .chars()
-        .map(|character| {
-            if character.is_control() {
-                ' '
-            } else {
-                character
-            }
-        })
-        .collect::<String>();
-
-    collapsed
-        .split_whitespace()
+    value
+        .split(|character: char| character.is_control() || character.is_whitespace())
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(" ")
         .replace('\\', "\\\\")
@@ -42,4 +32,26 @@ pub(crate) fn log_warn(component: &str, action: &str, outcome: &str, fields: &[(
     }
 
     eprintln!("{}", line);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_field_value;
+
+    #[test]
+    fn normalize_field_value_collapses_controls_whitespace_and_escapes() {
+        let cases: &[(&str, &str)] = &[
+            ("", ""),
+            ("  \t \n  ", ""),
+            ("ordinary multiword value", "ordinary multiword value"),
+            ("a\n\nb\tc\0d\u{7f}e", "a b c d e"),
+            ("x\u{a0}y\u{2003}z", "x y z"),
+            ("say \"hi\" \\ done", "say \\\"hi\\\" \\\\ done"),
+            ("caf\u{e9} na\u{ef}ve", "caf\u{e9} na\u{ef}ve"),
+        ];
+
+        for (input, expected) in cases {
+            assert_eq!(&normalize_field_value(input), expected, "input {input:?}");
+        }
+    }
 }

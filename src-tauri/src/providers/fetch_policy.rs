@@ -4,16 +4,17 @@ use std::net::IpAddr;
 /// probe (`commands::stream_resolver`) so the two caps cannot drift.
 pub(crate) const MAX_REDIRECT_HOPS: usize = 5;
 
-/// True when `host` is an IP literal outside the globally routable range:
-/// loopback, private, link-local, unspecified, multicast, broadcast,
-/// documentation, benchmark, and other reserved ranges. DNS names return
-/// false; name-based rebinding is out of scope for the sync redirect hook and
-/// stays bounded by the hop cap plus per-call timeouts and size limits.
+/// True when `host` is an IP literal outside the globally routable range
+/// (loopback, private, link-local, reserved). DNS names return false;
+/// name-based rebinding is out of scope for the sync redirect hook.
 pub(crate) fn is_blocked_ip_literal(host: &str) -> bool {
-    // Strip an IPv6 zone (`fe80::1%eth0`) so it cannot dodge the literal check.
-    // A single trailing dot is a valid FQDN root marker that resolvers ignore
-    // (`127.0.0.1.` still routes to loopback), so it is stripped as well;
-    // stripping never changes the verdict for real DNS names.
+    // URL host_str() retains brackets around IPv6 literals.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    // Strip an IPv6 zone (`fe80::1%eth0`) and a trailing FQDN root dot
+    // (`127.0.0.1.` still routes to loopback) — neither may dodge the check.
     let bare = host.split('%').next().unwrap_or(host).trim_end_matches('.');
     if let Ok(ip) = bare.parse::<IpAddr>() {
         // Unmap `::ffff:127.0.0.1`-style literals so IPv4 checks apply to them.
@@ -23,12 +24,11 @@ pub(crate) fn is_blocked_ip_literal(host: &str) -> bool {
         };
         return is_non_routable_ip(&canonical);
     }
-    // Non-standard numeric forms (`2130706433`, `0x7f.0.0.1`, `0177.0.0.1`,
-    // `127.1`) never parse as `IpAddr` but the OS resolver still routes them
-    // with `inet_aton` semantics, which would dodge the literal block above.
-    // Hosts with a non-numeric label are DNS names and pass; all-numeric
-    // hosts that fail to parse fail closed (an all-numeric TLD is invalid,
-    // so they can never be legitimate DNS names).
+    // Non-standard numeric forms (`2130706433`, `0x7f.0.0.1`, `127.1`) never
+    // parse as `IpAddr` but the OS resolver still routes them via
+    // `inet_aton` semantics. Non-numeric labels are DNS names and pass;
+    // all-numeric hosts that fail to parse fail closed (an all-numeric TLD
+    // is not a legitimate DNS name).
     if !is_numeric_ip_candidate(bare) {
         return false;
     }
@@ -38,9 +38,11 @@ pub(crate) fn is_blocked_ip_literal(host: &str) -> bool {
     }
 }
 
-/// True when every dot-separated label looks like a number (decimal, octal,
-/// or `0x`-hex) rather than a DNS label. Labels with hyphens, underscores,
-/// unprefixed letters beyond decimal digits, or colons are DNS names.
+/// True when every dot-separated label *looks* like a number (decimal,
+/// octal, or `0x`-hex) rather than a DNS label. Deliberately looser than
+/// `parse_numeric_part`: an over-large part (`0x100000000`) is numeric —
+/// the caller then fails closed when it can't be parsed — while a label
+/// with hyphens, underscores, or colons is a DNS name.
 fn is_numeric_ip_candidate(host: &str) -> bool {
     if host.is_empty() || host.contains(':') {
         return false;
@@ -142,25 +144,25 @@ fn is_non_routable_ip(ip: &IpAddr) -> bool {
     }
 }
 
-/// True when a redirect target carries embedded credentials. Addon URLs are
-/// opaque user data; a `user:pass@host` target would leak those secrets into
-/// request lines, error strings, and logs, so it is rejected outright.
+/// A `user:pass@host` target would leak embedded secrets into request lines
+/// and logs — rejected outright.
 fn redirect_target_has_userinfo(next: &reqwest::Url) -> bool {
     !next.username().is_empty() || next.password().is_some()
 }
 
-/// True when a redirect from `initial` to `next` may be followed. Targets are
-/// restricted to `http(s)` without embedded credentials; a hop onto a
-/// non-routable IP literal is allowed only back to the same host *and* port,
-/// which preserves the explicit local-addon policy (a user-configured
-/// loopback addon keeps working within its own origin) while stopping a
-/// public addon from redirecting fetches onto loopback, LAN, metadata IPs,
-/// or sideways to another local port.
+/// `http(s)` scheme with no embedded credentials — the shared gate every
+/// privileged fetch or redirect target passes before host-level checks.
+pub(crate) fn is_plain_http_url(parsed: &reqwest::Url) -> bool {
+    matches!(parsed.scheme(), "http" | "https") && !redirect_target_has_userinfo(parsed)
+}
+
+/// True when a redirect from `initial` to `next` may be followed. Targets
+/// are restricted to `http(s)` without embedded credentials; a hop onto a
+/// non-routable IP literal is allowed only back to the same host and port —
+/// a user-configured loopback addon keeps working within its own origin,
+/// while a public addon cannot redirect onto LAN/metadata IPs.
 pub(crate) fn redirect_target_allowed(initial: &reqwest::Url, next: &reqwest::Url) -> bool {
-    if !matches!(next.scheme(), "http" | "https") {
-        return false;
-    }
-    if redirect_target_has_userinfo(next) {
+    if !is_plain_http_url(next) {
         return false;
     }
     let blocked = next.host_str().is_some_and(is_blocked_ip_literal);
@@ -176,10 +178,9 @@ pub(crate) fn redirect_target_allowed(initial: &reqwest::Url, next: &reqwest::Ur
     }
 }
 
-/// True when `initial` and `next` share one origin (scheme, host, and
-/// effective port): proxy/secret headers addressed to the first hop stay on
-/// that origin. A cross-origin hop must drop them, or a CDN `302` to an
-/// attacker host exfiltrates the addon's bearer tokens with the probe.
+/// True when `initial` and `next` share one origin (scheme, host, effective
+/// port): proxy/secret headers stay on that origin. A cross-origin hop must
+/// drop them, or a CDN `302` exfiltrates bearer tokens to an attacker host.
 pub(crate) fn same_origin_for_proxy_headers(initial: &reqwest::Url, next: &reqwest::Url) -> bool {
     initial.scheme().eq_ignore_ascii_case(next.scheme())
         && initial

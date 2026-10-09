@@ -29,6 +29,7 @@ import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useAmbientActivity } from '@/hooks/use-ambient-activity';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useOnlineStatus } from '@/hooks/use-online-status';
+import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
@@ -40,7 +41,7 @@ import {
   type SearchFeed,
   type SearchMediaType,
 } from '@/lib/search-page-state';
-import { cn, prefersReducedMotion } from '@/lib/utils';
+import { cn, scrollBehavior } from '@/lib/utils';
 
 // Results fill every row edge to edge at near-home size: columns grow from
 // the 170px home minimum, so wide screens fit a full row (9+ on large
@@ -96,7 +97,11 @@ const renderSearchResult = (item: MediaItem) => (
 const estimateSearchItemHeight = (itemWidth: number) =>
   itemWidth * 1.5 + MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX;
 const SEARCH_PILL_BUTTON_CLASS =
-  'h-9 rounded-full border border-white/[0.08] bg-white/[0.04] px-5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
+  'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
+const SEARCH_FACET_BUTTON_CLASS =
+  'group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+const SEARCH_FACET_IDLE_CLASS =
+  'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
 
 function SearchPanel({
   action,
@@ -116,18 +121,23 @@ function SearchPanel({
   return (
     <div
       role={role}
-      className='mx-auto mt-10 flex max-w-sm flex-col items-center rounded-3xl border border-white/[0.07] bg-white/[0.02] px-8 py-12 text-center'
+      className='mx-auto mt-10 flex max-w-sm flex-col items-center rounded-xl border border-white/[0.07] bg-white/[0.02] px-6 py-10 text-center'
     >
       {icon ? (
-        <span className='flex h-12 w-12 items-center justify-center rounded-2xl bg-white/[0.05]'>
+        <span className='flex h-10 w-10 items-center justify-center rounded-lg bg-white/[0.05]'>
           {icon}
         </span>
       ) : null}
-      <p role={titleRole} className='mt-4 text-[15px] font-medium text-white'>
+      <p
+        role={titleRole}
+        className='mt-4 max-w-full [overflow-wrap:anywhere] text-[15px] font-medium text-white'
+      >
         {title}
       </p>
       {description ? (
-        <p className='mt-1 text-[13px] leading-relaxed text-zinc-500'>{description}</p>
+        <p className='mt-1 max-w-full [overflow-wrap:anywhere] text-[13px] leading-relaxed text-zinc-500'>
+          {description}
+        </p>
       ) : null}
       {action}
     </div>
@@ -308,39 +318,39 @@ const SearchResults = memo(function SearchResults({
         rowGap={SEARCH_GRID_ROW_GAP_PX}
       />
       <div ref={loadMoreRef} aria-hidden='true' className='h-1' />
-      {isOnline && isFetchingNextPage ? (
-        <output className='flex items-center justify-center gap-2 pb-2 pt-5 text-[12px] text-zinc-500'>
-          <Loader2 className='h-3.5 w-3.5 animate-spin' />
-          Loading more titles
-        </output>
-      ) : isOnline && isError ? (
-        <div className='flex flex-col items-center gap-1.5 pt-6' role='alert'>
-          <p className='text-[12px] text-zinc-500'>{getErrorMessage(errorObj)}</p>
+      {isOnline && (hasNextPage || isError || isFetchingNextPage) && (
+        <div className='flex flex-col items-center gap-1.5 pt-6'>
+          {isError && (
+            <p role='alert' className='text-[12px] text-zinc-500'>
+              {getErrorMessage(errorObj)}
+            </p>
+          )}
           <button
             type='button'
             aria-disabled={isFetching || undefined}
+            aria-busy={isFetchingNextPage || undefined}
             onClick={() => {
-              if (!isFetching) void (isFetchNextPageError ? fetchNextPage() : refetch());
+              if (!isFetching) {
+                void (isError && !isFetchNextPageError ? refetch() : fetchNextPage());
+              }
             }}
-            className={SEARCH_PILL_BUTTON_CLASS}
+            className={cn(SEARCH_PILL_BUTTON_CLASS, 'inline-flex items-center gap-2')}
           >
-            {isFetchNextPageError ? 'Retry loading more' : 'Try again'}
+            {isFetchingNextPage && (
+              <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
+            )}
+            <span aria-live='polite'>
+              {isFetchingNextPage
+                ? 'Loading more titles'
+                : isError
+                  ? isFetchNextPageError
+                    ? 'Retry loading more'
+                    : 'Try again'
+                  : 'Load more'}
+            </span>
           </button>
         </div>
-      ) : isOnline && hasNextPage ? (
-        <div className='flex justify-center pt-6'>
-          <button
-            type='button'
-            aria-disabled={isFetching || undefined}
-            onClick={() => {
-              if (!isFetching) void fetchNextPage();
-            }}
-            className={SEARCH_PILL_BUTTON_CLASS}
-          >
-            Load more
-          </button>
-        </div>
-      ) : null}
+      )}
     </div>
   );
 });
@@ -435,12 +445,7 @@ export function Search() {
 
   // Long catalogs deserve a quick way back to the filters.
   const [showBackToTop, setShowBackToTop] = useState(false);
-  useEffect(() => {
-    const handleScroll = () => setShowBackToTop(window.scrollY > 700);
-    handleScroll();
-    window.addEventListener('scroll', handleScroll, { passive: true });
-    return () => window.removeEventListener('scroll', handleScroll);
-  }, []);
+  useRafScrollListener(() => setShowBackToTop(window.scrollY > 700));
 
   return (
     <div className='page-enter pl-[60px]'>
@@ -448,14 +453,9 @@ export function Search() {
         <div className='mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex items-end justify-between gap-3'>
             <div className='min-w-0'>
-              <h1 className='bg-linear-to-br from-white via-white to-zinc-400 bg-clip-text text-[26px] font-semibold leading-none tracking-[-0.045em] text-transparent'>
+              <h1 className='text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
                 {isBrowsing ? 'Discover' : 'Search'}
               </h1>
-              <p className='mt-2 text-[12.5px] font-medium tracking-[-0.01em] text-zinc-500'>
-                {isBrowsing
-                  ? 'Find your next great watch.'
-                  : 'Movies, series, and anime. One place to explore.'}
-              </p>
             </div>
             {results.length > 0 ? (
               // <output> is an implicit live region — silence it during page
@@ -484,7 +484,7 @@ export function Search() {
               aria-label='Search movies, shows, and anime'
               data-search-input
               ref={searchInputRef}
-              className='h-12 w-full rounded-2xl border-white/[0.08] bg-white/[0.06] pl-11 pr-20 text-[15px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.07] focus-visible:border-white/20 focus-visible:bg-white/[0.07] focus-visible:ring-0'
+              className='h-11 w-full rounded-lg border-white/[0.08] bg-white/[0.04] pl-11 pr-20 text-[14px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.06] focus-visible:border-white/20 focus-visible:bg-white/[0.06] focus-visible:ring-0'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
@@ -527,7 +527,7 @@ export function Search() {
                   type='button'
                   aria-label='Clear search'
                   title='Clear search (Esc)'
-                  className='flex h-7 w-7 items-center justify-center rounded-full bg-white/[0.08] text-zinc-400 transition-colors hover:bg-white/[0.14] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+                  className='flex h-8 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
                   onClick={() => {
                     setQuery('');
                     // The button unmounts with the text — keep focus in the
@@ -541,21 +541,16 @@ export function Search() {
             </div>
           </div>
 
-          {/* lg+ pins the type group under the search bar's midpoint while
-              genre/feed/reset flank the container edges; narrower widths fall
-              back to the centered wrapping row. */}
-          <div className='mt-3 flex flex-wrap items-center justify-center gap-2 lg:grid lg:grid-cols-[1fr_auto_1fr]'>
-            <div className='justify-self-start'>
+          <div className='mt-3 flex flex-wrap items-center justify-center gap-2 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'>
+            <div className='min-w-0 justify-self-start'>
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <button
                     type='button'
-                    title='Filter by genre'
+                    title={activeGenre ? `Filter by genre: ${activeGenre}` : 'Filter by genre'}
                     className={cn(
-                      'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
-                      activeGenre
-                        ? 'accent-lattice-soft'
-                        : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
+                      SEARCH_FACET_BUTTON_CLASS,
+                      activeGenre ? 'accent-lattice-soft' : SEARCH_FACET_IDLE_CLASS,
                     )}
                   >
                     <Shapes className='h-3.5 w-3.5 opacity-70' />
@@ -569,6 +564,8 @@ export function Search() {
                   className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
                 >
                   <DropdownMenuItem
+                    role='menuitemradio'
+                    aria-checked={!activeGenre}
                     onSelect={() => {
                       // No-op when nothing's active — don't bounce the scroll.
                       if (!activeGenre) return;
@@ -588,6 +585,9 @@ export function Search() {
                     return (
                       <DropdownMenuItem
                         key={genre}
+                        role='menuitemradio'
+                        aria-checked={isActive}
+                        title={genre}
                         onSelect={() => {
                           handleGenreChange(genre);
                           resetScroll();
@@ -608,7 +608,7 @@ export function Search() {
             <div
               role='group'
               aria-label='Content type'
-              className='inline-flex items-center justify-center gap-1 rounded-xl border border-white/[0.08] bg-white/[0.04] p-1'
+              className='inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/[0.08] bg-white/[0.03] p-1 scrollbar-hide justify-self-center'
             >
               {SEARCH_TYPE_OPTIONS.map((option) => (
                 <button
@@ -617,9 +617,9 @@ export function Search() {
                   aria-pressed={activeType === option.id}
                   onClick={() => selectType(option.id)}
                   className={cn(
-                    'inline-flex h-8 min-w-[64px] items-center justify-center rounded-lg px-4 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                    'inline-flex h-7 shrink-0 items-center justify-center rounded-md px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
                     activeType === option.id
-                      ? 'font-semibold text-(--on-accent-nav) shadow-xs'
+                      ? 'text-(--on-accent-nav)'
                       : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
                   )}
                   style={
@@ -631,7 +631,7 @@ export function Search() {
               ))}
             </div>
 
-            <div className='flex items-center gap-2 justify-self-end'>
+            <div className='flex flex-wrap items-center justify-center gap-2 justify-self-end lg:justify-end'>
               <DropdownMenu modal={false}>
                 {/* aria-disabled + guards, not `disabled`: a native-disabled
                   button swallows pointer events, so the "why is it off"
@@ -657,10 +657,9 @@ export function Search() {
                       }
                     }}
                     className={cn(
-                      'group flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-40',
-                      activeFeed !== 'popular'
-                        ? 'accent-lattice-soft'
-                        : 'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100',
+                      SEARCH_FACET_BUTTON_CLASS,
+                      'aria-disabled:cursor-default aria-disabled:opacity-40',
+                      activeFeed !== 'popular' ? 'accent-lattice-soft' : SEARCH_FACET_IDLE_CLASS,
                     )}
                   >
                     <TrendingUp className='h-3.5 w-3.5 opacity-70' />
@@ -674,6 +673,8 @@ export function Search() {
                     return (
                       <DropdownMenuItem
                         key={option.id}
+                        role='menuitemradio'
+                        aria-checked={isActive}
                         onSelect={() => {
                           if (isActive) return;
                           handleFeedChange(option.id);
@@ -699,7 +700,7 @@ export function Search() {
                 aria-disabled={!hasActiveFilters || undefined}
                 title='Reset all filters'
                 className={cn(
-                  'flex h-[42px] items-center gap-1.5 rounded-xl border px-3.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                  SEARCH_FACET_BUTTON_CLASS,
                   hasActiveFilters
                     ? 'border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-white'
                     : 'cursor-default border-transparent text-zinc-700',
@@ -739,11 +740,12 @@ export function Search() {
         title='Back to top'
         aria-hidden={!showBackToTop || undefined}
         tabIndex={showBackToTop ? undefined : -1}
-        onClick={() =>
-          window.scrollTo({ top: 0, behavior: prefersReducedMotion() ? 'auto' : 'smooth' })
-        }
+        onClick={() => {
+          searchInputRef.current?.focus({ preventScroll: true });
+          window.scrollTo({ top: 0, behavior: scrollBehavior() });
+        }}
         className={cn(
-          'fixed bottom-6 left-[calc(50%+30px)] z-40 -translate-x-1/2 flex h-10 w-10 items-center justify-center rounded-full border border-white/[0.1] bg-zinc-950/80 text-zinc-400 shadow-lg backdrop-blur-md transition-[opacity,translate,background-color,border-color,color] duration-200 hover:border-white/[0.16] hover:bg-zinc-900/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+          'fixed bottom-6 left-[calc(50%+30px)] z-40 -translate-x-1/2 flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.1] bg-zinc-950/90 text-zinc-400 shadow-md transition-[opacity,translate,background-color,border-color,color] duration-200 hover:border-white/[0.16] hover:bg-zinc-900/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
           showBackToTop
             ? 'translate-y-0 opacity-100'
             : 'pointer-events-none translate-y-2 opacity-0',

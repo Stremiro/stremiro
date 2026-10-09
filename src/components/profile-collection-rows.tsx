@@ -2,6 +2,7 @@ import { formatDistanceToNow } from 'date-fns';
 import { Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
 import { useNavigate } from 'react-router';
+import { mediaCardRailKey } from '@/components/media-card';
 import { RemoteImage } from '@/components/remote-image';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
@@ -71,7 +72,7 @@ export function LibraryList({
   return (
     <WindowVirtualizedStack
       items={items}
-      getItemKey={(item) => `${item.type}:${item.id}`}
+      getItemKey={mediaCardRailKey}
       estimateSize={() => 76}
       renderItem={(item) => <LibraryListRow item={item} status={watchStatuses?.[item.id]} />}
     />
@@ -91,7 +92,7 @@ const LibraryListRow = memo(function LibraryListRow({
   return (
     <button
       type='button'
-      className='w-full flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] transition-colors text-left group focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:border-white/20'
+      className='w-full flex items-center gap-3 px-3 py-2.5 rounded-md bg-white/[0.015] border border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] transition-colors text-left group focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:border-white/20'
       onPointerEnter={prefetchDetails}
       onFocus={prefetchDetails}
       onClick={() => navigateToDetails(navigate, item.type, item.id)}
@@ -99,24 +100,20 @@ const LibraryListRow = memo(function LibraryListRow({
       <PosterThumb poster={item.poster} title={item.title} />
 
       <div className='flex-1 min-w-0'>
-        <p className='text-[14px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors'>
+        <p
+          dir='auto'
+          title={item.title}
+          className='text-[13px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
+        >
           {item.title}
         </p>
         <div className='flex items-center gap-1.5 mt-1 flex-wrap'>
           {item.displayYear && (
             <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
           )}
-          <span className='text-[9px] font-bold uppercase px-1.5 py-0.5 rounded-sm text-zinc-300 bg-white/[0.06]'>
-            {mediaTypeLabel(item.type)}
-          </span>
+          <span className='text-[11px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
           {status && isWatchStatusValue(status) && (
-            <span
-              className={cn(
-                'text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded-sm',
-                WATCH_STATUS_COLORS[status].text,
-                WATCH_STATUS_COLORS[status].bg,
-              )}
-            >
+            <span className={cn('text-[11px] font-medium', WATCH_STATUS_COLORS[status].text)}>
               {WATCH_STATUS_LABELS[status]}
             </span>
           )}
@@ -161,8 +158,10 @@ const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgr
       <PosterThumb poster={item.poster} title={item.title} progressPct={progressPct} />
 
       <div className='flex-1 min-w-0'>
-        <p className='text-[14px] font-semibold text-zinc-100 truncate'>{item.title}</p>
-        <div className='flex items-center gap-2 mt-1'>
+        <p dir='auto' title={item.title} className='text-[13px] font-medium text-zinc-100 truncate'>
+          {item.title}
+        </p>
+        <div className='flex flex-wrap items-center gap-x-2 gap-y-1 mt-1'>
           {seasonEpisodeLabel && (
             <span className='text-[11px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
           )}
@@ -179,7 +178,7 @@ const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgr
         <Button
           size='icon'
           variant='ghost'
-          className='h-7 w-7 rounded-md text-zinc-600 hover:text-white hover:bg-white/[0.08] transition-colors'
+          className='h-8 w-8 rounded-md text-zinc-400 hover:text-white hover:bg-white/[0.08] transition-colors'
           onClick={(e) => {
             if (!isPlayPending) void handlePlay(e);
           }}
@@ -196,7 +195,7 @@ const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgr
         <Button
           size='icon'
           variant='ghost'
-          className='h-7 w-7 rounded-md text-zinc-700 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-100 md:opacity-0 md:group-hover/hrow:opacity-100 md:group-focus-within/hrow:opacity-100 focus-visible:opacity-100'
+          className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-100 md:opacity-0 md:group-hover/hrow:opacity-100 md:group-focus-within/hrow:opacity-100 focus-visible:opacity-100'
           onClick={(e) => {
             e.stopPropagation();
             if (!removeItem.isPending) removeItem.mutate();

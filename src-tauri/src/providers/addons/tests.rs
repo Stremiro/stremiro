@@ -25,16 +25,6 @@ fn stream_contains_batch(s: &AddonStream) -> bool {
     stream_contains_batch_texts(s.match_texts())
 }
 
-fn stream_matches_episode(s: &AddonStream, season: u32, episode: u32) -> bool {
-    s.match_texts()
-        .fields_with_season_context(season, false)
-        .into_iter()
-        .flatten()
-        .any(|(text, season_context, _)| {
-            episode_matches_lowered(text, season, episode, season_context)
-        })
-}
-
 fn stream_episode_match(
     s: &AddonStream,
     season: u32,
@@ -320,7 +310,10 @@ fn stream_matches_episode_works_for_name_or_title() {
         title: Some("Other text".to_string()),
         ..test_stream()
     };
-    assert!(stream_matches_episode(&stream, 3, 7));
+    assert_eq!(
+        stream_episode_match_kind(&stream, 3, 7),
+        StreamEpisodeMatchKind::Exact
+    );
 }
 
 #[test]
@@ -334,6 +327,30 @@ fn stream_episode_match_kind_detects_episode_ranges() {
         stream_episode_match_kind(&stream, 21, 1004),
         StreamEpisodeMatchKind::EpisodeRange
     );
+}
+
+#[test]
+fn stream_episode_range_endpoints_are_not_standalone_exact_tokens() {
+    for name in [
+        "Show.S01E03-E07.1080p",
+        "Show.1x03-1x07.1080p",
+        "Show.Season.1.Episode.03-07.1080p",
+    ] {
+        let stream = named_stream(name);
+        for episode in [3, 4, 7] {
+            assert_eq!(
+                stream_episode_match_kind(&stream, 1, episode),
+                StreamEpisodeMatchKind::EpisodeRange,
+                "{name}, episode={episode}"
+            );
+            let exact = named_stream(&format!("{name} S01E{episode:02}"));
+            assert_eq!(
+                stream_episode_match_kind(&exact, 1, episode),
+                StreamEpisodeMatchKind::Exact,
+                "{name} plus standalone episode={episode}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -536,11 +553,9 @@ fn decode_stream_items_decodes_typed_protocol_fields() {
 
 #[test]
 fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
-    // The unified `AddonStream` DTO must round-trip prepared rows for the
-    // filter command, so derived fields deserialize. Network ingress must
-    // still discard them: otherwise a malicious addon floats to the top
-    // of Smart/size/seeds ordering plus auto-pick by asserting huge
-    // values, since hydration only fills these when absent.
+    // `seeders`/`sizeBytes`/`cached` are `skip_deserializing`: hydration is
+    // the only writer, so a malicious addon cannot float to the top of
+    // Smart/size/seeds ordering plus auto-pick by asserting huge values.
     let bytes = br#"{"streams": [{
             "name": "Release 1080p",
             "url": "https://example.com/file.mp4",
@@ -566,7 +581,13 @@ fn selection_priority_is_never_forged_or_serialized() {
     assert_eq!(streams[0].selection_priority, None);
 
     let mut prepared = sample_stream();
-    prepared.selection_priority = Some((StreamEpisodeMatchKind::Exact, true, 4, 4, 6));
+    prepared.selection_priority = Some(SelectionPriority {
+        episode_match: StreamEpisodeMatchKind::Exact,
+        season_claim_verified: true,
+        title_match: 4,
+        viability: 4,
+        language: 6,
+    });
     let json = serde_json::to_value(&prepared).expect("serializes");
     assert!(json.get("selectionPriority").is_none());
     assert!(json.get("selection_priority").is_none());
@@ -620,14 +641,16 @@ fn fetch_failure_cooldown_blocks_and_clear_cache_releases() {
     let transport = AddonTransport::new();
     let addon_key = config_cache_segment("https://dead.example.com");
 
-    assert!(!transport.fetch_failure_cooling_down(&addon_key));
+    assert!(!transport.fetch_failures.cooling_down(&addon_key));
     let generation = transport.generation.load(Ordering::SeqCst);
-    transport.note_fetch_failure_for_generation(&addon_key, generation);
-    assert!(transport.fetch_failure_cooling_down(&addon_key));
+    transport
+        .fetch_failures
+        .note(&addon_key, &transport.generation, generation);
+    assert!(transport.fetch_failures.cooling_down(&addon_key));
 
     // A config change (clear_cache) must give the host a fresh try.
     transport.clear_cache();
-    assert!(!transport.fetch_failure_cooling_down(&addon_key));
+    assert!(!transport.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]
@@ -655,13 +678,17 @@ fn fetch_failure_record_from_stale_generation_is_suppressed() {
     // A fetch that exhausted retries after `clear_cache` ran must not
     // reinstall the cooldown the clear just wiped.
     transport.clear_cache();
-    transport.note_fetch_failure_for_generation(&addon_key, stale);
-    assert!(!transport.fetch_failure_cooling_down(&addon_key));
+    transport
+        .fetch_failures
+        .note(&addon_key, &transport.generation, stale);
+    assert!(!transport.fetch_failures.cooling_down(&addon_key));
 
     // Same recording at the current generation still cools the addon down.
     let fresh = transport.generation.load(Ordering::SeqCst);
-    transport.note_fetch_failure_for_generation(&addon_key, fresh);
-    assert!(transport.fetch_failure_cooling_down(&addon_key));
+    transport
+        .fetch_failures
+        .note(&addon_key, &transport.generation, fresh);
+    assert!(transport.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]
@@ -675,12 +702,12 @@ fn fetch_failure_for_url_respects_caller_generation() {
     // reinstall the cooldown the clear just wiped.
     transport.clear_cache();
     transport.note_fetch_failure_for_url(addon_url, stale);
-    assert!(!transport.fetch_failure_cooling_down(&addon_key));
+    assert!(!transport.fetch_failures.cooling_down(&addon_key));
 
     // A timeout at the current generation still records.
     let fresh = transport.generation.load(Ordering::SeqCst);
     transport.note_fetch_failure_for_url(addon_url, fresh);
-    assert!(transport.fetch_failure_cooling_down(&addon_key));
+    assert!(transport.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]
@@ -691,16 +718,22 @@ fn stale_fetch_success_cannot_clear_fresh_cooldown() {
 
     transport.clear_cache();
     let fresh = transport.generation.load(Ordering::SeqCst);
-    transport.note_fetch_failure_for_generation(&addon_key, fresh);
+    transport
+        .fetch_failures
+        .note(&addon_key, &transport.generation, fresh);
 
     // A fetch that started before the clear must not wipe the new
     // generation's cooldown on success.
-    transport.clear_fetch_failure_for_generation(&addon_key, stale);
-    assert!(transport.fetch_failure_cooling_down(&addon_key));
+    transport
+        .fetch_failures
+        .clear_for_success(&addon_key, &transport.generation, stale);
+    assert!(transport.fetch_failures.cooling_down(&addon_key));
 
     // A success at the current generation still clears it.
-    transport.clear_fetch_failure_for_generation(&addon_key, fresh);
-    assert!(!transport.fetch_failure_cooling_down(&addon_key));
+    transport
+        .fetch_failures
+        .clear_for_success(&addon_key, &transport.generation, fresh);
+    assert!(!transport.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]

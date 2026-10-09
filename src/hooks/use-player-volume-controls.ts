@@ -50,39 +50,40 @@ export function usePlayerVolumeControls({
 
   const handleVolumeChange = useCallback(
     async (newVol: number) => {
+      newVol = clamp(newVol, 0, 100);
       setVolume(newVol);
       volumeRef.current = newVol;
       scheduleVolumePersist({ playerVolume: newVol });
       scheduleMpvSet('volume', newVol);
       triggerOsd({ kind: 'volume', level: newVol });
-      if (newVol > 0 && isMuted) {
+      if (newVol > 0 && isMutedRef.current) {
         setIsMuted(false);
         await setMpvProperty('mute', false);
       }
     },
-    [isMuted, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd],
+    [scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd],
   );
 
   // Relative changes use the live ref so rapid inputs accumulate.
   const stepVolume = useCallback(
     async (delta: number) => {
       // Stepping down while muted must not unmute to a louder level.
-      if (isMuted && delta < 0) {
+      if (isMutedRef.current && delta < 0) {
         triggerOsd({ kind: 'volume', level: 0 });
         return;
       }
-      await handleVolumeChange(clamp(volumeRef.current + delta, 0, 100));
+      await handleVolumeChange(volumeRef.current + delta);
     },
-    [handleVolumeChange, isMuted, triggerOsd],
+    [handleVolumeChange, triggerOsd],
   );
 
   const toggleMute = useCallback(async () => {
     // At 0% the button already shows muted; pressing it means "sound back".
-    if (!isMuted && volumeRef.current === 0) {
+    if (!isMutedRef.current && volumeRef.current === 0) {
       await handleVolumeChange(50);
       return;
     }
-    const newMute = !isMuted;
+    const newMute = !isMutedRef.current;
     setIsMuted(newMute);
     if (newMute) {
       setVolume(0);
@@ -97,7 +98,7 @@ export function usePlayerVolumeControls({
       triggerOsd({ kind: 'volume', level: restored });
     }
     await setMpvProperty('mute', newMute);
-  }, [handleVolumeChange, isMuted, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd]);
+  }, [handleVolumeChange, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd]);
 
   return {
     volume,

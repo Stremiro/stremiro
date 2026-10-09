@@ -3,15 +3,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-/// Saturating `usize` widening for response-size budget comparisons. Budgets
-/// fit in `u64` on every target, so saturation only guards the abstract case.
+/// Saturating `usize` → `u64` widening for response-size budget comparisons.
 pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
 }
 
-/// Trim, char-bound, and empty-reject for untrusted provider fields. Single
-/// owner: addon manifests, catalog payloads, and resource extras are all
-/// bounded the same way.
+/// Trim, char-bound, and empty-reject for untrusted provider fields —
+/// manifests, catalog payloads, and resource extras share this bound.
 pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
     let trimmed: String = value.trim().chars().take(max_chars).collect();
     if trimmed.is_empty() {
@@ -21,9 +19,7 @@ pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
     }
 }
 
-/// `trim_to_max` for optional fields: an all-empty result drops to `None`
-/// rather than persisting whitespace. Shared by media normalization,
-/// watch-progress persistence, and track-language candidate bounding.
+/// `trim_to_max` for optional fields — an all-empty result becomes `None`.
 pub(crate) fn bound_optional(value: Option<String>, max_chars: usize) -> Option<String> {
     value.and_then(|value| {
         // Byte length bounds char count, so an already-trimmed short value
@@ -36,22 +32,19 @@ pub(crate) fn bound_optional(value: Option<String>, max_chars: usize) -> Option<
     })
 }
 
-/// Whitespace-only text counts as missing. Single owner for the trim-gate
-/// every optional identity field shares (lookup ids, stream keys, source
-/// and family identity, info hashes, snapshot names, truncated fields).
+/// Whitespace-only text counts as missing — the trim-gate every optional
+/// identity field shares.
 pub(crate) fn non_blank(value: &str) -> bool {
     !value.trim().is_empty()
 }
 
-/// `non_blank` for optional fields: keeps the original text when present
-/// and non-blank — the Option-shaped variant for `or_else` fallback chains.
+/// `non_blank` for optional fields, for `or_else` fallback chains.
 pub(crate) fn non_blank_opt(value: Option<&str>) -> Option<&str> {
     value.filter(|text| non_blank(text))
 }
 
-/// `/manifest.json` suffix shared by every addon-URL normalization path:
-/// manifest-URL building, resource-URL building, registry persistence, and
-/// transport pre-trim (case-insensitive, trailing-slash tolerant).
+/// `/manifest.json` suffix shared by every addon-URL normalization path
+/// (case-insensitive, trailing-slash tolerant).
 pub(crate) const MANIFEST_JSON_SUFFIX: &str = "/manifest.json";
 
 pub(crate) fn has_manifest_suffix(path: &str) -> bool {
@@ -71,8 +64,7 @@ pub(crate) fn strip_manifest_suffix(path: &str) -> &str {
     }
 }
 
-/// Dedup-push for ordered string sets (language candidates, stream query
-/// ids). Empty values never enter the set.
+/// Dedup-push for ordered string sets; empty values never enter.
 pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
     if value.is_empty() || values.iter().any(|existing| existing == value) {
         return;
@@ -81,20 +73,23 @@ pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
     values.push(value.to_string());
 }
 
-/// Poison-recovering mutex lock for every in-memory state lock (registry
-/// memo, addon cache, playback runtime): a panicking holder can never wedge
-/// later callers.
+/// Poison-recovering mutex lock for every in-memory state lock: a panicking
+/// holder can never wedge later callers.
 pub(crate) fn lock_or_recover<T>(mutex: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// How `read_bounded_body` failed. `TooLarge` is deterministic for the
-/// endpoint — a retry re-reads the same bytes and fails the same way —
-/// while `Read` is a mid-stream transport error a retry can legitimately
-/// recover from. Callers classify by variant instead of comparing message
-/// strings.
+/// Shared retry contract for addon-facing providers: one back-off retry
+/// before a transport failure earns `FetchFailureCooldown`. An attempt that
+/// burns the full request timeout skips the retry — the host had its chance.
+pub(crate) const FETCH_ATTEMPTS: u8 = 2;
+pub(crate) const FETCH_RETRY_BACKOFF: Duration = Duration::from_millis(800);
+
+/// How `read_bounded_body` failed: `TooLarge` is deterministic (a retry
+/// re-reads the same bytes), `Read` is a transient mid-stream error a retry
+/// can recover from. Callers classify by variant, not message text.
 pub(crate) enum BoundedBodyError {
     TooLarge(String),
     Read(String),
@@ -109,9 +104,8 @@ impl BoundedBodyError {
 }
 
 /// Read a response body with a content-length pre-check and a streaming cap
-/// so oversized untrusted payloads are rejected before allocation. Single
-/// owner for addon, manifest, and skip-times fetch paths. `too_large_error`
-/// receives the declared content length when the server sent one.
+/// so oversized untrusted payloads are rejected before allocation.
+/// `too_large_error` receives the declared content length when sent.
 pub(crate) async fn read_bounded_body(
     response: reqwest::Response,
     max_bytes: usize,
@@ -157,10 +151,9 @@ pub(crate) struct MediaItem {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub year: Option<String>,
-    /// Ranking/filter signal — internal only: `normalize_media_item`
-    /// re-derives it from `year` on every load, so it never needs to cross
-    /// the wire or persist.
-    #[serde(rename = "primaryYear", skip_serializing)]
+    /// Ranking signal re-derived from `year` on load — never serialized,
+    /// so an injected payload value is ignored.
+    #[serde(skip)]
     pub primary_year: Option<u32>,
     #[serde(rename = "displayYear", skip_serializing_if = "Option::is_none")]
     pub display_year: Option<String>,
@@ -170,7 +163,9 @@ pub(crate) struct MediaItem {
     pub type_: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+// Serialize-only: meta payloads are parsed field-by-field (`parse_meta_item`),
+// never serde-decoded, so untrusted input can't reach `release_date`.
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct MediaDetails {
     pub id: String,
     #[serde(rename = "imdbId", default, skip_serializing_if = "Option::is_none")]
@@ -186,9 +181,8 @@ pub(crate) struct MediaDetails {
     pub year: Option<String>,
     #[serde(rename = "displayYear", skip_serializing_if = "Option::is_none")]
     pub display_year: Option<String>,
-    /// `build_media_schedule` input only — consumed in-process, never read
-    /// webview-side.
-    #[serde(rename = "releaseDate", skip_serializing)]
+    /// `build_media_schedule` input only — never crosses IPC.
+    #[serde(skip_serializing)]
     pub release_date: Option<String>,
     #[serde(rename = "type")]
     pub type_: String,
@@ -206,22 +200,21 @@ pub(crate) struct MediaDetails {
     pub episodes: Option<Vec<Episode>>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct Trailer {
     /// Strict 11-char YouTube video id; the frontend builds the embed URL.
     pub id: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Serialize, Clone)]
 pub(crate) struct Episode {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     pub season: u32,
     pub episode: u32,
-    /// Raw addon air date; only `release_date` (its normalized local day)
-    /// crosses IPC.
-    #[serde(default, skip_serializing)]
+    /// Raw addon air date; only the normalized `release_date` crosses IPC.
+    #[serde(skip_serializing)]
     pub released: Option<String>,
     #[serde(rename = "releaseDate", skip_serializing_if = "Option::is_none")]
     pub release_date: Option<String>,
@@ -283,17 +276,16 @@ pub(crate) fn extract_primary_year(value: Option<&str>) -> Option<u32> {
     None
 }
 
-/// reqwest runs `rustls-no-provider` (one TLS stack shared with the updater):
-/// install the ring crypto provider before any `Client` is built. Idempotent —
-/// `install_default` errors when a provider is already set.
+/// reqwest runs `rustls-no-provider`: install the ring provider before any
+/// `Client` builds. Idempotent — `install_default` errors when already set.
 pub(crate) fn ensure_rustls_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
 pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Client {
     ensure_rustls_crypto_provider();
-    // Generic provider fetch identity — the addon transport keeps its own,
-    // newer Chrome version (see `AddonTransport::new`); don't merge them.
+    // Generic provider identity — the addon transport keeps its own Chrome
+    // version (`AddonTransport::new`); don't merge them.
     let mut builder = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .redirect(fetch_policy::ssrf_redirect_policy())

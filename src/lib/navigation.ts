@@ -23,9 +23,7 @@ function navigateTo(to: To | number, options?: NavigateOptions): boolean {
   return true;
 }
 
-export function navigateApp(to: To | number, options?: NavigateOptions): boolean {
-  return navigateTo(to, options);
-}
+export const navigateApp = navigateTo;
 
 // Deep links fall back to home when there is no previous app entry.
 export function navigateAppBack(): boolean {

@@ -23,6 +23,8 @@ const FALLBACK_SKIP_SEGMENT_STYLE = {
   badge: 'bg-orange-500 text-black',
 };
 
+const subscribeWhileHidden = () => () => {};
+
 function getSegmentStyle(type: string): { color: string; badge: string } {
   return SKIP_SEGMENT_STYLES[type] ?? FALLBACK_SKIP_SEGMENT_STYLE;
 }
@@ -87,6 +89,8 @@ const SkipNotches = memo(function SkipNotches({
 });
 
 interface PlayerProgressBarProps {
+  /** Hidden chrome keeps local state without receiving playback ticks. */
+  active?: boolean;
   duration: number;
   /** Playback clock — this bar is a tick subscriber; the player tree isn't. */
   clock: PlaybackClock;
@@ -99,6 +103,7 @@ interface PlayerProgressBarProps {
 }
 
 export function PlayerProgressBar({
+  active = true,
   duration,
   clock,
   bufferedClock,
@@ -117,30 +122,41 @@ export function PlayerProgressBar({
   // Preview state stays local: pointermove during a drag re-renders this bar
   // only, not the whole player page.
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
-  const currentTime = useSyncExternalStore(clock.subscribe, clock.getSnapshot);
+  const subscribeToTicks = active || seekPreviewTime !== null;
+  const currentTime = useSyncExternalStore(
+    subscribeToTicks ? clock.subscribe : subscribeWhileHidden,
+    clock.getSnapshot,
+  );
   const bufferedAheadSecs = useSyncExternalStore(
-    bufferedClock.subscribe,
+    subscribeToTicks ? bufferedClock.subscribe : subscribeWhileHidden,
     bufferedClock.getSnapshot,
   );
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const [hoverPct, setHoverPct] = useState<number | null>(null);
-  const [hoverSegment, setHoverSegment] = useState<SkipSegment | null>(null);
+  const hoverTime = hoverPct === null ? null : (hoverPct / 100) * duration;
+  const hoverSegment =
+    hoverTime === null
+      ? null
+      : (skipSegments.find((seg) => hoverTime >= seg.start_time && hoverTime <= seg.end_time) ??
+        null);
+
+  const getSeekFraction = useCallback(
+    (clientX: number, rectOverride?: DOMRect | null): number | null => {
+      const rect = rectOverride || progressBarRef.current?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || !Number.isFinite(duration) || duration <= 0) {
+        return null;
+      }
+      return clamp((clientX - rect.left) / rect.width, 0, 1);
+    },
+    [duration],
+  );
 
   const updateHoverAtClientX = useCallback(
     (clientX: number, rectOverride?: DOMRect | null) => {
-      const rect = rectOverride || progressBarRef.current?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || !Number.isFinite(duration) || duration <= 0) return;
-
-      const pct = clamp(((clientX - rect.left) / rect.width) * 100, 0, 100);
-      const hoverTime = (pct / 100) * duration;
-      const segment =
-        skipSegments.find((seg) => hoverTime >= seg.start_time && hoverTime <= seg.end_time) ||
-        null;
-
-      setHoverPct(pct);
-      setHoverSegment(segment);
+      const fraction = getSeekFraction(clientX, rectOverride);
+      if (fraction !== null) setHoverPct(fraction * 100);
     },
-    [duration, skipSegments],
+    [getSeekFraction],
   );
 
   const scheduleHoverUpdate = useCallback(
@@ -158,17 +174,6 @@ export function PlayerProgressBar({
     [updateHoverAtClientX],
   );
 
-  const getSeekFraction = useCallback(
-    (clientX: number, rectOverride?: DOMRect | null): number | null => {
-      const rect = rectOverride || progressBarRef.current?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || !Number.isFinite(duration) || duration <= 0) {
-        return null;
-      }
-      return clamp((clientX - rect.left) / rect.width, 0, 1);
-    },
-    [duration],
-  );
-
   const clearHoverState = useCallback(() => {
     // Cancel the queued frame too: a pending rAF would otherwise resurrect
     // hover state after the pointer already left.
@@ -178,7 +183,6 @@ export function PlayerProgressBar({
     }
     pendingHoverXRef.current = null;
     setHoverPct(null);
-    setHoverSegment(null);
   }, []);
 
   // Abort the active drag without seeking. Safe to call twice: the pointer
@@ -347,6 +351,8 @@ export function PlayerProgressBar({
   }, []);
 
   const canSeek = Number.isFinite(duration) && duration > 0;
+  const displayTime = seekPreviewTime ?? currentTime;
+  const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
 
   // Buffered band spans playhead → buffered end. Anchored to the real
   // position (never the drag preview) and clamped: fully-cached local-style
@@ -367,23 +373,19 @@ export function PlayerProgressBar({
             }}
             aria-pressed={showRemainingTime}
             aria-label={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
-            className='text-[13px] font-mono text-white/75 tabular-nums leading-none hover:text-white transition-colors duration-150 cursor-pointer select-none'
+            className='rounded-sm text-[13px] font-mono text-white/75 tabular-nums leading-none hover:text-white transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
             title={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
           >
             {showRemainingTime && duration > 0 ? (
               <>
                 <span className='text-white/40'>-</span>
-                {formatTime(Math.max(0, duration - (seekPreviewTime ?? currentTime)))}
-                <span className='text-white/30'> / </span>
-                {formatTime(duration)}
+                {formatTime(Math.max(0, duration - displayTime))}
               </>
             ) : (
-              <>
-                {formatTime(seekPreviewTime ?? currentTime)}
-                <span className='text-white/30'> / </span>
-                {formatTime(duration)}
-              </>
+              formatTime(displayTime)
             )}
+            <span className='text-white/30'> / </span>
+            {formatTime(duration)}
           </button>
         </div>
       </div>
@@ -398,10 +400,8 @@ export function PlayerProgressBar({
         aria-disabled={canSeek ? undefined : true}
         aria-valuemin={0}
         aria-valuemax={canSeek ? duration : 0}
-        aria-valuenow={
-          canSeek ? Math.max(0, Math.min(duration, seekPreviewTime ?? currentTime)) : 0
-        }
-        aria-valuetext={formatTime(seekPreviewTime ?? currentTime)}
+        aria-valuenow={canSeek ? clamp(displayTime, 0, duration) : 0}
+        aria-valuetext={formatTime(displayTime)}
         className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
@@ -436,29 +436,23 @@ export function PlayerProgressBar({
         <div className='relative w-full h-2 group-hover/bar:h-[10px] transition-[height] duration-150 rounded-[3px] overflow-hidden bg-white/[0.16]'>
           {hoverPct !== null && duration > 0 && (
             <div
-              className='absolute inset-y-0 left-0 bg-white/25 pointer-events-none'
-              style={{ width: `${hoverPct}%` }}
+              className='absolute inset-0 origin-left bg-white/25 pointer-events-none'
+              style={{ transform: `scaleX(${hoverPct / 100})` }}
             />
           )}
 
           {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
             <div
-              className='absolute inset-y-0 bg-white/[0.28] pointer-events-none'
+              className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
               style={{
-                left: `${Math.min(100, (currentTime / duration) * 100)}%`,
-                width: `${((bufferedEndSecs - currentTime) / duration) * 100}%`,
+                transform: `translateX(${Math.min(100, (currentTime / duration) * 100)}%) scaleX(${(bufferedEndSecs - currentTime) / duration})`,
               }}
             />
           )}
 
           <div
-            className='absolute inset-y-0 left-0 bg-white pointer-events-none z-0'
-            style={{
-              width:
-                duration > 0
-                  ? `${Math.min(100, ((seekPreviewTime ?? currentTime) / duration) * 100)}%`
-                  : '0%',
-            }}
+            className='absolute inset-0 origin-left bg-white pointer-events-none z-0'
+            style={{ transform: `scaleX(${progressPct / 100})` }}
           />
 
           <SkipNotches
@@ -469,12 +463,10 @@ export function PlayerProgressBar({
 
           {/* Playhead nub sits above slices so position stays readable inside
               a segment band. */}
-          {duration > 0 && (seekPreviewTime ?? currentTime) > 0 && (
+          {duration > 0 && displayTime > 0 && (
             <div
               className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'
-              style={{
-                left: `${Math.min(100, ((seekPreviewTime ?? currentTime) / duration) * 100)}%`,
-              }}
+              style={{ left: `${progressPct}%` }}
             />
           )}
         </div>

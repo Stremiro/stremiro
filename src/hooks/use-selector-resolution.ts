@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
@@ -79,11 +79,13 @@ export function useSelectorResolution({
     type: streamMediaType,
   } = target;
   const navigate = useNavigate();
-  const [activeResolveKey, setActiveResolveKey] = useState<string | null>(null);
-  const [activeResolveSessionKey, setActiveResolveSessionKey] = useState<string | null>(null);
-  const [activeResolveFeedback, setActiveResolveFeedback] = useState<ActiveResolveFeedback | null>(
-    null,
-  );
+  // Key/session/feedback always move as one unit — a single nullable state
+  // can't tear mid-update the way three sibling states could.
+  const [activeResolve, setActiveResolve] = useState<{
+    feedback: ActiveResolveFeedback;
+    key: string;
+    sessionKey: string;
+  } | null>(null);
   // Synchronous in-flight guard: `isPending` is render-time state — two
   // selects in the same tick would both spawn a resolve IPC.
   const resolveInFlightRef = useRef(false);
@@ -123,13 +125,13 @@ export function useSelectorResolution({
     [mountedRef],
   );
 
-  const isActiveResolveInCurrentSession = activeResolveSessionKey === selectorSessionKey;
+  // The selector only exposes the in-flight resolve for its own session — a
+  // resolve started before a session switch stays hidden until invalidated.
+  const sessionResolve = activeResolve?.sessionKey === selectorSessionKey ? activeResolve : null;
 
   const resetActiveResolveState = useCallback(() => {
     resolveInFlightRef.current = false;
-    setActiveResolveSessionKey(null);
-    setActiveResolveKey(null);
-    setActiveResolveFeedback(null);
+    setActiveResolve(null);
   }, []);
 
   // Cancel affordance: invalidate the attempt so its late winner can't
@@ -144,15 +146,11 @@ export function useSelectorResolution({
     onClose();
   }, [cancelResolve, onClose]);
 
-  const invalidateResolveAttempt = useEffectEvent(() => {
-    cancelResolve();
-  });
-
   // Every open/session transition invalidates outstanding attempts — a stale
   // resolve can never act on the new session.
   useEffect(() => {
-    invalidateResolveAttempt();
-  }, [open, selectorSessionKey]);
+    cancelResolve();
+  }, [cancelResolve, open, selectorSessionKey]);
 
   const resolveStream = async (attempt: SelectorResolveAttempt) => {
     const { stream } = attempt;
@@ -268,13 +266,7 @@ export function useSelectorResolution({
 
   // Derived from session UI state: a cancelled resolve may still be settling,
   // but the user must be able to pick again.
-  const isAnyResolving = isActiveResolveInCurrentSession && activeResolveKey !== null;
-
-  const handleRequestClose = useCallback(() => {
-    // A slow `resolve_best_stream` probe must never freeze the dialog: closing
-    // cancels the UI wait and the attempt check ignores the late winner.
-    closeSelector();
-  }, [closeSelector]);
+  const isAnyResolving = sessionResolve !== null;
 
   const handleSelectStream = useCallback(
     (stream: AddonStream, episodeOverride?: SelectorEpisodeOverride) => {
@@ -304,19 +296,17 @@ export function useSelectorResolution({
         episodeOverride,
       };
       resolveInFlightRef.current = true;
-      setActiveResolveSessionKey(selectorSessionKey);
-      setActiveResolveKey(stream.streamKey);
-      setActiveResolveFeedback(feedback);
+      setActiveResolve({ feedback, key: stream.streamKey, sessionKey: selectorSessionKey });
       void resolveStreamRef.current?.(attempt);
     },
     [selectorSessionKey],
   );
 
   return {
-    activeResolveFeedback: isActiveResolveInCurrentSession ? activeResolveFeedback : null,
-    activeResolveKey: isActiveResolveInCurrentSession ? activeResolveKey : null,
+    activeResolveFeedback: sessionResolve?.feedback ?? null,
+    activeResolveKey: sessionResolve?.key ?? null,
     cancelResolve,
-    handleRequestClose,
+    handleRequestClose: closeSelector,
     handleSelectStream,
     isAnyResolving,
   };

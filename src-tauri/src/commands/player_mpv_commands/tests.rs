@@ -183,6 +183,27 @@ fn mpv_command_targets_are_gated() {
     assert!(validate_mpv_command("sub-add", &[json!("\\\\nas\\share\\s.srt")]).is_err());
     assert!(validate_mpv_command("loadfile", &[json!("magnet:?xt=urn:btih:x")]).is_err());
 
+    // Direct IPC must enforce the same subtitle policy as addon ingestion.
+    for target in [
+        "https://",
+        "https://user:pass@cdn.example/sub.srt",
+        "http://127.0.0.1/sub.srt",
+        "http://2130706433/sub.srt",
+        "http://192.168.1.1/sub.srt",
+        "http://169.254.169.254/sub.srt",
+        "http://[::1]/sub.srt",
+    ] {
+        assert!(
+            validate_mpv_command("sub-add", &[json!(target)]).is_err(),
+            "{target}"
+        );
+    }
+    assert!(
+        validate_mpv_command("sub-add", &[json!("https://cdn.example/sub.srt?token=x")]).is_ok()
+    );
+    // Resolved playback can use the app's local streaming service.
+    assert!(validate_mpv_command("loadfile", &[json!("http://127.0.0.1:11470/video")]).is_ok());
+
     // set/cycle only reach allowlisted properties (`sub` is mpv's sid alias —
     // the subtitle cycle hotkey depends on it).
     assert!(validate_mpv_command("set", &[json!("script"), json!("evil.lua")]).is_err());
@@ -198,4 +219,107 @@ fn mpv_command_rejects_non_scalar_or_oversized_args() {
     assert!(validate_mpv_command("seek", &[json!("x".repeat(MPV_ARG_MAX_CHARS + 1))]).is_err());
     let too_many = vec![json!("0"); MPV_COMMAND_MAX_ARGS + 1];
     assert!(validate_mpv_command("seek", &too_many).is_err());
+}
+
+#[test]
+fn property_batches_validate_every_entry_and_bound_native_work() {
+    let properties: Vec<(String, Value)> = serde_json::from_value(json!([
+        ["sub-delay", 0.2],
+        ["sub-pos", 90],
+        ["sub-scale", 1.1],
+        ["http-header-fields", ""]
+    ]))
+    .unwrap();
+    assert!(validate_mpv_properties(&properties).is_ok());
+    assert!(validate_mpv_properties(&[]).is_ok());
+    for invalid in [
+        ("script", json!("evil.lua")),
+        ("volume", json!({"nested": 80})),
+        ("sub-delay", Value::Null),
+        ("aid", json!("x".repeat(MPV_ARG_MAX_CHARS + 1))),
+    ] {
+        let mut batch = properties.clone();
+        batch.push((invalid.0.to_string(), invalid.1));
+        assert!(validate_mpv_properties(&batch).is_err());
+    }
+    assert!(validate_mpv_properties(&vec![
+        ("volume".to_string(), json!(80));
+        MPV_SETTABLE_PROPERTIES.len() + 1
+    ])
+    .is_err());
+}
+
+#[test]
+fn property_batch_preserves_order_and_continues_after_native_failure() {
+    let properties = vec![
+        ("sub-delay".to_string(), json!(0.2)),
+        ("sub-pos".to_string(), json!(90)),
+        ("http-header-fields".to_string(), json!("")),
+    ];
+    for fail in [false, true] {
+        let mut calls = Vec::new();
+        let result = apply_mpv_properties(&properties, |name, value| {
+            calls.push((name.to_string(), value.clone()));
+            if fail && name != "http-header-fields" {
+                Err(name.to_string())
+            } else {
+                Ok(())
+            }
+        });
+        assert_eq!(calls, properties);
+        assert_eq!(
+            result,
+            if fail {
+                Err("sub-delay".to_string())
+            } else {
+                Ok(())
+            }
+        );
+    }
+}
+
+#[test]
+fn encoded_addon_headers_fit_property_writes_without_widening_other_arguments() {
+    use crate::providers::addons::BehaviorHints;
+
+    let hints = BehaviorHints {
+        proxy_headers: Some(json!({"request": {
+            "Authorization": "a".repeat(3000),
+            "Cookie": "b".repeat(2000),
+        }})),
+        ..Default::default()
+    };
+    let fields = hints
+        .proxy_request_headers()
+        .into_iter()
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join(",");
+    assert!(fields.len() > MPV_ARG_MAX_CHARS);
+    for value in [json!(fields), json!("")] {
+        assert!(
+            validate_mpv_properties(&[("http-header-fields".to_string(), value.clone())]).is_ok()
+        );
+        for verb in ["set", "cycle"] {
+            assert!(
+                validate_mpv_command(verb, &[json!("http-header-fields"), value.clone()]).is_ok()
+            );
+        }
+    }
+    for value in [
+        json!("x".repeat(2 * crate::providers::addons::MAX_PROXY_HEADERS_BYTES + 1)),
+        json!("Authorization: secret\r\nX-Injected: value"),
+        json!("Cookie: secret\nX-Injected: value"),
+        json!(80),
+    ] {
+        assert!(
+            validate_mpv_properties(&[("http-header-fields".to_string(), value.clone())]).is_err()
+        );
+        for verb in ["set", "cycle"] {
+            assert!(
+                validate_mpv_command(verb, &[json!("http-header-fields"), value.clone()]).is_err()
+            );
+        }
+    }
+    assert!(validate_mpv_command("seek", &[json!(fields)]).is_err());
 }

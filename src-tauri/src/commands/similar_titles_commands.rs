@@ -308,6 +308,7 @@ mod tests {
             Ok(SearchCatalogPage {
                 items,
                 next_skip: Some(100),
+                all_cursors: None,
             })
         };
         assert!(

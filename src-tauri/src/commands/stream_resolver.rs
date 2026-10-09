@@ -5,12 +5,10 @@ use serde::Serialize;
 use std::sync::LazyLock;
 use std::time::Duration;
 
-/// Shared HTTP client for direct-stream probes. Re-used across calls to
-/// avoid per-request TLS handshake overhead. Redirect following is disabled
-/// here: `resolve_final_direct_url` walks hops manually so addon
-/// `proxyHeaders` secrets are sent on the first hop only and never forwarded
-/// cross-origin (reqwest strips standard auth headers, but a custom-named
-/// bearer would otherwise follow a `302` to an attacker host).
+/// Shared probe client (avoids per-request TLS handshakes). Redirects are
+/// disabled: `resolve_final_direct_url` walks hops manually so addon
+/// `proxyHeaders` secrets go to the first hop only — a custom-named bearer
+/// must never follow a `302` to an attacker host.
 static REDIRECT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     crate::providers::ensure_rustls_crypto_provider();
     reqwest::Client::builder()
@@ -113,18 +111,16 @@ impl From<String> for ProbeError {
     }
 }
 
-/// Probing is advisory: these statuses mean the server refuses the probe
-/// itself (auth-gated, HEAD-disabled, or range-unsupported) rather than
-/// proving the stream is dead. Pass the original URL through to libmpv,
-/// which retries with required headers and behavior hints. Every other
-/// failure stays hard so dead links still fail over to the next candidate.
+/// These statuses mean the server refuses the probe itself (auth-gated,
+/// HEAD-disabled, range-unsupported), not that the stream is dead — pass the
+/// URL through to libmpv. Every other failure stays hard so dead links fail
+/// over to the next candidate.
 fn is_advisory_probe_status(status: u16) -> bool {
     matches!(status, 401 | 403 | 407 | 405 | 501 | 416)
 }
 
-/// Build the outbound header map for header-gated CDN playback. Extraction
-/// already bounds entries; parsing rejects them again here so a malformed
-/// hint can never break request construction. Values are never logged.
+/// Outbound header map for header-gated CDN playback. Entries are already
+/// bounded; parse failures degrade to skipped entries. Never logged.
 fn proxy_header_map(headers: &[(String, String)]) -> reqwest::header::HeaderMap {
     let mut map = reqwest::header::HeaderMap::new();
     for (name, value) in headers {
@@ -149,23 +145,18 @@ enum ProbeLanding {
     DeadEnd,
 }
 
-/// Walk one redirect chain hop-by-hop, returning the landing outcome.
-/// The first request (issued by the caller with proxy headers) already
-/// produced `response`; each further hop is re-issued here, re-attaching
-/// proxy secrets only when the hop stays on the first hop's origin and going
-/// headerless cross-origin, so a `302` to an attacker host cannot exfiltrate
-/// addon bearer tokens. Every hop passes `redirect_target_allowed`;
-/// violations fail closed.
+/// Walk one redirect chain hop-by-hop. Each further hop re-attaches proxy
+/// secrets only when it stays on the first hop's origin (a `302` to an
+/// attacker host must not exfiltrate bearer tokens). Every hop passes
+/// `redirect_target_allowed`; violations fail closed.
 async fn follow_redirect_hop(
     initial: &reqwest::Url,
     response: reqwest::Response,
     headers: &reqwest::header::HeaderMap,
 ) -> Result<ProbeLanding, String> {
     let client = &*REDIRECT_CLIENT;
-    // `Policy::none` surfaces 3xx as a plain response: resolve the Location
-    // manually so each hop can be gated before it is requested. `base` tracks
-    // the last requested URL so relative `Location` values resolve against
-    // the hop that issued them, not the first hop.
+    // Resolve `Location` manually so each hop is gated before it is
+    // requested; `base` tracks the hop that issued it for relative targets.
     let mut base = response.url().clone();
     let mut current = response;
     let mut hops = 0;
@@ -177,9 +168,8 @@ async fn follow_redirect_hop(
             }
             return Ok(ProbeLanding::TerminalStatus(status.as_u16()));
         }
-        // Still redirecting after MAX_REDIRECT_HOPS fetches is the policy's
-        // `previous().len() > MAX_REDIRECT_HOPS` bound — report it without
-        // paying for a throwaway hop whose response would go unexamined.
+        // Matches the policy's `previous().len() > MAX_REDIRECT_HOPS` bound —
+        // report without paying for a throwaway hop.
         if hops == MAX_REDIRECT_HOPS {
             return Err("Direct stream exceeded the redirect limit.".to_string());
         }
@@ -212,9 +202,8 @@ async fn follow_redirect_hop(
         })?;
         base = next_url;
         hops += 1;
-        // No recheck here: `next_url` already passed `redirect_target_allowed`.
-        // The loop re-examines the new response, so a chain landing exactly on
-        // the last allowed hop is honored, not reported as over-limit.
+        // No recheck: `next_url` already passed `redirect_target_allowed`, so
+        // a chain landing exactly on the last allowed hop is honored.
     }
 }
 
@@ -222,26 +211,21 @@ async fn resolve_final_direct_url(
     direct_url: &str,
     request_headers: &[(String, String)],
 ) -> Result<String, ProbeError> {
-    // Validate before any network probe: the shared client would otherwise
-    // issue a HEAD/GET to a private/userinfo target before the landed-URL
-    // recheck runs. Same gate as subtitles/external URLs.
+    // Gate before any network probe — same check as subtitles/external URLs.
     if !crate::providers::addon_resource::is_fetchable_http_url(direct_url) {
         return Err("Direct stream URL is blocked by fetch policy."
             .to_string()
             .into());
     }
     let client = &*REDIRECT_CLIENT;
-    // Header-gated CDNs answer probes only with their required headers: send
-    // the addon's bounded `proxyHeaders.request` entries so candidate
-    // selection reflects what libmpv will receive. Servers ignore unknown
-    // headers, so this degrades safely for plain streams.
+    // Header-gated CDNs answer probes only with their required headers — the
+    // same entries libmpv will send. Unknown headers degrade safely.
     let headers = proxy_header_map(request_headers);
-    // `resolve_stream_inner` owns the "Direct stream validation failed"
-    // prefix — inner errors carry the bare cause.
+    // `resolve_stream_inner` owns the "validation failed" prefix — inner
+    // errors carry the bare cause.
     let initial = reqwest::Url::parse(direct_url).map_err(|_| "invalid source URL.".to_string())?;
-    // Hop-by-hop HEAD walk (no auto-follow; see `follow_redirect_hop` for the
-    // gating). A landed or terminal chain is authoritative — only a HEAD
-    // transport failure falls through to the range probe below.
+    // Hop-by-hop HEAD walk. A landed/terminal chain is authoritative — only a
+    // HEAD transport failure falls through to the range probe below.
     let head_error = match client
         .head(direct_url)
         .headers(headers.clone())
@@ -266,8 +250,8 @@ async fn resolve_final_direct_url(
         Ok(resp) if resp.status().is_success() => {
             return Ok(initial.to_string());
         }
-        // A HEAD-only advisory (auth/405/416) or hard status: the range GET
-        // below still runs authoritatively, but its error context starts here.
+        // HEAD-only advisory or hard status: the range GET below still runs
+        // authoritatively, but its error context starts here.
         Ok(resp) => ProbeError::status(
             format!("HEAD probe returned HTTP {}", resp.status().as_u16()),
             resp.status().as_u16(),
@@ -293,10 +277,8 @@ async fn resolve_final_direct_url(
         Ok(resp) if resp.status().is_redirection() => {
             match follow_redirect_hop(&initial, resp, &headers).await? {
                 ProbeLanding::Landed(landed) => Ok(landed),
-                // The range GET is authoritative for advisory pass-through:
-                // a chain terminating at an auth/HEAD/range refusal passes
-                // the original URL to libmpv like a direct advisory status;
-                // anything else reports both contexts so dead links fail over.
+                // Advisory terminal status: pass the original URL to libmpv
+                // like a direct advisory; hard failures report both contexts.
                 ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
                     Ok(direct_url.to_string())
                 }
@@ -311,15 +293,9 @@ async fn resolve_final_direct_url(
             }
         }
         Ok(resp) if resp.status().is_success() => Ok(initial.to_string()),
-        // The range GET is authoritative: it exercises the real resource
-        // path, so only its own advisory statuses pass through. A HEAD-only
-        // advisory never overrides a hard GET failure; dead links still
-        // fail over to the next candidate.
-        Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => {
-            // Valid header-dependent, HEAD-incompatible, or
-            // range-incompatible direct stream: let libmpv attempt it.
-            Ok(direct_url.to_string())
-        }
+        // Only the range GET's own advisory statuses pass through — a
+        // HEAD-only advisory never overrides a hard GET failure.
+        Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => Ok(direct_url.to_string()),
         Ok(resp) => {
             let status = resp.status().as_u16();
             Err(ProbeError::status(
@@ -339,8 +315,7 @@ async fn resolve_final_direct_url(
 }
 
 fn format_mpv_http_header_fields(headers: &[(String, String)]) -> String {
-    // Ingress already trims, validates, and bounds these headers. mpv's
-    // string-list uses comma separators and backslash escaping.
+    // mpv's string-list uses comma separators and backslash escaping.
     let escape = |value: &str| value.replace('\\', "\\\\").replace(',', "\\,");
     headers
         .iter()

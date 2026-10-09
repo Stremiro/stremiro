@@ -43,7 +43,7 @@ export function useOptimisticSeek({
   // newer seek primed (or the gate already cleared) must not roll the clock
   // back over the fresher position.
   const seekGenerationRef = useRef(0);
-  // Separate announcement epoch, bumped on prime and stream swap only: a seek
+  // Separate announcement epoch, bumped on prime and session reset: a seek
   // resolving out of order must not announce an older target, but a settle
   // tick must NOT bump it — a late ack still earned the announcement.
   const seekAnnounceEpochRef = useRef(0);
@@ -60,6 +60,10 @@ export function useOptimisticSeek({
     clearOptimisticSeek();
     seekAnnounceEpochRef.current += 1;
     seekStreakRef.current = null;
+    return () => {
+      clearOptimisticSeek();
+      seekAnnounceEpochRef.current += 1;
+    };
   }, [resetKey, clearOptimisticSeek]);
 
   /** time-pos gate for the mpv property observer: returns true while the tick

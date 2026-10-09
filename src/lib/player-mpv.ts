@@ -49,6 +49,12 @@ export function setMpvProperty(name: string, value: string | number | boolean): 
   return invoke('player_mpv_set_property', { name, value });
 }
 
+export function setMpvProperties(
+  properties: readonly (readonly [string, string | number | boolean])[],
+): Promise<void> {
+  return invoke('player_mpv_set_properties', { properties });
+}
+
 /** `cycle` steps aid/sid to the next track — the hotkey path's switch write.
     Resolves after mpv applies the selection, so a follow-up read reports the
     landed id. */

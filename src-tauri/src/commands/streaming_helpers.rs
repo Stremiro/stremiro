@@ -8,8 +8,8 @@ use crate::providers::addons::{
 use crate::providers::{non_blank, push_unique};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
-use std::sync::LazyLock;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{LazyLock, Mutex, PoisonError};
 
 static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
@@ -554,8 +554,36 @@ fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> 
         name.make_ascii_lowercase();
     }
     headers.sort();
-    let encoded = serde_json::to_vec(&(source_id, content_key, direct_url, headers)).ok()?;
-    Some(format!("s:{:x}", Sha256::digest(encoded)))
+    let mut hasher = Sha256::new();
+    serde_json::to_writer(&mut hasher, &(source_id, content_key, direct_url, headers)).ok()?;
+    Some(format!("s:{:x}", hasher.finalize()))
+}
+
+/// Content identity (`stream_dedup_key`) of recently resolved winners, by
+/// prepared key. Prepared keys differ per addon instance and transport, so
+/// cross-device comparison (watch party source matching) needs the identity
+/// a different addon serving the same file would share. Opaque keys only.
+static RESOLVED_CONTENT_KEYS: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
+const RESOLVED_CONTENT_KEYS_MAX: usize = 64;
+
+pub(crate) fn remember_resolved_content_key(stream_key: &str, content_key: String) {
+    let mut keys = RESOLVED_CONTENT_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    keys.retain(|(key, _)| key != stream_key);
+    if keys.len() >= RESOLVED_CONTENT_KEYS_MAX {
+        keys.pop_front();
+    }
+    keys.push_back((stream_key.to_string(), content_key));
+}
+
+pub(crate) fn resolved_content_key(stream_key: &str) -> Option<String> {
+    RESOLVED_CONTENT_KEYS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .iter()
+        .find(|(key, _)| key == stream_key)
+        .map(|(_, content_key)| content_key.clone())
 }
 
 /// Prepared selector key (`s:{sha256}`) — the form `prepare_addon_streams`
@@ -578,6 +606,17 @@ pub(crate) fn is_legacy_content_key(key: &str) -> bool {
 /// consumers can't drift.
 pub(crate) fn is_persistable_stream_key(key: &str) -> bool {
     is_prepared_stream_key(key) || is_legacy_content_key(key)
+}
+
+/// Bounded per-source error aggregation shared by the fan-out merges: keep
+/// the first few failures, drop the rest — one owner so every caller joins
+/// and caps identically.
+const MAX_SUMMARIZED_ERRORS: usize = 3;
+
+pub(crate) fn push_bounded_error(errors: &mut Vec<String>, error: impl Into<String>) {
+    if errors.len() < MAX_SUMMARIZED_ERRORS {
+        errors.push(error.into());
+    }
 }
 
 pub(crate) fn merge_unique_streams(

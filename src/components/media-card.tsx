@@ -17,6 +17,7 @@ import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
 import { RemoteImage } from '@/components/remote-image';
+import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import {
   useIsItemInLibrary,
@@ -48,6 +49,7 @@ import {
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clamp,
+  clearTimer,
   cn,
   isHttpUrl,
   mediaTypeLabel,
@@ -75,26 +77,23 @@ function getRatingStyle(score: number | null) {
   return { text: 'text-red-200/90', bg: 'bg-red-500/[0.08]', border: 'border-red-500/20' };
 }
 
-// Dwell before the card expands (and any details fetch fires): sweeping the
-// cursor across a row expands nothing; only an intentional hover pays for the
-// details/lists/history requests. The chain delay keeps card-to-card hops
-// fast.
+// Dwell gates addon requests; recently collapsed cards allow faster rail hops.
 const HOVER_EXPAND_DELAY_MS = 180;
 const HOVER_CHAIN_DELAY_MS = 70;
 const HOVER_CHAIN_WINDOW_MS = 1200;
 let lastCardCollapseAt = 0;
 const MIN_PROGRESS_BAR_PERCENT = 2;
-// Fixed popout width — applied as an inline style so the centering margin
-// can be derived from it.
 const POPOUT_WIDTH_PX = 270;
 
 // Resting slot width shared by home rails and all browse grids, so cards
 // render pixel-identical everywhere before hover.
 export const MEDIA_CARD_SLOT_CLASS_NAME = 'w-[170px] md:w-[190px]';
 
-// Title/subtitle block under the 2:3 poster; virtualized grids use it to
-// estimate row height before the first measurement pass.
-export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 68;
+// Includes the 6px top margin; reserve room for status before its query resolves.
+export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 70;
+const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-16 px-0.5 space-y-1';
+const CARD_ICON_BUTTON_CLASS_NAME =
+  'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95';
 
 // Shared rail callbacks for plain MediaCard rows (media-row, similar titles):
 // stable identities so HorizontalMediaRail's key-set memo doesn't re-run on
@@ -117,17 +116,9 @@ interface MediaCardProps {
   subtitle?: string;
 }
 
-// Resume progress: no knob, stays quiet under the artwork.
 function ResumeProgressBar({ progress }: { progress?: number }) {
   if (progress === undefined || progress < MIN_PROGRESS_BAR_PERCENT) return null;
-  return (
-    <div className='absolute bottom-0 left-0 right-0 z-20 h-[5px] bg-white/[0.14]'>
-      <div
-        className='h-full rounded-r-full bg-(--accent-prog) shadow-[0_0_6px_rgb(var(--accent-prog-rgb)/0.45)]'
-        style={{ width: `${progress}%` }}
-      />
-    </div>
-  );
+  return <WatchProgressStrip percent={progress} className='z-20 h-1' />;
 }
 
 interface MediaCardPosterProps {
@@ -154,7 +145,6 @@ function MediaCardPoster({
   subtitle,
 }: MediaCardPosterProps) {
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
-  // Resume cards play on click — say so, with the episode and time left.
   const anchorLabel = onPlay
     ? [`Resume ${item.title}`, subtitle, metaLine].filter(Boolean).join(', ')
     : item.title;
@@ -166,6 +156,7 @@ function MediaCardPoster({
       <a
         href={detailsPath}
         aria-label={anchorLabel}
+        aria-busy={isPlayPending || undefined}
         className='block relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
         onClick={(event) => {
           onPlay?.(event);
@@ -180,7 +171,7 @@ function MediaCardPoster({
           <div className='relative aspect-2/3 rounded-lg overflow-hidden bg-zinc-900'>
             <div
               aria-hidden='true'
-              className='absolute inset-0 flex items-center justify-center bg-linear-to-br from-zinc-900 to-zinc-950 px-4 text-center'
+              className='absolute inset-0 flex items-center justify-center px-4 text-center'
             >
               <span
                 dir='auto'
@@ -200,7 +191,7 @@ function MediaCardPoster({
 
             {subtitle && (
               <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
-                <div className='rounded-md border border-white/10 bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold uppercase tracking-[0.08em] text-white/85 backdrop-blur-xs'>
+                <div className='rounded-md border border-white/10 bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold uppercase tracking-[0.08em] text-white/85'>
                   {subtitle}
                 </div>
               </div>
@@ -208,8 +199,6 @@ function MediaCardPoster({
 
             <ResumeProgressBar progress={progress} />
 
-            {/* Resume lookups can pay a live addon fetch — the spinner shows
-                the click landed. */}
             {isPlayPending && (
               <div className='absolute inset-0 z-20 flex items-center justify-center bg-black/35'>
                 <Loader2 className='h-5 w-5 animate-spin text-white/85' />
@@ -219,7 +208,7 @@ function MediaCardPoster({
         </div>
       </a>
 
-      <div className='mt-1.5 px-0.5 space-y-1'>
+      <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
         <p
           dir='auto'
           title={item.title}
@@ -228,7 +217,10 @@ function MediaCardPoster({
           {item.title}
         </p>
         {metaLine ? (
-          <p className='truncate text-[11px] font-normal leading-none tabular-nums text-zinc-500'>
+          <p
+            title={metaLine}
+            className='truncate text-[11px] font-normal leading-none tabular-nums text-zinc-400'
+          >
             {metaLine}
           </p>
         ) : item.displayYear ? (
@@ -359,19 +351,11 @@ function MediaCardOverlay({
   const ratingScore = normalizeRating(details?.rating ?? null);
   const ratingStyle = getRatingStyle(ratingScore);
 
-  // YouTube draws title/channel chrome before play, on pause, and on end.
-  // The preview stays hidden until PLAYING, then auto-resumes so that chrome
-  // never paints. No playlist loop — it summons prev/next overlays.
   const trailerVideoId = details?.trailers?.[0]?.id;
-  // Opt-out pref + OS reduced-motion both keep the embed from ever mounting —
-  // reduced-motion can't reach inside a YouTube iframe, so the only fix is
-  // not creating it. Skipping the arm timer also avoids the iframe's whole
-  // script+socket cost.
+  // Reduced-motion CSS cannot stop playback inside an iframe.
   const trailersEnabled = useTrailerPreviews() && !prefersReducedMotion();
 
-  // The iframe waits out a second, longer dwell than the overlay: sweeping
-  // the cursor across a row mounts/unmounts overlays quickly, and a YouTube
-  // player per card fans out iframe + script + socket work.
+  // A second dwell avoids mounting expensive embeds during quick card hops.
   const [trailerArmed, setTrailerArmed] = useState(false);
   useEffect(() => {
     if (!trailerVideoId || !trailersEnabled) return;
@@ -387,8 +371,6 @@ function MediaCardOverlay({
       ? `Resume ${subtitle}`
       : 'Resume'
     : primaryPlayback.primaryActionLabel;
-  // `onPlay` callers (resume/history cards) resolve a playback plan before
-  // navigating — surface that wait on the same spinner the resolve path uses.
   const isPrimaryPending = isPlayPending || primaryPlayback.isResolvingPrimaryAction;
 
   const handlePrimaryAction = (e: ReactMouseEvent) => {
@@ -448,7 +430,7 @@ function MediaCardOverlay({
               type='button'
               aria-label={`Remove ${item.title} from history`}
               title='Remove from history'
-              className='absolute right-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-black/55 text-red-400 backdrop-blur-xs transition-colors duration-100 hover:bg-black/75 hover:text-red-300'
+              className='absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-lg bg-black/55 text-zinc-300 backdrop-blur-xs transition-colors duration-150 hover:bg-black/75 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
               onClick={(e) => {
                 e.preventDefault();
                 e.stopPropagation();
@@ -469,7 +451,7 @@ function MediaCardOverlay({
                   type='button'
                   aria-label='Back to actions'
                   title='Back'
-                  className='h-5 w-5 rounded flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition-colors shrink-0'
+                  className='h-8 w-8 rounded-md flex items-center justify-center text-zinc-400 hover:text-white hover:bg-white/10 transition-colors duration-150 shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
                   onClick={onToggleListPicker}
                 >
                   <ChevronLeft className='h-3.5 w-3.5' />
@@ -485,7 +467,9 @@ function MediaCardOverlay({
                       <button
                         key={list.id}
                         type='button'
-                        className='w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors text-left'
+                        title={list.name}
+                        aria-pressed={isInThisList}
+                        className='w-full min-h-9 flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors duration-150 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
@@ -517,7 +501,7 @@ function MediaCardOverlay({
               <div className='pt-1 border-t border-white/[0.06]'>
                 <button
                   type='button'
-                  className='w-full flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors text-zinc-400 hover:text-white'
+                  className='w-full min-h-9 flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors duration-150 text-zinc-400 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
                   onClick={(e) => {
                     e.preventDefault();
                     e.stopPropagation();
@@ -547,6 +531,7 @@ function MediaCardOverlay({
                       the details route so there is always a non-play path. */}
                   <a
                     href={detailsPath}
+                    title={item.title}
                     className='transition-colors hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 rounded-xs'
                     onClick={(event) =>
                       navigateOnAnchorClick(event, detailsPath, { state: { from } })
@@ -569,12 +554,12 @@ function MediaCardOverlay({
                 )}
               </div>
 
-              {/* Compact action row — h-8 primary next to the icon pair. */}
               <div className='flex items-center gap-1.5'>
                 <button
                   type='button'
                   data-media-card-primary
-                  className='accent-lattice flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/25 active:scale-[0.98] aria-disabled:cursor-wait aria-disabled:opacity-80'
+                  className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-[0.98] aria-disabled:cursor-wait aria-disabled:opacity-80'
+                  title={primaryActionLabel}
                   onClick={handlePrimaryAction}
                   aria-disabled={isPrimaryPending || undefined}
                 >
@@ -589,7 +574,7 @@ function MediaCardOverlay({
                 <button
                   type='button'
                   className={cn(
-                    'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95',
+                    CARD_ICON_BUTTON_CLASS_NAME,
                     isInLibrary
                       ? 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200/80 hover:bg-emerald-500/[0.10] hover:text-emerald-200'
                       : 'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white',
@@ -598,10 +583,7 @@ function MediaCardOverlay({
                   title={isInLibrary ? 'Remove from library' : 'Add to library'}
                   aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
                   aria-pressed={isInLibrary}
-                  // Never `disabled` here: a focused button loses focus the
-                  // moment it disables, the focusout bubbles to the card's
-                  // blur handler with relatedTarget=null and collapses the
-                  // popout mid-click. Guard re-entry instead.
+                  // Disabling a focused control would blur and collapse the card.
                   aria-disabled={toggleLibrary.isPending || undefined}
                   onClick={(e) => {
                     e.preventDefault();
@@ -620,13 +602,15 @@ function MediaCardOverlay({
                 <button
                   type='button'
                   className={cn(
-                    'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95',
+                    CARD_ICON_BUTTON_CLASS_NAME,
                     isInAnyList
                       ? 'border-white/20 bg-white/[0.12] text-white hover:bg-white/[0.16]'
                       : 'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white',
                   )}
                   title='Add to List'
+                  aria-label='Add to List'
                   aria-pressed={isInAnyList}
+                  aria-expanded={showListPicker}
                   onClick={onToggleListPicker}
                 >
                   <Bookmark className={cn('h-3.5 w-3.5', isInAnyList && 'fill-current')} />
@@ -706,20 +690,15 @@ export const MediaCard = memo(function MediaCard({
   const detailsRouteType = resolvePlayerRouteMediaType(item.type);
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
 
-  // Hover-expand state: the resting poster hides in place so layout never shifts.
   const [expanded, setExpanded] = useState(false);
   const [popoverAlign, setPopoverAlign] = useState<PopoverAlign>('center');
   const [showListPicker, setShowListPickerState, showListPickerRef] = useSyncedBooleanState();
   const [createListOpen, setCreateListOpenState, createListOpenRef] = useSyncedBooleanState();
   const cardRef = useRef<HTMLElement>(null);
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const restoringFocusRef = useRef(false);
 
-  const clearExpandTimer = useCallback(() => {
-    if (expandTimer.current) {
-      clearTimeout(expandTimer.current);
-      expandTimer.current = null;
-    }
-  }, []);
+  const clearExpandTimer = useCallback(() => clearTimer(expandTimer), []);
 
   const hasLockedCardInteraction = useCallback(
     () => showListPickerRef.current || createListOpenRef.current,
@@ -761,19 +740,15 @@ export const MediaCard = memo(function MediaCard({
   }, []);
 
   const scheduleExpand = useCallback(() => {
-    // Already open — focus bubbling between overlay controls re-fires this
-    // handler and must not re-arm the dwell timer or re-run the warm path.
-    if (expanded) return;
+    // Escape restores poster focus without immediately reopening the card.
+    if (expanded || restoringFocusRef.current) return;
     clearExpandTimer();
-    // Dwell-gated (see above); a hop from a just-collapsed card chains fast.
     const delay =
       Date.now() - lastCardCollapseAt < HOVER_CHAIN_WINDOW_MS
         ? HOVER_CHAIN_DELAY_MS
         : HOVER_EXPAND_DELAY_MS;
     expandTimer.current = setTimeout(() => {
       prefetchDetails();
-      // Dwell-expand is a strong play signal — the module cache makes repeat
-      // warms free, and a warm chunk turns a Play click into a Suspense hit.
       warmPlayerChunk();
       setPopoverAlign(resolvePopoverAlign());
       setExpanded(true);
@@ -782,7 +757,6 @@ export const MediaCard = memo(function MediaCard({
   }, [clearExpandTimer, expanded, prefetchDetails, resolvePopoverAlign]);
 
   const handleMouseLeave = useCallback(() => {
-    // Don't collapse while the picker/dialog is open.
     if (hasLockedCardInteraction()) return;
     collapseCard();
   }, [collapseCard, hasLockedCardInteraction]);
@@ -836,6 +810,7 @@ export const MediaCard = memo(function MediaCard({
       if (createListOpenRef.current) return;
       event.preventDefault();
       event.stopPropagation();
+      if (event.repeat) return;
       if (showListPickerRef.current) {
         setShowListPickerState(false);
         return;
@@ -844,7 +819,9 @@ export const MediaCard = memo(function MediaCard({
       // The overlay unmounts with its focused control — hand focus back to
       // the resting poster link instead of dropping keyboard users on <body>.
       window.requestAnimationFrame(() => {
+        restoringFocusRef.current = true;
         cardRef.current?.querySelector<HTMLElement>('a[href]')?.focus({ preventScroll: true });
+        restoringFocusRef.current = false;
       });
     },
     [expanded, collapseCard, createListOpenRef, setShowListPickerState, showListPickerRef],
@@ -889,7 +866,6 @@ export const MediaCard = memo(function MediaCard({
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
     >
-      {/* Poster hides in place while expanded so layout never shifts. */}
       <div className={cn(expanded && 'invisible')}>
         <MediaCardPoster
           currentStatus={currentStatus}
@@ -930,13 +906,15 @@ export const MediaCard = memo(function MediaCard({
 
 export function MediaCardSkeleton() {
   return (
-    <div className='space-y-1.5'>
+    <div aria-hidden='true'>
       <div className='aspect-2/3 animate-pulse rounded-lg border border-white/5 bg-zinc-900/50' />
-      <div className='h-8 space-y-1'>
-        <div className='h-3.5 w-3/4 animate-pulse rounded-md bg-zinc-900/40' />
-        <div className='h-3.5 w-1/2 animate-pulse rounded-md bg-zinc-900/30' />
+      <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
+        <div className='h-8 space-y-1'>
+          <div className='h-3.5 w-3/4 animate-pulse rounded-md bg-zinc-900/40' />
+          <div className='h-3.5 w-1/2 animate-pulse rounded-md bg-zinc-900/30' />
+        </div>
+        <div className='h-3 w-1/3 animate-pulse rounded-md bg-zinc-900/30' />
       </div>
-      <div className='h-3 w-1/3 animate-pulse rounded-md bg-zinc-900/30' />
     </div>
   );
 }

@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Stremiro",
-  "version": "0.6.0-alpha",
+  "version": "0.7.0-alpha",
   "identifier": "com.stremiro.app",
   "build": {
     "beforeDevCommand": "bun run dev",
@@ -52,6 +52,13 @@
     ]
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": [
+          "stremiro"
+        ]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0NjZDRDdFMzZGQjM2RTMKUldUak52czJmczFtUk0xR3p3ZWRiekRWTWZGeURqbHVaaEJNajVDOGFtSVZVOXdoWG5LVXpFZlEK",
       "endpoints": [

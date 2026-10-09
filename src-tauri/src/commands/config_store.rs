@@ -5,6 +5,7 @@ use crate::providers::{strip_manifest_suffix, trim_to_max};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::LazyLock;
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
 /// Default registry install URL, reused in user-facing "no catalog/meta
@@ -249,6 +250,34 @@ impl Default for ProfilePreferences {
             view_mode: ProfileViewMode::Grid,
         }
     }
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProfilePreferencesPatch {
+    username: Option<String>,
+    accent_color: Option<String>,
+    accent_intensity: Option<u8>,
+    accent_targets: Option<AccentTargetsPatch>,
+    // Missing preserves the avatar; explicit null removes it.
+    #[serde(default, deserialize_with = "deserialize_avatar_patch")]
+    avatar: Option<Option<String>>,
+    view_mode: Option<ProfileViewMode>,
+}
+
+#[derive(Debug, Deserialize)]
+struct AccentTargetsPatch {
+    navigation: Option<bool>,
+    actions: Option<bool>,
+    progress: Option<bool>,
+    artwork: Option<bool>,
+}
+
+fn deserialize_avatar_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -520,6 +549,39 @@ pub(crate) fn sanitize_profile_preferences(preferences: ProfilePreferences) -> P
         profile: sanitize_local_profile(preferences.profile),
         view_mode: preferences.view_mode,
     }
+}
+
+pub(crate) fn apply_profile_preferences_patch(
+    mut current: ProfilePreferences,
+    patch: ProfilePreferencesPatch,
+) -> ProfilePreferences {
+    let profile = &mut current.profile;
+    if let Some(value) = patch.username {
+        profile.username = value;
+    }
+    if let Some(value) = patch.accent_color {
+        profile.accent_color = value;
+    }
+    if let Some(value) = patch.accent_intensity {
+        profile.accent_intensity = value;
+    }
+    if let Some(value) = patch.avatar {
+        profile.avatar = value;
+    }
+    if let Some(targets) = patch.accent_targets {
+        profile.accent_targets = AccentTargets {
+            navigation: targets
+                .navigation
+                .unwrap_or(profile.accent_targets.navigation),
+            actions: targets.actions.unwrap_or(profile.accent_targets.actions),
+            progress: targets.progress.unwrap_or(profile.accent_targets.progress),
+            artwork: targets.artwork.unwrap_or(profile.accent_targets.artwork),
+        };
+    }
+    if let Some(value) = patch.view_mode {
+        current.view_mode = value;
+    }
+    sanitize_profile_preferences(current)
 }
 
 pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppUiPreferences {
@@ -904,11 +966,19 @@ fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
     })
 }
 
-/// Same URL identity `pin_default_addons` pins by.
-fn is_pinned_default_addon_url(url: &str) -> bool {
-    DEFAULT_ADDON_INSTALLS.iter().any(|(install_url, _)| {
-        normalize_addon_url(install_url).ok().flatten().as_deref() == Some(url)
-    })
+/// Same URL identity `pin_default_addons` pins by — normalized once, since the
+/// check runs per addon config on every `get_addon_configs` response.
+static NORMALIZED_DEFAULT_ADDON_URLS: LazyLock<Vec<String>> = LazyLock::new(|| {
+    DEFAULT_ADDON_INSTALLS
+        .iter()
+        .filter_map(|(install_url, _)| normalize_addon_url(install_url).ok().flatten())
+        .collect()
+});
+
+pub(super) fn is_pinned_default_addon_url(url: &str) -> bool {
+    NORMALIZED_DEFAULT_ADDON_URLS
+        .iter()
+        .any(|default| default == url)
 }
 
 /// Default addons are pinned: each entry in `DEFAULT_ADDON_INSTALLS` always

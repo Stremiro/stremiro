@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
@@ -22,7 +22,6 @@ import {
   resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
 import { formatSeasonEpisode } from '@/lib/utils';
-import { useDebounce } from '@/hooks/use-debounce';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
 type EpisodeSelectionReason = 'no-history' | HistoryPlaybackPlanReason;
@@ -96,8 +95,18 @@ export function useMediaPrimaryPlayback({
       ? session
       : null;
   const [isResolvingPrimaryAction, setIsResolvingPrimaryAction] = useState(false);
-  const delayedResolving = useDebounce(isResolvingPrimaryAction, 180);
-  const showResolvingFeedback = isResolvingPrimaryAction && delayedResolving;
+  // "Resolving" appears only after a slow resolve (rising edge delayed) and
+  // clears the instant resolution ends — a trailing hold would flash the
+  // label over the screen the action just opened.
+  const [showResolvingFeedback, setShowResolvingFeedback] = useState(false);
+  useEffect(() => {
+    if (!isResolvingPrimaryAction) {
+      setShowResolvingFeedback(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setShowResolvingFeedback(true), 180);
+    return () => window.clearTimeout(timer);
+  }, [isResolvingPrimaryAction]);
   const isMountedRef = useMountedRef();
   const primaryActionInFlightRef = useRef(false);
   const itemId = item?.id;

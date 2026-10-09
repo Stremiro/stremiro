@@ -14,7 +14,10 @@ use super::streaming_helpers::{
     stream_quality_score, stream_resolution_priority, stream_source_priority,
 };
 use super::up_next_commands::build_up_next_entries;
-use super::watch_history_commands::{build_title_watch_history_rows, build_up_next_sources};
+use super::watch_history_commands::{
+    build_continue_watching_entries, build_title_watch_history_rows, build_title_watch_progress,
+    build_up_next_sources,
+};
 use super::*;
 use crate::providers::addons::{
     detect_stream_flags, AddonStream, BehaviorHints, StreamDeliveryKind, StreamResolution,
@@ -24,6 +27,28 @@ use crate::test_helpers::{
     test_stream,
 };
 use std::collections::HashMap;
+
+#[test]
+fn string_list_decode_keeps_only_owned_string_array_members() {
+    for value in [
+        serde_json::json!(null),
+        serde_json::json!("text"),
+        serde_json::json!({ "0": "text" }),
+        serde_json::json!([]),
+        serde_json::json!([1, false, null]),
+        serde_json::json!(["", "a", 1, ["b"], "a", "雪"]),
+    ] {
+        let expected = serde_json::from_value::<Vec<serde_json::Value>>(value.clone())
+            .ok()
+            .map(|members| {
+                members
+                    .into_iter()
+                    .filter_map(|member| member.as_str().map(str::to_string))
+                    .collect::<Vec<_>>()
+            });
+        assert_eq!(store_helpers::decode_string_list(value), expected);
+    }
+}
 
 fn mk_watch_progress(id: &str, type_: &str, last_watched: u64) -> WatchProgress {
     WatchProgress {
@@ -191,10 +216,15 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
             (2, 13, "2026-01-02"),
         ])],
         "2026-01-03",
+        1_000_000_000,
+        1_003_600_000,
     );
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
     assert_eq!(entry.release_date, "2026-01-03");
+    // Released at local midnight, watched earlier and still inside the week
+    // window — the "New episode" badge the card used to derive per row.
+    assert!(entry.is_new_episode);
     assert_eq!((entry.row.season, entry.row.episode), (Some(2), Some(13)));
     assert_eq!(
         (entry.row.absolute_season, entry.row.absolute_episode),
@@ -212,6 +242,29 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
     let wire = serde_json::to_value(entry).unwrap();
     assert!(wire.get("episodes").is_none());
     assert_eq!(wire["releaseDate"], "2026-01-03");
+    assert_eq!(wire["isNewEpisode"], true);
+}
+
+#[test]
+fn up_next_badge_drops_outside_window_or_when_watched_after_release() {
+    let today_ms = 1_000_000_000_u64;
+    let day_ms = 86_400_000_u64;
+    let release_ms = today_ms - day_ms; // "2026-01-02" vs today "2026-01-03"
+
+    // Past the badge window, or watched after release: neither is new.
+    for (last_watched, now_ms) in [(0, today_ms + 8 * day_ms), (release_ms + 1, today_ms)] {
+        let source = series_episode_progress(last_watched, 1, 1, 1_200.0, 1_200.0);
+        assert!(
+            !build_up_next_entries(
+                vec![source],
+                vec![up_next_schedule(&[(1, 2, "2026-01-02")])],
+                "2026-01-03",
+                today_ms,
+                now_ms,
+            )[0]
+            .is_new_episode
+        );
+    }
 }
 
 #[test]
@@ -223,7 +276,9 @@ fn up_next_does_not_skip_unaired_or_invalid_successor_and_keeps_specials() {
             vec![up_next_schedule(
                 &[(1, 5, "2026-01-01"), (1, 4, next_date),]
             )],
-            "2026-01-03"
+            "2026-01-03",
+            1_000_000_000,
+            1_000_000_000,
         )
         .is_empty());
     }
@@ -235,6 +290,8 @@ fn up_next_does_not_skip_unaired_or_invalid_successor_and_keeps_specials() {
             (0, 4, "2026-01-03"),
         ])],
         "2026-01-03",
+        1_000_000_000,
+        1_000_000_000,
     );
     assert_eq!(
         (entries[0].row.season, entries[0].row.episode),
@@ -445,6 +502,39 @@ fn stream_dedup_key_url_variants_share_one_digest() {
     assert_ne!(signed_key, resigned_key);
     assert!(!signed_key.contains("sig=abc"));
     assert!(!resigned_key.contains("sig=def"));
+}
+
+#[test]
+fn prepared_stream_key_matches_buffered_json_with_headers() {
+    use sha2::{Digest, Sha256};
+    let mut stream = mk_stream(
+        Some("Header release"),
+        Some("1080p"),
+        Some("https://EXAMPLE.com/file.mkv?sig=fixture"),
+        Some("ABC123"),
+        None,
+    );
+    stream.behavior_hints = Some(BehaviorHints {
+        proxy_headers: Some(serde_json::json!({
+            "request": {"X-Test": "quoted \"雪\"", "Authorization": "Bearer fixture"}
+        })),
+        ..Default::default()
+    });
+    let mut headers = stream.request_headers();
+    for (name, _) in &mut headers {
+        name.make_ascii_lowercase();
+    }
+    headers.sort();
+    let encoded = serde_json::to_vec(&(
+        "addon-fixture",
+        streaming_helpers::stream_dedup_key(&stream).expect("content key"),
+        streaming_helpers::normalize_http_url(stream.url.as_deref().expect("URL")),
+        headers,
+    ))
+    .expect("encoded identity");
+    let expected = format!("s:{:x}", Sha256::digest(encoded));
+    let prepared = prepare_addon_streams(vec![stream], "Fixture", "addon-fixture");
+    assert_eq!(prepared[0].stream_key, expected);
 }
 
 #[test]
@@ -775,6 +865,84 @@ fn title_watch_history_rows_hydrate_lookup_id_within_series_gate() {
 }
 
 #[test]
+fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() {
+    let mut completed = series_episode_progress(3_000, 1, 8, 2_400.0, 2_400.0);
+    let mut movie = mk_watch_progress(&completed.id, "movie", 1_000);
+    movie.position = 600.0;
+    movie.duration = 2_400.0;
+    let mut first = series_episode_progress(1_000, 1, 3, 600.0, 2_400.0);
+    first.absolute_season = None;
+    first.absolute_episode = None;
+    first.last_stream_lookup_id = None;
+    let second = series_episode_progress(1_000, 1, 7, 600.0, 2_400.0);
+    completed.last_stream_key = Some("completed".to_string());
+
+    let progress = build_title_watch_progress(vec![completed, movie, first, second]);
+
+    assert_eq!(progress.history.len(), 4);
+    assert_eq!(progress.history[0].episode, Some(8));
+    assert!(progress.history[0].is_watched);
+    assert_eq!(progress.history[0].resume_start_time, None);
+    assert_eq!(progress.continue_watching.len(), 2);
+    // A completed first row still owns its group's ordering on cross-kind ties.
+    let resume = &progress.continue_watching[0];
+    assert_eq!(resume.type_, "series");
+    assert_eq!(resume.episode, Some(3));
+    assert_eq!(resume.absolute_season, Some(1));
+    assert_eq!(resume.absolute_episode, Some(3));
+    assert_eq!(
+        resume.last_stream_lookup_id.as_deref(),
+        Some(resume.id.as_str())
+    );
+    assert_eq!(resume.resume_start_time, Some(600.0));
+    assert_eq!(progress.continue_watching[1].type_, "movie");
+}
+
+#[test]
+fn title_episode_progress_prefers_canonical_coordinates_and_raw_fill() {
+    // Newest-first like storage: the remapped row's raw key collides with the
+    // canonical row's coordinates, so canonical claims it first.
+    let mut remapped = series_episode_progress(3_000, 1, 2, 600.0, 2_400.0);
+    remapped.absolute_season = Some(2);
+    remapped.absolute_episode = Some(12);
+    let canonical = series_episode_progress(1_000, 1, 2, 600.0, 2_400.0);
+    let mut movie = mk_watch_progress("tt7654321", "movie", 2_000);
+    movie.season = Some(9);
+    movie.episode = Some(9);
+
+    let progress = build_title_watch_progress(vec![remapped, movie, canonical]);
+
+    // The remapped row's raw key collides with the canonical row's claim —
+    // canonical wins it; the remapped row still sits under its own canonical
+    // coordinates. Movies never enter the episode map.
+    let claimant = &progress.episode_progress["tt7654321:1:2"];
+    assert_eq!(claimant.absolute_episode, Some(2));
+    assert_eq!(claimant.last_watched, 1_000);
+    assert_eq!(
+        progress.episode_progress["tt7654321:2:12"].last_watched,
+        3_000
+    );
+    assert!(!progress.episode_progress.contains_key("tt7654321:9:9"));
+    assert_eq!(progress.episode_progress.len(), 2);
+}
+
+#[test]
+fn watched_episode_ceiling_covers_partial_progress_and_latest_seed() {
+    // Latest series row has no watch time (a bare resume target): only the
+    // ceiling seed can expose it for spoiler masking. Older rows pin the
+    // has-started fold and the exclusion of untouched coordinates.
+    let resume_target = series_episode_progress(3_000, 4, 1, 0.0, 2_400.0);
+    let partial = series_episode_progress(2_000, 2, 5, 600.0, 2_400.0);
+    let unwatched = series_episode_progress(1_000, 9, 9, 0.0, 2_400.0);
+
+    let progress = build_title_watch_progress(vec![resume_target, partial, unwatched]);
+
+    assert_eq!(progress.watched_episode_ceiling[&4], 1);
+    assert_eq!(progress.watched_episode_ceiling[&2], 5);
+    assert!(!progress.watched_episode_ceiling.contains_key(&9));
+}
+
+#[test]
 fn near_completion_progress_is_not_skipped() {
     let mut existing = mk_watch_progress("tt123", "series", 1_000);
     existing.season = Some(1);
@@ -1041,29 +1209,21 @@ query_ids_tests! {
 }
 
 #[test]
-fn resolve_addon_configs_pins_defaults_for_explicit_empty_list() {
-    let resolved = resolve_addon_configs(Some(vec![]));
-
-    // Both defaults are pinned and cannot be removed; an empty stored list
-    // gains the enabled defaults instead of staying empty.
-    assert_eq!(resolved.len(), 2);
-    assert_eq!(resolved[0].url, "https://v3-cinemeta.strem.io");
-    assert_eq!(resolved[1].url, "https://opensubtitles-v3.strem.io");
-    assert!(resolved[0].enabled && resolved[1].enabled);
-}
-
-#[test]
 fn resolve_addon_configs_seeds_defaults_when_uninitialized() {
-    let resolved = resolve_addon_configs(None);
-
-    assert_eq!(resolved.len(), 2);
-    assert_eq!(resolved[0].id, "https://v3-cinemeta.strem.io");
-    assert_eq!(resolved[0].url, "https://v3-cinemeta.strem.io");
-    assert_eq!(resolved[0].name, "Cinemeta");
-    assert_eq!(resolved[1].id, "https://opensubtitles-v3.strem.io");
-    assert_eq!(resolved[1].url, "https://opensubtitles-v3.strem.io");
-    assert_eq!(resolved[1].name, "OpenSubtitles");
-    assert!(resolved[0].enabled && resolved[1].enabled);
+    // Missing and explicitly empty registries both seed the pinned defaults.
+    for stored in [None, Some(vec![])] {
+        let resolved = resolve_addon_configs(stored);
+        assert_eq!(resolved.len(), 2);
+        for (addon, (url, name)) in resolved.iter().zip([
+            ("https://v3-cinemeta.strem.io", "Cinemeta"),
+            ("https://opensubtitles-v3.strem.io", "OpenSubtitles"),
+        ]) {
+            assert_eq!(
+                (&*addon.id, &*addon.url, &*addon.name, addon.enabled),
+                (url, url, name, true)
+            );
+        }
+    }
 }
 
 #[test]
@@ -1166,6 +1326,15 @@ fn resolve_addon_configs_drops_display_only_stored_snapshots() {
 
 #[test]
 fn apply_manifest_snapshot_fills_only_the_host_fallback_name() {
+    let mut unnamed = resolve_addon_configs(Some(vec![AddonConfig {
+        name: String::new(),
+        ..cinemeta_addon()
+    }]))
+    .remove(0);
+    assert_eq!(unnamed.name, "v3-cinemeta.strem.io");
+    assert!(apply_manifest_snapshot(&mut unnamed, cinemeta_manifest()));
+    assert_eq!(unnamed.name, "Cinemeta");
+
     // The add flow seeds the URL host as a placeholder label: a classified
     // snapshot replaces it with the manifest's own name.
     let mut addon = AddonConfig {
@@ -1579,12 +1748,10 @@ fn choose_continue_watching_entry_prefers_resumable_episode_over_newer_zero_prog
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
 
-    let chosen = choose_entry(
-        vec![newer_zero_progress, resumable_episode],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![newer_zero_progress, resumable_episode])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(4));
     assert_eq!(chosen.position, 1_020.0);
@@ -1597,12 +1764,10 @@ fn choose_continue_watching_entry_prefers_older_resume_over_newer_same_episode_s
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
 
-    let chosen = choose_entry(
-        vec![startup_stub, resumable_episode],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![startup_stub, resumable_episode])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(4));
     assert_eq!(chosen.position, 1_020.0);
@@ -1614,12 +1779,10 @@ fn choose_continue_watching_entry_keeps_latest_episode_when_no_resumable_candida
 
     let older = series_episode_progress(300, 1, 4, 120.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![latest, older],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![latest, older])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(5));
     assert_eq!(chosen.last_watched, 400);
@@ -1632,12 +1795,10 @@ fn choose_continue_watching_entry_prefers_newest_meaningful_episode() {
 
     let newer = series_episode_progress(500, 1, 7, 920.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![newer, deeper_resume],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![newer, deeper_resume])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(7));
     assert_eq!(chosen.position, 920.0);
@@ -1651,12 +1812,10 @@ fn choose_continue_watching_entry_prefers_newest_across_seasons_with_same_episod
 
     let newer_shallower = series_episode_progress(500, 2, 5, 300.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![older_fuller, newer_shallower],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![older_fuller, newer_shallower])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.season, Some(2));
     assert_eq!(chosen.episode, Some(5));
@@ -1671,12 +1830,10 @@ fn choose_continue_watching_entry_rewind_to_earlier_episode_follows_last_watched
 
     let recent_rewind = series_episode_progress(500, 1, 3, 600.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![older_later_episode, recent_rewind],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![older_later_episode, recent_rewind])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(3));
     assert_eq!(chosen.last_watched, 500);
@@ -1693,12 +1850,10 @@ fn choose_continue_watching_entry_newer_untagged_row_wins_older_richly_tagged_ro
 
     let untagged = series_episode_progress(500, 1, 7, 920.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![tagged, untagged],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![tagged, untagged])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
 
     assert_eq!(chosen.episode, Some(7));
     assert_eq!(chosen.last_stream_key, None);
@@ -1711,20 +1866,16 @@ fn choose_continue_watching_entry_exact_tie_keeps_first_input_row() {
     let first = series_episode_progress(500, 1, 3, 600.0, 2_400.0);
     let second = series_episode_progress(500, 1, 7, 600.0, 2_400.0);
 
-    let chosen = choose_entry(
-        vec![first.clone(), second.clone()],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![first.clone(), second.clone()])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
     assert_eq!(chosen.episode, Some(3));
 
-    let chosen = choose_entry(
-        vec![second, first],
-        HistoryEntryQuery::ContinueWatching,
-        None,
-    )
-    .expect("continue watching entry");
+    let chosen = build_continue_watching_entries(vec![second, first])
+        .into_iter()
+        .next()
+        .expect("continue watching entry");
     assert_eq!(chosen.episode, Some(7));
 }
 
@@ -2014,26 +2165,19 @@ fn watch_status_boundary_accepts_canonical_values_only() {
 
     // Canonical values pass through unchanged; matching is case-insensitive
     // with surrounding whitespace trimmed so direct IPC stays forgiving.
-    assert_eq!(
-        normalize_watch_status("watching").as_deref(),
-        Some("watching")
-    );
-    assert_eq!(
-        normalize_watch_status("  Watched ").as_deref(),
-        Some("watched")
-    );
-    assert_eq!(
-        normalize_watch_status("plan_to_watch").as_deref(),
-        Some("plan_to_watch")
-    );
-    assert_eq!(
-        normalize_watch_status("Plan To Watch").as_deref(),
-        Some("plan_to_watch")
-    );
-    assert_eq!(
-        normalize_watch_status("DROPPED").as_deref(),
-        Some("dropped")
-    );
+    for (input, expected) in [
+        ("watching", "watching"),
+        ("  Watched ", "watched"),
+        ("plan_to_watch", "plan_to_watch"),
+        ("Plan To Watch", "plan_to_watch"),
+        ("DROPPED", "dropped"),
+    ] {
+        assert_eq!(
+            normalize_watch_status(input).as_deref(),
+            Some(expected),
+            "{input}"
+        );
+    }
     // Arbitrary strings must never persist: set/import/migration drop them.
     assert!(normalize_watch_status("").is_none());
     assert!(normalize_watch_status("watching soon").is_none());
@@ -2110,15 +2254,15 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
         .expect("prepare")
         .is_empty());
 
-    // An id the live key gate rejects still imports under a fresh safe id.
-    let hostile = vec![serde_json::json!(UserListWithItems {
+    // Repeated invalid ids also fold into one list under a fresh safe id.
+    let hostile = serde_json::json!(UserListWithItems {
         id: "bad id!!".to_string(),
         name: "Hostile".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
         items: vec![],
-    })];
-    let prepared = prepare_import_lists(hostile, &[]).expect("prepare");
+    });
+    let prepared = prepare_import_lists(vec![hostile.clone(), hostile], &[]).expect("prepare");
     assert_eq!(prepared.len(), 1);
     assert!(prepared[0].id.starts_with("list_"));
     assert_eq!(prepared[0].id.len(), "list_".len() + 32);
@@ -2179,6 +2323,68 @@ fn backup_validate_backup_size_bounds_payloads() {
     assert!(error.contains(&MAX_IMPORT_BYTES.to_string()));
 }
 
+#[test]
+fn list_read_repair_preserves_swapped_rows_and_dedupes_colliding_ids() {
+    use super::list_helpers::{list_item_store_key, list_meta_key, LISTS_ORDER_KEY};
+    let path = std::env::temp_dir().join(format!(
+        "stremiro-list-repair-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    let store = DurableStoreRegistry::default()
+        .open_path(path.clone())
+        .unwrap();
+    store.set(LISTS_ORDER_KEY, serde_json::json!(["list_a", "missing"]));
+    store.set(
+        list_meta_key("list_a"),
+        serde_json::json!({
+            "id": "drifted", "name": "Favorites", "icon": "star",
+            "item_ids": ["a", "b", "duplicate", "invalid", "absent"],
+        }),
+    );
+    for (key, id, title) in [
+        ("a", "b", "First"),
+        ("b", "a", "Second"),
+        ("duplicate", "b", "Discarded"),
+    ] {
+        let mut item = test_media_item(id, "movie");
+        item.title = title.into();
+        store.set(list_item_store_key("list_a", key), serde_json::json!(item));
+    }
+    store.set(
+        list_item_store_key("list_a", "invalid"),
+        serde_json::json!(null),
+    );
+    let rows = list_commands::read_lists(&store).unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, "list_a");
+    assert_eq!(rows[0].item_ids, ["b", "a"]);
+    assert_eq!(
+        rows[0]
+            .items
+            .iter()
+            .map(|item| item.title.as_str())
+            .collect::<Vec<_>>(),
+        ["First", "Second"]
+    );
+    for id in ["duplicate", "invalid", "absent"] {
+        assert!(store.get(list_item_store_key("list_a", id)).is_none());
+    }
+    assert_eq!(
+        store.get(LISTS_ORDER_KEY),
+        Some(serde_json::json!(["list_a"]))
+    );
+
+    // A fresh registry reads the actual committed file, not the live map.
+    let reopened = DurableStoreRegistry::default()
+        .open_path(path.clone())
+        .unwrap();
+    assert_eq!(
+        serde_json::to_value(list_commands::read_lists(&reopened).unwrap()).unwrap(),
+        serde_json::to_value(rows).unwrap(),
+    );
+    std::fs::remove_file(path).unwrap();
+}
+
 #[tokio::test]
 async fn cancelled_queued_store_operation_does_not_run() {
     let guard = STORE_OP_LOCK.lock().await;
@@ -2194,4 +2400,20 @@ async fn cancelled_queued_store_operation_does_not_run() {
     );
     drop(guard);
     assert!(receiver.await.is_err());
+}
+
+#[tokio::test]
+async fn external_file_work_does_not_wait_for_the_store_gate() {
+    let _guard = STORE_OP_LOCK.lock().await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    let path = std::env::temp_dir().join(format!("stremiro-backup-{}.json", uuid::Uuid::new_v4()));
+    let result = run_blocking_op(deadline, "External file work timed out.", move || {
+        write_atomic_file(&path, b"{}", false)?;
+        let bytes = std::fs::read(&path).map_err(|error| error.to_string())?;
+        std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        Ok(bytes)
+    })
+    .await
+    .expect("external file work completes while the store gate is held");
+    assert_eq!(result, b"{}");
 }

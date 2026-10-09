@@ -2,19 +2,16 @@ import { invoke } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 
 import { createSubscribableStore } from '@/lib/subscribable-store';
+import { createSerialTaskQueue } from '@/lib/utils';
 
-let viewportTransitionTail: Promise<void> = Promise.resolve();
+const viewportTransition = createSerialTaskQueue();
 let pipReadGeneration = 0;
 const pipStore = createSubscribableStore(false);
 
-export function enqueueViewportTransition(operation: () => Promise<void>): Promise<void> {
-  const result = viewportTransitionTail.then(operation);
-  viewportTransitionTail = result.catch(() => undefined);
-  return result;
-}
+export const enqueueViewportTransition = viewportTransition.enqueue;
 
 export function waitForViewportTransition(): Promise<void> {
-  return viewportTransitionTail;
+  return viewportTransition.pending();
 }
 
 export const isPlayerPip = pipStore.getSnapshot;

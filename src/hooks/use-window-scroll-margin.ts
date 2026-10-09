@@ -39,12 +39,21 @@ export function useWindowScrollMargin(
 
     window.addEventListener('resize', handleResize, { passive: true });
 
+    // Body resizes arrive in bursts (image decode settling, infinite-scroll
+    // appends) — collapse them into one measure per frame.
+    let measureFrame: number | null = null;
+    const scheduleMeasure = () => {
+      if (measureFrame !== null) return;
+      measureFrame = window.requestAnimationFrame(() => {
+        measureFrame = null;
+        updateScrollMargin();
+      });
+    };
+
     const resizeObserver =
       typeof ResizeObserver === 'undefined' || !containerRef.current
         ? null
-        : new ResizeObserver(() => {
-            updateScrollMargin();
-          });
+        : new ResizeObserver(scheduleMeasure);
 
     if (resizeObserver && containerRef.current) {
       resizeObserver.observe(containerRef.current);
@@ -56,6 +65,7 @@ export function useWindowScrollMargin(
 
     return () => {
       window.removeEventListener('resize', handleResize);
+      if (measureFrame !== null) window.cancelAnimationFrame(measureFrame);
       resizeObserver?.disconnect();
     };
   }, [containerRef, shouldVirtualize, updateScrollMargin]);

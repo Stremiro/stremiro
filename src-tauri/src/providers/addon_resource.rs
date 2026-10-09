@@ -1,16 +1,17 @@
-use super::ttl_cache::{hash_segment, InFlight, TtlCache};
+use super::ttl_cache::{
+    hash_segment, FetchContract, FetchFailure, FetchFailureCooldown, InFlight, TtlCache,
+};
 use super::{
     addon_manifest::{snapshot_supports_request, AddonCatalogCapability, AddonManifest},
-    build_provider_http_client, lock_or_recover, normalize_media_year, strip_manifest_suffix,
-    trim_to_max, BoundedBodyError, Episode, MediaDetails, MediaItem, Trailer,
+    build_provider_http_client, normalize_media_year, strip_manifest_suffix, trim_to_max,
+    BoundedBodyError, Episode, MediaDetails, MediaItem, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 use urlencoding::encode;
 
 /// Measured 2026-09-03 (decompressed JSON): series `top` ~537KB,
@@ -24,11 +25,6 @@ const SUBTITLE_MAX_BYTES: usize = 512 * 1024;
 /// routes as dead hosts; 20s keeps genuine reachability failures bounded by
 /// the post-failure cooldown below.
 const RESOURCE_TIMEOUT_SECS: u64 = 20;
-/// Retry contract mirrored from the stream transport: one retry after a
-/// short back-off before a transport failure earns the addon cooldown, so a
-/// single hiccup can't mark a whole source down for the window.
-const RESOURCE_FETCH_ATTEMPTS: u8 = 2;
-const RESOURCE_RETRY_BACKOFF: Duration = Duration::from_millis(800);
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
 const MAX_TRAILERS: usize = 32;
@@ -53,13 +49,12 @@ const SUBTITLE_CACHE_MAX_ENTRIES: usize = 64;
 /// outer caller timeout) never releases its key, so inserts sweep orphans
 /// once the map grows past this — same contract as the stream transport.
 const RESOURCE_IN_FLIGHT_SWEEP_AT: usize = 64;
-/// Per-addon transport-failure cooldown, mirroring the stream transport: a
-/// host that just failed to answer is presumed down, so catalog/meta/
-/// subtitle fetches fail fast for the window instead of re-paying
-/// connect+timeout on every browse page or details open. Session-local.
+/// Per-addon transport-failure cooldown: a host that just failed to answer
+/// is presumed down, so catalog/meta/subtitle fetches fail fast for the
+/// window instead of re-paying connect+timeout on every browse page or
+/// details open. Session-local; the map mechanics live in
+/// `FetchFailureCooldown`, shared with the stream transport.
 const RESOURCE_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
-/// Cooldown-map hygiene bound — same contract as the in-flight map.
-const RESOURCE_FETCH_FAILURES_SWEEP_AT: usize = RESOURCE_IN_FLIGHT_SWEEP_AT;
 /// Negative-cache bound for deterministic per-request failures.
 const RESOURCE_FAILURE_CACHE_MAX_ENTRIES: usize = 64;
 
@@ -157,7 +152,7 @@ struct SubtitleResponse {
     subtitles: Vec<Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddonSubtitle {
     pub id: String,
@@ -168,15 +163,9 @@ pub(crate) struct AddonSubtitle {
     pub label: Option<String>,
 }
 
-/// How a resource fetch failed. `Transport` marks host-reachability
-/// failures (send/connect/timeout/mid-stream read) that earn the per-addon
-/// cooldown; `Deterministic` (status, size cap, decode, absent meta)
-/// replays identically for the same request and lands in the per-key
-/// negative cache instead of marking the whole addon down.
-enum ResourceFetchError {
-    Transport(String),
-    Deterministic(String),
-}
+/// Cooldown message served while an addon sits inside its failure window.
+const RESOURCE_COOLDOWN_MESSAGE: &str =
+    "Addon fetch skipped: the source is cooling down after a recent transport failure.";
 
 pub(crate) struct AddonResourceClient {
     client: Client,
@@ -186,7 +175,7 @@ pub(crate) struct AddonResourceClient {
     subtitle_cache: TtlCache<Vec<AddonSubtitle>>,
     /// Per-addon transport-failure cooldown keyed by base-URL hash — same
     /// contract as the stream transport's `fetch_failures`.
-    fetch_failures: Mutex<HashMap<String, Instant>>,
+    fetch_failures: FetchFailureCooldown,
     /// Short-TTL negative cache keyed like the resource caches: a
     /// deterministic failure (status, size cap, decode, missing meta)
     /// replays identically for the same request, so a browse re-open or
@@ -202,99 +191,14 @@ pub(crate) struct AddonResourceClient {
     generation: AtomicU64,
 }
 
-fn resource_cooldown_error() -> String {
-    "Addon fetch skipped: the source is cooling down after a recent transport failure.".to_string()
-}
-
-/// Run `fetch` behind the cache + single-flight + failure-shortcut contract
-/// shared by all resource kinds. Deterministic failures land in a short-TTL
-/// negative cache; transport failures mark the addon's host down for
-/// `RESOURCE_FETCH_FAILURE_TTL` so a dead addon stops stalling every
-/// browse/details request — the same policy the stream transport applies,
-/// including its retry: a transport failure gets one back-off retry unless
-/// the attempt already burned the full request timeout (the host had its
-/// chance — a second wait would only double a dead source's stall).
-async fn cached_resource<T, Fetch, Fut, IsEmpty>(
-    client: &AddonResourceClient,
-    cache: &TtlCache<T>,
-    key: &str,
-    addon_key: &str,
-    is_empty: IsEmpty,
-    fetch: Fetch,
-) -> Result<T, String>
-where
-    T: Clone,
-    Fetch: Fn() -> Fut,
-    Fut: std::future::Future<Output = Result<T, ResourceFetchError>>,
-    IsEmpty: Fn(&T) -> bool,
-{
-    if let Some(cached) = cache.get(key) {
-        return Ok(cached);
+/// Card and full shapes share the cached full entry; the lite shape is
+/// rebuilt field-by-field so a card hit never copies the discarded
+/// `episodes`/`cast` (a new `MediaDetails` field fails this literal, forcing
+/// a lite-vs-full decision).
+pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetails {
+    if include_episodes {
+        return details.clone();
     }
-    if let Some(error) = client.failure_cache.get(key) {
-        return Err(error);
-    }
-    if client.fetch_failure_cooling_down(addon_key) {
-        return Err(resource_cooldown_error());
-    }
-
-    let key_lock = client.in_flight.claim(key);
-    let result = {
-        let _guard = key_lock.lock().await;
-        // The leader stored while this caller waited — take its result, or
-        // fail fast on the failure it just recorded instead of re-running
-        // the same doomed fetch.
-        if let Some(cached) = cache.get(key) {
-            Ok(cached)
-        } else if let Some(error) = client.failure_cache.get(key) {
-            Err(error)
-        } else if client.fetch_failure_cooling_down(addon_key) {
-            Err(resource_cooldown_error())
-        } else {
-            let generation = client.generation.load(Ordering::SeqCst);
-            let mut attempt = 0u8;
-            loop {
-                if attempt > 0 {
-                    tokio::time::sleep(RESOURCE_RETRY_BACKOFF).await;
-                }
-                let started_at = Instant::now();
-                match fetch().await {
-                    Ok(value) => {
-                        // A success proves the host reachable — drop a cooldown
-                        // a concurrent same-addon fetch recorded.
-                        client.clear_fetch_failure(addon_key, generation);
-                        // A clear_cache between fetch start and store drops the
-                        // write under the entries lock, so post-change callers
-                        // never read pre-change data.
-                        cache.put(key, value.clone(), is_empty(&value), || {
-                            client.generation.load(Ordering::SeqCst) == generation
-                        });
-                        break Ok(value);
-                    }
-                    Err(ResourceFetchError::Deterministic(error)) => {
-                        client.cache_failure(key, &error, generation);
-                        break Err(error);
-                    }
-                    Err(ResourceFetchError::Transport(error)) => {
-                        attempt += 1;
-                        let burned_timeout =
-                            started_at.elapsed() >= Duration::from_secs(RESOURCE_TIMEOUT_SECS);
-                        if attempt >= RESOURCE_FETCH_ATTEMPTS || burned_timeout {
-                            client.note_fetch_failure(addon_key, generation);
-                            break Err(error);
-                        }
-                    }
-                }
-            }
-        }
-    };
-    client.in_flight.release(key, &key_lock);
-    result
-}
-
-/// Card and full shapes share the cached full entry; the struct is rebuilt
-/// field-by-field so a card hit never copies the discarded `episodes`.
-fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetails {
     MediaDetails {
         id: details.id.clone(),
         imdb_id: details.imdb_id.clone(),
@@ -308,20 +212,10 @@ fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetail
         type_: details.type_.clone(),
         description: details.description.clone(),
         rating: details.rating.clone(),
-        // Cast renders only on the full details page; card/hero payloads
-        // skip it along with episodes.
-        cast: if include_episodes {
-            details.cast.clone()
-        } else {
-            None
-        },
+        cast: None,
         genres: details.genres.clone(),
         trailers: details.trailers.clone(),
-        episodes: if include_episodes {
-            details.episodes.clone()
-        } else {
-            None
-        },
+        episodes: None,
     }
 }
 
@@ -344,7 +238,10 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_TTL,
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
-            fetch_failures: Mutex::new(HashMap::new()),
+            fetch_failures: FetchFailureCooldown::new(
+                RESOURCE_FETCH_FAILURE_TTL,
+                RESOURCE_IN_FLIGHT_SWEEP_AT,
+            ),
             // Failures always take the short empty TTL: a fixed addon or a
             // corrected request recovers within seconds, not minutes.
             failure_cache: TtlCache::new(
@@ -366,103 +263,53 @@ impl AddonResourceClient {
         self.catalog_cache.clear();
         self.subtitle_cache.clear();
         self.failure_cache.clear();
-        lock_or_recover(&self.fetch_failures).clear();
+        self.fetch_failures.clear();
     }
 
-    /// True while `addon_key` sits inside its post-failure cooldown window.
-    /// Expired entries drop on read so the map can't accumulate stale keys.
-    fn fetch_failure_cooling_down(&self, addon_key: &str) -> bool {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        match failures.get(addon_key) {
-            Some(until) if *until > Instant::now() => true,
-            Some(_) => {
-                failures.remove(addon_key);
-                false
-            }
-            None => false,
+    /// The shared cache/single-flight/retry contract with this client's
+    /// guards and resource policy (timeout, cooldown message).
+    fn fetch_contract(&self) -> FetchContract<'_> {
+        FetchContract {
+            failure_cache: &self.failure_cache,
+            fetch_failures: &self.fetch_failures,
+            in_flight: &self.in_flight,
+            generation: &self.generation,
+            request_timeout: Duration::from_secs(RESOURCE_TIMEOUT_SECS),
+            cooldown_message: RESOURCE_COOLDOWN_MESSAGE,
         }
     }
 
-    /// Record a host-reachability failure for the addon, generation-checked:
-    /// a fetch that started before a `clear_cache` must not reinstall a
-    /// wiped cooldown (mutex before generation read — the stream transport's
-    /// ordering). Only transport failures reach this; status, size, and parse
-    /// errors are content-scoped and land in `failure_cache`.
-    fn note_fetch_failure(&self, addon_key: &str, generation: u64) {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        if self.generation.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        failures.insert(
-            addon_key.to_string(),
-            Instant::now() + RESOURCE_FETCH_FAILURE_TTL,
-        );
-        if failures.len() > RESOURCE_FETCH_FAILURES_SWEEP_AT {
-            let now = Instant::now();
-            failures.retain(|_, until| *until > now);
-        }
-    }
-
-    /// Generation-checked cooldown clear for a successful fetch: a success
-    /// that started before a `clear_cache` must not wipe a cooldown recorded
-    /// in the new generation.
-    fn clear_fetch_failure(&self, addon_key: &str, generation: u64) {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        if self.generation.load(Ordering::SeqCst) == generation {
-            failures.remove(addon_key);
-        }
-    }
-
-    /// Deterministic per-request failure write with the same generation
-    /// guard as the value caches: a `clear_cache` mid-fetch revokes it.
-    fn cache_failure(&self, key: &str, error: &str, generation: u64) {
-        let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
-        if !still_fresh() {
-            return;
-        }
-        self.failure_cache
-            .put(key, error.to_string(), true, still_fresh);
-    }
-
+    // Command-owned normalization runs before insertion, never on a cache hit.
     pub(crate) async fn fetch_catalog(
         &self,
         base_url: &str,
         type_: &str,
         catalog_id: &str,
         extras: &[CatalogExtra],
+        normalize: fn(MediaItem) -> MediaItem,
     ) -> Result<CatalogPage, String> {
         let url = build_resource_url(base_url, "catalog", type_, catalog_id, extras)?;
         let cache_key = resource_cache_key("catalog", &url);
         let addon_key = hash_segment(base_url);
-        cached_resource(
-            self,
-            &self.catalog_cache,
-            &cache_key,
-            &addon_key,
-            |page| page.items.is_empty(),
-            || async {
-                let what = format!("catalog {type_}/{catalog_id}");
-                let bytes =
-                    fetch_bounded_json(&self.client, &url, &what, CATALOG_MAX_BYTES).await?;
-                let response: CatalogResponse = serde_json::from_slice(&bytes).map_err(|_| {
-                    ResourceFetchError::Deterministic(
-                        "Invalid catalog response format.".to_string(),
-                    )
-                })?;
+        self.fetch_contract()
+            .run(
+                &self.catalog_cache,
+                &cache_key,
+                &addon_key,
+                |page| page.items.is_empty(),
+                || async {
+                    let what = format!("catalog {type_}/{catalog_id}");
+                    let bytes =
+                        fetch_bounded_json(&self.client, &url, &what, CATALOG_MAX_BYTES).await?;
+                    let response: CatalogResponse =
+                        serde_json::from_slice(&bytes).map_err(|_| {
+                            FetchFailure::Fatal("Invalid catalog response format.".to_string())
+                        })?;
 
-                Ok(CatalogPage {
-                    source_item_count: response.metas.len(),
-                    items: response
-                        .metas
-                        .into_iter()
-                        .filter_map(|value| serde_json::from_value::<CatalogItemJson>(value).ok())
-                        .filter_map(parse_catalog_item)
-                        .take(MAX_CATALOG_ITEMS)
-                        .collect(),
-                })
-            },
-        )
-        .await
+                    Ok(parse_catalog_page(response, normalize))
+                },
+            )
+            .await
     }
 
     pub(crate) async fn fetch_meta(
@@ -470,37 +317,36 @@ impl AddonResourceClient {
         base_url: &str,
         type_: &str,
         id: &str,
-        include_episodes: bool,
-    ) -> Result<MediaDetails, String> {
+        normalize: fn(MediaDetails) -> MediaDetails,
+    ) -> Result<Arc<MediaDetails>, String> {
         let url = build_resource_url(base_url, "meta", type_, id, &[])?;
         let cache_key = resource_cache_key("meta", &url);
         let addon_key = hash_segment(base_url);
-        let details = cached_resource(
-            self,
-            &self.meta_cache,
-            &cache_key,
-            &addon_key,
-            // Meta is success-or-error: parse failures return before this
-            // point, so a stored entry always earns the full TTL.
-            |_| false,
-            || async {
-                let what = format!("meta {type_}/{id}");
-                let bytes = fetch_bounded_json(&self.client, &url, &what, META_MAX_BYTES).await?;
-                let response: MetaResponse = serde_json::from_slice(&bytes).map_err(|_| {
-                    ResourceFetchError::Deterministic(
-                        "Invalid metadata response format.".to_string(),
-                    )
-                })?;
-                let meta = response.meta.ok_or_else(|| {
-                    ResourceFetchError::Deterministic("Metadata not found.".to_string())
-                })?;
-                parse_meta_item(meta).map(Arc::new).ok_or_else(|| {
-                    ResourceFetchError::Deterministic("Metadata not found.".to_string())
-                })
-            },
-        )
-        .await?;
-        Ok(meta_for_shape(details.as_ref(), include_episodes))
+        self.fetch_contract()
+            .run(
+                &self.meta_cache,
+                &cache_key,
+                &addon_key,
+                // Meta is success-or-error: parse failures return before this
+                // point, so a stored entry always earns the full TTL.
+                |_| false,
+                || async {
+                    let what = format!("meta {type_}/{id}");
+                    let bytes =
+                        fetch_bounded_json(&self.client, &url, &what, META_MAX_BYTES).await?;
+                    let response: MetaResponse = serde_json::from_slice(&bytes).map_err(|_| {
+                        FetchFailure::Fatal("Invalid metadata response format.".to_string())
+                    })?;
+                    let meta = response
+                        .meta
+                        .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))?;
+                    parse_meta_item(meta)
+                        .map(normalize)
+                        .map(Arc::new)
+                        .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))
+                },
+            )
+            .await
     }
 
     pub(crate) async fn fetch_subtitles(
@@ -512,30 +358,29 @@ impl AddonResourceClient {
         let url = build_resource_url(base_url, "subtitles", type_, id, &[])?;
         let cache_key = resource_cache_key("subtitles", &url);
         let addon_key = hash_segment(base_url);
-        cached_resource(
-            self,
-            &self.subtitle_cache,
-            &cache_key,
-            &addon_key,
-            |subtitles| subtitles.is_empty(),
-            || async {
-                let what = format!("subtitles {type_}/{id}");
-                let bytes =
-                    fetch_bounded_json(&self.client, &url, &what, SUBTITLE_MAX_BYTES).await?;
-                let response: SubtitleResponse = serde_json::from_slice(&bytes).map_err(|_| {
-                    ResourceFetchError::Deterministic(
-                        "Invalid subtitle response format.".to_string(),
-                    )
-                })?;
+        self.fetch_contract()
+            .run(
+                &self.subtitle_cache,
+                &cache_key,
+                &addon_key,
+                |subtitles| subtitles.is_empty(),
+                || async {
+                    let what = format!("subtitles {type_}/{id}");
+                    let bytes =
+                        fetch_bounded_json(&self.client, &url, &what, SUBTITLE_MAX_BYTES).await?;
+                    let response: SubtitleResponse =
+                        serde_json::from_slice(&bytes).map_err(|_| {
+                            FetchFailure::Fatal("Invalid subtitle response format.".to_string())
+                        })?;
 
-                Ok(response
-                    .subtitles
-                    .into_iter()
-                    .filter_map(parse_subtitle_item)
-                    .collect())
-            },
-        )
-        .await
+                    Ok(response
+                        .subtitles
+                        .into_iter()
+                        .filter_map(parse_subtitle_item)
+                        .collect())
+                },
+            )
+            .await
     }
 }
 
@@ -572,10 +417,9 @@ pub(crate) fn catalog_supports_request(
         ));
     }
 
-    // `search` stays a hard capability gate: a catalog that never declared
-    // it ignores the term and echoes its normal rows back as bogus search
-    // results. Other undeclared extras are advisory — servers drop extras
-    // they never declared and callers re-filter locally, so a missing
+    // `search` is a hard capability gate: an undeclaring catalog ignores the
+    // term and echoes its normal rows back as bogus results. Other undeclared
+    // extras are advisory — callers re-filter locally, so a missing
     // `genre`/`skip` declaration must not drop a servable source.
     if extras
         .iter()
@@ -679,6 +523,23 @@ fn json_u32(value: Option<&Value>) -> Option<u32> {
         Some(Value::Number(number)) => number.as_u64().and_then(|value| u32::try_from(value).ok()),
         Some(Value::String(text)) => text.trim().parse().ok(),
         _ => None,
+    }
+}
+
+fn parse_catalog_page(
+    response: CatalogResponse,
+    normalize: fn(MediaItem) -> MediaItem,
+) -> CatalogPage {
+    CatalogPage {
+        source_item_count: response.metas.len(),
+        items: response
+            .metas
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<CatalogItemJson>(value).ok())
+            .filter_map(parse_catalog_item)
+            .take(MAX_CATALOG_ITEMS)
+            .map(normalize)
+            .collect(),
     }
 }
 
@@ -884,16 +745,12 @@ pub(crate) fn is_magnet_url(url: &str) -> bool {
 
 /// Backend gate for player-fetchable http(s) URLs before they reach a
 /// privileged fetch path (mpv subtitle/stream fetch or direct-stream probe).
-/// Mirrors the frontend check plus the backend fetch policy: http(s) only,
-/// no embedded credentials, and no non-routable IP literal host.
+/// HTTP(S) only, no embedded credentials, and no non-routable IP literal host.
 pub(crate) fn is_fetchable_http_url(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
     };
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return false;
-    }
-    if !parsed.username().is_empty() || parsed.password().is_some() {
+    if !crate::providers::fetch_policy::is_plain_http_url(&parsed) {
         return false;
     }
     let Some(host) = parsed.host_str() else {
@@ -930,7 +787,6 @@ pub(crate) fn build_resource_url(
     let mut parsed = reqwest::Url::parse(base_url).map_err(|_| {
         "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
     })?;
-    let query = parsed.query().map(|value| value.to_string());
     let trimmed_path = parsed.path().trim_end_matches('/');
     let base_path = strip_manifest_suffix(trimmed_path);
 
@@ -960,7 +816,6 @@ pub(crate) fn build_resource_url(
     };
 
     parsed.set_path(&path);
-    parsed.set_query(query.as_deref());
     Ok(parsed.to_string())
 }
 
@@ -969,7 +824,7 @@ async fn fetch_bounded_json(
     url: &str,
     what: &str,
     max_bytes: usize,
-) -> Result<Vec<u8>, ResourceFetchError> {
+) -> Result<Vec<u8>, FetchFailure> {
     let response = client
         .get(url)
         .header("Accept", "application/json")
@@ -977,14 +832,14 @@ async fn fetch_bounded_json(
         .send()
         .await
         .map_err(|error| {
-            ResourceFetchError::Transport(format!(
+            FetchFailure::Retryable(format!(
                 "Failed to reach addon {what}: {}",
                 super::addons::sanitize_addon_log(&error.to_string())
             ))
         })?;
 
     if !response.status().is_success() {
-        return Err(ResourceFetchError::Deterministic(format!(
+        return Err(FetchFailure::Fatal(format!(
             "Addon {what} returned HTTP {}.",
             response.status().as_u16()
         )));
@@ -998,8 +853,8 @@ async fn fetch_bounded_json(
     })
     .await
     .map_err(|error| match error {
-        BoundedBodyError::TooLarge(message) => ResourceFetchError::Deterministic(message),
-        BoundedBodyError::Read(message) => ResourceFetchError::Transport(message),
+        BoundedBodyError::TooLarge(message) => FetchFailure::Fatal(message),
+        BoundedBodyError::Read(message) => FetchFailure::Retryable(message),
     })
 }
 

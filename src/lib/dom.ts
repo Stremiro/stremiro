@@ -25,3 +25,23 @@ export function isEditableTarget(target: EventTarget | null, extraSelector?: str
     )
   );
 }
+
+/** Run `onMounted` with the first `selector` match once it exists: a virtual
+    row mounts a frame after its scroll commit, so retry one frame before
+    giving up. */
+export function whenRowMounted(
+  getContainer: () => ParentNode | null,
+  selector: string,
+  onMounted: (row: HTMLElement) => void,
+): void {
+  let retried = false;
+  const attempt = () => {
+    const row = getContainer()?.querySelector<HTMLElement>(selector);
+    if (row) onMounted(row);
+    else if (!retried) {
+      retried = true;
+      requestAnimationFrame(attempt);
+    }
+  };
+  requestAnimationFrame(attempt);
+}

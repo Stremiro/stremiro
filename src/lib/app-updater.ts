@@ -53,7 +53,7 @@ interface AppUpdateState {
 let activeInstallPromise: Promise<void> | null = null;
 let activeCheckPromise: Promise<AppUpdateHandle | null> | null = null;
 
-function createInitialAppUpdateState(): AppUpdateState {
+export function getInitialAppUpdateState(): AppUpdateState {
   const isSupported = isTauriDesktopRuntime();
 
   return {
@@ -69,7 +69,7 @@ function createInitialAppUpdateState(): AppUpdateState {
 function readAppUpdateState(queryClient: QueryClient): AppUpdateState {
   return (
     queryClient.getQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY) ??
-    createInitialAppUpdateState()
+    getInitialAppUpdateState()
   );
 }
 
@@ -78,12 +78,8 @@ function writeAppUpdateState(
   updater: (current: AppUpdateState) => AppUpdateState,
 ) {
   queryClient.setQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY, (current) =>
-    updater(current ?? createInitialAppUpdateState()),
+    updater(current ?? getInitialAppUpdateState()),
   );
-}
-
-export function getInitialAppUpdateState(): AppUpdateState {
-  return createInitialAppUpdateState();
 }
 
 export function isUpdateReady(state?: Pick<AppUpdateState, 'status' | 'update'> | null): boolean {
@@ -150,22 +146,9 @@ export async function getCurrentAppVersion(): Promise<string | null> {
   }
 }
 
-async function checkForAppUpdate(): Promise<AppUpdateHandle | null> {
-  if (!isTauriDesktopRuntime()) return null;
-
-  const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
-  if (!update) {
-    // Housekeeping clear — a failed write must not fail the check itself.
-    await saveLastNotifiedAppUpdateVersion(null).catch(() => undefined);
-    return null;
-  }
-
-  return update;
-}
-
 export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUpdateHandle | null> {
   if (!isTauriDesktopRuntime()) {
-    writeAppUpdateState(queryClient, () => createInitialAppUpdateState());
+    writeAppUpdateState(queryClient, () => getInitialAppUpdateState());
     return null;
   }
 
@@ -189,7 +172,7 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
 
   activeCheckPromise = (async () => {
     try {
-      const update = await checkForAppUpdate();
+      const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
       const checkedAt = Date.now();
 
       if (!update) {
@@ -292,7 +275,7 @@ export async function runAppUpdateInstall(
   }
 
   if (!isTauriDesktopRuntime()) {
-    writeAppUpdateState(queryClient, () => createInitialAppUpdateState());
+    writeAppUpdateState(queryClient, () => getInitialAppUpdateState());
     throw new Error('Application updates are only available inside the packaged desktop app.');
   }
 
@@ -342,7 +325,7 @@ export async function runAppUpdateInstall(
       let recoveredCheckSucceeded = false;
 
       try {
-        recoveredUpdate = await checkForAppUpdate();
+        recoveredUpdate = await invoke<AppUpdateHandle | null>('check_for_app_update');
         recoveredCheckSucceeded = true;
       } catch {
         recoveredUpdate = null;

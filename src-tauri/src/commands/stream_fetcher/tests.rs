@@ -1,11 +1,25 @@
 use super::{
-    source_health_priority_for_addon, summarize_cooldown_skipped_addon, StreamSelectorData,
-    StreamSelectorSnapshot, StreamSelectorStats, StreamSourceStatus, StreamSourceSummary,
-    ACTIVE_SOURCE_COOLDOWN_PRIORITY,
+    fetch_addon_stream_outcome, source_health_priority_for_addon, summarize_cooldown_skipped_addon,
+    StreamSelectorData, StreamSelectorSnapshot, StreamSelectorStats, StreamSourceStatus,
+    StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
-use crate::providers::addons::{StreamDeliveryKind, StreamResolution};
+use crate::providers::addons::{AddonTransport, StreamDeliveryKind, StreamResolution};
 use crate::test_helpers::{test_addon, test_stream};
 use std::collections::HashMap;
+
+#[tokio::test]
+async fn borrowed_addon_outcomes_preserve_identity_on_empty_and_failed_fetches() {
+    let provider = AddonTransport::new();
+    let mut addon = test_addon("addon-1", "Example Addon");
+    addon.url = "not-a-url".to_string();
+    for query_ids in [Vec::new(), vec!["tt123".to_string()]] {
+        let outcome = fetch_addon_stream_outcome(&provider, "movie", &query_ids, &addon).await;
+        assert_eq!(outcome.id, addon.id);
+        assert_eq!(outcome.name, addon.name);
+        assert!(outcome.streams.is_empty());
+        assert_eq!(outcome.error_message.is_some(), !query_ids.is_empty());
+    }
+}
 
 #[test]
 fn source_health_priority_for_addon_uses_instance_ids() {

@@ -18,6 +18,85 @@ fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
 }
 
 #[test]
+fn cached_catalog_page_applies_normalizer_without_changing_source_count_or_bounds() {
+    let mut metas = vec![serde_json::json!(null)];
+    metas.extend((0..=MAX_CATALOG_ITEMS).map(|index| {
+        serde_json::json!({
+            "id": format!("tt{index}"), "type": "movie", "name": "Title"
+        })
+    }));
+    let page = parse_catalog_page(CatalogResponse { metas }, |mut item| {
+        item.primary_year = Some(2024);
+        if item.id == "tt0" {
+            item.title.clear();
+        }
+        item
+    });
+    assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS + 2);
+    assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
+    assert!(page.items[0].title.is_empty());
+    assert_eq!(page.items.last().unwrap().id, "tt499");
+    assert!(page
+        .items
+        .iter()
+        .all(|item| item.primary_year == Some(2024)));
+}
+
+#[tokio::test]
+async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic() {
+    let client = AddonResourceClient::new();
+    let base = "https://addon.test";
+    let catalog_url = build_resource_url(base, "catalog", "movie", "top", &[]).unwrap();
+    let page = parse_catalog_page(
+        serde_json::from_value(serde_json::json!({
+            "metas": [{"id": "tt1", "name": " A\t title ", "type": "movie", "year": "2024"}]
+        }))
+        .unwrap(),
+        |item| item,
+    );
+    client.catalog_cache.put(
+        &resource_cache_key("catalog", &catalog_url),
+        page,
+        false,
+        || true,
+    );
+    let hit = client
+        .fetch_catalog(base, "movie", "top", &[], |_| {
+            panic!("cache hit normalized")
+        })
+        .await
+        .unwrap();
+    assert_eq!(hit.items[0].id, "tt1");
+
+    let meta_url = build_resource_url(base, "meta", "series", "kitsu:1", &[]).unwrap();
+    let details = parse_meta_item(serde_json::json!({
+        "id": "tt1", "name": "Title", "type": "series"
+    }))
+    .unwrap();
+    client.meta_cache.put(
+        &resource_cache_key("meta", &meta_url),
+        Arc::new(details),
+        false,
+        || true,
+    );
+    let hit = client
+        .fetch_meta(base, "series", "kitsu:1", |_| {
+            panic!("cache hit normalized")
+        })
+        .await
+        .unwrap();
+    let again = client
+        .fetch_meta(base, "series", "kitsu:1", |_| {
+            panic!("cache hit normalized")
+        })
+        .await
+        .unwrap();
+    assert!(Arc::ptr_eq(&hit, &again));
+    assert_eq!(hit.imdb_id.as_deref(), Some("tt1"));
+    assert_eq!(again.id, "tt1");
+}
+
+#[test]
 fn build_resource_url_preserves_configured_path_and_query() {
     let url = build_resource_url(
         "https://example.com/stremio/v1?token=abc",
@@ -31,6 +110,13 @@ fn build_resource_url_preserves_configured_path_and_query() {
     assert_eq!(
         url,
         "https://example.com/stremio/v1/catalog/movie/top/search=dune.json?token=abc"
+    );
+    assert_eq!(
+        crate::providers::addon_manifest::build_manifest_url(
+            "https://example.com/stremio/v1?token=abc"
+        )
+        .expect("manifest url"),
+        "https://example.com/stremio/v1/manifest.json?token=abc"
     );
 }
 
@@ -310,10 +396,16 @@ fn episode_numbers_reject_u32_overflow_instead_of_wrapping() {
 #[test]
 fn fetchable_http_gate_blocks_private_targets_and_userinfo() {
     assert!(is_fetchable_http_url("https://cdn.test/video.m3u8"));
+    assert!(is_fetchable_http_url(
+        "https://[2606:4700:4700::1111]/video.m3u8"
+    ));
     for blocked in [
         "http://127.0.0.1:9999/video.mp4",
         "http://169.254.169.254/latest/meta-data",
         "http://192.168.1.1/video.mp4",
+        "http://[::1]/video.mp4",
+        "http://[::ffff:127.0.0.1]/video.mp4",
+        "http://[fc00::1]/video.mp4",
         "file:///etc/passwd",
         "https://user:pass@cdn.test/video.mp4",
     ] {
@@ -454,6 +546,8 @@ fn subtitle_item_rejects_private_targets_and_userinfo() {
         "http://127.0.0.1:11470/subs/en.srt",
         "http://169.254.169.254/latest/meta-data",
         "http://192.168.1.1/subs/en.srt",
+        "http://[::1]/subs/en.srt",
+        "http://[::ffff:127.0.0.1]/subs/en.srt",
         "file:///etc/passwd",
         "https://user:pass@subs.test/en.srt",
     ] {
@@ -524,30 +618,36 @@ fn transport_failures_cool_down_and_clear_recovers() {
     let client = AddonResourceClient::new();
     let addon_key = hash_segment("https://dead-addon.test");
 
-    assert!(!client.fetch_failure_cooling_down(&addon_key));
-    client.note_fetch_failure(&addon_key, 0);
-    assert!(client.fetch_failure_cooling_down(&addon_key));
+    assert!(!client.fetch_failures.cooling_down(&addon_key));
+    client
+        .fetch_failures
+        .note(&addon_key, &client.generation, 0);
+    assert!(client.fetch_failures.cooling_down(&addon_key));
 
     // A record written under a superseded generation is dropped: a fetch
     // that outlived a clear_cache must not reinstall the wiped cooldown.
     client.clear_cache();
-    assert!(!client.fetch_failure_cooling_down(&addon_key));
-    client.note_fetch_failure(&addon_key, 0);
-    assert!(!client.fetch_failure_cooling_down(&addon_key));
-    client.note_fetch_failure(&addon_key, 1);
-    assert!(client.fetch_failure_cooling_down(&addon_key));
+    assert!(!client.fetch_failures.cooling_down(&addon_key));
+    client
+        .fetch_failures
+        .note(&addon_key, &client.generation, 0);
+    assert!(!client.fetch_failures.cooling_down(&addon_key));
+    client
+        .fetch_failures
+        .note(&addon_key, &client.generation, 1);
+    assert!(client.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]
 fn deterministic_failures_negative_cache_until_clear() {
     let client = AddonResourceClient::new();
-    client.cache_failure("meta:x", "boom", 0);
+    client.fetch_contract().cache_failure("meta:x", "boom", 0);
     assert_eq!(client.failure_cache.get("meta:x").as_deref(), Some("boom"));
 
     // Same generation guard as the value caches: a clear_cache mid-fetch
     // revokes the negative-cache write too.
     client.clear_cache();
     assert_eq!(client.failure_cache.get("meta:x"), None);
-    client.cache_failure("meta:x", "boom", 0);
+    client.fetch_contract().cache_failure("meta:x", "boom", 0);
     assert_eq!(client.failure_cache.get("meta:x"), None);
 }

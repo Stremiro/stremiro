@@ -58,6 +58,7 @@ fn source_health_priority_rewards_recent_success() {
 fn stream_family_priority_rewards_recent_nearby_success() {
     let now_ms = 100_000;
     let snapshot = PlaybackStreamFamilySnapshot {
+        scope_key: None,
         source_id: None,
         last_success_at: Some(99_000),
         last_success_season: Some(1),
@@ -79,6 +80,7 @@ fn stream_family_priority_rewards_recent_nearby_success() {
 fn stream_family_priority_penalizes_recent_nearby_failure() {
     let now_ms = 100_000;
     let snapshot = PlaybackStreamFamilySnapshot {
+        scope_key: None,
         source_id: None,
         last_success_at: None,
         last_success_season: None,
@@ -102,6 +104,7 @@ fn stream_family_snapshot(
     last_failure_at: Option<u64>,
 ) -> PlaybackStreamFamilySnapshot {
     PlaybackStreamFamilySnapshot {
+        scope_key: None,
         source_id: source_id.map(str::to_string),
         last_success_at,
         last_success_season: None,
@@ -403,7 +406,7 @@ fn deleted_history_snapshot_cannot_repopulate_coalescing_cache() {
     service.mark_history_persisted(key.clone(), progress.clone(), generation);
     assert!(service.should_skip_history_write(&key, &progress, None));
 
-    let mut runtime = crate::providers::lock_or_recover(&service.runtime);
+    let mut persisted = crate::providers::lock_or_recover(&service.persisted_history);
     let pending_service = service.clone();
     let pending_key = key.clone();
     let pending_progress = progress.clone();
@@ -411,8 +414,8 @@ fn deleted_history_snapshot_cannot_repopulate_coalescing_cache() {
         pending_service.mark_history_persisted(pending_key, pending_progress, generation);
     });
     service.bump_history_generation();
-    runtime.persisted_history.clear();
-    drop(runtime);
+    persisted.clear();
+    drop(persisted);
     pending.join().expect("pending save completion");
 
     assert!(!service.should_skip_history_write(&key, &progress, None));

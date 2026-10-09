@@ -1,15 +1,14 @@
 import type {
   AddonConfig,
-  AddonConfigInput,
+  AddonConfigsOp,
   AddonUrlInspection,
   AppUiPreferences,
   AppUiPreferencesPatch,
   DataStats,
   ImportResult,
-  LocalProfile,
   MediaItem,
   ProfilePreferences,
-  ProfileViewMode,
+  ProfilePreferencesPatch,
   StreamSelectorPreferences,
   StreamSelectorPreferencesState,
   TitleWatchProgress,
@@ -53,16 +52,12 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
   return {
     getAddonConfigs,
     inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
-    saveAddonConfigs: (configs: AddonConfigInput[]) =>
+    updateAddonConfigs: (op: AddonConfigsOp) =>
       // Track the full write (including the cache-clear continuation) so a
       // close/export during a settings save waits on it — and sees failure.
       trackPendingAppWrite(
         (async () => {
-          // Rust owns capability snapshots; omit read-only response fields even
-          // when saving an existing AddonConfig array.
-          const saved = await safeInvoke<AddonConfig[]>('save_addon_configs', {
-            configs: configs.map(({ id, url, name, enabled }) => ({ id, url, name, enabled })),
-          });
+          const saved = await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
           clearProviderDataCaches(caches);
           return saved;
         })(),
@@ -73,10 +68,11 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
         patch,
       }),
     getProfilePreferences: () => safeInvoke<ProfilePreferences>('get_profile_preferences'),
-    saveProfilePreferences: (profile: LocalProfile, viewMode: ProfileViewMode) =>
+    saveProfilePreferences: (patch: ProfilePreferencesPatch) =>
       safeInvoke<ProfilePreferences>('save_profile_preferences', {
-        profile,
-        viewMode,
+        // Undefined means removal to the UI, but omitted fields mean preserve
+        // to Rust. Send explicit null only when the avatar was actually edited.
+        patch: 'avatar' in patch ? { ...patch, avatar: patch.avatar ?? null } : patch,
       }),
     getStreamSelectorPreferences: () =>
       safeInvoke<StreamSelectorPreferencesState>('get_stream_selector_preferences'),

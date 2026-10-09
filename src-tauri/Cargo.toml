@@ -1,6 +1,6 @@
 [package]
 name = "stremiro"
-version = "0.6.0-alpha"
+version = "0.7.0-alpha"
 description = "Lightweight Stremio-compatible desktop client"
 authors = ["Stremiro contributors"]
 edition = "2021"
@@ -35,6 +35,11 @@ futures-util = "0.3.34"
 tauri-plugin-dialog = "2.7.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
+# Privacy pin: no IP transports or discovery; re-audit on every iroh bump.
+iroh = { version = "=1.3.0", default-features = false, features = ["tls-ring"] }
+base64 = "0.22"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 [patch.crates-io]
 tauri-plugin-libmpv = { path = "vendor/tauri-plugin-libmpv" }
@@ -53,5 +58,5 @@ opt-level = 1
 # slice of a bundle already dominated by libmpv.
 lto = true
 codegen-units = 1
-panic = "abort"
+# Default unwind: a panicking background task fails alone (tokio JoinError / party catch_unwind) instead of aborting playback.
 strip = true

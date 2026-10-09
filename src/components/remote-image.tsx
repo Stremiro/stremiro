@@ -29,7 +29,9 @@ export function RemoteImage({
   onError = hideBrokenImage,
 }: RemoteImageProps) {
   return (
+    // A changed URL must not inherit the previous image's hidden fallback.
     <img
+      key={src}
       src={src}
       alt={alt}
       className={className}

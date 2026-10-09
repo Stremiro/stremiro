@@ -1,4 +1,5 @@
 use super::language::canonicalize_language_token;
+use super::normalize_token_text;
 #[cfg(debug_assertions)]
 use super::streaming_helpers::format_stream_size_label;
 use super::streaming_helpers::{
@@ -6,8 +7,9 @@ use super::streaming_helpers::{
     stream_resolution_priority, stream_source_priority,
 };
 use crate::providers::addons::{
-    stream_episode_match_texts, AddonStream, StreamEpisodeMatch, StreamEpisodeMatchKind,
-    StreamFlags, StreamMatchSummary, StreamRecommendationReason, StreamTitleMatch,
+    stream_episode_match_texts, AddonStream, SelectionPriority, StreamEpisodeMatch,
+    StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary, StreamRecommendationReason,
+    StreamTitleMatch,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -211,13 +213,10 @@ fn canonicalize_language_prefs(
 ) -> CanonicalLanguagePrefs {
     let audio = audio.and_then(canonicalize_language_token);
     let subtitle = subtitle.and_then(|value| {
-        let normalized = value.trim().to_ascii_lowercase();
-        if normalized.is_empty() {
-            None
-        } else if normalized == "off" {
+        if value.trim().eq_ignore_ascii_case("off") {
             Some(CanonicalSubtitlePref::Off)
         } else {
-            canonicalize_language_token(&normalized).map(CanonicalSubtitlePref::Lang)
+            canonicalize_language_token(value).map(CanonicalSubtitlePref::Lang)
         }
     });
     CanonicalLanguagePrefs { audio, subtitle }
@@ -292,13 +291,12 @@ impl StreamSignalCache {
         language_prefs: CanonicalLanguagePrefs,
     ) -> &CachedStreamSignals {
         if stream.stream_key.is_empty() {
-            self.uncached = Some(compute_cached_signals(
+            return self.uncached.insert(compute_cached_signals(
                 stream,
                 inputs,
                 reference,
                 language_prefs,
             ));
-            return self.uncached.as_ref().expect("uncached slot just filled");
         }
         // get-then-insert avoids cloning the key on hits.
         if !self.by_stream_key.contains_key(&stream.stream_key) {
@@ -392,12 +390,10 @@ fn stream_language_preference_priority(
         return 0;
     }
 
-    // One tokenize pass: the canonical set answers the preference lookups
-    // and the raw-token questions fold into single-pass booleans. The
-    // haystack arrives already lowered and separator-normalized (the match
-    // text memo), so borrowed tokens see the same boundaries as an
-    // allocated `tokenize_language_meta` pass.
-    let mut language_tokens: HashSet<&str> = HashSet::new();
+    // Only two language memberships are needed; track them while tokenizing
+    // instead of allocating a set for every stream.
+    let mut audio_matches = false;
+    let mut subtitle_matches = false;
     let mut has_dub = false;
     let mut has_subtitle_hint = false;
     for token in haystack
@@ -409,11 +405,12 @@ fn stream_language_preference_priority(
             "sub" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
             _ => {}
         }
-        if let Some(canonical) = canonicalize_language_token(token) {
-            language_tokens.insert(canonical);
-        } else {
-            language_tokens.insert(token);
-        }
+        let canonical = canonicalize_language_token(token).unwrap_or(token);
+        audio_matches |= preferred_audio_language == Some(canonical);
+        subtitle_matches |= matches!(
+            preferred_subtitle_language,
+            Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
+        );
     }
     // Flags come from the shared `StreamFlags` memo so ranking and the
     // presentation badge score the same vocabulary off the same haystack.
@@ -422,8 +419,8 @@ fn stream_language_preference_priority(
     let has_multi_sub = flags.multi_sub;
     let mut score = 0;
 
-    if let Some(preferred_audio_language) = preferred_audio_language {
-        if language_tokens.contains(preferred_audio_language) {
+    if preferred_audio_language.is_some() {
+        if audio_matches {
             score += 4;
         } else if has_dual_audio || has_multi_audio {
             score += 2;
@@ -434,8 +431,8 @@ fn stream_language_preference_priority(
         Some(CanonicalSubtitlePref::Off) if has_dub || has_dual_audio || has_multi_audio => {
             score += 2;
         }
-        Some(CanonicalSubtitlePref::Lang(preferred_subtitle_language)) => {
-            if language_tokens.contains(preferred_subtitle_language) {
+        Some(CanonicalSubtitlePref::Lang(_)) => {
+            if subtitle_matches {
                 score += 3;
             } else if has_multi_sub || has_dual_audio || has_multi_audio || has_subtitle_hint {
                 score += 1;
@@ -496,57 +493,16 @@ fn is_title_boundary_token(token: &str) -> bool {
         || matches!(token, "ep" | "episode")
 }
 
-fn tokenize_title_words(value: &str, stop_at_boundary: bool) -> Vec<String> {
-    let normalized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    let mut words = Vec::new();
-    for token in normalized.split_whitespace() {
-        if stop_at_boundary && is_title_boundary_token(token) {
-            break;
-        }
-
-        if token.len() == 1 && !token.chars().all(|ch| ch.is_ascii_digit()) {
-            continue;
-        }
-
-        words.push(token.to_string());
-        if words.len() >= 12 {
-            break;
-        }
-    }
-
-    words
+/// Borrow words from the normalized buffer instead of allocating each token.
+fn tokenize_title_words(normalized: &str, stop_at_boundary: bool) -> impl Iterator<Item = &str> {
+    normalized
+        .split_whitespace()
+        .take_while(move |token| !stop_at_boundary || !is_title_boundary_token(token))
+        .filter(|token| token.len() != 1 || token.chars().all(|ch| ch.is_ascii_digit()))
+        .take(12)
 }
 
-fn build_title_token_set(words: &[String]) -> HashSet<String> {
-    words
-        .iter()
-        .filter(|word| !is_title_stop_word(word))
-        .cloned()
-        .collect()
-}
-
-/// Borrowed variant for candidate sets that die inside the per-stream loop —
-/// skips ~12 String clones per candidate per stream. The reference set stays
-/// owned: it outlives the word Vec it was built from.
-fn build_title_token_set_ref(words: &[String]) -> HashSet<&str> {
-    words
-        .iter()
-        .map(String::as_str)
-        .filter(|word| !is_title_stop_word(word))
-        .collect()
-}
-
-fn build_title_initialism(words: &[String]) -> Option<String> {
+fn build_title_initialism(words: &[&str]) -> Option<String> {
     let initialism: String = words
         .iter()
         .filter(|word| !is_title_stop_word(word))
@@ -616,11 +572,13 @@ struct ReferenceTitle {
 }
 
 fn build_reference_title(title: Option<&str>) -> Option<ReferenceTitle> {
-    let words = tokenize_title_words(title?.trim(), false);
-    if words.is_empty() {
-        return None;
-    }
-    let tokens = build_title_token_set(&words);
+    let normalized = normalize_token_text(title?.trim());
+    let words: Vec<_> = tokenize_title_words(&normalized, false).collect();
+    let tokens: HashSet<String> = words
+        .iter()
+        .filter(|word| !is_title_stop_word(word))
+        .map(|word| word.to_string())
+        .collect();
     if tokens.is_empty() {
         return None;
     }
@@ -673,8 +631,10 @@ fn stream_title_relevance_score(
     .into_iter()
     .flatten()
     {
-        let candidate_words = tokenize_title_words(strip_leading_group_tag(candidate), true);
-        let candidate_tokens = build_title_token_set_ref(&candidate_words);
+        let normalized = normalize_token_text(strip_leading_group_tag(candidate));
+        let candidate_tokens: HashSet<&str> = tokenize_title_words(&normalized, true)
+            .filter(|word| !is_title_stop_word(word))
+            .collect();
         if candidate_tokens.is_empty() {
             continue;
         }
@@ -751,50 +711,48 @@ const MAX_RECOMMENDATION_REASONS: usize = 2;
 
 fn recommendation_reasons_from_key(
     key: &StreamRecommendationKey,
-) -> Vec<StreamRecommendationReason> {
+    reasons: &mut Vec<StreamRecommendationReason>,
+) {
     use StreamRecommendationReason as Reason;
-    let mut reasons = Vec::with_capacity(6);
+    reasons.clear();
+    reasons.reserve_exact(MAX_RECOMMENDATION_REASONS);
 
-    // Episode/title match facts ship on `match_summary` — duplicating them
-    // here would render the same fact twice in the selector row.
-
-    match key.health {
-        3 => reasons.push(Reason::VerifiedSource),
-        1 => reasons.push(Reason::SourceIssues),
-        0 => reasons.push(Reason::SourceCooling),
-        _ => {}
-    }
-
-    match key.family {
-        4 => reasons.push(Reason::ProvenReleaseGroup),
-        1 => reasons.push(Reason::ReleaseGroupIssues),
-        0 => reasons.push(Reason::ReleaseGroupCooling),
-        _ => {}
-    }
-
-    if key.title_source_affinity > 0 {
-        reasons.push(Reason::TitleAffinity);
-    }
-
-    if key.language >= 4 {
-        reasons.push(Reason::LanguageMatch);
-    } else if key.language >= 2 {
-        reasons.push(Reason::LanguageFlexible);
-    }
-
-    // Delivery facts ("Cached"/"HTTP") are intentionally absent: the row's
-    // icon tile and delivery label already carry them — repeating them as
-    // reason chips renders the same fact twice.
-
-    if key.quality >= 400 {
-        reasons.push(Reason::TopQuality);
-    } else if key.quality >= 250 {
-        reasons.push(Reason::GoodQuality);
-    }
-
-    if key.source_priority > 0 {
-        reasons.push(Reason::PreferredSource);
-    }
+    // Match and delivery facts already have dedicated row badges.
+    reasons.extend(
+        [
+            match key.health {
+                3 => Some(Reason::VerifiedSource),
+                1 => Some(Reason::SourceIssues),
+                0 => Some(Reason::SourceCooling),
+                _ => None,
+            },
+            match key.family {
+                4 => Some(Reason::ProvenReleaseGroup),
+                1 => Some(Reason::ReleaseGroupIssues),
+                0 => Some(Reason::ReleaseGroupCooling),
+                _ => None,
+            },
+            (key.title_source_affinity > 0).then_some(Reason::TitleAffinity),
+            if key.language >= 4 {
+                Some(Reason::LanguageMatch)
+            } else if key.language >= 2 {
+                Some(Reason::LanguageFlexible)
+            } else {
+                None
+            },
+            if key.quality >= 400 {
+                Some(Reason::TopQuality)
+            } else if key.quality >= 250 {
+                Some(Reason::GoodQuality)
+            } else {
+                None
+            },
+            (key.source_priority > 0).then_some(Reason::PreferredSource),
+        ]
+        .into_iter()
+        .flatten()
+        .take(MAX_RECOMMENDATION_REASONS),
+    );
 
     // "Fallback" only when the row has nothing else going for it — a lone
     // match badge is already meaningful on its own.
@@ -804,9 +762,6 @@ fn recommendation_reasons_from_key(
     {
         reasons.push(Reason::Fallback);
     }
-
-    reasons.truncate(MAX_RECOMMENDATION_REASONS);
-    reasons
 }
 
 /// Dev-inspector dump of the whole sort key, in rank order. Compiled out of
@@ -866,14 +821,14 @@ pub(crate) fn sort_streams_by_recommendation(
 
     for (key, mut stream) in keyed {
         stream.match_summary = stream_match_summary(&key);
-        stream.selection_priority = Some((
-            key.episode_match,
-            key.season_claim_verified,
-            key.title_match,
-            key.viability,
-            key.language,
-        ));
-        stream.recommendation_reasons = recommendation_reasons_from_key(&key);
+        stream.selection_priority = Some(SelectionPriority {
+            episode_match: key.episode_match,
+            season_claim_verified: key.season_claim_verified,
+            title_match: key.title_match,
+            viability: key.viability,
+            language: key.language,
+        });
+        recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
         // Dev-only: ship the sort key so the selector's ranking inspector
         // can explain the order without re-running the match battery.
         #[cfg(debug_assertions)]

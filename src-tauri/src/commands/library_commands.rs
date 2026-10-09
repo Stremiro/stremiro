@@ -25,8 +25,7 @@ pub(super) fn prepare_library_write(
         "Invalid library item. ID, title, and media type are required.".to_string()
     })?;
     let existing = store
-        .get(library_item_key(&item.id))
-        .and_then(|value| serde_json::from_value::<MediaItem>(value).ok())
+        .get_typed(library_item_key(&item.id))
         .and_then(normalize_library_item);
     let item = if let Some(existing) = existing {
         merge_library_item(existing, item)
@@ -70,8 +69,19 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
         // op so a removed title can't leave an invisible status row. Both stores and both
         // indexes are opened and validated before any delete/set/save, so a
         // corrupt status index fails before the library entry is touched.
+        // Statuses are committed first: a leftover status without its library
+        // row is the harmful half — the details self-heal can resurrect the
+        // title — while a library row without a status is benign.
         let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
         let mut status_index = load_watch_status_index(&status_store)?;
+
+        let removed_status = status_store.delete(watch_status_item_key(&id));
+        let original_status_len = status_index.len();
+        status_index.retain(|entry| entry != &id);
+        if removed_status || status_index.len() != original_status_len {
+            status_store.set(WATCH_STATUS_INDEX_KEY, json!(status_index));
+            status_store.save()?;
+        }
 
         let deleted_item = store.delete(library_item_key(&id));
         let original_len = index.len();
@@ -80,14 +90,6 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
         if deleted_item || index.len() != original_len {
             store.set(LIBRARY_INDEX_KEY, json!(index));
             store.save()?;
-        }
-
-        let removed_status = status_store.delete(watch_status_item_key(&id));
-        let original_status_len = status_index.len();
-        status_index.retain(|entry| entry != &id);
-        if removed_status || status_index.len() != original_status_len {
-            status_store.set(WATCH_STATUS_INDEX_KEY, json!(status_index));
-            status_store.save()?;
         }
 
         Ok(())

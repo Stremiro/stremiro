@@ -52,12 +52,14 @@ export async function safeInvoke<T>(command: string, args?: object): Promise<T> 
       const { handlePreviewInvoke } = await import('@/lib/api-preview-mocks');
       return await handlePreviewInvoke<T>(command, args as Record<string, unknown> | undefined);
     }
-
-    throw new Error(`Command "${command}" requires the Tauri desktop runtime.`);
   } catch (error) {
     if (isDev) console.error(`Raw invoke error for ${command}:`, error);
     const message = getErrorMessage(error);
     if (isDev) console.error(`Processed error message for ${command}:`, message);
     throw new Error(message || 'Unknown error (empty message)', { cause: error });
   }
+
+  // Outside the try: this isn't an invoke failure, so it must not be
+  // dev-logged as one or re-wrapped with itself as its own cause.
+  throw new Error(`Command "${command}" requires the Tauri desktop runtime.`);
 }

@@ -5,25 +5,16 @@ import {
   type AccentTargets,
   api,
   type LocalProfile,
+  type LocalProfileUpdate,
   type ProfilePreferences,
+  type ProfilePreferencesPatch,
   type ProfileViewMode,
 } from '@/lib/api';
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
-import { registerPendingAppWriteFlusher, settlePendingAppWrites } from '@/lib/pending-app-writes';
+import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { PROFILE_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 
-export type { AccentTargets, LocalProfile, ProfileViewMode };
-
-export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets'>> & {
-  accentTargets?: Partial<AccentTargets>;
-};
-
-const pendingProfileWrites = new Set<Promise<void>>();
-
-async function flushPendingProfilePreferences(): Promise<void> {
-  await settlePendingAppWrites(pendingProfileWrites);
-}
-registerPendingAppWriteFlusher(flushPendingProfilePreferences);
+export type { AccentTargets, LocalProfile, LocalProfileUpdate, ProfileViewMode };
 
 const DEFAULT_ACCENT_TARGETS: AccentTargets = {
   navigation: true,
@@ -92,18 +83,17 @@ export function useLocalProfile() {
   const profilePreferencesQuery = useProfilePreferencesQuery();
 
   const savePreferencesMutation = useMutation({
-    mutationFn: (preferences: ProfilePreferences) =>
-      api.saveProfilePreferences(preferences.profile, preferences.viewMode),
+    mutationFn: api.saveProfilePreferences,
   });
   const { mutateAsync: saveProfilePrefs } = savePreferencesMutation;
 
   const currentPreferences = profilePreferencesQuery.data ?? DEFAULT_PROFILE_PREFERENCES;
 
   const persistPreferences = useCallback(
-    (update: (preferences: ProfilePreferences) => ProfilePreferences) => {
+    (patch: ProfilePreferencesPatch) => {
       const operation = (async () => {
-        // Placeholders are display-only: hydrate before composing a full-profile
-        // write, and read again after the await so rapid edits build on each other.
+        // Hydrate the optimistic display; Rust applies only the edited fields
+        // to the latest persisted profile under the store gate.
         await queryClient.ensureQueryData({
           queryKey: PROFILE_PREFERENCES_QUERY_KEY,
           queryFn: api.getProfilePreferences,
@@ -111,46 +101,36 @@ export function useLocalProfile() {
         const latest =
           queryClient.getQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY) ??
           DEFAULT_PROFILE_PREFERENCES;
-        const preferences = update(latest);
+        const { viewMode, ...profile } = patch;
+        const preferences: ProfilePreferences = {
+          viewMode: viewMode ?? latest.viewMode,
+          profile: {
+            ...latest.profile,
+            ...profile,
+            accentTargets: { ...latest.profile.accentTargets, ...profile.accentTargets },
+          },
+        };
         await runOptimisticQueryMutation({
           mutate: saveProfilePrefs,
           optimisticData: preferences,
           queryClient,
           queryKey: PROFILE_PREFERENCES_QUERY_KEY,
-          variables: preferences,
+          variables: patch,
         });
       })();
       // Track hydration too: a backup can start before the IPC write is queued.
-      pendingProfileWrites.add(operation);
-      const cleanup = () => pendingProfileWrites.delete(operation);
-      void operation.then(cleanup, cleanup);
-      return operation;
+      return trackPendingAppWrite(operation);
     },
     [queryClient, saveProfilePrefs],
   );
 
-  // Targets merge per flag: two toggles in one tick must not clobber each
-  // other with a render-time snapshot of the whole object.
   const updateProfile = useCallback(
-    (updates: LocalProfileUpdate) => {
-      return persistPreferences((latest) => ({
-        ...latest,
-        profile: {
-          ...latest.profile,
-          ...updates,
-          accentTargets: { ...latest.profile.accentTargets, ...updates.accentTargets },
-        },
-      }));
-    },
+    (updates: LocalProfileUpdate) => persistPreferences(updates),
     [persistPreferences],
   );
 
   const updateViewMode = useCallback(
-    (viewMode: ProfileViewMode) =>
-      persistPreferences((latest) => ({
-        ...latest,
-        viewMode,
-      })),
+    (viewMode: ProfileViewMode) => persistPreferences({ viewMode }),
     [persistPreferences],
   );
 

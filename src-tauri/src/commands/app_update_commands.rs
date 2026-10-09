@@ -1,8 +1,7 @@
 use crate::providers::lock_or_recover;
 use serde::Serialize;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{command, AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
 
@@ -37,7 +36,7 @@ const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
 /// reqwest's per-request timeout is total-duration, so it cannot bound a
 /// legitimately long download — instead a watchdog aborts when no chunk has
 /// arrived for this long.
-const UPDATE_DOWNLOAD_STALL_LIMIT_MS: u64 = 120_000;
+const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
 const UPDATE_DOWNLOAD_WATCHDOG_TICK: Duration = Duration::from_secs(15);
 
 pub(crate) const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
@@ -101,6 +100,13 @@ pub async fn check_for_app_update(
         date: update.date.map(|date| date.date().to_string()),
     });
 
+    // A successful no-update check retires the previous notification;
+    // clearing is best-effort.
+    if update.is_none() {
+        let _ =
+            super::config_commands::save_last_notified_app_update_version(app.clone(), None).await;
+    }
+
     // A fresh check replaces the pending handle and clears the last install
     // failure: retry always requires this fresh handle, never a stale one.
     let mut state = pending_update.lock();
@@ -154,13 +160,16 @@ pub async fn install_app_update(
     let finish_app = app.clone();
     let mut downloaded_bytes = 0_u64;
     let mut last_reported_percent = None::<u64>;
-    let last_chunk_at = Arc::new(AtomicU64::new(crate::commands::now_unix_millis()));
-    let watchdog_last_chunk_at = last_chunk_at.clone();
-    let install_phase_clock = last_chunk_at.clone();
+    // One stall clock shared by all three sites: chunk arrivals and the
+    // install-phase transition reset it, the watchdog reads it — three
+    // names for one `Instant` hid that they are the same cell.
+    let last_activity_at = Arc::new(Mutex::new(Instant::now()));
+    let chunk_activity_at = last_activity_at.clone();
+    let install_activity_at = last_activity_at.clone();
 
     let download = update.download_and_install(
         move |chunk_length, content_length| {
-            last_chunk_at.store(crate::commands::now_unix_millis(), Ordering::Relaxed);
+            *lock_or_recover(&chunk_activity_at) = Instant::now();
             downloaded_bytes =
                 downloaded_bytes.saturating_add(u64::try_from(chunk_length).unwrap_or(u64::MAX));
 
@@ -191,7 +200,7 @@ pub async fn install_app_update(
             // Download is done: reset the stall clock so the watchdog below
             // measures install-time silence from here, not from the last
             // downloaded byte.
-            install_phase_clock.store(crate::commands::now_unix_millis(), Ordering::Relaxed);
+            *lock_or_recover(&install_activity_at) = Instant::now();
             // On Windows the process exits inside `download_and_install`, so
             // RunEvent::Exit may never run — retry any failed durable-store
             // saves here while the app is still alive.
@@ -215,12 +224,11 @@ pub async fn install_app_update(
         tokio::select! {
             outcome = &mut download => break outcome.map_err(|error| error.to_string()),
             _ = tokio::time::sleep(UPDATE_DOWNLOAD_WATCHDOG_TICK) => {
-                let idle_ms = crate::commands::now_unix_millis()
-                    .saturating_sub(watchdog_last_chunk_at.load(Ordering::Relaxed));
-                if idle_ms >= UPDATE_DOWNLOAD_STALL_LIMIT_MS {
+                let stalled_for = lock_or_recover(&last_activity_at).elapsed();
+                if stalled_for >= UPDATE_DOWNLOAD_STALL_LIMIT {
                     break Err(format!(
                         "Update download stalled — no data received for {}s.",
-                        UPDATE_DOWNLOAD_STALL_LIMIT_MS / 1000
+                        UPDATE_DOWNLOAD_STALL_LIMIT.as_secs()
                     ));
                 }
             }

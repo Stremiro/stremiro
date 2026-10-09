@@ -14,6 +14,12 @@ export function isSeriesLikeMediaType(value?: string | null): boolean {
 
 export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 
+/** Browse-page content-column insets that clear the fixed left sidebar
+    (pl 84→92px = 60px rail + gutter). Concatenated, never `cn()`-merged —
+    separate left/right padding: a combined `lg:px-*` would override
+    `lg:pl-[92px]` under tailwind-merge and pull the column under the sidebar. */
+export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
+
 /** `#rrggbb` to `"r g b"` for use inside `rgb()`/`rgba()` with CSS vars. */
 export function hexToRgbTriplet(value: string): `${number} ${number} ${number}` {
   const match = HEX_COLOR_PATTERN.exec(value.trim());
@@ -40,6 +46,12 @@ export function nonBlank(value?: string | null): string | undefined {
   return value?.trim() || undefined;
 }
 
+/** 'local' is the sentinel media id for playback without a catalog title —
+    resume, language-preference and stream-health persistence all skip it. */
+export function isLocalMediaId(mediaId?: string | null): boolean {
+  return mediaId === 'local';
+}
+
 /** Resolve after `ms` — single owner for poll/verify/settle pacing. */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -52,6 +64,35 @@ export function clearTimer(timerRef: { current: TimerHandle | null }) {
   if (timerRef.current === null) return;
   clearTimeout(timerRef.current);
   timerRef.current = null;
+}
+
+/** Insert-or-refresh into a recency-ordered `Map` bounded to `max` entries:
+    delete+set re-inserts so recency is insertion order, then the oldest key
+    is evicted at capacity — a plain `set` would leave a revisited entry in
+    its first-seen slot and evict live entries before stale ones. */
+export function boundedMapSet<K, V>(map: Map<K, V>, key: K, value: V, max: number) {
+  map.delete(key);
+  map.set(key, value);
+  if (map.size > max) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+}
+
+/** Serial operation queue: each `enqueue` runs after the previous settles.
+    The stored tail is recovered so one failure can't wedge later work —
+    callers get the raw result (errors propagate) while `pending` stays
+    awaitable for lifecycle barriers. */
+export function createSerialTaskQueue() {
+  let tail: Promise<void> = Promise.resolve();
+  return {
+    enqueue(operation: () => Promise<void>): Promise<void> {
+      const result = tail.then(operation);
+      tail = result.catch(() => undefined);
+      return result;
+    },
+    pending: () => tail,
+  };
 }
 
 /** `Promise.race` with a self-clearing timer: `onTimeout` supplies the
@@ -77,6 +118,12 @@ export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T)
  * global guard in index.css. */
 export function prefersReducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+
+/** `ScrollBehavior` honoring reduced motion — single owner for the
+    `prefersReducedMotion() ? 'auto' : 'smooth'` policy at scroll call sites. */
+export function scrollBehavior(): ScrollBehavior {
+  return prefersReducedMotion() ? 'auto' : 'smooth';
 }
 
 /** `<img onError>` fallback: hide the broken element instead of a torn icon. */

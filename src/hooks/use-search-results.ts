@@ -1,8 +1,9 @@
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
-import { api, type MediaItem, type SearchCatalogPage } from '@/lib/api';
+import { api, type AllBrowseCursors, type SearchCatalogPage } from '@/lib/api';
 import { canonicalizeSearchText } from '@/lib/api-cache';
+import { useLocalDay } from '@/hooks/use-local-day';
 import { SEARCH_CATALOG_QUERY_KEY } from '@/lib/query-invalidation';
 import { flattenCatalogPages, nextCatalogSkip } from '@/lib/search-catalog';
 import type { SearchFeed, SearchMediaType } from '@/lib/search-page-state';
@@ -13,75 +14,6 @@ interface UseSearchResultsArgs {
   activeFeed: SearchFeed;
   activeGenre?: string;
   isOnline: boolean;
-}
-
-// `all` browse owns one cursor per catalog — movie and series pages advance
-// independently so an exhausted or failing branch can't strand the other.
-interface AllBrowseCursors {
-  movie?: number;
-  series?: number;
-}
-
-interface SearchResultsPage extends SearchCatalogPage {
-  /** `all`-browse pages carry per-catalog cursors instead of `nextSkip`. */
-  allCursors?: AllBrowseCursors;
-}
-
-const ALL_BROWSE_TYPES = ['movie', 'series'] as const;
-
-async function fetchAllBrowsePage(
-  cursors: AllBrowseCursors,
-  options: { feed?: 'featured'; genre?: string; year?: number },
-): Promise<SearchResultsPage> {
-  const branches = ALL_BROWSE_TYPES.flatMap((type) => {
-    const skip = cursors[type];
-    return skip === undefined ? [] : [{ type, skip }];
-  });
-  const settled = await Promise.allSettled(
-    branches.map((branch) =>
-      api.querySearchCatalogPage({
-        mediaType: branch.type,
-        feed: options.feed,
-        genres: options.genre ? [options.genre] : undefined,
-        yearFrom: options.year,
-        yearTo: options.year,
-        skip: branch.skip > 0 ? branch.skip : undefined,
-      }),
-    ),
-  );
-
-  const pages = new Map<(typeof ALL_BROWSE_TYPES)[number], SearchCatalogPage>();
-  const allCursors: AllBrowseCursors = {};
-  let firstError: unknown;
-  settled.forEach((outcome, index) => {
-    const branch = branches[index];
-    if (outcome.status === 'rejected') {
-      // Retry the failed branch on the next page: one flaky catalog must not
-      // blank the other's remaining results or end pagination.
-      allCursors[branch.type] = branch.skip;
-      firstError ??= outcome.reason;
-      return;
-    }
-    pages.set(branch.type, outcome.value);
-    const nextSkip = outcome.value.nextSkip;
-    allCursors[branch.type] =
-      typeof nextSkip === 'number' && nextSkip > branch.skip ? nextSkip : undefined;
-  });
-
-  if (pages.size === 0) {
-    throw firstError ?? new Error('Failed to load catalog.');
-  }
-
-  // Interleave branches so the merged grid mixes movies and series.
-  const items: MediaItem[] = [];
-  const movieItems = pages.get('movie')?.items ?? [];
-  const seriesItems = pages.get('series')?.items ?? [];
-  for (let index = 0; index < Math.max(movieItems.length, seriesItems.length); index += 1) {
-    if (index < movieItems.length) items.push(movieItems[index]);
-    if (index < seriesItems.length) items.push(seriesItems[index]);
-  }
-
-  return { items, nextSkip: null, allCursors };
 }
 
 export function useSearchResults({
@@ -99,7 +31,10 @@ export function useSearchResults({
   const browseFeed = normalizedQuery ? undefined : activeFeed;
   // The `new` feed is the provider `year` catalog: a single pinned year on the
   // Popular feed, which the backend routes to `year` when no genre is stacked.
-  const newFeedYear = browseFeed === 'new' ? new Date().getFullYear() : undefined;
+  // `useLocalDay` re-keys the query after a midnight rollover — a one-time
+  // `getFullYear()` would pin the mount-day's year for an always-open session.
+  const localDay = useLocalDay();
+  const newFeedYear = browseFeed === 'new' ? localDay.getFullYear() : undefined;
   // `all` with no query merges both browse catalogs; with a query the backend
   // already fans out to the movie and series search catalogs on its own.
   const allBrowse = activeType === 'all' && !normalizedQuery;
@@ -127,22 +62,17 @@ export function useSearchResults({
       // `new` pins a year; key it so a rollover can't serve a stale catalog.
       newFeedYear ?? null,
     ],
-    queryFn: ({ pageParam }): Promise<SearchResultsPage> => {
-      if (allBrowse) {
-        return fetchAllBrowsePage(pageParam as AllBrowseCursors, {
-          feed: browseFeed === 'featured' ? 'featured' : undefined,
-          genre: normalizedGenre,
-          year: newFeedYear,
-        });
-      }
+    queryFn: ({ pageParam }): Promise<SearchCatalogPage> => {
+      const feed = browseFeed === 'featured' ? 'featured' : undefined;
       return api.querySearchCatalogPage({
         query: normalizedQuery,
         mediaType: activeType === 'all' ? undefined : activeType,
-        feed: browseFeed === 'featured' ? 'featured' : undefined,
+        feed,
         genres: normalizedGenre ? [normalizedGenre] : undefined,
         yearFrom: newFeedYear,
         yearTo: newFeedYear,
         skip: typeof pageParam === 'number' && pageParam > 0 ? pageParam : undefined,
+        allCursors: allBrowse ? (pageParam as AllBrowseCursors) : undefined,
       });
     },
     initialPageParam: (allBrowse ? { movie: 0, series: 0 } : 0) as number | AllBrowseCursors,

@@ -9,22 +9,16 @@ export function useDelayedUnmount(
   exitMs = 280,
 ): { mounted: boolean; exiting: boolean } {
   const [mounted, setMounted] = useState(active);
-  const [exiting, setExiting] = useState(false);
 
   useEffect(() => {
     if (active) {
       setMounted(true);
-      setExiting(false);
       return;
     }
     if (!mounted) return;
-    setExiting(true);
-    const timer = window.setTimeout(() => {
-      setMounted(false);
-      setExiting(false);
-    }, exitMs);
+    const timer = window.setTimeout(() => setMounted(false), exitMs);
     return () => window.clearTimeout(timer);
   }, [active, exitMs, mounted]);
 
-  return { mounted, exiting };
+  return { mounted: active || mounted, exiting: !active && mounted };
 }

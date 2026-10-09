@@ -1,8 +1,9 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
-import { AlertTriangle, Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
+import { Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { api, getErrorMessage, type ImportResult } from '@/lib/api';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
@@ -10,11 +11,9 @@ import {
   ADDON_CONFIGS_QUERY_KEY,
   DATA_STATS_QUERY_KEY,
   DATA_STATS_STALE_TIME_MS,
-  invalidateDataStatsQuery,
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueries,
-  invalidateSettingsQueries,
   invalidateStoredDataQueries,
   invalidateWatchStatusQueries,
   PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
@@ -24,19 +23,15 @@ import {
 import { cn } from '@/lib/utils';
 import { SETTINGS_OUTLINE_BUTTON_CLASS, SettingsGroup, SettingsGroupHeader } from './chrome';
 
-// ── Types ────────────────────────────────────────────────────────────────────
-
 interface DataCategory {
   key: 'history' | 'library' | 'lists' | 'statuses';
   label: string;
   description: string;
-  count: number;
+  count: number | undefined;
   unit: string;
   clearFn: () => Promise<void>;
   invalidateCaches: () => Promise<void>;
 }
-
-// ── Backup & Restore ─────────────────────────────────────────────────────────
 
 function BackupRestore() {
   const queryClient = useQueryClient();
@@ -99,11 +94,10 @@ function BackupRestore() {
         if (settingsChanged || (result?.addons_imported ?? 0) > 0) {
           await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
         }
-        await Promise.all([
-          invalidateStoredDataQueries(queryClient),
-          (settingsChanged || (result?.addons_imported ?? 0) > 0) &&
-            invalidateSettingsQueries(queryClient),
-        ]);
+        await invalidateStoredDataQueries(
+          queryClient,
+          settingsChanged || (result?.addons_imported ?? 0) > 0,
+        );
       }
       const summary = [
         `${result.history_imported} history`,
@@ -122,7 +116,7 @@ function BackupRestore() {
   };
 
   return (
-    <div className='flex items-center justify-between gap-4 px-5 py-4'>
+    <div className='flex flex-col items-start justify-between gap-4 px-5 py-4 sm:flex-row sm:items-center'>
       <div className='min-w-0'>
         <p className='text-[13.5px] font-medium text-white'>Backup & restore</p>
         <p className='mt-0.5 text-[12.5px] leading-relaxed text-zinc-500'>
@@ -179,13 +173,16 @@ function BackupButton({
   );
 }
 
-// ── Data manager ─────────────────────────────────────────────────────────────
-
 function DataManager() {
   const queryClient = useQueryClient();
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
 
-  const { data: stats, isLoading: statsLoading } = useQuery({
+  const {
+    data: stats,
+    isLoadingError,
+    isFetching,
+    refetch,
+  } = useQuery({
     queryKey: DATA_STATS_QUERY_KEY,
     queryFn: api.getDataStats,
     staleTime: DATA_STATS_STALE_TIME_MS,
@@ -198,9 +195,7 @@ function DataManager() {
     },
     onSuccess: async (cat) => {
       setConfirmKey(null);
-      // Invalidation refetches this mounted query — a manual refetchStats()
-      // would issue a second identical read.
-      await Promise.all([cat.invalidateCaches(), invalidateDataStatsQuery(queryClient)]);
+      await cat.invalidateCaches();
       toast.success(`${cat.label} cleared`);
     },
     onError: (err: unknown, cat) => {
@@ -212,9 +207,9 @@ function DataManager() {
   const categories: DataCategory[] = [
     {
       key: 'history',
-      label: 'Watch History',
+      label: 'Watch history',
       description: 'Viewed episodes, movies and progress data.',
-      count: stats?.history_count ?? 0,
+      count: stats?.history_count,
       unit: 'entries',
       clearFn: api.clearWatchHistory,
       invalidateCaches: () => invalidatePlaybackHistoryQueries(queryClient),
@@ -222,8 +217,8 @@ function DataManager() {
     {
       key: 'library',
       label: 'Library',
-      description: 'Saved movies and shows.',
-      count: stats?.library_count ?? 0,
+      description: 'Saved movies, shows, and their watch statuses.',
+      count: stats?.library_count,
       unit: 'items',
       clearFn: api.clearLibrary,
       // `clear_library` wipes watch statuses too — status is a library
@@ -237,21 +232,26 @@ function DataManager() {
     },
     {
       key: 'lists',
-      label: 'Custom Lists',
+      label: 'Custom lists',
       description: 'All custom lists and their contents.',
-      count: stats?.lists_count ?? 0,
+      count: stats?.lists_count,
       unit: 'lists',
       clearFn: api.clearAllLists,
       invalidateCaches: () => invalidateListQueries(queryClient),
     },
     {
       key: 'statuses',
-      label: 'Watch Statuses',
+      label: 'Watch statuses',
       description: 'Watching / Watched / Plan to Watch / Dropped labels.',
-      count: stats?.watch_statuses_count ?? 0,
+      count: stats?.watch_statuses_count,
       unit: 'labels',
       clearFn: api.clearAllWatchStatuses,
-      invalidateCaches: () => invalidateWatchStatusQueries(queryClient),
+      invalidateCaches: async () => {
+        await Promise.all([
+          invalidateWatchStatusQueries(queryClient),
+          queryClient.invalidateQueries({ queryKey: DATA_STATS_QUERY_KEY }),
+        ]);
+      },
     },
   ];
 
@@ -264,6 +264,15 @@ function DataManager() {
         <p className='text-[11.5px] text-zinc-600'>Permanent — no undo</p>
       </div>
 
+      {isLoadingError && (
+        <RetryBanner
+          className='mx-5 my-3'
+          message="Couldn't load local record counts."
+          onRetry={() => void refetch()}
+          isRetrying={isFetching}
+        />
+      )}
+
       <div className='divide-y divide-white/[0.05]'>
         {categories.map((cat) => {
           const isPending = clearMutation.isPending && clearMutation.variables?.key === cat.key;
@@ -271,51 +280,53 @@ function DataManager() {
           const isEmpty = cat.count === 0;
 
           return (
-            <div key={cat.key} className='flex items-center justify-between gap-4 px-5 py-3.5'>
+            <div
+              key={cat.key}
+              className='flex flex-col items-start justify-between gap-3 px-5 py-3.5 sm:flex-row sm:items-center'
+            >
               <div className='min-w-0'>
                 <div className='flex flex-wrap items-center gap-2'>
                   <span className='text-[13.5px] font-medium text-white'>{cat.label}</span>
-                  {statsLoading ? (
-                    <span className='text-[12px] text-zinc-600'>loading…</span>
-                  ) : (
-                    <span className='text-[12px] tabular-nums text-zinc-500'>
-                      {cat.count} {cat.unit}
-                    </span>
-                  )}
+                  <span className='text-[12px] tabular-nums text-zinc-500'>
+                    {cat.count ?? '—'} {cat.unit}
+                  </span>
                 </div>
-                <p className='mt-0.5 truncate text-[12.5px] text-zinc-500'>{cat.description}</p>
+                <p className='mt-0.5 text-[12.5px] leading-relaxed text-zinc-400'>
+                  {cat.description}
+                </p>
               </div>
 
               <div className='flex shrink-0 items-center gap-2'>
                 {isConfirming ? (
                   <>
-                    <span className='flex items-center gap-1 text-[12px] font-medium text-amber-400'>
-                      <AlertTriangle className='h-3.5 w-3.5' />
-                      Confirm?
-                    </span>
                     <Button
                       size='sm'
                       variant='outline'
+                      aria-label={`Cancel clearing ${cat.label.toLowerCase()}`}
                       onClick={() => setConfirmKey(null)}
+                      disabled={clearMutation.isPending}
                       className={cn('h-8 px-3 text-[12px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
                     >
                       Cancel
                     </Button>
                     <Button
                       size='sm'
+                      aria-label={`Clear permanently: ${cat.label.toLowerCase()}`}
                       onClick={() => clearMutation.mutate(cat)}
-                      disabled={isPending}
+                      disabled={clearMutation.isPending || cat.count === undefined}
                       className='h-8 rounded-lg border-0 bg-red-500 px-3 text-[12px] font-semibold text-white hover:bg-red-600'
                     >
-                      {isPending ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : 'Clear'}
+                      {isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
+                      Clear permanently
                     </Button>
                   </>
                 ) : (
                   <Button
                     size='sm'
                     variant='outline'
+                    aria-label={`Clear ${cat.label.toLowerCase()}`}
                     onClick={() => setConfirmKey(cat.key)}
-                    disabled={isEmpty || clearMutation.isPending}
+                    disabled={cat.count === undefined || isEmpty || clearMutation.isPending}
                     className={cn(
                       'h-8 rounded-lg px-3 text-[12px] font-medium',
                       isEmpty
@@ -334,8 +345,6 @@ function DataManager() {
     </div>
   );
 }
-
-// ── Main export ──────────────────────────────────────────────────────────────
 
 export function DataSection() {
   return (

@@ -25,7 +25,7 @@ class RootErrorBoundary extends React.Component<
   }
 
   componentDidCatch(error: unknown) {
-    console.error('Unhandled render error', error);
+    if (import.meta.env.DEV) console.error('Unhandled render error', error);
   }
 
   render() {

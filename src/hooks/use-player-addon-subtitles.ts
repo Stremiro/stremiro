@@ -16,24 +16,11 @@ import { nonBlank } from '@/lib/utils';
 // Stable fallback so `?? []` never changes memo identity per render.
 const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
 
-/** Addon subtitle URLs are untrusted input fed to a privileged mpv command. */
-function isSafeAddonSubtitleUrl(url: string): boolean {
-  const trimmed = url.trim();
-  if (trimmed.length === 0 || trimmed.length > 2048) return false;
-  try {
-    const parsed = new URL(trimmed);
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
 interface UsePlayerAddonSubtitlesOptions {
   activeStreamUrl?: string;
   announce: (text: string, icon?: PlayerOsdMessageIcon) => void;
   effectiveResolveMediaType: string;
   id?: string;
-  isSeriesLike: boolean;
   mountedRef: RefObject<boolean>;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
@@ -52,7 +39,6 @@ export function usePlayerAddonSubtitles({
   announce,
   effectiveResolveMediaType,
   id,
-  isSeriesLike,
   mountedRef,
   resolvedStreamEpisode,
   resolvedStreamSeason,
@@ -65,20 +51,6 @@ export function usePlayerAddonSubtitles({
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
-
-  const subtitleLookup = useMemo(() => {
-    const base = streamLookupId || id;
-    if (!base) return { lookupId: undefined, season: undefined, episode: undefined };
-    // Only a trailing :season:episode means the id is already episode-scoped;
-    // namespaced base ids (kitsu:48316) still need coordinates appended.
-    if (!isSeriesLike || /:\d+:\d+$/.test(base))
-      return { lookupId: base, season: undefined, episode: undefined };
-    return {
-      lookupId: base,
-      season: resolvedStreamSeason,
-      episode: resolvedStreamEpisode,
-    };
-  }, [streamLookupId, id, isSeriesLike, resolvedStreamSeason, resolvedStreamEpisode]);
 
   // Addon subtitles fetch lazily on first menu open. Addon-sub identity is
   // bound to the loaded file's track-list — external tracks die with the
@@ -95,23 +67,23 @@ export function usePlayerAddonSubtitles({
   // Normalized once so the query key matches the trimmed values the API
   // layer sends — untrimmed keys would split one request into two entries.
   const lookupMediaType = effectiveResolveMediaType.trim();
-  const lookupMediaId = subtitleLookup.lookupId?.trim();
+  const lookupMediaId = (streamLookupId || id)?.trim();
   const subtitlesEnabled = subtitleMenuOpened && lookupMediaType !== '' && !!lookupMediaId;
 
   const subtitlesQuery = useQuery({
     queryKey: addonSubtitlesQueryKey(
       lookupMediaType || undefined,
       lookupMediaId,
-      subtitleLookup.season,
-      subtitleLookup.episode,
+      resolvedStreamSeason,
+      resolvedStreamEpisode,
     ),
     queryFn: () => {
       if (!lookupMediaType || !lookupMediaId) throw new Error('Missing media identity');
       return api.getAddonSubtitles(
         lookupMediaType,
         lookupMediaId,
-        subtitleLookup.season,
-        subtitleLookup.episode,
+        resolvedStreamSeason,
+        resolvedStreamEpisode,
       );
     },
     enabled: subtitlesEnabled,
@@ -131,10 +103,6 @@ export function usePlayerAddonSubtitles({
   const handleSelectAddonSubtitle = useCallback(
     async (subtitle: AddonSubtitle) => {
       if (addonSubtitleLoadingId || !mountedRef.current) return;
-      if (!isSafeAddonSubtitleUrl(subtitle.url)) {
-        toast.error('Invalid subtitle URL');
-        return;
-      }
       const subtitleKey = addonSubtitleKey(subtitle);
       const epoch = subtitleSessionEpochRef.current;
       setAddonSubtitleLoadingId(subtitleKey);
@@ -179,16 +147,6 @@ export function usePlayerAddonSubtitles({
   // Follow the popover rather than latching open: a closed menu stops the
   // addon query's refetch eligibility — its cached data still paints on the
   // next open, so reopening stays instant.
-  const handleSubtitleMenuOpenChange = useCallback((open: boolean) => {
-    setSubtitleMenuOpened(open);
-  }, []);
-
-  const handleAddonSubtitleSelect = useCallback(
-    (subtitle: AddonSubtitle) => {
-      void handleSelectAddonSubtitle(subtitle);
-    },
-    [handleSelectAddonSubtitle],
-  );
 
   // The addon checkmark is derived from mpv truth: only one sid can be
   // selected, so the row follows the selected external track whether it got
@@ -215,8 +173,8 @@ export function usePlayerAddonSubtitles({
     addonSubtitlesError,
     addonSubtitlesLoading,
     addonSubtitlesQueried,
-    handleAddonSubtitleSelect,
+    handleAddonSubtitleSelect: handleSelectAddonSubtitle,
     handleSubTrackSelect,
-    handleSubtitleMenuOpenChange,
+    handleSubtitleMenuOpenChange: setSubtitleMenuOpened,
   };
 }

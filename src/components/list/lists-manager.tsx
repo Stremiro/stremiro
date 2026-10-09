@@ -20,8 +20,6 @@ import {
   ChevronRight,
   Film,
   GripVertical,
-  LayoutGrid,
-  LayoutList,
   ListPlus,
   Pencil,
   Search,
@@ -31,9 +29,9 @@ import {
 } from 'lucide-react';
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
-import { toast } from 'sonner';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
+import { ViewToggle } from '@/components/profile-library-controls';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
 import { useLists } from '@/hooks/use-media-library';
@@ -61,8 +59,6 @@ const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-2',
   'list-manager-skeleton-3',
 ] as const;
-
-// ─── Sortable List Card ────────────────────────────────────────────────────────
 
 interface SortableListCardProps {
   list: UserList;
@@ -93,41 +89,42 @@ function SortableListCard({
       ref={setNodeRef}
       style={style}
       className={cn(
-        'rounded-xl border transition-all duration-200',
+        'rounded-xl border transition-[background-color,border-color,opacity] duration-200',
         isDragging
           ? 'opacity-40 border-white/20 bg-zinc-900/80 scale-[0.98]'
           : 'border-white/8 bg-zinc-900/40 hover:border-white/15 hover:bg-zinc-900/60',
       )}
     >
-      {/* List Header */}
       <div className='flex items-center gap-3 px-4 py-3'>
-        {/* Drag handle */}
         <button
           type='button'
           {...attributes}
           {...listeners}
-          className='text-zinc-700 hover:text-zinc-400 transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0'
-          aria-label='Drag to reorder'
+          className='-ml-2 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+          aria-label={`Reorder ${list.name}`}
         >
           <GripVertical className='w-4 h-4' />
         </button>
 
-        {/* Expand toggle */}
         <button
           type='button'
           onClick={() => onToggleExpand(list.id)}
           aria-expanded={isExpanded}
-          className='flex items-center gap-3 flex-1 min-w-0 group'
+          className='flex min-h-8 items-center gap-3 flex-1 min-w-0 rounded-md group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         >
           <span className='shrink-0 text-zinc-300'>
             <ListIcon iconId={list.icon} size={16} />
           </span>
           <div className='flex-1 min-w-0 text-left'>
             <div className='flex items-center gap-2'>
-              <span className='font-semibold text-sm text-zinc-200 group-hover:text-white transition-colors truncate'>
+              <span
+                dir='auto'
+                title={list.name}
+                className='font-medium text-sm text-zinc-200 group-hover:text-white transition-colors truncate'
+              >
                 {list.name}
               </span>
-              <span className='text-[10px] font-bold text-zinc-600 bg-zinc-800/80 px-1.5 py-0.5 rounded-full shrink-0'>
+              <span className='text-[12px] tabular-nums text-zinc-500 shrink-0'>
                 {list.item_ids.length}
               </span>
             </div>
@@ -141,7 +138,6 @@ function SortableListCard({
           </div>
         </button>
 
-        {/* Actions */}
         <div className='flex items-center gap-1 shrink-0'>
           <Button
             size='icon'
@@ -149,7 +145,7 @@ function SortableListCard({
             onClick={() => onRename(list)}
             aria-label={`Rename ${list.name}`}
             title='Rename list'
-            className='h-7 w-7 rounded-lg text-zinc-600 hover:text-zinc-200 hover:bg-white/8'
+            className='h-8 w-8 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/8'
           >
             <Pencil className='w-3.5 h-3.5' />
           </Button>
@@ -159,14 +155,13 @@ function SortableListCard({
             onClick={() => onDelete(list)}
             aria-label={`Delete ${list.name}`}
             title='Delete list'
-            className='h-7 w-7 rounded-lg text-zinc-600 hover:text-red-400 hover:bg-red-500/10'
+            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10'
           >
             <Trash2 className='w-3.5 h-3.5' />
           </Button>
         </div>
       </div>
 
-      {/* Expanded items */}
       {isExpanded && (
         <div className='border-t border-white/5'>
           <ListItemsView list={list} />
@@ -175,8 +170,6 @@ function SortableListCard({
     </div>
   );
 }
-
-// ─── Sortable Item Row ─────────────────────────────────────────────────────────
 
 interface SortableItemRowProps {
   item: MediaItem;
@@ -219,21 +212,20 @@ const SortableItemRow = memo(function SortableItemRow({
         ref={setNodeRef}
         style={style}
         className={cn(
-          'relative group rounded-lg overflow-hidden bg-zinc-900/60 transition-all duration-200',
+          'relative group rounded-lg overflow-hidden bg-zinc-900/60 transition-[background-color,opacity,box-shadow] duration-200',
           isDragging ? 'opacity-40 scale-95' : 'hover:ring-1 hover:ring-white/20',
         )}
       >
-        {/* Drag handle */}
-        <div
+        <button
+          type='button'
           {...attributes}
           {...listeners}
           aria-label={`Reorder ${item.title}`}
-          className='absolute top-2 left-2 z-20 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md p-1 touch-none'
+          className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
         >
           <GripVertical className='w-3 h-3 text-white' />
-        </div>
+        </button>
 
-        {/* Remove button */}
         <button
           type='button'
           onClick={(e) => {
@@ -243,7 +235,7 @@ const SortableItemRow = memo(function SortableItemRow({
           disabled={removeItem.isPending}
           aria-label={`Remove ${item.title} from list`}
           title='Remove from list'
-          className='absolute top-2 right-2 z-20 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md p-1 hover:bg-red-500/80 text-white disabled:opacity-50'
+          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
         >
           <X className='w-3 h-3' />
         </button>
@@ -251,7 +243,7 @@ const SortableItemRow = memo(function SortableItemRow({
         <button
           type='button'
           aria-label={`Open details for ${item.title}`}
-          className='aspect-2/3 w-full cursor-pointer'
+          className='aspect-2/3 w-full cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
           onPointerEnter={prefetchDetails}
           onFocus={prefetchDetails}
           onClick={() => navigateToDetails(navigate, item.type, item.id)}
@@ -274,7 +266,11 @@ const SortableItemRow = memo(function SortableItemRow({
           )}
         </button>
         <div className='p-2'>
-          <p className='text-[11px] font-medium text-zinc-300 truncate leading-tight'>
+          <p
+            dir='auto'
+            title={item.title}
+            className='text-[11px] font-medium text-zinc-300 truncate leading-tight'
+          >
             {item.title}
           </p>
           {item.displayYear && (
@@ -285,75 +281,71 @@ const SortableItemRow = memo(function SortableItemRow({
     );
   }
 
-  // List view
   return (
     <div
       ref={setNodeRef}
       style={style}
       className={cn(
-        'flex items-center gap-3 px-3 py-2 rounded-lg group transition-all duration-150',
+        'flex items-center gap-3 px-3 py-2 rounded-lg group transition-[background-color,opacity] duration-150',
         isDragging ? 'opacity-40 bg-zinc-800/80' : 'hover:bg-white/5',
       )}
     >
-      <div
+      <button
+        type='button'
         {...attributes}
         {...listeners}
         aria-label={`Reorder ${item.title}`}
-        className='text-zinc-700 hover:text-zinc-400 transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0'
+        className='-ml-1 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
       >
         <GripVertical className='w-3.5 h-3.5' />
-      </div>
+      </button>
 
-      {/* Poster thumb */}
       <button
         type='button'
         aria-label={`Open details for ${item.title}`}
-        className='h-10 w-7 rounded overflow-hidden bg-zinc-800 shrink-0 cursor-pointer'
+        className='flex flex-1 min-w-0 items-center gap-3 rounded-md cursor-pointer text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         onPointerEnter={prefetchDetails}
         onFocus={prefetchDetails}
         onClick={() => navigateToDetails(navigate, item.type, item.id)}
       >
-        {isHttpUrl(item.poster) ? (
-          <RemoteImage
-            src={item.poster}
-            alt={item.title}
-            className='w-full h-full object-cover'
-            loading='lazy'
-          />
-        ) : (
-          <div className='w-full h-full flex items-center justify-center'>
-            {item.type === 'movie' ? (
-              <Film className='w-3 h-3 text-zinc-600' />
-            ) : (
-              <Tv className='w-3 h-3 text-zinc-600' />
-            )}
-          </div>
-        )}
-      </button>
-
-      {/* Title info */}
-      <button
-        type='button'
-        className='flex-1 min-w-0 cursor-pointer text-left'
-        onPointerEnter={prefetchDetails}
-        onFocus={prefetchDetails}
-        onClick={() => navigateToDetails(navigate, item.type, item.id)}
-      >
-        <p className='text-sm font-medium text-zinc-200 group-hover:text-white transition-colors truncate'>
-          {item.title}
-        </p>
-        <div className='flex items-center gap-1.5 mt-0.5'>
-          <span className='text-[10px] text-zinc-500 capitalize'>{item.type}</span>
-          {item.displayYear && (
-            <>
-              <span className='text-zinc-700 text-[10px]'>·</span>
-              <span className='text-[10px] text-zinc-500'>{item.displayYear}</span>
-            </>
+        <span className='h-10 w-7 rounded overflow-hidden bg-zinc-800 shrink-0'>
+          {isHttpUrl(item.poster) ? (
+            <RemoteImage
+              src={item.poster}
+              alt=''
+              className='w-full h-full object-cover'
+              loading='lazy'
+            />
+          ) : (
+            <span className='w-full h-full flex items-center justify-center'>
+              {item.type === 'movie' ? (
+                <Film className='w-3 h-3 text-zinc-600' />
+              ) : (
+                <Tv className='w-3 h-3 text-zinc-600' />
+              )}
+            </span>
           )}
-        </div>
+        </span>
+        <span className='flex-1 min-w-0'>
+          <span
+            dir='auto'
+            title={item.title}
+            className='block text-sm font-medium text-zinc-200 group-hover:text-white transition-colors truncate'
+          >
+            {item.title}
+          </span>
+          <span className='flex items-center gap-1.5 mt-0.5'>
+            <span className='text-[10px] text-zinc-500 capitalize'>{item.type}</span>
+            {item.displayYear && (
+              <>
+                <span className='text-zinc-700 text-[10px]'>·</span>
+                <span className='text-[10px] text-zinc-500'>{item.displayYear}</span>
+              </>
+            )}
+          </span>
+        </span>
       </button>
 
-      {/* Remove */}
       <Button
         size='icon'
         variant='ghost'
@@ -361,7 +353,7 @@ const SortableItemRow = memo(function SortableItemRow({
         disabled={removeItem.isPending}
         aria-label={`Remove ${item.title} from list`}
         title='Remove from list'
-        className='h-7 w-7 rounded-lg text-zinc-700 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-all shrink-0'
+        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
       >
         <X className='w-3.5 h-3.5' />
       </Button>
@@ -369,15 +361,11 @@ const SortableItemRow = memo(function SortableItemRow({
   );
 });
 
-// ─── List Items View (inner DnD for items) ────────────────────────────────────
-
 // orderedIds resets via the parent SortableListCard's key={list.id} remount
 // and via collapse/expand unmount — there is no key on the usage itself.
 function ListItemsView({ list }: { list: UserList }) {
   const queryClient = useQueryClient();
 
-  // Store only the ordered IDs — lightweight and easy to reset.
-  // Initialised lazily so it only runs once per mount.
   const [orderedIds, setOrderedIds] = useState<string[]>(() => list.item_ids);
 
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
@@ -433,7 +421,7 @@ function ListItemsView({ list }: { list: UserList }) {
         setOrderedIds(persisted ?? list.item_ids);
       }
       void invalidateListQueries(queryClient);
-      toast.error('Failed to save order');
+      notifyAction('Failed to save order', { tone: 'error' });
     },
   });
 
@@ -459,8 +447,7 @@ function ListItemsView({ list }: { list: UserList }) {
       // Compute the next order outside the state updater: updaters must be
       // pure — React may invoke them more than once (Strict Mode double
       // render), which would double-fire the persistence mutation.
-      let current = orderedIds.includes(activeItemId) ? orderedIds : [...orderedIds, activeItemId];
-      current = current.includes(overItemId) ? current : [...current, overItemId];
+      const current = orderedItems.map((item) => item.id);
 
       const oldIndex = current.indexOf(activeItemId);
       const newIndex = current.indexOf(overItemId);
@@ -471,7 +458,7 @@ function ListItemsView({ list }: { list: UserList }) {
       latestReorderIdsRef.current = next;
       reorderItems.mutate(next);
     },
-    [list.id, orderedIds, reorderItems],
+    [list.id, orderedItems, reorderItems],
   );
 
   const filtered = useMemo(() => {
@@ -502,70 +489,40 @@ function ListItemsView({ list }: { list: UserList }) {
 
   return (
     <div className='p-3 space-y-3'>
-      {/* Toolbar */}
       <div className='flex items-center gap-2'>
         <SearchInput
           value={search}
           onValueChange={setSearch}
-          placeholder='Search in list...'
+          placeholder='Search in list…'
           clearLabel='Clear list search'
           wrapperClassName='flex-1'
-          className='h-8 pl-8 rounded-lg bg-zinc-800/60 border-white/8 text-xs text-zinc-300 placeholder:text-zinc-600 focus-visible:ring-0 focus-visible:border-white/20'
+          className='h-9 pl-8 rounded-lg bg-white/[0.03] border-white/[0.07] text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
         />
-        <div className='flex items-center bg-zinc-800/60 rounded-lg border border-white/8 p-0.5'>
-          <button
-            type='button'
-            onClick={() => setViewMode('list')}
-            aria-label='List view'
-            aria-pressed={viewMode === 'list'}
-            title='List view'
-            className={cn(
-              'h-6 w-6 rounded-md flex items-center justify-center transition-all',
-              viewMode === 'list' ? 'bg-white/15 text-white' : 'text-zinc-600 hover:text-zinc-400',
-            )}
-          >
-            <LayoutList className='w-3.5 h-3.5' />
-          </button>
-          <button
-            type='button'
-            onClick={() => setViewMode('grid')}
-            aria-label='Grid view'
-            aria-pressed={viewMode === 'grid'}
-            title='Grid view'
-            className={cn(
-              'h-6 w-6 rounded-md flex items-center justify-center transition-all',
-              viewMode === 'grid' ? 'bg-white/15 text-white' : 'text-zinc-600 hover:text-zinc-400',
-            )}
-          >
-            <LayoutGrid className='w-3.5 h-3.5' />
-          </button>
-        </div>
+        <ViewToggle viewMode={viewMode} onChange={setViewMode} />
       </div>
 
-      {/* Items */}
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
         onDragStart={handleDragStart}
         onDragEnd={handleDragEnd}
+        onDragCancel={() => setActiveId(null)}
       >
         <SortableContext
           items={sortableItemIds}
           strategy={viewMode === 'grid' ? rectSortingStrategy : verticalListSortingStrategy}
         >
-          {viewMode === 'grid' ? (
-            <div className='grid grid-cols-4 sm:grid-cols-5 md:grid-cols-6 lg:grid-cols-8 gap-2'>
-              {filtered.map((item) => (
-                <SortableItemRow key={item.id} item={item} listId={list.id} viewMode='grid' />
-              ))}
-            </div>
-          ) : (
-            <div className='space-y-0.5'>
-              {filtered.map((item) => (
-                <SortableItemRow key={item.id} item={item} listId={list.id} viewMode='list' />
-              ))}
-            </div>
-          )}
+          <div
+            className={
+              viewMode === 'grid'
+                ? 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2'
+                : 'space-y-0.5'
+            }
+          >
+            {filtered.map((item) => (
+              <SortableItemRow key={item.id} item={item} listId={list.id} viewMode={viewMode} />
+            ))}
+          </div>
         </SortableContext>
 
         <DragOverlay>
@@ -617,8 +574,6 @@ function ListItemsView({ list }: { list: UserList }) {
   );
 }
 
-// ─── Ghost Overlay Card (list drag) ──────────────────────────────────────────
-
 function ListGhostCard({ list }: { list: UserList }) {
   return (
     <div className='rounded-xl border border-white/20 bg-zinc-900/90 shadow-2xl shadow-black/60 px-4 py-3 flex items-center gap-3 opacity-90'>
@@ -627,14 +582,10 @@ function ListGhostCard({ list }: { list: UserList }) {
         <ListIcon iconId={list.icon} size={16} />
       </span>
       <span className='font-semibold text-sm text-zinc-200'>{list.name}</span>
-      <span className='text-[10px] font-bold text-zinc-600 bg-zinc-800 px-1.5 py-0.5 rounded-full ml-1'>
-        {list.item_ids.length}
-      </span>
+      <span className='text-[12px] tabular-nums text-zinc-500 ml-1'>{list.item_ids.length}</span>
     </div>
   );
 }
-
-// ─── Main ListsManager ────────────────────────────────────────────────────────
 
 export function ListsManager() {
   const queryClient = useQueryClient();
@@ -645,14 +596,14 @@ export function ListsManager() {
 
   const sensors = useSortableSensors();
 
-  const { data: lists = [], isLoading, isLoadingError, refetch } = useLists();
+  const { data: lists = [], isLoading, isLoadingError, isFetching, refetch } = useLists();
 
   const reorderLists = useMutation({
     mutationFn: (ids: string[]) => api.reorderLists(ids),
     onError: () => {
       // Revert the optimistic cache write to server order.
       void invalidateListQueries(queryClient);
-      toast.error('Failed to save list order');
+      notifyAction('Failed to save list order', { tone: 'error' });
     },
   });
 
@@ -665,9 +616,9 @@ export function ListsManager() {
         next.delete(id);
         return next;
       });
-      toast.success('List deleted');
+      notifyAction('List deleted');
     },
-    onError: () => toast.error('Failed to delete list'),
+    onError: () => notifyAction('Failed to delete list', { tone: 'error' }),
   });
 
   const toggleExpand = (id: string) => {
@@ -722,26 +673,24 @@ export function ListsManager() {
 
   return (
     <div className='space-y-6'>
-      {/* Header */}
       <div className='flex items-center justify-between'>
         <div>
-          <h2 className='text-2xl font-bold text-white'>My Lists</h2>
-          <p className='text-sm text-zinc-500 mt-0.5'>
+          <h2 className='text-[15px] font-medium tracking-tight text-white'>Lists</h2>
+          <p className='text-[13px] text-zinc-400 mt-1'>
             {lists.length > 0
-              ? `${lists.length} list${lists.length !== 1 ? 's' : ''} · add titles via a card's "Add to List" button`
-              : 'Create lists to organise your media'}
+              ? `${lists.length} list${lists.length !== 1 ? 's' : ''}`
+              : 'Organize saved titles into collections.'}
           </p>
         </div>
         <Button
           onClick={() => setCreateOpen(true)}
-          className='bg-white text-black hover:bg-zinc-200 font-semibold gap-2 h-9 px-4 text-sm'
+          className='bg-white text-black hover:bg-zinc-200 font-medium gap-2 h-9 rounded-lg px-4 text-[13px]'
         >
           <ListPlus className='w-4 h-4' />
-          New List
+          New list
         </Button>
       </div>
 
-      {/* Content */}
       {isLoading ? (
         <div className='space-y-3'>
           {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
@@ -753,27 +702,21 @@ export function ListsManager() {
         </div>
       ) : isLoadingError ? (
         <RetryBanner
-          message="Couldn't load your lists — try again."
+          message="Couldn't load your lists."
           onRetry={() => void refetch()}
+          isRetrying={isFetching}
         />
       ) : lists.length === 0 ? (
-        <div className='flex flex-col items-center justify-center py-20 gap-5 border border-dashed border-white/10 rounded-3xl bg-zinc-900/20'>
-          <div className='w-16 h-16 rounded-full bg-zinc-800/50 flex items-center justify-center text-zinc-400'>
-            <ListIcon iconId='Film' size={28} />
+        <div className='flex flex-col items-center justify-center px-6 py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015]'>
+          <div className='w-10 h-10 flex items-center justify-center text-zinc-600'>
+            <ListIcon iconId='Film' size={24} />
           </div>
           <div className='text-center'>
-            <p className='text-lg font-medium text-zinc-300'>No lists yet</p>
-            <p className='text-sm text-zinc-600 mt-1'>
+            <p className='text-[15px] font-semibold text-zinc-200'>No lists yet</p>
+            <p className='text-[13px] leading-relaxed text-zinc-400 mt-1'>
               Create a list, then use &ldquo;Add to List&rdquo; on any movie or show's card.
             </p>
           </div>
-          <Button
-            onClick={() => setCreateOpen(true)}
-            className='bg-white text-black hover:bg-zinc-200 font-semibold gap-2'
-          >
-            <ListPlus className='w-4 h-4' />
-            Create your first list
-          </Button>
         </div>
       ) : (
         <DndContext
@@ -781,6 +724,7 @@ export function ListsManager() {
           collisionDetection={closestCenter}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
+          onDragCancel={() => setActiveListId(null)}
         >
           <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
             <div className='space-y-2'>
@@ -809,9 +753,6 @@ export function ListsManager() {
           open={!!renameTarget}
           onOpenChange={(open: boolean) => {
             if (!open) setRenameTarget(null);
-          }}
-          onRenamed={() => {
-            setRenameTarget(null);
           }}
         />
       )}

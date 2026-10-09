@@ -7,6 +7,84 @@ use super::{
 };
 
 #[test]
+fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
+    let patch = |value| serde_json::from_value::<super::ProfilePreferencesPatch>(value).unwrap();
+    let current = ProfilePreferences {
+        profile: LocalProfile {
+            username: "Saved User".into(),
+            avatar: Some("data:image/png;base64,AAAA".into()),
+            accent_targets: AccentTargets {
+                navigation: false,
+                ..AccentTargets::default()
+            },
+            ..LocalProfile::default()
+        },
+        view_mode: ProfileViewMode::Grid,
+    };
+    assert_eq!(
+        super::apply_profile_preferences_patch(current.clone(), patch(serde_json::json!({}))),
+        current
+    );
+    let saved = super::apply_profile_preferences_patch(
+        current.clone(),
+        patch(serde_json::json!({
+            "accentColor": " #ABCDEF ", "accentTargets": {"actions":false}, "viewMode":"list"
+        })),
+    );
+    assert_eq!(saved.profile.username, current.profile.username);
+    assert_eq!(saved.profile.avatar, current.profile.avatar);
+    assert_eq!(saved.profile.accent_color, "#abcdef");
+    assert!(!saved.profile.accent_targets.navigation);
+    assert!(!saved.profile.accent_targets.actions);
+    assert!(saved.profile.accent_targets.progress);
+    assert_eq!(saved.view_mode, ProfileViewMode::List);
+    let saved = super::apply_profile_preferences_patch(
+        saved,
+        patch(serde_json::json!({"username":"Next User"})),
+    );
+    assert_eq!(saved.profile.accent_color, "#abcdef");
+    assert!(!saved.profile.accent_targets.actions);
+    assert_eq!(saved.view_mode, ProfileViewMode::List);
+}
+
+#[test]
+fn profile_avatar_patch_distinguishes_omission_clear_and_replacement() {
+    let patch = |value| serde_json::from_value::<super::ProfilePreferencesPatch>(value).unwrap();
+    let current = ProfilePreferences {
+        profile: LocalProfile {
+            avatar: Some("data:image/png;base64,AAAA".into()),
+            ..LocalProfile::default()
+        },
+        ..ProfilePreferences::default()
+    };
+    for (edit, expected) in [
+        (
+            serde_json::json!({"viewMode":"list"}),
+            current.profile.avatar.as_deref(),
+        ),
+        (serde_json::json!({"avatar":null}), None),
+        (
+            serde_json::json!({"avatar":"data:image/webp;base64,BBBB"}),
+            Some("data:image/webp;base64,BBBB"),
+        ),
+        (
+            serde_json::json!({"avatar":"https://example.com/avatar.png"}),
+            None,
+        ),
+    ] {
+        let saved = super::apply_profile_preferences_patch(current.clone(), patch(edit));
+        assert_eq!(saved.profile.avatar.as_deref(), expected);
+    }
+    for invalid in [
+        serde_json::json!({"avatar":false}),
+        serde_json::json!({"accentIntensity":256}),
+        serde_json::json!({"accentTargets":{"actions":"false"}}),
+    ] {
+        assert!(serde_json::from_value::<super::ProfilePreferencesPatch>(invalid).is_err());
+    }
+}
+
+#[test]
 fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     let view = AddonConfigView::from_config(AddonConfig {
         id: "a1".to_string(),

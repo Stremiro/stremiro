@@ -1,7 +1,5 @@
 use super::{normalize_media_image_url, MEDIA_ID_MAX_CHARS, MEDIA_TITLE_MAX_CHARS};
-use crate::providers::{
-    bound_optional, extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem,
-};
+use crate::providers::{extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -37,7 +35,17 @@ pub(crate) fn build_display_year(value: Option<&str>) -> Option<String> {
 /// Trim + char-bound a required field; the field stays present even when the
 /// payload collapses to empty (callers that need a title reject separately).
 fn bound_required(value: &str, max_chars: usize) -> String {
-    value.trim().chars().take(max_chars).collect()
+    trim_bounded_end(value.trim().chars().take(max_chars).collect())
+}
+
+fn trim_bounded_end(mut value: String) -> String {
+    // Truncation can expose trailing whitespace; remove it now to keep normalization idempotent.
+    value.truncate(value.trim_end().len());
+    value
+}
+
+fn bound_optional(value: Option<String>, max_chars: usize) -> Option<String> {
+    crate::providers::bound_optional(value, max_chars).map(trim_bounded_end)
 }
 
 // Display text only: preserve punctuation, language and emoji sequences.
@@ -79,6 +87,7 @@ fn bound_string_list(
         .unwrap_or_default()
         .iter()
         .filter_map(|value| trim_to_max(value, max_chars))
+        .map(trim_bounded_end)
         .take(max_items)
         .collect();
     (!bounded.is_empty()).then_some(bounded)
@@ -158,15 +167,7 @@ pub(crate) fn normalize_media_item(mut item: MediaItem) -> MediaItem {
     item
 }
 
-pub(crate) fn normalize_media_items(items: Vec<MediaItem>) -> Vec<MediaItem> {
-    items
-        .into_iter()
-        .map(normalize_media_item)
-        .filter(|item| !item.title.is_empty())
-        .collect()
-}
-
-pub(crate) fn normalize_media_details(
+pub(crate) fn with_requested_media_id(
     mut details: MediaDetails,
     requested_id: &str,
 ) -> MediaDetails {
@@ -174,6 +175,11 @@ pub(crate) fn normalize_media_details(
     if details.id != requested_id {
         details.id = requested_id.to_string();
     }
+    details
+}
+
+pub(crate) fn normalize_media_details(details: MediaDetails, requested_id: &str) -> MediaDetails {
+    let mut details = with_requested_media_id(details, requested_id);
     details.title = normalize_title(&details.title, MEDIA_TITLE_MAX_CHARS);
     details.imdb_id = bound_optional(details.imdb_id, MEDIA_ID_MAX_CHARS);
     details.poster = details.poster.and_then(|s| normalize_media_image_url(&s));

@@ -22,7 +22,7 @@ import {
   toTrackLanguageCandidate,
   type Track,
 } from '@/lib/player-track-utils';
-import { sleep } from '@/lib/utils';
+import { isLocalMediaId, sleep } from '@/lib/utils';
 
 const TRACK_SWITCH_VERIFY_ATTEMPTS = 8;
 const TRACK_SWITCH_VERIFY_DELAY_MS = 150;
@@ -818,7 +818,7 @@ export function usePlayerTrackController({
   }, [activeStreamUrl, mediaId, mediaType]);
 
   useEffect(() => {
-    if (!hasPlaybackStarted || isLoading || isResolving || !mediaId || mediaId === 'local') {
+    if (!hasPlaybackStarted || isLoading || isResolving || !mediaId || isLocalMediaId(mediaId)) {
       return;
     }
 
@@ -882,7 +882,6 @@ export function usePlayerTrackController({
     selectAddonSubtitle,
     setTrack,
     subTracks,
-    subtitlesOff,
     trackSwitching,
   };
 }

@@ -1,5 +1,6 @@
 mod commands;
 mod operational_log;
+mod party;
 mod providers;
 #[cfg(test)]
 mod test_helpers;
@@ -13,6 +14,13 @@ use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }))
         .on_page_load(|webview, payload| {
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let window = webview.window();
@@ -29,6 +37,8 @@ pub fn run() {
         .plugin(tauri_plugin_libmpv::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_deep_link::init())
+        .manage(party::PartyService::default())
         // App-owned durable stores: registry exists before any command runs.
         .manage(commands::DurableStoreRegistry::default())
         .manage(commands::player_window_commands::PlayerPipState::default())
@@ -77,6 +87,18 @@ pub fn run() {
         .manage(AddonTransport::new())
         .manage(SkipTimesProvider::new())
         .invoke_handler(tauri::generate_handler![
+            party::commands::party_create,
+            party::commands::party_join,
+            party::commands::party_inspect_invite,
+            party::commands::party_snapshot,
+            party::commands::party_invite,
+            party::commands::party_leave,
+            party::commands::party_send_chat,
+            party::commands::party_set_display_name,
+            party::commands::party_set_lock,
+            party::commands::party_follow,
+            party::commands::party_report_playback,
+            party::commands::party_match_stream,
             commands::app_update_commands::get_current_app_version,
             commands::app_update_commands::check_for_app_update,
             commands::app_update_commands::install_app_update,
@@ -104,7 +126,7 @@ pub fn run() {
             commands::watch_history_commands::remove_all_from_watch_history,
             commands::config_commands::get_addon_configs,
             commands::config_commands::inspect_addon_url,
-            commands::config_commands::save_addon_configs,
+            commands::config_commands::update_addon_configs,
             commands::playback_preferences_commands::save_playback_language_preference,
             commands::playback_preferences_commands::get_playback_language_preferences,
             commands::playback_preferences_commands::get_effective_playback_language_preferences,
@@ -117,6 +139,7 @@ pub fn run() {
             commands::player_mpv_commands::player_mpv_destroy,
             commands::player_mpv_commands::player_mpv_set_video_margin_ratio,
             commands::player_mpv_commands::player_mpv_set_property,
+            commands::player_mpv_commands::player_mpv_set_properties,
             commands::player_mpv_commands::player_mpv_get_property,
             commands::player_mpv_commands::player_mpv_get_playback_position,
             commands::player_mpv_commands::player_mpv_init,
@@ -158,7 +181,7 @@ pub fn run() {
         .run(|app, event| {
             if matches!(event, tauri::RunEvent::Exit) {
                 // Persist whatever the trailing debounce window mutated —
-                // the plugin autosave this replaces no longer exists.
+                // the store plugin autosave this replaces no longer exists.
                 if let Some(registry) = app.try_state::<commands::DurableStoreRegistry>() {
                     if let Err(error) = registry.flush_dirty() {
                         operational_log::log_warn(
@@ -168,6 +191,9 @@ pub fn run() {
                             &[operational_log::field("error", error)],
                         );
                     }
+                }
+                if let Some(party) = app.try_state::<party::PartyService>() {
+                    party.shutdown();
                 }
             }
         });

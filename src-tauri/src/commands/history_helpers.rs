@@ -203,15 +203,15 @@ pub(super) fn is_near_completion_watch_progress(position: f64, duration: f64) ->
         || progress_ratio >= WATCH_PROGRESS_NEAR_COMPLETION_RATIO
 }
 
-fn is_series_like_watch_progress(item: &WatchProgress) -> bool {
+pub(crate) fn is_series_like_watch_progress(item: &WatchProgress) -> bool {
     matches!(item.type_.as_str(), "series" | "anime")
 }
 
-fn watch_progress_absolute_season(item: &WatchProgress) -> Option<u32> {
+pub(crate) fn watch_progress_absolute_season(item: &WatchProgress) -> Option<u32> {
     item.absolute_season.or(item.season)
 }
 
-fn watch_progress_absolute_episode(item: &WatchProgress) -> Option<u32> {
+pub(crate) fn watch_progress_absolute_episode(item: &WatchProgress) -> Option<u32> {
     item.absolute_episode.or(item.episode)
 }
 
@@ -648,11 +648,10 @@ fn merge_watch_progress_from_donor(
 }
 
 /// Which entry a caller wants out of one title's history rows: the latest
-/// row with donor metadata merged, the best resumable row across episodes,
-/// or the latest row matching exact episode coordinates.
+/// row with donor metadata merged or the latest row matching exact episode
+/// coordinates.
 pub(crate) enum HistoryEntryQuery<'a> {
     Latest,
-    ContinueWatching,
     Exact {
         media_id: &'a str,
         media_type: &'a str,
@@ -668,7 +667,6 @@ pub(crate) fn choose_entry(
 ) -> Option<WatchProgress> {
     match query {
         HistoryEntryQuery::Latest => choose_latest_entry(items, source_health_priorities),
-        HistoryEntryQuery::ContinueWatching => choose_continue_watching_entry(items),
         HistoryEntryQuery::Exact {
             media_id,
             media_type,
@@ -728,23 +726,6 @@ fn choose_latest_entry(
 
     hydrate_watch_progress_lookup_id(&mut chosen);
     Some(chosen)
-}
-
-/// `build_history_key` keys rows by `(id, season, episode)`, so the choice
-/// is direct: hydrate every row, keep the playable candidates, and take the
-/// first under the shared continue-watching ordering.
-fn choose_continue_watching_entry(items: Vec<WatchProgress>) -> Option<WatchProgress> {
-    // `min_by` returns the first element on full (confidence, recency) ties —
-    // the loader's deterministic DB order — without collecting or sorting the
-    // candidate vec.
-    items
-        .into_iter()
-        .map(|mut item| {
-            hydrate_watch_progress_lookup_id(&mut item);
-            item
-        })
-        .filter(is_continue_watching_candidate)
-        .min_by(compare_continue_watching)
 }
 
 pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {

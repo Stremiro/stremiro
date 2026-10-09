@@ -21,8 +21,6 @@ interface PlayerStreamSelectorProps {
 
 // `startTime` is a lazy getter read at pick time — subscribing to the clock
 // would re-render the selector subtree on every tick, open or closed.
-// Memoized: every prop is a primitive or stable callback so unrelated player
-// renders don't re-render the mounted selector.
 export const PlayerStreamSelector = memo(function PlayerStreamSelector({
   clock,
   open,
@@ -38,13 +36,9 @@ export const PlayerStreamSelector = memo(function PlayerStreamSelector({
     if (!isCurrentEpisode) {
       return targetStartTime;
     }
-    // Live position wins; the route's carried startTime is the fallback.
     return playableResumePosition(clock.getSnapshot(), routeStartTime) ?? 0;
   }, [clock, isCurrentEpisode, routeStartTime, targetStartTime]);
 
-  // `StreamSelector` renders through a `DialogPortal`, so it escapes into
-  // `body` and needs no positioning wrapper here — this component only
-  // provides the clock-derived `getStartTime`.
   return (
     <StreamSelector
       open={open}

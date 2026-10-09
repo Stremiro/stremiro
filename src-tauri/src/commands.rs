@@ -26,7 +26,7 @@ pub(crate) mod playback_state_commands;
 pub(crate) mod player_mpv_commands;
 pub(crate) mod player_track_commands;
 pub(crate) mod player_window_commands;
-mod probe_pool;
+pub(crate) mod probe_pool;
 mod resume_store;
 pub(crate) mod search_commands;
 pub(crate) mod similar_titles_commands;
@@ -34,7 +34,7 @@ mod startup_validation;
 mod store_helpers;
 pub(crate) mod stream_commands;
 mod stream_coordinator;
-mod stream_fetcher;
+pub(crate) mod stream_fetcher;
 mod stream_resolver;
 mod streaming_helpers;
 #[cfg(test)]
@@ -71,19 +71,32 @@ where
     let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
         .map_err(|_| "Background persistence timed out.".to_string())?;
-    let mut task = tauri::async_runtime::spawn_blocking(move || {
+    run_blocking_op(deadline, "Background persistence timed out.", move || {
         let _guard = guard;
         operation()
-    });
+    })
+    .await
+}
+
+/// Bounds worker execution without taking the store gate for external file IO.
+pub(crate) async fn run_blocking_op<T, F>(
+    deadline: tokio::time::Instant,
+    timeout_message: &'static str,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    let mut task = tauri::async_runtime::spawn_blocking(operation);
     match tokio::time::timeout_at(deadline, &mut task).await {
         Ok(result) => {
             result.map_err(|error| format!("Background persistence task failed: {}", error))?
         }
         Err(_) => {
-            // Abort also cancels work still queued in the blocking pool.
-            // Already-running work keeps its guard until it finishes.
+            // Abort cancels queued work; running blocking work cannot be cancelled.
             task.abort();
-            Err("Background persistence timed out.".to_string())
+            Err(timeout_message.to_string())
         }
     }
 }
@@ -94,10 +107,11 @@ pub(crate) use durable_store::{
 pub(crate) use media_type::{normalize_stream_media_type, normalize_watch_progress_type};
 pub(crate) use startup_validation::validate_startup_stores;
 use store_helpers::{load_library_index, load_watch_status_index};
+pub(crate) use streaming_helpers::{resolved_content_key, stream_dedup_key};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WatchProgress {
-    pub id: String,    // imdb_id
+    pub id: String,    // opaque addon id (e.g. `tt…`, `kitsu:…`)
     pub type_: String, // "movie" or "series"
     // `None` fields omit instead of emitting `null`: the TS contract is
     // `field?: T`, and absent keeps `=== undefined` guards truthful.
@@ -219,6 +233,22 @@ fn normalize_query(input: &str) -> Option<String> {
     Some(trimmed.chars().take(MAX_SEARCH_QUERY_CHARS).collect())
 }
 
+/// Pre-tokenization normalization shared by the coordinator, language, and
+/// search match paths: lowercase ASCII alphanumerics, every other char
+/// becomes a space so `split_whitespace` does the rest.
+pub(crate) fn normalize_token_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect()
+}
+
 fn now_unix_millis() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
@@ -237,17 +267,15 @@ pub struct PlaybackLanguagePreferences {
 
 // ─── Skip Times ──────────────────────────────────────────────────────────────
 
-/// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB, the
-/// single skip-data provider.
+/// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB.
 ///
 /// SkipDB keys on the IMDb id: the supplied `imdb_id` wins, then a tt-shaped
-/// media id (Cinemeta ids are IMDb ids). Legacy `kitsu:` history rows carry
-/// no IMDb anchor and return an empty result. Movies omit season/episode;
-/// episode rows send both. `duration_secs` is the playing stream's length —
-/// it enables SkipDB's duration matching/shifting for this cut.
+/// media id (Cinemeta ids are IMDb ids). Legacy `kitsu:` rows carry no IMDb
+/// anchor and return empty. `duration_secs` enables SkipDB's duration
+/// matching for this cut.
 ///
-/// Always returns an empty result on errors or when no data exists — callers
-/// treat missing skip times as a normal crowdsourced condition.
+/// Always returns an empty result on errors — missing skip times are a
+/// normal crowdsourced condition.
 #[command]
 pub async fn get_skip_times(
     skip_provider: State<'_, crate::providers::skip_times::SkipTimesProvider>,
@@ -301,6 +329,7 @@ pub async fn get_skip_times(
 #[derive(Debug, Serialize)]
 pub struct DataStats {
     pub history_count: usize,
+    pub history_title_count: usize,
     pub library_count: usize,
     pub lists_count: usize,
     pub watch_statuses_count: usize,
@@ -317,6 +346,7 @@ pub async fn get_data_stats(
         let service = playback_state.inner().clone();
         move || {
             let history_count = service.count_resume_entries(&app)?;
+            let history_title_count = service.count_resume_titles(&app)?;
 
             // Index headers alone answer the count — `load_*_map` parses
             // every record and can repair-write inside a read-only stats
@@ -332,6 +362,7 @@ pub async fn get_data_stats(
 
             Ok(DataStats {
                 history_count,
+                history_title_count,
                 library_count,
                 lists_count,
                 watch_statuses_count,
@@ -358,17 +389,19 @@ pub async fn clear_watch_history(
 /// Wipes all library entries and their watch statuses: a leftover status
 /// row would let the details self-heal re-add a deliberately cleared title
 /// on next open, and orphaned `id → status` rows have no render surface.
+/// Statuses clear first so a crash or a failed second save can't leave the
+/// harmful half — statuses without a library are benign and self-repair.
 #[command]
 pub async fn clear_library(app: AppHandle) -> Result<(), String> {
     run_blocking_store_op(move || {
-        let store = open_store(&app, LIBRARY_STORE_FILE)?;
-        store_helpers::clear_index_domain(&store, &[LIBRARY_ITEM_PREFIX], LIBRARY_INDEX_KEY)?;
         let status_store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
         store_helpers::clear_index_domain(
             &status_store,
             &[WATCH_STATUS_ITEM_PREFIX],
-            WATCH_STATUS_INDEX_KEY,
-        )
+            &[WATCH_STATUS_INDEX_KEY],
+        )?;
+        let store = open_store(&app, LIBRARY_STORE_FILE)?;
+        store_helpers::clear_index_domain(&store, &[LIBRARY_ITEM_PREFIX], &[LIBRARY_INDEX_KEY])
     })
     .await
 }
@@ -381,7 +414,7 @@ pub async fn clear_all_lists(app: AppHandle) -> Result<(), String> {
         store_helpers::clear_index_domain(
             &store,
             &[LIST_META_KEY_PREFIX, LIST_ITEM_KEY_PREFIX],
-            LISTS_ORDER_KEY,
+            &[LISTS_ORDER_KEY],
         )
     })
     .await
@@ -395,7 +428,7 @@ pub async fn clear_all_watch_statuses(app: AppHandle) -> Result<(), String> {
         store_helpers::clear_index_domain(
             &store,
             &[WATCH_STATUS_ITEM_PREFIX],
-            WATCH_STATUS_INDEX_KEY,
+            &[WATCH_STATUS_INDEX_KEY],
         )
     })
     .await

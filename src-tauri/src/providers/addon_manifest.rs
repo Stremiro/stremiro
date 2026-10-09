@@ -60,22 +60,24 @@ pub(crate) struct AddonManifest {
     pub catalogs: Vec<AddonCatalogCapability>,
 }
 
+fn item_list_from_value<T: DeserializeOwned>(value: serde_json::Value) -> Vec<T> {
+    let serde_json::Value::Array(items) = value else {
+        return Vec::new();
+    };
+    items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect()
+}
+
 fn deserialize_item_list<'de, D, T>(deserializer: D) -> Result<Vec<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: DeserializeOwned,
 {
-    let Some(value) = Option::<serde_json::Value>::deserialize(deserializer)? else {
-        return Ok(Vec::new());
-    };
-    let serde_json::Value::Array(items) = value else {
-        return Ok(Vec::new());
-    };
-
-    Ok(items
-        .into_iter()
-        .filter_map(|item| serde_json::from_value(item).ok())
-        .collect())
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .map(item_list_from_value)
+        .unwrap_or_default())
 }
 
 fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -85,13 +87,17 @@ where
     deserialize_item_list::<D, String>(deserializer)
 }
 
+/// `Some` only when the field carries a real list: an explicit `null` must
+/// behave like an absent key (inherit from the manifest) — not like a
+/// declared-empty list, which means "serve nothing" for `types` and the
+/// "any id" opt-out for `idPrefixes`.
 fn deserialize_optional_string_list<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    Ok(Some(deserialize_string_list(deserializer)?))
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?.map(item_list_from_value))
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,7 +213,7 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
     // former while names like `search`/`skip` often appear only in the
     // latter. Merge both (objects win the dedupe on name collision so
     // their options survive); picking one would lose capabilities.
-    let extra_source: Vec<RawExtra> = raw
+    let extra_source = raw
         .extra
         .into_iter()
         .chain(raw.extra_supported.into_iter().filter_map(|name| {
@@ -216,8 +222,7 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
                 is_required: None,
                 options: Vec::new(),
             })
-        }))
-        .collect();
+        }));
 
     for extra in extra_source {
         let Some(name) = trim_to_max(extra.name.as_deref().unwrap_or(""), MAX_EXTRA_NAME_CHARS)
@@ -340,7 +345,6 @@ pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String
     let mut parsed = reqwest::Url::parse(normalized_base).map_err(|_| {
         "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
     })?;
-    let query = parsed.query().map(|value| value.to_string());
     let trimmed_path = parsed.path().trim_end_matches('/');
     let already_manifest = has_manifest_suffix(trimmed_path);
     let manifest_path = if trimmed_path.is_empty() {
@@ -351,7 +355,6 @@ pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String
         format!("{trimmed_path}{MANIFEST_JSON_SUFFIX}")
     };
     parsed.set_path(&manifest_path);
-    parsed.set_query(query.as_deref());
     Ok(parsed.to_string())
 }
 

@@ -3,12 +3,12 @@ import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import {
+  type UpNextEntry,
   useContinueWatching,
   useRemoveFromContinueWatching,
   useUpNextEntries,
 } from '@/hooks/use-media-library';
 import { type WatchProgress } from '@/lib/api';
-import type { UpNextEntry } from '@/lib/up-next';
 import { cn } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
 import { watchProgressItemKey } from './profile-collection-rows';

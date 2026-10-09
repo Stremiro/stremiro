@@ -2,6 +2,7 @@ import type { QueryClient } from '@tanstack/react-query';
 
 import { api } from '@/lib/api';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
+import { routeChunks } from '@/lib/route-chunks';
 import {
   detailsCardQueryKey,
   detailsQueryKey,
@@ -46,7 +47,7 @@ export function prefetchDetailsRouteData(
 
   const routeType = resolvePlayerRouteMediaType(mediaType);
 
-  void import('@/pages/details').catch(() => undefined);
+  void routeChunks.details().catch(() => undefined);
 
   // Card payload only: hover intent must stay cheap. The details route
   // fetches the full episode payload once on commit.

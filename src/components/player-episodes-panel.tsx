@@ -16,12 +16,11 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { SearchInput } from '@/components/ui/search-input';
-import { useDebounce } from '@/hooks/use-debounce';
 import type { Episode, WatchProgress } from '@/lib/api';
 import {
-  EPISODE_SEARCH_DEBOUNCE_MS,
   EPISODE_SEARCH_MIN_COUNT,
   filterEpisodesBySearchQuery,
+  useEffectiveEpisodeSearch,
 } from '@/lib/episode-search';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
@@ -103,13 +102,11 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   // Same filter vocabulary as the details episode grid — number, title,
   // overview — shared via `episode-search` so the surfaces can't drift.
   const [episodeSearch, setEpisodeSearch] = useState('');
-  const debouncedEpisodeSearch = useDebounce(episodeSearch.trim(), EPISODE_SEARCH_DEBOUNCE_MS);
   // The field hides under the count threshold — a persisted query must not
   // silently filter rows the user can't see or clear. The text itself is kept
   // so it returns with the field on a searchable season.
   const searchVisible = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
-  const effectiveEpisodeSearch =
-    searchVisible && episodeSearch.trim() ? debouncedEpisodeSearch : '';
+  const effectiveEpisodeSearch = useEffectiveEpisodeSearch(episodeSearch, searchVisible);
   const visibleEpisodes = useMemo(
     () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
     [effectiveEpisodeSearch, seasonEpisodes],
@@ -212,7 +209,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 Resume
               </span>
             )}
-            <div className='absolute bottom-1 right-1 flex h-4 items-center rounded bg-black/60 px-1 text-[10px] font-semibold leading-none tabular-nums text-white/70 backdrop-blur-xs'>
+            <div className='absolute bottom-1 right-1 flex h-4 items-center rounded bg-black/60 px-1 text-[10px] font-semibold leading-none tabular-nums text-white/70'>
               {ep.episode}
             </div>
             <WatchProgressStrip percent={progressPercent} />
@@ -302,6 +299,8 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 {seasons.map((seasonNumber) => (
                   <DropdownMenuItem
                     key={seasonNumber}
+                    role='menuitemradio'
+                    aria-checked={selectedSeason === seasonNumber}
                     onSelect={() => onSeasonChange(seasonNumber)}
                     className={cn(
                       'cursor-pointer py-2 px-3 text-sm transition-colors',
@@ -342,10 +341,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         </div>
       )}
 
-      <ScrollArea
-        viewportRef={scrollViewportRef}
-        className='flex-1 [&>[data-radix-scroll-area-viewport]>div]:block!'
-      >
+      <ScrollArea viewportRef={scrollViewportRef} className='flex-1'>
         {visibleEpisodes.length === 0 ? (
           <p className='px-6 py-10 text-center text-xs text-zinc-500'>
             {effectiveEpisodeSearch ? (

@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect } from 'react';
 
 const APP_TITLE = 'Stremiro';
 
@@ -9,15 +9,13 @@ const APP_TITLE = 'Stremiro';
  * has taken the title since.
  */
 export function useDocumentTitle(title?: string | null) {
-  const appliedTitleRef = useRef<string | null>(null);
   useEffect(() => {
     const next = title ? `${title} — ${APP_TITLE}` : APP_TITLE;
     document.title = next;
-    appliedTitleRef.current = next;
     return () => {
       // Only restore when this instance's write is still live — a later
       // writer owns the title otherwise.
-      if (document.title === appliedTitleRef.current) {
+      if (document.title === next) {
         document.title = APP_TITLE;
       }
     };

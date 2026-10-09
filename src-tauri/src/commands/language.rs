@@ -136,18 +136,10 @@ fn normalize_lower(value: Option<&str>) -> Option<String> {
 }
 
 pub(crate) fn tokenize_language_meta(value: &str) -> Vec<String> {
-    let normalized: String = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect();
-
-    normalized.split_whitespace().map(str::to_string).collect()
+    super::normalize_token_text(value)
+        .split_whitespace()
+        .map(str::to_string)
+        .collect()
 }
 
 /// How a token reached a canonical code: `Exact` means the whole value

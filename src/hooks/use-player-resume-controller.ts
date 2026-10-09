@@ -2,7 +2,7 @@ import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import { api } from '@/lib/api';
 import { getPlayableResumeStartTime, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { mpvCommand, setMpvProperty } from '@/lib/player-mpv';
-import { formatTime } from '@/lib/utils';
+import { clearTimer, formatTime, isLocalMediaId } from '@/lib/utils';
 
 const RESUME_SEEK_MAX_ATTEMPTS = 6;
 const RESUME_SEEK_RETRY_DELAY_MS = 220;
@@ -98,12 +98,7 @@ export function usePlayerResumeController({
   const activeStreamUrlRef = useRef(activeStreamUrl);
   const applyResumeIfReadyRef = useRef<() => Promise<void>>(async () => undefined);
 
-  const clearResumeRetryTimer = useCallback(() => {
-    if (resumeSeekRetryTimerRef.current !== null) {
-      window.clearTimeout(resumeSeekRetryTimerRef.current);
-      resumeSeekRetryTimerRef.current = null;
-    }
-  }, []);
+  const clearResumeRetryTimer = useCallback(() => clearTimer(resumeSeekRetryTimerRef), []);
 
   const releaseResumePause = useCallback(async () => {
     if (!resumePausePendingRef.current || !mountedRef.current || isDestroyedRef.current) {
@@ -320,8 +315,15 @@ export function usePlayerResumeController({
 
     if (restartLoadedStream) {
       resumeAppliedRef.current = true;
+      const restartEpoch = resumeSessionEpochRef.current;
       void mpvCommand('seek', ['0', 'absolute'])
-        .then(() => setMpvProperty('pause', false))
+        .then(() =>
+          restartEpoch === resumeSessionEpochRef.current &&
+          mountedRef.current &&
+          !isDestroyedRef.current
+            ? setMpvProperty('pause', false)
+            : undefined,
+        )
         .catch(() => undefined);
       return;
     }
@@ -341,13 +343,15 @@ export function usePlayerResumeController({
     currentTimeRef,
     durationRef,
     failoverResumePositionRef,
+    isDestroyedRef,
     mediaId,
     mediaType,
+    mountedRef,
     startTime,
   ]);
 
   useEffect(() => {
-    if (!mediaType || !mediaId || mediaId === 'local') {
+    if (!mediaType || !mediaId || isLocalMediaId(mediaId)) {
       return;
     }
 

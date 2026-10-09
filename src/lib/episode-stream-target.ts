@@ -13,7 +13,7 @@ export interface NextEpisodeStreamCoordinates {
   absoluteEpisode: number;
 }
 
-// Blank addon IDs count as missing — mirrors Rust `non_empty`, which
+// Blank addon IDs count as missing — mirrors Rust `non_blank_opt`, which
 // rejects whitespace-only values but keeps the raw string otherwise.
 const nonEmpty = (value?: string) => (value && value.trim() ? value : undefined);
 

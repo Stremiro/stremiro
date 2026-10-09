@@ -1,4 +1,4 @@
-use super::{media_normalization::normalize_media_items, normalize_non_empty, normalize_query};
+use super::{normalize_non_empty, normalize_query};
 use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
     MediaItem,
@@ -18,6 +18,16 @@ const MAX_BROWSE_SOURCE_FETCHES: usize = 8;
 pub struct SearchCatalogPage {
     pub items: Vec<MediaItem>,
     pub next_skip: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_cursors: Option<AllBrowseCursors>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AllBrowseCursors {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    movie: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    series: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -130,7 +140,7 @@ impl SearchYearRange {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct SearchCatalogCriteria {
     query: Option<String>,
     media_type: Option<SearchMediaType>,
@@ -138,6 +148,7 @@ struct SearchCatalogCriteria {
     genres: Vec<String>,
     year_range: SearchYearRange,
     skip: u32,
+    all_cursors: Option<AllBrowseCursors>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -150,6 +161,7 @@ pub struct SearchCatalogRequest {
     year_from: Option<u32>,
     year_to: Option<u32>,
     skip: Option<u32>,
+    all_cursors: Option<AllBrowseCursors>,
 }
 
 impl SearchCatalogRequest {
@@ -162,16 +174,9 @@ impl SearchCatalogRequest {
             year_from: None,
             year_to: None,
             skip: None,
+            all_cursors: None,
         }
     }
-}
-
-#[derive(Debug)]
-struct RankedSearchItem {
-    item: MediaItem,
-    score: i32,
-    year: u32,
-    original_index: usize,
 }
 
 fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
@@ -199,7 +204,14 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     let normalized_query = request.query.as_deref().and_then(normalize_query);
     let parsed_media_type = SearchMediaType::parse(request.media_type.as_deref());
 
-    if normalized_query.is_none() && parsed_media_type.is_none() {
+    if request.all_cursors.is_some()
+        && (normalized_query.is_some() || request.media_type.is_some() || request.skip.is_some())
+    {
+        return Err(
+            "All-browse cursors cannot be combined with a query, media type or skip.".into(),
+        );
+    }
+    if normalized_query.is_none() && parsed_media_type.is_none() && request.all_cursors.is_none() {
         return Err("Media type is required to browse the search catalog.".to_string());
     }
 
@@ -210,20 +222,12 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         genres: normalize_genres(request.genres),
         year_range: SearchYearRange::resolve(request.year_from, request.year_to),
         skip: request.skip.unwrap_or(0),
+        all_cursors: request.all_cursors,
     })
 }
 
 fn normalize_search_text(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_lowercase()
-            } else {
-                ' '
-            }
-        })
-        .collect::<String>()
+    super::normalize_token_text(value)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
@@ -286,40 +290,24 @@ fn score_search_item(
 
 fn rank_search_results(
     query: &str,
-    items: Vec<MediaItem>,
+    mut items: Vec<MediaItem>,
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
     let normalized_query = normalize_search_text(query);
     let query_tokens = normalized_query.split_whitespace().collect::<Vec<_>>();
     let spaced_query = format!(" {normalized_query}");
-    let mut ranked = items
-        .into_iter()
-        .map(|item| {
-            // Items arrive normalized: reuse `primary_year` instead of
-            // re-parsing `item.year` per item.
-            let year = item.primary_year.unwrap_or(0);
-            let score = score_search_item(&normalized_query, &query_tokens, &spaced_query, &item);
-            (score, year, item)
-        })
-        .filter(|(_, year, _)| !year_range.is_active() || year_range.contains(*year))
-        .enumerate()
-        .map(|(original_index, (score, year, item))| RankedSearchItem {
-            year,
-            score,
-            item,
-            original_index,
-        })
-        .collect::<Vec<_>>();
-
-    ranked.sort_by(|left, right| {
-        right
-            .score
-            .cmp(&left.score)
-            .then_with(|| right.year.cmp(&left.year))
-            .then_with(|| left.original_index.cmp(&right.original_index))
+    items.retain(|item| {
+        !year_range.is_active() || year_range.contains(item.primary_year.unwrap_or(0))
     });
-
-    ranked.into_iter().map(|entry| entry.item).collect()
+    // Cache each score once and sort stably: tied scores/years keep catalog
+    // order without a parallel ranked-item vector or explicit input indices.
+    items.sort_by_cached_key(|item| {
+        std::cmp::Reverse((
+            score_search_item(&normalized_query, &query_tokens, &spaced_query, item),
+            item.primary_year.unwrap_or(0),
+        ))
+    });
+    items
 }
 
 fn item_has_genre(item: &MediaItem, genre: &str) -> bool {
@@ -448,9 +436,15 @@ async fn fetch_query_results(
     let items = super::addon_registry::merge_catalog_items(outcomes, "Failed to search catalog.")?;
 
     Ok(retain_search_items_matching_genres(
-        normalize_media_items(items),
+        retain_titled_catalog_items(items),
         &required_genres,
     ))
+}
+
+fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
+    // Filter after merging so an empty first claimant still owns a duplicate identity.
+    items.retain(|item| !item.title.is_empty());
+    items
 }
 
 /// Genre enforcement for text search, where a provider may honor `search`
@@ -628,10 +622,8 @@ async fn fetch_browse_page(
         };
         next_skip = page.next_skip;
 
-        // Normalize once per page up front: year/genre filters and the final
-        // ordering all read the precomputed fields instead of re-parsing.
         let batch = apply_browse_filters(
-            normalize_media_items(page.items),
+            retain_titled_catalog_items(page.items),
             media_type,
             &fetch_genres,
             criteria.year_range,
@@ -653,7 +645,65 @@ async fn fetch_browse_page(
         }
     }
 
-    Ok(SearchCatalogPage { items, next_skip })
+    Ok(SearchCatalogPage {
+        items,
+        next_skip,
+        all_cursors: None,
+    })
+}
+
+fn merge_all_browse_pages(
+    cursors: AllBrowseCursors,
+    movie: Option<Result<SearchCatalogPage, String>>,
+    series: Option<Result<SearchCatalogPage, String>>,
+) -> Result<SearchCatalogPage, String> {
+    let mut next = AllBrowseCursors::default();
+    let mut pages = [Vec::new(), Vec::new()];
+    let mut succeeded = false;
+    let mut first_error = None;
+    for (index, skip, outcome) in [(0, cursors.movie, movie), (1, cursors.series, series)] {
+        let (Some(skip), Some(outcome)) = (skip, outcome) else {
+            continue;
+        };
+        let cursor = if index == 0 {
+            &mut next.movie
+        } else {
+            &mut next.series
+        };
+        match outcome {
+            Ok(page) => {
+                succeeded = true;
+                *cursor = page.next_skip.filter(|next_skip| *next_skip > skip);
+                pages[index] = page.items;
+            }
+            Err(error) => {
+                // Preserve a failed branch's cursor so the next page retries it.
+                *cursor = Some(skip);
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if !succeeded {
+        return Err(first_error.unwrap_or_else(|| "Failed to load catalog.".into()));
+    }
+
+    let [movie, series] = pages;
+    let mut items = Vec::with_capacity(movie.len() + series.len());
+    let mut movie = movie.into_iter();
+    let mut series = series.into_iter();
+    loop {
+        let pair = (movie.next(), series.next());
+        if pair.0.is_none() && pair.1.is_none() {
+            break;
+        }
+        items.extend(pair.0);
+        items.extend(pair.1);
+    }
+    Ok(SearchCatalogPage {
+        items,
+        next_skip: None,
+        all_cursors: Some(next),
+    })
 }
 
 #[command]
@@ -672,6 +722,32 @@ pub(crate) async fn query_search_catalog_for_request(
 ) -> Result<SearchCatalogPage, String> {
     let criteria = build_search_criteria(request)?;
 
+    if let Some(cursors) = criteria.all_cursors {
+        let fetch = |media_type, skip: Option<u32>| {
+            let criteria = &criteria;
+            async move {
+                let skip = skip?;
+                Some(
+                    fetch_browse_page(
+                        app,
+                        client,
+                        &SearchCatalogCriteria {
+                            media_type: Some(media_type),
+                            skip,
+                            ..criteria.clone()
+                        },
+                    )
+                    .await,
+                )
+            }
+        };
+        let (movie, series) = tokio::join!(
+            fetch(SearchMediaType::Movie, cursors.movie),
+            fetch(SearchMediaType::Series, cursors.series),
+        );
+        return merge_all_browse_pages(cursors, movie, series);
+    }
+
     if let Some(query) = criteria.query.as_deref() {
         // Items arrive normalized, so the scorer reads `primary_year` instead
         // of re-parsing year strings per item.
@@ -682,6 +758,7 @@ pub(crate) async fn query_search_catalog_for_request(
         return Ok(SearchCatalogPage {
             items,
             next_skip: None,
+            all_cursors: None,
         });
     }
 

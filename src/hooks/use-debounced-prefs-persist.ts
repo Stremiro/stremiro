@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef } from 'react';
 
 import { registerAppUiPreferenceFlusher } from '@/hooks/use-app-ui-preferences';
 import type { AppUiPreferencesPatch } from '@/lib/api';
+import { clearTimer } from '@/lib/utils';
 
 const PREFS_PERSIST_DEBOUNCE_MS = 400;
 
@@ -13,10 +14,7 @@ export function useDebouncedPrefsPersist(
   const persistTimerRef = useRef<number | null>(null);
 
   const flushPreferences = useCallback(() => {
-    if (persistTimerRef.current !== null) {
-      window.clearTimeout(persistTimerRef.current);
-      persistTimerRef.current = null;
-    }
+    clearTimer(persistTimerRef);
     const patch = pendingPatchRef.current;
     pendingPatchRef.current = null;
     if (patch) updatePreferences(patch);
@@ -25,9 +23,7 @@ export function useDebouncedPrefsPersist(
   const schedulePrefsPersist = useCallback(
     (patch: AppUiPreferencesPatch) => {
       pendingPatchRef.current = { ...pendingPatchRef.current, ...patch };
-      if (persistTimerRef.current !== null) {
-        window.clearTimeout(persistTimerRef.current);
-      }
+      clearTimer(persistTimerRef);
       persistTimerRef.current = window.setTimeout(flushPreferences, PREFS_PERSIST_DEBOUNCE_MS);
     },
     [flushPreferences],

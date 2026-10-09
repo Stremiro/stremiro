@@ -1,17 +1,16 @@
-use super::AddonStream;
+use super::{AddonStream, MAX_PROXY_HEADERS_BYTES};
 use crate::providers::addon_resource::{build_resource_url, is_fetchable_http_url, is_magnet_url};
-use crate::providers::ttl_cache::{hash_segment, InFlight, TtlCache};
-use crate::providers::{
-    ensure_rustls_crypto_provider, fetch_policy, lock_or_recover, non_blank, read_bounded_body,
+use crate::providers::ttl_cache::{
+    hash_segment, FetchContract, FetchFailure, FetchFailureCooldown, InFlight, TtlCache,
 };
+use crate::providers::{ensure_rustls_crypto_provider, fetch_policy, non_blank, read_bounded_body};
 use regex::Regex;
 use reqwest::{header, Client};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 static SEEDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"👤\s*(\d+)").expect("valid seeder regex"));
@@ -22,18 +21,12 @@ static PLAIN_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|\s)([\d\.]+)\s*([KMGT]i?B)\b").expect("valid plain size regex")
 });
 
-/// Maximum serialized bytes retained for a raw `proxyHeaders` payload.
-/// Entry-level bounds apply at extraction; this caps the stored opaque value
-/// so one malicious stream cannot bloat in-memory selector state.
-const MAX_PROXY_HEADERS_BYTES: usize = 8 * 1024;
-/// `infoHash` feeds the `h:{hash}:{file_idx}` dedup key, which persists as
-/// `last_stream_key` under a 128-char cap — an unbounded addon-supplied hash
-/// would silently break the saved-stream round-trip. Real btih/btmh values
-/// are far shorter; this also bounds the per-stream IPC payload.
+/// `infoHash` persists inside `last_stream_key` (128-char cap): an unbounded
+/// addon-supplied hash would silently break the saved-stream round-trip.
 const INFO_HASH_MAX_CHARS: usize = 112;
 
-/// Builds a short deterministic cache segment from the addon config URL so that
-/// different addons never share a cache entry for the same content.
+/// Deterministic cache segment from the addon config URL so different addons
+/// never share an entry for the same content.
 pub(super) fn config_cache_segment(config_url: &str) -> String {
     let url = config_url.trim();
     if url.is_empty() {
@@ -67,19 +60,12 @@ pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, Stri
 
 fn truncate_field(value: &mut Option<String>, max_chars: usize) {
     if let Some(text) = value {
-        // Byte length bounds char count from above, so a short-enough field
-        // is its own truncation — skip the rebuilding collect.
-        if text.len() <= max_chars {
-            if !non_blank(text) {
-                *value = None;
-            }
-            return;
+        // Byte length bounds char count from above: short fields skip the rebuild.
+        if text.len() > max_chars {
+            *text = text.chars().take(max_chars).collect();
         }
-        let truncated: String = text.chars().take(max_chars).collect();
-        if !non_blank(&truncated) {
+        if !non_blank(text) {
             *value = None;
-        } else {
-            *value = Some(truncated);
         }
     }
 }
@@ -89,15 +75,8 @@ pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     truncate_field(&mut stream.title, 2_048);
     truncate_field(&mut stream.url, 2_048);
     truncate_field(&mut stream.info_hash, INFO_HASH_MAX_CHARS);
-    // Never trust ranking inputs from the wire: Stremio streams carry no
-    // `seeders`/`size` fields, and hydration only fills absent values, so an
-    // addon could otherwise inflate its ranking. Drop them at ingress.
-    stream.seeders = None;
-    stream.size_bytes = None;
-    // `url` reaches the probe and libmpv fetch paths: strip non-fetchable
-    // targets at ingress so they can't pollute selector rows and dedup keys.
-    // Magnet identifiers are not fetch targets and carry no SSRF surface, so
-    // they are preserved.
+    // Strip non-fetchable targets at ingress so they can't pollute selector
+    // rows and dedup keys; magnets are identifiers, not fetch targets.
     let url_blocked = stream
         .url
         .as_deref()
@@ -108,9 +87,8 @@ pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     if let Some(hints) = stream.behavior_hints.as_mut() {
         truncate_field(&mut hints.binge_group, 256);
         truncate_field(&mut hints.filename, 2_048);
-        // Raw header blobs are opaque addon input: drop pathological payloads
-        // outright so one malicious stream cannot bloat selector state. The
-        // bounded extractor above serves the legitimate entries.
+        // Drop pathological raw header blobs outright; the bounded extractor
+        // serves the legitimate entries.
         if hints
             .proxy_headers
             .as_ref()
@@ -121,9 +99,8 @@ pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     }
 }
 
-/// Serialized-size estimate for a JSON value, without materializing the
-/// string. Slightly over-counts (ignores separators); good enough for the
-/// ingress sanity cap, which only rejects pathological payloads.
+/// Serialized-size estimate without materializing the string. Slightly
+/// over-counts; good enough for the ingress sanity cap.
 fn json_size_estimate(value: &Value) -> usize {
     match value {
         Value::Null | Value::Bool(_) => 5,
@@ -139,74 +116,57 @@ fn json_size_estimate(value: &Value) -> usize {
     }
 }
 
-/// TTL for cached addon stream responses. Shared across selector fetches and
-/// best-stream resolution to avoid duplicate HTTP requests for the same content.
+/// TTL for cached stream responses, shared by selector fetches and
+/// best-stream resolution so one addon fetch serves both.
 const STREAM_CACHE_TTL: Duration = Duration::from_secs(180);
 
-/// Shorter TTL for empty stream responses. A stream-less title otherwise
-/// re-runs the full addon fan-out on every selector open; a short cooldown
-/// still lets newly indexed content surface quickly.
+/// Shorter TTL for empty responses — a stream-less title must not re-run
+/// the full fan-out per open, yet newly indexed content still surfaces fast.
 const STREAM_CACHE_EMPTY_TTL: Duration = Duration::from_secs(30);
 
-/// Maximum number of entries before a full eviction pass.
+/// Entries past this bound evict the soonest-expiring rows.
 pub(super) const STREAM_CACHE_MAX_ENTRIES: usize = 64;
 
-/// Per-addon transport-failure cooldown. A host that just exhausted its
-/// retries is presumed down: subsequent fetches fail fast for this window
-/// instead of re-paying connect/timeout on every selector open.
+/// Per-addon transport-failure cooldown: after retries exhaust, sibling
+/// fetches fail fast for this window instead of re-paying connect/timeout.
 const STREAM_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
-/// Single-flight map hygiene bound. A `get_streams` future dropped mid-fetch
-/// (e.g. by the fetcher's outer timeout) never reaches `release_in_flight`,
-/// so orphan entries are swept on insert once the map grows past this.
+/// A `get_streams` future dropped mid-fetch (outer timeout) never releases
+/// its key; orphan entries sweep on insert past this bound.
 const STREAM_IN_FLIGHT_SWEEP_AT: usize = 64;
-/// Cooldown-map sweep bound — same hygiene contract as the in-flight map.
-const STREAM_FETCH_FAILURES_SWEEP_AT: usize = STREAM_IN_FLIGHT_SWEEP_AT;
 
-/// Bound on decoded stream items before hydrate. Hydration runs per-item
-/// regex parsing, so a pathological payload must be cut before it rather
-/// than after.
+/// Cut a pathological payload before the per-item regex hydration battery.
 const DECODED_STREAMS_MAX: usize = 512;
-/// Upper bound for a single stream response body. Matches the catalog/subtitle
-/// budget; checked via content-length before allocation and during streaming.
+/// Response body cap (same budget as subtitles), checked before allocation
+/// and during streaming.
 const STREAM_MAX_BYTES: usize = 512 * 1024;
-/// Shared with the retry loop: a size-limit rejection is deterministic for a
-/// given endpoint, so the loop compares by identity instead of substring and
-/// fails fast rather than sleeping and re-requesting identical bytes.
+/// Whole-request timeout: the client `.timeout` and the retry loop's
+/// burned-timeout check both read this.
+const STREAM_REQUEST_TIMEOUT_SECS: u64 = 35;
+/// Shared with the retry loop so a size-limit rejection is recognized by
+/// identity, not substring match.
 const STREAM_BODY_TOO_LARGE: &str = "Addon stream response exceeds the size limit.";
 
-/// How a single fetch attempt failed. The retry loop only re-runs
-/// transient transport errors — status, size-limit, and decode rejections
-/// are deterministic for this endpoint, so a retry would re-fetch identical
-/// bytes and fail the same way.
-enum StreamFetchFailure {
-    Retryable(String),
-    Fatal(String),
-}
+/// Cooldown message served while an addon sits inside its failure window.
+const STREAM_COOLDOWN_MESSAGE: &str =
+    "Addon stream fetch skipped: the source is cooling down after a recent transport failure.";
 
 pub(crate) struct AddonTransport {
     client: Client,
-    /// In-memory, TTL-based cache for stream results keyed by
-    /// `{type}|{id}|{addon_url_hash}` — one addon HTTP fetch per content
-    /// across selector fetches and best-stream resolution. Shared ownership:
-    /// hits clone the `Arc` handle and materialize the `Vec` once, while puts
-    /// move the fetched `Vec` in without a second deep clone.
+    /// Stream results keyed `{type}|{id}|{addon_url_hash}`; hits clone the
+    /// shared `Arc` handle once.
     pub(super) cache: TtlCache<Arc<[AddonStream]>>,
-    /// Generation bumped by every `clear_cache`. A fetch that started before
-    /// a clear must not repopulate the cleared generation on completion.
+    /// Bumped by `clear_cache`: a fetch started before a clear must not
+    /// repopulate on completion.
     pub(super) generation: AtomicU64,
-    /// Single-flight locks keyed like `cache`: concurrent selector/resolve
-    /// calls for one key wait on the leader and re-read the cache instead of
-    /// each paying the full HTTP + decode + rank.
+    /// Single-flight locks keyed like `cache`: followers wait on the leader
+    /// and re-read its cached result.
     in_flight: InFlight,
     /// Per-addon transport-failure cooldown keyed by `config_cache_segment`.
-    /// Session-local only: a dead host is not a persisted condition.
-    fetch_failures: Mutex<HashMap<String, Instant>>,
-    /// Short-TTL negative cache keyed like `cache`: deterministic failures
-    /// (status, size-limit, decode) replay identically for the same request,
-    /// so a selector re-open fails fast without the HTTP round-trip.
-    /// Host-wide reachability failures stay on the addon-level
-    /// `fetch_failures` cooldown — a content-scoped 404 must never mark the
-    /// whole addon dead.
+    /// Session-local only — a dead host is not a persisted condition.
+    pub(super) fetch_failures: FetchFailureCooldown,
+    /// Short-TTL negative cache for deterministic per-request failures
+    /// (status, size-limit, decode). Host-wide reachability failures stay on
+    /// `fetch_failures` — a content 404 must not mark the whole addon dead.
     failure_cache: TtlCache<String>,
 }
 
@@ -216,9 +176,8 @@ impl AddonTransport {
         type_: &str,
         id: &str,
     ) -> Result<String, String> {
-        // Single source of truth with catalog/meta/subtitle clients: preserves
-        // configured paths/query, strips a trailing manifest.json once, and
-        // URL-encodes the media id.
+        // Shared resource-URL builder: keeps configured path/query, strips a
+        // trailing manifest.json, encodes the media id.
         build_resource_url(base_url, "stream", type_, id, &[])
     }
 
@@ -269,15 +228,14 @@ impl AddonTransport {
         Self {
             client: {
                 ensure_rustls_crypto_provider();
-                // Own client identity, not `build_provider_http_client`:
-                // Stremio protocol headers plus a separately-tracked Chrome
-                // version (fingerprint freshness matters for addon hosts).
+                // Own identity (Stremio headers + separately-tracked Chrome
+                // version), not `build_provider_http_client`.
                 Client::builder()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
                 .default_headers(headers)
                 .redirect(fetch_policy::ssrf_redirect_policy())
                 .connect_timeout(Duration::from_secs(12))
-                .timeout(Duration::from_secs(35))
+                .timeout(Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
                 .pool_idle_timeout(Duration::from_secs(90))
                 .tcp_keepalive(Duration::from_secs(30))
                 .build()
@@ -292,9 +250,11 @@ impl AddonTransport {
             ),
             generation: AtomicU64::new(0),
             in_flight: InFlight::new(STREAM_IN_FLIGHT_SWEEP_AT),
-            fetch_failures: Mutex::new(HashMap::new()),
-            // Failures always take the short empty TTL: a fixed addon or a
-            // newly indexed title recovers within seconds, not minutes.
+            fetch_failures: FetchFailureCooldown::new(
+                STREAM_FETCH_FAILURE_TTL,
+                STREAM_IN_FLIGHT_SWEEP_AT,
+            ),
+            // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
                 STREAM_CACHE_MAX_ENTRIES,
                 STREAM_CACHE_EMPTY_TTL,
@@ -303,14 +263,12 @@ impl AddonTransport {
         }
     }
 
-    /// Insert a stream result into the TTL cache, enforcing a hard
-    /// `STREAM_CACHE_MAX_ENTRIES` bound even when no entries have expired.
-    /// Puts from a superseded generation (a `clear_cache` happened after the
-    /// fetch started) are dropped so stale data never repopulates a clear.
+    /// Insert a stream result into the TTL cache. Puts from a superseded
+    /// generation (a `clear_cache` landed mid-fetch) are dropped.
+    #[cfg(test)]
     pub(super) fn cache_put(&self, key: &str, streams: Vec<AddonStream>, generation: u64) {
         let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
-        // Cheap pre-check before taking the entries lock; `put` re-checks
-        // under it, where `clear_cache`'s bump-then-clear order is visible.
+        // Cheap pre-check; `put` re-checks under the entries lock.
         if !still_fresh() {
             return;
         }
@@ -319,95 +277,43 @@ impl AddonTransport {
             .put(key, Arc::from(streams), is_empty, still_fresh);
     }
 
-    /// Clear the in-memory cache (e.g. when the user changes their config).
-    /// Bumps the generation first so in-flight fetches cannot repopulate it.
-    /// Failure cooldowns clear too: a config change may fix the dead host.
+    /// Clear caches on config change. The generation bump revokes in-flight
+    /// fetch writebacks; cooldowns clear too (the change may fix a dead host).
     pub(crate) fn clear_cache(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.cache.clear();
         self.failure_cache.clear();
-        lock_or_recover(&self.fetch_failures).clear();
+        self.fetch_failures.clear();
     }
 
-    /// Current cache generation — snapshot before an operation whose late
-    /// completion must not write back into a cleared generation.
+    /// Generation snapshot for operations whose late completion must not
+    /// write back into a cleared cache.
     pub(crate) fn cache_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
     }
 
-    /// True while `addon_key` sits inside its post-failure cooldown window.
-    /// Expired entries drop on read so the map can't accumulate stale keys.
-    pub(super) fn fetch_failure_cooling_down(&self, addon_key: &str) -> bool {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        match failures.get(addon_key) {
-            Some(until) if *until > Instant::now() => true,
-            Some(_) => {
-                failures.remove(addon_key);
-                false
-            }
-            None => false,
-        }
-    }
-
-    /// Record a fetch failure keyed by raw `addon_url` — for callers outside
-    /// this module (the fetcher times out `get_streams` futures, so a dropped
-    /// future never reaches its own generation-checked record). The caller
-    /// snapshots the generation before spawning, so a `clear_cache` landing
-    /// mid-timeout still suppresses the record.
+    /// Record a fetch failure for callers outside this module (the fetcher
+    /// times out `get_streams` futures, which then never reach their own
+    /// generation-checked record).
     pub(crate) fn note_fetch_failure_for_url(&self, addon_url: &str, generation: u64) {
-        self.note_fetch_failure_for_generation(&config_cache_segment(addon_url), generation);
-    }
-
-    /// Record a transport-exhaustion failure for the addon, generation-checked:
-    /// a fetch started before a `clear_cache` must not reinstall a wiped
-    /// cooldown. The failure mutex is taken before the generation read so
-    /// ordering vs. the clear's bump is unambiguous. Only transport-exhaustion
-    /// callers (retry loop spent, fetcher timeout) reach this.
-    pub(super) fn note_fetch_failure_for_generation(&self, addon_key: &str, generation: u64) {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        if self.generation.load(Ordering::SeqCst) != generation {
-            return;
-        }
-        failures.insert(
-            addon_key.to_string(),
-            Instant::now() + STREAM_FETCH_FAILURE_TTL,
+        self.fetch_failures.note(
+            &config_cache_segment(addon_url),
+            &self.generation,
+            generation,
         );
-        if failures.len() > STREAM_FETCH_FAILURES_SWEEP_AT {
-            let now = Instant::now();
-            failures.retain(|_, until| *until > now);
+    }
+
+    /// Shared contract wiring so the run sites stay declarative; constants
+    /// carry the stream policy (timeout, cooldown message).
+    fn fetch_contract(&self) -> FetchContract<'_> {
+        FetchContract {
+            failure_cache: &self.failure_cache,
+            fetch_failures: &self.fetch_failures,
+            in_flight: &self.in_flight,
+            generation: &self.generation,
+            request_timeout: Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS),
+            cooldown_message: STREAM_COOLDOWN_MESSAGE,
         }
-    }
-
-    /// Generation-checked cooldown clear for a successful fetch: a success
-    /// that started before a `clear_cache` must not wipe a cooldown recorded
-    /// in the new generation. Same mutex-then-generation ordering as the
-    /// record path.
-    pub(super) fn clear_fetch_failure_for_generation(&self, addon_key: &str, generation: u64) {
-        let mut failures = lock_or_recover(&self.fetch_failures);
-        if self.generation.load(Ordering::SeqCst) == generation {
-            failures.remove(addon_key);
-        }
-    }
-
-    /// Fresh cache entry for `key`, cloned out of the shared `Arc` handle.
-    fn cached_streams(&self, key: &str) -> Option<Vec<AddonStream>> {
-        self.cache.get(key).map(|streams| streams.to_vec())
-    }
-
-    /// Freshly cached deterministic failure for `key`.
-    fn cached_failure(&self, key: &str) -> Option<String> {
-        self.failure_cache.get(key)
-    }
-
-    /// Store a deterministic per-endpoint failure with the same generation
-    /// guard as `cache_put`: a `clear_cache` mid-fetch revokes the write.
-    fn cache_failure_put(&self, key: &str, error: &str, generation: u64) {
-        let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
-        if !still_fresh() {
-            return;
-        }
-        self.failure_cache
-            .put(key, error.to_string(), true, still_fresh);
     }
 
     pub(crate) async fn get_streams(
@@ -416,91 +322,13 @@ impl AddonTransport {
         id: &str,
         addon_url: &str,
     ) -> Result<Vec<AddonStream>, String> {
-        // id for movies: tt1234567
-        // id for series: tt1234567:1:2
-
-        // Include a config_url segment so different addons never share entries.
-        let addon_key = config_cache_segment(addon_url);
-        let cache_key = format!("{}|{}|{}", type_, id, addon_key);
-        if let Some(streams) = self.cached_streams(&cache_key) {
-            return Ok(streams);
-        }
-        if let Some(error) = self.cached_failure(&cache_key) {
-            return Err(error);
-        }
-
-        // A host inside its failure window is skipped outright: the fetch
-        // would pay connect/timeout + retry back-off only to fail again.
-        if self.fetch_failure_cooling_down(&addon_key) {
-            return Err(
-                "Addon stream fetch skipped: the source is cooling down after a recent transport failure."
-                    .to_string(),
-            );
-        }
-
-        // Single-flight: a concurrent call for this key may already be
-        // fetching (selector open + best-stream resolve). Wait, then re-read
-        // the cache — the leader's result lands there, including the
-        // short-TTL empty marker — instead of duplicating the whole request.
-        let key_lock = self.in_flight.claim(&cache_key);
-        let _fetch_permit = key_lock.lock().await;
-
-        if let Some(streams) = self.cached_streams(&cache_key) {
-            self.in_flight.release(&cache_key, &key_lock);
-            return Ok(streams);
-        }
-        if let Some(error) = self.cached_failure(&cache_key) {
-            self.in_flight.release(&cache_key, &key_lock);
-            return Err(error);
-        }
-
-        // The leader may have just recorded a transport failure — a follower
-        // that waited must not re-run the same doomed fetch.
-        if self.fetch_failure_cooling_down(&addon_key) {
-            self.in_flight.release(&cache_key, &key_lock);
-            return Err(
-                "Addon stream fetch skipped: the source is cooling down after a recent transport failure."
-                    .to_string(),
-            );
-        }
-
-        // Capture the generation before the fetch: a concurrent `clear_cache`
-        // revokes this fetch's right to repopulate the cache or the cooldown
-        // map (both writebacks below are generation-checked).
-        let start_generation = self.generation.load(Ordering::SeqCst);
-        let result = self
-            .fetch_streams_uncached(
-                &cache_key,
-                type_,
-                id,
-                addon_url,
-                &addon_key,
-                start_generation,
-            )
-            .await;
-        if result.is_ok() {
-            // A success clears any cooldown a concurrent same-addon fetch
-            // recorded — the host is reachable.
-            self.clear_fetch_failure_for_generation(&addon_key, start_generation);
-        }
-        self.in_flight.release(&cache_key, &key_lock);
-        result
-    }
-
-    async fn fetch_streams_uncached(
-        &self,
-        cache_key: &str,
-        type_: &str,
-        id: &str,
-        addon_url: &str,
-        addon_key: &str,
-        start_generation: u64,
-    ) -> Result<Vec<AddonStream>, String> {
+        // Validate before the contract: an addon URL that cannot produce an
+        // endpoint/origin never had a fetch to cache, so the shared checks
+        // would only miss.
         let base_url = addon_url.trim();
         if base_url.is_empty() {
             return Ok(vec![]);
         }
-
         let url = Self::build_stream_endpoint(base_url, type_, id)?;
 
         #[cfg(debug_assertions)]
@@ -511,53 +339,28 @@ impl AddonTransport {
         // CORS-aware checks without leaking the user's API key in the Referer.
         let origin = Self::build_request_origin(base_url)?;
 
-        // Max 2 attempts: one fresh request + one retry after a short back-off.
-        let mut last_error = String::new();
-        for attempt in 0u8..2 {
-            if attempt > 0 {
-                tokio::time::sleep(Duration::from_millis(800)).await;
-            }
-
-            match self.fetch_streams_once(&url, &origin).await {
-                Ok(streams) => {
-                    // Empty results cache too (short TTL): a stream-less
-                    // title must not re-run the full fan-out on every
-                    // selector open.
-                    self.cache_put(cache_key, streams.clone(), start_generation);
-                    return Ok(streams);
-                }
-                Err(StreamFetchFailure::Fatal(error)) => {
-                    // Deterministic for this exact endpoint: a re-open of
-                    // the same selector fails fast from the negative cache
-                    // instead of re-paying the request.
-                    self.cache_failure_put(cache_key, &error, start_generation);
-                    return Err(error);
-                }
-                Err(StreamFetchFailure::Retryable(error)) => last_error = error,
-            }
-        }
-
-        // Retries exhausted on transport errors: cool the addon down so the
-        // next selector open fails fast instead of re-paying the dead host.
-        // Generation-checked like the cache writes above: a fetch that
-        // outlived a `clear_cache` must not reinstall the wiped cooldown.
-        self.note_fetch_failure_for_generation(addon_key, start_generation);
-        Err(if last_error.is_empty() {
-            "Addon stream request failed after retries".to_string()
-        } else {
-            last_error
-        })
+        let addon_key = config_cache_segment(addon_url);
+        let cache_key = format!("{}|{}|{}", type_, id, addon_key);
+        self.fetch_contract()
+            .run(
+                &self.cache,
+                &cache_key,
+                &addon_key,
+                |streams| streams.is_empty(),
+                || async { self.fetch_streams_once(&url, &origin).await.map(Arc::from) },
+            )
+            .await
+            .map(|streams| streams.to_vec())
     }
 
     /// One fetch attempt: request → status gate → bounded body → decode →
-    /// hydrate. Transport order is decode order only — dedupe, ranking, and
-    /// trimming all live in the coordinator's prepare/merge/recommendation
-    /// stack so per-stream identity and rank keys are computed exactly once.
+    /// hydrate. Dedupe and ranking live in the coordinator, so transport
+    /// order stays decode order.
     async fn fetch_streams_once(
         &self,
         url: &str,
         origin: &str,
-    ) -> Result<Vec<AddonStream>, StreamFetchFailure> {
+    ) -> Result<Vec<AddonStream>, FetchFailure> {
         let res = match self
             .client
             .get(url)
@@ -568,13 +371,12 @@ impl AddonTransport {
         {
             Ok(r) => r,
             Err(e) => {
-                // reqwest errors embed the full request URL, which may carry
-                // the user's own addon-side credentials as path/query data.
-                // Sanitize in all builds: this string surfaces via IPC.
+                // reqwest errors embed the request URL, which may carry
+                // addon-side credentials — sanitize before it surfaces via IPC.
                 let error = sanitize_addon_log(&e.to_string());
                 #[cfg(debug_assertions)]
                 eprintln!("Addon stream request failed: {}", error);
-                return Err(StreamFetchFailure::Retryable(error));
+                return Err(FetchFailure::Retryable(error));
             }
         };
 
@@ -587,7 +389,7 @@ impl AddonTransport {
                 sanitize_addon_log(url)
             );
 
-            return Err(StreamFetchFailure::Fatal(format!(
+            return Err(FetchFailure::Fatal(format!(
                 "Configured addon returned HTTP {}. Check the addon URL in Settings → Streaming.",
                 status.as_u16()
             )));
@@ -603,13 +405,12 @@ impl AddonTransport {
                     let message = error.into_message();
                     #[cfg(debug_assertions)]
                     eprintln!("Addon stream body error: {}", message);
-                    // Size-limit rejections are deterministic for this endpoint:
-                    // retrying just burns another request plus the back-off sleep.
-                    // Transport truncations stay retryable.
+                    // Size-limit rejections are deterministic: don't retry.
+                    // Mid-stream truncations stay retryable.
                     return Err(if fatal {
-                        StreamFetchFailure::Fatal(message)
+                        FetchFailure::Fatal(message)
                     } else {
-                        StreamFetchFailure::Retryable(message)
+                        FetchFailure::Retryable(message)
                     });
                 }
             };
@@ -619,9 +420,8 @@ impl AddonTransport {
             Err(e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Addon stream JSON parse error: {}", e);
-                // Parsing is deterministic over the bytes just read; a retry
-                // would fetch identical bytes and fail the same way.
-                return Err(StreamFetchFailure::Fatal(e));
+                // Deterministic over the bytes just read — don't retry.
+                return Err(FetchFailure::Fatal(e));
             }
         };
         Self::hydrate_streams(&mut streams);
@@ -629,16 +429,14 @@ impl AddonTransport {
     }
 
     fn hydrate_streams(streams: &mut [AddonStream]) {
-        // One scratch buffer for the per-stream name+title probe text —
-        // the join is re-materialized per stream otherwise.
+        // One scratch buffer for the name+title probe text across all streams.
         let mut combined = String::new();
         for stream in streams {
             Self::hydrate_stream_inner(stream, &mut combined);
         }
     }
 
-    /// Single-stream wrapper for tests — the batch path shares one scratch
-    /// buffer via `hydrate_streams`.
+    /// Single-stream wrapper for tests; the batch path uses `hydrate_streams`.
     #[cfg(test)]
     pub(super) fn hydrate_stream(stream: &mut AddonStream) {
         let mut combined = String::new();
@@ -646,9 +444,8 @@ impl AddonTransport {
     }
 
     fn hydrate_stream_inner(stream: &mut AddonStream, combined: &mut String) {
-        // Parse seeders/size from both title and name — addons place metadata
-        // in different fields. `truncate_stream_item` already discarded
-        // wire-claimed values, so hydration fills unconditionally.
+        // Seeders/size parse from name and title (addons place them in
+        // either); wire-claimed values were already discarded at decode.
         combined.clear();
         combined.push_str(stream.name.as_deref().unwrap_or(""));
         combined.push('\n');
@@ -658,7 +455,7 @@ impl AddonTransport {
             .captures(combined)
             .and_then(|caps| caps[1].parse::<u32>().ok());
 
-        // Fallback: plain-text size like "1.2 GB" without emoji prefix.
+        // Fallback: plain-text size ("1.2 GB") without emoji prefix.
         stream.size_bytes = SIZE_REGEX
             .captures(combined)
             .and_then(|caps| Self::parse_size_to_bytes(&caps[1], &caps[2]))
@@ -673,22 +470,17 @@ impl AddonTransport {
         let has_lightning = name_text.contains('\u{26A1}') || title_text.contains('\u{26A1}');
         let has_download_arrow = name_text.contains('\u{2B07}') || title_text.contains('\u{2B07}');
 
-        // Advisory only: an addon availability hint may mark a stream cached,
-        // but a plain direct-HTTP URL must surface as `http` delivery rather
-        // than cached. ⬇ explicitly opts out.
+        // ⚡ hints a cached/debrid stream; ⬇ explicitly opts out.
         stream.cached = has_lightning && !has_download_arrow;
 
-        // Warm the match-text memo while the fields are final: hydrated
-        // streams are what the TTL cache stores, so every cache-hit clone
-        // carries the computed text instead of re-running the battery.
+        // Warm the match-text memo while the fields are final: cached rows
+        // then carry the computed text instead of re-running the battery.
         stream.match_texts();
     }
 
     fn parse_size_to_bytes(value: &str, unit: &str) -> Option<u64> {
-        // Non-finite parses ("NaN"/"inf" parse as f64) must not become a
-        // size: NaN saturates to 0 and inf to u64::MAX, both misleading rank
-        // inputs. The final cast maps a clamped finite f64, so precision and
-        // truncation lints are scoped to this function.
+        // Reject non-finite parses ("NaN"/"inf" parse as f64): NaN saturates
+        // to 0 and inf to u64::MAX — both misleading rank inputs.
         #![allow(
             clippy::cast_precision_loss,
             clippy::cast_possible_truncation,
@@ -698,21 +490,17 @@ impl AddonTransport {
             .parse::<f64>()
             .ok()
             .filter(|parsed| parsed.is_finite() && *parsed >= 0.0)?;
-        let multiplier = if unit.eq_ignore_ascii_case("kb") || unit.eq_ignore_ascii_case("kib") {
-            1024.0
-        } else if unit.eq_ignore_ascii_case("mb") || unit.eq_ignore_ascii_case("mib") {
-            1024.0 * 1024.0
-        } else if unit.eq_ignore_ascii_case("gb") || unit.eq_ignore_ascii_case("gib") {
-            1024.0 * 1024.0 * 1024.0
-        } else if unit.eq_ignore_ascii_case("tb") || unit.eq_ignore_ascii_case("tib") {
-            1024.0 * 1024.0 * 1024.0 * 1024.0
-        } else {
-            1.0
+        let exponent = match unit.as_bytes().first().map(u8::to_ascii_uppercase) {
+            Some(b'K') => 1,
+            Some(b'M') => 2,
+            Some(b'G') => 3,
+            Some(b'T') => 4,
+            _ => 0,
         };
         // `u64::MAX as f64` rounds to 2^64; clamp just below it so the
-        // float-to-int cast below saturates instead of wrapping.
+        // float-to-int cast saturates instead of wrapping.
         const MAX_EXACT_F64_PLUS_ONE: f64 = 18_446_744_073_709_551_616.0;
-        let bytes = (parsed * multiplier)
+        let bytes = (parsed * 1024f64.powi(exponent))
             .clamp(0.0, MAX_EXACT_F64_PLUS_ONE - 1.0)
             .round() as u64;
         Some(bytes)
@@ -720,24 +508,19 @@ impl AddonTransport {
 }
 
 pub(crate) fn sanitize_addon_log(value: &str) -> String {
-    // Addon URLs are opaque user data and may embed the user's own addon-side
-    // credentials as path/query segments. Redact the known credential-bearing
-    // query key family so those values never reach debug logs. The app itself
-    // stores no such keys.
-    // Over-redaction is safe here: this only feeds log and error strings.
+    // Addon URLs may embed credentials in path/query. Redact the known
+    // credential-bearing query-key family; over-redaction is safe since this
+    // only feeds log/error strings.
     static TOKEN_RE: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"(?i)((?:rd(?:_token)?|key|apikey|api_key|token|secret|password|passwd|auth|bearer|signature|sig|expires|exp|policy|hdnts|md5|x-amz-algorithm|x-amz-credential|x-amz-date|x-amz-expires|x-amz-signature|x-goog-algorithm|x-goog-credential|x-goog-date|x-goog-expires|x-goog-signature)=)[^/\s]+")
             .expect("valid regex")
     });
-    // Path-configured addons carry the user's opaque config blob —
-    // potentially resolver credentials — as a long path segment. Protocol
-    // segments (catalog ids, types, years, media ids, skips) are all short,
-    // so a 32+ char base64url-ish segment is a secret. Query values use the
-    // key family above.
+    // Path-configured addons carry an opaque config blob (possibly resolver
+    // credentials) as a long path segment; protocol segments are all short,
+    // so a 32+ char base64url-ish segment is treated as a secret.
     static PATH_BLOB_RE: LazyLock<Regex> = LazyLock::new(|| {
-        // Greedy runs need no trailing boundary: the match already extends to
-        // the full run, and leaving the delimiter unconsumed keeps adjacent
-        // blobs visible to the same single pass.
+        // No trailing boundary needed: the greedy run already extends to its
+        // full length, keeping adjacent blobs visible to the same pass.
         Regex::new(r"/[-A-Za-z0-9_+=]{32,}").expect("valid regex")
     });
 
@@ -745,13 +528,11 @@ pub(crate) fn sanitize_addon_log(value: &str) -> String {
     let redacted = PATH_BLOB_RE
         .replace_all(&redacted, "/[redacted-path]")
         .into_owned();
-    // reqwest errors embed the full request URL; addon URLs carry path/query
-    // config, so redact embedded userinfo too before surfacing via IPC/logs.
+    // Redact embedded userinfo too — reqwest errors embed the full URL.
     redact_userinfo_authority(&redacted)
 }
 
-/// Replace `scheme://user:pass@host` with `scheme://[redacted-userinfo]@host`
-/// so persisted addon-user credentials never land in logs or IPC errors.
+/// Replace `scheme://user:pass@host` with `scheme://[redacted-userinfo]@host`.
 fn redact_userinfo_authority(value: &str) -> String {
     static USERINFO_RE: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"(?i)([a-z][a-z0-9+.-]*://)[^/\s@]+@").expect("valid regex"));

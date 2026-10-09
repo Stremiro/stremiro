@@ -4,7 +4,7 @@ import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { PlaybackStreamOutcome } from '@/lib/api';
 import { invalidateStreamQueries } from '@/lib/query-invalidation';
 import { applyResolvedStreamToSession, recoverPlayerStream } from '@/lib/resolve-player-stream';
-import { withTimeout } from '@/lib/utils';
+import { clearTimer, withTimeout } from '@/lib/utils';
 
 // Above the normal backend path (~store op + fetch + probe ≈ 20-30s worst)
 // but far below a wedged invoke: a hung recovery must still release
@@ -88,10 +88,7 @@ export function useStreamRecovery({
   const clearRecoveryTimers = useCallback(() => {
     // Cancelled so in-flight recovery cannot swap streams after unmount.
     startupWatchdogCancelledRef.current = true;
-    if (startupWatchdogTimerRef.current) {
-      clearTimeout(startupWatchdogTimerRef.current);
-      startupWatchdogTimerRef.current = null;
-    }
+    clearTimer(startupWatchdogTimerRef);
   }, []);
 
   const markPlaybackStarted = useCallback(() => {
@@ -226,9 +223,7 @@ export function useStreamRecovery({
     // reset the re-armed timer would stay cancelled for the rest of startup.
     startupWatchdogCancelledRef.current = false;
 
-    if (startupWatchdogTimerRef.current) {
-      clearTimeout(startupWatchdogTimerRef.current);
-    }
+    clearTimer(startupWatchdogTimerRef);
 
     const startupWatchdogDelayMs = isHistoryResume ? 10000 : 12000;
     const epoch = recoveryEpochRef.current;
@@ -285,10 +280,7 @@ export function useStreamRecovery({
 
     return () => {
       startupWatchdogCancelledRef.current = true;
-      if (startupWatchdogTimerRef.current) {
-        clearTimeout(startupWatchdogTimerRef.current);
-        startupWatchdogTimerRef.current = null;
-      }
+      clearTimer(startupWatchdogTimerRef);
     };
   }, [
     stream,

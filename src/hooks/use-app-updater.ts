@@ -19,7 +19,7 @@ import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 export function useAppUpdater() {
   const queryClient = useQueryClient();
 
-  const { data: updateState = getInitialAppUpdateState() } = useQuery({
+  const { data: updateState } = useQuery({
     queryKey: APP_UPDATE_STATE_QUERY_KEY,
     // Cache-as-store: a refetch must preserve live state, not reset to
     // initial — an invalidate mid-install would otherwise wipe progress.

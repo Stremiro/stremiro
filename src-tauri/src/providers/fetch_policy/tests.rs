@@ -16,6 +16,11 @@ fn blocked_ip_literals_cover_loopback_private_and_metadata_ranges() {
         "224.0.0.1",
         "::1",
         "::ffff:127.0.0.1",
+        "[::1]",
+        "[::]",
+        "[::ffff:127.0.0.1]",
+        "[fc00::1]",
+        "[fe80::1%eth0]",
     ] {
         assert!(is_blocked_ip_literal(host), "{host} must be blocked");
     }
@@ -29,6 +34,8 @@ fn public_hosts_and_ips_are_not_blocked() {
         "1.1.1.1",
         "kitsu.io",
         "example-addon.test",
+        "[2606:4700:4700::1111]",
+        "[::ffff:8.8.8.8]",
         // Non-standard numerics routing to public space must also pass.
         "134744072", // 8.8.8.8 as a single decimal
         "0x8080808", // 8.8.8.8 as a single hex
@@ -91,6 +98,9 @@ fn url_parser_normalizes_routable_numerics_before_the_gate() {
         ("http://0177.0.0.1/", "127.0.0.1"),
         ("http://127.1/", "127.0.0.1"),
         ("http://10.1/", "10.0.0.1"),
+        ("http://[::1]/", "[::1]"),
+        ("http://[::ffff:127.0.0.1]/", "[::ffff:7f00:1]"),
+        ("http://[fc00::1]/", "[fc00::1]"),
     ] {
         let parsed = url(raw);
         assert_eq!(
@@ -115,6 +125,9 @@ fn public_to_numeric_private_redirect_is_blocked() {
         "http://0x7f.0.0.1/admin",
         "http://0177.0.0.1/admin",
         "http://2852039166/latest/meta-data/",
+        "http://[::1]/admin",
+        "http://[::ffff:127.0.0.1]/admin",
+        "http://[fc00::1]/admin",
     ] {
         assert!(
             !redirect_target_allowed(&initial, &url(target)),
@@ -129,6 +142,10 @@ fn public_to_public_and_non_http_targets() {
     assert!(redirect_target_allowed(
         &initial,
         &url("https://cdn.test/streams.json")
+    ));
+    assert!(redirect_target_allowed(
+        &initial,
+        &url("https://[2606:4700:4700::1111]/streams.json")
     ));
     assert!(!redirect_target_allowed(
         &initial,
@@ -152,6 +169,15 @@ fn local_addon_same_host_redirect_stays_allowed() {
     assert!(!redirect_target_allowed(
         &initial,
         &url("http://127.0.0.1:9999/admin")
+    ));
+    let initial = url("http://[::1]:11470/manifest.json");
+    assert!(redirect_target_allowed(
+        &initial,
+        &url("http://[::1]:11470/stream.json")
+    ));
+    assert!(!redirect_target_allowed(
+        &initial,
+        &url("http://[::1]:9999/admin")
     ));
 }
 

@@ -47,7 +47,7 @@ const EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY = [
 ] as const;
 
 export function effectivePlaybackLanguagePreferencesQueryKey(mediaType?: string, mediaId?: string) {
-  return [EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY[0], mediaType, mediaId] as const;
+  return [...EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, mediaType, mediaId] as const;
 }
 
 async function invalidateQuery(
@@ -158,15 +158,26 @@ export async function invalidateLibraryQueries(queryClient: QueryClient) {
   ]);
 }
 
-export async function invalidatePlaybackHistoryQueries(queryClient: QueryClient) {
-  refreshScheduleQueries(queryClient);
+async function invalidateHistoryCollections(
+  queryClient: QueryClient,
+  itemId?: string,
+  refetchTitleProgress = true,
+) {
   await Promise.all([
     invalidateQuery(queryClient, CONTINUE_WATCHING_QUERY_KEY, true),
     invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
-    invalidateQuery(queryClient, TITLE_WATCH_PROGRESS_QUERY_KEY),
+    queryClient.invalidateQueries({
+      queryKey: itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
+      refetchType: refetchTitleProgress ? 'active' : 'none',
+    }),
     invalidateQuery(queryClient, TOTAL_WATCH_TIME_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
+}
+
+export async function invalidatePlaybackHistoryQueries(queryClient: QueryClient) {
+  refreshScheduleQueries(queryClient);
+  await invalidateHistoryCollections(queryClient);
 }
 
 // Title-scoped variant: single-title removes/restores and player flushes need
@@ -175,17 +186,10 @@ export async function invalidatePlaybackHistoryQueries(queryClient: QueryClient)
 export async function invalidatePlaybackHistoryQueriesForTitle(
   queryClient: QueryClient,
   itemId: string | undefined,
+  { refetchTitleProgress = true }: { refetchTitleProgress?: boolean } = {},
 ) {
   refreshScheduleQueries(queryClient);
-  await Promise.all([
-    invalidateQuery(queryClient, CONTINUE_WATCHING_QUERY_KEY, true),
-    invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
-    itemId
-      ? invalidateQuery(queryClient, titleWatchProgressQueryKey(itemId))
-      : invalidateQuery(queryClient, TITLE_WATCH_PROGRESS_QUERY_KEY),
-    invalidateQuery(queryClient, TOTAL_WATCH_TIME_QUERY_KEY),
-    invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
-  ]);
+  await invalidateHistoryCollections(queryClient, itemId, refetchTitleProgress);
 }
 
 export async function invalidateListQueries(queryClient: QueryClient) {
@@ -200,6 +204,28 @@ export async function invalidateListQueries(queryClient: QueryClient) {
 export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
   refreshScheduleQueries(queryClient);
   await invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY);
+}
+
+// Selector pages key under the streams prefix so invalidateStreamQueries
+// sweeps them — rename-safety needs one owner (the `trending` precedent).
+export function streamSelectorQueryKey(
+  type: string | undefined,
+  lookupId: string | undefined,
+  season: number | undefined,
+  episode: number | undefined,
+  absoluteEpisode: number | undefined,
+  rankingCacheKey: string,
+) {
+  return [
+    ...STREAMS_QUERY_KEY,
+    'selector',
+    type,
+    lookupId,
+    season,
+    episode,
+    absoluteEpisode,
+    rankingCacheKey,
+  ] as const;
 }
 
 export function addonSubtitlesQueryKey(
@@ -245,31 +271,33 @@ export async function invalidatePlaybackLanguageQueries(queryClient: QueryClient
   ]);
 }
 
-export async function invalidateDataStatsQuery(queryClient: QueryClient) {
-  await invalidateQuery(queryClient, DATA_STATS_QUERY_KEY);
-}
-
 // Backup restore rewrites preferences, profile, and the addon registry in one
 // pass — every surface built from them refetches.
-export async function invalidateSettingsQueries(queryClient: QueryClient) {
+async function invalidateSettingsQueries(queryClient: QueryClient) {
   await Promise.all([
     invalidateQuery(queryClient, APP_UI_PREFERENCES_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_PREFERENCES_QUERY_KEY),
     invalidateQuery(queryClient, STREAM_SELECTOR_PREFERENCES_QUERY_KEY),
     invalidateQuery(queryClient, PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
     invalidateQuery(queryClient, ADDON_CONFIGS_QUERY_KEY),
-    invalidatePlaybackLanguageQueries(queryClient),
+    invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
     invalidateStreamQueries(queryClient),
     invalidateDiscoveryQueries(queryClient),
   ]);
 }
 
-export async function invalidateStoredDataQueries(queryClient: QueryClient) {
+export async function invalidateStoredDataQueries(
+  queryClient: QueryClient,
+  restoreSettings = false,
+) {
+  // Settings discovery owns the awaited schedule refresh when restored;
+  // data-only imports keep the usual nonblocking schedule refresh.
+  if (!restoreSettings) refreshScheduleQueries(queryClient);
   await Promise.all([
-    invalidatePlaybackHistoryQueries(queryClient),
-    invalidateLibraryQueries(queryClient),
-    invalidateListQueries(queryClient),
-    invalidateWatchStatusQueries(queryClient),
-    invalidateDataStatsQuery(queryClient),
+    invalidateHistoryCollections(queryClient),
+    invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, LISTS_QUERY_KEY),
+    invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
+    restoreSettings && invalidateSettingsQueries(queryClient),
   ]);
 }

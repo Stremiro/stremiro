@@ -89,27 +89,16 @@ export function WindowVirtualizedGrid<T>({
   }, [updateMetrics]);
 
   useEffect(() => {
-    const handleResize = () => {
-      updateMetrics();
-    };
-
     const container = containerRef.current;
-    const resizeObserver =
-      typeof ResizeObserver === 'undefined'
-        ? null
-        : new ResizeObserver(() => {
-            handleResize();
-          });
+    if (!container || typeof ResizeObserver === 'undefined') return;
 
-    if (container) {
-      resizeObserver?.observe(container);
-    }
-
-    window.addEventListener('resize', handleResize, { passive: true });
+    // The grid is viewport-fluid, so a window resize that changes metrics
+    // always resizes the container — the observer owns every resync.
+    const resizeObserver = new ResizeObserver(updateMetrics);
+    resizeObserver.observe(container);
 
     return () => {
-      resizeObserver?.disconnect();
-      window.removeEventListener('resize', handleResize);
+      resizeObserver.disconnect();
     };
   }, [updateMetrics]);
 

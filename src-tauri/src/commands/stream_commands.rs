@@ -81,6 +81,8 @@ pub async fn get_stream_selector_data(
         &query.request(&query.id),
         &query.ranking,
         Some(&on_progress),
+        // Selector opens keep the full per-addon budgets.
+        None,
     )
     .await
     .map(|(data, _is_final_season)| data)

@@ -4,6 +4,7 @@ import { api, type WatchProgress } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import type { PlaybackClock } from '@/lib/player-clock';
+import { isLocalMediaId } from '@/lib/utils';
 
 interface UsePlaybackProgressPersistenceArgs {
   mediaId?: string;
@@ -46,10 +47,15 @@ export function usePlaybackProgressPersistence({
   } = stream;
   const lastPlayingStateRef = useRef(isPlaying);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingSaveRef = useRef<{ fingerprint: string; operation: Promise<void> } | null>(null);
   const currentTimeRef = clock.ref;
 
+  useEffect(() => {
+    pendingSaveRef.current = null;
+  }, [stream.activeStreamUrl]);
+
   const buildWatchProgressPayload = useCallback((): WatchProgress | null => {
-    if (!mediaType || !mediaId || mediaId === 'local') return null;
+    if (!mediaType || !mediaId || isLocalMediaId(mediaId)) return null;
 
     return {
       id: mediaId,
@@ -108,17 +114,32 @@ export function usePlaybackProgressPersistence({
     // write is queued must not let it resurrect the row — the backend
     // generation guard only covers saves already in flight.
     const enqueuedEpoch = getWatchProgressEpoch();
+    // Exclude the trigger time so overlapping exit saves share one operation.
+    // Only the queue tail can join: an intervening changed snapshot must still save.
+    const fingerprint = JSON.stringify([
+      stream.activeStreamUrl,
+      enqueuedEpoch,
+      { ...payload, last_watched: undefined },
+    ]);
+    if (pendingSaveRef.current?.fingerprint === fingerprint) {
+      return pendingSaveRef.current.operation;
+    }
     const operation = saveQueueRef.current.then(async () => {
       if (getWatchProgressEpoch() !== enqueuedEpoch) return;
       await api.saveWatchProgress(payload);
     });
+    pendingSaveRef.current = { fingerprint, operation };
+    const clearPendingSave = () => {
+      if (pendingSaveRef.current?.operation === operation) pendingSaveRef.current = null;
+    };
+    void operation.then(clearPendingSave, clearPendingSave);
     saveQueueRef.current = operation.catch(() => {
       if (import.meta.env.DEV) console.warn('[player] watch progress persist failed');
     });
     // Global tracking covers this final operation after the player unmounts:
     // the hook's own flusher only runs while it is still registered.
     return trackPendingAppWrite(operation);
-  }, [buildWatchProgressPayload]);
+  }, [buildWatchProgressPayload, stream.activeStreamUrl]);
 
   // Never rejects, so every fire-and-forget trigger keeps its old contract.
   const saveProgress = useCallback(

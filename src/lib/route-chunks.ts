@@ -4,6 +4,7 @@ export const routeChunks = {
   settings: () => import('@/pages/settings/index'),
   profile: () => import('@/pages/profile'),
   calendar: () => import('@/pages/calendar'),
+  party: () => import('@/pages/party'),
 };
 
 export function warmRouteChunks(): void {

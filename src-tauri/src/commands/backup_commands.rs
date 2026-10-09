@@ -229,15 +229,14 @@ pub(super) fn prepare_import_lists(
             ));
         }
         let new_id = normalized_id
-            // A preserved id must survive the live path's key gate verbatim:
-            // an id carrying characters `normalize_list_id` rejects would
-            // land under a key delete/rename/reorder can't address.
-            .filter(|id| normalize_list_id(id).as_deref() == Some(id.as_str()))
-            .filter(|id| !known_ids.contains(id))
+            .as_deref()
+            .and_then(normalize_list_id)
             .unwrap_or_else(|| format!("list_{}", uuid::Uuid::new_v4().simple()));
-        // Register the assigned id immediately so a repeat of the same
-        // backup id folds into the list just prepared instead of importing
-        // a second copy under another uuid.
+        // Remember both identities: repeated invalid backup ids must also
+        // fold into the prepared list after receiving a fresh safe id.
+        if let Some(id) = normalized_id {
+            known_ids.insert(id);
+        }
         known_ids.insert(new_id.clone());
         prepared.push(UserListWithItems {
             id: new_id,
@@ -377,10 +376,7 @@ pub(crate) async fn export_app_data(
             let order = load_lists_order(&lists_store)?;
             let mut lists: Vec<UserListWithItems> = Vec::with_capacity(order.len());
             for list_id in &order {
-                let Some(meta_val) = lists_store.get(list_meta_key(list_id)) else {
-                    continue;
-                };
-                let Ok(list) = serde_json::from_value::<UserList>(meta_val) else {
+                let Some(list) = lists_store.get_typed::<UserList>(list_meta_key(list_id)) else {
                     continue;
                 };
                 let mut items: Vec<MediaItem> = Vec::with_capacity(list.item_ids.len());
@@ -661,15 +657,12 @@ pub async fn export_app_data_to_file(app: AppHandle, path: String) -> Result<(),
     // The snapshot ran inside `run_blocking_store_op`; the external file
     // write rides the blocking pool on its own so no store lock is held
     // across user-path IO.
-    tokio::time::timeout(
-        super::BLOCKING_OP_TIMEOUT,
-        tauri::async_runtime::spawn_blocking(move || {
-            super::write_atomic_file(&target_path, payload.as_bytes(), false)
-        }),
+    super::run_blocking_op(
+        tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
+        "Backup export timed out.",
+        move || super::write_atomic_file(&target_path, payload.as_bytes(), false),
     )
     .await
-    .map_err(|_| "Backup export timed out.".to_string())?
-    .map_err(|error| format!("Background persistence task failed: {}", error))?
 }
 
 /// Reads backup JSON from the provided file path and imports it.
@@ -680,18 +673,22 @@ pub async fn import_app_data_from_file(
 ) -> Result<ImportResult, String> {
     let source_path = normalize_backup_path(&path)
         .ok_or_else(|| "Import path must be an absolute .json file path.".to_string())?;
-    // Capped blocking read: avoids TOCTOU/RAM overshoot without new dep.
-    // `import_app_data` re-checks the length before parsing.
-    let data = run_blocking_store_op(move || {
-        use std::io::Read as _;
-        let limit = usize_to_u64_saturating(MAX_IMPORT_BYTES);
-        let file = std::fs::File::open(&source_path).map_err(|e| e.to_string())?;
-        let mut limited = file.take(limit.saturating_add(1));
-        let mut data = String::new();
-        std::io::Read::read_to_string(&mut limited, &mut data).map_err(|e| e.to_string())?;
-        validate_backup_size(data.len())?;
-        Ok(data)
-    })
+    // External file IO must not hold the store gate. The capped read avoids
+    // TOCTOU/RAM overshoot; `import_app_data` rechecks before parsing.
+    let data = super::run_blocking_op(
+        tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
+        "Backup import timed out.",
+        move || {
+            use std::io::Read as _;
+            let limit = usize_to_u64_saturating(MAX_IMPORT_BYTES);
+            let file = std::fs::File::open(&source_path).map_err(|e| e.to_string())?;
+            let mut limited = file.take(limit.saturating_add(1));
+            let mut data = String::new();
+            std::io::Read::read_to_string(&mut limited, &mut data).map_err(|e| e.to_string())?;
+            validate_backup_size(data.len())?;
+            Ok(data)
+        },
+    )
     .await?;
     import_app_data(app.clone(), app.state::<PlaybackStateService>(), data).await
 }

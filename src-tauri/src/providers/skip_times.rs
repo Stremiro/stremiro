@@ -110,7 +110,7 @@ const SKIP_TIMES_MAX_BYTES: usize = 256 * 1024;
 
 const SKIPDB_SEGMENTS_URL: &str = "https://api.skipdb.tv/api/segments";
 
-async fn read_bounded_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+async fn read_skip_times_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
     super::read_bounded_body(response, SKIP_TIMES_MAX_BYTES, |_| {
         "Skip-times response too large.".to_string()
     })
@@ -141,13 +141,11 @@ impl SkipTimesProvider {
 
     /// Fetch skippable segments from the SkipDB API (`GET /api/segments`).
     ///
-    /// `season`/`episode` are passed together for episodes and omitted
-    /// together for movies, per the API contract. The stream `duration_secs`
-    /// enables SkipDB's duration matching: with `adjust=conservative`
-    /// timestamps are shifted earlier to fit this cut (never later, so a skip
-    /// can't land past the content), and an outro without `end_ms` resolves
-    /// to the stream duration. Entries reported `out-of-range` are dropped —
-    /// they belong to a different cut and would place the skip wrongly.
+    /// `season`/`episode` are sent together (episodes) or omitted together
+    /// (movies). `duration_secs` enables duration matching: `adjust=
+    /// conservative` shifts timestamps earlier to fit this cut — never
+    /// later, so a skip can't land past the content — and `out-of-range`
+    /// entries (a different cut) are dropped.
     ///
     /// Always returns an empty result on transport/parse failure: missing
     /// skip data is a normal crowdsourced condition, not an app error.
@@ -181,7 +179,7 @@ impl SkipTimesProvider {
             return SkipTimesResult::default();
         }
 
-        let bytes = match read_bounded_body(res).await {
+        let bytes = match read_skip_times_body(res).await {
             Ok(bytes) => bytes,
             Err(_too_large) => {
                 // Oversize crowdsourced payloads degrade to "no data" —

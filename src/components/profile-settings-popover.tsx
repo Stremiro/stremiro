@@ -65,12 +65,11 @@ export function ProfileSettingsPopover({
           type='button'
           title='Customize profile'
           aria-label='Customize profile'
-          className='group flex h-6 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] pl-2 pr-2.5 text-zinc-500 transition-all duration-200 hover:border-white/[0.14] hover:bg-white/[0.07] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/25'
+          className='flex h-8 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2.5 text-zinc-400 transition-colors duration-150 hover:border-white/[0.14] hover:bg-white/[0.07] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         >
-          {/* Live accent dot — the chip doubles as the current-color readout. */}
           <span
             aria-hidden='true'
-            className='h-1.5 w-1.5 rounded-full transition-transform duration-200 group-hover:scale-125'
+            className='h-1.5 w-1.5 rounded-full'
             style={{ backgroundColor: profile.accentColor }}
           />
           <Settings2 className='w-3 h-3' />
@@ -82,20 +81,11 @@ export function ProfileSettingsPopover({
         sideOffset={8}
         className='w-72 p-0 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl shadow-black/60 overflow-hidden'
       >
-        <div
-          className='h-px w-full'
-          style={{ background: `linear-gradient(to right, transparent, ${active}55, transparent)` }}
-        />
-
         <div className='px-3.5 pt-3 pb-2.5 border-b border-white/[0.06]'>
-          <h2 className='text-[13px] font-semibold text-white'>Customize Profile</h2>
-          <p className='text-[11px] text-zinc-600 mt-0.5'>
-            Accent tints the app. Glow sets the tint strength.
-          </p>
+          <h2 className='text-[13px] font-semibold text-white'>Customize profile</h2>
         </div>
 
         <div className='px-3.5 py-3 space-y-4'>
-          {/* Live preview */}
           <div className='flex items-center gap-2.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2'>
             <ProfileAvatar
               name={previewName}
@@ -105,7 +95,13 @@ export function ProfileSettingsPopover({
               fallbackStyle={{ backgroundColor: `${active}1f`, color: active }}
             />
             <div className='min-w-0 flex-1'>
-              <p className='truncate text-[12.5px] font-semibold text-white'>{previewName}</p>
+              <p
+                dir='auto'
+                title={previewName}
+                className='truncate text-[12.5px] font-semibold text-white'
+              >
+                {previewName}
+              </p>
               <p className='text-[10.5px] text-zinc-600'>Preview — save to apply</p>
             </div>
             <div
@@ -165,7 +161,7 @@ export function ProfileSettingsPopover({
               setOpen(false);
               navigate('/settings?section=appearance');
             }}
-            className='flex w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] py-1.5 text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-zinc-200'
+            className='flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
           >
             <SlidersHorizontal className='h-3 w-3' />
             Tint controls

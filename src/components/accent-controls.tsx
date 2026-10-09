@@ -1,5 +1,5 @@
 import * as SliderPrimitive from '@radix-ui/react-slider';
-import { useEffect, useRef } from 'react';
+import { useEffect, useLayoutEffect, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn, clamp, HEX_COLOR_PATTERN } from '@/lib/utils';
 
@@ -30,8 +30,6 @@ export function resolveAccentPreviewColor(draft: string, committed: string): str
   return HEX_COLOR_PATTERN.test(draft) ? draft : committed;
 }
 
-// Slider ticks paint --app-glow directly so the ambient tint follows the
-// pointer frame-by-frame; the persisted value only writes on commit/close.
 function setGlowVar(value: number) {
   document.documentElement.style.setProperty(
     '--app-glow',
@@ -72,6 +70,8 @@ export function AccentControls({
   // Clamp locally so the preview never lies; Rust clamps again at the boundary.
   const previewIntensity = clamp(Math.round(intensity), 0, 100);
 
+  useLayoutEffect(() => setGlowVar(previewIntensity), [previewIntensity]);
+
   const committedIntensityRef = useRef(committedIntensity);
   committedIntensityRef.current = committedIntensity;
   // On unmount, snap the ambient back to whatever is actually persisted.
@@ -84,15 +84,16 @@ export function AccentControls({
           <div className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
             Accent
           </div>
-          {accentColor !== DEFAULT_ACCENT_COLOR && (
-            <button
-              type='button'
-              onClick={() => onAccentColorChange(DEFAULT_ACCENT_COLOR)}
-              className='text-[11px] font-medium text-zinc-600 hover:text-zinc-300 transition-colors'
-            >
-              Reset
-            </button>
-          )}
+          <button
+            type='button'
+            aria-disabled={accentColor === DEFAULT_ACCENT_COLOR}
+            onClick={() => {
+              if (accentColor !== DEFAULT_ACCENT_COLOR) onAccentColorChange(DEFAULT_ACCENT_COLOR);
+            }}
+            className='rounded-sm text-[11px] font-medium text-zinc-600 transition-colors hover:text-zinc-300 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:text-zinc-600'
+          >
+            Reset
+          </button>
         </div>
         <div className='grid grid-cols-6 gap-1.5'>
           {ACCENT_PRESETS.map((p) => {
@@ -173,7 +174,6 @@ export function AccentControls({
           onValueChange={([value]) => {
             if (value === undefined) return;
             onIntensityChange(value);
-            setGlowVar(value);
           }}
           onValueCommit={([value]) => {
             if (value !== undefined) onIntensityCommit?.(value);

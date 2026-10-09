@@ -1,5 +1,6 @@
 use super::history_helpers::{
-    choose_entry, playable_resume_start_time, sanitize_watch_progress, HistoryEntryQuery,
+    choose_entry, playable_resume_start_time, sanitize_watch_progress,
+    watch_progress_absolute_episode, watch_progress_absolute_season, HistoryEntryQuery,
 };
 use super::media_commands::resolve_episode_stream_mapping_inner;
 use super::playback_state::PlaybackStateService;
@@ -148,8 +149,8 @@ fn is_mapped_anime_history_item(item: &WatchProgress) -> bool {
 /// (`stream_*` may hold absolute coords on legacy kitsu rows, so items with
 /// no explicit stream context wait for the episode mapping instead).
 fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
-    let absolute_season = item.absolute_season.or(item.season);
-    let absolute_episode = item.absolute_episode.or(item.episode);
+    let absolute_season = watch_progress_absolute_season(item);
+    let absolute_episode = watch_progress_absolute_episode(item);
     let should_defer_mapped_anime_coordinates =
         !has_explicit_stream_episode_context(item) && is_mapped_anime_history_item(item);
     let stream_season = item.stream_season.or({
@@ -322,11 +323,13 @@ async fn resolve_history_episode_context(
     playback_state: &PlaybackStateService,
     client: &AddonResourceClient,
     item: &WatchProgress,
-) -> Option<ResolvedHistoryEpisodeContext> {
+) -> Result<Option<ResolvedHistoryEpisodeContext>, String> {
     let base_context = get_episode_context(item);
     let stream_lookup_id = get_immediate_stream_lookup_id(item);
     // Canonical coords without a stream pair resolve through the persisted
-    // episode mapping; everything else uses the base context as-is.
+    // episode mapping; everything else uses the base context as-is. A
+    // mapping-lookup failure must surface (store read, meta fetch) — only a
+    // genuinely absent mapping degrades to the details plan.
     let missing_stream_coords =
         base_context.stream_season.is_none() || base_context.stream_episode.is_none();
 
@@ -334,7 +337,7 @@ async fn resolve_history_episode_context(
         if let (Some(absolute_season), Some(absolute_episode)) =
             (base_context.absolute_season, base_context.absolute_episode)
         {
-            return resolve_episode_stream_mapping_inner(
+            return Ok(resolve_episode_stream_mapping_inner(
                 app,
                 playback_state,
                 client,
@@ -343,26 +346,24 @@ async fn resolve_history_episode_context(
                 absolute_season,
                 absolute_episode,
             )
-            .await
-            .ok()
-            .flatten()
+            .await?
             .map(|mapping| ResolvedHistoryEpisodeContext {
                 absolute_season: Some(mapping.canonical_season),
                 absolute_episode: Some(mapping.canonical_episode),
                 stream_season: Some(mapping.source_season),
                 stream_episode: Some(mapping.source_episode),
-                stream_lookup_id: mapping.lookup_id,
-            });
+                stream_lookup_id: mapping.source_lookup_id,
+            }));
         }
     }
 
-    Some(ResolvedHistoryEpisodeContext {
+    Ok(Some(ResolvedHistoryEpisodeContext {
         absolute_season: base_context.absolute_season,
         absolute_episode: base_context.absolute_episode,
         stream_season: base_context.stream_season,
         stream_episode: base_context.stream_episode,
         stream_lookup_id,
-    })
+    }))
 }
 
 #[command]
@@ -401,7 +402,7 @@ pub async fn build_history_playback_plan(
 
     let Some(resolved_context) =
         resolve_history_episode_context(app, playback_state.inner(), client.inner(), &latest_item)
-            .await
+            .await?
     else {
         return Ok(build_details_plan(&latest_item, from));
     };

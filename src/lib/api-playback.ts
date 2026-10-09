@@ -39,9 +39,25 @@ interface PlaybackApiContext {
   caches: PlaybackApiCaches;
 }
 
+// One fold for the four preferred-identity hints: the cache key and the
+// IPC payload must agree on what counts as "absent".
+function normalizePreferredStreamHints(hints: {
+  preferredStreamKey?: string;
+  preferredSourceId?: string;
+  preferredSourceName?: string;
+  preferredStreamFamily?: string;
+}) {
+  return {
+    preferredStreamKey: nonBlank(hints.preferredStreamKey),
+    preferredSourceId: nonBlank(hints.preferredSourceId),
+    preferredSourceName: nonBlank(hints.preferredSourceName),
+    preferredStreamFamily: nonBlank(hints.preferredStreamFamily),
+  };
+}
+
 // Single composer for best-stream keys; selector relies on RQ + Rust.
 // Every input that can change the resolved winner must appear here:
-// content coordinates, ranking options, and all three preferred-identity
+// content coordinates, ranking options, and all four preferred-identity
 // hints — a preferred key, source, or family that differs must miss.
 function bestStreamCacheKey(
   type: string,
@@ -51,13 +67,14 @@ function bestStreamCacheKey(
   absoluteEpisode?: number,
   options?: ResolveBestStreamOptions,
 ): string {
+  const hints = normalizePreferredStreamHints(options ?? {});
   return JSON.stringify([
     buildStreamCacheKey(type, id, season, episode, absoluteEpisode),
     buildStreamRankingCacheKey(options),
-    options?.preferredStreamKey?.trim() || null,
-    options?.preferredSourceId?.trim() || null,
-    options?.preferredSourceName?.trim() || null,
-    options?.preferredStreamFamily?.trim() || null,
+    hints.preferredStreamKey ?? null,
+    hints.preferredSourceId ?? null,
+    hints.preferredSourceName ?? null,
+    hints.preferredStreamFamily ?? null,
   ]);
 }
 
@@ -110,10 +127,12 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         preferredStreamFamily: rawPreferredStreamFamily,
         ...rankingOptions
       } = options ?? {};
-      const preferredStreamKey = nonBlank(rawPreferredStreamKey);
-      const preferredSourceId = nonBlank(rawPreferredSourceId);
-      const preferredSourceName = nonBlank(rawPreferredSourceName);
-      const preferredStreamFamily = nonBlank(rawPreferredStreamFamily);
+      const preferredHints = normalizePreferredStreamHints({
+        preferredStreamKey: rawPreferredStreamKey,
+        preferredSourceId: rawPreferredSourceId,
+        preferredSourceName: rawPreferredSourceName,
+        preferredStreamFamily: rawPreferredStreamFamily,
+      });
       const cacheKey = bestStreamCacheKey(
         trimmedType,
         trimmedId,
@@ -129,10 +148,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
           season,
           episode,
           absoluteEpisode,
-          preferredStreamKey,
-          preferredSourceId,
-          preferredSourceName,
-          preferredStreamFamily,
+          ...preferredHints,
           ...rankingOptions,
         }),
       );
@@ -211,7 +227,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       ),
     getPlaybackLanguagePreferences: () =>
       safeInvoke<PlaybackLanguagePreferences>('get_playback_language_preferences'),
-    getEffectivePlaybackLanguagePreferences: (mediaId?: string, mediaType?: string) =>
+    getEffectivePlaybackLanguagePreferences: (mediaType?: string, mediaId?: string) =>
       safeInvoke<PlaybackLanguagePreferences>('get_effective_playback_language_preferences', {
         mediaId,
         mediaType,
@@ -269,8 +285,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       trackPendingAppWrite(safeInvoke<void>('save_watch_progress_batch', { rows })),
     getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
     getContinueWatching: () => safeInvoke<WatchProgress[]>('get_continue_watching'),
-    getUpNextEntries: (localToday: string) =>
-      safeInvoke<UpNextCandidate[]>('get_up_next_entries', { localToday }),
+    getUpNextEntries: (localToday: string, localTodayMs: number) =>
+      safeInvoke<UpNextCandidate[]>('get_up_next_entries', { localToday, localTodayMs }),
     getTitleWatchProgress: (id: string) =>
       safeInvoke<TitleWatchProgress>('get_title_watch_progress', { id }),
     getTotalWatchTimeSecs: () => safeInvoke<number>('get_total_watch_time_secs'),

@@ -1,5 +1,6 @@
 import {
   ArrowLeft,
+  Check,
   Cloud,
   FastForward,
   Maximize,
@@ -10,7 +11,7 @@ import {
   Rewind,
   SkipForward,
 } from 'lucide-react';
-import { memo, type Ref, useState } from 'react';
+import { memo, type ReactNode, type Ref } from 'react';
 import { CHROME_ICON_BUTTON_CLASS, CHROME_POPOVER_CLASS } from '@/components/player-chrome-styles';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerSlider } from '@/components/player-slider';
@@ -36,6 +37,8 @@ interface PlayerTopChromeProps {
   /** Live source label — reflects failover swaps, not just the launch pick. */
   streamSourceName?: string;
   isFullscreen: boolean;
+  /** Extra trailing controls; pass a stable element to keep the memo bailout. */
+  actions?: ReactNode;
   onBack: () => Promise<void>;
   onToggleFullscreen: () => Promise<void>;
 }
@@ -51,6 +54,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   episodeTitle,
   streamSourceName,
   isFullscreen,
+  actions,
   onBack,
   onToggleFullscreen,
 }: PlayerTopChromeProps) {
@@ -68,7 +72,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
     <div
       ref={chromeRef}
       data-player-interactive
-      className='pointer-events-auto relative flex items-center justify-between'
+      className='pointer-events-auto cursor-auto relative flex items-center justify-between'
     >
       <button
         type='button'
@@ -86,6 +90,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
           <p className='text-xs text-white/50 mt-0.5 truncate'>{secondaryParts.join(' · ')}</p>
         )}
       </div>
+      {actions}
       <button
         type='button'
         onClick={(e) => {
@@ -136,7 +141,6 @@ interface PlayerControlsRowProps {
     options?: { persistPreference?: boolean },
   ) => void;
   subTracks: Track[];
-  subtitlesOff: boolean;
   subtitleDelay: number;
   subtitlePos: number;
   subtitleScale: number;
@@ -185,7 +189,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   trackSwitching,
   onSelectAudioTrack,
   subTracks,
-  subtitlesOff,
   subtitleDelay,
   subtitlePos,
   subtitleScale,
@@ -203,9 +206,8 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   onApplySubtitleScale,
   onSelectSubTrack,
 }: PlayerControlsRowProps) {
-  // Held during a volume drag: Radix captures the pointer, so pointer-up still
-  // bubbles here when the cursor leaves — the card stays visible for the drag.
-  const [volumeSliderHeld, setVolumeSliderHeld] = useState(false);
+  const volumeIsSilent = isMuted || volume === 0;
+  const displayedVolume = isMuted ? 0 : Math.round(volume);
   return (
     <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 pt-1'>
       <div className='flex min-w-0 max-w-full flex-wrap items-center gap-1'>
@@ -272,11 +274,11 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </button>
         )}
 
-        {/* Volume: mute button plus an inline slider that slides out to its
-            right — the playback bar's blocky track shape, no floating card. */}
+        {/* A compact, always-visible rail reserves its space: hover/focus
+            and pointer capture can never push adjacent controls around. */}
         <div
           data-player-interactive
-          className='flex items-center group/vol'
+          className='flex shrink-0 items-center gap-1.5 pr-1'
           // Interactive regions swallow the ambient wheel handler — scrolling
           // over the cluster still adjusts volume, like hovering the icon.
           onWheel={(e) => {
@@ -287,53 +289,39 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
         >
           <button
             type='button'
-            aria-label={isMuted ? 'Unmute' : 'Mute'}
+            aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
             aria-keyshortcuts='m'
-            title={isMuted ? 'Unmute (M)' : 'Mute (M)'}
+            title={volumeIsSilent ? 'Unmute (M)' : 'Mute (M)'}
             onClick={() => void onToggleMute().catch(() => undefined)}
-            className={cn(CHROME_ICON_BUTTON_CLASS, 'z-10')}
+            className={CHROME_ICON_BUTTON_CLASS}
           >
             <PlayerVolumeIcon
-              muted={isMuted || volume === 0}
+              muted={volumeIsSilent}
               volume={volume}
               className='h-[18px] w-[18px]'
               strokeWidth={2.5}
             />
           </button>
 
-          {/* Held during a volume drag: Radix captures the pointer, so a drag
-              wandering off the cluster can't collapse the slider mid-gesture.
-              Touch has no hover — coarse pointers keep the rail open. */}
-          <div
-            className={cn(
-              'invisible flex w-0 items-center overflow-hidden opacity-0 transition-[width,opacity,visibility] duration-200 ease-out motion-reduce:transition-none',
-              'group-hover/vol:visible group-hover/vol:w-[128px] group-hover/vol:opacity-100',
-              'group-focus-within/vol:visible group-focus-within/vol:w-[128px] group-focus-within/vol:opacity-100',
-              '[@media(hover:none)]:visible [@media(hover:none)]:w-[128px] [@media(hover:none)]:opacity-100',
-              volumeSliderHeld && 'visible w-[128px] opacity-100',
-            )}
-            onPointerDown={() => setVolumeSliderHeld(true)}
-            onPointerUp={() => setVolumeSliderHeld(false)}
-            onPointerCancel={() => setVolumeSliderHeld(false)}
-            onLostPointerCapture={() => setVolumeSliderHeld(false)}
-          >
-            <PlayerSlider
-              variant='bar'
-              value={[isMuted ? 0 : volume]}
-              max={100}
-              step={1}
-              aria-label='Volume'
-              aria-valuetext={isMuted ? 'Muted' : `${Math.round(volume)}%`}
-              title={isMuted ? 'Volume: muted' : `Volume: ${Math.round(volume)}%`}
-              onValueChange={(val) => void onVolumeChange(val[0]).catch(() => undefined)}
-              onKeyDown={(event) => {
-                if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                  event.stopPropagation();
-                }
-              }}
-              className='ml-1.5 w-[116px] shrink-0'
-            />
-          </div>
+          <PlayerSlider
+            variant='bar'
+            value={[isMuted ? 0 : volume]}
+            max={100}
+            step={1}
+            aria-label='Volume'
+            aria-valuetext={isMuted ? 'Muted' : `${displayedVolume}%`}
+            title={isMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
+            onValueChange={(val) => void onVolumeChange(val[0]).catch(() => undefined)}
+            onKeyDown={(event) => {
+              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                event.stopPropagation();
+              }
+            }}
+            className='w-20 shrink-0'
+          />
+          <span aria-hidden='true' className='w-9 text-right text-xs tabular-nums text-white/65'>
+            {displayedVolume}%
+          </span>
         </div>
 
         {/* Speed */}
@@ -344,7 +332,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
               aria-label={`Playback speed: ${playbackSpeed}x`}
               title='Playback speed ([/])'
               className={cn(
-                'flex h-9 items-center justify-center rounded-lg px-2 text-[11px] font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
+                'flex h-9 min-w-12 items-center justify-center rounded-lg px-2 text-xs font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
                 playbackSpeed === 1
                   ? 'text-white/50 hover:text-white hover:bg-white/10'
                   : 'text-[var(--accent-nav)] hover:bg-white/10',
@@ -359,11 +347,15 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           <PopoverContent
             side='top'
             sideOffset={10}
-            className={cn(CHROME_POPOVER_CLASS, 'w-20 p-1')}
+            className={cn(
+              CHROME_POPOVER_CLASS,
+              'max-h-(--radix-popover-content-available-height) w-32 overflow-y-auto overscroll-contain p-1.5',
+            )}
             onClick={(event) => {
               event.stopPropagation();
             }}
           >
+            <h4 className='px-2.5 py-2 text-xs font-semibold text-zinc-300'>Speed</h4>
             <div className='flex flex-col'>
               {SPEED_OPTIONS.map((s) => (
                 <button
@@ -372,13 +364,13 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
                   aria-pressed={s === playbackSpeed}
                   onClick={() => onSpeedChange(s)}
                   className={cn(
-                    'flex h-7 items-center justify-between rounded-md px-2.5 text-left text-[11px] tabular-nums transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:bg-white/[0.08] focus-visible:text-white',
+                    'flex h-9 items-center justify-between rounded-md px-2.5 text-left text-xs tabular-nums transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30',
                     s === playbackSpeed
-                      ? 'text-white font-semibold'
+                      ? 'bg-white/[0.08] text-white font-semibold'
                       : 'text-white/60 hover:text-white',
                   )}
                 >
-                  {s}x{s === playbackSpeed && <span className='h-1 w-1 rounded-full bg-white' />}
+                  {s}x{s === playbackSpeed && <Check className='h-3 w-3' strokeWidth={3} />}
                 </button>
               ))}
             </div>
@@ -420,7 +412,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
         {/* Subtitle Track Selector */}
         <SubtitleTrackSelector
           subTracks={subTracks}
-          subtitlesOff={subtitlesOff}
           trackSwitching={trackSwitching}
           subtitleDelay={subtitleDelay}
           subtitlePos={subtitlePos}

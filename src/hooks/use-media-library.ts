@@ -32,12 +32,29 @@ import {
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { buildUpNextEntries } from '@/lib/up-next';
 import { formatEpisodeHeading } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
 const CONTINUE_WATCHING_STALE_TIME = 1000 * 30;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
+
+// Optimistic status write shared by the details chip group and the library
+// toggle — one updater so both mirrors agree on insert/delete semantics.
+export function setCachedWatchStatus(
+  queryClient: QueryClient,
+  itemId: string,
+  status: WatchStatus | null,
+): void {
+  queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (old) => {
+    if (status === null) {
+      if (!old || !(itemId in old)) return old;
+      const next = { ...old };
+      delete next[itemId];
+      return next;
+    }
+    return { ...old, [itemId]: status };
+  });
+}
 
 interface SharedCollectionQueryOptions {
   enabled?: boolean;
@@ -161,8 +178,8 @@ export function useContinueWatching(options?: SharedCollectionQueryOptions) {
   });
 }
 
-/// Total seconds watched across every raw history row — the collapsed
-/// history queries would drop per-episode rows.
+/// Saved playback seconds across canonical episodes, which collapsed title
+/// history queries would omit.
 export function useTotalWatchTime(options?: SharedCollectionQueryOptions) {
   return useQuery({
     queryKey: TOTAL_WATCH_TIME_QUERY_KEY,
@@ -287,12 +304,7 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
         previousStatuses =
           queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY);
-        queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (old) => {
-          if (!old || !(item.id in old)) return old;
-          const next = { ...old };
-          delete next[item.id];
-          return next;
-        });
+        setCachedWatchStatus(queryClient, item.id, null);
       }
 
       return { previousLibrary, previousStatuses };
@@ -464,8 +476,16 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
       queryClient.setQueryData<TitleWatchProgress>(progressKey, (old) => {
         if (!old) return old;
         return {
+          ...old,
           history: watched ? old.history : old.history.filter(keep),
           continueWatching: old.continueWatching.filter(keep),
+          // Unwatch drops the episode map rows too; the spoiler ceiling stays
+          // stale (over-masking is the safe direction) until Rust rebuilds it.
+          episodeProgress: watched
+            ? old.episodeProgress
+            : Object.fromEntries(
+                Object.entries(old.episodeProgress).filter(([, row]) => keep(row)),
+              ),
         };
       });
       return { previous };
@@ -496,7 +516,10 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
         detail: error instanceof Error ? error.message : undefined,
       });
     },
-    onSettled: () => invalidatePlaybackHistoryQueriesForTitle(queryClient, item?.id),
+    onSettled: (_progress, error) =>
+      invalidatePlaybackHistoryQueriesForTitle(queryClient, item?.id, {
+        refetchTitleProgress: error != null,
+      }),
   });
 }
 
@@ -508,26 +531,43 @@ export function useMarkSeasonWatched({ item }: UseToggleEpisodeWatchedOptions) {
   return useEpisodesWatchedMutation(item, true);
 }
 
-// Rust returns only the next aired episode for each eligible title.
+const UP_NEXT_META_LINE = 'Up next';
+const NEW_EPISODE_META_LINE = 'New episode';
+
+export interface UpNextEntry {
+  row: WatchProgress;
+  metaLine: string;
+}
+
+// Label mapping only — the "aired in the last week" decision is computed in
+// Rust with the successor fold so the rail never re-times it per render.
+function buildUpNextEntries(candidates: readonly UpNextCandidate[]): UpNextEntry[] {
+  return candidates.map(({ row, isNewEpisode }) => ({
+    row,
+    metaLine: isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE,
+  }));
+}
+
+// Rust returns only the next aired episode for each eligible title; the
+// continue-watching exclusion dedups a title the rail already shows.
 export function useUpNextEntries(
   continueWatching: readonly WatchProgress[],
   options?: SharedCollectionQueryOptions,
 ) {
-  const localToday = format(useLocalDay(), 'yyyy-MM-dd');
+  const localDay = useLocalDay();
+  const localToday = format(localDay, 'yyyy-MM-dd');
+  const localTodayMs = localDay.getTime();
   const selectEntries = useCallback(
     (candidates: UpNextCandidate[]) => {
       const resumable = new Set(continueWatching.map((row) => row.id));
-      return buildUpNextEntries(
-        candidates.filter(({ row }) => !resumable.has(row.id)),
-        Date.now(),
-      );
+      return buildUpNextEntries(candidates.filter(({ row }) => !resumable.has(row.id)));
     },
     [continueWatching],
   );
 
   return useQuery({
     queryKey: [...UP_NEXT_ENTRIES_QUERY_KEY, localToday],
-    queryFn: () => api.getUpNextEntries(localToday),
+    queryFn: () => api.getUpNextEntries(localToday, localTodayMs),
     select: selectEntries,
     ...resolveSharedCollectionQueryOptions(options, WATCH_HISTORY_STALE_TIME_MS),
   });

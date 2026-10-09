@@ -4,9 +4,8 @@ mod transport;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-// Re-exports keep the `providers::addons::X` surface unchanged for the
-// commands/* consumers; the match battery lives in `stream_match` and
-// fetch/decode/cache in `transport`.
+// Re-exports keep the `providers::addons::X` surface unchanged: the match
+// battery lives in `stream_match`, fetch/decode/cache in `transport`.
 pub(crate) use stream_match::{
     normalize_separators, stream_conflicts_with_episode_targets, stream_contains_batch_texts,
     stream_episode_match_texts, StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags,
@@ -17,7 +16,7 @@ pub(crate) use stream_match::{
 pub(crate) use stream_match::detect_stream_flags;
 pub(crate) use transport::{sanitize_addon_log, AddonTransport};
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum StreamResolution {
     #[serde(rename = "4k")]
     P2160,
@@ -30,7 +29,7 @@ pub(crate) enum StreamResolution {
     Sd,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum StreamDeliveryKind {
     #[default]
@@ -40,13 +39,13 @@ pub(crate) enum StreamDeliveryKind {
     Http,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+// Serialize-only: `AddonStream.presentation` is `skip_deserializing` — the
+// coordinator owns presentation facts and the wire can never supply them.
+#[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StreamPresentation {
-    /// Display label parsed from the stream's own `name`/`title` text (first
-    /// line, leading meta stripped) — e.g. the release group or debrid tag
-    /// the addon embedded. NOT the producing addon's name; that lives on
-    /// `AddonStream.source_name` / `source_id`.
+    /// Display label parsed from the stream's own `name`/`title` text —
+    /// NOT the producing addon's name (that lives on `AddonStream.source_name`).
     pub source_name: String,
     pub stream_title: String,
     pub resolution: StreamResolution,
@@ -108,9 +107,8 @@ pub(crate) enum StreamRecommendationReason {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddonStream {
-    // Raw addon fields below stay Rust-side: resolution runs by
-    // `stream_key`, so name/title/hash/url/hints never cross into the webview
-    // payload (behavior hints can carry proxy-header secrets).
+    // Raw addon fields stay Rust-side (hints can carry proxy-header secrets);
+    // resolution runs by `stream_key`, so they never cross into the payload.
     #[serde(skip_serializing)]
     pub name: Option<String>,
     #[serde(alias = "description", skip_serializing)]
@@ -124,82 +122,105 @@ pub(crate) struct AddonStream {
     #[serde(rename = "behaviorHints", alias = "behavior_hints", skip_serializing)]
     pub behavior_hints: Option<BehaviorHints>,
 
-    // Computed fields; serde keeps old wire working.
-    /// Hydration-derived availability hint — consumed Rust-side by delivery
-    /// classification and family derivation; the wire exposes only the
-    /// `presentation.deliveryKind` verdict.
-    #[serde(default, skip_serializing)]
+    // Computed fields: Stremio streams carry no `seeders`/`size`/`cached`
+    // keys, so wire values could only spoof ranking — hydration is the sole
+    // writer, decode ignores them outright.
+    /// Hydration-derived availability hint for delivery classification; the
+    /// wire exposes only the `presentation.deliveryKind` verdict.
+    #[serde(skip)]
     pub cached: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub seeders: Option<u32>,
-    #[serde(default, alias = "size_bytes", skip_serializing_if = "Option::is_none")]
+    #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
-    /// Which addon/source produced this stream (set by commands.rs, not from the addon payload).
+    /// Producing addon/source (set by commands.rs, not the addon payload).
     #[serde(
         default,
         alias = "source_name",
         skip_serializing_if = "Option::is_none"
     )]
     pub source_name: Option<String>,
-    /// Stable instance id of the producing addon config (set by commands.rs):
-    /// the selector filters on this rather than the display name.
+    /// Stable instance id of the producing addon config — the selector
+    /// filters on this rather than the display name.
     #[serde(default, alias = "source_id", skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
-    /// Stable backend-derived identity for release families that can be reused across nearby episodes.
+    /// Backend-derived release-family identity reused across nearby episodes.
     #[serde(
         default,
         alias = "stream_family",
         skip_serializing_if = "Option::is_none"
     )]
     pub stream_family: Option<String>,
-    /// Canonical backend-issued identity for selection, history, and recovery flows.
+    /// Canonical backend-issued identity for selection, history, and recovery.
     #[serde(rename = "streamKey", alias = "stream_key", default)]
     pub stream_key: String,
-    /// Why the coordinator ranked this stream here, as structured kinds; the
-    /// UI owns the labels. Coordinator outputs below are never decoded from
-    /// addon payloads: a malformed injected value would otherwise fail the
-    /// whole stream's decode.
+    /// Structured reasons the coordinator ranked this stream here; the UI
+    /// owns the labels. Coordinator outputs never decode from the wire —
+    /// a malformed injected value would otherwise fail the stream's decode.
     #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
     pub recommendation_reasons: Vec<StreamRecommendationReason>,
     /// Structured episode/title match facts, set during coordinator ranking.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub match_summary: Option<StreamMatchSummary>,
-    /// Dev-only dump of the full sort key, populated only in debug builds
-    /// (`cfg!(debug_assertions)`) so the release payload is byte-identical.
-    /// `skip_deserializing` keeps an addon payload from forging it.
+    /// Debug-build dump of the full sort key — absent from release payloads;
+    /// `skip_deserializing` keeps the wire from forging it.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub rank_debug: Option<String>,
     #[serde(skip)]
-    pub(crate) selection_priority: Option<(StreamEpisodeMatchKind, bool, i8, u8, u8)>,
-    /// Backend-prepared presentation facts so the UI can render without reparsing raw stream text.
+    pub(crate) selection_priority: Option<SelectionPriority>,
+    /// Backend-prepared presentation facts so the UI renders without reparsing raw text.
     #[serde(skip_deserializing)]
     pub presentation: StreamPresentation,
-    /// Lazily computed lowered match text shared by every ranking layer
-    /// (transport sort, presentation build, coordinator). The matchable
-    /// fields are fixed at decode time, so the first probe fills this once
-    /// and later layers reuse it. Never serialized and never read from the
-    /// wire: an addon payload cannot smuggle precomputed ranking text in.
+    /// Lazily computed lowered match text shared by every ranking layer. The
+    /// matchable fields are fixed at decode time, so the first probe fills
+    /// this once. `skip` keeps the wire from smuggling precomputed rank text.
+    /// `Arc` keeps TTL-cache clones to a refcount bump instead of re-cloning
+    /// the four normalized strings on every cache-hit `to_vec`.
     #[serde(skip)]
-    pub(crate) match_text: std::sync::OnceLock<StreamMatchText>,
+    pub(crate) match_text: std::sync::OnceLock<std::sync::Arc<StreamMatchText>>,
 }
 
 impl AddonStream {
-    /// Lowered, separator-normalized match text, computed at most once per
-    /// stream and shared by transport rank, presentation, and coordinator
-    /// ranking. `name`, `title`, and `behavior_hints.filename` are
-    /// decode-time fields — callers must not mutate them after the first
-    /// match probe.
+    /// Lowered, separator-normalized match text, computed once per stream.
+    /// `name`, `title`, and `behavior_hints.filename` are decode-time fields
+    /// — callers must not mutate them after the first match probe.
     pub(crate) fn match_texts(&self) -> &StreamMatchText {
-        self.match_text.get_or_init(|| StreamMatchText::lower(self))
+        self.match_text
+            .get_or_init(|| std::sync::Arc::new(StreamMatchText::lower(self)))
+            .as_ref()
     }
 
-    /// Request headers required to play this stream, lifted out of
-    /// `behaviorHints.proxyHeaders.request`.
+    /// Headers required to play this stream, from `proxyHeaders.request`.
     pub(crate) fn request_headers(&self) -> Vec<(String, String)> {
         self.behavior_hints
             .as_ref()
             .map(BehaviorHints::proxy_request_headers)
             .unwrap_or_default()
+    }
+}
+
+/// Coordinator-assigned quality fingerprint used by the preferred-position
+/// scan: "at least as good as the pool's best" is an elementwise dominance
+/// check, not a tuple order — named fields keep the construction site in
+/// `stream_coordinator` and the comparison in `probe_pool` honest.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct SelectionPriority {
+    pub(crate) episode_match: StreamEpisodeMatchKind,
+    pub(crate) season_claim_verified: bool,
+    pub(crate) title_match: i8,
+    pub(crate) viability: u8,
+    pub(crate) language: u8,
+}
+
+impl SelectionPriority {
+    /// True when `self` trails `best` on no field. `>=` on the tuple shape
+    /// would be lexicographic — dominance must compare every field.
+    pub(crate) fn covers(&self, best: &Self) -> bool {
+        self.episode_match >= best.episode_match
+            && self.season_claim_verified >= best.season_claim_verified
+            && self.title_match >= best.title_match
+            && self.viability >= best.viability
+            && self.language >= best.language
     }
 }
 
@@ -212,12 +233,12 @@ pub(crate) struct BehaviorHints {
     pub proxy_headers: Option<Value>,
 }
 
-/// Maximum `proxyHeaders.request` entries honored per stream. Protocol hints
-/// carry a handful of CDN auth headers; the cap keeps a malicious addon from
-/// stuffing unbounded header lists into probe requests and player state.
+/// `proxyHeaders.request` entries honored per stream — real hints carry a
+/// handful of CDN auth headers; the cap blocks unbounded lists.
 const MAX_PROXY_REQUEST_HEADERS: usize = 8;
 const MAX_PROXY_HEADER_NAME_CHARS: usize = 128;
 const MAX_PROXY_HEADER_VALUE_CHARS: usize = 4 * 1024;
+pub(crate) const MAX_PROXY_HEADERS_BYTES: usize = 8 * 1024;
 
 fn is_http_token(name: &str) -> bool {
     // RFC 7230 token: alphanumerics plus `!#$%&'*+-.^_`|~`.
@@ -243,12 +264,10 @@ fn is_http_token(name: &str) -> bool {
     })
 }
 
-/// Headers owned by the HTTP transport itself. An addon hint carrying one of
-/// these would collide with the client's own framing (notably a second
-/// `Range` next to the probe's `bytes=0-0`, which servers may reject),
-/// misroute the request (`Host`), or leak proxy credentials, so they are
-/// never forwarded. Content headers (`Authorization`, `Cookie`, `Referer`,
-/// `User-Agent`, custom tokens) pass through.
+/// Transport-owned headers: an addon hint carrying one would collide with
+/// the client's framing (a second `Range` next to the probe's `bytes=0-0`),
+/// misroute (`Host`), or leak proxy credentials — never forwarded. Content
+/// headers (`Authorization`, `Cookie`, custom tokens) pass through.
 fn is_transport_owned_header(name: &str) -> bool {
     // Case-insensitive without allocating: probe headers run per stream.
     [
@@ -293,10 +312,8 @@ fn proxy_request_header(name: &str, value: &Value) -> Option<(String, String)> {
 
 impl BehaviorHints {
     /// Bounded `proxyHeaders.request` headers for header-gated CDN playback.
-    /// Only the `request` object is honored; malformed entries degrade to
-    /// headerless playback instead of failing the stream or risking response
-    /// splitting. Header values are secrets (bearer tokens): callers must
-    /// never log or persist the result.
+    /// Malformed entries degrade to headerless playback rather than failing
+    /// the stream. Values are secrets — never log or persist them.
     pub(crate) fn proxy_request_headers(&self) -> Vec<(String, String)> {
         let Some(request) = self
             .proxy_headers

@@ -13,18 +13,14 @@ export function resolveSearchUrlType(value: string | null): SearchMediaType {
   return value === 'movie' || value === 'series' || value === 'anime' ? value : 'all';
 }
 
-/** Genre menu options per type tab. `all` unions the movie and series sets —
-    first spelling wins, matching `sameSearchGenre`'s fold. */
+/** Genre menu options per type tab. The `all` union is computed in the
+    backend payload (movie then series, first spelling wins) so the menu
+    never re-folds here. */
 export function searchGenreOptions(
   browseGenres: BrowseGenres | undefined,
   mediaType: SearchMediaType,
 ): readonly string[] {
-  if (!browseGenres) return [];
-  if (mediaType !== 'all') return browseGenres[mediaType];
-  const seen = new Set<string>();
-  return [...browseGenres.movie, ...browseGenres.series].filter((genre) =>
-    seen.add(foldAsciiCase(genre)),
-  );
+  return browseGenres ? browseGenres[mediaType] : [];
 }
 
 export function resolveSearchUrlFeed(value: string | null): SearchFeed {

@@ -1,6 +1,7 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
 import { setVideoMarginRatio } from '@/lib/player-mpv';
+import { clamp } from '@/lib/utils';
 
 // Chrome geometry shared with the mini player's drag bounds — one owner so a
 // rail/titlebar resize can't desync margins from the floating frame.
@@ -10,7 +11,7 @@ const MINI_MASK_TARGET_SELECTOR = '[data-mini-mask]';
 
 function clampMarginRatio(value: number): number {
   if (!Number.isFinite(value)) return 0;
-  return Math.max(0, Math.min(0.98, value));
+  return clamp(value, 0, 0.98);
 }
 
 function normalizeMarginRatioPart(value?: number): number {
@@ -33,12 +34,11 @@ function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
 function sendMarginRatio(
   fingerprintRef: RefObject<string | null>,
   ratio: VideoMarginRatio,
-  send: (ratio: VideoMarginRatio) => Promise<void> = setVideoMarginRatio,
 ): Promise<boolean> {
   const fingerprint = serializeVideoMarginRatio(ratio);
   if (fingerprintRef.current === fingerprint) return Promise.resolve(false);
   fingerprintRef.current = fingerprint;
-  return send(ratio).then(
+  return setVideoMarginRatio(ratio).then(
     () => true,
     () => {
       // A late reject clears the fingerprint only while it still owns the slot.
@@ -95,7 +95,6 @@ interface UsePlayerSurfaceLayoutArgs {
   isLoading: boolean;
   isResolving: boolean;
   showErrorOverlay: boolean;
-  showStreamSelector: boolean;
   /** 'mini' hands margin ownership to useMiniPlayerSurface. */
   presentation: 'expanded' | 'mini';
 }
@@ -111,7 +110,6 @@ export function usePlayerSurfaceLayout({
   isLoading,
   isResolving,
   showErrorOverlay,
-  showStreamSelector,
   presentation,
 }: UsePlayerSurfaceLayoutArgs) {
   const lastAppliedMarginFingerprintRef = useRef<string | null>(null);
@@ -150,7 +148,9 @@ export function usePlayerSurfaceLayout({
       }
 
       const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
-      const shouldCollapseVideoSurface = showStreamSelector || showErrorOverlay;
+      // The stream selector deliberately keeps the frame painted: its dimmed
+      // overlay reads as "still playing" instead of blacking out mid-switch.
+      const shouldCollapseVideoSurface = showErrorOverlay;
       const topChromeRect = topChromeRef.current?.getBoundingClientRect();
       const bottomChromeRect = bottomChromeRef.current?.getBoundingClientRect();
 
@@ -197,7 +197,6 @@ export function usePlayerSurfaceLayout({
       isResolving,
       playerContainerRef,
       showErrorOverlay,
-      showStreamSelector,
       topChromeRef,
     ],
   );
@@ -258,7 +257,7 @@ export function usePlayerSurfaceLayout({
         window.cancelAnimationFrame(animationFrameId);
       }
     };
-  }, [bottomChromeRef, isMini, isPip, playerContainerRef, topChromeRef]);
+  }, [bottomChromeRef, isMini, playerContainerRef, topChromeRef]);
 
   useEffect(() => {
     marginRequestRef.current();
@@ -342,9 +341,17 @@ function positionMiniMaskHoles(rect: MiniVideoRect) {
     const holeX = rect.x - bounds[index].left;
     const holeY = rect.y - bounds[index].top;
     const key = `${rect.width}x${rect.height}@${holeX},${holeY}`;
-    if (maskHoleCache.get(element) === key) return;
+    const previousKey = maskHoleCache.get(element);
+    if (previousKey === key) return;
     // Legacy -webkit- values first so the standard property wins where supported.
-    element.style.setProperty('-webkit-mask-image', MINI_MASK_IMAGES);
+    if (previousKey === undefined) {
+      element.style.setProperty('-webkit-mask-image', MINI_MASK_IMAGES);
+      element.style.setProperty('-webkit-mask-repeat', 'no-repeat, no-repeat');
+      element.style.setProperty('-webkit-mask-composite', 'xor');
+      element.style.maskImage = MINI_MASK_IMAGES;
+      element.style.maskRepeat = 'no-repeat, no-repeat';
+      element.style.maskComposite = 'exclude';
+    }
     element.style.setProperty(
       '-webkit-mask-size',
       `${MINI_MASK_BASE_SIZE}, ${rect.width}px ${rect.height}px`,
@@ -353,13 +360,8 @@ function positionMiniMaskHoles(rect: MiniVideoRect) {
       '-webkit-mask-position',
       `${MINI_MASK_BASE_POSITION}, ${holeX}px ${holeY}px`,
     );
-    element.style.setProperty('-webkit-mask-repeat', 'no-repeat, no-repeat');
-    element.style.setProperty('-webkit-mask-composite', 'xor');
-    element.style.maskImage = MINI_MASK_IMAGES;
     element.style.maskSize = `${MINI_MASK_BASE_SIZE}, ${rect.width}px ${rect.height}px`;
     element.style.maskPosition = `${MINI_MASK_BASE_POSITION}, ${holeX}px ${holeY}px`;
-    element.style.maskRepeat = 'no-repeat, no-repeat';
-    element.style.maskComposite = 'exclude';
     maskHoleCache.set(element, key);
   });
 }

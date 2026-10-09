@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { History, LayoutList, Library, Play, Search, TriangleAlert } from 'lucide-react';
+import { History, LayoutList, Library, Play, Search } from 'lucide-react';
 import { useCallback, useDeferredValue, useMemo, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -8,6 +8,7 @@ import {
   MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX,
   MediaCard,
   MediaCardSkeleton,
+  mediaCardRailKey,
 } from '@/components/media-card';
 import {
   HistoryItem,
@@ -23,8 +24,10 @@ import {
 } from '@/components/profile-library-controls';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { SearchInput } from '@/components/ui/search-input';
+import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { useDocumentTitle } from '@/hooks/use-document-title';
@@ -49,7 +52,7 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { DATA_STATS_QUERY_KEY, DATA_STATS_STALE_TIME_MS } from '@/lib/query-invalidation';
-import { cn } from '@/lib/utils';
+import { cn, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
 const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
   { length: 12 },
@@ -81,8 +84,7 @@ function isProfileTabId(value: string | null): value is ProfileTabId {
 
 // Deferred so typing in the field never blocks on the filtered render.
 function useNormalizedSearchQuery(value: string): string {
-  const deferred = useDeferredValue(value);
-  return useMemo(() => deferred.trim().toLowerCase(), [deferred]);
+  return useDeferredValue(value).trim().toLowerCase();
 }
 
 export function Profile() {
@@ -120,6 +122,7 @@ export function Profile() {
     data: library,
     isLoading: libraryLoading,
     isError: libraryError,
+    isFetching: libraryFetching,
     refetch: refetchLibrary,
   } = useLibraryItems();
 
@@ -127,14 +130,16 @@ export function Profile() {
     data: history,
     isLoading: historyLoading,
     isError: historyError,
+    isFetching: historyFetching,
     refetch: refetchHistory,
-  } = useWatchHistory();
+  } = useWatchHistory({ enabled: activeTab === 'history' });
 
   // Only its own tab consumes this — every other profile visit skips the read.
   const {
     data: continueWatching,
     isLoading: continueWatchingLoading,
     isError: continueWatchingError,
+    isFetching: continueWatchingFetching,
     refetch: refetchContinueWatching,
   } = useContinueWatching({
     enabled: activeTab === 'continue-watching',
@@ -150,6 +155,7 @@ export function Profile() {
   const {
     data: allWatchStatuses,
     isError: watchStatusesError,
+    isFetching: watchStatusesFetching,
     refetch: refetchWatchStatuses,
   } = useWatchStatuses();
 
@@ -233,7 +239,10 @@ export function Profile() {
     allWatchStatuses,
   ]);
 
-  const totalWatched = history?.length ?? 0;
+  const historyCount =
+    activeTab === 'history' && history !== undefined
+      ? history.length
+      : (dataStats?.history_title_count ?? history?.length);
   const libraryCount = library?.length ?? 0;
   const listsCount = dataStats?.lists_count ?? 0;
 
@@ -249,35 +258,40 @@ export function Profile() {
   const tabCounts: Partial<Record<ProfileTabId, number>> = {
     library: libraryCount || undefined,
     lists: listsCount || undefined,
-    history: totalWatched || undefined,
+    history: historyCount || undefined,
     'continue-watching': continueWatching?.length || undefined,
   };
 
   return (
     <div className='relative min-h-screen page-enter'>
-      <div className='mx-auto w-full max-w-7xl pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8 pt-6 pb-16 space-y-6 relative z-10'>
+      <div
+        className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-6 pb-16 space-y-6 relative z-10`}
+      >
         <ProfileHeader
           profile={profile}
           onUpdateProfile={updateProfile}
           isSaving={isSavingProfilePreferences}
-          libraryCount={libraryCount}
-          listsCount={listsCount}
-          totalWatched={totalWatched}
+          libraryCount={library?.length}
+          listsCount={dataStats?.lists_count}
+          historyCount={historyCount}
           totalWatchTimeSecs={totalWatchTimeSecs}
           statusCounts={statusCounts}
         />
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
-          <TabsList className='bg-white/[0.04] border border-white/[0.07] p-1 rounded-xl h-auto inline-flex gap-0.5 self-start'>
+          <TabsList
+            aria-label='Profile collections'
+            className='max-w-full justify-start overflow-x-auto rounded-lg border border-white/[0.07] bg-white/[0.03] p-1 h-auto gap-0.5 scrollbar-hide'
+          >
             {PROFILE_TABS.map((tab) => (
               <TabsTrigger
                 key={tab.id}
                 value={tab.id}
                 style={tab.id === activeTab ? { backgroundColor: 'var(--accent-nav)' } : undefined}
                 className={cn(
-                  'px-4 py-2 rounded-lg text-[13px] font-semibold transition-colors flex items-center gap-1.5 hover:text-zinc-100',
+                  'shrink-0 px-3 py-2 rounded-md text-[13px] font-medium shadow-none transition-colors flex items-center gap-1.5 hover:text-zinc-100',
                   tab.id === activeTab
-                    ? 'shadow-xs text-(--on-accent-nav) hover:text-(--on-accent-nav)'
+                    ? 'text-(--on-accent-nav) hover:text-(--on-accent-nav)'
                     : 'text-zinc-400',
                 )}
               >
@@ -307,6 +321,7 @@ export function Profile() {
               onSortChange={setLibrarySort}
               viewMode={viewMode}
               onViewModeChange={handleViewModeChange}
+              onReset={resetLibraryFilters}
             />
           )}
 
@@ -317,8 +332,9 @@ export function Profile() {
               items={filteredLibrary}
               errorLabel={libraryReadFailed ? 'your library' : 'your watch statuses'}
               onRetry={libraryReadFailed ? refetchLibrary : refetchWatchStatuses}
+              isRetrying={libraryReadFailed ? libraryFetching : watchStatusesFetching}
               viewMode={viewMode}
-              getItemKey={(item) => `${item.type}:${item.id}`}
+              getItemKey={mediaCardRailKey}
               renderItem={(item) => (
                 <MediaCard
                   item={item}
@@ -333,13 +349,14 @@ export function Profile() {
                     icon={<Library className='w-6 h-6 text-zinc-600' />}
                     title={librarySearch.trim() ? 'No matching items' : 'No items with this filter'}
                     action={
-                      <button
-                        type='button'
-                        className='text-xs text-zinc-500 hover:text-zinc-300 transition-colors'
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        className='h-8 text-xs text-zinc-400'
                         onClick={resetLibraryFilters}
                       >
-                        Clear filters →
-                      </button>
+                        Clear filters
+                      </Button>
                     }
                   />
                 ) : (
@@ -378,6 +395,7 @@ export function Profile() {
               items={filteredHistory}
               errorLabel='your watch history'
               onRetry={refetchHistory}
+              isRetrying={historyFetching}
               viewMode={viewMode}
               getItemKey={watchProgressItemKey}
               renderItem={(item) => <HistoryItem item={item} />}
@@ -389,13 +407,14 @@ export function Profile() {
                     title='No results'
                     subtitle={`Nothing in your history matches "${historySearch}".`}
                     action={
-                      <button
-                        type='button'
-                        className='text-xs text-zinc-500 hover:text-zinc-300 transition-colors'
+                      <Button
+                        size='sm'
+                        variant='ghost'
+                        className='h-8 text-xs text-zinc-400'
                         onClick={() => setHistorySearch('')}
                       >
-                        Clear search →
-                      </button>
+                        Clear search
+                      </Button>
                     }
                   />
                 ) : (
@@ -422,6 +441,7 @@ export function Profile() {
               items={continueWatching ?? []}
               errorLabel='continue watching'
               onRetry={refetchContinueWatching}
+              isRetrying={continueWatchingFetching}
               viewMode={viewMode}
               getItemKey={watchProgressItemKey}
               renderItem={(item) => <HistoryItem item={item} />}
@@ -447,116 +467,111 @@ function ProfileHeader({
   isSaving,
   libraryCount,
   listsCount,
-  totalWatched,
+  historyCount,
   totalWatchTimeSecs,
   statusCounts,
 }: {
   profile: LocalProfile;
   onUpdateProfile: (updates: LocalProfileUpdate) => Promise<void>;
   isSaving: boolean;
-  libraryCount: number;
-  listsCount: number;
-  totalWatched: number;
+  libraryCount: number | undefined;
+  listsCount: number | undefined;
+  historyCount: number | undefined;
   totalWatchTimeSecs: number | undefined;
   statusCounts: Record<WatchStatus, number>;
 }) {
-  const accentColor = profile.accentColor;
-
   return (
-    <div className='animate-in fade-in slide-in-from-bottom-2 duration-300'>
-      <div className='relative rounded-2xl border border-white/[0.06] bg-white/[0.02] backdrop-blur-xs overflow-hidden px-6 py-6'>
-        <div
-          className='absolute inset-x-0 top-0 h-px pointer-events-none transition-colors duration-700'
-          style={{
-            background: `linear-gradient(to right, transparent, ${accentColor}40, transparent)`,
-          }}
-        />
-
-        <div className='flex flex-col sm:flex-row gap-6 items-start sm:items-center justify-between'>
-          <div className='flex items-center gap-5'>
+    <div>
+      <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
+        <div className='flex flex-col gap-5 lg:flex-row lg:items-center lg:gap-8'>
+          <div className='flex min-w-0 items-center gap-4 lg:w-56 lg:shrink-0'>
             <ProfileAvatarEditor profile={profile} onUpdate={onUpdateProfile} />
 
             <div className='min-w-0'>
-              <div className='flex items-center gap-3 flex-wrap'>
-                <h1 className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'>
+              <div className='flex min-w-0 items-center gap-2'>
+                <h1
+                  dir='auto'
+                  title={profile.username}
+                  className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'
+                >
                   {profile.username}
                 </h1>
-                <ProfileSettingsPopover
-                  profile={profile}
-                  onUpdate={onUpdateProfile}
-                  isSaving={isSaving}
-                />
+                <div className='shrink-0'>
+                  <ProfileSettingsPopover
+                    profile={profile}
+                    onUpdate={onUpdateProfile}
+                    isSaving={isSaving}
+                  />
+                </div>
               </div>
             </div>
           </div>
 
-          <div className='flex items-center gap-1 flex-wrap rounded-lg bg-black/30 border border-white/[0.05] px-3 py-2 shrink-0'>
+          <div className='grid w-full max-w-2xl grid-cols-4 gap-3 self-center lg:mx-auto lg:flex-1'>
             <StatChip value={libraryCount} label='Library' valueClassName='text-(--accent-nav)' />
-            <StatDivider />
             <StatChip value={listsCount} label='Lists' valueClassName='text-white' />
-            <StatDivider />
-            <StatChip value={totalWatched} label='Watched' valueClassName='text-white' />
-            {totalWatchTimeSecs != null && (
-              <>
-                <StatDivider />
-                <StatChip
-                  value={formatHoursWatched(totalWatchTimeSecs)}
-                  label='Hours watched'
-                  valueClassName='text-white'
-                />
-              </>
-            )}
+            <StatChip value={historyCount} label='History' valueClassName='text-white' />
+            <StatChip
+              value={
+                totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)
+              }
+              label='Hours watched'
+              valueClassName='text-white'
+              title='Estimated from saved playback progress, including seeks and episodes marked watched.'
+            />
+          </div>
+        </div>
+        {WATCH_STATUSES.some((status) => statusCounts[status] > 0) && (
+          <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-3'>
             {WATCH_STATUSES.map((s) => {
               const count = statusCounts[s] ?? 0;
               if (count === 0) return null;
               const colors = WATCH_STATUS_COLORS[s];
               return (
-                <span key={s} className='flex items-center gap-1'>
-                  <StatDivider />
-                  <StatChip
-                    value={count}
-                    label={WATCH_STATUS_LABELS[s]}
-                    valueClassName={colors.text}
-                  />
+                <span key={s} className='flex items-center gap-1.5 text-[12px]'>
+                  <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
+                  <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
                 </span>
               );
             })}
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
 }
 
-// Whole hours; a sub-hour total still reads as honest time watched.
 function formatHoursWatched(secs: number): string {
-  const hours = Math.floor(secs / 3600);
-  return hours === 0 && secs > 0 ? '<1' : String(hours);
+  const hours = Math.floor(secs / 360) / 10;
+  return hours === 0 && secs > 0
+    ? '<0.1'
+    : hours.toLocaleString(undefined, { maximumFractionDigits: 1 });
 }
 
 function StatChip({
   value,
   label,
   valueClassName,
+  title,
 }: {
-  value: number | string;
+  value: number | string | undefined;
   label: string;
   valueClassName?: string;
+  title?: string;
 }) {
   return (
-    <div className='flex flex-col items-center px-3 py-2 min-w-[56px]'>
-      <span className={cn('text-[22px] font-bold tracking-tight leading-none', valueClassName)}>
-        {value}
+    <div className='flex min-w-0 flex-col items-center gap-1.5 text-center' title={title}>
+      <span
+        className={cn(
+          'text-[21px] font-semibold tabular-nums tracking-tight leading-none',
+          valueClassName,
+        )}
+      >
+        {value ?? '—'}
       </span>
-      <span className='text-[10px] font-semibold text-zinc-500 uppercase tracking-widest mt-1.5 whitespace-nowrap'>
-        {label}
-      </span>
+      <span className='text-[11px] leading-4 text-zinc-400'>{label}</span>
     </div>
   );
-}
-
-function StatDivider() {
-  return <div className='w-px h-8 bg-white/[0.07]' />;
 }
 
 function EmptyState({
@@ -571,10 +586,8 @@ function EmptyState({
   action?: React.ReactNode;
 }) {
   return (
-    <div className='flex flex-col items-center justify-center py-16 gap-3 border border-dashed border-white/[0.08] rounded-2xl bg-white/[0.02] text-center px-6'>
-      <div className='w-14 h-14 rounded-2xl bg-white/[0.05] border border-white/[0.07] flex items-center justify-center'>
-        {icon}
-      </div>
+    <div className='flex flex-col items-center justify-center py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015] text-center px-6'>
+      <div className='w-10 h-10 flex items-center justify-center'>{icon}</div>
       <p className='text-[15px] font-semibold text-zinc-200'>{title}</p>
       {subtitle && <p className='text-[13px] text-zinc-500 max-w-xs leading-relaxed'>{subtitle}</p>}
       {action}
@@ -590,13 +603,10 @@ function EmptyStateLink({ to, children }: { to: string; children: React.ReactNod
   );
 }
 
-// Every collection tab runs the same switch: a failed read must never pose
-// as an empty list (error wins over loading), a pending read shows skeletons,
-// and the populated view is grid-or-list on the shared virtualizers. Per-tab
-// wrinkles arrive as resolved props.
 function CollectionTabContent<T>({
   isError,
   isLoading,
+  isRetrying,
   items,
   errorLabel,
   onRetry,
@@ -608,6 +618,7 @@ function CollectionTabContent<T>({
 }: {
   isError: boolean;
   isLoading: boolean;
+  isRetrying: boolean;
   items: T[];
   errorLabel: string;
   onRetry: () => void;
@@ -618,14 +629,31 @@ function CollectionTabContent<T>({
   empty: React.ReactNode;
 }) {
   if (isError) {
-    return <CollectionErrorState label={errorLabel} onRetry={onRetry} />;
+    return (
+      <RetryBanner
+        message={`Couldn't load ${errorLabel}.`}
+        onRetry={onRetry}
+        isRetrying={isRetrying}
+      />
+    );
   }
   if (isLoading) {
     return (
-      <div className='grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'>
-        {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) => (
-          <MediaCardSkeleton key={key} />
-        ))}
+      <div
+        aria-hidden='true'
+        className={
+          viewMode === 'grid'
+            ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
+            : 'flex flex-col gap-1.5'
+        }
+      >
+        {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) =>
+          viewMode === 'grid' ? (
+            <MediaCardSkeleton key={key} />
+          ) : (
+            <Skeleton key={key} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
+          ),
+        )}
       </div>
     );
   }
@@ -642,21 +670,4 @@ function CollectionTabContent<T>({
     );
   }
   return empty;
-}
-
-// A failed collection read must never pose as an empty list or spin a
-// skeleton forever — surface the failure with a retry instead.
-function CollectionErrorState({ label, onRetry }: { label: string; onRetry: () => void }) {
-  return (
-    <EmptyState
-      icon={<TriangleAlert className='w-6 h-6 text-amber-400/80' />}
-      title={`Couldn't load ${label}`}
-      subtitle='The read failed — this is usually temporary.'
-      action={
-        <Button variant='outline' size='sm' onClick={() => onRetry()}>
-          Retry
-        </Button>
-      }
-    />
-  );
 }

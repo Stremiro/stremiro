@@ -1,15 +1,15 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { type Key, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef } from 'react';
+import { type Key, type ReactNode, useLayoutEffect, useMemo, useRef } from 'react';
 import { Button } from '@/components/ui/button';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
-import { cn, prefersReducedMotion } from '@/lib/utils';
+import { boundedMapSet, cn, scrollBehavior } from '@/lib/utils';
 import { MediaCardSkeleton, MEDIA_CARD_SLOT_CLASS_NAME } from './media-card';
 
 export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'pr-6 pl-[84px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
 
 const SCROLL_BUTTON_CLASS_NAME =
-  'h-7 w-7 rounded-full bg-transparent border border-white/[0.08] text-zinc-500 hover:bg-white/[0.08] hover:text-white transition-colors duration-150 backdrop-blur-xs';
+  'h-9 w-9 rounded-md bg-transparent border border-white/[0.08] text-zinc-400 hover:bg-white/[0.08] hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-40';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
   'flex overflow-x-auto gap-4 pb-8 scrollbar-hide snap-x snap-proximity';
@@ -18,13 +18,7 @@ const RAIL_SCROLL_MEMORY_MAX = 64;
 const railScrollPositions = new Map<string, number>();
 
 function rememberRailScrollPosition(railId: string, position: number): void {
-  // Re-set refreshes recency; evict the oldest key at capacity.
-  railScrollPositions.delete(railId);
-  railScrollPositions.set(railId, position);
-  if (railScrollPositions.size > RAIL_SCROLL_MEMORY_MAX) {
-    const oldest = railScrollPositions.keys().next().value;
-    if (oldest !== undefined) railScrollPositions.delete(oldest);
-  }
+  boundedMapSet(railScrollPositions, railId, position, RAIL_SCROLL_MEMORY_MAX);
 }
 
 // Cap mounted cards; full catalogs remain available through search.
@@ -37,6 +31,7 @@ interface HorizontalMediaRailProps<T> {
   getItemKey: (item: T, index: number) => Key;
   headerContent?: ReactNode;
   isLoading: boolean;
+  isPlaceholderData?: boolean;
   items: readonly T[];
   /** Stable identity for cross-remount scroll memory (e.g. 'continue-watching'). */
   railId?: string;
@@ -53,6 +48,7 @@ export function HorizontalMediaRail<T>({
   getItemKey,
   headerContent,
   isLoading,
+  isPlaceholderData = false,
   items,
   railId,
   renderItem,
@@ -70,34 +66,40 @@ export function HorizontalMediaRail<T>({
     ...scrollState
   } = useScrollEdgeIndicators(scrollContainerRef, lastScrollLeftRef);
 
-  // ResizeObserver only watches the container box — a new item set changes
-  // scrollWidth without resizing it, so content swaps resync explicitly.
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(syncScrollState);
-    return () => window.cancelAnimationFrame(frame);
-  }, [isLoading, items.length, syncScrollState]);
-
   const itemKeys = useMemo(() => {
     if (isLoading) return new Set<string>();
     return new Set(items.map((item, index) => String(getItemKey(item, index))));
   }, [getItemKey, isLoading, items]);
   const previousKeysRef = useRef<ReadonlySet<string> | null>(null);
+  const activeRailIdRef = useRef<string | undefined>(undefined);
 
   useLayoutEffect(() => {
-    // Loading/empty phases must not re-arm the initial scroll restoration.
-    if (itemKeys.size === 0) return;
-    const previousKeys = previousKeysRef.current;
-    previousKeysRef.current = itemKeys;
+    if (isPlaceholderData || isLoading) {
+      syncScrollState();
+      return;
+    }
     const scrollContainer = scrollContainerRef.current;
     if (!scrollContainer) return;
+    const previousRailId = activeRailIdRef.current;
+    const identityChanged = previousRailId !== railId;
+    if (identityChanged && previousRailId) {
+      rememberRailScrollPosition(previousRailId, lastScrollLeftRef.current);
+    }
+    activeRailIdRef.current = railId;
+    if (identityChanged) previousKeysRef.current = null;
+    // Empty phases must not re-arm restoration within the same catalog.
+    if (itemKeys.size === 0) {
+      syncScrollState();
+      return;
+    }
+    const previousKeys = previousKeysRef.current;
+    previousKeysRef.current = itemKeys;
     if (!previousKeys) {
       if (railId) {
         const remembered = railScrollPositions.get(railId);
-        if (remembered !== undefined && remembered > 0) {
-          scrollContainer.scrollLeft = remembered;
-          syncScrollState();
-        }
+        scrollContainer.scrollLeft = remembered ?? 0;
       }
+      syncScrollState();
       return;
     }
     // Reorders and pure insertions/removals preserve the user's position.
@@ -108,17 +110,20 @@ export function HorizontalMediaRail<T>({
     const insertOrRemoveOnly = sharedKeys === previousKeys.size || sharedKeys === itemKeys.size;
     if (!insertOrRemoveOnly) {
       scrollContainer.scrollLeft = 0;
-      syncScrollState();
     }
-  }, [itemKeys, railId, syncScrollState]);
+    syncScrollState();
+  }, [isLoading, isPlaceholderData, itemKeys, railId, syncScrollState]);
 
-  useEffect(() => {
-    if (!railId) return;
+  useLayoutEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
     const position = lastScrollLeftRef;
     return () => {
-      rememberRailScrollPosition(railId, position.current);
+      const activeRailId = activeRailIdRef.current;
+      if (activeRailId) {
+        rememberRailScrollPosition(activeRailId, scrollContainer?.scrollLeft ?? position.current);
+      }
     };
-  }, [railId]);
+  }, []);
 
   const scroll = (direction: 'left' | 'right') => {
     if (!scrollContainerRef.current) {
@@ -127,7 +132,7 @@ export function HorizontalMediaRail<T>({
 
     const { current } = scrollContainerRef;
     const delta = direction === 'left' ? -current.offsetWidth * 0.8 : current.offsetWidth * 0.8;
-    current.scrollBy({ left: delta, behavior: prefersReducedMotion() ? 'auto' : 'smooth' });
+    current.scrollBy({ left: delta, behavior: scrollBehavior() });
   };
 
   const edgeMask = scrollState.hasOverflow
@@ -137,19 +142,16 @@ export function HorizontalMediaRail<T>({
   return (
     <section className={cn('py-4 relative group/section', sectionClassName)}>
       <div className={`${contentInsetsClassName} mb-3`}>
-        <div className='flex items-center justify-between mb-3'>
+        <div className='flex min-h-9 items-center justify-between mb-3'>
           <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>{title}</h2>
 
           {scrollState.hasOverflow && (
-            <div className='flex items-center gap-1.5 opacity-0 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-300'>
+            <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150'>
               <Button
                 aria-label='Scroll rail left'
                 size='icon'
                 variant='ghost'
-                className={cn(
-                  SCROLL_BUTTON_CLASS_NAME,
-                  !scrollState.canScrollLeft && 'cursor-default opacity-40',
-                )}
+                className={SCROLL_BUTTON_CLASS_NAME}
                 // Keep keyboard focus when reaching an edge.
                 aria-disabled={!scrollState.canScrollLeft || undefined}
                 onClick={() => {
@@ -162,10 +164,7 @@ export function HorizontalMediaRail<T>({
                 aria-label='Scroll rail right'
                 size='icon'
                 variant='ghost'
-                className={cn(
-                  SCROLL_BUTTON_CLASS_NAME,
-                  !scrollState.canScrollRight && 'cursor-default opacity-40',
-                )}
+                className={SCROLL_BUTTON_CLASS_NAME}
                 aria-disabled={!scrollState.canScrollRight || undefined}
                 onClick={() => {
                   if (scrollState.canScrollRight) scroll('right');

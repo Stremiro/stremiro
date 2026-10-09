@@ -1,7 +1,9 @@
 use super::history_helpers::WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO;
 use super::streaming_helpers::is_persistable_stream_key;
 use crate::commands::WatchProgress;
-use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction};
+use rusqlite::{
+    params, Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement, Transaction,
+};
 use std::path::Path;
 use std::time::Duration;
 
@@ -54,6 +56,67 @@ impl ResumeStore {
         Self::initialize_schema(&connection, version)?;
 
         Ok(Self { connection })
+    }
+
+    /// Opens the store, quarantining an unreadable file (not a database /
+    /// corrupt header) so history recovers instead of failing every command.
+    /// Unsupported schema versions still fail closed without touching the file.
+    pub(crate) fn open_or_quarantine(path: &Path) -> Result<Self, String> {
+        match Self::open(path) {
+            Err(_) if Self::is_unreadable_database(path) => {
+                Self::quarantine(path)?;
+                Self::open(path)
+            }
+            result => result,
+        }
+    }
+
+    /// True only when SQLite itself reports the file unreadable — not a
+    /// database or a corrupt header. Version mismatches fail closed in `open`,
+    /// and busy/permission errors are transient: neither may be renamed aside.
+    fn is_unreadable_database(path: &Path) -> bool {
+        fn is_corruption(error: &rusqlite::Error) -> bool {
+            matches!(
+                error.sqlite_error_code(),
+                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+            )
+        }
+
+        if !path.exists() {
+            return false;
+        }
+        let probe = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+            Ok(connection) => connection,
+            Err(error) => return is_corruption(&error),
+        };
+        match probe.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)) {
+            Ok(_) => false,
+            Err(error) => is_corruption(&error),
+        }
+    }
+
+    /// Renames the unreadable database aside (`<stem>.corrupt-<millis>`, the
+    /// same convention as `startup_validation`) and moves its WAL sidecar so
+    /// the retry starts clean; the SHM sibling is disposable and dropped.
+    /// Only the main rename is fatal — stale sidecars may not exist.
+    fn quarantine(path: &Path) -> Result<(), String> {
+        let quarantined = path.with_extension(format!("corrupt-{}", super::now_unix_millis()));
+        std::fs::rename(path, &quarantined).map_err(|error| {
+            format!("Failed to quarantine unreadable playback resume database: {error}")
+        })?;
+        crate::operational_log::log_warn("resume-store", "open", "quarantined", &[]);
+
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        if Path::new(&wal).exists() {
+            let mut wal_target = quarantined.as_os_str().to_owned();
+            wal_target.push("-wal");
+            let _ = std::fs::rename(&wal, &wal_target);
+        }
+        let mut shm = path.as_os_str().to_owned();
+        shm.push("-shm");
+        let _ = std::fs::remove_file(&shm);
+        Ok(())
     }
 
     /// Read-only probe of an existing file's schema version, run before any
@@ -161,10 +224,13 @@ impl ResumeStore {
         let wrote = upsert_progress_tx(&transaction, key, progress)?;
         // Steady-state saves (one key, ~15s cadence) almost never overflow:
         // prune only titles/counts that can actually exceed their caps so a
-        // normal tick pays one upsert, not two prune scans plus deletes.
-        prune_title_history_tx(&transaction, &progress.type_, &progress.id)?;
-        if count_history_tx(&transaction)? > MAX_RESUME_TOTAL_ENTRIES {
-            prune_total_history_tx(&transaction)?;
+        // normal tick pays one upsert, not two prune scans plus deletes. A
+        // recency-guarded no-op wrote nothing, so nothing can have overflowed.
+        if wrote {
+            prune_title_history_tx(&transaction, &progress.type_, &progress.id)?;
+            if count_history_tx(&transaction)? > MAX_RESUME_TOTAL_ENTRIES {
+                prune_total_history_tx(&transaction)?;
+            }
         }
 
         transaction
@@ -174,18 +240,12 @@ impl ResumeStore {
     }
 
     pub(crate) fn load_entries(&mut self) -> Result<Vec<(String, WatchProgress)>, String> {
-        let mut statement = self
-            .connection
-            .prepare(&format!(
-                "{WATCH_PROGRESS_SELECT} ORDER BY last_watched DESC, history_key DESC"
-            ))
-            .map_err(|error| format!("Failed to prepare playback resume read: {}", error))?;
-
-        let rows = statement
-            .query_map([], read_watch_progress_row)
-            .map_err(|error| format!("Failed to query playback resume rows: {}", error))?;
-
-        Ok(collect_progress_rows(rows))
+        query_progress_rows(
+            &self.connection,
+            "ORDER BY last_watched DESC, history_key DESC",
+            [],
+            "",
+        )
     }
 
     pub(crate) fn count_entries(&mut self) -> Result<usize, String> {
@@ -197,19 +257,41 @@ impl ResumeStore {
             .map_err(|error| format!("Failed to count playback resume rows: {}", error))
     }
 
-    /// "Hours watched" sums the raw per-episode rows in SQL — decoding every
-    /// row to add positions would pay a full-table scan for one number. The
-    /// CASE mirrors the row-level contract: corrupt overruns count the
-    /// runtime, rows with no known runtime keep their raw position, and
-    /// negative positions floor at zero.
+    pub(crate) fn count_titles(&mut self) -> Result<usize, String> {
+        self.connection
+            .query_row(
+                // History collapses by the exact (type, id) tuple, not just id.
+                "SELECT COUNT(*) FROM (
+                    SELECT DISTINCT media_type, media_id FROM watch_progress
+                )",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| usize::try_from(count.max(0)).unwrap_or(usize::MAX))
+            .map_err(|error| format!("Failed to count playback history titles: {}", error))
+    }
+
+    /// Sum saved progress once per canonical episode, choosing its newest
+    /// storage alias just as the episode UI does. Known runtimes cap overruns;
+    /// unknown runtimes keep the position, and negative positions floor at zero.
     pub(crate) fn total_watch_time_secs(&mut self) -> Result<u64, String> {
         self.connection
             .query_row(
-                "SELECT COALESCE(SUM(
+                "WITH ranked_progress AS (
+                    SELECT position, duration,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY media_type, media_id,
+                                            COALESCE(absolute_season, season),
+                                            COALESCE(absolute_episode, episode)
+                               ORDER BY last_watched DESC, history_key DESC
+                           ) AS episode_rank
+                    FROM watch_progress
+                )
+                SELECT COALESCE(SUM(
                     CASE WHEN duration > 0.0 THEN MIN(MAX(position, 0.0), duration)
                          ELSE MAX(position, 0.0)
                     END
-                ), 0.0) FROM watch_progress",
+                ), 0.0) FROM ranked_progress WHERE episode_rank = 1",
                 [],
                 |row| row.get::<_, f64>(0),
             )
@@ -221,20 +303,12 @@ impl ResumeStore {
         &mut self,
         media_id: &str,
     ) -> Result<Vec<(String, WatchProgress)>, String> {
-        let mut statement = self
-            .connection
-            .prepare(&format!(
-                "{WATCH_PROGRESS_SELECT} WHERE media_id = ?1 ORDER BY last_watched DESC, history_key DESC"
-            ))
-            .map_err(|error| {
-                format!("Failed to prepare playback resume media-id read: {}", error)
-            })?;
-
-        let rows = statement
-            .query_map(params![media_id], read_watch_progress_row)
-            .map_err(|error| format!("Failed to query playback resume media-id rows: {}", error))?;
-
-        Ok(collect_progress_rows(rows))
+        query_progress_rows(
+            &self.connection,
+            "WHERE media_id = ?1 ORDER BY last_watched DESC, history_key DESC",
+            params![media_id],
+            " media-id",
+        )
     }
 
     pub(crate) fn load_entries_for_title(
@@ -242,18 +316,12 @@ impl ResumeStore {
         media_type: &str,
         media_id: &str,
     ) -> Result<Vec<(String, WatchProgress)>, String> {
-        let mut statement = self
-            .connection
-            .prepare(&format!(
-                "{WATCH_PROGRESS_SELECT} WHERE media_type = ?1 AND media_id = ?2 ORDER BY last_watched DESC, history_key DESC"
-            ))
-            .map_err(|error| format!("Failed to prepare playback resume title read: {}", error))?;
-
-        let rows = statement
-            .query_map(params![media_type, media_id], read_watch_progress_row)
-            .map_err(|error| format!("Failed to query playback resume title rows: {}", error))?;
-
-        Ok(collect_progress_rows(rows))
+        query_progress_rows(
+            &self.connection,
+            "WHERE media_type = ?1 AND media_id = ?2 ORDER BY last_watched DESC, history_key DESC",
+            params![media_type, media_id],
+            " title",
+        )
     }
 
     pub(crate) fn merge_entries(
@@ -281,10 +349,10 @@ impl ResumeStore {
                     format!("Failed to prepare playback resume merge upsert: {}", error)
                 })?;
             for (key, progress) in entries {
-                // The upsert's recency guard is the source of truth: `changes()`
-                // reports whether it landed, so no separate SELECT round-trip.
-                upsert_progress_stmt(&mut upsert_statement, &key, &progress)?;
-                if transaction.changes() == 0 {
+                // The upsert's recency guard is the source of truth: the
+                // affected-row count reports whether it landed, so no
+                // separate SELECT round-trip.
+                if upsert_progress_stmt(&mut upsert_statement, &key, &progress)? == 0 {
                     continue;
                 }
                 pruned_titles.insert((progress.type_.clone(), progress.id.clone()));
@@ -432,17 +500,35 @@ fn upsert_progress_tx(
     let mut statement = transaction
         .prepare(UPSERT_PROGRESS_SQL)
         .map_err(|error| format!("Failed to prepare playback resume save: {}", error))?;
-    upsert_progress_stmt(&mut statement, key, progress)?;
-    // `changes()` reflects the upsert's recency guard: 0 means an existing
-    // newer row won and nothing was written.
-    Ok(transaction.changes() > 0)
+    // The upsert's recency guard reports via the affected-row count: 0
+    // means an existing newer row won and nothing was written.
+    Ok(upsert_progress_stmt(&mut statement, key, progress)? > 0)
+}
+
+/// Shared prepare+collect for `WATCH_PROGRESS_SELECT` reads; `op` is the
+/// label spliced into error messages (`" media-id"` → "media-id read").
+fn query_progress_rows(
+    connection: &Connection,
+    sql: &str,
+    params: impl rusqlite::Params,
+    op: &str,
+) -> Result<Vec<(String, WatchProgress)>, String> {
+    let mut statement = connection
+        .prepare(&format!("{WATCH_PROGRESS_SELECT} {sql}"))
+        .map_err(|error| format!("Failed to prepare playback resume{op} read: {}", error))?;
+
+    let rows = statement
+        .query_map(params, read_watch_progress_row)
+        .map_err(|error| format!("Failed to query playback resume{op} rows: {}", error))?;
+
+    Ok(collect_progress_rows(rows))
 }
 
 fn upsert_progress_stmt(
     statement: &mut Statement<'_>,
     key: &str,
     progress: &WatchProgress,
-) -> Result<(), String> {
+) -> Result<usize, String> {
     // Stream URLs are credential-bearing and short-lived: `WatchProgress` has
     // no URL field, and the legacy `last_stream_url` column is always rewritten
     // to NULL. Resume re-resolves through opaque lookup/key/source identities.
@@ -482,9 +568,7 @@ fn upsert_progress_stmt(
             progress.stream_family,
             progress.source_id,
         ])
-        .map_err(|error| format!("Failed to save playback resume row: {}", error))?;
-
-    Ok(())
+        .map_err(|error| format!("Failed to save playback resume row: {}", error))
 }
 
 /// Rows of one title that aren't watched marks — the completion ratio is the
@@ -633,7 +717,7 @@ fn to_sql_i64(value: u64) -> i64 {
 }
 
 fn from_sql_u64(value: i64) -> u64 {
-    u64::try_from(value.max(0)).unwrap_or_default()
+    value.max(0) as u64
 }
 
 #[cfg(test)]

@@ -21,13 +21,12 @@ use self::stream_health::{
 };
 use super::history_helpers::should_skip_watch_progress_save;
 use super::resume_store::ResumeStore;
-use super::store_helpers::decode_string_list;
+use super::store_helpers::{clear_index_domain, decode_string_list};
 use super::{normalize_media_id, normalize_watch_progress_type, DurableStore, WatchProgress};
 use crate::providers::lock_or_recover;
-use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
@@ -62,30 +61,45 @@ impl PlaybackStreamOutcomeKind {
     }
 }
 
+/// Shared state carried by `PlaybackStateService` clones — one `Arc` bump
+/// shares every primitive below. `pub(crate)` only because it is the
+/// `Deref` target of a `pub(crate)` type; the fields stay module-private.
 #[derive(Default)]
-struct PlaybackRuntimeState {
-    persisted_history: HashMap<String, WatchProgress>,
-}
-
-/// State shared across Tauri commands. `Clone` shares the same underlying
-/// mutexes, so owned copies can cross into `spawn_blocking` closures while the
-/// async command future keeps its own `State` guard.
-#[derive(Default, Clone)]
-pub(crate) struct PlaybackStateService {
-    runtime: std::sync::Arc<Mutex<PlaybackRuntimeState>>,
-    resume_store: std::sync::Arc<Mutex<Option<ResumeStore>>>,
-    history_generation: std::sync::Arc<AtomicU64>,
-    source_health_prune_at: std::sync::Arc<AtomicU64>,
-    stream_family_prune_at: std::sync::Arc<AtomicU64>,
+pub(crate) struct PlaybackStateInner {
+    /// In-memory coalescing cache of snapshots already persisted to SQLite;
+    /// generation-gated so a clear/remove can never be resurrected by a
+    /// late writer.
+    persisted_history: Mutex<HashMap<String, WatchProgress>>,
+    resume_store: Mutex<Option<ResumeStore>>,
+    history_generation: AtomicU64,
+    source_health_prune_at: AtomicU64,
+    stream_family_prune_at: AtomicU64,
     /// `playback_state.json` is a shared in-memory map, so `set()`-then-`save()`
     /// sequences are only atomic against each other under this lock. Writers
     /// must take it before checking `history_generation` and hold it until
     /// after `save()`, or a racing `clear`/`remove_keys` can delete the
     /// entries first and then be resurrected by the in-flight writer's save.
     /// Never held across `.await`.
-    state_file_write_lock: std::sync::Arc<Mutex<()>>,
+    state_file_write_lock: Mutex<()>,
     /// One pending deferred `playback_state.json` flush at a time.
-    state_save_pending: std::sync::Arc<AtomicBool>,
+    state_save_pending: AtomicBool,
+}
+
+/// State shared across Tauri commands. `Clone` shares the same underlying
+/// state, so owned copies can cross into `spawn_blocking` closures while the
+/// async command future keeps its own `State` guard. Deref reaches the inner
+/// primitives directly (`service.resume_store`, not `service.inner.*`).
+#[derive(Default, Clone)]
+pub(crate) struct PlaybackStateService {
+    inner: Arc<PlaybackStateInner>,
+}
+
+impl std::ops::Deref for PlaybackStateService {
+    type Target = PlaybackStateInner;
+
+    fn deref(&self) -> &PlaybackStateInner {
+        &self.inner
+    }
 }
 
 impl PlaybackStateService {
@@ -179,28 +193,25 @@ impl PlaybackStateService {
         std::fs::create_dir_all(&app_dir)
             .map_err(|error| format!("Failed to create app data directory: {}", error))?;
 
-        ResumeStore::open(&app_dir.join("playback_resume.sqlite3"))
+        ResumeStore::open_or_quarantine(&app_dir.join("playback_resume.sqlite3"))
     }
 
-    /// Generation-guarded save: when `expected_generation` is set, the write
-    /// is dropped if a clear/remove/import bumped the generation after the
-    /// caller captured it. The check runs inside `with_resume_store` (under
-    /// the resume mutex, next to the SQLite write) so a clear racing the
-    /// read/write gap cannot resurrect rows; the health-file write is gated
-    /// on the same check so the JSON snapshot cannot resurrect either.
+    /// Drop saves superseded by clear/remove/import, checking again under
+    /// the resume mutex next to the SQLite write so the read/write gap cannot
+    /// resurrect rows.
     pub(crate) fn track_progress_guarded(
         &self,
         app: &AppHandle,
         key: &str,
         progress: &WatchProgress,
-        expected_generation: Option<u64>,
+        expected_generation: u64,
     ) -> Result<bool, String> {
-        if expected_generation.is_some_and(|expected| self.history_generation() != expected) {
+        if self.history_generation() != expected_generation {
             return Ok(false);
         }
 
         self.with_resume_store(app, |resume_store| {
-            if expected_generation.is_some_and(|expected| self.history_generation() != expected) {
+            if self.history_generation() != expected_generation {
                 return Ok(false);
             }
             // `false` also means the upsert's recency guard suppressed the
@@ -215,9 +226,9 @@ impl PlaybackStateService {
         incoming: &WatchProgress,
         persisted_history: Option<&WatchProgress>,
     ) -> bool {
-        let runtime = lock_or_recover(&self.runtime);
+        let persisted = lock_or_recover(&self.persisted_history);
 
-        if let Some(existing) = runtime.persisted_history.get(key) {
+        if let Some(existing) = persisted.get(key) {
             return should_skip_watch_progress_save(existing, incoming);
         }
 
@@ -232,14 +243,14 @@ impl PlaybackStateService {
         progress: WatchProgress,
         expected_generation: u64,
     ) {
-        let mut runtime = lock_or_recover(&self.runtime);
+        let mut persisted = lock_or_recover(&self.persisted_history);
         // A clear/remove can finish between the SQLite write and this lock.
         // Never reinstall its deleted snapshot into the coalescing cache.
         if self.history_generation() != expected_generation {
             return;
         }
-        runtime.persisted_history.insert(key, progress);
-        Self::prune_cached_history(&mut runtime.persisted_history);
+        persisted.insert(key, progress);
+        Self::prune_cached_history(&mut persisted);
     }
 
     fn prune_cached_history(cached: &mut HashMap<String, WatchProgress>) {
@@ -271,6 +282,10 @@ impl PlaybackStateService {
 
     pub(crate) fn count_resume_entries(&self, app: &AppHandle) -> Result<usize, String> {
         self.with_resume_store(app, |resume_store| resume_store.count_entries())
+    }
+
+    pub(crate) fn count_resume_titles(&self, app: &AppHandle) -> Result<usize, String> {
+        self.with_resume_store(app, |resume_store| resume_store.count_titles())
     }
 
     pub(crate) fn total_watch_time_secs(&self, app: &AppHandle) -> Result<u64, String> {
@@ -330,7 +345,7 @@ impl PlaybackStateService {
         // a snapshot that never reached the database. Bulk insert with a
         // single prune so a 10k import does not pay per-row scans.
         {
-            let mut runtime = lock_or_recover(&self.runtime);
+            let mut persisted = lock_or_recover(&self.persisted_history);
             // A racing clear/remove bumps the generation before it takes
             // this lock to wipe `persisted_history`, so an unchanged
             // generation here proves no wipe ran since the merge — without
@@ -338,9 +353,9 @@ impl PlaybackStateService {
             // `should_skip_history_write` drop post-clear re-saves.
             if self.history_generation() == start_generation {
                 for (key, progress) in imported_entries {
-                    runtime.persisted_history.insert(key, progress);
+                    persisted.insert(key, progress);
                 }
-                Self::prune_cached_history(&mut runtime.persisted_history);
+                Self::prune_cached_history(&mut persisted);
             }
         }
         // The post-merge bump runs after marking so the check above still
@@ -374,9 +389,9 @@ impl PlaybackStateService {
         // Source-health pruning belongs to the outcome writers — no health
         // record is keyed to these history rows, and a failed `playback_state.json`
         // open here would have left the deleted snapshots suppressing re-saves.
-        let mut runtime = lock_or_recover(&self.runtime);
+        let mut persisted = lock_or_recover(&self.persisted_history);
         for key in keys {
-            runtime.persisted_history.remove(key);
+            persisted.remove(key);
         }
 
         Ok(())
@@ -393,8 +408,8 @@ impl PlaybackStateService {
         // store open/save failure must not leave deleted snapshots in place
         // to suppress re-saves. Never held across store IO.
         {
-            let mut runtime = lock_or_recover(&self.runtime);
-            runtime.persisted_history.clear();
+            let mut persisted = lock_or_recover(&self.persisted_history);
+            persisted.clear();
         }
 
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
@@ -403,39 +418,22 @@ impl PlaybackStateService {
         // already passed its check.
         let _state_file_guard = self.lock_state_file_write();
 
-        // Item deletes sweep the keyspace by prefix, not by index: a corrupt
-        // index parses as empty, which would orphan rows that direct-key
-        // reads still resolve — cleared data must not resurrect.
-        for key in store.keys() {
-            if key.starts_with(PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX)
-                || key.starts_with(PLAYBACK_STREAM_FAMILY_ITEM_PREFIX)
-                || key.starts_with(PLAYBACK_EPISODE_MAPPING_ITEM_PREFIX)
-                || key.starts_with(PLAYBACK_EPISODE_MAPPING_DIGEST_ITEM_PREFIX)
-                || key.starts_with(PLAYBACK_LANGUAGE_PREFERENCES_ITEM_PREFIX)
-            {
-                store.delete(key);
-            }
-        }
-
-        store.set(
-            PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
-            json!(Vec::<String>::new()),
-        );
-        store.set(
-            PLAYBACK_STREAM_FAMILY_INDEX_KEY,
-            json!(Vec::<String>::new()),
-        );
-        store.set(
-            PLAYBACK_EPISODE_MAPPING_INDEX_KEY,
-            json!(Vec::<String>::new()),
-        );
-        store.set(
-            PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
-            json!(Vec::<String>::new()),
-        );
-        store.save()?;
-
-        Ok(())
+        clear_index_domain(
+            &store,
+            &[
+                PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX,
+                PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
+                PLAYBACK_EPISODE_MAPPING_ITEM_PREFIX,
+                PLAYBACK_EPISODE_MAPPING_DIGEST_ITEM_PREFIX,
+                PLAYBACK_LANGUAGE_PREFERENCES_ITEM_PREFIX,
+            ],
+            &[
+                PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+                PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+                PLAYBACK_EPISODE_MAPPING_INDEX_KEY,
+                PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
+            ],
+        )
     }
 }
 
@@ -460,12 +458,24 @@ fn prune_index_to_cap(
     if overflow == 0 {
         return;
     }
-    let mut by_age: Vec<(String, u64)> = index
+    let scored: Vec<(String, u64)> = index
         .iter()
         .map(|key| (key.clone(), updated_at(store, key)))
         .collect();
-    by_age.sort_by_key(|(_, updated_at)| *updated_at);
-    let evicted: HashSet<String> = by_age
+    evict_least_active(store, index, scored, overflow, item_key);
+}
+
+/// Drop the `overflow` lowest-scored keys from `index`, deleting their store
+/// items. `scored` is `(key, recency)` pairs over index members.
+fn evict_least_active(
+    store: &DurableStore,
+    index: &mut Vec<String>,
+    mut scored: Vec<(String, u64)>,
+    overflow: usize,
+    item_key: impl Fn(&str) -> String,
+) {
+    scored.sort_by_key(|(_, score)| *score);
+    let evicted: HashSet<String> = scored
         .into_iter()
         .take(overflow)
         .map(|(key, _)| key)
@@ -486,10 +496,32 @@ fn insert_sorted_unique(index: &mut Vec<String>, value: &str) -> bool {
     }
 }
 
+fn merge_sorted_unique(index: &mut Vec<String>, mut values: Vec<String>) -> bool {
+    values.sort_unstable();
+    values.dedup();
+    let previous_len = index.len();
+    let mut merged = Vec::with_capacity(previous_len + values.len());
+    let mut values = values.into_iter().peekable();
+    for key in index.drain(..) {
+        while let Some(value) = values.next_if(|value| value < &key) {
+            merged.push(value);
+        }
+        let _ = values.next_if(|value| value == &key);
+        merged.push(key);
+    }
+    merged.extend(values);
+    let changed = merged.len() != previous_len;
+    *index = merged;
+    changed
+}
+
 /// Read-only index load: every mutation path re-sets the index it changed,
 /// so a read (e.g. preferred-title-source inside selector ranking) must not
-/// pay a full store write to materialize an empty index.
-fn load_index(store: &DurableStore, index_key: &str) -> Vec<String> {
+/// pay a full store write to materialize an empty index. Advisory data —
+/// source health, stream families, mappings, language prefs — degrades to
+/// an empty index rather than erroring; `store_helpers::load_index` is the
+/// strict counterpart for domains where corrupt must surface.
+fn load_advisory_index(store: &DurableStore, index_key: &str) -> Vec<String> {
     store
         .get(index_key)
         .and_then(decode_string_list)

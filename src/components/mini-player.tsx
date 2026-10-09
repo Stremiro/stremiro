@@ -2,8 +2,10 @@ import {
   FastForward,
   Loader2,
   Maximize2,
+  Move,
   Pause,
   Play,
+  RotateCcw,
   SkipForward,
   TriangleAlert,
   VolumeX,
@@ -122,7 +124,7 @@ function easeOutCubic(t: number): number {
 }
 
 const MINI_ICON_BUTTON_CLASS =
-  'flex h-7 w-7 shrink-0 cursor-pointer items-center justify-center rounded-md text-white/75 transition-colors hover:bg-white/15 hover:text-white focus-visible:bg-white/15 focus-visible:text-white focus-visible:outline-none';
+  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60';
 
 // The expand/close icons render twice (hover chrome and the error/empty
 // overlay), so the buttons live here once.
@@ -134,9 +136,25 @@ function MiniExpandButton({ onClick, className }: { onClick: () => void; classNa
       aria-keyshortcuts='f'
       title='Back to player (F)'
       onClick={onClick}
-      className={cn(MINI_ICON_BUTTON_CLASS, 'h-6 w-6', className)}
+      className={cn(MINI_ICON_BUTTON_CLASS, className)}
     >
       <Maximize2 className='h-3.5 w-3.5' strokeWidth={2.25} />
+    </button>
+  );
+}
+
+// Dragging is pointer-only, so this button is the keyboard path to moving an
+// overlay that can cover content — each press glides to the next corner.
+function MiniSnapButton({ onClick, className }: { onClick: () => void; className?: string }) {
+  return (
+    <button
+      type='button'
+      aria-label='Move mini player to another corner'
+      title='Move to another corner'
+      onClick={onClick}
+      className={cn(MINI_ICON_BUTTON_CLASS, className)}
+    >
+      <Move className='h-3.5 w-3.5' strokeWidth={2.25} />
     </button>
   );
 }
@@ -148,11 +166,7 @@ function MiniCloseButton({ onClick, className }: { onClick: () => void; classNam
       aria-label='Close mini player'
       title='Close'
       onClick={onClick}
-      className={cn(
-        MINI_ICON_BUTTON_CLASS,
-        'h-6 w-6 hover:bg-red-500/25 hover:text-red-200',
-        className,
-      )}
+      className={cn(MINI_ICON_BUTTON_CLASS, 'hover:bg-red-500/25 hover:text-red-200', className)}
     >
       <X className='h-3.5 w-3.5' strokeWidth={2.25} />
     </button>
@@ -208,7 +222,10 @@ const MiniPlayerHairline = memo(function MiniPlayerHairline({
   const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
   return (
     <div className='pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[2px] bg-white/[0.08]'>
-      <div className='h-full bg-white/75' style={{ width: `${progressPct}%` }} />
+      <div
+        className='h-full origin-left bg-white/75'
+        style={{ transform: `scaleX(${progressPct / 100})` }}
+      />
     </div>
   );
 });
@@ -220,9 +237,9 @@ const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
 }: MiniPlayerTickProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore);
   return (
-    <span className='shrink-0 pl-1 text-[10px] font-mono tabular-nums text-white/60'>
+    <span className='shrink-0 text-[11px] tabular-nums text-white/80'>
       {formatTime(displayTime)}
-      {duration > 0 && <span className='text-white/30'> / {formatTime(duration)}</span>}
+      {duration > 0 && <span className='text-white/55'> / {formatTime(duration)}</span>}
     </span>
   );
 });
@@ -244,6 +261,7 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       value={[Math.max(0, displayTime)]}
       max={Math.max(duration, 1)}
       step={0.5}
+      aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
       disabled={duration <= 0}
       onValueChange={(value) => seekPreviewStore.publish(value[0] ?? null)}
       onValueCommit={(value) => {
@@ -253,12 +271,13 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       }}
       onPointerUp={() => seekPreviewStore.publish(null)}
       onPointerCancel={() => seekPreviewStore.publish(null)}
-      className='h-4 w-full'
+      className='h-6 w-full'
     />
   );
 });
 
 interface MiniPlayerProps {
+  partyControl?: React.ReactNode;
   title: string;
   episodeLabel?: string;
   backdrop?: string;
@@ -275,7 +294,7 @@ interface MiniPlayerProps {
   /** 0–100 master volume; mirrors the expanded player's slider. */
   volume: number;
   /** EOF offer: stream ended and a next episode exists — a docked player isn't a dead end. */
-  upNext?: { label: string; thumbnail?: string };
+  upNext?: { label: string };
   /** EOF with no next episode (movies, finales): replay/back strip over the frozen frame. */
   endOfMedia?: boolean;
   /** Active skip-segment CTA — `s` fires it from the focused surface. */
@@ -305,6 +324,7 @@ interface MiniPlayerProps {
 }
 
 export const MiniPlayer = memo(function MiniPlayer({
+  partyControl,
   title,
   episodeLabel,
   backdrop,
@@ -365,8 +385,6 @@ export const MiniPlayer = memo(function MiniPlayer({
   // External store, not state — per-pointermove publishes reach only the tick leaves.
   const seekPreviewStore = useMemo(() => createSubscribableStore<number | null>(null), []);
   const [isMoving, setIsMoving] = useState(false);
-  // Held during a volume drag so the collapsible rail can't shut mid-gesture.
-  const [volumeSliderHeld, setVolumeSliderHeld] = useState(false);
   // Mount veiled when a live surface exists: the mask hole punches before the
   // first margin IPC lands, and without the cover that gap shows a wrong-cropped
   // slice. The exiting instance dissolves over live video — never veiled.
@@ -654,7 +672,7 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0) return;
+      if (event.button !== 0 || !event.isPrimary || dragStateRef.current !== null) return;
       const target = event.target;
       if (!(target instanceof Element)) return;
       if (target.closest('button, a, input, [role="slider"]')) return;
@@ -676,6 +694,26 @@ export const MiniPlayer = memo(function MiniPlayer({
     },
     [cancelSnap],
   );
+
+  // Keyboard/pointer-free move: hop to the next corner using the same eased
+  // glide and margin-chase cover a pointer drag's snap would produce.
+  const snapToNextAnchor = useCallback(() => {
+    const position = positionRef.current;
+    if (!position || anchors.length === 0) return;
+    // Nearest corner without the drag magnet's radius cap — the cycle must
+    // advance even from a free-floating position.
+    let nearest = 0;
+    let bestDistance = Infinity;
+    anchors.forEach((anchor, index) => {
+      const distance = Math.hypot(anchor.x - position.x, anchor.y - position.y);
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        nearest = index;
+      }
+    });
+    setIsMoving(true);
+    animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
+  }, [anchors, animateTo]);
 
   // Nearest snap anchor within the magnet radius — drives the release glide
   // and the ghost outline while dragging.
@@ -912,6 +950,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const snapGhostAnchor = snapTargetIndex !== null ? anchors[snapTargetIndex] : null;
   const showLiveSurface = hasVideo && !error;
   const effectivelyMuted = isMuted || volume === 0;
+  const displayedVolume = isMuted ? 0 : Math.round(volume);
 
   const frame = (
     <div
@@ -942,6 +981,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       onPointerMove={handlePointerMove}
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
     >
       {/* Inner wrapper owns the entrance animation so outer-frame drag
           transforms are never overridden. Stays transparent — a fill would
@@ -961,18 +1001,20 @@ export const MiniPlayer = memo(function MiniPlayer({
             webview. The painted border is the bezel covering the mask hole's
             rim and square corners; overflow-hidden clips children to its
             inner edge so square overlays never bleed over the corner curve. */}
+        {/* This focusable media region scopes hotkeys without making its controls children of a button. */}
+        {/* eslint-disable jsx-a11y/no-noninteractive-tabindex */}
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
         <div
           data-mini-video
           ref={videoSurfaceRef}
-          // role='button' is the only focusable role the a11y lint accepts
-          // here; Enter expands, Space/arrows act as media shortcuts.
-          role='button'
+          role='application'
           tabIndex={0}
-          aria-label='Playback surface'
+          aria-label={`Mini player: ${title}. Space to play or pause, F to expand.`}
           onKeyDown={handleVideoSurfaceKeyDown}
           className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
           style={{ height: metrics.videoHeight }}
         >
+          {/* eslint-enable jsx-a11y/no-noninteractive-tabindex */}
           {/* Motion cover: mpv margins chase the DOM rect over async IPC, so
               an opaque poster hides the surface while the frame moves. */}
           <div
@@ -1001,7 +1043,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           </div>
 
           {/* Center icon flash on click-to-toggle — bare glyph, no circle. */}
-          {flash && (
+          {flash && !upNext && !endOfMedia && (
             <div
               key={flash.id}
               className='pointer-events-none absolute inset-0 z-30 flex items-center justify-center'
@@ -1023,44 +1065,8 @@ export const MiniPlayer = memo(function MiniPlayer({
             />
           )}
 
-          {/* EOF "Up Next" strip — a frozen last frame alone reads as a
-              stall. Fades under hover chrome, which carries its own next
-              button. */}
-          {upNext && showLiveSurface && (
-            <button
-              type='button'
-              // A rest-state cue only: hover/focus swaps in the docked chrome,
-              // which carries the same action — taking the tab stop keeps an
-              // invisible element out of keyboard order.
-              tabIndex={-1}
-              onClick={(e) => {
-                e.stopPropagation();
-                onNextEpisode();
-              }}
-              className='absolute inset-x-2 bottom-2.5 z-[25] flex items-center gap-2 rounded-lg border border-white/10 bg-black/70 py-1.5 pl-1.5 pr-2.5 text-left backdrop-blur-md transition-opacity duration-200 hover:bg-black/80 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
-            >
-              {upNext.thumbnail && (
-                <RemoteImage
-                  src={upNext.thumbnail}
-                  alt=''
-                  className='h-7 w-12 shrink-0 rounded object-cover'
-                />
-              )}
-              <span className='min-w-0 flex-1'>
-                <span className='block text-[8.5px] font-semibold uppercase tracking-[0.18em] leading-none text-white/40'>
-                  Up Next
-                </span>
-                <span className='mt-0.5 block truncate text-[11px] font-medium leading-tight text-white/90'>
-                  {upNext.label}
-                </span>
-              </span>
-              <Play className='ml-0.5 h-3.5 w-3.5 shrink-0 fill-white text-white/90' />
-            </button>
-          )}
-
-          {/* Skip chip — same slot/fade contract as the Up Next strip; under
-              hover the chrome's own button takes over. */}
-          {skipAction && showLiveSurface && !upNext && !endOfMedia && (
+          {/* During playback the skip chip yields to the hover controls. */}
+          {skipAction && showLiveSurface && isPlaying && !upNext && !endOfMedia && (
             <button
               type='button'
               // Same rest-state contract as the Up Next strip — the docked
@@ -1072,10 +1078,10 @@ export const MiniPlayer = memo(function MiniPlayer({
                 skipAction.onSkip();
               }}
               aria-keyshortcuts='s'
-              className='absolute bottom-2.5 right-2 z-[25] flex items-center gap-1.5 rounded-lg border border-white/10 bg-black/70 px-2.5 py-1.5 backdrop-blur-md transition-opacity duration-200 hover:bg-black/80 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
+              className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 backdrop-blur-md transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
             >
               <FastForward className='h-3 w-3 shrink-0 text-white/90' strokeWidth={2.5} />
-              <span className='text-[11px] font-semibold leading-tight text-white/90'>
+              <span className='text-xs font-medium leading-tight text-white'>
                 {skipAction.label}
               </span>
             </button>
@@ -1115,49 +1121,90 @@ export const MiniPlayer = memo(function MiniPlayer({
             <div
               className={cn(
                 'pointer-events-none absolute inset-0 z-20 flex flex-col justify-between transition-opacity duration-200',
-                isMoving
+                isMoving || isDocking || isSettling
                   ? 'opacity-0'
-                  : 'opacity-0 group-hover/mini:opacity-100 group-focus-within/mini:opacity-100',
+                  : !isPlaying || isWorking || upNext || endOfMedia
+                    ? 'opacity-100'
+                    : 'opacity-0 group-hover/mini:opacity-100 group-focus-within/mini:opacity-100',
               )}
             >
-              {/* Top: expand + title + close on a scrim — empty space still
-                  passes through to drag. Rows settle on reveal so the chrome
-                  eases in. */}
-              <div className='flex items-center gap-1 bg-linear-to-b from-black/70 via-black/25 to-transparent px-1.5 pb-4 pt-1.5 -translate-y-0.5 transition-transform duration-200 ease-out group-hover/mini:translate-y-0 group-focus-within/mini:translate-y-0'>
+              {/* Empty space on the title scrim still passes through to drag. */}
+              <div className='flex items-center gap-1 bg-linear-to-b from-black/85 via-black/40 to-transparent px-1.5 pb-4 pt-1.5'>
                 <MiniExpandButton onClick={onExpand} className='pointer-events-auto' />
-                <p className='min-w-0 flex-1 truncate px-1 text-[11px] font-medium leading-tight text-white/90 drop-shadow'>
+                <MiniSnapButton onClick={snapToNextAnchor} className='pointer-events-auto' />
+                <p
+                  className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'
+                  title={title}
+                >
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>
+                {partyControl}
                 <MiniCloseButton onClick={onClose} className='pointer-events-auto' />
               </div>
 
-              {/* Bottom: scrim + controls. Hidden at EOF-without-next —
-                  seek/play/next are dead and the end strip owns the corner. */}
+              {/* Movies and finales use the replay strip instead. */}
               {!endOfMedia && (
-                <div className='bg-linear-to-t from-black/85 via-black/40 to-transparent px-1.5 pb-1.5 pt-5 translate-y-1 transition-transform duration-200 ease-out group-hover/mini:translate-y-0 group-focus-within/mini:translate-y-0 group-hover/mini:pointer-events-auto group-focus-within/mini:pointer-events-auto'>
+                <div
+                  className={cn(
+                    'bg-linear-to-t from-black/90 via-black/60 to-transparent px-2.5 pb-2 pt-5',
+                    !isPlaying || isWorking || upNext
+                      ? 'pointer-events-auto'
+                      : 'group-hover/mini:pointer-events-auto group-focus-within/mini:pointer-events-auto',
+                  )}
+                >
+                  <div className='flex min-w-0 items-center justify-between gap-2'>
+                    {upNext ? (
+                      <button
+                        type='button'
+                        onClick={onNextEpisode}
+                        aria-label={`Next episode: ${upNext.label}`}
+                        title={`Next episode: ${upNext.label} (N)`}
+                        className='min-w-0 truncate rounded px-1 py-1 text-left text-xs font-medium text-white hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+                      >
+                        Up next · {upNext.label}
+                      </button>
+                    ) : (
+                      <span className='text-[11px] text-white/65'>
+                        {!isPlaying ? 'Paused' : ''}
+                      </span>
+                    )}
+                    <MiniPlayerTimeLabel
+                      clock={clock}
+                      duration={duration}
+                      seekPreviewStore={seekPreviewStore}
+                    />
+                  </div>
                   <MiniPlayerSeekSlider
                     clock={clock}
                     duration={duration}
                     seekPreviewStore={seekPreviewStore}
                     onSeek={onSeek}
                   />
-                  <div className='mt-0.5 flex items-center gap-0.5'>
+                  <div className='flex items-center gap-1'>
                     <button
                       type='button'
-                      aria-label={isPlaying ? 'Pause' : 'Play'}
+                      aria-label={upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play'}
                       aria-keyshortcuts='Space k'
-                      title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-                      onClick={onTogglePlay}
-                      className={cn(MINI_ICON_BUTTON_CLASS, 'h-8 w-8 text-white')}
+                      title={
+                        upNext
+                          ? 'Watch again (Space)'
+                          : isPlaying
+                            ? 'Pause (Space)'
+                            : 'Play (Space)'
+                      }
+                      onClick={upNext ? onReplay : onTogglePlay}
+                      className={cn(MINI_ICON_BUTTON_CLASS, 'bg-white/10 text-white')}
                     >
-                      {isPlaying ? (
+                      {upNext ? (
+                        <RotateCcw className='h-4 w-4' />
+                      ) : isPlaying ? (
                         <Pause className='h-4 w-4 fill-white' />
                       ) : (
                         <Play className='ml-px h-4 w-4 fill-white' />
                       )}
                     </button>
 
-                    {canGoNext && (
+                    {canGoNext && !upNext && (
                       <button
                         type='button'
                         aria-label='Next episode'
@@ -1185,11 +1232,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                       </button>
                     )}
 
-                    {/* Volume rail slides open on hover or keyboard focus —
-                        and stays open mid-drag: Radix captures the pointer, so
-                        the cursor leaving the rail would collapse it mid-gesture
-                        without the held latch. */}
-                    <div className='group/vol flex items-center'>
+                    <div className='ml-auto flex shrink-0 items-center gap-2'>
                       <button
                         type='button'
                         aria-label={effectivelyMuted ? 'Unmute' : 'Mute'}
@@ -1205,35 +1248,21 @@ export const MiniPlayer = memo(function MiniPlayer({
                           strokeWidth={2.25}
                         />
                       </button>
-                      <div
-                        className={cn(
-                          'invisible w-0 shrink-0 overflow-hidden opacity-0 transition-[width,opacity,visibility] duration-200 ease-out motion-reduce:transition-none group-hover/vol:visible group-hover/vol:w-16 group-hover/vol:opacity-100 group-focus-within/vol:visible group-focus-within/vol:w-16 group-focus-within/vol:opacity-100',
-                          volumeSliderHeld && 'visible w-16 opacity-100',
-                        )}
-                        onPointerDown={() => setVolumeSliderHeld(true)}
-                        onPointerUp={() => setVolumeSliderHeld(false)}
-                        onPointerCancel={() => setVolumeSliderHeld(false)}
-                        onLostPointerCapture={() => setVolumeSliderHeld(false)}
-                      >
-                        <PlayerSlider
-                          variant='bar'
-                          aria-label='Volume'
-                          aria-valuetext={isMuted ? 'Muted' : `${Math.round(volume)}%`}
-                          title={isMuted ? 'Volume: muted' : `Volume: ${Math.round(volume)}%`}
-                          value={[isMuted ? 0 : volume]}
-                          max={100}
-                          step={1}
-                          onValueChange={(value) => onVolumeChange(value[0] ?? 0)}
-                          className='ml-1 h-7 w-14'
-                        />
-                      </div>
+                      <PlayerSlider
+                        variant='bar'
+                        aria-label='Volume'
+                        aria-valuetext={effectivelyMuted ? 'Muted' : `${displayedVolume}%`}
+                        title={effectivelyMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
+                        value={[isMuted ? 0 : volume]}
+                        max={100}
+                        step={1}
+                        onValueChange={(value) => onVolumeChange(value[0] ?? 0)}
+                        className='h-8 w-14 shrink-0'
+                      />
+                      <span className='w-7 text-right text-[11px] tabular-nums text-white/75'>
+                        {displayedVolume}%
+                      </span>
                     </div>
-
-                    <MiniPlayerTimeLabel
-                      clock={clock}
-                      duration={duration}
-                      seekPreviewStore={seekPreviewStore}
-                    />
 
                     {isWorking && (
                       <Loader2 className='ml-1 h-3 w-3 shrink-0 animate-spin text-white/40' />
@@ -1271,7 +1300,11 @@ export const MiniPlayer = memo(function MiniPlayer({
               )}
               <div className='pointer-events-none absolute inset-0 bg-linear-to-t from-black/70 via-black/30 to-black/50' />
               <div className='absolute inset-x-0 top-0 z-10 flex items-center justify-between p-1.5'>
-                <MiniExpandButton onClick={onExpand} />
+                <div className='flex items-center gap-1'>
+                  <MiniExpandButton onClick={onExpand} />
+                  <MiniSnapButton onClick={snapToNextAnchor} />
+                </div>
+                {partyControl}
                 <MiniCloseButton onClick={onClose} />
               </div>
               {/* Pointer-transparent — rendered last, this center block would

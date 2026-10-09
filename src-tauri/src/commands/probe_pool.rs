@@ -9,7 +9,7 @@ use super::stream_resolver::{
 };
 use super::streaming_helpers::{
     is_legacy_content_key, normalize_http_url, normalize_source_id, normalize_source_key,
-    stream_dedup_key,
+    push_bounded_error, remember_resolved_content_key, stream_dedup_key,
 };
 use super::{normalize_media_id, normalize_non_empty, normalize_stream_media_type};
 use crate::providers::addons::{
@@ -151,11 +151,12 @@ struct StreamResolveCandidateInput {
     source_name: Option<String>,
     stream_family: Option<String>,
     stream_key: String,
+    content_key: Option<String>,
     direct_url: String,
     request_headers: Vec<(String, String)>,
 }
 
-fn build_candidate_input(stream: &AddonStream) -> Option<StreamResolveCandidateInput> {
+fn build_candidate_input(stream: AddonStream) -> Option<StreamResolveCandidateInput> {
     // Same fetchable gate as stream ingress plus the probe: private-literal,
     // userinfo, and non-http(s) URLs never spend a probe task. The canonical
     // form is stored so the excluded-URL compare below matches the
@@ -164,13 +165,16 @@ fn build_candidate_input(stream: &AddonStream) -> Option<StreamResolveCandidateI
     if !crate::providers::addon_resource::is_fetchable_http_url(&direct_url) {
         return None;
     }
+    let content_key = stream_dedup_key(&stream);
+    let request_headers = stream.request_headers();
     Some(StreamResolveCandidateInput {
-        source_id: stream.source_id.clone(),
-        source_name: stream.source_name.clone(),
-        stream_family: stream.stream_family.clone(),
-        stream_key: stream.stream_key.clone(),
+        source_id: stream.source_id,
+        source_name: stream.source_name,
+        stream_family: stream.stream_family,
+        stream_key: stream.stream_key,
+        content_key,
         direct_url,
-        request_headers: stream.request_headers(),
+        request_headers,
     })
 }
 
@@ -178,6 +182,9 @@ fn candidate_resolved_stream(
     candidate: StreamResolveCandidateInput,
     resolved: ResolvedStream,
 ) -> BestResolvedStream {
+    if let Some(content_key) = candidate.content_key {
+        remember_resolved_content_key(&candidate.stream_key, content_key);
+    }
     BestResolvedStream {
         url: resolved.url,
         format: resolved.format,
@@ -209,13 +216,11 @@ async fn probe_candidate(mut candidate: StreamResolveCandidateInput) -> Candidat
 }
 
 /// The caller's preferred stream identity: the exact stream key when it
-/// survives, else the saved source/family. A saved `s:` key (fresh rows) or
-/// `h:`/`uh:` key (legacy rows) names the same stream both ways — see
-/// `preferred_key_matches`. Signed URLs re-digest across sessions, so a
-/// URL-derived key rots even when the same stream is still listed — the
-/// source/family fallback recovers that case. `source_id` (the stable addon
-/// instance) beats `source_name`, which duplicate display names make
-/// ambiguous.
+/// survives, else the saved source/family. Signed URLs re-digest across
+/// sessions, so a URL-derived key rots even when the same stream is still
+/// listed — the source/family fallback recovers that case. `source_id` (the
+/// stable addon instance) beats `source_name`, which duplicate display
+/// names make ambiguous.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct PreferredStreamHint<'a> {
     pub stream_key: Option<&'a str>,
@@ -237,27 +242,39 @@ fn preferred_key_matches(stream: &AddonStream, key: &str) -> bool {
 }
 
 pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded_keys: &[String]) {
-    if !excluded_keys.is_empty() {
-        streams.retain(|stream| {
-            !excluded_keys
-                .iter()
-                .any(|key| preferred_key_matches(stream, key))
-        });
+    if excluded_keys.is_empty() {
+        return;
     }
+    // A legacy `h:`/`uh:` exclusion binds by recomputing the content-dedup
+    // key — derive it once per stream instead of once per key, and skip it
+    // entirely when no legacy key is present.
+    let legacy_keys: Vec<&str> = excluded_keys
+        .iter()
+        .filter(|key| is_legacy_content_key(key))
+        .map(String::as_str)
+        .collect();
+    streams.retain(|stream| {
+        if excluded_keys.contains(&stream.stream_key) {
+            return false;
+        }
+        if legacy_keys.is_empty() {
+            return true;
+        }
+        match stream_dedup_key(stream) {
+            Some(dedup) => !legacy_keys.iter().any(|key| *key == dedup),
+            None => true,
+        }
+    });
 }
 
 /// Locate the preferred stream in the freshly fetched pool: exact key first,
-/// then release family, then source identity. Each fallback is weaker, so a
-/// key hit never consults the fuzzier tiers. Only probeable, non-excluded
-/// rows qualify — a key hit on a stream with no direct URL (e.g. a saved
-/// `h:` torrent key) or a row matching the excluded stream must fall through
-/// to the softer tiers instead of dead-ending. The soft tiers additionally
-/// refuse a row whose coordinator selection priority trails the pool's
-/// best, so a stale family/source hint cannot jump past better episode,
-/// title, viability, or language matches; the exact saved key stays
-/// honored regardless. When a `source_id` is supplied, family hits must
-/// come from that same instance and a missed id never falls through to the
-/// display-name tier: duplicate addon names make it ambiguous.
+/// then release family, then source identity. Only probeable, non-excluded
+/// rows qualify — a key hit on an unprobeable or excluded stream falls
+/// through to the softer tiers instead of dead-ending. The soft tiers also
+/// refuse a row whose coordinator selection priority trails the pool's best,
+/// so a stale family/source hint cannot jump past better matches; the exact
+/// saved key stays honored regardless. A supplied `source_id` scopes family
+/// hits to that instance and skips the ambiguous display-name tier.
 fn find_preferred_position(
     streams: &[AddonStream],
     preferred: PreferredStreamHint<'_>,
@@ -308,13 +325,9 @@ fn find_preferred_position(
     let soft_eligible = |index: usize, stream: &AddonStream| {
         eligible(index, stream)
             && best_priority.is_none_or(|best| {
-                stream.selection_priority.is_some_and(|candidate| {
-                    candidate.0 >= best.0
-                        && candidate.1 >= best.1
-                        && candidate.2 >= best.2
-                        && candidate.3 >= best.3
-                        && candidate.4 >= best.4
-                })
+                stream
+                    .selection_priority
+                    .is_some_and(|candidate| candidate.covers(&best))
             })
     };
 
@@ -380,15 +393,16 @@ where
             Ok(Ok(_)) => {}
             Ok(Err(error)) => {
                 rate_limited |= error.rate_limited;
-                errors.push(format!("{source_name}: {}", error.message));
+                push_bounded_error(&mut errors, format!("{source_name}: {}", error.message));
             }
-            Err(_) => errors.push(format!(
-                "{source_name} timed out after {BEST_STREAM_CANDIDATE_TIMEOUT_SECS}s"
-            )),
+            Err(_) => push_bounded_error(
+                &mut errors,
+                format!("{source_name} timed out after {BEST_STREAM_CANDIDATE_TIMEOUT_SECS}s"),
+            ),
         }
     }
 
-    let summary = errors.into_iter().take(3).collect::<Vec<_>>().join(" | ");
+    let summary = errors.join(" | ");
     let message = if summary.is_empty() {
         "Unable to resolve a playable stream from the best candidates.".to_string()
     } else {
@@ -425,7 +439,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
         // the same fetchable-URL gate `build_candidate_input` applies — so a
         // found position always yields a candidate; only the excluded-URL
         // check can skip it.
-        if let Some(candidate) = build_candidate_input(&preferred_stream) {
+        if let Some(candidate) = build_candidate_input(preferred_stream) {
             if excluded_resolved_url.as_deref() != Some(candidate.direct_url.as_str()) {
                 // The user's prior/picked stream: its probe heads the ordered
                 // results, so a resolvable preferred stream always wins over
@@ -444,7 +458,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
                 .as_deref()
                 .is_none_or(|key| !preferred_key_matches(stream, key))
         })
-        .filter_map(|stream| build_candidate_input(&stream))
+        .filter_map(build_candidate_input)
         .filter(|candidate| {
             excluded_resolved_url
                 .as_deref()

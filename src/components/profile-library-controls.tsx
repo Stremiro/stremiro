@@ -8,6 +8,7 @@ import {
   LayoutGrid,
   List,
   type LucideIcon,
+  RotateCcw,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -37,7 +38,7 @@ const LIBRARY_SORT_OPTIONS: Record<LibrarySort, { label: string; icon: LucideIco
 const LIBRARY_SORT_KEYS = Object.keys(LIBRARY_SORT_OPTIONS) as LibrarySort[];
 
 const FILTER_MENU_BUTTON_CLASS =
-  'h-9 px-3 gap-1.5 text-[11px] font-semibold rounded-md bg-white/[0.03] border-white/[0.06] hover:bg-white/[0.07] text-zinc-400 hover:text-white shrink-0 inline-flex items-center';
+  'h-9 px-3 gap-1.5 text-[12px] font-medium rounded-md bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0 inline-flex items-center';
 
 const VIEW_MODES: { mode: 'grid' | 'list'; label: string; icon: LucideIcon }[] = [
   { mode: 'grid', label: 'Grid view', icon: LayoutGrid },
@@ -58,6 +59,7 @@ export function LibraryToolbar({
   onSortChange,
   viewMode,
   onViewModeChange,
+  onReset,
 }: {
   typeFilter: 'all' | 'movie' | 'series';
   onTypeFilterChange: (type: 'all' | 'movie' | 'series') => void;
@@ -72,115 +74,154 @@ export function LibraryToolbar({
   onSortChange: (sort: LibrarySort) => void;
   viewMode: 'grid' | 'list';
   onViewModeChange: (mode: 'grid' | 'list') => void;
+  onReset: () => void;
 }) {
   const activeSortOption = LIBRARY_SORT_OPTIONS[sort];
   const ActiveSortIcon = activeSortOption.icon;
+  const hasFilters =
+    typeFilter !== 'all' || statusFilter !== 'all' || search.length > 0 || sort !== 'default';
 
   return (
-    <div className='flex items-center gap-2 flex-wrap rounded-lg border border-white/[0.06] bg-white/[0.02] px-3 py-2.5'>
-      <div className='flex items-center gap-0.5 p-1 rounded-lg bg-white/[0.04] border border-white/[0.07] shrink-0'>
-        {(['all', 'movie', 'series'] as const).map((t) => (
-          <button
-            key={t}
-            type='button'
-            aria-pressed={typeFilter === t}
-            onClick={() => onTypeFilterChange(t)}
-            style={typeFilter === t ? { backgroundColor: 'var(--accent-nav)' } : undefined}
-            className={cn(
-              'px-3 py-1.5 rounded-md text-[12px] font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
-              typeFilter === t
-                ? 'text-(--on-accent-nav) shadow-xs'
-                : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06]',
-            )}
-          >
-            {t === 'all' ? 'All' : t === 'movie' ? 'Movies' : 'Shows'}
-          </button>
-        ))}
+    <div className='space-y-3'>
+      <div className='flex items-center gap-3'>
+        <SearchInput
+          placeholder='Search library…'
+          value={search}
+          onValueChange={onSearchChange}
+          clearLabel='Clear library search'
+          wrapperClassName='flex-1 min-w-0'
+          className='h-10 text-[13px] bg-white/[0.03] border-white/[0.08] text-white placeholder:text-zinc-500 focus-visible:ring-white/20 rounded-lg'
+        />
+        <span className='text-[12px] tabular-nums text-zinc-400 shrink-0' role='status'>
+          {filteredCount === libraryCount
+            ? `${libraryCount} ${libraryCount === 1 ? 'title' : 'titles'}`
+            : `${filteredCount} of ${libraryCount}`}
+        </span>
       </div>
+      <div className='flex items-center gap-2 flex-wrap'>
+        <div
+          className='flex items-center gap-0.5 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
+          role='group'
+          aria-label='Library media type'
+        >
+          {(['all', 'movie', 'series'] as const).map((t) => (
+            <button
+              key={t}
+              type='button'
+              aria-pressed={typeFilter === t}
+              onClick={() => onTypeFilterChange(t)}
+              style={typeFilter === t ? { backgroundColor: 'var(--accent-nav)' } : undefined}
+              className={cn(
+                'h-8 px-3 rounded-sm text-[12px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                typeFilter === t
+                  ? 'text-(--on-accent-nav)'
+                  : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06]',
+              )}
+            >
+              {t === 'all' ? 'All' : t === 'movie' ? 'Movies' : 'Shows'}
+            </button>
+          ))}
+        </div>
 
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant='outline' size='sm' className={FILTER_MENU_BUTTON_CLASS}>
-            {statusFilter !== 'all' && (
-              <span
-                aria-hidden='true'
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full bg-current',
-                  WATCH_STATUS_COLORS[statusFilter].text,
-                )}
-              />
-            )}
-            <span>
-              {statusFilter === 'all' ? 'All statuses' : WATCH_STATUS_LABELS[statusFilter]}
-            </span>
-            <ChevronDown className='w-3 h-3 opacity-50' />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align='start' className='w-44 bg-zinc-950/98 border-white/10'>
-          <FilterMenuItem
-            checked={statusFilter === 'all'}
-            onSelect={() => onStatusFilterChange('all')}
-          >
-            All statuses
-            <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>{libraryCount}</span>
-          </FilterMenuItem>
-          {WATCH_STATUSES.map((s) => {
-            const colors = WATCH_STATUS_COLORS[s];
-            return (
-              <FilterMenuItem
-                key={s}
-                checked={statusFilter === s}
-                onSelect={() => onStatusFilterChange(s)}
-              >
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant='outline'
+              size='sm'
+              className={FILTER_MENU_BUTTON_CLASS}
+              aria-label={`Library status: ${statusFilter === 'all' ? 'All statuses' : WATCH_STATUS_LABELS[statusFilter]}`}
+            >
+              {statusFilter !== 'all' && (
                 <span
                   aria-hidden='true'
-                  className={cn('h-1.5 w-1.5 rounded-full bg-current', colors.text)}
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full bg-current',
+                    WATCH_STATUS_COLORS[statusFilter].text,
+                  )}
                 />
-                {WATCH_STATUS_LABELS[s]}
-                <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
-                  {statusCounts[s] ?? 0}
-                </span>
-              </FilterMenuItem>
-            );
-          })}
-        </DropdownMenuContent>
-      </DropdownMenu>
+              )}
+              <span>
+                {statusFilter === 'all' ? 'All statuses' : WATCH_STATUS_LABELS[statusFilter]}
+              </span>
+              <ChevronDown className='w-3 h-3 opacity-50' />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align='start' className='w-44 bg-zinc-950/98 border-white/10'>
+            <FilterMenuItem
+              checked={statusFilter === 'all'}
+              onSelect={() => onStatusFilterChange('all')}
+            >
+              All statuses
+              <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>{libraryCount}</span>
+            </FilterMenuItem>
+            {WATCH_STATUSES.map((s) => {
+              const colors = WATCH_STATUS_COLORS[s];
+              return (
+                <FilterMenuItem
+                  key={s}
+                  checked={statusFilter === s}
+                  onSelect={() => onStatusFilterChange(s)}
+                >
+                  <span
+                    aria-hidden='true'
+                    className={cn('h-1.5 w-1.5 rounded-full bg-current', colors.text)}
+                  />
+                  {WATCH_STATUS_LABELS[s]}
+                  <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
+                    {statusCounts[s] ?? 0}
+                  </span>
+                </FilterMenuItem>
+              );
+            })}
+          </DropdownMenuContent>
+        </DropdownMenu>
 
-      <SearchInput
-        placeholder='Search library…'
-        value={search}
-        onValueChange={onSearchChange}
-        clearLabel='Clear library search'
-        wrapperClassName='flex-1 min-w-[140px]'
-        className='h-9 text-sm bg-white/[0.03] border-white/[0.06] text-white placeholder:text-zinc-600 focus-visible:ring-white/10 rounded-lg'
-      />
+        <Button
+          variant='ghost'
+          size='sm'
+          aria-disabled={!hasFilters || undefined}
+          onClick={() => {
+            if (hasFilters) onReset();
+          }}
+          className='h-9 gap-1.5 px-2 text-[12px] text-zinc-400 hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default'
+        >
+          <RotateCcw className='h-3.5 w-3.5' />
+          Reset
+        </Button>
+        <div className='ml-auto flex items-center gap-2'>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant='outline'
+                size='sm'
+                className={FILTER_MENU_BUTTON_CLASS}
+                aria-label={`Sort library: ${activeSortOption.label}`}
+              >
+                {ActiveSortIcon ? <ActiveSortIcon className='w-3 h-3' /> : null}
+                <span>{activeSortOption.label}</span>
+                <ChevronDown className='w-3 h-3 opacity-50' />
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align='end' className='w-36 bg-zinc-950/98 border-white/10'>
+              {LIBRARY_SORT_KEYS.map((key) => {
+                const { label, icon: ItemIcon } = LIBRARY_SORT_OPTIONS[key];
+                return (
+                  <FilterMenuItem
+                    key={key}
+                    checked={sort === key}
+                    onSelect={() => onSortChange(key)}
+                  >
+                    {ItemIcon ? <ItemIcon className='w-3.5 h-3.5' /> : null}
+                    {label}
+                  </FilterMenuItem>
+                );
+              })}
+            </DropdownMenuContent>
+          </DropdownMenu>
 
-      <span className='text-[11px] tabular-nums text-zinc-600 shrink-0'>
-        {filteredCount} of {libraryCount}
-      </span>
-
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button variant='outline' size='sm' className={FILTER_MENU_BUTTON_CLASS}>
-            {ActiveSortIcon ? <ActiveSortIcon className='w-3 h-3' /> : null}
-            <span>{activeSortOption.label}</span>
-            <ChevronDown className='w-3 h-3 opacity-50' />
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align='end' className='w-36 bg-zinc-950/98 border-white/10'>
-          {LIBRARY_SORT_KEYS.map((key) => {
-            const { label, icon: ItemIcon } = LIBRARY_SORT_OPTIONS[key];
-            return (
-              <FilterMenuItem key={key} checked={sort === key} onSelect={() => onSortChange(key)}>
-                {ItemIcon ? <ItemIcon className='w-3.5 h-3.5' /> : null}
-                {label}
-              </FilterMenuItem>
-            );
-          })}
-        </DropdownMenuContent>
-      </DropdownMenu>
-
-      <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+          <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+        </div>
+      </div>
     </div>
   );
 }
@@ -196,7 +237,9 @@ function FilterMenuItem({
 }) {
   return (
     <DropdownMenuItem
-      onClick={onSelect}
+      role='menuitemradio'
+      aria-checked={checked}
+      onSelect={onSelect}
       className='gap-2 text-[12px] rounded-md cursor-pointer py-1.5'
     >
       {checked ? (
@@ -217,7 +260,11 @@ export function ViewToggle({
   onChange: (v: 'grid' | 'list') => void;
 }) {
   return (
-    <div className='flex items-center gap-0.5 p-0.5 rounded-md bg-white/[0.04] border border-white/[0.07] shrink-0'>
+    <div
+      className='flex items-center gap-0.5 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
+      role='group'
+      aria-label='Collection view'
+    >
       {VIEW_MODES.map(({ mode, label, icon: Icon }) => (
         <button
           key={mode}
@@ -227,8 +274,8 @@ export function ViewToggle({
           aria-pressed={viewMode === mode}
           onClick={() => onChange(mode)}
           className={cn(
-            'p-1.5 rounded-md transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/30',
-            viewMode === mode ? 'accent-active' : 'text-zinc-600 hover:text-zinc-300',
+            'flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/30',
+            viewMode === mode ? 'accent-active' : 'text-zinc-400 hover:text-zinc-200',
           )}
         >
           <Icon className='w-3.5 h-3.5' />

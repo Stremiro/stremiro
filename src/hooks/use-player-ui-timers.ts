@@ -3,7 +3,7 @@ import {
   type RefObject,
   type SetStateAction,
   useCallback,
-  useEffect,
+  useEffectEvent,
   useRef,
 } from 'react';
 
@@ -38,10 +38,7 @@ export function usePlayerUiTimers({
   shouldHoldControls,
 }: UsePlayerUiTimersArgs) {
   const controlsTimeoutRef = useRef<TimerHandle | null>(null);
-  const holdRef = useRef(shouldHoldControls);
-  useEffect(() => {
-    holdRef.current = shouldHoldControls;
-  });
+  const shouldHoldControlsNow = useEffectEvent(() => shouldHoldControls?.());
   const osdTimerRef = useRef<TimerHandle | null>(null);
   const osdClearTimerRef = useRef<TimerHandle | null>(null);
   const osdAnimationFrameRef = useRef<number | null>(null);
@@ -60,8 +57,9 @@ export function usePlayerUiTimers({
     }
   }, []);
 
-  const scheduleControlsAutoHide = useCallback(
+  const showControlsWithAutoHide = useCallback(
     (delayMs = CONTROLS_AUTO_HIDE_DELAY_MS) => {
+      setShowControls(true);
       clearControlsAutoHide();
 
       if (!isPlayingRef.current) {
@@ -72,7 +70,7 @@ export function usePlayerUiTimers({
         controlsTimeoutRef.current = window.setTimeout(() => {
           controlsTimeoutRef.current = null;
           if (!mountedRef.current || !isPlayingRef.current) return;
-          if (holdRef.current?.()) {
+          if (shouldHoldControlsNow()) {
             arm();
             return;
           }
@@ -82,20 +80,6 @@ export function usePlayerUiTimers({
       arm();
     },
     [clearControlsAutoHide, isPlayingRef, mountedRef, setShowControls],
-  );
-
-  const showControlsWithAutoHide = useCallback(
-    (delayMs = CONTROLS_AUTO_HIDE_DELAY_MS) => {
-      setShowControls(true);
-
-      if (!isPlayingRef.current) {
-        clearControlsAutoHide();
-        return;
-      }
-
-      scheduleControlsAutoHide(delayMs);
-    },
-    [clearControlsAutoHide, isPlayingRef, scheduleControlsAutoHide, setShowControls],
   );
 
   const triggerOsd = useCallback(

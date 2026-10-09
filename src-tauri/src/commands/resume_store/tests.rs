@@ -63,8 +63,72 @@ fn user_version(path: &std::path::Path) -> i32 {
         .expect("read version")
 }
 
+/// Temp-dir variant of `TempDbPath` for quarantine tests that need sibling
+/// files: removes its whole tree on drop.
+struct TempDbDir(std::path::PathBuf);
+
+impl TempDbDir {
+    fn new() -> Self {
+        let dir = std::env::temp_dir().join(format!(
+            "stremiro-resume-quarantine-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        Self(dir)
+    }
+}
+
+impl std::ops::Deref for TempDbDir {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        self.0.as_path()
+    }
+}
+
+impl Drop for TempDbDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+fn corrupt_siblings(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .expect("list temp dir")
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("playback_resume.corrupt-"))
+        })
+        .collect()
+}
+
 fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
     store.get_entry(key).expect("read ok").expect("row present")
+}
+
+#[test]
+fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
+    let path = TempDbPath::new("title-count");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    assert_eq!(store.count_titles().expect("empty count"), 0);
+    for (key, type_, episode) in [
+        ("series:tt1234567:1:1", "series", Some(1)),
+        ("series:tt1234567:1:2", "series", Some(2)),
+        ("movie:tt1234567", "movie", None),
+    ] {
+        let row = WatchProgress {
+            type_: type_.to_string(),
+            season: episode.map(|_| 1),
+            episode,
+            ..sample_progress(1_000, 120.0)
+        };
+        store.upsert_progress(key, &row).expect("seed history");
+    }
+    assert_eq!(store.count_entries().expect("raw row count"), 3);
+    assert_eq!(store.count_titles().expect("collapsed title count"), 2);
 }
 
 #[test]
@@ -158,14 +222,6 @@ fn undo_restores_more_than_500_rows_for_one_title_in_one_merge() {
 
 #[test]
 fn open_initializes_v3_and_rejects_future_versions_without_clobbering() {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    fn file_hash(path: &std::path::Path) -> u64 {
-        let bytes = std::fs::read(path).expect("read file");
-        let mut hasher = DefaultHasher::new();
-        bytes.hash(&mut hasher);
-        hasher.finish()
-    }
     let path = TempDbPath::new("future");
     ResumeStore::open(&path).expect("fresh db opens as v3");
     let version = user_version(&path);
@@ -178,7 +234,7 @@ fn open_initializes_v3_and_rejects_future_versions_without_clobbering() {
             .expect("open for bump")
             .execute_batch(&format!("PRAGMA user_version = {version};"))
             .expect("stamp unsupported version");
-        let digest_before = file_hash(&path);
+        let bytes_before = std::fs::read(&path).expect("read file");
         let error = match ResumeStore::open(&path) {
             Ok(_) => panic!("v{version} must be rejected"),
             Err(error) => error,
@@ -194,8 +250,8 @@ fn open_initializes_v3_and_rejects_future_versions_without_clobbering() {
         let still = user_version(&path);
         assert_eq!(still, version);
         assert_eq!(
-            file_hash(&path),
-            digest_before,
+            std::fs::read(&path).expect("read file"),
+            bytes_before,
             "rejected open must leave the file byte-identical"
         );
         // The read-only probe must not leave WAL/SHM/journal sidecars behind.
@@ -256,37 +312,26 @@ fn stale_progress_write_does_not_regress_resume() {
 fn upsert_drops_url_shaped_stream_keys() {
     let path = TempDbPath::new("keyshape");
     let mut store = ResumeStore::open(&path).expect("fresh db opens");
-    let mut progress = sample_progress(4000, 200.0);
-    progress.last_stream_key = Some("u:https://cdn.example/legacy.mp4?sig=abc:0".to_string());
-    store
-        .upsert_progress("movie:tt1234567", &progress)
-        .expect("write ok");
-    let kept = read_entry(&mut store, "movie:tt1234567");
-    assert_eq!(kept.last_stream_key, None);
-
-    // Opaque hash identities (`h:`/`uh:`) and the prepared `s:` selector key
-    // still persist — the `s:` form is what fresh rows carry.
-    progress.last_stream_key = Some("uh:0123456789abcdef:0".to_string());
-    progress.last_watched = 5000;
-    store
-        .upsert_progress("movie:tt1234567", &progress)
-        .expect("write ok");
-    let kept = read_entry(&mut store, "movie:tt1234567");
-    assert_eq!(
-        kept.last_stream_key.as_deref(),
-        Some("uh:0123456789abcdef:0")
-    );
-
-    progress.last_stream_key = Some("s:0123456789abcdef0123456789abcdef".to_string());
-    progress.last_watched = 6000;
-    store
-        .upsert_progress("movie:tt1234567", &progress)
-        .expect("write ok");
-    let kept = read_entry(&mut store, "movie:tt1234567");
-    assert_eq!(
-        kept.last_stream_key.as_deref(),
-        Some("s:0123456789abcdef0123456789abcdef")
-    );
+    for (key, expected) in [
+        ("u:https://cdn.example/legacy.mp4?sig=abc:0", None),
+        ("uh:0123456789abcdef:0", Some("uh:0123456789abcdef:0")),
+        (
+            "s:0123456789abcdef0123456789abcdef",
+            Some("s:0123456789abcdef0123456789abcdef"),
+        ),
+    ] {
+        let mut progress = sample_progress(4000, 200.0);
+        progress.last_stream_key = Some(key.to_string());
+        store
+            .upsert_progress("movie:tt1234567", &progress)
+            .expect("write ok");
+        assert_eq!(
+            read_entry(&mut store, "movie:tt1234567")
+                .last_stream_key
+                .as_deref(),
+            expected
+        );
+    }
 }
 
 #[test]
@@ -384,24 +429,38 @@ fn total_watch_time_secs_caps_at_duration_and_keeps_unknown_runtime_rows() {
     assert_eq!(store.total_watch_time_secs().expect("empty sum"), 0);
 
     let mut watched_full = sample_progress(1_000, 1_380.0);
+    watched_full.id = "tt1".to_string();
+    watched_full.type_ = "series".to_string();
+    watched_full.season = Some(1);
+    watched_full.episode = Some(4);
+    watched_full.absolute_season = Some(1);
+    watched_full.absolute_episode = Some(14);
     watched_full.duration = 1_380.0;
     store
-        .upsert_progress("series:tt1:1:1", &watched_full)
+        .upsert_progress("series:tt1:1:4", &watched_full)
         .expect("write watched_full");
 
     let mut overrun = sample_progress(1_000, 2_000.0);
+    overrun.id = "tt2".to_string();
+    overrun.type_ = "series".to_string();
+    overrun.season = Some(1);
+    overrun.episode = Some(1);
     overrun.duration = 1_500.0;
     store
         .upsert_progress("series:tt2:1:1", &overrun)
         .expect("write overrun");
 
     let mut unknown_runtime = sample_progress(1_000, 120.0);
+    unknown_runtime.id = "tt3".to_string();
+    unknown_runtime.type_ = "movie".to_string();
     unknown_runtime.duration = 0.0;
     store
         .upsert_progress("movie:tt3", &unknown_runtime)
         .expect("write unknown_runtime");
 
     let mut negative = sample_progress(1_000, -30.0);
+    negative.id = "tt4".to_string();
+    negative.type_ = "movie".to_string();
     negative.duration = 0.0;
     store
         .upsert_progress("movie:tt4", &negative)
@@ -410,6 +469,40 @@ fn total_watch_time_secs_caps_at_duration_and_keeps_unknown_runtime_rows() {
     assert_eq!(
         store.total_watch_time_secs().expect("sum ok"),
         1_380 + 1_500 + 120
+    );
+
+    let mut canonical_alias = watched_full.clone();
+    canonical_alias.episode = Some(14);
+    canonical_alias.position = 600.0;
+    canonical_alias.last_watched = 2_000;
+    store
+        .upsert_progress("series:tt1:1:14", &canonical_alias)
+        .expect("write newer canonical alias");
+    assert_eq!(
+        store.total_watch_time_secs().expect("deduplicated sum"),
+        600 + 1_500 + 120
+    );
+
+    let mut sibling = canonical_alias.clone();
+    sibling.episode = Some(15);
+    sibling.absolute_episode = Some(15);
+    sibling.position = 200.0;
+    store
+        .upsert_progress("series:tt1:1:15", &sibling)
+        .expect("write distinct episode");
+    assert_eq!(
+        store.total_watch_time_secs().expect("distinct episode sum"),
+        600 + 200 + 1_500 + 120
+    );
+
+    canonical_alias.episode = Some(5);
+    canonical_alias.position = 900.0;
+    store
+        .upsert_progress("series:tt1:1:5", &canonical_alias)
+        .expect("write recency tie");
+    assert_eq!(
+        store.total_watch_time_secs().expect("stable recency tie"),
+        900 + 200 + 1_500 + 120
     );
 }
 
@@ -458,4 +551,52 @@ fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
 
     let clamped = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(clamped.position, 0.0);
+}
+
+#[test]
+fn unreadable_database_file_is_quarantined_and_recreated() {
+    let dir = TempDbDir::new();
+    let path = dir.join("playback_resume.sqlite3");
+    let garbage = vec![0xABu8; 4096];
+    std::fs::write(&path, &garbage).expect("write garbage db");
+
+    let store = ResumeStore::open_or_quarantine(&path).expect("unreadable db heals");
+    drop(store);
+    assert_eq!(user_version(&path), 3);
+
+    let quarantined = corrupt_siblings(&dir);
+    assert_eq!(quarantined.len(), 1, "exactly one quarantined sibling");
+    assert_eq!(
+        std::fs::read(&quarantined[0]).expect("read quarantined file"),
+        garbage,
+        "quarantined file keeps the original bytes"
+    );
+}
+
+#[test]
+fn unsupported_schema_version_fails_without_quarantine() {
+    let dir = TempDbDir::new();
+    let path = dir.join("playback_resume.sqlite3");
+    ResumeStore::open(&path).expect("fresh db opens as v3");
+    Connection::open(&path)
+        .expect("open for bump")
+        .execute_batch("PRAGMA user_version = 99;")
+        .expect("stamp unsupported version");
+    let bytes_before = std::fs::read(&path).expect("read file");
+
+    let error = match ResumeStore::open_or_quarantine(&path) {
+        Ok(_) => panic!("v99 must be rejected"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("Unsupported playback resume schema version 99"),
+        "unexpected error: {error}"
+    );
+    assert!(path.exists(), "rejected file stays in place");
+    assert_eq!(
+        std::fs::read(&path).expect("read file"),
+        bytes_before,
+        "rejected open leaves the file byte-identical"
+    );
+    assert!(corrupt_siblings(&dir).is_empty(), "no quarantined sibling");
 }

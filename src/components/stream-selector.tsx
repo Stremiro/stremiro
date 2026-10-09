@@ -25,6 +25,7 @@ import {
   type Episode,
   type StreamSelectorSort,
 } from '@/lib/api';
+import { whenRowMounted } from '@/lib/dom';
 import { buildEpisodeStreamTarget, episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { episodeProgressKey, getPlayableResumeStartTime } from '@/lib/history-playback';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
@@ -44,7 +45,6 @@ import { cn, mediaTypeLabel, nonBlank } from '@/lib/utils';
 // payloads, and this gate keeps the branch out of production bundles.
 const isDev = import.meta.env.DEV;
 
-// Match-tier tint for the corner dot grid.
 const MATCH_DOT_COLORS: Record<StreamMatchTier, string> = {
   exact: 'rgba(110, 231, 183, 0.5)',
   episode_range: 'rgba(125, 211, 252, 0.42)',
@@ -127,8 +127,6 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
   };
 }
 
-// Memoized so resolving-state changes only re-render the active row: the
-// parent passes a stable handler plus per-row flags, never a fresh closure.
 const StreamItem = memo(function StreamItem({
   stream,
   onSelect,
@@ -170,7 +168,6 @@ const StreamItem = memo(function StreamItem({
         isResolving && 'pointer-events-none border-white/[0.16] bg-white/[0.05]',
       )}
     >
-      {/* Match-tier dot grid (see MATCH_DOT_COLORS). */}
       {matchTier && (
         <span
           aria-hidden='true'
@@ -192,10 +189,13 @@ const StreamItem = memo(function StreamItem({
         onClick={() => onSelect(stream)}
         onFocus={() => onRowFocus(stream.streamKey)}
         aria-disabled={disabled || undefined}
+        aria-current={isActive ? 'true' : undefined}
+        aria-busy={isResolving || undefined}
         data-stream-key={stream.streamKey}
         tabIndex={tabIndex}
         aria-label={`Select ${sourceName} stream${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
-        className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25 focus-visible:ring-offset-0'
+        title={`${sourceName}\n${streamTitle}`}
+        className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
       />
 
       {isResolving && (
@@ -216,10 +216,7 @@ const StreamItem = memo(function StreamItem({
 
         <div className='flex-1 min-w-0'>
           <div className='flex items-center gap-1.5 min-w-0'>
-            <p
-              className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'
-              title={sourceName}
-            >
+            <p className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'>
               {sourceName}
             </p>
             <div className='flex items-center gap-1 shrink-0'>
@@ -229,8 +226,6 @@ const StreamItem = memo(function StreamItem({
                   className={cn(
                     'inline-flex h-[18px] items-center px-1.5 rounded-md border text-[10px] font-semibold tracking-wide leading-none tabular-nums',
                     badge.cls,
-                    // Sorting by quality lights the resolution chip the
-                    // sort ordered on — the ranking key reads on the card.
                     badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
                   )}
                 >
@@ -263,12 +258,7 @@ const StreamItem = memo(function StreamItem({
             </div>
           </div>
 
-          <p
-            className='text-[11px] text-zinc-400/80 truncate mt-0.5 leading-snug'
-            title={streamTitle}
-          >
-            {streamTitle}
-          </p>
+          <p className='text-[11px] text-zinc-400/80 truncate mt-0.5 leading-snug'>{streamTitle}</p>
 
           <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
             {metaParts.map((part, index) => (
@@ -302,8 +292,6 @@ const StreamItem = memo(function StreamItem({
             )}
           </div>
 
-          {/* Signal line: colored-dot match tokens plus plain-text reasons —
-              the facts stay, the chip chrome doesn't stack up. */}
           {(matchBadges.length > 0 || recommendationReasons.length > 0) && (
             <div className='mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1'>
               {matchBadges.map((badge) => (
@@ -346,6 +334,7 @@ const StreamItem = memo(function StreamItem({
 const STREAM_ROW_ESTIMATE_PX = 92;
 const STREAM_ROW_GAP_PX = 6;
 const STREAM_LIST_VIRTUALIZE_THRESHOLD = 40;
+const EMPTY_PACK_EPISODES: Episode[] = [];
 
 interface StreamVirtualListProps {
   streams: readonly AddonStream[];
@@ -457,22 +446,14 @@ function StreamVirtualList({
   // initial pass also scrolls the remembered row into view, which covers
   // the non-virtualized path (the virtualizer scrolls itself).
   const scheduleRowFocus = useCallback((streamKey: string, initial: boolean) => {
-    let retried = false;
-    const attempt = () => {
-      const row = scrollRef.current?.querySelector<HTMLElement>(
-        `[data-stream-key="${CSS.escape(streamKey)}"]`,
-      );
-      if (!row) {
-        if (!retried) {
-          retried = true;
-          requestAnimationFrame(attempt);
-        }
-        return;
-      }
-      row.focus({ preventScroll: initial });
-      if (initial) row.scrollIntoView({ block: 'nearest' });
-    };
-    requestAnimationFrame(attempt);
+    whenRowMounted(
+      () => scrollRef.current,
+      `[data-stream-key="${CSS.escape(streamKey)}"]`,
+      (row) => {
+        row.focus({ preventScroll: initial });
+        if (initial) row.scrollIntoView({ block: 'nearest' });
+      },
+    );
   }, []);
 
   const focusRow = useCallback(
@@ -690,7 +671,7 @@ export function StreamSelector({
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
-    enabledAddons,
+    hasEnabledAddons,
     episodeProgressMap,
     fatalAddonError,
     handleDialogOpenChange,
@@ -750,9 +731,7 @@ export function StreamSelector({
     requestAnimationFrame(() => packReturnFocusRef.current?.focus());
   }, [cancelResolve]);
 
-  // `episodes` arrives (season, episode)-sorted natively — no re-sort; the
-  // memo only pins a stable empty list for `undefined`.
-  const packEpisodes = useMemo(() => episodes ?? [], [episodes]);
+  const packEpisodes = episodes ?? EMPTY_PACK_EPISODES;
 
   const handleStreamPress = useCallback(
     (stream: AddonStream) => {
@@ -848,7 +827,6 @@ export function StreamSelector({
         title={title || 'Unknown Title'}
       />
 
-      {/* Divider */}
       <div className='h-px bg-white/5 shrink-0' />
 
       {/* Stream list — or the in-selector pack episode picker. The stream
@@ -867,7 +845,7 @@ export function StreamSelector({
             />
           ) : !isOnline ? (
             <StreamListOfflineState />
-          ) : !isLoadingAddonConfigs && enabledAddons.length === 0 ? (
+          ) : !isLoadingAddonConfigs && !hasEnabledAddons ? (
             <StreamListNoAddonsState />
           ) : !isLoadingAddonConfigs && streamSourceCount === 0 ? (
             <StreamListNoStreamAddonsState />

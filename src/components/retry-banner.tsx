@@ -6,12 +6,18 @@ interface RetryBannerProps {
   className?: string;
   /** Optional bold headline above the message. */
   title?: string;
+  isRetrying?: boolean;
   message: string;
   onRetry: () => void;
 }
 
-/** Slim failed-read alert: a query error must not collapse into an empty state. */
-export function RetryBanner({ className, title, message, onRetry }: RetryBannerProps) {
+export function RetryBanner({
+  className,
+  title,
+  isRetrying = false,
+  message,
+  onRetry,
+}: RetryBannerProps) {
   return (
     <div
       role='alert'
@@ -21,20 +27,26 @@ export function RetryBanner({ className, title, message, onRetry }: RetryBannerP
       )}
     >
       {title ? (
-        <div>
+        <div className='min-w-0'>
           <p className='text-[13px] font-medium text-white'>{title}</p>
-          <p className='text-[12px] text-zinc-500 mt-0.5'>{message}</p>
+          <p className='text-[12px] text-zinc-400 mt-0.5'>{message}</p>
         </div>
       ) : (
-        <p className='text-[12.5px] text-zinc-500'>{message}</p>
+        <p className='min-w-0 text-[12.5px] text-zinc-400'>{message}</p>
       )}
       <Button
         variant='ghost'
         size='sm'
-        onClick={onRetry}
-        className='h-8 shrink-0 gap-1.5 text-[12px] text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+        onClick={() => {
+          if (!isRetrying) onRetry();
+        }}
+        aria-disabled={isRetrying || undefined}
+        aria-busy={isRetrying}
+        className='h-8 shrink-0 gap-1.5 text-[12px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-wait aria-disabled:opacity-50'
       >
-        <RotateCcw className='h-3.5 w-3.5' />
+        <RotateCcw
+          className={cn('h-3.5 w-3.5', isRetrying && 'animate-spin motion-reduce:animate-none')}
+        />
         Retry
       </Button>
     </div>

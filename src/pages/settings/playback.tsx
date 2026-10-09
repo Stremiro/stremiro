@@ -19,15 +19,15 @@ import {
 } from '@/lib/api';
 import { normalizeLanguageToken } from '@/lib/player-track-utils';
 import { SUPPORTED_LANGUAGES_QUERY_KEY } from '@/lib/query-invalidation';
+import { clearTimer, cn } from '@/lib/utils';
 import {
+  SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsRow,
   SettingsSwitch,
 } from './chrome';
-
-// ── Constants ────────────────────────────────────────────────────────────────
 
 const LANGUAGE_MENU_ITEM_CLASS =
   'gap-2.5 py-2 px-3 text-sm rounded-lg cursor-pointer hover:bg-white/10 text-zinc-200 hover:text-white transition-colors';
@@ -49,8 +49,6 @@ function formatLanguageLabel(
   return option ? `${option.label} (${option.code})` : normalized;
 }
 
-// ── Language selector ────────────────────────────────────────────────────────
-
 interface LanguageSelectorProps {
   label: string;
   value: string;
@@ -70,6 +68,8 @@ function LanguageSelector({
 }: LanguageSelectorProps) {
   const normalized = normalizeLanguageToken(value);
   const selectorLabelId = `${kind}-language-selector-label`;
+  const selectorValueId = `${kind}-language-selector-value`;
+  const valueLabel = formatLanguageLabel(value, kind, options);
 
   return (
     <div className='space-y-2'>
@@ -80,12 +80,15 @@ function LanguageSelector({
         <DropdownMenuTrigger asChild>
           <Button
             variant='outline'
-            aria-labelledby={selectorLabelId}
+            aria-labelledby={`${selectorLabelId} ${selectorValueId}`}
             disabled={disabled}
-            className='h-10 w-full justify-between rounded-xl border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium shadow-none transition-colors hover:border-white/15 hover:bg-white/[0.07]'
+            className={cn(
+              'h-10 w-full justify-between px-3.5 text-[13px] shadow-none',
+              SETTINGS_OUTLINE_BUTTON_CLASS,
+            )}
           >
-            <span className='truncate text-zinc-100'>
-              {formatLanguageLabel(value, kind, options)}
+            <span id={selectorValueId} title={valueLabel} className='truncate text-zinc-100'>
+              {valueLabel}
             </span>
             <ChevronDown className='ml-2 h-4 w-4 shrink-0 text-zinc-500 opacity-70' />
           </Button>
@@ -120,8 +123,6 @@ function LanguageSelector({
   );
 }
 
-// ── Playback language config ─────────────────────────────────────────────────
-
 // Selections persist on pick — the write queue in the hook serializes rapid
 // changes and Rust updates only the picked field, so the two selectors can
 // be toggled back-to-back without clobbering each other.
@@ -142,12 +143,7 @@ function PlaybackLanguageConfig() {
   });
   const options = languageOptions ?? [];
 
-  useEffect(
-    () => () => {
-      if (savedResetTimerRef.current) clearTimeout(savedResetTimerRef.current);
-    },
-    [],
-  );
+  useEffect(() => () => clearTimer(savedResetTimerRef), []);
 
   const handleLanguageChange = (kind: 'audio' | 'subtitle', value: string) => {
     const next = normalizeLanguageToken(value) || undefined;
@@ -156,10 +152,7 @@ function PlaybackLanguageConfig() {
 
     pendingSavesRef.current += 1;
     setSaveState('saving');
-    if (savedResetTimerRef.current) {
-      clearTimeout(savedResetTimerRef.current);
-      savedResetTimerRef.current = null;
-    }
+    clearTimer(savedResetTimerRef);
 
     void save
       .then(() => {
@@ -200,8 +193,6 @@ function PlaybackLanguageConfig() {
         />
       </div>
 
-      {/* Fixed-height status lane: the indicator appearing/fading never
-          shifts the controls above it. */}
       <div className='flex h-5 items-center justify-end' role='status' aria-live='polite'>
         {saveState === 'saving' ? (
           <span className='flex items-center gap-1.5 text-[12px] font-medium text-zinc-500'>
@@ -219,8 +210,6 @@ function PlaybackLanguageConfig() {
   );
 }
 
-// ── Boolean app-UI preference toggle ─────────────────────────────────────────
-
 function AppUiPreferenceToggle({
   appUiPreferences,
   field,
@@ -236,7 +225,7 @@ function AppUiPreferenceToggle({
   const checked = preferences[field];
 
   return (
-    <SettingsRow label={label} description={description}>
+    <SettingsRow label={label} description={description} className='py-3.5 first:pt-0 last:pb-0'>
       <SettingsSwitch
         ariaLabel={label}
         checked={checked}
@@ -251,8 +240,6 @@ function AppUiPreferenceToggle({
   );
 }
 
-// ── Main export ──────────────────────────────────────────────────────────────
-
 export function PlaybackSettings() {
   const appUiPreferences = useAppUiPreferences();
 
@@ -260,13 +247,13 @@ export function PlaybackSettings() {
     <SettingsGroup>
       <SettingsGroupHeader
         title='Playback'
-        description='Preferred language codes — the player auto-selects matching tracks. Use Off to disable subtitles by default.'
+        description='Select preferred track languages. Choose Off to disable subtitles by default.'
       />
       <SettingsBody>
         <PlaybackLanguageConfig />
       </SettingsBody>
       <div className='border-t border-white/[0.06]'>
-        <SettingsBody>
+        <SettingsBody className='divide-y divide-white/[0.06]'>
           <AppUiPreferenceToggle
             appUiPreferences={appUiPreferences}
             field='spoilerProtection'

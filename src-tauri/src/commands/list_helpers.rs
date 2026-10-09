@@ -77,6 +77,15 @@ pub(super) fn list_item_store_key(list_id: &str, item_id: &str) -> String {
     format!("{}{}:{}", LIST_ITEM_KEY_PREFIX, list_id, item_id)
 }
 
+/// Meta read for the mutation commands: absent or corrupt both fail the
+/// command as "not found" — a corrupt meta has no usable `item_ids` to
+/// mutate anyway.
+pub(super) fn load_list(store: &DurableStore, list_id: &str) -> Result<UserList, String> {
+    store
+        .get_typed(list_meta_key(list_id))
+        .ok_or_else(|| "List not found".to_string())
+}
+
 /// Strict order read through the shared index policy: a missing header is
 /// an empty domain, but a non-array or all-undecodable header is corrupt —
 /// erroring keeps create/delete/import/reorder from rebuilding an empty

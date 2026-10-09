@@ -90,14 +90,14 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
 }
 
 /// Shared prefix-sweep clear for index/item store domains: deletes every key
-/// under `prefixes`, resets the index/order key, and saves once. Prefix
+/// under `prefixes`, resets each index/order key, and saves once. Prefix
 /// sweep, not index-driven enumeration: a corrupt index parses as empty and
 /// would orphan item rows nothing else scans — key space is the only
 /// complete enumeration.
 pub(super) fn clear_index_domain(
     store: &DurableStore,
     prefixes: &[&str],
-    index_key: &str,
+    index_keys: &[&str],
 ) -> Result<(), String> {
     let item_keys: Vec<String> = store
         .keys()
@@ -107,7 +107,9 @@ pub(super) fn clear_index_domain(
     for key in item_keys {
         store.delete(key);
     }
-    store.set(index_key, json!(Vec::<String>::new()));
+    for index_key in index_keys {
+        store.set(*index_key, json!(Vec::<String>::new()));
+    }
     store.save()?;
     Ok(())
 }
@@ -117,14 +119,18 @@ pub(super) fn clear_index_domain(
 /// keys still resolve directly, and a rewritten empty index would strand
 /// them permanently.
 pub(crate) fn decode_string_list(value: serde_json::Value) -> Option<Vec<String>> {
-    serde_json::from_value::<Vec<serde_json::Value>>(value)
-        .ok()
-        .map(|members| {
-            members
-                .into_iter()
-                .filter_map(|member| member.as_str().map(str::to_string))
-                .collect()
-        })
+    let serde_json::Value::Array(members) = value else {
+        return None;
+    };
+    Some(
+        members
+            .into_iter()
+            .filter_map(|member| match member {
+                serde_json::Value::String(text) => Some(text),
+                _ => None,
+            })
+            .collect(),
+    )
 }
 
 /// Index read for the current index+item store shape: an absent index is an
