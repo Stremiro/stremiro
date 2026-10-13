@@ -35,8 +35,7 @@ interface SkipNotchesProps {
   hoverSegment: SkipSegment | null;
 }
 
-// Memoized: the bar re-renders on every clock tick for the playhead, but the
-// segment geometry only changes with the segment list, duration, or hover.
+// Memoized — the bar re-renders per clock tick, but segment geometry only changes with list/duration/hover.
 const SkipNotches = memo(function SkipNotches({
   duration,
   skipSegments,
@@ -58,8 +57,7 @@ const SkipNotches = memo(function SkipNotches({
 
         return (
           <Fragment key={segmentKey}>
-            {/* Uniform segment band — the playhead nub marks position inside
-                it, so the color stays consistent before and after it's passed. */}
+            {/* Uniform segment band — the playhead nub marks position inside it, so color stays consistent past it. */}
             <div
               className={cn(
                 'absolute inset-y-0 pointer-events-none overflow-hidden transition-opacity duration-100 z-10',
@@ -112,15 +110,13 @@ export function PlayerProgressBar({
   onSeek,
 }: PlayerProgressBarProps) {
   const progressBarRef = useRef<HTMLDivElement>(null);
-  // The active pointer's id, not a boolean: a second pointer (touch + mouse,
-  // two fingers) must never share or cancel a drag it didn't start.
+  // The active pointer's id, not a boolean — a second pointer must never share or cancel a drag it didn't start.
   const dragPointerIdRef = useRef<number | null>(null);
   const dragRectRef = useRef<DOMRect | null>(null);
   const hoverRafRef = useRef<number | null>(null);
   const pendingHoverXRef = useRef<number | null>(null);
 
-  // Preview state stays local: pointermove during a drag re-renders this bar
-  // only, not the whole player page.
+  // Preview state stays local — pointermove during a drag re-renders this bar only, not the player page.
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
   const subscribeToTicks = active || seekPreviewTime !== null;
   const currentTime = useSyncExternalStore(
@@ -175,8 +171,7 @@ export function PlayerProgressBar({
   );
 
   const clearHoverState = useCallback(() => {
-    // Cancel the queued frame too: a pending rAF would otherwise resurrect
-    // hover state after the pointer already left.
+    // Cancel the queued frame too — a pending rAF would resurrect hover after the pointer left.
     if (hoverRafRef.current !== null) {
       window.cancelAnimationFrame(hoverRafRef.current);
       hoverRafRef.current = null;
@@ -185,9 +180,7 @@ export function PlayerProgressBar({
     setHoverPct(null);
   }, []);
 
-  // Abort the active drag without seeking. Safe to call twice: the pointer
-  // id is cleared first, so the `lostpointercapture` fired by the release
-  // below is a no-op.
+  // Abort the drag without seeking; safe twice — the pointer id clears first, so the release's `lostpointercapture` is a no-op.
   const cancelDrag = useCallback(() => {
     const pointerId = dragPointerIdRef.current;
     if (pointerId === null) return;
@@ -222,8 +215,7 @@ export function PlayerProgressBar({
   const handlePointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       e.stopPropagation();
-      // Gate before claiming the pointer: a second pointer, a non-primary
-      // button, or an unseekable bar must not capture or focus.
+      // Gate before claiming the pointer: a second pointer, non-primary button, or unseekable bar must not capture or focus.
       if (dragPointerIdRef.current !== null) return;
       if (e.button !== 0 || !e.isPrimary) return;
       if (!Number.isFinite(duration) || duration <= 0) return;
@@ -236,8 +228,7 @@ export function PlayerProgressBar({
 
       clearHoverState();
       e.currentTarget.setPointerCapture(e.pointerId);
-      // Pointer focus must not trip :focus-visible — the ring is for
-      // keyboard tabbing only, a click shouldn't paint a box around the bar.
+      // Pointer focus must not trip :focus-visible — the ring is for keyboard tabbing only.
       e.currentTarget.focus({ preventScroll: true, focusVisible: false });
       dragPointerIdRef.current = e.pointerId;
       dragRectRef.current = rect;
@@ -266,8 +257,7 @@ export function PlayerProgressBar({
       e.stopPropagation();
       if (e.pointerId !== dragPointerIdRef.current) return;
 
-      // Clear the pointer id before releasing capture so the resulting
-      // `lostpointercapture` cannot cancel the seek being committed here.
+      // Clear the pointer id before releasing capture so `lostpointercapture` can't cancel the seek committing here.
       const pointerId = e.pointerId;
       dragPointerIdRef.current = null;
 
@@ -331,15 +321,13 @@ export function PlayerProgressBar({
 
       event.preventDefault();
       event.stopPropagation();
-      // No local preview: the parent's optimistic seek updates currentTime,
-      // and a preview left set here would pin the bar at the seek target.
+      // No local preview — the parent's optimistic seek updates currentTime; a preview set here would pin the bar at the target.
       void Promise.resolve(onSeek(nextTime)).catch(() => undefined);
     },
     [currentTime, duration, onSeek, seekPreviewTime],
   );
 
-  // Unmount: cancel queued work only — state writes on a dead component are
-  // wasted renders, and a dangling capture belongs to the removed element.
+  // Unmount: cancel queued work only — a dangling capture belongs to the removed element.
   useEffect(() => {
     return () => {
       if (hoverRafRef.current !== null) {
@@ -354,15 +342,13 @@ export function PlayerProgressBar({
   const displayTime = seekPreviewTime ?? currentTime;
   const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
 
-  // Buffered band spans playhead → buffered end. Anchored to the real
-  // position (never the drag preview) and clamped: fully-cached local-style
-  // streams report cache windows that overshoot duration.
+  // Buffered band spans playhead → buffered end, anchored to the real position (never the drag preview);
+  // clamped — fully-cached local-style streams report cache windows overshooting duration.
   const bufferedEndSecs =
     canSeek && bufferedAheadSecs > 0 ? Math.min(currentTime + bufferedAheadSecs, duration) : null;
 
   return (
     <>
-      {/* Time display — right-aligned above the progress bar; click toggles remaining. */}
       <div className='flex items-center justify-end px-0.5 pb-2'>
         <div className='shrink-0'>
           <button
@@ -373,7 +359,7 @@ export function PlayerProgressBar({
             }}
             aria-pressed={showRemainingTime}
             aria-label={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
-            className='rounded-sm text-[13px] font-mono text-white/75 tabular-nums leading-none hover:text-white transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+            className='rounded-sm text-[13px] font-medium text-white/75 tabular-nums leading-none hover:text-white transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
             title={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
           >
             {showRemainingTime && duration > 0 ? (
@@ -402,7 +388,7 @@ export function PlayerProgressBar({
         aria-valuemax={canSeek ? duration : 0}
         aria-valuenow={canSeek ? clamp(displayTime, 0, duration) : 0}
         aria-valuetext={formatTime(displayTime)}
-        className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+        className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center rounded-md touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default'
         onMouseMove={handleMouseMove}
         onMouseLeave={handleMouseLeave}
         onPointerDown={handlePointerDown}
@@ -427,13 +413,13 @@ export function PlayerProgressBar({
                 {getSkipLabel(hoverSegment.type)}
               </span>
             )}
-            <div className='bg-zinc-900/95 text-white text-[11px] font-mono tabular-nums whitespace-nowrap px-2.5 py-[5px] rounded-md shadow-xl leading-none border border-white/10'>
+            <div className='whitespace-nowrap rounded-md bg-black/85 px-2 py-1 text-[12px] font-semibold leading-none tracking-tight tabular-nums text-white shadow-lg ring-1 ring-white/10'>
               {formatTime((hoverPct / 100) * duration)}
             </div>
           </div>
         )}
 
-        <div className='relative w-full h-2 group-hover/bar:h-[10px] transition-[height] duration-150 rounded-[3px] overflow-hidden bg-white/[0.16]'>
+        <div className='relative w-full h-2 group-hover/bar:h-[10px] group-focus-visible/bar:h-[10px] transition-[height] duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
           {hoverPct !== null && duration > 0 && (
             <div
               className='absolute inset-0 origin-left bg-white/25 pointer-events-none'
@@ -461,8 +447,7 @@ export function PlayerProgressBar({
             hoverSegment={hoverSegment}
           />
 
-          {/* Playhead nub sits above slices so position stays readable inside
-              a segment band. */}
+          {/* Playhead nub sits above slices so position stays readable inside a segment band. */}
           {duration > 0 && displayTime > 0 && (
             <div
               className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'

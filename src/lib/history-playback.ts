@@ -9,10 +9,9 @@ import {
   type WatchProgress,
 } from '@/lib/api';
 import { prefetchFullDetailsData } from '@/lib/details-prefetch';
-import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { warmPlayerChunk } from '@/lib/player-session';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
-import { clamp, isSeriesLikeMediaType, withTimeout } from '@/lib/utils';
+import { clamp, withTimeout } from '@/lib/utils';
 
 export interface DetailsHistoryRouteState {
   // Optional: a self-referential `from` dead-ends the titlebar Back button.
@@ -26,9 +25,8 @@ export interface DetailsHistoryRouteState {
 
 type HistoryPlaybackFallbackNoticeMode = 'open-details' | 'select-episode';
 
-// Mirrors Rust `WATCH_PROGRESS_MIN_RESUME_POSITION_SECS`: below this a
-// position counts as "start from the beginning" — resume offers, persistence,
-// and selector start times all share it.
+// Mirrors Rust `WATCH_PROGRESS_MIN_RESUME_POSITION_SECS`: below this a position
+// counts as "start from the beginning"; shared by resume offers and selector starts.
 export const MIN_RESUME_POSITION_SECS = 5;
 
 export function getHistoryPlaybackFallbackNotice(mode: HistoryPlaybackFallbackNoticeMode): {
@@ -46,9 +44,7 @@ export function getHistoryPlaybackFallbackNotice(mode: HistoryPlaybackFallbackNo
       };
 }
 
-/** The live clock position wins; the route's `startTime` is the fallback.
-    Below `MIN_RESUME_POSITION_SECS` counts as absent — the backend's own
-    no-resume boundary. */
+/** Live clock wins over route `startTime`; below `MIN_RESUME_POSITION_SECS` counts as absent. */
 export function playableResumePosition(
   livePosition: number | undefined,
   routeStartTime: number | undefined,
@@ -67,18 +63,6 @@ export function playableResumePosition(
     : undefined;
 }
 
-export function getPlayableResumeStartTime(
-  item?: Pick<WatchProgress, 'resume_start_time'> | null,
-): number | undefined {
-  // Unwraps the Rust resume decision; UI never reimplements thresholds.
-  if (!item) return undefined;
-  if (typeof item.resume_start_time !== 'number' || !Number.isFinite(item.resume_start_time)) {
-    return undefined;
-  }
-
-  return item.resume_start_time > 0 ? item.resume_start_time : undefined;
-}
-
 const RESUME_LOOKUP_TIMEOUT_MS = 6_000;
 
 export async function getLatestEpisodeResumeStartTime(
@@ -88,69 +72,39 @@ export async function getLatestEpisodeResumeStartTime(
   episode?: number,
 ): Promise<number | undefined> {
   try {
-    // Bounded: a wedged store read must not hold "Choose Stream" hostage —
-    // the resume position is advisory.
+    // Bounded: a wedged store read must not hold "Choose Stream" hostage.
     const progress = await withTimeout(
       api.getWatchProgress(mediaId, mediaType, season, episode),
       RESUME_LOOKUP_TIMEOUT_MS,
       () => null,
     );
-    return getPlayableResumeStartTime(progress);
+    return progress?.resume_start_time;
   } catch {
     return undefined;
   }
 }
 
-// Canonical coordinates — the absolute (normalized) season/episode wins over
-// the raw stream coordinates. One owner for resume targets, lookups, and subtitles.
+// Absolute (normalized) season/episode wins over raw stream coordinates.
+// One owner for resume targets, lookups, and subtitles.
 export function watchProgressCoordinates(
   item?: Pick<WatchProgress, 'absolute_season' | 'absolute_episode' | 'season' | 'episode'> | null,
 ): { season?: number; episode?: number } {
-  // Rust serializes `Option<u32>` as explicit `null` — collapse to
-  // `undefined`, which is what the `=== undefined` guards downstream test.
+  // Rust serializes `Option<u32>` as `null`; collapse to `undefined` for downstream guards.
   return {
     season: item?.absolute_season ?? item?.season ?? undefined,
     episode: item?.absolute_episode ?? item?.episode ?? undefined,
   };
 }
 
-/** `id:season:episode` — the per-episode progress-map key format. One owner
-    so map writes and lookups can't drift on ordering or separators. */
+// Shared row identity for Home's resume rail and Profile's grid/list views.
+export function watchProgressItemKey(item: WatchProgress): string {
+  const { season, episode } = watchProgressCoordinates(item);
+  return `${item.type_}-${item.id}-${season ?? ''}-${episode ?? ''}`;
+}
+
+/** `id:season:episode` — lookup key for the backend's per-episode progress index. */
 export function episodeProgressKey(id: string, season: number, episode: number): string {
   return `${id}:${season}:${episode}`;
-}
-
-// Backend-folded `id:season:episode` lookups arrive as a Record — adapt the
-// wire shape to the Map the details/player/selector lookups use.
-export function titleEpisodeProgressMap(
-  episodeProgress: Record<string, WatchProgress> | undefined,
-): Map<string, WatchProgress> {
-  return new Map(Object.entries(episodeProgress ?? {}));
-}
-
-// "Last used" stream identity for the selector badge: exact canonical coords
-// first, then the newest matching row (`last_watched` DESC) — only rows of
-// the target's media kind (movie vs series/anime).
-export function getLastUsedStreamIdentity(
-  history: readonly WatchProgress[] | undefined,
-  mediaType: string,
-  season?: number,
-  episode?: number,
-): { lastStreamKey?: string; lastStreamFamily?: string } {
-  const seriesLikeTarget = isSeriesLikeMediaType(mediaType);
-  const sameKind = (row: WatchProgress) => isSeriesLikeMediaType(row.type_) === seriesLikeTarget;
-  const exactCoords = (row: WatchProgress) => {
-    const coords = watchProgressCoordinates(row);
-    return coords.season === season && coords.episode === episode;
-  };
-  const candidate =
-    history?.find((row) => sameKind(row) && exactCoords(row)) ?? history?.find(sameKind);
-  return {
-    lastStreamKey: candidate?.last_stream_key || undefined,
-    // Exact keys are per-episode — on a sibling episode the release family
-    // is the signal that survives.
-    lastStreamFamily: candidate?.stream_family || undefined,
-  };
 }
 
 // WatchProgress → MediaItem card adapter — cards only need identity + poster.
@@ -178,8 +132,7 @@ export function getWatchProgressPercent(position: number, duration: number): num
   return clamp((position / duration) * 100, 0, 100);
 }
 
-// Compact "time left" label ("24m left", "1h 5m left"). Rounds to the minute;
-// tails under half a minute read as finished so nothing claims "0m left".
+// Compact "time left" label; tails under 30s read as finished so nothing claims "0m left".
 export function formatWatchRemaining(position: number, duration: number): string | null {
   if (
     typeof position !== 'number' ||
@@ -199,74 +152,27 @@ export function formatWatchRemaining(position: number, duration: number): string
   const rest = mins % 60;
   return rest === 0 ? `${hours}h left` : `${hours}h ${rest}m left`;
 }
-// Fire the player's exact resolve request when the plan lands: the best-stream
-// cache dedupes in-flight calls, so the mount-time auto-resolve joins this
-// request. Every field must mirror the player's derivation — a difference
-// silently misses the cache key.
-function warmHistoryPlayerResolve(plan: HistoryPlaybackPlan): void {
-  const state = plan.state;
-  if (plan.kind !== 'player') return;
-
-  // plan.target is `/player/{type}/{id}/…` — Rust already canonicalized the
-  // media type (kitsu: → anime), which the frontend mapping can't see.
-  const [, , typeSegment, idSegment] = plan.target.split('/');
-  const mediaId = idSegment && decodeURIComponent(idSegment).trim();
-  if (!mediaId) return;
-
-  const mediaType = resolvePlayerRouteMediaType(typeSegment);
-  // A coordinate-less warm keys on `na|na` while the replay uses the mapped
-  // pair — a guaranteed miss that still pays a full addon fan-out.
-  if (
-    isSeriesLikeMediaType(mediaType) &&
-    (state.absoluteSeason !== undefined || state.absoluteEpisode !== undefined) &&
-    state.streamSeason === undefined &&
-    state.streamEpisode === undefined
-  ) {
-    return;
-  }
-
-  void resolvePlayerStream({
-    mediaType,
-    mediaId,
-    streamLookupId: state.streamLookupId,
-    streamSeason: state.streamSeason,
-    streamEpisode: state.streamEpisode,
-    absoluteSeason: state.absoluteSeason,
-    absoluteEpisode: state.absoluteEpisode,
-    // The player's replay feeds `state.title` unfallbacked — the display
-    // default must not enter the ranking key.
-    title: state.title || undefined,
-    preferred: {
-      streamKey: state.selectedStreamKey,
-      sourceId: state.streamSourceId,
-      sourceName: state.streamSourceName,
-      streamFamily: state.streamFamily,
-    },
-  }).catch(() => {
-    // A failed warm never caches — the mount-time call retries on the same
-    // key and owns the error surface.
-  });
+interface HistoryPlaybackOptions {
+  onSelectEpisode?: ((reason: HistoryPlaybackPlanReason) => void | Promise<void>) | null;
+  /** Ignore late completion after the initiating surface unmounts. */
+  isCancelled?: () => boolean;
 }
 
-// One owner for applying a plan: player plans warm the resolve and navigate;
-// details plans surface the notice, then pick in-page or navigate.
-export async function applyHistoryPlaybackPlan(
+// Player plans warm the resolve and navigate; details plans surface the notice,
+// then pick in-page or navigate.
+async function applyHistoryPlaybackPlan(
   navigate: NavigateFunction,
   plan: HistoryPlaybackPlan,
-  options?: {
-    onSelectEpisode?: ((reason: HistoryPlaybackPlanReason) => void | Promise<void>) | null;
-    /** Late-completion guard: if the initiating surface unmounted meanwhile,
-        navigating would yank the user away from wherever they went. */
-    isCancelled?: () => boolean;
-  },
+  options?: HistoryPlaybackOptions,
 ): Promise<void> {
   if (options?.isCancelled?.()) {
     return;
   }
   if (plan.kind === 'player') {
-    // The addon fan-out starts now, overlapped with navigation and mpv init —
-    // the player joins this in-flight request.
-    warmHistoryPlayerResolve(plan);
+    // Fan-out starts now, overlapped with navigation and mpv init.
+    if (plan.warmResolveRequest) {
+      void resolvePlayerStream(plan.warmResolveRequest).catch(() => undefined);
+    }
     navigate(plan.target, { state: plan.state });
     return;
   }
@@ -292,18 +198,17 @@ export async function openHistoryPlaybackPlan(
   from: string,
   errorTitle: string,
   queryClient?: QueryClient,
-  options?: { isCancelled?: () => boolean },
+  options?: HistoryPlaybackOptions,
 ): Promise<void> {
-  // A resume click predicts a player mount — overlap the chunk fetch.
-  warmPlayerChunk();
-  // Series resumes gate the player's resolve on the details payload — start
-  // it now so it overlaps the plan lookup and navigation.
-  if (queryClient) {
-    prefetchFullDetailsData(queryClient, { mediaId: item.id, mediaType: item.type_ });
-  }
   try {
+    // A resume click predicts a player mount — overlap the chunk fetch.
+    warmPlayerChunk();
+    // Series resumes gate the player's resolve on the details payload.
+    if (queryClient) {
+      prefetchFullDetailsData(queryClient, { mediaId: item.id, mediaType: item.type_ });
+    }
     const plan = await api.buildHistoryPlaybackPlan(item, from);
-    await applyHistoryPlaybackPlan(navigate, plan, { isCancelled: options?.isCancelled });
+    await applyHistoryPlaybackPlan(navigate, plan, options);
   } catch (error) {
     toast.error(errorTitle, {
       description: error instanceof Error ? error.message : 'Please try again.',

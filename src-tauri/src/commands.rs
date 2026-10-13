@@ -26,7 +26,7 @@ pub(crate) mod playback_state_commands;
 pub(crate) mod player_mpv_commands;
 pub(crate) mod player_track_commands;
 pub(crate) mod player_window_commands;
-pub(crate) mod probe_pool;
+mod probe_pool;
 mod resume_store;
 pub(crate) mod search_commands;
 pub(crate) mod similar_titles_commands;
@@ -34,7 +34,7 @@ mod startup_validation;
 mod store_helpers;
 pub(crate) mod stream_commands;
 mod stream_coordinator;
-pub(crate) mod stream_fetcher;
+mod stream_fetcher;
 mod stream_resolver;
 mod streaming_helpers;
 #[cfg(test)]
@@ -46,17 +46,13 @@ pub(crate) mod watch_status_commands;
 use list_helpers::{load_lists_order, LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, LIST_META_KEY_PREFIX};
 use playback_state::PlaybackStateService;
 
-/// Serializes blocking store work: every JSON-store/SQLite command is a
-/// read-modify-write, and two ops interleaving load→mutate→save let a stale
-/// snapshot silently drop the other command's write (e.g. a library add
-/// racing a status clear, or a backup import racing a progress tick). One
-/// lock covers every store — ops are milliseconds and a single lock cannot
-/// deadlock.
+/// Serializes blocking store work — interleaved load→mutate→save would let a stale
+/// snapshot silently drop the other's write. One lock covers every store; ops are
+/// milliseconds and a single lock cannot deadlock.
 static STORE_OP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-/// Shared budget for blocking hops off the async runtime (store ops, native
-/// plugin IPC, user-path file IO). A timeout releases the caller; blocking
-/// work already executing cannot be cancelled and retains its store guard.
+/// Shared budget for blocking hops off the async runtime (store ops, plugin IPC,
+/// file IO). A timeout releases the caller; running blocking work can't be cancelled.
 pub(crate) const BLOCKING_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Serialize store work without blocking a worker while it waits in the queue.
@@ -66,8 +62,7 @@ where
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
     let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
-    // Wait before entering the blocking pool so expired store waiters never
-    // submit a mutation after their caller has received a failure.
+    // Wait before entering the blocking pool so expired waiters never submit a mutation after their caller failed.
     let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
         .map_err(|_| "Background persistence timed out.".to_string())?;
@@ -107,14 +102,12 @@ pub(crate) use durable_store::{
 pub(crate) use media_type::{normalize_stream_media_type, normalize_watch_progress_type};
 pub(crate) use startup_validation::validate_startup_stores;
 use store_helpers::{load_library_index, load_watch_status_index};
-pub(crate) use streaming_helpers::{resolved_content_key, stream_dedup_key};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WatchProgress {
     pub id: String,    // opaque addon id (e.g. `tt…`, `kitsu:…`)
     pub type_: String, // "movie" or "series"
-    // `None` fields omit instead of emitting `null`: the TS contract is
-    // `field?: T`, and absent keeps `=== undefined` guards truthful.
+    // `None` fields omit rather than emit `null`: the TS contract is `field?: T`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub season: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -144,16 +137,14 @@ pub struct WatchProgress {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     /// Stable addon-instance id (`AddonConfig.id`): the source-health and
-    /// resume-binding identity of record, independent of the display name.
-    /// `None` on rows written before instance-id plumbing.
+    /// resume-binding identity of record. `None` on pre-instance-id rows.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream_family: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resume_start_time: Option<f64>,
-    /// Read-side annotations like `resume_start_time`: derived from
-    /// position/duration on the way out, never persisted or trusted inbound.
+    /// Read-side annotation: derived on the way out, never persisted or trusted inbound.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_watched: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -165,12 +156,10 @@ const LIBRARY_ITEM_PREFIX: &str = "library_item:";
 const WATCH_STATUS_INDEX_KEY: &str = "watch_status_index";
 const WATCH_STATUS_ITEM_PREFIX: &str = "watch_status:";
 const MAX_SEARCH_QUERY_CHARS: usize = 120;
-/// Char bounds for media identity fields crossing IPC into durable state:
-/// ids are addon-owned opaque strings, titles feed the webview.
+/// Char bounds for media identity fields crossing IPC into durable state.
 pub(crate) const MEDIA_ID_MAX_CHARS: usize = 256;
 pub(crate) const MEDIA_TITLE_MAX_CHARS: usize = 512;
-/// Poster/backdrop/logo URLs are rendered by the webview: bounded so
-/// `data:`/`file:` payloads and unbounded strings never persist.
+/// Bounded so `data:`/`file:` payloads and unbounded strings never persist into the webview.
 const MEDIA_IMAGE_URL_MAX_CHARS: usize = 2_048;
 const SETTINGS_STORE_FILE: &str = "settings.json";
 const LIBRARY_STORE_FILE: &str = "library.json";
@@ -186,19 +175,15 @@ fn normalize_non_empty(input: &str) -> Option<String> {
     }
 }
 
-/// Media ids become store keys and addon request path segments: opaque-field
-/// hygiene plus a char bound — reject overlong input rather than truncate so
-/// two hostile ids can't collide onto one key, and unbounded strings never
-/// persist or fan out into outbound URLs.
+/// Media ids become store keys and addon request path segments — reject overlong
+/// input rather than truncate, so two hostile ids can't collide onto one key.
 pub(crate) fn normalize_media_id(input: &str) -> Option<String> {
     normalize_opaque_field(input).filter(|id| id.chars().count() <= MEDIA_ID_MAX_CHARS)
 }
 
-/// Normalize a persisted media image URL (poster/backdrop/logo): trimmed,
-/// char-bounded, and gated by the same fetch policy as addon-ingress
-/// artwork — http(s) only, no credentials, no non-routable host. Anything
-/// else returns `None` so hostile or corrupt input degrades to "no
-/// artwork" instead of persisting.
+/// Normalize a persisted media image URL: trimmed, char-bounded, gated by the
+/// addon-ingress artwork policy — http(s) only, no credentials, no non-routable
+/// host. Anything else degrades to "no artwork" instead of persisting.
 pub(crate) fn normalize_media_image_url(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty() || trimmed.chars().count() > MEDIA_IMAGE_URL_MAX_CHARS {
@@ -208,10 +193,8 @@ pub(crate) fn normalize_media_image_url(input: &str) -> Option<String> {
     crate::providers::addon_resource::is_fetchable_http_url(&normalized).then_some(normalized)
 }
 
-/// Opaque free-text fields that cross the IPC boundary (source names, stream
-/// metadata, recovery extras, skip-segment types): trim, then reject empty
-/// and the literal `null`/`undefined` sentinels leaked by JSON callers.
-/// Single owner.
+/// Opaque free-text fields crossing IPC (source names, stream metadata, skip-segment
+/// types): trim, reject empty and the `null`/`undefined` sentinels JSON callers leak.
 pub(crate) fn normalize_opaque_field(input: &str) -> Option<String> {
     let trimmed = input.trim();
     if trimmed.is_empty()
@@ -233,9 +216,8 @@ fn normalize_query(input: &str) -> Option<String> {
     Some(trimmed.chars().take(MAX_SEARCH_QUERY_CHARS).collect())
 }
 
-/// Pre-tokenization normalization shared by the coordinator, language, and
-/// search match paths: lowercase ASCII alphanumerics, every other char
-/// becomes a space so `split_whitespace` does the rest.
+/// Pre-tokenization normalization shared by coordinator/language/search paths:
+/// lowercase ASCII alphanumerics, every other char becomes a space.
 pub(crate) fn normalize_token_text(value: &str) -> String {
     value
         .chars()
@@ -265,17 +247,10 @@ pub struct PlaybackLanguagePreferences {
     pub preferred_subtitle_language: Option<String>,
 }
 
-// ─── Skip Times ──────────────────────────────────────────────────────────────
-
 /// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB.
-///
-/// SkipDB keys on the IMDb id: the supplied `imdb_id` wins, then a tt-shaped
-/// media id (Cinemeta ids are IMDb ids). Legacy `kitsu:` rows carry no IMDb
-/// anchor and return empty. `duration_secs` enables SkipDB's duration
-/// matching for this cut.
-///
-/// Always returns an empty result on errors — missing skip times are a
-/// normal crowdsourced condition.
+/// SkipDB keys on the IMDb id: supplied `imdb_id` wins, then a tt-shaped media id
+/// (Cinemeta ids are IMDb ids); `kitsu:` rows have no IMDb anchor and return empty.
+/// Unkeyable input and missing data return empty; only transient upstream failures are errors.
 #[command]
 pub async fn get_skip_times(
     skip_provider: State<'_, crate::providers::skip_times::SkipTimesProvider>,
@@ -286,8 +261,7 @@ pub async fn get_skip_times(
     episode: Option<u32>,
     duration_secs: Option<f64>,
 ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
-    // The id bounds the IPC surface the same way other media ids are; the
-    // lookup itself is keyed on the IMDb anchor.
+    // The id bounds the IPC surface like other media ids; the lookup keys on the IMDb anchor.
     let Some(id) = normalize_media_id(&id) else {
         return Ok(crate::providers::skip_times::SkipTimesResult::default());
     };
@@ -300,9 +274,8 @@ pub async fn get_skip_times(
         return Ok(crate::providers::skip_times::SkipTimesResult::default());
     };
 
-    // SkipDB wants both coordinates for an episode and neither for a movie.
-    // A lone season or episode can't name an episode — never silently
-    // default to S1, which would pull the wrong episode's segments.
+    // SkipDB wants both coordinates for an episode, neither for a movie. A lone
+    // coordinate can't name an episode — never silently default to S1.
     let (season, episode) = if media_type.trim().eq_ignore_ascii_case("movie") {
         (None, None)
     } else {
@@ -312,19 +285,16 @@ pub async fn get_skip_times(
         }
     };
 
-    // Duration enables SkipDB's matching/shifting; bound it so a malformed
-    // value never reaches the outbound query (24h covers any stream).
+    // Bound duration so a malformed value never reaches the outbound query (24h covers any stream).
     const MAX_STREAM_DURATION_SECS: f64 = 24.0 * 60.0 * 60.0;
     let duration_secs = duration_secs
         .filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_STREAM_DURATION_SECS)
         .map(|d| d.round());
 
-    Ok(skip_provider
+    skip_provider
         .get_segments(&imdb_id, season, episode, duration_secs)
-        .await)
+        .await
 }
-
-// ─── Data Management ──────────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
 pub struct DataStats {
@@ -348,9 +318,8 @@ pub async fn get_data_stats(
             let history_count = service.count_resume_entries(&app)?;
             let history_title_count = service.count_resume_titles(&app)?;
 
-            // Index headers alone answer the count — `load_*_map` parses
-            // every record and can repair-write inside a read-only stats
-            // endpoint.
+            // Index headers alone answer the count — `load_*_map` parses every record
+            // and can repair-write inside a read-only endpoint.
             let library_store = open_store(&app, LIBRARY_STORE_FILE)?;
             let library_count = load_library_index(&library_store)?.len();
 
@@ -386,21 +355,20 @@ pub async fn clear_watch_history(
     .await
 }
 
-/// Wipes all library entries and their watch statuses: a leftover status
-/// row would let the details self-heal re-add a deliberately cleared title
-/// on next open, and orphaned `id → status` rows have no render surface.
-/// Statuses clear first so a crash or a failed second save can't leave the
-/// harmful half — statuses without a library are benign and self-repair.
+/// Wipes all library entries and their watch statuses — a leftover status row would
+/// let the details self-heal re-add a cleared title. Statuses clear first: orphaned
+/// `id → status` rows are benign and self-repair; the reverse order isn't.
 #[command]
 pub async fn clear_library(app: AppHandle) -> Result<(), String> {
     run_blocking_store_op(move || {
         let status_store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
+        // Parse-validate the library before mutating statuses — a corrupt file must not fail after statuses cleared.
+        let store = open_store(&app, LIBRARY_STORE_FILE)?;
         store_helpers::clear_index_domain(
             &status_store,
             &[WATCH_STATUS_ITEM_PREFIX],
             &[WATCH_STATUS_INDEX_KEY],
         )?;
-        let store = open_store(&app, LIBRARY_STORE_FILE)?;
         store_helpers::clear_index_domain(&store, &[LIBRARY_ITEM_PREFIX], &[LIBRARY_INDEX_KEY])
     })
     .await

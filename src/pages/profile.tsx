@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { History, LayoutList, Library, Play, Search } from 'lucide-react';
-import { useCallback, useDeferredValue, useMemo, useState } from 'react';
+import { History, LayoutList, Library, Search } from 'lucide-react';
+import { useCallback, useDeferredValue, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { ListsManager } from '@/components/list/lists-manager';
@@ -10,13 +10,7 @@ import {
   MediaCardSkeleton,
   mediaCardRailKey,
 } from '@/components/media-card';
-import {
-  HistoryItem,
-  HistoryListView,
-  isWatchStatusValue,
-  LibraryList,
-  watchProgressItemKey,
-} from '@/components/profile-collection-rows';
+import { HistoryItem, HistoryListView, LibraryList } from '@/components/profile-collection-rows';
 import {
   LibraryToolbar,
   ViewToggle,
@@ -37,7 +31,6 @@ import {
   useLocalProfile,
 } from '@/hooks/use-local-profile';
 import {
-  useContinueWatching,
   useLibraryItems,
   useTotalWatchTime,
   useWatchHistory,
@@ -52,6 +45,7 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { DATA_STATS_QUERY_KEY, DATA_STATS_STALE_TIME_MS } from '@/lib/query-invalidation';
+import { watchProgressItemKey } from '@/lib/history-playback';
 import { cn, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
 const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
@@ -59,12 +53,12 @@ const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
   (_, index) => `profile-grid-skeleton-${index}`,
 );
 
-// Leading year of `2010` / `2010–2015`; undated titles sink in both directions.
+// `primaryYear` is backend-extracted; undated titles sink in both directions.
 function compareReleaseYears(a: MediaItem, b: MediaItem, direction: 1 | -1): number {
-  const left = Number.parseInt(a.year ?? '', 10);
-  const right = Number.parseInt(b.year ?? '', 10);
-  if (Number.isNaN(left) || Number.isNaN(right)) {
-    return Number(Number.isNaN(left)) - Number(Number.isNaN(right));
+  const left = a.primaryYear;
+  const right = b.primaryYear;
+  if (left === undefined || right === undefined) {
+    return Number(left === undefined) - Number(right === undefined);
   }
   return (left - right) * direction;
 }
@@ -73,7 +67,6 @@ const PROFILE_TABS = [
   { id: 'library', label: 'Library', icon: Library },
   { id: 'lists', label: 'Lists', icon: LayoutList },
   { id: 'history', label: 'History', icon: History },
-  { id: 'continue-watching', label: 'Continue Watching', icon: Play },
 ] as const;
 
 type ProfileTabId = (typeof PROFILE_TABS)[number]['id'];
@@ -99,28 +92,28 @@ export function Profile() {
   } = useLocalProfile();
 
   // Preserve the active tab across details navigation.
-  const routeTab: ProfileTabId = location.pathname === '/library' ? 'library' : 'history';
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
-  const activeTab = isProfileTabId(tabParam) ? tabParam : routeTab;
+  const activeTab = isProfileTabId(tabParam) ? tabParam : 'library';
   const setActiveTab = useCallback(
     (tab: string) => {
       setSearchParams(
         (current) => {
           const next = new URLSearchParams(current);
-          if (tab === routeTab) next.delete('tab');
+          if (tab === 'library') next.delete('tab');
           else next.set('tab', tab);
           return next;
         },
         { replace: true },
       );
     },
-    [routeTab, setSearchParams],
+    [setSearchParams],
   );
 
   const {
     data: library,
     isLoading: libraryLoading,
+    isFetched: libraryFetched,
     isError: libraryError,
     isFetching: libraryFetching,
     refetch: refetchLibrary,
@@ -129,21 +122,11 @@ export function Profile() {
   const {
     data: history,
     isLoading: historyLoading,
+    isFetched: historyFetched,
     isError: historyError,
     isFetching: historyFetching,
     refetch: refetchHistory,
   } = useWatchHistory({ enabled: activeTab === 'history' });
-
-  // Only its own tab consumes this — every other profile visit skips the read.
-  const {
-    data: continueWatching,
-    isLoading: continueWatchingLoading,
-    isError: continueWatchingError,
-    isFetching: continueWatchingFetching,
-    refetch: refetchContinueWatching,
-  } = useContinueWatching({
-    enabled: activeTab === 'continue-watching',
-  });
 
   // ListsManager fetches full list rows only when its tab opens.
   const { data: dataStats } = useQuery({
@@ -155,6 +138,7 @@ export function Profile() {
   const {
     data: allWatchStatuses,
     isError: watchStatusesError,
+    isFetched: watchStatusesFetched,
     isFetching: watchStatusesFetching,
     refetch: refetchWatchStatuses,
   } = useWatchStatuses();
@@ -166,8 +150,10 @@ export function Profile() {
   const [libraryTypeFilter, setLibraryTypeFilter] = useState<'all' | 'movie' | 'series'>('all');
   const [librarySort, setLibrarySort] = useState<LibrarySort>('default');
   const [librarySearch, setLibrarySearch] = useState('');
+  const librarySearchRef = useRef<HTMLInputElement>(null);
   const normalizedLibrarySearch = useNormalizedSearchQuery(librarySearch);
-  const libraryReadFailed = libraryError && library === undefined;
+  const libraryReadFailed =
+    (libraryError || (libraryFetched && libraryLoading)) && library === undefined;
   const statusFilterPending = libraryStatusFilter !== 'all' && allWatchStatuses === undefined;
 
   const handleViewModeChange = useCallback(
@@ -182,6 +168,7 @@ export function Profile() {
     setLibraryTypeFilter('all');
     setLibrarySort('default');
     setLibrarySearch('');
+    librarySearchRef.current?.focus({ preventScroll: true });
   }, []);
 
   // Filter and sort changes do not affect unfiltered status counts.
@@ -189,7 +176,7 @@ export function Profile() {
     const counts = {} as Record<WatchStatus, number>;
     for (const item of library ?? []) {
       const status = allWatchStatuses?.[item.id];
-      if (status && isWatchStatusValue(status)) counts[status] = (counts[status] ?? 0) + 1;
+      if (status) counts[status] = (counts[status] ?? 0) + 1;
     }
     return counts;
   }, [library, allWatchStatuses]);
@@ -247,6 +234,7 @@ export function Profile() {
   const listsCount = dataStats?.lists_count ?? 0;
 
   const [historySearch, setHistorySearch] = useState('');
+  const historySearchRef = useRef<HTMLInputElement>(null);
   const normalizedHistorySearch = useNormalizedSearchQuery(historySearch);
   const filteredHistory = useMemo(() => {
     if (!history) return [];
@@ -259,7 +247,6 @@ export function Profile() {
     library: libraryCount || undefined,
     lists: listsCount || undefined,
     history: historyCount || undefined,
-    'continue-watching': continueWatching?.length || undefined,
   };
 
   return (
@@ -317,6 +304,7 @@ export function Profile() {
               filteredCount={filteredLibrary.length}
               search={librarySearch}
               onSearchChange={setLibrarySearch}
+              searchInputRef={librarySearchRef}
               sort={librarySort}
               onSortChange={setLibrarySort}
               viewMode={viewMode}
@@ -327,7 +315,10 @@ export function Profile() {
 
           <TabsContent value='library' className='space-y-4'>
             <CollectionTabContent
-              isError={libraryReadFailed || (statusFilterPending && watchStatusesError)}
+              isError={
+                libraryReadFailed ||
+                (statusFilterPending && (watchStatusesError || watchStatusesFetched))
+              }
               isLoading={libraryLoading || statusFilterPending}
               items={filteredLibrary}
               errorLabel={libraryReadFailed ? 'your library' : 'your watch statuses'}
@@ -379,18 +370,26 @@ export function Profile() {
             {history && history.length > 0 && (
               <div className='flex items-center gap-2'>
                 <SearchInput
+                  inputRef={historySearchRef}
                   placeholder='Search history…'
                   value={historySearch}
                   onValueChange={setHistorySearch}
                   clearLabel='Clear history search'
-                  wrapperClassName='flex-1'
-                  className='h-9 text-sm bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-600 focus-visible:ring-white/10 rounded-lg'
+                  wrapperClassName='flex-1 min-w-0'
+                  className='h-9 text-[13px] bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25 rounded-lg'
                 />
+                <output className='shrink-0 text-[12px] tabular-nums text-zinc-400'>
+                  {normalizedHistorySearch
+                    ? `${filteredHistory.length} of ${history.length}`
+                    : `${history.length} ${history.length === 1 ? 'title' : 'titles'}`}
+                </output>
                 <ViewToggle viewMode={viewMode} onChange={handleViewModeChange} />
               </div>
             )}
             <CollectionTabContent
-              isError={historyError && history === undefined}
+              isError={
+                (historyError || (historyFetched && historyLoading)) && history === undefined
+              }
               isLoading={historyLoading}
               items={filteredHistory}
               errorLabel='your watch history'
@@ -411,7 +410,10 @@ export function Profile() {
                         size='sm'
                         variant='ghost'
                         className='h-8 text-xs text-zinc-400'
-                        onClick={() => setHistorySearch('')}
+                        onClick={() => {
+                          setHistorySearch('');
+                          historySearchRef.current?.focus({ preventScroll: true });
+                        }}
                       >
                         Clear search
                       </Button>
@@ -425,33 +427,6 @@ export function Profile() {
                     action={<EmptyStateLink to='/'>Find something to watch</EmptyStateLink>}
                   />
                 )
-              }
-            />
-          </TabsContent>
-
-          <TabsContent value='continue-watching' className='space-y-4'>
-            {continueWatching && continueWatching.length > 0 && !continueWatchingLoading && (
-              <div className='flex items-center justify-end'>
-                <ViewToggle viewMode={viewMode} onChange={handleViewModeChange} />
-              </div>
-            )}
-            <CollectionTabContent
-              isError={continueWatchingError && continueWatching === undefined}
-              isLoading={continueWatchingLoading || continueWatching === undefined}
-              items={continueWatching ?? []}
-              errorLabel='continue watching'
-              onRetry={refetchContinueWatching}
-              isRetrying={continueWatchingFetching}
-              viewMode={viewMode}
-              getItemKey={watchProgressItemKey}
-              renderItem={(item) => <HistoryItem item={item} />}
-              renderList={(items) => <HistoryListView items={items} />}
-              empty={
-                <EmptyState
-                  icon={<Play className='w-6 h-6 text-zinc-600 ml-0.5' />}
-                  title='Nothing to continue'
-                  subtitle='You have no unfinished items.'
-                />
               }
             />
           </TabsContent>
@@ -589,7 +564,11 @@ function EmptyState({
     <div className='flex flex-col items-center justify-center py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015] text-center px-6'>
       <div className='w-10 h-10 flex items-center justify-center'>{icon}</div>
       <p className='text-[15px] font-semibold text-zinc-200'>{title}</p>
-      {subtitle && <p className='text-[13px] text-zinc-500 max-w-xs leading-relaxed'>{subtitle}</p>}
+      {subtitle && (
+        <p className='w-full max-w-xs text-[13px] leading-relaxed text-zinc-500 [overflow-wrap:anywhere]'>
+          {subtitle}
+        </p>
+      )}
       {action}
     </div>
   );

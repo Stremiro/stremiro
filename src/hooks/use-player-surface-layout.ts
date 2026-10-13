@@ -1,10 +1,9 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
-import { setVideoMarginRatio } from '@/lib/player-mpv';
+import { setMpvProperty, setVideoMarginRatio } from '@/lib/player-mpv';
 import { clamp } from '@/lib/utils';
 
-// Chrome geometry shared with the mini player's drag bounds — one owner so a
-// rail/titlebar resize can't desync margins from the floating frame.
+// Shared with the mini player's drag bounds so chrome resizes can't desync them.
 export const PLAYER_SIDEBAR_WIDTH_PX = 60;
 export const PLAYER_TITLEBAR_HEIGHT_PX = 32;
 const MINI_MASK_TARGET_SELECTOR = '[data-mini-mask]';
@@ -27,15 +26,13 @@ function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
   ].join('|');
 }
 
-/** Fingerprint-deduped margin send: skips an identical repeat, records intent
- * up front so chase frames coalesce, and clears on failure so the next send
- * retries. Resolves true only on a verified fresh send — a dedup hit or a
- * reject is false, so callers never claim a paint that wasn't verified. */
+/** Fingerprint-deduped margin send: records intent up front so chase frames
+ * coalesce, clears on failure. Resolves true only on a verified fresh send. */
 function sendMarginRatio(
   fingerprintRef: RefObject<string | null>,
   ratio: VideoMarginRatio,
+  fingerprint = serializeVideoMarginRatio(ratio),
 ): Promise<boolean> {
-  const fingerprint = serializeVideoMarginRatio(ratio);
   if (fingerprintRef.current === fingerprint) return Promise.resolve(false);
   fingerprintRef.current = fingerprint;
   return setVideoMarginRatio(ratio).then(
@@ -113,12 +110,17 @@ export function usePlayerSurfaceLayout({
   presentation,
 }: UsePlayerSurfaceLayoutArgs) {
   const lastAppliedMarginFingerprintRef = useRef<string | null>(null);
-  // Last ratio actually sent — the mini dock FLIP's origin. Not reset on
-  // presentation flip: the mini mount reads where the video visibly was.
+  // Last ratio actually sent — the mini dock FLIP's origin; kept across
+  // presentation flips so the mini mount reads where the video visibly was.
   const lastAppliedRatioRef = useRef<VideoMarginRatio | null>(null);
   // Stale async applies must never overwrite a newer computation.
   const marginGenerationRef = useRef(0);
   const isMini = presentation === 'mini';
+  useEffect(() => {
+    if (!mpvSurfaceReady || !activeStreamUrl) return;
+    // Margins shrink video, not subtitle text; keep the track and saved tuning intact.
+    void setMpvProperty('sub-visibility', !isMini).catch(() => undefined);
+  }, [activeStreamUrl, isMini, mpvSurfaceReady]);
 
   useEffect(() => {
     lastAppliedMarginFingerprintRef.current = null;
@@ -127,12 +129,11 @@ export function usePlayerSurfaceLayout({
   const applyMarginRatio = useCallback(
     async (ratio: VideoMarginRatio, generation: number): Promise<boolean> => {
       // Stale-generation calls must return before the send records intent —
-      // a deduped chase frame would poison the fingerprint for a ratio never
-      // sent, and a fresh apply early-returns forever.
+      // a deduped chase frame would poison the fingerprint for a ratio never sent.
       if (generation !== marginGenerationRef.current) return false;
       const sent = await sendMarginRatio(lastAppliedMarginFingerprintRef, ratio);
-      // Recorded only after a verified send at the current generation — the
-      // dock FLIP treats it as the rect the surface actually painted.
+      // Record only after a verified send — the dock FLIP treats it as the
+      // rect the surface actually painted.
       if (!sent || generation !== marginGenerationRef.current) return false;
       lastAppliedRatioRef.current = ratio;
       return true;
@@ -148,8 +149,8 @@ export function usePlayerSurfaceLayout({
       }
 
       const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
-      // The stream selector deliberately keeps the frame painted: its dimmed
-      // overlay reads as "still playing" instead of blacking out mid-switch.
+      // The stream selector deliberately keeps the frame painted; only the
+      // error overlay collapses the surface.
       const shouldCollapseVideoSurface = showErrorOverlay;
       const topChromeRect = topChromeRef.current?.getBoundingClientRect();
       const bottomChromeRect = bottomChromeRef.current?.getBoundingClientRect();
@@ -201,9 +202,8 @@ export function usePlayerSurfaceLayout({
     ],
   );
 
-  // Latest-render binding for imperative callers: a state token would
-  // re-render the player tree per margin event. The write must precede every
-  // effect that reads the ref.
+  // Latest-render binding for imperative callers; a state token would re-render
+  // the player tree per margin event. Write precedes every effect that reads it.
   const marginRequestRef = useRef<() => void>(() => undefined);
   useEffect(() => {
     marginRequestRef.current = () => {
@@ -211,9 +211,8 @@ export function usePlayerSurfaceLayout({
 
       const generation = ++marginGenerationRef.current;
       // The expanded apply is the hole-release signal: until it lands the
-      // deferred mask keeps the surface where the frame left it instead of
-      // flashing black. A failed or deduped send leaves the mask for the
-      // safety cap — it must not lift on an unverified paint.
+      // deferred mask keeps the surface where the frame left it. A failed or
+      // deduped send must not lift the mask on an unverified paint.
       void applyVideoMargins(generation).then((applied) => {
         if (applied) releaseDeferredMiniMasks();
       });
@@ -241,8 +240,7 @@ export function usePlayerSurfaceLayout({
 
       animationFrameId = window.requestAnimationFrame(() => {
         animationFrameId = null;
-        // Imperative apply — no state bump, so a chrome resize never
-        // re-renders the tree.
+        // Imperative apply — a chrome resize never re-renders the tree.
         marginRequestRef.current();
       });
     });
@@ -257,21 +255,20 @@ export function usePlayerSurfaceLayout({
         window.cancelAnimationFrame(animationFrameId);
       }
     };
-  }, [bottomChromeRef, isMini, playerContainerRef, topChromeRef]);
+    // PiP unmounts the chrome; returning mounts new nodes behind the same refs.
+  }, [bottomChromeRef, isMini, isPip, playerContainerRef, topChromeRef]);
 
   useEffect(() => {
     marginRequestRef.current();
   }, [activeStreamUrl, applyVideoMargins, isMini, mpvSurfaceReady]);
 
-  // Stable handle for mpv reconfig triggers — routes through the ref so
-  // callers get the latest gated apply.
+  // Stable handle for mpv reconfig triggers; routes to the latest gated apply.
   const requestMarginApply = useCallback(() => {
     marginRequestRef.current();
   }, []);
 
-  // Where the expanded surface last painted, in viewport px — the mini player
-  // reads it once at mount as the FLIP origin. Rebuilt from the live container
-  // rect so a chrome offset keeps the origin honest.
+  // Where the expanded surface last painted — the mini player's FLIP origin,
+  // rebuilt from the live container rect.
   const getExpandedVideoRect = useCallback((): MiniVideoRect | null => {
     const ratio = lastAppliedRatioRef.current;
     const containerRect = playerContainerRef.current?.getBoundingClientRect();
@@ -303,8 +300,7 @@ export interface MiniVideoRect {
 
 const MINI_MASK_IMAGES = 'linear-gradient(#000 0 0), linear-gradient(#000 0 0)';
 // The base layer deliberately overcovers the element: a 100% base would clip
-// descendants painting outside the border box (mask coverage = alpha); only
-// the second layer cuts the hole.
+// descendants painting outside the border box; only the second layer cuts the hole.
 const MINI_MASK_BASE_SIZE = '12000px 12000px';
 const MINI_MASK_BASE_POSITION = '-5000px -5000px';
 
@@ -334,8 +330,7 @@ function clearMiniMasks() {
 
 function positionMiniMaskHoles(rect: MiniVideoRect) {
   const elements = Array.from(document.querySelectorAll<HTMLElement>(MINI_MASK_TARGET_SELECTOR));
-  // All reads before any write — interleaved rect reads and style writes
-  // thrash layout every frame a rect chase runs.
+  // All reads before any write — interleaving thrashes layout per chased frame.
   const bounds = elements.map((element) => element.getBoundingClientRect());
   elements.forEach((element, index) => {
     const holeX = rect.x - bounds[index].left;
@@ -366,9 +361,9 @@ function positionMiniMaskHoles(rect: MiniVideoRect) {
   });
 }
 
-// On expand the mpv margins still describe the corner rect for a frame or
-// two — clearing the hole immediately would flash the app surface where the
-// video was. The clear defers until the expanded apply lands (or a cap elapses).
+// On expand, mpv margins still describe the corner rect for a frame or two —
+// clearing immediately would flash app surface. Clear defers until the
+// expanded apply lands or the cap elapses.
 const DEFERRED_MINI_MASK_CLEAR_MS = 400;
 let deferredMiniMaskClearTimer: number | null = null;
 
@@ -398,16 +393,14 @@ interface UseMiniPlayerSurfaceArgs {
   videoRectRef: RefObject<MiniVideoRect | null>;
   /** Gate the see-through hole on a live mpv surface so it can never show the desktop. */
   surfaceReady: boolean;
-  /** Evaluated whenever the hole would clear (disable, rect loss). True on the
-      expand handoff so the hole outlives the mini chrome until the expanded
-      apply lands; close/unmount paths return false. */
+  /** True on the expand handoff so the hole outlives the mini chrome until the
+      expanded apply lands; close/unmount paths return false. */
   holdHoleOnRelease?: () => boolean;
 }
 
 /**
- * While minimized the video is letterboxed into the floating rect via margins,
- * and every app-painted layer gets a matching mask hole so the mpv surface
- * shows through. The mini chrome portals outside the masked layers.
+ * While minimized, the video is letterboxed into the floating rect via margins
+ * and app-painted layers get a matching mask hole so mpv shows through.
  */
 export function useMiniPlayerSurface({
   enabled,
@@ -417,8 +410,8 @@ export function useMiniPlayerSurface({
 }: UseMiniPlayerSurfaceArgs) {
   const marginFingerprintRef = useRef<string | null>(null);
   const holeAppliedRef = useRef(false);
-  // Fingerprint of the ratio mpv verifiably paints AND the hole was cut for —
-  // scroll/resize applies reuse it to reposition holes without an IPC resend.
+  // Ratio mpv verifiably paints AND the hole was cut for — scroll/resize
+  // applies reuse it to reposition holes without an IPC resend.
   const holeFingerprintRef = useRef<string | null>(null);
   const holdHoleOnReleaseRef = useRef(holdHoleOnRelease);
   useEffect(() => {
@@ -442,7 +435,6 @@ export function useMiniPlayerSurface({
     if (!rect || !surfaceReady) {
       releaseMasks();
       marginFingerprintRef.current = null;
-      holeFingerprintRef.current = null;
       return Promise.resolve(false);
     }
 
@@ -457,8 +449,8 @@ export function useMiniPlayerSurface({
       bottomPx: viewportHeight - (rect.y + rect.height),
     });
 
-    // The painted ratio already matches this rect — only the document-space
-    // holes moved (scroll, route restore), so reposition them without an IPC.
+    // Painted ratio already matches — only the document-space holes moved
+    // (scroll, route restore), so reposition without an IPC.
     const fingerprint = serializeVideoMarginRatio(ratio);
     if (
       holeAppliedRef.current &&
@@ -469,20 +461,17 @@ export function useMiniPlayerSurface({
       return Promise.resolve(true);
     }
 
-    const send = sendMarginRatio(marginFingerprintRef, ratio);
-    // Intent is recorded synchronously — this is the fingerprint a later send
-    // supersedes; the stale-send check relies on it.
-    const sentFingerprint = marginFingerprintRef.current;
-    return send.then((applied) => {
-      // Only a verified margin may own the see-through hole, and only while
-      // this send owns the fingerprint — a reject leaves mpv at its previous
-      // rect, and a stale send would cut a hole for a rect mpv no longer paints.
-      if (!applied || marginFingerprintRef.current !== sentFingerprint) return false;
+    // The send records `fingerprint` as intent synchronously — the stale-send
+    // check below relies on that.
+    return sendMarginRatio(marginFingerprintRef, ratio, fingerprint).then((applied) => {
+      // Only a verified margin may own the hole: a reject leaves mpv at its
+      // previous rect, a stale send would cut a hole for a rect mpv no longer paints.
+      if (!applied || marginFingerprintRef.current !== fingerprint) return false;
 
       // A verified apply supersedes any deferred clear left over from an expand.
       cancelDeferredMiniMaskClear();
       holeAppliedRef.current = true;
-      holeFingerprintRef.current = sentFingerprint;
+      holeFingerprintRef.current = fingerprint;
       positionMiniMaskHoles(rect);
       return true;
     });
@@ -504,8 +493,7 @@ export function useMiniPlayerSurface({
     };
 
     window.addEventListener('resize', scheduleSync);
-    // The in-flow mask target lives in document space — inner scroll panes
-    // leave the hole glued in place.
+    // The mask target lives in document space — inner scroll panes move it.
     window.addEventListener('scroll', scheduleSync, { passive: true });
 
     return () => {
@@ -517,7 +505,6 @@ export function useMiniPlayerSurface({
       }
       releaseMasks();
       marginFingerprintRef.current = null;
-      holeFingerprintRef.current = null;
     };
   }, [enabled, applyMiniSurface, releaseMasks]);
 

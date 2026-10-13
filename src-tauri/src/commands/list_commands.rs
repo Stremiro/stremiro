@@ -53,26 +53,17 @@ pub async fn delete_list(app: AppHandle, list_id: String) -> Result<(), String> 
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        // Validate the order index before the first mutation: a corrupt
-        // header must fail without leaving dirty deletes the exit flush
-        // would commit.
+        // Validate the order index before the first mutation — a corrupt header must
+        // fail without leaving dirty deletes the exit flush would commit.
         let mut order = load_lists_order(&store)?;
 
         store.delete(list_meta_key(&list_id));
 
-        // Prefix sweep, not meta enumeration: a corrupt meta has no readable
-        // item_ids, and ids dropped by an earlier partial write leave item
-        // keys the meta no longer lists. The trailing `:` keeps `list_a`
-        // from matching `list_ab`'s items.
+        // Prefix sweep, not meta enumeration — a corrupt meta has no readable
+        // item_ids and partial writes leave unlisted item keys. The trailing `:`
+        // keeps `list_a` from matching `list_ab`'s items.
         let item_prefix = format!("{LIST_ITEM_KEY_PREFIX}{list_id}:");
-        let item_keys: Vec<String> = store
-            .keys()
-            .into_iter()
-            .filter(|key| key.starts_with(&item_prefix))
-            .collect();
-        for key in item_keys {
-            store.delete(key);
-        }
+        store.delete_matching(|key| key.starts_with(&item_prefix));
 
         order.retain(|id| id != &list_id);
         store.set(LISTS_ORDER_KEY, json!(order));
@@ -184,9 +175,8 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
         };
         surviving_ids.push(list_id.clone());
         let mut seen = HashSet::with_capacity(list.item_ids.len());
-        // Read every original row before repairing keys. Swapped ids must
-        // not overwrite an unread row; colliding ids keep the first valid
-        // item, matching backup import's dedupe policy.
+        // Read every original row before repairing keys — swapped ids must not
+        // overwrite an unread row; collisions keep the first valid item (backup import's dedupe policy).
         let items: Vec<MediaItem> = list
             .item_ids
             .iter()
@@ -273,9 +263,7 @@ pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), 
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let current_order = load_lists_order(&store)?;
-        // The stale-snapshot merge rule lives in `reorder_known_ids`: ids the
-        // payload omits are appended in current order instead of being dropped
-        // from the only index `get_lists` reads.
+        // Merge rule lives in `reorder_known_ids` — omitted ids append in current order.
         let new_order = reorder_known_ids(&current_order, list_ids);
 
         store.set(LISTS_ORDER_KEY, json!(new_order));

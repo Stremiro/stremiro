@@ -1,82 +1,61 @@
-import { memo, useMemo } from 'react';
+import { memo } from 'react';
+import { format } from 'date-fns';
 import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
-import { useOnlineStatus } from '@/hooks/use-online-status';
-import {
-  type UpNextEntry,
-  useContinueWatching,
-  useRemoveFromContinueWatching,
-  useUpNextEntries,
-} from '@/hooks/use-media-library';
-import { type WatchProgress } from '@/lib/api';
+import { useLocalDay } from '@/hooks/use-local-day';
+import { useRemoveFromContinueWatching, useResumeRail } from '@/hooks/use-media-library';
+import { type ResumeRailEntry, type WatchProgress } from '@/lib/api';
+import { watchProgressItemKey } from '@/lib/history-playback';
 import { cn } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
-import { watchProgressItemKey } from './profile-collection-rows';
 
-type ResumeRailEntry = { row: WatchProgress; metaLine?: undefined } | UpNextEntry;
+// The "aired in the last week" decision arrives on the row; only labels live here.
+const UP_NEXT_META_LINE = 'Up next';
+const NEW_EPISODE_META_LINE = 'New episode';
 
-// Stable empties keep the merge memo (and the up-next source memo) from
-// recomputing every render while queries load.
-const EMPTY_ROWS: WatchProgress[] = [];
-const EMPTY_UP_NEXT: UpNextEntry[] = [];
+// A stable empty keeps the rail's key-set diff from re-running while loading.
+const EMPTY_ENTRIES: ResumeRailEntry[] = [];
 
-// Up-next cards slot in by recency; the continue-watching order (which
-// demotes low-confidence resumes) is otherwise preserved.
-function mergeByRecency(
-  continueWatching: readonly WatchProgress[],
-  upNext: readonly UpNextEntry[],
-): ResumeRailEntry[] {
-  const merged: ResumeRailEntry[] = [];
-  let next = 0;
-  for (const row of continueWatching) {
-    while (next < upNext.length && upNext[next].row.last_watched > row.last_watched) {
-      merged.push(upNext[next]);
-      next += 1;
-    }
-    merged.push({ row });
-  }
-  return merged.concat(upNext.slice(next));
-}
-
-// Stable callbacks keep the rail's key-set diff from re-running on unrelated
-// renders — inline arrows would rebuild the Set and layout effect each time.
+// Stable callbacks keep the rail's key-set diff from re-running per render.
 const resumeEntryKey = (entry: ResumeRailEntry) => watchProgressItemKey(entry.row);
 
 const renderResumeEntry = (entry: ResumeRailEntry) =>
-  entry.metaLine === undefined ? (
+  entry.isNewEpisode === undefined ? (
     <ResumeCard item={entry.row} />
   ) : (
     <WatchProgressCard
       item={entry.row}
-      metaLine={entry.metaLine}
+      metaLine={entry.isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE}
       playErrorTitle='Failed to open the next episode'
     />
   );
 
 export function ResumeSection() {
-  const isOnline = useOnlineStatus();
-  const { data = EMPTY_ROWS, isLoading, isError, refetch } = useContinueWatching();
-  const { data: upNext = EMPTY_UP_NEXT } = useUpNextEntries(data, {
-    enabled: isOnline && !isLoading,
-  });
-  const entries = useMemo(() => mergeByRecency(data, upNext), [data, upNext]);
+  const localDay = useLocalDay();
+  const {
+    data: entries = EMPTY_ENTRIES,
+    isLoading,
+    isError,
+    isFetched,
+    isFetching,
+    refetch,
+  } = useResumeRail(format(localDay, 'yyyy-MM-dd'), localDay.getTime());
 
-  // A failed read must not collapse silently into "no items" — that hides
-  // the section forever with no recovery path. A failed *refetch* with rows
-  // still cached keeps the stale rail instead: its entries remain playable.
-  if (isError && !isLoading && entries.length === 0) {
+  // A failed read must not collapse into "no items" (hides the section with no
+  // recovery); a failed refetch with cached rows keeps the playable stale rail.
+  if ((isError || (isFetched && isLoading)) && entries.length === 0) {
     return (
       <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>
         <RetryBanner
           message="Couldn't load continue watching — try again."
+          isRetrying={isFetching}
           onRetry={() => void refetch()}
         />
       </div>
     );
   }
 
-  // Hidden until there is something to resume; the profile tab has its own
-  // empty state.
+  // Hidden until there is something to resume.
   if (!isLoading && entries.length === 0) {
     return null;
   }

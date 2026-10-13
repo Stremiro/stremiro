@@ -13,11 +13,13 @@ import {
   useState,
 } from 'react';
 import { useLocation, useMatch, useParams } from 'react-router';
+import { DesktopTitlebar } from '@/components/desktop-titlebar';
+import { RemoteImage } from '@/components/remote-image';
+import { type PlayerRouteState, sanitizePlayerRouteState } from '@/lib/player-navigation';
+import { routeChunks } from '@/lib/route-chunks';
+import { isHttpUrl } from '@/lib/utils';
 
-/**
- * Playback is a root-level session, not a route: /player registers *what* to
- * play; leaving it flips the session to `mini` instead of tearing mpv down.
- */
+/** Playback is a root-level session, not a route — leaving /player flips to `mini` instead of tearing mpv down. */
 
 type PlayerPresentation = 'expanded' | 'mini';
 
@@ -38,7 +40,7 @@ interface PlayerSessionLaunch {
 }
 
 interface PlayerSession extends PlayerSessionLaunch {
-  /** Mirrors the historic InnerPlayer remount key: any coordinate change is a new session. */
+  /** Any coordinate change is a new session (remount key). */
   key: string;
 }
 
@@ -48,15 +50,13 @@ interface PlayerSessionContextValue {
   presentation: PlayerPresentation | null;
   launch: (launch: PlayerSessionLaunch) => void;
   close: () => void;
-  /** Survives remounts, expand/mini flips, and close — a user-docked corner
-      never jumps back to the default. */
+  /** Survives remounts and close — a user-docked corner never jumps back to the default. */
   miniPositionRef: RefObject<MiniPlayerPosition | null>;
 }
 
 const PlayerSessionContext = createContext<PlayerSessionContextValue | null>(null);
 
-// Structural tuple: addon ids carry `:` (`kitsu:1`, `tt1:2:3`), so a joined
-// string could alias two episodes onto one key and skip the remount.
+// Structural tuple — addon ids carry `:` (kitsu:1), so a joined string could alias episodes and skip the remount.
 function buildSessionKey(launch: PlayerSessionLaunch): string {
   return JSON.stringify([
     launch.type ?? null,
@@ -84,8 +84,7 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
 
   const close = useCallback(() => {
     setSession(null);
-    // miniPositionRef deliberately survives — the docked corner is user
-    // preference, so a new session lands where the last was left.
+    // miniPositionRef survives — a new session lands where the last was docked.
   }, []);
 
   const presentation: PlayerPresentation | null = session
@@ -110,15 +109,13 @@ export function usePlayerSession(): PlayerSessionContextValue {
   return context;
 }
 
-/** Route element for /player/*: writes the launch into the session; the
-    root-level host renders the player so it survives route changes. */
+/** Route element for /player/* — writes the launch into the session; the root-level host renders it. */
 export function PlayerRouteRegistrar() {
   const { type, id, season, episode } = useParams();
   const location = useLocation();
   const { launch } = usePlayerSession();
 
-  // Layout effect: the session must be written before paint so PlayerHost
-  // never renders a "no session" frame.
+  // Layout effect — the session must land before paint so PlayerHost never renders a "no session" frame.
   useLayoutEffect(() => {
     launch({ type, id, season, episode, state: location.state, playerPath: location.pathname });
   }, [launch, type, id, season, episode, location.state, location.pathname]);
@@ -126,33 +123,45 @@ export function PlayerRouteRegistrar() {
   return null;
 }
 
-const loadPlayerChunk = () => import('@/pages/player').then((m) => ({ default: m.Player }));
+const LazyPlayer = lazy(() => routeChunks.player().then((m) => ({ default: m.Player })));
 
-const LazyPlayer = lazy(loadPlayerChunk);
-
-/**
- * Kick the player chunk fetch early — stream resolution, resume clicks, and
- * selector opens all predict a mount, so launch is an instant Suspense hit.
- */
+/** Kick the player chunk fetch early so launch is an instant Suspense hit. */
 export function warmPlayerChunk() {
-  void loadPlayerChunk().catch(() => undefined);
+  void routeChunks.player().catch(() => undefined);
 }
 
-function PlayerRouteLoader() {
+function PlayerRouteLoader({ state }: { state: unknown }) {
+  const { backdrop } = sanitizePlayerRouteState(state as PlayerRouteState | null);
   return (
-    <div className='fixed inset-0 z-60 flex h-screen w-screen items-center justify-center bg-black'>
-      <Loader2 className='h-8 w-8 animate-spin text-white/50' />
+    <div className='fixed inset-0 z-60 bg-black'>
+      {isHttpUrl(backdrop) && (
+        <>
+          <RemoteImage
+            src={backdrop}
+            alt=''
+            className='h-full w-full object-cover opacity-50'
+            loading='eager'
+          />
+          <div className='absolute inset-0 bg-black/50 backdrop-blur-xs' />
+        </>
+      )}
+      {/* Same 350ms debounce as the player's loading card — a warm chunk never flashes a spinner. */}
+      <div className='absolute inset-0 flex items-center justify-center animate-in fade-in duration-200 fill-mode-backwards [animation-delay:350ms] motion-reduce:[animation-delay:0ms]'>
+        <Loader2 className='h-8 w-8 animate-spin text-white/50' />
+      </div>
+      <DesktopTitlebar className='bg-linear-to-b from-black/70 via-black/35 to-transparent' />
     </div>
   );
 }
 
-/** Root-level mount for the active session — lives outside the routed outlet
-    so leaving /player minimizes instead of unmounting. */
+/** Root-level mount outside the routed outlet — leaving /player minimizes instead of unmounting. */
 export function PlayerHost() {
   const { session, presentation } = usePlayerSession();
   if (!session) return null;
   return (
-    <Suspense fallback={presentation === 'expanded' ? <PlayerRouteLoader /> : null}>
+    <Suspense
+      fallback={presentation === 'expanded' ? <PlayerRouteLoader state={session.state} /> : null}
+    >
       <LazyPlayer />
     </Suspense>
   );

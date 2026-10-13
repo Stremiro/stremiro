@@ -267,6 +267,10 @@ fn subtitle_merge_dedupes_by_source_identity() {
     assert_eq!(subtitles[0].source_id, addon.id);
     assert_eq!(subtitles[0].source_name, addon.name);
     assert_eq!(subtitles[0].lang.as_deref(), Some("eng"));
+    assert_eq!(
+        serde_json::to_value(&subtitles[0]).unwrap()["selectionKey"],
+        r#"["https://subtitles-addon.test","sub-1","https://subtitles-addon.test/subs/en.srt","eng"]"#
+    );
 }
 
 #[test]
@@ -300,6 +304,14 @@ fn subtitle_merge_preserves_delimiter_containing_identities() {
         );
     }
     assert_eq!(subtitles.len(), 2);
+    assert_eq!(
+        subtitles[0].selection_key,
+        r#"["source|variant","entry","https://subtitles-addon.test/file.srt","eng"]"#
+    );
+    assert_eq!(
+        subtitles[1].selection_key,
+        r#"["source","variant|entry","https://subtitles-addon.test/file.srt","eng"]"#
+    );
 }
 
 #[test]
@@ -317,6 +329,6 @@ fn subtitle_merge_keeps_language_variants_of_same_url() {
     add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle("eng"));
     add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle("English"));
     // Same language in different case is still the same variant.
-    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle("ENG"));
+    add_subtitle_if_unique(&mut subtitles, &mut seen, &addon, subtitle(" ENG "));
     assert_eq!(subtitles.len(), 2);
 }

@@ -60,17 +60,13 @@ export const DEFAULT_LIST_ICON = 'Film';
 
 interface ListIconProps {
   iconId: string;
-  /** Extra Tailwind classes applied to the icon / fallback span */
+  /** Extra Tailwind classes on the icon/fallback span. */
   className?: string;
   /** Pixel size passed to the Lucide icon (default 16) */
   size?: number;
 }
 
-/**
- * Renders a list icon.
- * - If `iconId` matches a known Lucide icon name → renders the SVG icon.
- * - Otherwise falls back to rendering the raw string (legacy emoji support).
- */
+/** Renders a list icon; unknown ids fall back to raw text (legacy emoji support). */
 export function ListIcon({ iconId, className, size = 16 }: ListIconProps) {
   const found = LIST_ICONS.find((i) => i.id === iconId);
 

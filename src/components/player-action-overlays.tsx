@@ -64,7 +64,7 @@ export const PlayerActionOverlays = memo(function PlayerActionOverlays({
         title={`${skipAction.label} (S)`}
         className={cn(
           'relative min-h-11 max-w-full overflow-hidden px-4 py-2.5 text-sm font-semibold rounded-xl',
-          'bg-zinc-950/80 hover:bg-zinc-900/90 text-white backdrop-blur-xl',
+          'bg-zinc-950/80 hover:bg-zinc-900/90 text-white',
           'border border-white/20 hover:border-white/40',
           'shadow-2xl shadow-black/60',
           'flex items-center gap-2 transition-colors duration-150',

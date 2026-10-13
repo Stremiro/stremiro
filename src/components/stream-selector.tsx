@@ -1,7 +1,17 @@
-import { defaultRangeExtractor, type Range, useVirtualizer } from '@tanstack/react-virtual';
-import { ArrowUp, Globe, Magnet, Zap, type LucideIcon } from 'lucide-react';
+import { type Range, useVirtualizer } from '@tanstack/react-virtual';
+import {
+  ArrowUp,
+  Check,
+  CloudCheck,
+  Layers,
+  Link2,
+  Package,
+  Waypoints,
+  type LucideIcon,
+} from 'lucide-react';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  focusedRowRange,
   StreamAddonHealthChips,
   StreamFilterToolbar,
   StreamListEmptyState,
@@ -25,9 +35,9 @@ import {
   type Episode,
   type StreamSelectorSort,
 } from '@/lib/api';
-import { whenRowMounted } from '@/lib/dom';
+import { isEditableTarget, whenRowMounted } from '@/lib/dom';
 import { buildEpisodeStreamTarget, episodeMatchesCoordinates } from '@/lib/episode-stream-target';
-import { episodeProgressKey, getPlayableResumeStartTime } from '@/lib/history-playback';
+import { episodeProgressKey } from '@/lib/history-playback';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import {
   buildStreamMatchBadges,
@@ -36,19 +46,42 @@ import {
   DEFAULT_FILTERS,
   streamMatchTier,
   type StreamMatchBadge,
+  type StreamMatchBadgeKind,
   type StreamMatchTier,
   type StreamReasonChip,
 } from '@/lib/stream-selector-utils';
 import { cn, mediaTypeLabel, nonBlank } from '@/lib/utils';
 
-// Dev-only ranking inspector: `rankDebug` only exists on debug-build
-// payloads, and this gate keeps the branch out of production bundles.
-const isDev = import.meta.env.DEV;
+const MATCH_BADGE_ICONS: Record<StreamMatchBadgeKind, LucideIcon | null> = {
+  episode: Check,
+  range: Layers,
+  season: Package,
+  title: Check,
+  title_partial: null,
+};
 
+// Dot field follows the profile accent ("artwork" target); tiers differ by tint density, not hue, so any accent keeps them distinct.
 const MATCH_DOT_COLORS: Record<StreamMatchTier, string> = {
-  exact: 'rgba(110, 231, 183, 0.5)',
-  episode_range: 'rgba(125, 211, 252, 0.42)',
-  season_pack: 'rgba(252, 211, 77, 0.42)',
+  exact: 'rgb(var(--accent-art-rgb) / 0.5)',
+  episode_range: 'rgb(var(--accent-art-rgb) / 0.34)',
+  season_pack: 'rgb(var(--accent-art-rgb) / 0.24)',
+  title: 'rgb(var(--accent-art-rgb) / 0.42)',
+};
+
+// Mixed toward white so a dark profile accent stays legible on the zinc row.
+const REASON_TONE_CLASS: Record<StreamReasonChip['tone'], string> = {
+  positive: 'font-medium text-[color-mix(in_srgb,var(--accent-act)_70%,white)]',
+  caution: 'font-medium text-amber-200/90',
+  neutral: 'text-zinc-400',
+};
+
+const DELIVERY_TILES: Record<
+  AddonStream['presentation']['deliveryKind'],
+  { Icon: LucideIcon; iconClass: string }
+> = {
+  cached: { Icon: CloudCheck, iconClass: 'text-(--accent-act)' },
+  http: { Icon: Link2, iconClass: 'text-zinc-200' },
+  p2p: { Icon: Waypoints, iconClass: 'text-zinc-500' },
 };
 
 interface StreamItemProps {
@@ -60,8 +93,7 @@ interface StreamItemProps {
   isResolving: boolean;
   onRowFocus: (streamKey: string) => void;
   onSelect: (stream: AddonStream) => void;
-  /** Active sort — the card emphasizes whichever fact ordered it so the
-      ranking reads on the row instead of only in the toolbar. */
+  /** Active sort — the row emphasizes whichever fact ordered it, so the ranking reads on the row. */
   sortMode: StreamSelectorSort;
   stream: AddonStream;
   tabIndex: number;
@@ -77,25 +109,21 @@ interface StreamRowModel {
   recommendationReasons: StreamReasonChip[];
   matchAria: string;
   playableAria: string;
-  SourceIcon: LucideIcon;
-  iconTileClass: string;
+  deliveryTile: (typeof DELIVERY_TILES)[keyof typeof DELIVERY_TILES];
   metaParts: { key: string; className?: string; text: string }[];
 }
 
-// Everything the row derives from `stream` in one pass — memoized per
-// stream identity so flag-only re-renders (resolve/focus/disabled changes)
-// skip the badge builders entirely.
+// Everything the row derives from `stream` in one pass — memoized per stream identity so flag-only re-renders skip the badge builders.
 function buildStreamRowModel(stream: AddonStream): StreamRowModel {
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
-  const isCached = presentation.deliveryKind === 'cached';
-  const isHttp = presentation.deliveryKind === 'http';
   const matchBadges = buildStreamMatchBadges(stream);
-  const deliveryClass = isCached
-    ? 'text-emerald-400/90'
-    : isHttp
-      ? 'text-sky-400/90'
-      : 'text-zinc-500';
+  const deliveryClass =
+    presentation.deliveryKind === 'cached'
+      ? 'text-(--accent-act)'
+      : presentation.deliveryKind === 'http'
+        ? 'text-zinc-300'
+        : 'text-zinc-500';
 
   const metaParts: StreamRowModel['metaParts'] = [];
   if (stream.sourceName) metaParts.push({ key: 'addon', text: stream.sourceName });
@@ -106,9 +134,11 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
   if (presentation.multiAudioLabel)
     metaParts.push({ key: 'multi', text: presentation.multiAudioLabel });
 
+  const sourceName = nonBlank(presentation.sourceName) || 'Unknown';
+
   return {
     isPlayable,
-    sourceName: nonBlank(presentation.sourceName) || 'Unknown',
+    sourceName,
     streamTitle: nonBlank(presentation.streamTitle) || 'Unknown',
     techBadges: buildStreamTechBadges(stream),
     matchBadges,
@@ -117,12 +147,7 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
     matchAria:
       matchBadges.length > 0 ? `, ${matchBadges.map((badge) => badge.label).join(', ')}` : '',
     playableAria: isPlayable ? '' : ', P2P source, not playable in this build',
-    SourceIcon: isCached ? Zap : isHttp ? Globe : Magnet,
-    iconTileClass: isCached
-      ? 'border-emerald-400/20 bg-emerald-400/[0.08] text-emerald-300'
-      : isHttp
-        ? 'border-sky-400/20 bg-sky-400/[0.08] text-sky-300'
-        : 'border-white/[0.08] bg-white/[0.04] text-zinc-400',
+    deliveryTile: DELIVERY_TILES[presentation.deliveryKind],
     metaParts,
   };
 }
@@ -149,10 +174,10 @@ const StreamItem = memo(function StreamItem({
     recommendationReasons,
     matchAria,
     playableAria,
-    SourceIcon,
-    iconTileClass,
+    deliveryTile,
     metaParts,
   } = useMemo(() => buildStreamRowModel(stream), [stream]);
+  const DeliveryIcon = deliveryTile.Icon;
 
   return (
     <div
@@ -163,7 +188,8 @@ const StreamItem = memo(function StreamItem({
         'hover:bg-white/[0.045] hover:border-white/[0.1]',
         'transition-[background-color,border-color,opacity] duration-150 cursor-pointer w-full overflow-hidden',
         !isPlayable && 'opacity-55 saturate-[0.65]',
-        isActive && 'border-emerald-400/30 bg-emerald-400/[0.04]',
+        isActive &&
+          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
         disabled && !isResolving && 'opacity-50',
         isResolving && 'pointer-events-none border-white/[0.16] bg-white/[0.05]',
       )}
@@ -194,7 +220,6 @@ const StreamItem = memo(function StreamItem({
         data-stream-key={stream.streamKey}
         tabIndex={tabIndex}
         aria-label={`Select ${sourceName} stream${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
-        title={`${sourceName}\n${streamTitle}`}
         className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
       />
 
@@ -206,12 +231,13 @@ const StreamItem = memo(function StreamItem({
 
       <div className='relative z-10 flex items-center gap-3 pointer-events-none'>
         <div
-          className={cn(
-            'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border',
-            iconTileClass,
-          )}
+          aria-hidden='true'
+          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
         >
-          <SourceIcon className='h-4 w-4' strokeWidth={2} />
+          <DeliveryIcon
+            className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
+            strokeWidth={1.75}
+          />
         </div>
 
         <div className='flex-1 min-w-0'>
@@ -224,7 +250,7 @@ const StreamItem = memo(function StreamItem({
                 <span
                   key={`${badge.label}:${badge.cls}`}
                   className={cn(
-                    'inline-flex h-[18px] items-center px-1.5 rounded-md border text-[10px] font-semibold tracking-wide leading-none tabular-nums',
+                    'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
                     badge.cls,
                     badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
                   )}
@@ -233,32 +259,26 @@ const StreamItem = memo(function StreamItem({
                 </span>
               ))}
               {isActive && (
-                <span className='inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wider px-2 py-[3px] rounded-md border bg-emerald-400/[0.08] border-emerald-400/25 text-emerald-200 leading-none'>
-                  <span className='h-1 w-1 rounded-full bg-emerald-400 animate-pulse' />
+                <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
+                  <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act) motion-safe:animate-pulse' />
                   Current
                 </span>
               )}
               {!isActive && isLastUsed && (
-                <span
-                  title='The stream this title last played through'
-                  className='inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider text-sky-300/90 leading-none'
-                >
-                  <span className='h-1 w-1 rounded-full bg-sky-400' />
+                <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
+                  <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
                   Last used
                 </span>
               )}
               {!isActive && !isLastUsed && isSameFamily && (
-                <span
-                  title='Same release family as the stream this title last played through'
-                  className='text-[10px] font-medium uppercase tracking-wider text-zinc-500 leading-none'
-                >
+                <span className='text-[11px] font-medium leading-none text-zinc-400'>
                   Same release
                 </span>
               )}
             </div>
           </div>
 
-          <p className='text-[11px] text-zinc-400/80 truncate mt-0.5 leading-snug'>{streamTitle}</p>
+          <p className='text-[11px] text-zinc-400 truncate mt-0.5 leading-snug'>{streamTitle}</p>
 
           <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
             {metaParts.map((part, index) => (
@@ -266,7 +286,7 @@ const StreamItem = memo(function StreamItem({
                 {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
                 <span
                   className={cn(
-                    'text-[10px] font-medium text-zinc-400/75 truncate min-w-0',
+                    'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
                     part.className,
                   )}
                 >
@@ -279,10 +299,8 @@ const StreamItem = memo(function StreamItem({
                 <span className='text-zinc-700 text-[10px]'>·</span>
                 <span
                   className={cn(
-                    'text-[10px] inline-flex items-center gap-0.5 shrink-0',
-                    sortMode === 'seeds'
-                      ? 'text-emerald-300 font-semibold'
-                      : 'text-emerald-400/90 font-medium',
+                    'text-[10.5px] inline-flex items-center gap-0.5 shrink-0',
+                    sortMode === 'seeds' ? 'text-white font-semibold' : 'text-zinc-300 font-medium',
                   )}
                 >
                   <ArrowUp className='w-[9px] h-[9px]' strokeWidth={2.5} />
@@ -293,37 +311,43 @@ const StreamItem = memo(function StreamItem({
           </div>
 
           {(matchBadges.length > 0 || recommendationReasons.length > 0) && (
-            <div className='mt-1.5 flex flex-wrap items-center gap-x-2.5 gap-y-1'>
-              {matchBadges.map((badge) => (
-                <span
-                  key={badge.kind}
-                  className={cn(
-                    'inline-flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-wider leading-none',
-                    badge.textCls,
+            <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
+              {matchBadges.map((badge) => {
+                const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
+                return (
+                  <span
+                    key={badge.kind}
+                    className={cn(
+                      'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
+                      badge.cls,
+                    )}
+                  >
+                    {BadgeIcon && (
+                      <BadgeIcon className='-ml-px h-[11px] w-[11px]' strokeWidth={2.5} />
+                    )}
+                    {badge.label}
+                  </span>
+                );
+              })}
+              {recommendationReasons.map((reason, index) => (
+                <Fragment key={reason.kind}>
+                  {index > 0 && (
+                    <span aria-hidden='true' className='text-[11px] text-zinc-700'>
+                      ·
+                    </span>
                   )}
-                >
-                  <span className={cn('h-1 w-1 rounded-full', badge.dotCls)} />
-                  {badge.label}
-                </span>
-              ))}
-              {recommendationReasons.map((reason) => (
-                <span
-                  key={reason.kind}
-                  className={cn(
-                    'text-[10px] font-medium leading-none',
-                    reason.caution ? 'text-amber-200/70' : 'text-zinc-500',
-                  )}
-                >
-                  {reason.label}
-                </span>
+                  <span
+                    className={cn(
+                      'text-[11px] leading-none',
+                      index === 0 && matchBadges.length > 0 && 'ml-1.5',
+                      REASON_TONE_CLASS[reason.tone],
+                    )}
+                  >
+                    {reason.label}
+                  </span>
+                </Fragment>
               ))}
             </div>
-          )}
-
-          {isDev && stream.rankDebug && (
-            <p className='mt-1 truncate font-mono text-[10px] leading-4 text-white/30'>
-              {stream.rankDebug}
-            </p>
           )}
         </div>
       </div>
@@ -333,7 +357,6 @@ const StreamItem = memo(function StreamItem({
 
 const STREAM_ROW_ESTIMATE_PX = 92;
 const STREAM_ROW_GAP_PX = 6;
-const STREAM_LIST_VIRTUALIZE_THRESHOLD = 40;
 const EMPTY_PACK_EPISODES: Episode[] = [];
 
 interface StreamVirtualListProps {
@@ -341,8 +364,7 @@ interface StreamVirtualListProps {
   activeResolveKey: string | null;
   currentStreamKey?: string;
   lastStreamKey?: string;
-  /** Release family of the last-used pick — the fallback badge when the
-      exact key can't exist (sibling episode) or rotted. */
+  /** Release family of the last-used pick — fallback badge when the exact key can't exist (sibling episode) or rotted. */
   lastStreamFamily?: string;
   handleSelectStream: (stream: AddonStream) => void;
   isAnyResolving: boolean;
@@ -353,8 +375,7 @@ interface StreamVirtualListProps {
   sortMode: StreamSelectorSort;
 }
 
-// Container-virtualized stream rows: a 500-row payload costs ~15 mounted
-// rows; below the threshold it renders directly with no virtualizer overhead.
+// Container-virtualized rows: a 500-row payload costs ~15 mounted rows.
 // Plain function — useVirtualizer helpers are unmemoizable by design.
 function StreamVirtualList({
   streams,
@@ -369,10 +390,6 @@ function StreamVirtualList({
   sortMode,
 }: StreamVirtualListProps) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  // Latched at mount: progressive arrivals crossing the threshold mid-session
-  // would swap every row's DOM under the focused element, killing keyboard
-  // nav. Filter remounts (key) still re-evaluate.
-  const [isVirtualized] = useState(() => streams.length >= STREAM_LIST_VIRTUALIZE_THRESHOLD);
   const streamIndexByKey = useMemo(() => {
     const indices = new Map<string, number>();
     streams.forEach((stream, index) => indices.set(stream.streamKey, index));
@@ -380,9 +397,7 @@ function StreamVirtualList({
   }, [streams]);
   const getItemKey = useCallback((index: number) => streams[index].streamKey, [streams]);
 
-  // Roving tabindex: one tab stop for the whole list; arrows move the stop.
-  // Lands on the currently-playing row, else the last-used pick, else the
-  // first playable row.
+  // Roving tabindex: one tab stop for the list; lands on the playing row, else last-used, else first playable.
   const [focusedStreamKey, setFocusedStreamKey] = useState(() => {
     if (currentStreamKey && streamIndexByKey.has(currentStreamKey)) return currentStreamKey;
     if (lastStreamKey && streamIndexByKey.has(lastStreamKey)) return lastStreamKey;
@@ -391,22 +406,13 @@ function StreamVirtualList({
       streams[0]?.streamKey
     );
   });
-  // Progressive ranking can insert rows before the focused stream. Identity,
-  // not its old index, owns the tab stop and the next arrow-key destination.
+  // Progressive ranking can insert rows before the focused stream — identity, not index, owns the tab stop.
   const matchedFocusedIndex = streamIndexByKey.get(focusedStreamKey ?? '');
   const focusedIndex = matchedFocusedIndex ?? 0;
   const firstStreamKey = streams[0]?.streamKey;
-  // Keep one extra row mounted: scrolling or progressive re-ranking must not
-  // remove the focused button (or the pack picker's return-focus target).
+  // Keep the focused row always mounted — scrolling or re-ranking must not remove it (or the pack picker's return target).
   const rangeExtractor = useCallback(
-    (range: Range) => {
-      const indices = defaultRangeExtractor(range);
-      if (focusedIndex < range.count && !indices.includes(focusedIndex)) {
-        indices.push(focusedIndex);
-        indices.sort((left, right) => left - right);
-      }
-      return indices;
-    },
+    (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
   );
   const virtualizer = useVirtualizer({
@@ -416,16 +422,12 @@ function StreamVirtualList({
     getItemKey,
     rangeExtractor,
     overscan: 8,
-    enabled: isVirtualized,
   });
 
-  // Which row the open-time autofocus targeted — lets a late-resolving
-  // lastStreamKey complete the deferred autofocus below.
+  // Which row open-time autofocus targeted — lets a late-resolving lastStreamKey complete the deferred autofocus.
   const autofocusKeyRef = useRef<string | null>(null);
 
-  // Family fallback badge: only when the exact key isn't listed (sibling
-  // episode / re-digested key). The badge lands on the first family member
-  // in the active list order.
+  // Family fallback badge: only when the exact key isn't listed (sibling episode / re-digested key); lands on the first family member.
   const familyFallbackKey = useMemo(() => {
     if (!lastStreamFamily) return null;
     if (lastStreamKey && streamIndexByKey.has(lastStreamKey)) return null;
@@ -441,15 +443,13 @@ function StreamVirtualList({
     }
   }, [firstStreamKey, matchedFocusedIndex]);
 
-  // A virtual row mounts only after the scroll commit, so the frame after
-  // scrollToIndex can still miss it — retry once before giving up. The
-  // initial pass also scrolls the remembered row into view, which covers
-  // the non-virtualized path (the virtualizer scrolls itself).
+  // A virtual row mounts only after the scroll commit, so the frame after scrollToIndex can still miss it — retry once.
   const scheduleRowFocus = useCallback((streamKey: string, initial: boolean) => {
     whenRowMounted(
       () => scrollRef.current,
       `[data-stream-key="${CSS.escape(streamKey)}"]`,
       (row) => {
+        if (initial && isEditableTarget(document.activeElement)) return;
         row.focus({ preventScroll: initial });
         if (initial) row.scrollIntoView({ block: 'nearest' });
       },
@@ -461,39 +461,28 @@ function StreamVirtualList({
       const stream = streams[index];
       if (!stream) return;
       setFocusedStreamKey(stream.streamKey);
-      if (isVirtualized) {
-        virtualizer.scrollToIndex(index, { align: 'auto' });
-      }
+      virtualizer.scrollToIndex(index, { align: 'auto' });
       scheduleRowFocus(stream.streamKey, false);
     },
-    [isVirtualized, scheduleRowFocus, streams, virtualizer],
+    [scheduleRowFocus, streams, virtualizer],
   );
 
-  // Per-open: focus the remembered row and scroll it into view. Filter
-  // remounts leave pending=false so a chip click never steals focus back.
+  // Per-open: focus the remembered row. Filter remounts leave pending=false so a chip click never steals focus.
   useEffect(() => {
     if (!initialFocusPending) return;
     onInitialFocusDone();
     const streamKey = streams[focusedIndex]?.streamKey;
     if (!streamKey) return;
     autofocusKeyRef.current = streamKey;
-    if (isVirtualized) {
-      virtualizer.scrollToIndex(focusedIndex, { align: 'center' });
-    }
-    // Deliberately not the effect's cleanup: `onInitialFocusDone` flips
-    // `initialFocusPending`, which re-runs this effect and would cancel the
-    // frame it just scheduled. The rAF callback is null-safe after unmount
-    // and self-limits to one retry, so it needs no cancellation.
+    virtualizer.scrollToIndex(focusedIndex, { align: 'center' });
+    // No cleanup — `onInitialFocusDone` re-runs this effect and would cancel the frame it just scheduled.
     scheduleRowFocus(streamKey, true);
-    // focusedIndex intentionally read once at open — later arrow moves must
-    // not retrigger the auto-focus path.
+    // focusedIndex read once at open — later arrow moves must not retrigger auto-focus.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [isVirtualized, onInitialFocusDone, initialFocusPending, scheduleRowFocus, virtualizer]);
+  }, [onInitialFocusDone, initialFocusPending, scheduleRowFocus, virtualizer]);
 
-  // lastStreamKey resolves via a query that can land after mount on a cold
-  // cache. Retarget autofocus onto the last-used row — but only while the
-  // roving stop still sits where autofocus left it: resting focus (opener
-  // trigger, dialog default) is not a user claim.
+  // lastStreamKey can land after mount on a cold cache — retarget autofocus onto the last-used row, but only
+  // while the roving stop still sits where autofocus left it (resting focus is not a user claim).
   useEffect(() => {
     const from = autofocusKeyRef.current;
     if (!lastStreamKey || from === null) return;
@@ -506,8 +495,7 @@ function StreamVirtualList({
     autofocusKeyRef.current = null;
     if (lastStreamKey === from) return;
 
-    // Tabbing to chrome doesn't change the roving stop. Only retarget while
-    // focus still rests on the auto-focused row or the dialog container.
+    // Tabbing to chrome doesn't move the roving stop — retarget only while focus rests on the auto-focused row or container.
     const listEl = scrollRef.current;
     const active = document.activeElement;
     const autoRow = listEl?.querySelector(`[data-stream-key="${CSS.escape(from)}"]`);
@@ -586,48 +574,38 @@ function StreamVirtualList({
   );
 
   return (
-    // Keydown lands here via bubbling from the focused row button — the
-    // container itself is never the interaction target.
+    // Keydown lands here via bubbling from the focused row button — the container is never the target.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <div
       ref={scrollRef}
       role='list'
-      className={cn(
-        'h-full overflow-y-auto overscroll-contain',
-        !isVirtualized && 'p-3 space-y-1.5 pb-6',
-      )}
+      className='h-full overflow-y-auto overscroll-contain'
       onKeyDown={handleListKeyDown}
     >
-      {isVirtualized ? (
-        <div
-          className='relative w-full'
-          // Absolute rows ignore padding: 12px top + 24px bottom insets are
-          // folded into the explicit height (top-3 offsets + trailing space
-          // matching the non-virtualized pb-6).
-          style={{ height: `${virtualizer.getTotalSize() + 36}px` }}
-        >
-          {virtualizer.getVirtualItems().map((virtualRow) => {
-            const stream = streams[virtualRow.index];
-            if (!stream) return null;
-            return (
-              <div
-                key={stream.streamKey}
-                data-index={virtualRow.index}
-                ref={virtualizer.measureElement}
-                className='absolute left-3 right-3 top-3'
-                style={{
-                  transform: `translateY(${virtualRow.start}px)`,
-                  paddingBottom: `${STREAM_ROW_GAP_PX}px`,
-                }}
-              >
-                {renderRow(stream, virtualRow.index)}
-              </div>
-            );
-          })}
-        </div>
-      ) : (
-        streams.map(renderRow)
-      )}
+      <div
+        className='relative w-full'
+        // Absolute rows ignore padding — the 12px top + 24px bottom insets are folded into the explicit height.
+        style={{ height: `${virtualizer.getTotalSize() + 36}px` }}
+      >
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const stream = streams[virtualRow.index];
+          if (!stream) return null;
+          return (
+            <div
+              key={stream.streamKey}
+              data-index={virtualRow.index}
+              ref={virtualizer.measureElement}
+              className='absolute left-3 right-3 top-3'
+              style={{
+                transform: `translateY(${virtualRow.start}px)`,
+                paddingBottom: `${STREAM_ROW_GAP_PX}px`,
+              }}
+            >
+              {renderRow(stream, virtualRow.index)}
+            </div>
+          );
+        })}
+      </div>
     </div>
   );
 }
@@ -672,7 +650,8 @@ export function StreamSelector({
     compactOverview,
     effectiveAddonFilter,
     hasEnabledAddons,
-    episodeProgressMap,
+    episodeProgress,
+    watchedEpisodeCeiling,
     fatalAddonError,
     handleDialogOpenChange,
     handleRequestClose,
@@ -690,6 +669,8 @@ export function StreamSelector({
     refetchStreams,
     resetFilters,
     selectorSessionKey,
+    searchQuery,
+    setSearchQuery,
     setFilters,
     showBatchFilter,
     sortMode,
@@ -707,16 +688,13 @@ export function StreamSelector({
     target,
   });
 
-  // Canonical display coordinates — the header shows the numbering the user
-  // browsed (absolute), not the addon's stream-space remap.
+  // Canonical display coordinates — the header shows the browsed (absolute) numbering, not the addon's stream-space remap.
   const displaySeason = absoluteSeason ?? season;
   const displayEpisode = absoluteEpisode ?? episode;
 
-  // Pack browsing: a playable batch row opens the "inside the pack" episode
-  // picker instead of resolving blind. Reset on close and on session change.
+  // Pack browsing: a playable batch row opens the in-pack episode picker instead of resolving blind.
   const [packStream, setPackStream] = useState<AddonStream | null>(null);
-  // Row that opened the picker — refocused on return. The stream list stays
-  // mounted under the pack overlay, so the element survives the round-trip.
+  // Row that opened the picker — refocused on return; the list stays mounted under the overlay, so the element survives.
   const packReturnFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
     setPackStream(null);
@@ -726,8 +704,7 @@ export function StreamSelector({
   const closePackPicker = useCallback(() => {
     cancelResolve();
     setPackStream(null);
-    // The picker unmounts with focus inside it — hand it back to the pack
-    // row that opened it rather than dropping to <body>.
+    // The picker unmounts with focus inside it — hand focus back to the pack row rather than dropping to <body>.
     requestAnimationFrame(() => packReturnFocusRef.current?.focus());
   }, [cancelResolve]);
 
@@ -752,22 +729,19 @@ export function StreamSelector({
   );
 
   const packProgressFor = useCallback(
-    (ep: Episode) => episodeProgressMap.get(episodeProgressKey(target.id, ep.season, ep.episode)),
-    [episodeProgressMap, target.id],
+    (ep: Episode) => episodeProgress?.[episodeProgressKey(target.id, ep.season, ep.episode)],
+    [episodeProgress, target.id],
   );
 
   const handlePickPackEpisode = useCallback(
     (ep: Episode) => {
       if (!packStream) return;
-      // The selector's own target episode keeps the live/resume getter;
-      // any other episode reads its own saved progress row.
+      // The selector's target episode keeps the live/resume getter; any other episode reads its own progress row.
       const isTargetEpisode = episodeMatchesCoordinates(ep, displaySeason, displayEpisode);
-      const startTime = isTargetEpisode
-        ? getStartTime?.()
-        : getPlayableResumeStartTime(packProgressFor(ep));
+      const savedStartTime = packProgressFor(ep)?.resume_start_time;
       handleSelectStream(packStream, {
         ...buildEpisodeStreamTarget(lookupId, ep),
-        startTime,
+        getStartTime: isTargetEpisode ? getStartTime : () => savedStartTime,
       });
     },
     [
@@ -781,26 +755,22 @@ export function StreamSelector({
     ],
   );
 
-  // Opening the selector predicts a player mount moments later — warm the
-  // lazy chunk now so the transition is an instant Suspense hit.
+  // Opening the selector predicts a player mount — warm the lazy chunk so the transition is an instant Suspense hit.
   useEffect(() => {
     if (open) warmPlayerChunk();
   }, [open]);
 
-  // One-shot row autofocus per open: the flag survives list remounts from
-  // filter changes, so a chip click can't steal focus back to row zero.
+  // One-shot row autofocus per open: the flag survives list remounts from filter changes so a chip click can't steal focus.
   const [listFocusPending, setListFocusPending] = useState(false);
   useEffect(() => {
     if (open) setListFocusPending(true);
   }, [open]);
   const handleInitialFocusDone = useCallback(() => setListFocusPending(false), []);
 
-  // Filter or sort changes drop the list to the top — remounting the virtual
-  // list resets scroll offset and row measurements in one step.
-  const listResetKey = `${qualityFilter}:${sourceFilter}:${batchFilter}:${sortMode}:${effectiveAddonFilter}`;
+  // Filter/sort changes drop the list to the top — remounting resets scroll offset and row measurements in one step.
+  const listResetKey = `${qualityFilter}:${sourceFilter}:${batchFilter}:${sortMode}:${effectiveAddonFilter}:${searchQuery}`;
 
-  // Per-source chips ride the loading state too — the roster snapshot lands
-  // before any stream, so "searching" shows real names instead of skeletons.
+  // Per-source chips ride the loading state too — the roster lands before any stream, so "searching" shows real names.
   const healthChips =
     addonHealthMetrics.length > 0 ? (
       <StreamAddonHealthChips
@@ -829,10 +799,8 @@ export function StreamSelector({
 
       <div className='h-px bg-white/5 shrink-0' />
 
-      {/* Stream list — or the in-selector pack episode picker. The stream
-          tree stays mounted under the pack overlay (`inert` keeps it out of
-          the tab order and a11y tree) so scroll offset, roving tabindex, and
-          virtualizer state survive the round-trip. */}
+      {/* Stream list — or the in-selector pack episode picker. The tree stays mounted under the pack overlay
+          (`inert` drops it from tab order/a11y) so scroll, roving tabindex, and virtualizer state survive. */}
       <div className='relative flex-1 min-h-0 bg-zinc-950'>
         <div className='h-full min-h-0' inert={packStream !== null}>
           {isLoading ? (
@@ -851,8 +819,7 @@ export function StreamSelector({
             <StreamListNoStreamAddonsState />
           ) : streams.length > 0 ? (
             <div className='flex h-full min-h-0 flex-col'>
-              {/* Must stay a bounded flex column: the list below is flex-1, and
-                without min-h-0/flex context it overflows instead of scrolling. */}
+              {/* Must stay a bounded flex column — without min-h-0 the flex-1 list overflows instead of scrolling. */}
               <div
                 className={cn(
                   'flex min-h-0 flex-1 flex-col px-3 pt-3',
@@ -867,7 +834,9 @@ export function StreamSelector({
                   hasActiveFilter={hasActiveFilter}
                   onFiltersChange={setFilters}
                   onResetFilters={resetFilters}
+                  onSearchQueryChange={setSearchQuery}
                   qualityFilter={qualityFilter}
+                  searchQuery={searchQuery}
                   showBatchFilter={showBatchFilter}
                   sortMode={sortMode}
                   sourceFilter={sourceFilter}
@@ -897,10 +866,12 @@ export function StreamSelector({
                   </div>
                 ) : (
                   <StreamListFilteredEmptyState
-                    // A true clear, not resetFilters: the session default
-                    // (`batch: 'episodes'` for series) can itself be the filter
-                    // that emptied the list.
-                    onClearFilters={() => setFilters({ ...DEFAULT_FILTERS })}
+                    searchQuery={searchQuery}
+                    // A true clear, not resetFilters — the session default (`batch: 'episodes'` for series) can itself be the emptying filter.
+                    onClearFilters={() => {
+                      setSearchQuery('');
+                      setFilters({ ...DEFAULT_FILTERS });
+                    }}
                   />
                 )}
               </div>
@@ -922,6 +893,7 @@ export function StreamSelector({
               onBack={closePackPicker}
               onPick={handlePickPackEpisode}
               progressFor={packProgressFor}
+              watchedEpisodeCeiling={watchedEpisodeCeiling}
               stream={packStream}
               targetEpisode={displayEpisode}
               targetSeason={displaySeason}

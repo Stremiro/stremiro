@@ -2,7 +2,7 @@ use super::{
     build_display_year, build_release_date, extract_primary_year, normalize_episode_metadata_list,
     normalize_media_details, normalize_media_item, normalize_title,
 };
-use crate::providers::{Episode, MediaDetails, MediaItem};
+use crate::providers::{Episode, MediaDetails, MediaItem, MediaSeason};
 
 #[test]
 fn title_cleanup_preserves_names_and_bounds_visible_characters() {
@@ -77,6 +77,30 @@ fn normalize_media_item_sets_display_year() {
 }
 
 #[test]
+fn media_item_wire_emits_primary_year_and_ignores_inbound_values() {
+    let item = normalize_media_item(MediaItem {
+        year: Some("Premiered in 2021".to_string()),
+        ..crate::test_helpers::test_media_item("tt1", "series")
+    });
+    let wire = serde_json::to_value(&item).expect("serialize");
+    assert_eq!(wire["primaryYear"], serde_json::json!(2021));
+    // Undated items omit the key entirely rather than emitting null.
+    let undated = serde_json::to_value(crate::test_helpers::test_media_item("tt2", "movie"))
+        .expect("serialize");
+    assert!(undated.get("primaryYear").is_none());
+
+    // Inbound values never land: `skip_deserializing` drops the field and
+    // normalization re-derives it from `year`.
+    let inbound: MediaItem = serde_json::from_value(serde_json::json!({
+        "id": "tt3", "title": "T", "type": "series",
+        "year": "Premiered in 2021", "primaryYear": 1888
+    }))
+    .expect("deserialize");
+    assert_eq!(inbound.primary_year, None);
+    assert_eq!(normalize_media_item(inbound).primary_year, Some(2021));
+}
+
+#[test]
 fn normalize_media_details_normalizes_years_and_episodes() {
     let details = MediaDetails {
         id: "tt123".to_string(),
@@ -122,6 +146,10 @@ fn normalize_media_details_normalizes_years_and_episodes() {
                 stream_episode: None,
             },
         ]),
+        seasons: Some(vec![MediaSeason {
+            number: 1,
+            episode_count: 2,
+        }]),
     };
 
     let normalized = normalize_media_details(details, "kitsu:123");
@@ -211,6 +239,7 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
         genres: None,
         trailers: None,
         episodes: None,
+        seasons: None,
     };
 
     // A full `released` stamp keeps its exact day; without it the year-only
@@ -295,6 +324,10 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         genres: None,
         trailers: None,
         episodes: Some((1..=2).map(episode).collect()),
+        seasons: Some(vec![MediaSeason {
+            number: 1,
+            episode_count: 2,
+        }]),
     };
 
     let normalized = normalize_media_details(details, "tt123");

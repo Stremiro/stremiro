@@ -372,7 +372,7 @@ fn sorts_prefers_episode_match_over_english_wrong_episode() {
 fn language_priority_ignores_unspecified_dub_for_english_pref() {
     let prefs = canonicalize_language_prefs(Some("en"), None);
     let score = |haystack: &str| {
-        stream_language_preference_priority(haystack, prefs, detect_stream_flags(haystack))
+        stream_language_preference_priority(haystack, prefs, detect_stream_flags(haystack), None)
     };
 
     assert_eq!(score("German Dub"), score("German"));
@@ -397,17 +397,88 @@ fn language_priority_tracks_independent_memberships_without_double_counting() {
         ("german", "unknown", "unknown", 0),
         ("english", "en", "", 4),
         ("eng", " EN ", "English", 6),
+        ("japanese audio english subs", "en", "", 0),
+        ("japanese audio english subs", "ja", "en", 6),
+        ("japanese audio english subs", "en", "ja", 1),
+        ("english audio", "en", "en", 4),
+        ("english dub", "en", "en", 4),
+        ("english dubbed", "en", "en", 4),
+        ("english sub", "en", "en", 3),
+        ("english subs", "en", "en", 3),
+        ("english subbed", "en", "en", 3),
+        ("english subtitle", "en", "en", 3),
+        ("english subtitles", "en", "en", 3),
+        ("no time to die 1080p", "no", "", 0),
+        ("hi score girl", "hi", "", 0),
+        ("norwegian audio", "no", "", 4),
+        ("hindi", "hi", "hi", 6),
     ] {
         assert_eq!(
             stream_language_preference_priority(
                 haystack,
                 canonicalize_language_prefs(Some(audio), Some(subtitle)),
                 detect_stream_flags(haystack),
+                None,
             ),
             expected,
             "{haystack}, audio={audio}, subtitle={subtitle}"
         );
     }
+}
+
+#[test]
+fn ranking_language_evidence_excludes_reference_title_words() {
+    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
+    for (title, language, marker) in [
+        ("It Follows", "it", "italian audio"),
+        ("La Casa de Papel", "de", "german audio"),
+    ] {
+        let mut plain = sort_stream("alpha");
+        plain.name = Some(format!("{title} 1080p"));
+        let reference = build_reference_title(Some(title));
+        let inputs = recommendation_inputs(
+            &addon_priorities,
+            &source_health,
+            &stream_family_priorities,
+            None,
+            StreamMatchContext {
+                title: Some(title),
+                ..no_match_context()
+            },
+            Some(language),
+            Some(language),
+        );
+        for (stream, expected) in [
+            (plain.clone(), 0),
+            (
+                AddonStream {
+                    name: Some(format!("{title} 1080p {marker}")),
+                    ..plain
+                },
+                4,
+            ),
+        ] {
+            let key = stream_recommendation_key(
+                &stream,
+                &inputs,
+                reference.as_ref(),
+                canonicalize_language_prefs(Some(language), Some(language)),
+                &mut StreamSignalCache::default(),
+            );
+            assert_eq!(key.language, expected, "{title}, {:?}", stream.name);
+        }
+    }
+}
+
+#[test]
+fn title_initialism_keeps_partial_relevance_without_overlap() {
+    let reference = build_reference_title(Some("Full Metal Alchemist"));
+    let mut stream = sort_stream("alpha");
+    stream.name = Some("FMA 1080p".to_string());
+    assert_eq!(
+        super::stream_title_relevance_score(&stream, "series", reference.as_ref()),
+        2
+    );
 }
 
 #[test]
@@ -839,6 +910,17 @@ fn release_tag_spellings_never_count_as_title_extras() {
         "eng",
         "japanese",
         "jap",
+        "cam",
+        "camrip",
+        "hdcam",
+        "hd-cam",
+        "telesync",
+        "hdts",
+        "hd-ts",
+        "telecine",
+        "hdtc",
+        "screener",
+        "dvdscr",
     ];
     for spelling in FLAG_SPELLINGS {
         for word in tokenize_title_words(&normalize_token_text(spelling), false) {
@@ -877,34 +959,4 @@ fn sorts_titled_final_season_release_below_the_requested_season() {
             None,
         ),
     );
-}
-
-#[test]
-/// Dev ranking inspector: the sort stamps each stream with its full key
-/// dump in debug builds; the field is `skip_serializing_if`-gated so a
-/// release payload can never carry it.
-fn sort_attaches_rank_debug_in_debug_builds() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut streams = vec![sort_stream("alpha")];
-
-    sort_streams_by_recommendation(
-        &mut streams,
-        recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context("Shingeki no Kyojin", 1, 4),
-            None,
-            None,
-        ),
-        &mut StreamSignalCache::default(),
-    );
-
-    if cfg!(debug_assertions) {
-        let dump = streams[0].rank_debug.as_deref().expect("debug rank dump");
-        assert!(dump.contains("ep=") && dump.contains("q=") && dump.contains("size="));
-    } else {
-        assert!(streams[0].rank_debug.is_none());
-    }
 }

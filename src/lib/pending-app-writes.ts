@@ -1,12 +1,7 @@
-// App-level write barrier for native lifecycle points (window close,
-// backup import/export, updater install): each global write owner
-// registers its existing flusher once at module scope, and lifecycle
-// callers await them all without owning any per-owner policy.
+// Write barrier for native lifecycle points (window close, backup, updater install): owners register flushers at module scope; lifecycle awaits them all.
 const pendingAppWriteFlushers = new Set<() => Promise<unknown>>();
 
-// Raw write operations tracked here stay visible to the barrier after their
-// owner unmounts. The barrier snapshots the set when it runs, so a settled
-// failure is dropped by the cleanup and never vetoes a later close.
+// Tracked writes stay visible after their owner unmounts; the barrier snapshots the set, so a settled failure drops out and never vetoes a later close.
 const activeAppWrites = new Set<Promise<unknown>>();
 const activeBarriers = new Set<Set<Promise<unknown>>>();
 
@@ -16,8 +11,7 @@ export function trackPendingAppWrite<T>(write: Promise<T>): Promise<T> {
   const cleanup = () => {
     activeAppWrites.delete(write);
   };
-  // `then(cleanup, cleanup)` observes the rejection — the raw write still
-  // propagates it to its own caller.
+  // `then(cleanup, cleanup)` observes the rejection — the raw write still propagates it.
   void write.then(cleanup, cleanup);
   return write;
 }
@@ -27,8 +21,7 @@ export function registerPendingAppWriteFlusher(flush: () => Promise<unknown>): (
   return () => pendingAppWriteFlushers.delete(flush);
 }
 
-// Strict settle: the barrier waits for every captured write, then rethrows
-// the first rejection instead of swallowing it inside `allSettled`.
+// Strict settle: wait for every write, then rethrow the first rejection instead of swallowing via `allSettled`.
 export async function settlePendingAppWrites(writes: Iterable<Promise<unknown>>): Promise<void> {
   const results = await Promise.allSettled(writes);
   const firstRejected = results.find(

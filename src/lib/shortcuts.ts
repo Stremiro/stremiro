@@ -1,5 +1,4 @@
-// One owner for the key tables: the settings page and the player's `?`
-// overlay render from the same rows so docs can't drift from the bindings.
+// One owner for the key tables — settings page and player `?` overlay render the same rows.
 export interface ShortcutRow {
   label: string;
   keys: string[];
@@ -29,8 +28,7 @@ export const PLAYER_SHORTCUTS: ShortcutRow[] = [
   { label: 'Back / close panel', keys: ['Esc'] },
 ];
 
-// Global bindings from `use-browse-hotkeys` — active on every page outside
-// the player.
+// Global bindings from `use-browse-hotkeys` — active outside the player.
 export const BROWSE_SHORTCUTS: ShortcutRow[] = [
   { label: 'Jump to search', keys: ['/', 'Ctrl+K'] },
   { label: 'Back', keys: ['Esc', 'Backspace', 'Alt+←'] },

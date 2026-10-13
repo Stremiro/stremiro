@@ -4,12 +4,7 @@ import type { PlayerRouteMediaType } from '@/lib/player-navigation';
 import { buildStreamRankingOptions, buildStreamRankingTarget } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
-/**
- * Everything a resolve/recover/prime needs to describe what is playing.
- * Source and canonical coordinates travel together: ranking collapses
- * `absolute ?? source`, the commands route on source coordinates, and
- * `streamLookupId` defaults to `mediaId`.
- */
+/** All the coordinates a resolve/recover/prime needs — ranking collapses `absolute ?? source`, commands route on source, `streamLookupId` defaults to `mediaId`. */
 export interface PlayerStreamRequest {
   mediaId: string;
   mediaType: PlayerRouteMediaType;
@@ -32,8 +27,7 @@ export interface PreferredStreamIdentity {
   streamFamily?: string;
 }
 
-/** The identity refs + URL setter a resolved winner writes through — one
-    shared apply keeps auto-resolve and recovery from drifting. */
+/** Identity refs + URL setter a resolved winner writes through — one shared apply for auto-resolve and recovery. */
 export interface ResolvedStreamSession {
   activeStreamFormatRef: RefObject<string | undefined>;
   activeStreamSourceIdRef: RefObject<string | undefined>;
@@ -70,10 +64,7 @@ interface FailedStreamIdentity extends PreferredStreamIdentity {
   streamUrl?: string;
 }
 
-// One canonical ranking target — the same bundle feeds the resolve and the
-// rank, so call sites can't drift. Source coordinates must ride along: the
-// `absolute ?? source` collapse must match the key the selector used or
-// non-absolute-episode series never cache-hit.
+// One ranking target for resolve + rank — source coords must ride along or the `absolute ?? source` collapse mismatches the selector key.
 export function playerStreamRankingOptions(request: PlayerStreamRequest) {
   return buildStreamRankingOptions(
     buildStreamRankingTarget({
@@ -127,8 +118,7 @@ export function recoverPlayerStream(
     streamSeason: coords.streamSeason,
     streamEpisode: coords.streamEpisode,
     absoluteSeason: coords.absoluteSeason,
-    // Recovery always sends an episode coordinate — the source episode is the
-    // fallback when the canonical one never resolved.
+    // Always send an episode coordinate — source episode is the fallback when the canonical one never resolved.
     absoluteEpisode: coords.absoluteEpisode ?? coords.streamEpisode,
     failedStreamUrl: failed?.streamUrl,
     failedSourceId: failed?.sourceId,
@@ -140,13 +130,7 @@ export function recoverPlayerStream(
   });
 }
 
-/**
- * Seed a caller-resolved stream under the exact key the player's re-resolve
- * computes — `primeBestStream` owns the cache-key contract both sides share.
- *
- * `requestedStreamKey` is the key the player replays: the pick's key for a
- * selector resolve, the winner key for generic resolves.
- */
+/** Seeds under the exact key the player replays — `requestedStreamKey`: pick's key for selector resolves, winner key otherwise. */
 export function primePlayerStream(
   resolved: BestResolvedStream,
   request: PlayerStreamRequest,

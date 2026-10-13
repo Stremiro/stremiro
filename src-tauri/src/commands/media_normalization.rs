@@ -1,5 +1,5 @@
 use super::{normalize_media_image_url, MEDIA_ID_MAX_CHARS, MEDIA_TITLE_MAX_CHARS};
-use crate::providers::{extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem};
+use crate::providers::{extract_primary_year, Episode, MediaDetails, MediaItem};
 use regex::Regex;
 use std::sync::LazyLock;
 
@@ -9,9 +9,8 @@ pub(crate) const MEDIA_DESCRIPTION_MAX_CHARS: usize = 4_096;
 pub(crate) const MEDIA_YEAR_MAX_CHARS: usize = 32;
 pub(crate) const MEDIA_GENRES_MAX: usize = 16;
 pub(crate) const MEDIA_GENRE_MAX_CHARS: usize = 64;
-/// Details-only bounds for pathological meta payloads: response-size caps
-/// already keep these unreachable for honest addons, so they bound hostile
-/// input without ever truncating real catalogs.
+/// Details-only bounds for pathological meta payloads — response-size caps already
+/// keep them unreachable for honest addons, so they bound hostile input only.
 const MEDIA_DETAILS_RATING_MAX_CHARS: usize = 64;
 const MEDIA_DETAILS_CAST_MAX: usize = 64;
 const MEDIA_DETAILS_CAST_NAME_MAX_CHARS: usize = 128;
@@ -21,9 +20,8 @@ const EPISODE_RELEASED_MAX_CHARS: usize = 64;
 const EPISODE_OVERVIEW_MAX_CHARS: usize = 4_096;
 const EPISODE_THUMBNAIL_MAX_CHARS: usize = 2_048;
 
-// `\b` after the day group fails on ISO datetimes (`2024-07-18T00:00:00.000Z` —
-// `8T` is word-to-word), which is exactly the Cinemeta `released` shape; a
-// non-digit terminator accepts it while still rejecting a longer digit run.
+// `\b` after the day fails on ISO datetimes (`2024-07-18T00:00…` — `8T` is
+// word-to-word), the exact Cinemeta `released` shape; a non-digit terminator accepts it.
 static RELEASE_DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})(?:[^\d]|$)").expect("valid release date regex")
 });
@@ -85,9 +83,8 @@ fn bound_string_list(
 ) -> Option<Vec<String>> {
     let bounded: Vec<String> = values
         .unwrap_or_default()
-        .iter()
-        .filter_map(|value| trim_to_max(value, max_chars))
-        .map(trim_bounded_end)
+        .into_iter()
+        .filter_map(|value| bound_optional(Some(value), max_chars))
         .take(max_items)
         .collect();
     (!bounded.is_empty()).then_some(bounded)

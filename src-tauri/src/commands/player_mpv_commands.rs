@@ -1,8 +1,7 @@
-//! Webview-facing mpv surface behind allowlists. The plugin's raw IPC would
-//! let any in-webview script issue the full mpv command language (`run`/`subprocess`,
-//! `screenshot`/`screenshot-to-file` file writes, `loadfile` of arbitrary targets) and init mpv with
-//! unconstrained options (`script`, `include`, `wid`). These commands expose
-//! only the verbs and properties the player UI uses, bound to the invoking window.
+//! Webview-facing mpv surface behind allowlists — the plugin's raw IPC would let any
+//! in-webview script issue the full mpv command language (`run`/`subprocess`,
+//! `loadfile` of arbitrary targets, `screenshot-to-file` writes) and unconstrained
+//! init options. These commands expose only the verbs/properties the player UI uses.
 
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
@@ -35,13 +34,14 @@ const MPV_SETTABLE_PROPERTIES: &[&str] = &[
     "sub-delay",
     "sub-pos",
     "sub-scale",
+    "sub-visibility",
     "http-header-fields",
 ];
 
 /// Properties readable via `get_property`.
 const MPV_READABLE_PROPERTIES: &[&str] = &[
     "time-pos",
-    "demuxer-cache-time",
+    "demuxer-cache-duration",
     "track-list/count",
     "current-tracks/audio/id",
     "current-tracks/sub/id",
@@ -117,10 +117,8 @@ pub async fn player_mpv_set_video_margin_ratio(
     .await
 }
 
-/// Every option here must be verified against the bundled mpv build: the
-/// wrapper DLL wedges instead of erroring on unknown options. The plugin
-/// rejects structurally malformed config before the FFI call, but only
-/// verified names are safe to add.
+/// Every option must be verified against the bundled mpv build — the wrapper DLL
+/// wedges instead of erroring on unknown options. Only verified names are safe to add.
 fn build_player_mpv_config(
     initial_volume: f64,
     initial_muted: bool,
@@ -389,7 +387,7 @@ fn read_playback_position(
     let time_pos = get_property("time-pos").and_then(|value| value.as_f64());
     PlaybackPositionProbe {
         time_pos,
-        buffered_ahead: get_property("demuxer-cache-time").and_then(|value| value.as_f64()),
+        buffered_ahead: get_property("demuxer-cache-duration").and_then(|value| value.as_f64()),
         near_completion: time_pos
             .is_some_and(|position| is_near_completion_watch_progress(position, duration_secs)),
     }

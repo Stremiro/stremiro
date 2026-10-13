@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query';
 
 import { api } from '@/lib/api';
+import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { routeChunks } from '@/lib/route-chunks';
 import {
@@ -17,9 +18,12 @@ interface PrefetchDetailsRouteDataOptions {
   mediaType?: string | null;
 }
 
-// Guard on cached data, not query state: a state entry also exists for a
-// previously failed fetch, and prefetching past it is what makes a
-// transient error retryable instead of blocking until GC evicts it.
+// One bundle invoke per title at a time (in-flight leader pattern): the
+// resolved-data guard can't see an in-flight call, so followers share the leader.
+const detailsPrefetchInFlight = new Map<string, Promise<void>>();
+
+// Guard on cached data, not query state: a failed fetch also leaves a state
+// entry, and prefetching past it keeps a transient error retryable.
 function prefetchQueryOnce(
   queryClient: QueryClient,
   queryKey: readonly unknown[],
@@ -49,26 +53,53 @@ export function prefetchDetailsRouteData(
 
   void routeChunks.details().catch(() => undefined);
 
-  // Card payload only: hover intent must stay cheap. The details route
-  // fetches the full episode payload once on commit.
-  prefetchQueryOnce(queryClient, detailsCardQueryKey(routeType, normalizedId), () =>
-    api.getMediaCardDetails(routeType, normalizedId),
-  );
+  // One IPC warms both reads: the episode-free card payload (hover stays cheap;
+  // the route fetches the full payload on commit) plus the resume snapshot.
+  const detailsKey = detailsCardQueryKey(routeType, normalizedId);
+  const progressKey = titleWatchProgressQueryKey(normalizedId);
+  if (
+    queryClient.getQueryData(detailsKey) !== undefined &&
+    queryClient.getQueryData(progressKey) !== undefined
+  ) {
+    return;
+  }
 
-  // The same resume snapshot feeds the details Continue label, the card
-  // overlay's primary button, and the hero slide — a local read, so warming
-  // it keeps every one of them from flipping Play→Resume after first paint.
-  prefetchQueryOnce(queryClient, titleWatchProgressQueryKey(normalizedId), () =>
-    api.getTitleWatchProgress(normalizedId),
-  );
+  const inFlightKey = `${routeType}:${normalizedId}`;
+  if (detailsPrefetchInFlight.has(inFlightKey)) {
+    return;
+  }
+
+  // Same guard as prefetchQueryOnce, re-checked at write time so a mount-time
+  // fetch that landed first wins. A failed/absent details half leaves the
+  // mounted query's own fetch; a failed bundle leaves no state entry, so the
+  // next hover retries instead of blocking until GC.
+  const progressEpoch = getWatchProgressEpoch();
+  const request = api
+    .getDetailsPrefetchBundle(routeType, normalizedId)
+    .then((bundle) => {
+      if (bundle.details && queryClient.getQueryData(detailsKey) === undefined) {
+        queryClient.setQueryData(detailsKey, bundle.details);
+      }
+      if (
+        progressEpoch === getWatchProgressEpoch() &&
+        queryClient.getQueryData(progressKey) === undefined
+      ) {
+        queryClient.setQueryData(progressKey, bundle.progress);
+      }
+    })
+    .catch(() => undefined)
+    .finally(() => {
+      if (detailsPrefetchInFlight.get(inFlightKey) === request) {
+        detailsPrefetchInFlight.delete(inFlightKey);
+      }
+    });
+  detailsPrefetchInFlight.set(inFlightKey, request);
 }
 
 /**
- * The full details payload (episode list + imdb anchor). The player's
- * episode-mapping gate waits on this for series-like titles, so resume
- * clicks prefetch it in parallel with the playback plan instead of
- * serializing the fetch behind the mount. Movies resolve without episode
- * context and skip the heavier payload entirely.
+ * Full details payload (episodes + imdb anchor) for series-like titles — the
+ * player's episode-mapping gate waits on it, so resume clicks prefetch in
+ * parallel. Movies skip it.
  */
 export function prefetchFullDetailsData(
   queryClient: QueryClient,
@@ -78,14 +109,13 @@ export function prefetchFullDetailsData(
   if (!normalizedId) {
     return;
   }
-  // The kitsu check covers legacy history rows whose saved type predates
-  // the anime type — the backend still routes them through episode mapping.
+  // Legacy kitsu: history rows predate the anime type but still need episode mapping.
   if (!isSeriesLikeMediaType(mediaType) && !normalizedId.startsWith('kitsu:')) {
     return;
   }
 
-  // Legacy kitsu: history rows play through the anime route; the player's
-  // details query keys on the resolved route type, not the saved type.
+  // Legacy kitsu: rows play through the anime route; the player's details query
+  // keys on the resolved route type, not the saved type.
   const routeType = normalizedId.startsWith('kitsu:')
     ? 'anime'
     : resolvePlayerRouteMediaType(mediaType);

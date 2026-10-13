@@ -15,25 +15,25 @@ export function ReleaseNotes({ body, className }: { body?: string | null; classN
   }
 
   return (
-    <div className={cn('space-y-1.5', className)}>
+    <div className={cn('space-y-2', className)}>
       {blocks.map((block) =>
         block.kind === 'heading' ? (
           <p
             key={block.key}
-            className='pt-2 text-[10.5px] font-bold uppercase tracking-[0.14em] text-zinc-500 first:pt-0'
+            className='pt-3 text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500 first:pt-0'
           >
             {block.text}
           </p>
         ) : block.kind === 'bullet' ? (
-          <p key={block.key} className='flex gap-2 text-[13px] leading-relaxed text-zinc-400'>
+          <p key={block.key} className='flex gap-2.5 text-[13px] leading-[1.6] text-zinc-300'>
             <span
               aria-hidden='true'
-              className='mt-[9px] h-1 w-1 shrink-0 rounded-full bg-white/25'
+              className='mt-[9px] h-1 w-1 shrink-0 rounded-full bg-zinc-500'
             />
             <span className='min-w-0'>{block.text}</span>
           </p>
         ) : (
-          <p key={block.key} className='text-[13px] leading-relaxed text-zinc-400'>
+          <p key={block.key} className='text-[13px] leading-[1.6] text-zinc-300'>
             {block.text}
           </p>
         ),

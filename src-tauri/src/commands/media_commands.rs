@@ -5,6 +5,10 @@ use super::{
     normalize_media_id, normalize_stream_media_type, normalize_watch_progress_type,
     playback_state::{PlaybackEpisodeMappingSnapshot, PlaybackStateService},
     streaming_helpers::push_bounded_error,
+    watch_history_commands::{
+        build_title_watch_progress_with_priorities, load_entries_with_source_health,
+        TitleWatchProgress,
+    },
 };
 use crate::providers::{
     addon_resource::{meta_for_shape, AddonResourceClient},
@@ -17,14 +21,11 @@ use std::time::Duration;
 use tauri::{command, AppHandle, State};
 
 const MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT: usize = 6;
-// Per-burst bound on schedule fetches: every item fans out to a full meta
-// fetch (up to `MAX_CATALOG_SOURCES` sources), so one burst stays finite.
-// Requests past the bound are served by sequential bursts — same
-// instantaneous fan-out, no silently dropped titles.
+// Per-burst bound on schedule fetches — every item fans out to a full meta fetch.
+// Requests past the bound are served by sequential bursts; nothing is dropped.
 const MEDIA_SCHEDULE_MAX_ITEMS: usize = 200;
-// Overall batch deadline: with no cap, a few stalled hosts (each up to the
-// provider client timeout) serialize into minutes of fetch time. On expiry
-// the results already collected are returned instead of failing the page.
+// Overall batch deadline — uncapped, stalled hosts serialize into minutes.
+// On expiry the collected results return instead of failing the page.
 const MEDIA_SCHEDULE_FETCH_DEADLINE: Duration = Duration::from_secs(90);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -115,10 +116,8 @@ fn source_coordinates_from_mapping(
     }
 }
 
-/// Cache episode-coordinate mappings and enrich stream targets in one
-/// blocking-pool round-trip. The cache pass returns the snapshots it
-/// resolved, so enrichment applies them directly instead of re-reading the
-/// store once per episode.
+/// Cache episode-coordinate mappings and enrich stream targets in one blocking-pool
+/// round-trip — the cache pass returns resolved snapshots so enrichment reuses them.
 pub(crate) async fn cache_and_enrich_episode_targets(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -141,9 +140,8 @@ pub(crate) async fn cache_and_enrich_episode_targets(
             &episodes,
         ) {
             Ok(snapshots) => snapshots,
-            // A mapping-store failure degrades to payload-derived targets
-            // (the `None` arm below): the details payload stays servable
-            // and streams still resolve.
+            // A mapping-store failure degrades to payload-derived targets —
+            // the details payload stays servable and streams still resolve.
             Err(_error) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Episode mapping cache failed: {_error}");
@@ -243,6 +241,49 @@ pub async fn get_media_details(
     Ok(details)
 }
 
+/// The two reads the details-route prefetch fires per hover/focus, in one IPC.
+/// A details failure degrades to `None`; a store error still fails the bundle.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailsPrefetchBundle {
+    pub details: Option<MediaDetails>,
+    pub progress: TitleWatchProgress,
+}
+
+#[command]
+pub async fn get_details_prefetch_bundle(
+    app: AppHandle,
+    playback_state: State<'_, PlaybackStateService>,
+    client: State<'_, AddonResourceClient>,
+    media_type: String,
+    id: String,
+) -> Result<DetailsPrefetchBundle, String> {
+    let id = normalize_media_id(&id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(&media_type, Some(&id))
+        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?
+        .to_string();
+
+    // The card shape never carries episodes, so details skips the episode-enrichment
+    // hop; the resume read joins the meta fetch with the same source-health join
+    // `get_title_watch_progress` performs so donor merge scores identically.
+    let progress_id = id.clone();
+    let (details, loaded) = tokio::join!(
+        fetch_media_details_inner(&app, &client, &media_type, &id, false),
+        load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
+            service.load_resume_entries_for_media_id(app, &progress_id)
+        })
+    );
+    let (items, source_health_priorities) = loaded?;
+
+    Ok(DetailsPrefetchBundle {
+        details: details.ok(),
+        progress: build_title_watch_progress_with_priorities(
+            items,
+            Some(&source_health_priorities),
+        ),
+    })
+}
+
 #[command]
 pub async fn get_addon_subtitles(
     app: AppHandle,
@@ -291,10 +332,9 @@ pub(crate) async fn fetch_media_schedules(
     client: &AddonResourceClient,
     items: Vec<MediaScheduleRequest>,
 ) -> Result<Vec<MediaSchedule>, String> {
-    // Dedupe fetches on the canonical key, but remember every caller's raw
-    // type per fetch: the frontend indexes results by its own request pair,
-    // and a `series` request with a kitsu id normalizes to `anime` here — so
-    // one canonical fetch must echo one schedule per raw requester.
+    // Dedupe fetches on the canonical key, but remember every caller's raw type —
+    // the frontend indexes by its own request pair and a `series`+kitsu request
+    // normalizes to `anime`, so one fetch must echo a schedule per raw requester.
     let mut fetch_index_by_key: HashMap<String, usize> = HashMap::new();
     let mut normalized_requests: Vec<(Vec<String>, String, String)> =
         Vec::with_capacity(items.len());
@@ -329,9 +369,7 @@ pub(crate) async fn fetch_media_schedules(
     let mut schedules = Vec::new();
     let mut errors = Vec::new();
 
-    // Sequential bursts of MEDIA_SCHEDULE_MAX_ITEMS serve the whole
-    // request while keeping instantaneous fan-out bounded — the constants
-    // above own the rationale.
+    // Sequential bursts keep instantaneous fan-out bounded — constants above own the rationale.
     for chunk in normalized_requests.chunks(MEDIA_SCHEDULE_MAX_ITEMS) {
         let mut pending = stream::iter(chunk.iter().cloned().enumerate().map(
             |(index, (request_types, media_type, id))| {
@@ -345,9 +383,8 @@ pub(crate) async fn fetch_media_schedules(
         ))
         .buffer_unordered(MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT);
 
-        // Collect incrementally under a per-burst deadline so a few stalled
-        // hosts return partial results instead of pinning the calendar view
-        // for the full per-request timeout chain; the next burst still runs.
+        // Incremental collection under a per-burst deadline — stalled hosts return
+        // partial results instead of pinning the page; the next burst still runs.
         let deadline = tokio::time::sleep(MEDIA_SCHEDULE_FETCH_DEADLINE);
         tokio::pin!(deadline);
         let mut outcomes = Vec::new();
@@ -371,9 +408,7 @@ pub(crate) async fn fetch_media_schedules(
         for (_, mut request_types, outcome) in outcomes {
             match outcome {
                 Ok(mut schedule) => {
-                    // Echo each caller's type, not the normalized fetch type.
-                    // The fetched schedule moves into the final echo; only
-                    // earlier aliases pay a clone.
+                    // Echo each caller's raw type, not the normalized fetch type.
                     if let Some(last_type) = request_types.pop() {
                         for request_type in request_types {
                             let mut echo = schedule.clone();
@@ -469,9 +504,8 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
         }
     }
 
-    // A persisted mapping was already checked before the details fetch, and
-    // `cache_episode_mappings` returned snapshots for every current episode —
-    // nothing between the two can have produced a row for this coordinate.
+    // The persisted mapping was checked pre-fetch and `cache_episode_mappings` covered
+    // every current episode — nothing between the two can have produced this row.
     Ok(None)
 }
 

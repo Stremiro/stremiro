@@ -1,6 +1,6 @@
 use super::store_helpers::load_index;
 use super::{normalize_non_empty, DurableStore};
-use crate::providers::MediaItem;
+use crate::providers::{trim_to_max, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
@@ -28,19 +28,17 @@ pub(crate) const LIST_META_KEY_PREFIX: &str = "list:";
 pub(crate) const LIST_ITEM_KEY_PREFIX: &str = "list_item:";
 pub(super) const MAX_LIST_NAME_CHARS: usize = 64;
 pub(super) const MAX_LIST_ICON_CHARS: usize = 16;
-/// Generated ids are `list_<32 lowercase hex>`; the bound leaves headroom
-/// without admitting arbitrary strings. Shared with backup import so the
+/// Generated ids are `list_<32 lowercase hex>` — shared with backup import so the
 /// live and restore paths agree on what fits.
 pub(super) const MAX_LIST_ID_CHARS: usize = 64;
-/// Live bounds on the lists domain — single owner for the command handlers
-/// and backup import so a restore can never exceed what `create_list` or
-/// `add_to_list` would accept.
+/// Live bounds on the lists domain — single owner for commands and backup import so
+/// a restore never exceeds what `create_list`/`add_to_list` accept.
 pub(super) const MAX_LISTS: usize = 128;
 pub(super) const MAX_LIST_ITEMS: usize = 2_000;
 
-/// List ids are app-generated and become store keys (`list:{id}`): opaque
-/// hygiene plus charset + length so a hostile id can't probe or collide onto
-/// another key namespace. Read paths stay lenient for legacy data.
+/// List ids are app-generated and become store keys (`list:{id}`) — charset + length
+/// bound so a hostile id can't probe or collide another key namespace.
+/// Read paths stay lenient for legacy data.
 pub(super) fn normalize_list_id(input: &str) -> Option<String> {
     let id = super::normalize_opaque_field(input)?;
     if id.chars().count() > MAX_LIST_ID_CHARS
@@ -53,19 +51,15 @@ pub(super) fn normalize_list_id(input: &str) -> Option<String> {
     Some(id)
 }
 
-/// Single ingress rule for list names/icons across the live commands and
-/// backup import: trim, drop blank names, cap lengths. The trimmed prefix
-/// always starts with a non-space char, so the bound cannot reintroduce
-/// emptiness.
+/// Single ingress rule for list names/icons across live commands and backup
+/// import: trim, drop blanks, cap lengths — the trimmed prefix can't reintroduce emptiness.
 pub(super) fn normalize_list_name(input: &str) -> Option<String> {
-    normalize_non_empty(input)
-        .map(|name| name.chars().take(MAX_LIST_NAME_CHARS).collect::<String>())
+    trim_to_max(input, MAX_LIST_NAME_CHARS)
 }
 
 pub(super) fn normalize_list_icon(input: Option<&str>) -> String {
     input
-        .and_then(normalize_non_empty)
-        .map(|icon| icon.chars().take(MAX_LIST_ICON_CHARS).collect::<String>())
+        .and_then(|icon| trim_to_max(icon, MAX_LIST_ICON_CHARS))
         .unwrap_or_else(|| "📋".to_string())
 }
 
@@ -77,19 +71,17 @@ pub(super) fn list_item_store_key(list_id: &str, item_id: &str) -> String {
     format!("{}{}:{}", LIST_ITEM_KEY_PREFIX, list_id, item_id)
 }
 
-/// Meta read for the mutation commands: absent or corrupt both fail the
-/// command as "not found" — a corrupt meta has no usable `item_ids` to
-/// mutate anyway.
+/// Meta read for the mutation commands — absent or corrupt both fail as "not found"
+/// (a corrupt meta has no usable `item_ids` anyway).
 pub(super) fn load_list(store: &DurableStore, list_id: &str) -> Result<UserList, String> {
     store
         .get_typed(list_meta_key(list_id))
         .ok_or_else(|| "List not found".to_string())
 }
 
-/// Strict order read through the shared index policy: a missing header is
-/// an empty domain, but a non-array or all-undecodable header is corrupt —
-/// erroring keeps create/delete/import/reorder from rebuilding an empty
-/// index over orphaned `list:*` keys.
+/// Strict order read through the shared index policy — a non-array or
+/// all-undecodable header is corrupt; erroring keeps mutations from rebuilding
+/// an empty index over orphaned `list:*` keys.
 pub(super) fn load_lists_order(store: &DurableStore) -> Result<Vec<String>, String> {
     let raw_order = load_index(store, LISTS_ORDER_KEY)?;
 
@@ -106,9 +98,9 @@ pub(super) fn load_lists_order(store: &DurableStore) -> Result<Vec<String>, Stri
     Ok(order)
 }
 
-/// Shared reorder merge for `reorder_list_items`/`reorder_lists`: the payload
-/// is a reorder, not a delete — omitted ids are appended in current order so
-/// a stale snapshot can't orphan stored keys. O(n+m) via hash sets.
+/// Shared reorder merge for `reorder_list_items`/`reorder_lists`: the payload is a
+/// reorder, not a delete — omitted ids append in current order so a stale snapshot
+/// can't orphan stored keys. O(n+m) via hash sets.
 pub(super) fn reorder_known_ids(current: &[String], requested: Vec<String>) -> Vec<String> {
     let known: HashSet<&str> = current.iter().map(String::as_str).collect();
     let mut seen: HashSet<String> = HashSet::with_capacity(current.len());

@@ -16,8 +16,7 @@ import { prefersReducedMotion, sleep } from '@/lib/utils';
 const FULLSCREEN_VERIFY_ATTEMPTS = 12;
 const FULLSCREEN_VERIFY_DELAY_MS = 50;
 
-// Preserve fullscreen across episode remounts. Native fullscreen restores the
-// window placement; maximized windows must first shed their work-area frame.
+// Module-level so fullscreen state survives episode remounts.
 let desktopFullscreen = false;
 let restoreMaximized = false;
 async function waitForFullscreenState(appWindow: TauriWindow, expected: boolean): Promise<void> {
@@ -143,8 +142,7 @@ export function usePlayerViewportMode(
               restoreMaximized ||= await appWindow.isMaximized();
               try {
                 if (restoreMaximized) await appWindow.unmaximize();
-                // Native fullscreen removes the Windows frame, covers the
-                // monitor's client area and informs the Windows taskbar.
+                // Native fullscreen drops the Windows frame so video covers the taskbar.
                 await appWindow.setFullscreen(true);
                 await waitForFullscreenState(appWindow, true);
                 desktopFullscreen = true;
@@ -208,7 +206,6 @@ export function usePlayerViewportMode(
     let isActive = true;
     let disposeWindowListener: (() => void) | undefined;
     let resizeTimer: ReturnType<typeof setTimeout> | undefined;
-    const initialSyncTimer = window.setTimeout(sync, 0);
     if (appWindow)
       void waitForViewportTransition()
         .then(syncPlayerPip)
@@ -230,16 +227,15 @@ export function usePlayerViewportMode(
     return () => {
       isActive = false;
       ++syncGeneration.current;
-      window.clearTimeout(initialSyncTimer);
       clearTimeout(resizeTimer);
       disposeWindowListener?.();
       document.removeEventListener('fullscreenchange', sync);
     };
   }, [appWindow, syncFullscreenState]);
 
-  expandedRef.current = expanded;
   useEffect(() => {
-    // Docking always restores the window, including an entry still in flight.
+    expandedRef.current = expanded;
+    // Also the mount-time sync. Docking always restores the window, even mid-entry.
     const ready = expanded ? Promise.resolve() : enqueueViewportTransition(exitFullscreenIfNeeded);
     void ready.then(() => syncFullscreenState()).catch(() => undefined);
   }, [expanded, exitFullscreenIfNeeded, syncFullscreenState]);

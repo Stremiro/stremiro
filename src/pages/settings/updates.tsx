@@ -19,6 +19,9 @@ import {
   SettingsGroupHeader,
 } from './chrome';
 
+const UPDATE_STATUS_CHIP_CLASS =
+  'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.04] px-2 py-1 text-[11px] font-semibold text-zinc-300';
+
 function formatReleaseDate(date: string | null | undefined): string | null {
   if (!date) return null;
   const parsed = parseLocalScheduleDate(date);
@@ -57,12 +60,12 @@ export function UpdatesSection() {
           : 'Updates download a signed installer from GitHub Releases and apply it in place.';
 
   const statusChip = isInstalling ? null : updateState.status === 'up-to-date' ? (
-    <span className='inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.04] px-2 py-1 text-[11px] font-semibold text-zinc-300'>
+    <span className={UPDATE_STATUS_CHIP_CLASS}>
       <span className='h-1.5 w-1.5 rounded-full bg-emerald-300/80' />
       Up to date
     </span>
   ) : isUpdateAvailable ? (
-    <span className='inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.04] px-2 py-1 text-[11px] font-semibold text-zinc-300'>
+    <span className={UPDATE_STATUS_CHIP_CLASS}>
       <span className='h-1.5 w-1.5 rounded-full bg-emerald-300' />
       <span className='tabular-nums text-emerald-200'>v{pendingUpdate?.version}</span> ready
     </span>
@@ -79,20 +82,16 @@ export function UpdatesSection() {
           toast.success('Stremiro is up to date');
           return;
         }
-        // The user has now seen this version — mark it so the scheduled
-        // announce card doesn't re-notify the same release.
+        // Mark seen so the scheduled announce card doesn't re-notify this release.
         void markUpdateNotified(update.version).catch(() => undefined);
-        toast.info(`Update ${update.version} is available`, {
-          description: 'Install the latest signed desktop release from GitHub Releases.',
-        });
+        toast.info(`Update v${update.version} is available`);
       })
       .catch((error) => toast.error(`Update check failed: ${getErrorMessage(error)}`));
   };
 
   const handleInstall = () => {
     if (!pendingUpdate) return;
-    // Progress renders in the page (and the announce card when mounted) —
-    // only the failure needs a toast.
+    // Progress renders in the page; only the failure needs a toast.
     void installUpdate(pendingUpdate).catch((error) => {
       toast.error(`Update install failed: ${getErrorMessage(error)}`);
     });
@@ -100,7 +99,9 @@ export function UpdatesSection() {
 
   const handleOpenRelease = () => {
     if (!pendingUpdate) return;
-    void openUrl(appReleaseTagUrl(pendingUpdate.version)).catch(() => undefined);
+    void openUrl(appReleaseTagUrl(pendingUpdate.version)).catch((error) =>
+      toast.error(getErrorMessage(error)),
+    );
   };
 
   return (
@@ -178,22 +179,51 @@ export function UpdatesSection() {
         ) : null}
 
         {pendingUpdate ? (
-          <div className='border-t border-white/[0.06] pt-4'>
-            <div className='flex items-baseline justify-between gap-3'>
+          <div className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'>
+            <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>
               <p className='text-[13px] font-semibold text-white'>
-                What's new in v{pendingUpdate.version}
+                What's new
+                <span className='ml-2 font-medium tabular-nums text-emerald-200'>
+                  v{pendingUpdate.version}
+                </span>
               </p>
               {releaseDate ? (
-                <p className='shrink-0 text-[12px] tabular-nums text-zinc-600'>{releaseDate}</p>
+                <p className='text-[12px] tabular-nums text-zinc-500'>{releaseDate}</p>
               ) : null}
+              <button
+                type='button'
+                onClick={handleOpenRelease}
+                className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+              >
+                View on GitHub
+                <ArrowUpRight className='h-3.5 w-3.5' />
+              </button>
             </div>
-            <div data-selectable='true' className='mt-2 max-h-56 overflow-y-auto pr-1'>
+            <div
+              data-selectable='true'
+              className='max-h-64 overflow-y-auto overscroll-contain px-4 py-3.5'
+            >
               <ReleaseNotes body={pendingUpdate.body} />
             </div>
           </div>
         ) : null}
 
         <div className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'>
+          {pendingUpdate ? (
+            <Button
+              size='sm'
+              onClick={handleInstall}
+              disabled={isInstalling || isChecking}
+              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200'
+            >
+              {isInstalling ? (
+                <Loader2 className='h-3.5 w-3.5 animate-spin' />
+              ) : (
+                <Download className='h-3.5 w-3.5' />
+              )}
+              Update & restart
+            </Button>
+          ) : null}
           <Button
             size='sm'
             variant='outline'
@@ -206,33 +236,8 @@ export function UpdatesSection() {
             ) : (
               <RefreshCw className='h-3.5 w-3.5' />
             )}
-            Check
+            {pendingUpdate ? 'Check again' : 'Check for updates'}
           </Button>
-
-          <Button
-            size='sm'
-            onClick={handleInstall}
-            disabled={!pendingUpdate || isInstalling || isChecking}
-            className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200'
-          >
-            {isInstalling ? (
-              <Loader2 className='h-3.5 w-3.5 animate-spin' />
-            ) : (
-              <Download className='h-3.5 w-3.5' />
-            )}
-            Update & restart
-          </Button>
-
-          {pendingUpdate ? (
-            <button
-              type='button'
-              onClick={handleOpenRelease}
-              className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12.5px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
-            >
-              View release on GitHub
-              <ArrowUpRight className='h-3.5 w-3.5' />
-            </button>
-          ) : null}
         </div>
 
         <p className='text-[12.5px] leading-relaxed text-zinc-500'>{statusNote}</p>

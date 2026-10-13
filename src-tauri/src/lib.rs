@@ -1,6 +1,5 @@
 mod commands;
 mod operational_log;
-mod party;
 mod providers;
 #[cfg(test)]
 mod test_helpers;
@@ -37,8 +36,6 @@ pub fn run() {
         .plugin(tauri_plugin_libmpv::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_deep_link::init())
-        .manage(party::PartyService::default())
         // App-owned durable stores: registry exists before any command runs.
         .manage(commands::DurableStoreRegistry::default())
         .manage(commands::player_window_commands::PlayerPipState::default())
@@ -87,18 +84,6 @@ pub fn run() {
         .manage(AddonTransport::new())
         .manage(SkipTimesProvider::new())
         .invoke_handler(tauri::generate_handler![
-            party::commands::party_create,
-            party::commands::party_join,
-            party::commands::party_inspect_invite,
-            party::commands::party_snapshot,
-            party::commands::party_invite,
-            party::commands::party_leave,
-            party::commands::party_send_chat,
-            party::commands::party_set_display_name,
-            party::commands::party_set_lock,
-            party::commands::party_follow,
-            party::commands::party_report_playback,
-            party::commands::party_match_stream,
             commands::app_update_commands::get_current_app_version,
             commands::app_update_commands::check_for_app_update,
             commands::app_update_commands::install_app_update,
@@ -110,7 +95,8 @@ pub fn run() {
             commands::browse_genre_commands::get_browse_genres,
 
             commands::media_commands::get_media_details,
-            commands::up_next_commands::get_up_next_entries,
+            commands::media_commands::get_details_prefetch_bundle,
+            commands::up_next_commands::get_resume_rail,
             commands::calendar_commands::get_calendar_events,
             commands::media_commands::get_addon_subtitles,
             commands::history_playback_commands::build_history_playback_plan,
@@ -119,7 +105,6 @@ pub fn run() {
             commands::watch_history_commands::save_watch_progress_batch,
             commands::watch_history_commands::set_episodes_watched,
             commands::watch_history_commands::get_watch_history,
-            commands::watch_history_commands::get_continue_watching,
             commands::watch_history_commands::get_watch_progress,
             commands::watch_history_commands::get_title_watch_progress,
             commands::watch_history_commands::get_total_watch_time_secs,
@@ -191,9 +176,6 @@ pub fn run() {
                             &[operational_log::field("error", error)],
                         );
                     }
-                }
-                if let Some(party) = app.try_state::<party::PartyService>() {
-                    party.shutdown();
                 }
             }
         });

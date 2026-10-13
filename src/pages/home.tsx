@@ -33,12 +33,11 @@ export function Home() {
   const isOnline = useOnlineStatus();
   const [genre, setGenre] = useState(ALL_GENRES);
 
-  // Same manifest-driven genre list as the search filter: one source of
-  // truth, and the rail follows whatever the metadata addon declares.
+  // Same manifest-driven genre list as the search filter.
   const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
   const genreOptions = useMemo(
-    // A manifest genre literally named "All" would render a second,
-    // differently-styled tab for the same unfiltered state — drop it.
+    // A manifest genre literally named "All" would render a second tab for the
+    // same unfiltered state — drop it.
     () => [
       ALL_GENRES,
       ...(browseGenres?.movie ?? []).filter((option) => !sameSearchGenre(option, ALL_GENRES)),
@@ -46,8 +45,7 @@ export function Home() {
     [browseGenres],
   );
 
-  // Same key/queryFn/staleTime as the `All` movie row, so hero and row share
-  // one fetch.
+  // Same key/queryFn/staleTime as the `All` movie row — hero and row share one fetch.
   const { data: heroItems, isPending: isHeroPending } = useQuery({
     queryKey: trendingRowQueryKey('movies', 'All'),
     queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
@@ -66,8 +64,8 @@ export function Home() {
       {showHero && <Hero items={heroSlice} />}
 
       {/* Rails overlap the hero's bottom dissolve; the wash ramps across the
-          overlap, then stays solid. Mid-stops keep the ramp smooth enough
-          that it can't band on 8-bit panels (see the ambient layer). */}
+          overlap then stays solid. Mid-stops keep the ramp from banding on
+          8-bit panels (see the ambient layer). */}
       <div
         className={cn(
           'relative z-10 space-y-2',
@@ -86,9 +84,9 @@ export function Home() {
           <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
             <div
               role='status'
-              className='mb-4 flex items-start gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[13px] text-zinc-400'
+              className='mb-4 flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[12.5px] text-zinc-400'
             >
-              <WifiOff aria-hidden='true' className='mt-0.5 h-4 w-4 shrink-0 text-zinc-500' />
+              <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
               <p>You're offline. Reconnect to refresh titles or find streams.</p>
             </div>
           </div>
@@ -118,8 +116,7 @@ export function Home() {
           enabled={isOnline}
         />
 
-        {/* The anime catalog is provider "Animation" series, which also
-            carries western cartoons — the title says what it holds. */}
+        {/* Provider "Animation" series also carries western cartoons — hence the title. */}
         <MediaRow
           title='Trending Animation'
           titleHref='/search?type=anime'

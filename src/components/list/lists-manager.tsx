@@ -30,7 +30,6 @@ import {
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
-import { ListIcon } from '@/components/list/list-icons';
 import { ViewToggle } from '@/components/profile-library-controls';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
@@ -53,6 +52,7 @@ import { notifyAction } from '@/lib/notify';
 
 import { invalidateListQueries, LISTS_QUERY_KEY } from '@/lib/query-invalidation';
 import { cn, isHttpUrl } from '@/lib/utils';
+import { ListIcon } from './list-icons';
 
 const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-1',
@@ -177,8 +177,7 @@ interface SortableItemRowProps {
   viewMode: 'grid' | 'list';
 }
 
-// memo: search keystrokes re-render ListItemsView with the same item objects
-// (structural sharing), so rows not affected by the filter skip rendering.
+// memo: keystrokes re-render the view with the same item objects (structural sharing) — unaffected rows skip rendering.
 const SortableItemRow = memo(function SortableItemRow({
   item,
   listId,
@@ -361,8 +360,7 @@ const SortableItemRow = memo(function SortableItemRow({
   );
 });
 
-// orderedIds resets via the parent SortableListCard's key={list.id} remount
-// and via collapse/expand unmount — there is no key on the usage itself.
+// `orderedIds` resets via `key={list.id}` remount and collapse/expand unmount — no key on the usage itself.
 function ListItemsView({ list }: { list: UserList }) {
   const queryClient = useQueryClient();
 
@@ -372,14 +370,10 @@ function ListItemsView({ list }: { list: UserList }) {
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const [search, setSearch] = useState('');
 
-  // Derive the full item objects from the user's preferred ordering.
-  // • Items removed externally disappear automatically (filter step).
-  // • Items added externally via context-menu appear at the end.
-  // TanStack Query uses structural sharing, so list.items only gets a new
-  // reference when actual data changes — memo recomputes are infrequent.
+  // Derive items from the preferred order — external removals drop out, external adds append.
+  // Structural sharing keeps `list.items` referentially stable, so recomputes are infrequent.
   const orderedItems = useMemo(() => {
-    // `items` is absent on the create-list response; list views always read
-    // through get_lists which populates it.
+    // `items` is absent on create-list response; views always read through `get_lists` which populates it.
     const sourceItems = list.items ?? [];
     const itemMap = new Map(sourceItems.map((i) => [i.id, i]));
     const ordered = orderedIds.flatMap((id) => {
@@ -393,17 +387,13 @@ function ListItemsView({ list }: { list: UserList }) {
 
   const sensors = useSortableSensors();
 
-  // The newest issued order owns cache writes and failure reverts: two
-  // in-flight saves can settle out of order, and a superseded response must
-  // neither roll the cache back nor stomp a newer drag's display order.
+  // Newest issued order owns cache writes and failure reverts — a superseded response must not roll back or stomp a newer drag.
   const latestReorderIdsRef = useRef<string[] | null>(null);
 
   const reorderItems = useMutation({
     mutationFn: (newIds: string[]) => api.reorderListItems(list.id, newIds),
     onSuccess: (_data, newIds) => {
-      // Collapsing a list unmounts this view, and `orderedIds` re-initializes
-      // from `list.item_ids` — mirror the saved order into the cached lists
-      // so a collapse/re-expand doesn't snap back to the pre-drag order.
+      // Collapse unmounts this view and `orderedIds` re-inits from `list.item_ids` — mirror the saved order into cache so re-expand doesn't snap back.
       if (latestReorderIdsRef.current === newIds) {
         queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
           lists?.map((entry) => (entry.id === list.id ? { ...entry, item_ids: newIds } : entry)),
@@ -412,8 +402,7 @@ function ListItemsView({ list }: { list: UserList }) {
       void invalidateListQueries(queryClient);
     },
     onError: (_error, newIds) => {
-      // Revert display order to the freshest persisted order, read from the
-      // cache rather than the render-stale `list` prop.
+      // Revert to the freshest persisted order from the cache, not the render-stale `list` prop.
       if (latestReorderIdsRef.current === newIds) {
         const persisted = queryClient
           .getQueryData<UserList[]>(LISTS_QUERY_KEY)
@@ -444,9 +433,7 @@ function ListItemsView({ list }: { list: UserList }) {
         ? String(over.id).slice(prefix.length)
         : String(over.id);
 
-      // Compute the next order outside the state updater: updaters must be
-      // pure — React may invoke them more than once (Strict Mode double
-      // render), which would double-fire the persistence mutation.
+      // Compute outside the state updater — Strict Mode double-invokes updaters, which would double-fire the mutation.
       const current = orderedItems.map((item) => item.id);
 
       const oldIndex = current.indexOf(activeItemId);
@@ -466,8 +453,7 @@ function ListItemsView({ list }: { list: UserList }) {
     return query ? orderedItems.filter((i) => i.title.toLowerCase().includes(query)) : orderedItems;
   }, [orderedItems, search]);
 
-  // SortableContext diff work keys off this array's identity — keep it
-  // stable between renders that don't change membership.
+  // SortableContext diffs off this array's identity — keep it stable across membership-equal renders.
   const sortableItemIds = useMemo(
     () => filtered.map((i) => `${list.id}::${i.id}`),
     [filtered, list.id],
@@ -596,7 +582,14 @@ export function ListsManager() {
 
   const sensors = useSortableSensors();
 
-  const { data: lists = [], isLoading, isLoadingError, isFetching, refetch } = useLists();
+  const {
+    data: lists = [],
+    isLoading,
+    isLoadingError,
+    isFetched,
+    isFetching,
+    refetch,
+  } = useLists();
 
   const reorderLists = useMutation({
     mutationFn: (ids: string[]) => api.reorderLists(ids),
@@ -656,17 +649,14 @@ export function ListsManager() {
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
 
-  // Non-empty lists confirm through the in-app dialog; empty ones delete
-  // straight away — there is nothing to lose.
+  // Non-empty lists confirm in-app; empty ones delete straight away.
   const [deleteTarget, setDeleteTarget] = useState<UserList | null>(null);
   const handleDeleteConfirm = (list: UserList) => {
     if (list.item_ids.length > 0) {
       setDeleteTarget(list);
       return;
     }
-    // Empty lists delete without the dialog — gate repeat clicks on the
-    // in-flight delete for this list, or a double-click issues a second
-    // request that fails after the first already removed it.
+    // Gate repeat clicks on this list's in-flight delete — a double-click would issue a second request that fails after the first removed it.
     if (deleteList.isPending && deleteList.variables === list.id) return;
     deleteList.mutate(list.id);
   };
@@ -691,7 +681,7 @@ export function ListsManager() {
         </Button>
       </div>
 
-      {isLoading ? (
+      {isLoading && !isFetched ? (
         <div className='space-y-3'>
           {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
             <div
@@ -700,7 +690,7 @@ export function ListsManager() {
             />
           ))}
         </div>
-      ) : isLoadingError ? (
+      ) : isLoadingError || (isFetched && isLoading) ? (
         <RetryBanner
           message="Couldn't load your lists."
           onRetry={() => void refetch()}

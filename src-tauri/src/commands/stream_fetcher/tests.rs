@@ -1,7 +1,8 @@
 use super::{
-    fetch_addon_stream_outcome, source_health_priority_for_addon, summarize_cooldown_skipped_addon,
-    StreamSelectorData, StreamSelectorSnapshot, StreamSelectorStats, StreamSourceStatus,
-    StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
+    fetch_addon_stream_outcome, source_health_priority_for_addon, summarize_addon_outcome,
+    summarize_cooldown_skipped_addon, AddonStreamFetchOutcome, StreamSelectorData,
+    StreamSelectorSnapshot, StreamSelectorStats, StreamSourceStatus, StreamSourceSummary,
+    ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
 use crate::providers::addons::{AddonTransport, StreamDeliveryKind, StreamResolution};
 use crate::test_helpers::{test_addon, test_stream};
@@ -60,6 +61,42 @@ fn summarize_cooldown_skipped_addon_marks_source_offline() {
 }
 
 #[test]
+fn successful_empty_sources_are_no_results_without_hiding_fetch_failures() {
+    for (has_streams, latency_ms, error_message, status) in [
+        (false, 10, None, StreamSourceStatus::NoResults),
+        (false, 5_000, None, StreamSourceStatus::NoResults),
+        (true, 10, None, StreamSourceStatus::Healthy),
+        (true, 5_000, None, StreamSourceStatus::Degraded),
+        (false, 10, Some("fetch failed"), StreamSourceStatus::Offline),
+    ] {
+        let outcome = AddonStreamFetchOutcome {
+            id: "addon-1".to_string(),
+            name: "Example".to_string(),
+            streams: if has_streams {
+                vec![test_stream()]
+            } else {
+                Vec::new()
+            },
+            latency_ms,
+            error_message: error_message.map(str::to_string),
+        };
+        let summary = summarize_addon_outcome(&outcome);
+        assert_eq!(summary.status, status);
+        assert_eq!(summary.stream_count, usize::from(has_streams));
+        assert_eq!(
+            summary.latency_ms,
+            error_message.is_none().then_some(latency_ms)
+        );
+        if status == StreamSourceStatus::NoResults {
+            assert_eq!(
+                serde_json::to_value(summary).unwrap()["status"],
+                "no_results"
+            );
+        }
+    }
+}
+
+#[test]
 fn selector_snapshot_serializes_like_selector_data() {
     // The progressive channel serializes `StreamSelectorSnapshot`, a borrowed
     // mirror of `StreamSelectorData`: if the owned struct gains a field this
@@ -84,16 +121,50 @@ fn selector_snapshot_serializes_like_selector_data() {
         latency_ms: Some(12),
         error_message: None,
     };
+    for (sources, expected) in [
+        (
+            vec![],
+            serde_json::json!({"degraded": 0, "offline": 0, "pending": 0}),
+        ),
+        (
+            vec![StreamSourceSummary {
+                status: StreamSourceStatus::Pending,
+                ..summary.clone()
+            }],
+            serde_json::json!({"degraded": 0, "offline": 0, "pending": 1}),
+        ),
+    ] {
+        let stats = StreamSelectorStats::from_snapshot(&[], &sources);
+        assert_eq!(
+            serde_json::to_value(stats).unwrap()["sourceHealth"],
+            expected
+        );
+    }
 
     for fatal_error_message in [None, Some("boom".to_string())] {
         let owned = StreamSelectorData {
             streams: vec![p2p.clone(), cached.clone(), http.clone()],
-            source_summaries: vec![summary.clone()],
+            source_summaries: [
+                StreamSourceStatus::Degraded,
+                StreamSourceStatus::Offline,
+                StreamSourceStatus::Offline,
+                StreamSourceStatus::Pending,
+                StreamSourceStatus::Pending,
+                StreamSourceStatus::Pending,
+                StreamSourceStatus::Healthy,
+                StreamSourceStatus::NoResults,
+            ]
+            .into_iter()
+            .map(|status| StreamSourceSummary {
+                status,
+                ..summary.clone()
+            })
+            .collect(),
             fatal_error_message,
         };
         let snapshot = StreamSelectorSnapshot {
             streams: &owned.streams,
-            stats: StreamSelectorStats::from_streams(&owned.streams),
+            stats: StreamSelectorStats::from_snapshot(&owned.streams, &owned.source_summaries),
             source_summaries: owned.source_summaries.iter().collect(),
             fatal_error_message: owned.fatal_error_message.as_deref(),
         };
@@ -105,6 +176,7 @@ fn selector_snapshot_serializes_like_selector_data() {
                 "resCounts": {"4k": 0, "1080p": 1, "720p": 1, "sd": 0},
                 "playableCount": 2, "p2pCount": 1, "cachedCount": 1,
                 "batchCount": 1, "episodeLikeCount": 1,
+                "sourceHealth": {"degraded": 1, "offline": 2, "pending": 3},
             })
         );
     }

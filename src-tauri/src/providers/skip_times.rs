@@ -3,15 +3,12 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use urlencoding::encode;
 
-/// A single skippable segment (intro, recap, outro, preview). Serialize-only:
-/// SkipDB payloads decode through `SkipDbSegmentEntry` instead.
+/// One skippable segment (intro/recap/outro/preview); SkipDB decodes via `SkipDbSegmentEntry`.
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct SkipSegment {
     #[serde(rename = "type")]
     pub type_: String,
-    /// Segment start in seconds
     pub start_time: f64,
-    /// Segment end in seconds
     pub end_time: f64,
 }
 
@@ -83,8 +80,8 @@ fn normalize_skip_segments(segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
     merged_segments
 }
 
-/// IMDb ids (`tt` + digits) are the only lookup key SkipDB accepts. Bounded
-/// and normalized once so a malformed id never reaches the outbound query.
+/// IMDb ids (`tt` + digits) are the only lookup key SkipDB accepts — bound and
+/// normalize once so a malformed id never reaches the outbound query.
 pub(crate) fn normalize_imdb_id(input: &str) -> Option<String> {
     let trimmed = input.trim();
     let lowered = trimmed.to_ascii_lowercase();
@@ -103,19 +100,26 @@ pub(crate) struct SkipTimesProvider {
     client: Client,
 }
 
-/// SkipDB responses are small crowdsourced JSON. Bound them before
-/// allocation so a compromised endpoint cannot OOM the app via unbounded
-/// `res.json()` materialization.
+/// Bound crowdsourced JSON before allocation — a compromised endpoint must not OOM the app.
 const SKIP_TIMES_MAX_BYTES: usize = 256 * 1024;
 
 const SKIPDB_SEGMENTS_URL: &str = "https://api.skipdb.tv/api/segments";
+const TRANSIENT_ERROR: &str = "Skip times are temporarily unavailable.";
 
-async fn read_skip_times_body(response: reqwest::Response) -> Result<Vec<u8>, String> {
+async fn read_skip_times_body(
+    response: reqwest::Response,
+) -> Result<Vec<u8>, super::BoundedBodyError> {
     super::read_bounded_body(response, SKIP_TIMES_MAX_BYTES, |_| {
         "Skip-times response too large.".to_string()
     })
     .await
-    .map_err(|error| error.into_message())
+}
+
+fn skip_times_body_failure(error: super::BoundedBodyError) -> Result<SkipTimesResult, String> {
+    match error {
+        super::BoundedBodyError::Read(_) => Err(TRANSIENT_ERROR.to_string()),
+        super::BoundedBodyError::TooLarge(_) => Ok(SkipTimesResult::default()),
+    }
 }
 
 impl SkipTimesProvider {
@@ -133,29 +137,25 @@ impl SkipTimesProvider {
                 .timeout(Duration::from_secs(15))
                 .pool_idle_timeout(Duration::from_secs(60))
                 .build()
-                // Fail closed: a default-client fallback would silently drop
-                // the SSRF redirect policy installed above.
+                // Fail closed: a fallback client would silently drop the SSRF redirect policy.
                 .expect("skip-times HTTP client must build"),
         }
     }
 
-    /// Fetch skippable segments from the SkipDB API (`GET /api/segments`).
-    ///
-    /// `season`/`episode` are sent together (episodes) or omitted together
-    /// (movies). `duration_secs` enables duration matching: `adjust=
-    /// conservative` shifts timestamps earlier to fit this cut — never
-    /// later, so a skip can't land past the content — and `out-of-range`
-    /// entries (a different cut) are dropped.
-    ///
-    /// Always returns an empty result on transport/parse failure: missing
-    /// skip data is a normal crowdsourced condition, not an app error.
+    /// Fetch skippable segments from SkipDB (`GET /api/segments`).
+    /// `season`/`episode` are sent together or omitted together; `duration_secs`
+    /// enables duration matching (`adjust=conservative` only shifts earlier — a
+    /// skip can't land past the content). Definitive answers (data, 4xx, bad
+    /// payload) are `Ok` — missing skip data is a normal crowdsourced condition.
+    /// Transient failures (transport, 429, 5xx) are `Err` so the caller neither
+    /// caches them as "no data" nor skips its retry.
     pub(crate) async fn get_segments(
         &self,
         imdb_id: &str,
         season: Option<u32>,
         episode: Option<u32>,
         duration_secs: Option<f64>,
-    ) -> SkipTimesResult {
+    ) -> Result<SkipTimesResult, String> {
         let mut url = format!("{}?imdb_id={}", SKIPDB_SEGMENTS_URL, encode(imdb_id));
         if let (Some(season), Some(episode)) = (season, episode) {
             url.push_str(&format!("&season={season}&episode={episode}"));
@@ -169,25 +169,26 @@ impl SkipTimesProvider {
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[SkipTimes] SkipDB request error: {}", _e);
-                return SkipTimesResult::default();
+                return Err(TRANSIENT_ERROR.to_string());
             }
         };
 
-        if !res.status().is_success() {
+        let status = res.status();
+        if !status.is_success() {
             #[cfg(debug_assertions)]
-            eprintln!("[SkipTimes] SkipDB HTTP {}", res.status());
-            return SkipTimesResult::default();
+            eprintln!("[SkipTimes] SkipDB HTTP {status}");
+            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+                return Err(TRANSIENT_ERROR.to_string());
+            }
+            return Ok(SkipTimesResult::default());
         }
 
         let bytes = match read_skip_times_body(res).await {
             Ok(bytes) => bytes,
-            Err(_too_large) => {
-                // Oversize crowdsourced payloads degrade to "no data" —
-                // never a playback error — but stay distinguishable in
-                // debug traces from transport/parse failures.
+            Err(error) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] {_too_large}");
-                return SkipTimesResult::default();
+                eprintln!("[SkipTimes] body error");
+                return skip_times_body_failure(error);
             }
         };
         let body: SkipDbSegmentsResponse = match serde_json::from_slice(&bytes) {
@@ -195,20 +196,24 @@ impl SkipTimesProvider {
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("[SkipTimes] SkipDB parse error: {}", _e);
-                return SkipTimesResult::default();
+                return Ok(SkipTimesResult::default());
             }
         };
 
-        SkipTimesResult {
-            segments: normalize_skip_segments(collect_skip_db_segments(body.segments)),
-        }
+        Ok(SkipTimesResult {
+            segments: normalize_skip_segments(collect_skip_db_segments(
+                body.segments,
+                duration_secs,
+            )),
+        })
     }
 }
 
-/// One bad crowdsourced row must not sink the siblings: each slot parses
-/// independently (`serde_json::from_value` per entry), matching the
-/// per-item `filter_map`/`ok()` isolation the other providers use.
-fn collect_skip_db_segments(segments: SkipDbSegments) -> Vec<SkipSegment> {
+/// Per-entry parse isolation: one bad crowdsourced row must not sink the siblings.
+fn collect_skip_db_segments(
+    segments: SkipDbSegments,
+    duration_secs: Option<f64>,
+) -> Vec<SkipSegment> {
     let mut collected = Vec::with_capacity(4);
     for (segment_type, entry) in [
         ("intro", segments.intro),
@@ -216,10 +221,10 @@ fn collect_skip_db_segments(segments: SkipDbSegments) -> Vec<SkipSegment> {
         ("outro", segments.outro),
         ("preview", segments.preview),
     ] {
-        let segment = entry
+        if let Some(segment) = entry
             .and_then(|value| serde_json::from_value::<SkipDbSegmentEntry>(value).ok())
-            .and_then(|entry| entry.into_segment(segment_type));
-        if let Some(segment) = segment {
+            .and_then(|entry| entry.into_segment(segment_type, duration_secs))
+        {
             collected.push(segment);
         }
     }
@@ -232,8 +237,6 @@ impl Default for SkipTimesProvider {
     }
 }
 
-// ─── SkipDB deserialization ──────────────────────────────────────────────────
-
 #[derive(Deserialize)]
 struct SkipDbSegmentsResponse {
     #[serde(default)]
@@ -242,8 +245,7 @@ struct SkipDbSegmentsResponse {
 
 #[derive(Deserialize, Default)]
 struct SkipDbSegments {
-    // Raw `Value` slots so a malformed entry fails its own per-entry parse
-    // instead of the whole `SkipDbSegmentsResponse` decode.
+    // Raw `Value` slots: a malformed entry fails its own parse, not the whole decode.
     intro: Option<serde_json::Value>,
     recap: Option<serde_json::Value>,
     outro: Option<serde_json::Value>,
@@ -253,27 +255,28 @@ struct SkipDbSegments {
 #[derive(Deserialize)]
 struct SkipDbSegmentEntry {
     start_ms: f64,
-    /// Omitted on outro rows that run to the end of the stream. The API
-    /// substitutes the stream duration when one is sent; without it these
-    /// rows carry no usable cut.
+    /// May be omitted on outros: they then run to the end of the stream.
     end_ms: Option<f64>,
-    /// `exact | shifted | agnostic | out-of-range`. Absent on legacy rows —
-    /// treat a missing match as usable rather than dropping real data.
+    /// `exact|shifted|agnostic|out-of-range`; absent on legacy rows — treat missing as usable.
     #[serde(default, rename = "match")]
     match_: Option<String>,
 }
 
 impl SkipDbSegmentEntry {
-    fn into_segment(self, type_: &'static str) -> Option<SkipSegment> {
-        // The closest stored cut differs too much from this stream to shift
-        // reliably — its timestamps would place the skip on the wrong scene.
+    fn into_segment(self, type_: &'static str, duration_secs: Option<f64>) -> Option<SkipSegment> {
+        // An out-of-range match differs too much to shift — its timestamps would land on the wrong scene.
         if self.match_.as_deref() == Some("out-of-range") {
             return None;
         }
+        let end_time = match self.end_ms {
+            Some(end_ms) => end_ms / 1000.0,
+            None if type_ == "outro" => duration_secs?,
+            None => return None,
+        };
         Some(SkipSegment {
             type_: type_.to_string(),
             start_time: self.start_ms / 1000.0,
-            end_time: self.end_ms? / 1000.0,
+            end_time,
         })
     }
 }

@@ -22,10 +22,8 @@ use std::sync::LazyLock;
 use tauri::{command, AppHandle, State};
 
 const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
-/// Shared classify pool: `reqwest::Client` is cheap to clone (Arc-backed) and
-/// reuses keep-alive/TLS sessions across settings opens. The previous form
-/// built and dropped a pool per burst, paying re-handshakes every time an
-/// unclassified addon needed fetching.
+/// Shared classify pool — reuses keep-alive/TLS sessions across settings opens
+/// instead of paying re-handshakes per burst.
 static CLASSIFY_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_provider_http_client(Some(ADDON_CLASSIFY_CONCURRENCY)));
 /// Registry and reorder-payload bound, shared with backup import.
@@ -34,11 +32,10 @@ const MAX_ADDON_CONFIGS: usize = 32;
 /// can't persist unbounded strings.
 const MAX_ADDON_FIELD_CHARS: usize = 256;
 
-/// Backup restore: appends addons whose URL isn't installed yet, under the
-/// same URL normalization and field bounds as `update_addon_configs`. Imported
-/// capability snapshots are dropped — never trusted from outside a server-side
-/// fetch — so the background classifier re-fetches them. Returns the number
-/// of addons added; the caller owns `store.save()`.
+/// Backup restore: appends addons whose URL isn't installed, under the same
+/// normalization and bounds as `update_addon_configs`. Imported capability
+/// snapshots are dropped — never trusted outside a server-side fetch — so the
+/// classifier re-fetches them. Returns addons added; caller owns `store.save()`.
 pub(crate) fn merge_imported_addon_configs(
     store: &DurableStore,
     imported: Vec<AddonConfig>,
@@ -191,9 +188,8 @@ pub async fn save_stream_selector_preferences(
     .await
 }
 
-/// The add flow seeds the URL's host as a placeholder label: only that
-/// fallback is replaced by the fetched manifest name — an explicit custom
-/// or pinned name is never overwritten.
+/// Only the add flow's seeded host-placeholder label is replaced by the fetched
+/// manifest name — an explicit custom or pinned name is never overwritten.
 fn is_host_fallback_name(config: &AddonConfig) -> bool {
     reqwest::Url::parse(&config.url)
         .ok()
@@ -281,9 +277,8 @@ pub(super) async fn classify_missing_addon_capabilities(
     Ok(classified)
 }
 
-/// Reports whether a config gained a snapshot: a still-unreachable addon would
-/// otherwise force a store write plus generation bump on every retry cycle,
-/// invalidating the enabled-registry memo for zero change.
+/// Reports whether a config gained a snapshot — an unreachable addon must not
+/// force a store write + generation bump (registry memo invalidation) per retry.
 fn merge_classified_capabilities(latest: &mut [AddonConfig], classified: Vec<AddonConfig>) -> bool {
     let mut snapshots: std::collections::HashMap<String, AddonManifest> = classified
         .into_iter()

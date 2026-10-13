@@ -6,16 +6,12 @@ import type { WatchProgress } from '@/lib/api';
 import { openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { currentPathWithSearch, navigateApp } from '@/lib/navigation';
 
-// The root-bound navigate — `useNavigate()` here would subscribe every
-// mounted history card to location changes for a function that never varies.
+// Root-bound navigate: useNavigate() would re-subscribe every history card to location changes.
 const boundNavigate: NavigateFunction = (to: To | number, options?: NavigateOptions) => {
   navigateApp(to, options);
 };
 
-// Resume-from-history click: resolves the Rust playback plan before
-// navigating — an async hop the surface can't otherwise show feedback for.
-// The ref guard blocks double-fires while `isPending` powers spinners, and
-// late completion is dropped if the surface unmounted meanwhile.
+// Resume-from-history click: resolves the Rust playback plan before navigating. Ref guard blocks double-fires; late completion is dropped after unmount.
 export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
   const queryClient = useQueryClient();
   const isMountedRef = useMountedRef();

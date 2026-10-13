@@ -20,7 +20,7 @@ use self::stream_health::{
     PLAYBACK_STREAM_FAMILY_INDEX_KEY, PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
 };
 use super::history_helpers::should_skip_watch_progress_save;
-use super::resume_store::ResumeStore;
+use super::resume_store::{ProgressWrite, ResumeStore};
 use super::store_helpers::{clear_index_domain, decode_string_list};
 use super::{normalize_media_id, normalize_watch_progress_type, DurableStore, WatchProgress};
 use crate::providers::lock_or_recover;
@@ -31,14 +31,12 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 pub(super) const PLAYBACK_STATE_STORE_FILE: &str = "playback_state.json";
-/// Health-index prunes scan every indexed entry against the store, so they
-/// run at most once per window instead of on every outcome write; entries
-/// only become stale after ≥30 minutes anyway.
+/// Health-index prunes scan every indexed entry, so they run at most once per
+/// window instead of on every outcome write.
 const HEALTH_PRUNE_MIN_INTERVAL_MS: u64 = 60_000;
-/// Trailing-flush delay for stream-outcome writes: a failover chain records
-/// several outcomes in seconds, and each `save()` serializes the whole
-/// `playback_state.json`. The data is advisory reputation, so the writes
-/// coalesce into one disk flush per burst.
+/// Trailing-flush delay for stream-outcome writes: a failover chain records several
+/// outcomes in seconds and each `save()` serializes the whole `playback_state.json` —
+/// advisory reputation data, so bursts coalesce into one flush.
 const OUTCOME_SAVE_DEBOUNCE_MS: u64 = 750;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,34 +59,29 @@ impl PlaybackStreamOutcomeKind {
     }
 }
 
-/// Shared state carried by `PlaybackStateService` clones — one `Arc` bump
-/// shares every primitive below. `pub(crate)` only because it is the
-/// `Deref` target of a `pub(crate)` type; the fields stay module-private.
+/// Shared state carried by `PlaybackStateService` clones — one `Arc` bump shares
+/// every primitive. `pub(crate)` only as the `Deref` target; fields stay private.
 #[derive(Default)]
 pub(crate) struct PlaybackStateInner {
-    /// In-memory coalescing cache of snapshots already persisted to SQLite;
-    /// generation-gated so a clear/remove can never be resurrected by a
-    /// late writer.
+    /// Coalescing cache of snapshots already persisted to SQLite; generation-gated
+    /// so a clear/remove can never be resurrected by a late writer.
     persisted_history: Mutex<HashMap<String, WatchProgress>>,
     resume_store: Mutex<Option<ResumeStore>>,
     history_generation: AtomicU64,
     source_health_prune_at: AtomicU64,
     stream_family_prune_at: AtomicU64,
-    /// `playback_state.json` is a shared in-memory map, so `set()`-then-`save()`
-    /// sequences are only atomic against each other under this lock. Writers
-    /// must take it before checking `history_generation` and hold it until
-    /// after `save()`, or a racing `clear`/`remove_keys` can delete the
-    /// entries first and then be resurrected by the in-flight writer's save.
+    /// `set()`-then-`save()` on the shared in-memory map is only atomic under this
+    /// lock: writers must hold it from the `history_generation` check until after
+    /// `save()`, or a racing `clear`/`remove_keys` gets resurrected by the save.
     /// Never held across `.await`.
     state_file_write_lock: Mutex<()>,
     /// One pending deferred `playback_state.json` flush at a time.
     state_save_pending: AtomicBool,
 }
 
-/// State shared across Tauri commands. `Clone` shares the same underlying
-/// state, so owned copies can cross into `spawn_blocking` closures while the
-/// async command future keeps its own `State` guard. Deref reaches the inner
-/// primitives directly (`service.resume_store`, not `service.inner.*`).
+/// State shared across Tauri commands. `Clone` shares the underlying state so owned
+/// copies can cross into `spawn_blocking` closures. Deref reaches the inner primitives
+/// directly (`service.resume_store`, not `service.inner.*`).
 #[derive(Default, Clone)]
 pub(crate) struct PlaybackStateService {
     inner: Arc<PlaybackStateInner>,
@@ -115,17 +108,14 @@ impl PlaybackStateService {
         self.history_generation.fetch_add(1, Ordering::SeqCst);
     }
 
-    /// Serializes `playback_state.json` mutation sections — the
-    /// generation-check-to-save contract lives on `state_file_write_lock`.
+    /// Serializes `playback_state.json` mutations — the generation-check-to-save contract lives on this lock.
     fn lock_state_file_write(&self) -> std::sync::MutexGuard<'_, ()> {
         lock_or_recover(&self.state_file_write_lock)
     }
 
-    /// Trailing flush for `record_stream_outcome`: mutations already live in
-    /// the shared in-memory map, so one pending timer collapses an outcome
-    /// burst into a single disk write. The flush re-opens the store and
-    /// serializes the *current* map — including any clear that landed since —
-    /// under the same write lock, so it can never resurrect stale entries.
+    /// Trailing flush for `record_stream_outcome`: one pending timer collapses an
+    /// outcome burst into a single disk write. The flush serializes the *current*
+    /// map under the write lock, so it can never resurrect stale entries.
     fn schedule_state_file_save(&self, app: &AppHandle) {
         if self.state_save_pending.swap(true, Ordering::SeqCst) {
             return;
@@ -167,16 +157,11 @@ impl PlaybackStateService {
         app: &AppHandle,
         operation: impl FnOnce(&mut ResumeStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        // rusqlite is blocking: keep the critical section to open + one
-        // operation. The 5s busy_timeout plus WAL serializes writers, and the
-        // connection never crosses an `.await` boundary. All callers run on the
-        // dedicated blocking pool via `run_blocking_store_op`, never a bare
-        // async worker.
+        // rusqlite is blocking: critical section is open + one operation, the
+        // connection never crosses `.await`. All callers run on the blocking pool
+        // via `run_blocking_store_op`, never a bare async worker.
         let mut guard = lock_or_recover(&self.resume_store);
 
-        // `initialize_resume_store` does blocking filesystem + SQLite work;
-        // every caller is a Tauri command routed through
-        // `run_blocking_store_op`, never a bare async worker.
         let resume_store = match guard.as_mut() {
             Some(store) => store,
             None => guard.insert(self.initialize_resume_store(app)?),
@@ -196,27 +181,30 @@ impl PlaybackStateService {
         ResumeStore::open_or_quarantine(&app_dir.join("playback_resume.sqlite3"))
     }
 
-    /// Drop saves superseded by clear/remove/import, checking again under
-    /// the resume mutex next to the SQLite write so the read/write gap cannot
-    /// resurrect rows.
+    /// Drops saves superseded by clear/remove/import — re-checks the generation under
+    /// the resume mutex next to the SQLite write so the read/write gap can't resurrect rows.
     pub(crate) fn track_progress_guarded(
         &self,
         app: &AppHandle,
-        key: &str,
-        progress: &WatchProgress,
+        key: String,
+        progress: WatchProgress,
         expected_generation: u64,
-    ) -> Result<bool, String> {
+    ) -> Result<(), String> {
         if self.history_generation() != expected_generation {
-            return Ok(false);
+            return Ok(());
         }
 
         self.with_resume_store(app, |resume_store| {
             if self.history_generation() != expected_generation {
-                return Ok(false);
+                return Ok(());
             }
-            // `false` also means the upsert's recency guard suppressed the
-            // write: callers must not mark the in-memory snapshot persisted.
-            resume_store.upsert_progress(key, progress)
+            // Mark under the resume lock to keep the cache in commit order; a recency-guarded no-op marks nothing.
+            if let ProgressWrite::Written { pruned } =
+                resume_store.upsert_progress(&key, &progress)?
+            {
+                self.mark_history_persisted([(key, progress)], pruned, expected_generation);
+            }
+            Ok(())
         })
     }
 
@@ -239,25 +227,27 @@ impl PlaybackStateService {
 
     pub(crate) fn mark_history_persisted(
         &self,
-        key: String,
-        progress: WatchProgress,
+        entries: impl IntoIterator<Item = (String, WatchProgress)>,
+        pruned: bool,
         expected_generation: u64,
     ) {
         let mut persisted = lock_or_recover(&self.persisted_history);
-        // A clear/remove can finish between the SQLite write and this lock.
-        // Never reinstall its deleted snapshot into the coalescing cache.
+        // A clear/remove can land between the SQLite write and this lock — never reinstall its deleted snapshot.
         if self.history_generation() != expected_generation {
             return;
         }
-        persisted.insert(key, progress);
+        if pruned {
+            // Pruning deleted rows this cache may still hold — a stale snapshot would suppress re-saves.
+            persisted.clear();
+            return;
+        }
+        persisted.extend(entries);
         Self::prune_cached_history(&mut persisted);
     }
 
     fn prune_cached_history(cached: &mut HashMap<String, WatchProgress>) {
-        // Bound in-memory coalescing cache alongside the SQLite global cap so
-        // long sessions cannot grow it without limit. Eviction matches the DB
-        // order (newest `last_watched`, then `history_key`) and only runs on
-        // overflow; a dropped entry self-heals via an extra DB read.
+        // Bound alongside the SQLite cap; eviction matches the DB order (newest
+        // `last_watched`, then `history_key`). A dropped entry self-heals via an extra DB read.
         const MAX_CACHED_HISTORY: usize = 2_000;
         if cached.len() <= MAX_CACHED_HISTORY {
             return;
@@ -322,45 +312,24 @@ impl PlaybackStateService {
             return Ok(0);
         }
 
-        // Bump before the merge so a save racing the import either lands
-        // fully before (recency-guarded) or drops on the generation check,
-        // and after so saves starting during the slow merge drop instead of
-        // resurrecting cleared rows. Mirrors remove_keys/clear.
+        // Bump before the merge so a racing save lands fully before (recency-guarded)
+        // or drops on the generation check. Mirrors remove_keys/clear.
         self.bump_history_generation();
         let start_generation = self.history_generation();
-        let imported_entries = self.with_resume_store(app, |resume_store| {
+        // Mark only rows actually written: recency-skipped entries must not pollute
+        // the coalescing cache, or future saves compare against a snapshot that
+        // never reached the database.
+        let imported = self.with_resume_store(app, |resume_store| {
             if self.history_generation() != start_generation {
-                return Ok(Vec::new());
+                return Ok(0);
             }
-            resume_store.merge_entries(entries)
+            let (imported_entries, pruned) = resume_store.merge_entries(entries)?;
+            let imported = imported_entries.len();
+            self.mark_history_persisted(imported_entries, pruned, start_generation);
+            Ok(imported)
         })?;
-        let imported = imported_entries.len();
-        if imported == 0 {
-            self.bump_history_generation();
-            return Ok(0);
-        }
-
-        // Mark only rows actually written: skipped-by-recency entries must
-        // not pollute the coalescing cache, or future saves compare against
-        // a snapshot that never reached the database. Bulk insert with a
-        // single prune so a 10k import does not pay per-row scans.
-        {
-            let mut persisted = lock_or_recover(&self.persisted_history);
-            // A racing clear/remove bumps the generation before it takes
-            // this lock to wipe `persisted_history`, so an unchanged
-            // generation here proves no wipe ran since the merge — without
-            // the check, ghost "persisted" snapshots would make
-            // `should_skip_history_write` drop post-clear re-saves.
-            if self.history_generation() == start_generation {
-                for (key, progress) in imported_entries {
-                    persisted.insert(key, progress);
-                }
-                Self::prune_cached_history(&mut persisted);
-            }
-        }
-        // The post-merge bump runs after marking so the check above still
-        // sees `start_generation`; it lands before this call returns,
-        // dropping saves that started mid-merge.
+        // Post-merge bump runs after marking so the check above still sees
+        // `start_generation`; it drops saves that started mid-merge.
         self.bump_history_generation();
 
         Ok(imported)
@@ -379,16 +348,14 @@ impl PlaybackStateService {
             return Ok(());
         }
 
-        // Bump before the delete so a save that already passed its generation
-        // check cannot slip a write between the check and this delete.
+        // Bump before the delete so a checked save can't slip a write in between.
         self.bump_history_generation();
         self.with_resume_store(app, |resume_store| resume_store.remove_keys(keys))?;
         // Fence writes that captured the generation while the delete was running.
         self.bump_history_generation();
 
-        // Source-health pruning belongs to the outcome writers — no health
-        // record is keyed to these history rows, and a failed `playback_state.json`
-        // open here would have left the deleted snapshots suppressing re-saves.
+        // Source-health pruning belongs to the outcome writers — no health record is
+        // keyed to these history rows.
         let mut persisted = lock_or_recover(&self.persisted_history);
         for key in keys {
             persisted.remove(key);
@@ -398,24 +365,22 @@ impl PlaybackStateService {
     }
 
     pub(crate) fn clear(&self, app: &AppHandle) -> Result<(), String> {
-        // Double-bump around the delete: the post-delete bump runs before the
-        // slow file/store work so a save starting during that IO still drops.
-        self.bump_history_generation();
-        self.with_resume_store(app, |resume_store| resume_store.clear())?;
-        self.bump_history_generation();
-
-        // Wipe the coalescing cache in a scoped lock before the JSON work: a
-        // store open/save failure must not leave deleted snapshots in place
-        // to suppress re-saves. Never held across store IO.
+        // A failed JSON open must not leave cached snapshots suppressing re-saves.
         {
             let mut persisted = lock_or_recover(&self.persisted_history);
             persisted.clear();
         }
 
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
-        // Writers hold this lock across their generation check + mutation +
-        // save, so these deletes can't be raced by an in-flight writer that
-        // already passed its check.
+        // Double-bump around the delete so a save starting during the slow IO still drops.
+        self.bump_history_generation();
+        self.with_resume_store(app, |resume_store| resume_store.clear())?;
+        self.bump_history_generation();
+        // A save may have refilled the cache during the JSON preflight.
+        lock_or_recover(&self.persisted_history).clear();
+
+        // Writers hold this lock across check + mutation + save, so these deletes
+        // can't be raced by an in-flight writer past its check.
         let _state_file_guard = self.lock_state_file_write();
 
         clear_index_domain(
@@ -444,9 +409,8 @@ fn playback_title_scope_key(media_type: Option<&str>, media_id: Option<&str>) ->
     Some(format!("{}:{}", media_type, media_id))
 }
 
-/// Evict oldest index entries past `cap`, by each snapshot's `updated_at`.
-/// Keeps the freshest entries so active titles survive while browsing many
-/// cannot grow the store without bound.
+/// Evicts oldest index entries past `cap` by each snapshot's `updated_at` — keeps
+/// the freshest entries so browsing can't grow the store without bound.
 fn prune_index_to_cap(
     store: &DurableStore,
     index: &mut Vec<String>,
@@ -515,12 +479,9 @@ fn merge_sorted_unique(index: &mut Vec<String>, mut values: Vec<String>) -> bool
     changed
 }
 
-/// Read-only index load: every mutation path re-sets the index it changed,
-/// so a read (e.g. preferred-title-source inside selector ranking) must not
-/// pay a full store write to materialize an empty index. Advisory data —
-/// source health, stream families, mappings, language prefs — degrades to
-/// an empty index rather than erroring; `store_helpers::load_index` is the
-/// strict counterpart for domains where corrupt must surface.
+/// Read-only index load: mutation paths re-set the index they changed, so a read
+/// must not pay a store write to materialize an empty index. Advisory data degrades
+/// to empty rather than erroring; `store_helpers::load_index` is the strict counterpart.
 fn load_advisory_index(store: &DurableStore, index_key: &str) -> Vec<String> {
     store
         .get(index_key)

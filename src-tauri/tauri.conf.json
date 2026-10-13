@@ -52,13 +52,6 @@
     ]
   },
   "plugins": {
-    "deep-link": {
-      "desktop": {
-        "schemes": [
-          "stremiro"
-        ]
-      }
-    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ0NjZDRDdFMzZGQjM2RTMKUldUak52czJmczFtUk0xR3p3ZWRiekRWTWZGeURqbHVaaEJNajVDOGFtSVZVOXdoWG5LVXpFZlEK",
       "endpoints": [

@@ -84,11 +84,11 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
             calls.borrow_mut().push(name.to_string());
             match name {
                 "time-pos" => time_pos.clone(),
-                "demuxer-cache-time" => buffered_ahead.clone(),
+                "demuxer-cache-duration" => buffered_ahead.clone(),
                 _ => panic!("unexpected native property {name}"),
             }
         });
-        assert_eq!(*calls.borrow(), ["time-pos", "demuxer-cache-time"]);
+        assert_eq!(*calls.borrow(), ["time-pos", "demuxer-cache-duration"]);
         assert_eq!(
             serde_json::to_value(probe).unwrap(),
             json!({
@@ -134,7 +134,7 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
         assert!(!config.observed_properties.contains_key("time-pos"));
         assert!(!config
             .observed_properties
-            .contains_key("demuxer-cache-time"));
+            .contains_key("demuxer-cache-duration"));
         // The wrapper wedges on malformed init payloads instead of erroring —
         // the built config must always pass the plugin's pre-FFI validator.
         tauri_plugin_libmpv::validate_mpv_config(&config).unwrap();
@@ -227,6 +227,8 @@ fn property_batches_validate_every_entry_and_bound_native_work() {
         ["sub-delay", 0.2],
         ["sub-pos", 90],
         ["sub-scale", 1.1],
+        ["sub-visibility", false],
+        ["sub-visibility", true],
         ["http-header-fields", ""]
     ]))
     .unwrap();

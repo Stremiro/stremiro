@@ -13,8 +13,7 @@ export interface NextEpisodeStreamCoordinates {
   absoluteEpisode: number;
 }
 
-// Blank addon IDs count as missing — mirrors Rust `non_blank_opt`, which
-// rejects whitespace-only values but keeps the raw string otherwise.
+// Blank addon IDs count as missing — mirrors Rust `non_blank_opt`.
 const nonEmpty = (value?: string) => (value && value.trim() ? value : undefined);
 
 export function buildEpisodeStreamTarget(
@@ -30,9 +29,7 @@ export function buildEpisodeStreamTarget(
   };
 }
 
-/** Canonical `season`+`episode` match — one predicate owner so find/findIndex/
-    boolean sites across pages can't drift on which fields compare. Undefined
-    coordinates never match (episode numbers collide across seasons). */
+/** Canonical `season`+`episode` match; undefined coordinates never match (episode numbers collide across seasons). */
 export function episodeMatchesCoordinates(
   candidate: Pick<Episode, 'season' | 'episode'>,
   season: number | undefined,
@@ -46,9 +43,7 @@ export function episodeMatchesCoordinates(
   );
 }
 
-/** Stream-target equality on all four coordinates — absolute (user-facing)
-    and stream-space (addon remap) alike. One owner so "is this the playing
-    episode?" checks across the player can't drift on which fields compare. */
+/** Stream-target equality on all four coordinates (absolute user-facing + stream-space addon remap). */
 export function sameEpisodeCoordinates(
   a: Partial<
     Pick<
@@ -71,8 +66,7 @@ export function sameEpisodeCoordinates(
   );
 }
 
-/** `episodes.find` by canonical coordinates — undefined coordinates return
-    undefined instead of scanning. */
+/** `episodes.find` by canonical coordinates — undefined returns undefined without scanning. */
 export function findEpisodeByCoordinates(
   episodes: readonly Episode[] | undefined,
   season: number | undefined,

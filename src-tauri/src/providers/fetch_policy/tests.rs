@@ -9,6 +9,8 @@ fn blocked_ip_literals_cover_loopback_private_and_metadata_ranges() {
     for host in [
         "127.0.0.1",
         "10.0.0.8",
+        "100.64.0.1",
+        "100.127.255.255",
         "192.168.1.10",
         "172.16.4.2",
         "0.0.0.0",
@@ -32,6 +34,8 @@ fn public_hosts_and_ips_are_not_blocked() {
         "v3-cinemeta.strem.io",
         "8.8.8.8",
         "1.1.1.1",
+        "100.63.255.255",
+        "100.128.0.0",
         "kitsu.io",
         "example-addon.test",
         "[2606:4700:4700::1111]",

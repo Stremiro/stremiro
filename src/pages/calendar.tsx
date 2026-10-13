@@ -24,7 +24,7 @@ import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/h
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
-import { api } from '@/lib/api';
+import { api, type CalendarScheduleEvent } from '@/lib/api';
 import { toCalendarEvent, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
@@ -40,11 +40,9 @@ import {
 } from '@/lib/utils';
 
 const MAX_VISIBLE_DAY_EVENTS = 3;
-// Shared empty fallback — a fresh `[]` per lookup would defeat the memoized
-// day cells' prop comparison.
+// Shared empty fallback — a fresh `[]` would defeat the memoized cells' prop comparison.
 const EMPTY_DAY_EVENTS: CalendarEvent[] = [];
 const UPCOMING_WINDOW_DAYS = 14;
-const MAX_UPCOMING_EVENTS = 8;
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const CALENDAR_POPOVER_CLASS =
   'w-72 max-w-[calc(100vw-2rem)] bg-zinc-950/95 backdrop-blur-xl border-white/[0.1] text-white shadow-xl rounded-lg';
@@ -76,6 +74,13 @@ function calendarEventLinkProps(
     title: label,
   };
 }
+
+// Grouping/sorting live in `get_calendar_events`; the frontend only parses `releaseDate`.
+const toCalendarEvents = (events: CalendarScheduleEvent[]) =>
+  events.flatMap((event) => {
+    const calendarEvent = toCalendarEvent(event);
+    return calendarEvent ? [calendarEvent] : [];
+  });
 
 export function Calendar() {
   const queryClient = useQueryClient();
@@ -127,54 +132,12 @@ export function Calendar() {
     queryFn: () => api.getCalendarEvents(range),
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
   });
-  const events = useMemo(
-    () =>
-      (schedule?.events ?? []).flatMap((event) => {
-        const calendarEvent = toCalendarEvent(event);
-        return calendarEvent ? [calendarEvent] : [];
-      }),
+  const upcomingEvents = useMemo(() => toCalendarEvents(schedule?.upcoming ?? []), [schedule]);
+
+  const eventsByDay = useMemo(
+    () => new Map((schedule?.days ?? []).map((day) => [day.date, toCalendarEvents(day.events)])),
     [schedule],
   );
-
-  const upcomingEvents = useMemo(
-    () =>
-      events
-        .filter((event) => {
-          const ms = event.date.getTime();
-          return ms >= todayStartMs && ms <= upcomingEndMs;
-        })
-        .toSorted((a, b) => a.date.getTime() - b.date.getTime())
-        .slice(0, MAX_UPCOMING_EVENTS),
-    [events, todayStartMs, upcomingEndMs],
-  );
-
-  const eventsByDay = useMemo(() => {
-    const grouped = new Map<string, CalendarEvent[]>();
-    for (const event of events) {
-      const key = format(event.date, 'yyyy-MM-dd');
-      const existing = grouped.get(key);
-      if (existing) {
-        existing.push(event);
-      } else {
-        grouped.set(key, [event]);
-      }
-    }
-
-    grouped.forEach((list) => {
-      list.sort((a, b) => {
-        if (a.type !== b.type) {
-          return a.type === 'episode' ? -1 : 1;
-        }
-        if (a.type === 'episode') {
-          if ((a.season ?? 0) !== (b.season ?? 0)) return (a.season ?? 0) - (b.season ?? 0);
-          return (a.episode ?? 0) - (b.episode ?? 0);
-        }
-        return a.seriesTitle.localeCompare(b.seriesTitle);
-      });
-    });
-
-    return grouped;
-  }, [events]);
 
   const airingTodayCount = eventsByDay.get(format(now, 'yyyy-MM-dd'))?.length ?? 0;
 
@@ -269,8 +232,7 @@ export function Calendar() {
           <Button
             variant='ghost'
             size='sm'
-            // aria-disabled, not disabled: landing on the current month would
-            // drop the focused button's focus to <body>.
+            // aria-disabled, not disabled: it would drop the focused button's focus to <body>.
             aria-disabled={isCurrentMonthView || undefined}
             aria-label='Today — jump to current month'
             aria-keyshortcuts='T'
@@ -361,9 +323,21 @@ export function Calendar() {
         </div>
       )}
 
+      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
       <div
+        role='region'
+        aria-label={`${format(currentMonth, 'MMMM yyyy')} releases`}
         aria-busy={isFetchingSchedules}
-        className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40'
+        tabIndex={0}
+        onKeyDown={(event) => {
+          if (
+            event.target === event.currentTarget &&
+            (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+          ) {
+            event.stopPropagation();
+          }
+        }}
+        className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
       >
         <div className='min-w-[640px]'>
           <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
@@ -401,6 +375,7 @@ export function Calendar() {
           </div>
         </div>
       </div>
+      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
     </div>
   );
 }
@@ -420,7 +395,7 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
   return (
     <Link
       {...calendarEventLinkProps(event, from, onPrefetch)}
-      className='group min-w-0 rounded-md p-2 transition-colors duration-150 hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20'
+      className='group min-w-0 rounded-md p-2 transition-colors duration-150 hover:bg-white/[0.04] focus-visible:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
     >
       <div className='flex items-center gap-2.5'>
         <div className='w-9 h-[54px] rounded-sm overflow-hidden bg-black/30 shrink-0'>
@@ -483,6 +458,8 @@ const CalendarDayCell = memo(function CalendarDayCell({
     <div
       className={cn(
         'min-w-0 min-h-[132px] p-1.5 sm:p-2 border-b border-r border-white/[0.05] relative group transition-colors hover:bg-white/[0.025]',
+        isToday &&
+          'bg-[rgb(var(--accent-nav-rgb)/0.035)] shadow-[inset_0_0_0_1px_rgb(var(--accent-nav-rgb)/0.18)]',
         !isCurrentMonth && 'bg-black/20',
         isLastColumn && 'border-r-0',
       )}

@@ -1,13 +1,7 @@
 import type { Episode } from '@/lib/api';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
 
-/**
- * Everything a "Choose stream" surface needs to identify and present one
- * media target. One bundle threaded StreamSelector → controller → resolution
- * so the identity/presentation field set cannot drift between layers; hosts
- * pre-compute `title`/`overview` and hold the object in state (or a memo) so
- * identity stays stable for memoized consumers.
- */
+/** One media-target bundle threaded StreamSelector → controller → resolution; hosts hold it in state/memo for stable identity. */
 export interface StreamSelectorTarget {
   type: PlayerRouteMediaType;
   id: string;
@@ -29,10 +23,6 @@ export interface StreamSelectorTarget {
   episodes?: Episode[];
   /** Safe internal return path for the player's Back navigation. */
   from?: string;
-  /**
-   * The selector host's own origin — when `from` is a details page reached
-   * from elsewhere, this carries that origin through so Back→details→Back
-   * doesn't dead-end on the details route.
-   */
+  /** The selector host's own origin — carried through so Back→details→Back doesn't dead-end on the details route. */
   originFrom?: string;
 }

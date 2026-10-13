@@ -2,6 +2,7 @@ import type {
   BrowseGenres,
   CalendarRange,
   CalendarSchedule,
+  DetailsPrefetchBundle,
   MediaDetails,
   MediaItem,
   SearchCatalogPage,
@@ -14,8 +15,7 @@ interface DiscoveryApiContext {
 }
 
 export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
-  // Rust owns request normalization, resource caching and overlapping fetches;
-  // React Query owns view payloads and their invalidation.
+  // Rust owns normalization/caching/fetch overlap; React Query owns view payloads and invalidation.
   const querySearchCatalogPage = (request: SearchCatalogQuery) =>
     safeInvoke<SearchCatalogPage>('query_search_catalog', { request });
 
@@ -31,6 +31,13 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       mediaType: type,
       id,
       includeEpisodes: false,
+    });
+
+  // One IPC for the details-route prefetch: card details + resume snapshot.
+  const getDetailsPrefetchBundle = (type: string, id: string) =>
+    safeInvoke<DetailsPrefetchBundle>('get_details_prefetch_bundle', {
+      mediaType: type,
+      id,
     });
 
   const getCalendarEvents = (range: CalendarRange) =>
@@ -54,6 +61,7 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
     querySearchCatalogPage,
     getMediaDetails,
     getMediaCardDetails,
+    getDetailsPrefetchBundle,
     getCalendarEvents,
     getBrowseGenres,
     querySimilarTitles,

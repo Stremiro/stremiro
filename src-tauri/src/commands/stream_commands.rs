@@ -5,7 +5,9 @@ use super::{
         is_probeable_stream, resolve_ranked_best_stream_candidate, retain_unexcluded_streams,
         PreferredStreamHint, StreamPoolQuery,
     },
-    stream_fetcher::{fetch_stream_selector_data, StreamRankingOverrides, StreamSelectorData},
+    stream_fetcher::{
+        fetch_stream_selector_data, ResolveFetch, StreamRankingOverrides, StreamSelectorData,
+    },
     stream_resolver::{
         BestResolvedStream, ResolveStreamError, ResolveStreamErrorKind, MISSING_DIRECT_URL_MESSAGE,
     },
@@ -25,11 +27,9 @@ fn normalize_recovery_text(value: Option<String>) -> Option<String> {
 }
 
 fn normalize_recovery_url(value: Option<String>) -> Option<String> {
-    // Recovery URLs feed directly into the player without the probe's
-    // landed-URL recheck: apply the shared fetchable-URL gate (scheme plus
-    // embedded-credential and non-routable-target rejection) so a malicious
-    // or stale recovery payload cannot aim libmpv at loopback, LAN, metadata
-    // endpoints, or userinfo targets.
+    // Recovery URLs feed the player without the probe's landed-URL recheck — apply
+    // the shared fetchable-URL gate so a malicious/stale payload can't aim libmpv
+    // at loopback, LAN, metadata, or userinfo targets.
     value.and_then(|value| {
         let normalized = normalize_http_url(&value)?;
         if crate::providers::addon_resource::is_fetchable_http_url(&normalized) {
@@ -46,7 +46,7 @@ pub async fn get_stream_selector_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     provider: State<'_, AddonTransport>,
-    on_progress: Channel<serde_json::Value>,
+    on_progress: Channel,
     media_type: String,
     id: String,
     season: Option<u32>,
@@ -125,8 +125,17 @@ pub async fn resolve_best_stream(
         "stream lookup",
     )?;
 
+    let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_opaque_field(&key));
     let mut streams = query
-        .fetch_pool(&app, &playback_state, &addon_transport, &query.id)
+        .fetch_pool(
+            &app,
+            &playback_state,
+            &addon_transport,
+            &query.id,
+            ResolveFetch {
+                settle_on_stream_key: preferred_stream_key.as_deref(),
+            },
+        )
         .await?;
 
     // `prepare_addon_streams` already dropped placeholders and rows with no
@@ -138,9 +147,8 @@ pub async fn resolve_best_stream(
         ));
     }
 
-    // Best-stream plays direct http(s) only: non-http rows list in the
-    // selector but have no probeable URL. Fail fast with the direct-link
-    // guidance instead of the generic unable-to-resolve wall.
+    // Best-stream plays direct http(s) only — non-http rows list in the selector
+    // but have no probeable URL, so fail fast with the direct-link guidance.
     streams.retain(is_probeable_stream);
     if streams.is_empty() {
         return Err(ResolveStreamError::new(
@@ -149,7 +157,6 @@ pub async fn resolve_best_stream(
         ));
     }
 
-    let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_opaque_field(&key));
     resolve_ranked_best_stream_candidate(
         streams,
         None,
@@ -220,18 +227,14 @@ pub async fn recover_playback_stream(
         .take(RECOVERY_EXCLUDED_STREAM_KEYS_MAX)
         .filter_map(|key| normalize_opaque_field(key))
         .collect();
-    // Recovery must query the same ID space the initial resolve used: on
-    // mapped titles (e.g. kitsu: -> tt…) the media id is not the id addons
-    // index streams under, so fetching by `normalized_id` would find nothing.
-    // The lookup id becomes the outbound stream-request path segment, so it
-    // takes the same bound as the media id it may replace.
+    // Recovery must query the same ID space the initial resolve used: on mapped
+    // titles (kitsu: → tt…) the media id is not what addons index streams under.
+    // The lookup id becomes the outbound path segment — same bound as the media id.
     let stream_lookup_id = stream_lookup_id.as_deref().and_then(normalize_media_id);
     let fetch_id = stream_lookup_id.unwrap_or_else(|| normalized_id.clone());
 
-    // Store/file IO is blocking: the outcome snapshot runs on the blocking
-    // pool, matching `report_playback_stream_outcome`. It is best-effort
-    // telemetry detached from the failover path — awaited inline, a wedged
-    // store would delay the re-resolve below by its full timeout.
+    // Blocking store/file IO on the blocking pool, matching `report_playback_stream_outcome`.
+    // Best-effort telemetry — awaited inline, a wedged store would delay the re-resolve.
     {
         let outcome_app = app.clone();
         let outcome_service = playback_state.inner().clone();
@@ -265,7 +268,13 @@ pub async fn recover_playback_stream(
     }
 
     let mut streams = match query
-        .fetch_pool(&app, &playback_state, &addon_transport, &fetch_id)
+        .fetch_pool(
+            &app,
+            &playback_state,
+            &addon_transport,
+            &fetch_id,
+            ResolveFetch::default(),
+        )
         .await
     {
         Ok(streams) => streams,
@@ -288,9 +297,8 @@ pub async fn recover_playback_stream(
         }
     };
 
-    // Streams arrived already filtered by `prepare_addon_streams` (no
-    // placeholders, playable source required); only earlier failures of this
-    // recovery chain leave before the candidate fan-out.
+    // Streams arrive pre-filtered by `prepare_addon_streams`; only earlier
+    // recovery-chain failures leave before the candidate fan-out.
     retain_unexcluded_streams(&mut streams, &excluded_stream_keys);
     if streams.is_empty() {
         log_warn(

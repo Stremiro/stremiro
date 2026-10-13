@@ -14,16 +14,14 @@ interface UsePlayerBackNavigationOptions {
   effectiveResolveMediaType: PlayerRouteMediaType;
   from?: string;
   id?: string;
-  /** The launch page's own origin — written onto the reopened details entry
-      so Back→details→Back reaches the real origin. */
+  /** The launch page's own origin — lets Back→details→Back reach the real origin. */
   originFrom?: string;
   restoreCursorVisibility: () => void;
   routeAbsoluteEpisode?: number;
   routeAbsoluteSeason?: number;
   setShowControls: (value: boolean) => void;
   setShowEpisodes: (value: boolean) => void;
-  /** Evaluated at back-time: reopen the selector only when leaving is
-      meaningful (failed, unverified, finished) — a clean exit lands quietly. */
+  /** Back-time check: reopen the selector only when leaving is meaningful (failed, unverified, finished). */
   shouldReopenStreamSelector: () => boolean;
   startTime?: number;
 }
@@ -47,20 +45,17 @@ export function usePlayerBackNavigation({
   startTime,
 }: UsePlayerBackNavigationOptions): UsePlayerBackNavigationResult {
   const navigate = useNavigate();
-  // Replace the player in history so Back from the destination never
-  // re-launches it. Back drops to the mini player instead of ending playback;
-  // the dock transition flushes progress.
+  // Replace the player in history so Back never re-launches it; Back drops
+  // to the mini player and the dock transition flushes progress.
   const navigateBack = useCallback(async () => {
     setShowControls(true);
     setShowEpisodes(false);
     restoreCursorVisibility();
-    // The selector modal and Esc intercept swallow Back while a pick is open —
-    // the route's own coordinates are the only ones a back target can carry.
+    // The selector/Esc can swallow Back mid-pick, so only route coordinates can ride the back target.
     const backSeason = routeAbsoluteSeason;
     const backEpisode = routeAbsoluteEpisode;
     const backStartTime = playableResumePosition(currentTimeRef.current, startTime);
-    // Reopen state: season/episode 0 stay valid, episode needs a season,
-    // start time positive.
+    // Reopen state: 0 stays valid, episode needs a season, start time positive.
     const safeFrom = resolveSafeInternalReturnPath(from);
     const safeOriginFrom = resolveSafeInternalReturnPath(originFrom);
     const detailsTarget = safeFrom?.startsWith('/details/')
@@ -69,8 +64,7 @@ export function usePlayerBackNavigation({
     const reopenSelectorState: DetailsHistoryRouteState = {
       reopenStreamSelector: shouldReopenStreamSelector(),
     };
-    // `from` on the reopened details entry is that page's own origin —
-    // writing the details path would dead-end its titlebar Back.
+    // `from` is the launch page's origin — writing the details path would dead-end titlebar Back.
     if (safeOriginFrom && safeOriginFrom !== detailsTarget) {
       reopenSelectorState.from = safeOriginFrom;
     }
@@ -89,9 +83,8 @@ export function usePlayerBackNavigation({
       reopenSelectorState.reopenStartTime = backStartTime;
     }
 
-    // When the launch entry still sits directly below the player, pop onto it —
-    // a replace would stack a duplicate Back dead-ends on. History state can't
-    // ride a POP, so the reopen handoff goes through the path-keyed stash.
+    // If the launch entry sits directly below the player, pop onto it — a replace
+    // would stack a duplicate. History state can't ride a POP, so the reopen handoff uses the path-keyed stash.
     if (safeFrom && pathBelowTop() === safeFrom) {
       if (safeFrom.startsWith('/details/')) {
         stashDetailsReturnState(safeFrom, reopenSelectorState);

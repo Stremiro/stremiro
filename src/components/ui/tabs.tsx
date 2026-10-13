@@ -63,9 +63,7 @@ const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivEl
 );
 TabsList.displayName = 'TabsList';
 
-// Roving tabindex (`tabIndex` below) needs the matching half of the ARIA
-// tabs pattern: arrows/Home/End move focus AND activate — without it, only
-// the active tab is keyboard-reachable.
+// Roving tabindex needs the matching ARIA half: arrows/Home/End move focus AND activate.
 const TAB_NAVIGATION_KEYS = new Set([
   'ArrowLeft',
   'ArrowRight',
@@ -126,8 +124,7 @@ const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
             nextIndex = (currentIndex + direction + triggers.length) % triggers.length;
           }
           const next = triggers[nextIndex];
-          // `.click()` reuses the trigger's own activation path so key and
-          // pointer selection can never diverge.
+          // `.click()` reuses the trigger's activation path so key and pointer can't diverge.
           next?.focus();
           next?.click();
         }}

@@ -1,17 +1,14 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
-import { mpvCommand } from '@/lib/player-mpv';
+import { mpvCommand, seekAbsoluteSeconds } from '@/lib/player-mpv';
 
 import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 import type { PlaybackClock } from '@/lib/player-clock';
 
-// Optimistic-seek protocol: `seek`/`seekRelative` publish the target into the
-// clock immediately so the playhead snaps without waiting on mpv's throttled
-// time-pos. Ticks still reporting the pre-seek position are swallowed until
-// settle or the hold window lapses.
+// Optimistic-seek protocol: publish the target into the clock immediately; ticks still
+// reporting the pre-seek position are swallowed until settle or hold lapse.
 const OPTIMISTIC_SEEK_HOLD_MS = 450;
 const OPTIMISTIC_SEEK_SETTLED_DELTA_SECS = 1.1;
-// Same-direction relative seeks inside this window report one running offset
-// ("+30s" after three taps) — matches the seek OSD's visible window.
+// Same-direction relative seeks in this window report one running offset — matches the seek OSD's visible window.
 const SEEK_STREAK_WINDOW_MS = 900;
 
 interface SeekStreak {
@@ -22,11 +19,9 @@ interface SeekStreak {
 
 interface UseOptimisticSeekArgs {
   clock: PlaybackClock;
-  /** Mirrors every `setDuration` write, so the seek chain keeps one identity
-      for the whole session instead of re-forming when duration lands. */
+  /** Mirrors every `setDuration` write so the seek chain keeps one identity all session. */
   durationRef: RefObject<number>;
-  /** Stream-scoped reset (activeStreamUrl): a swap abandons any in-flight
-      seek, so the pending target must not swallow the new stream's ticks. */
+  /** Stream-scoped reset — a swap abandons in-flight seeks, so pending targets must not swallow new-stream ticks. */
   resetKey?: string;
   triggerOsd: (action: PlayerOsdAction) => void;
 }
@@ -39,13 +34,9 @@ export function useOptimisticSeek({
 }: UseOptimisticSeekArgs) {
   const pendingSeekTargetRef = useRef<number | null>(null);
   const pendingSeekDeadlineRef = useRef(0);
-  // Bumped on every prime and every clear: a command that rejects after a
-  // newer seek primed (or the gate already cleared) must not roll the clock
-  // back over the fresher position.
+  // Bumped on prime and clear — a late rejection must not roll the clock back over a fresher position.
   const seekGenerationRef = useRef(0);
-  // Separate announcement epoch, bumped on prime and session reset: a seek
-  // resolving out of order must not announce an older target, but a settle
-  // tick must NOT bump it — a late ack still earned the announcement.
+  // Announcement epoch, bumped on prime/reset only — a late ack still earned its announcement, so a settle tick must NOT bump it.
   const seekAnnounceEpochRef = useRef(0);
   const seekStreakRef = useRef<SeekStreak | null>(null);
   const currentTimeRef = clock.ref;
@@ -66,8 +57,7 @@ export function useOptimisticSeek({
     };
   }, [resetKey, clearOptimisticSeek]);
 
-  /** time-pos gate for the mpv property observer: returns true while the tick
-      should be swallowed in favor of the pending optimistic target. */
+  /** time-pos gate: true while the tick should be swallowed in favor of the pending target. */
   const observeTimeUpdate = useCallback(
     (timePos: number, now: number): boolean => {
       const pendingSeekTarget = pendingSeekTargetRef.current;
@@ -108,7 +98,7 @@ export function useOptimisticSeek({
   const runSeek = useCallback(
     async (
       targetTime: number,
-      commandArgs: (boundedTarget: number) => [string, string],
+      command: (boundedTarget: number) => Promise<void>,
       osd: (boundedTarget: number) => PlayerOsdAction,
     ) => {
       const previousTime = currentTimeRef.current;
@@ -117,11 +107,9 @@ export function useOptimisticSeek({
       const announceEpoch = seekAnnounceEpochRef.current;
 
       try {
-        await mpvCommand('seek', commandArgs(boundedTarget));
+        await command(boundedTarget);
       } catch (seekError) {
-        // Roll back only while this seek still owns the pending slot —
-        // otherwise the display already tracks a newer prime or the settled
-        // position, and publishing the pre-seek time would stomp it.
+        // Roll back only while this seek still owns the pending slot — publishing the pre-seek time would stomp a newer prime.
         if (seekGenerationRef.current === generation) {
           clearOptimisticSeek();
           clock.publish(previousTime);
@@ -129,9 +117,7 @@ export function useOptimisticSeek({
         throw seekError;
       }
 
-      // Announce only while this seek still owns the announcement epoch —
-      // an out-of-order ack from an older seek (or a stream swap) must not
-      // flash a stale target over the newer position.
+      // Announce only while this seek owns the epoch — an out-of-order ack must not flash a stale target.
       if (seekAnnounceEpochRef.current === announceEpoch) {
         triggerOsd(osd(boundedTarget));
       }
@@ -144,9 +130,8 @@ export function useOptimisticSeek({
       seekStreakRef.current = null;
       return runSeek(
         seconds,
-        (boundedTarget) => [boundedTarget.toString(), 'absolute'],
-        // Absolute jumps (percent keys, bar release, segment skips) had no
-        // feedback — show where playback landed.
+        seekAbsoluteSeconds,
+        // Absolute jumps (percent keys, bar release, skips) had no feedback — show the landing point.
         (boundedTarget) => ({ kind: 'seek', target: boundedTarget }),
       );
     },
@@ -166,12 +151,11 @@ export function useOptimisticSeek({
       seekStreakRef.current = streak;
       return runSeek(
         baseTime + seconds,
-        (boundedTarget) => [(boundedTarget - baseTime).toString(), 'relative'],
+        (boundedTarget) => mpvCommand('seek', [(boundedTarget - baseTime).toString(), 'relative']),
         (boundedTarget) => ({
           kind: 'seek',
           direction: seconds > 0 ? 'forward' : 'backward',
-          // Offset actually travelled since the streak began, so clamping at
-          // either end never reports seconds that didn't happen.
+          // Offset travelled since the streak began so end-clamping never reports seconds that didn't happen.
           seconds: Math.round(Math.abs(boundedTarget - streak.origin)),
           target: boundedTarget,
         }),
@@ -180,9 +164,7 @@ export function useOptimisticSeek({
     [runSeek, currentTimeRef],
   );
 
-  // Position-probe gate: a pending seek means the stream position is about
-  // to move — the paused-state poll idle-out must keep ticking until the
-  // settle tick lands (or the hold window lapses).
+  // Position-probe gate: a pending seek means position is about to move — the paused poll must keep ticking until settle or hold lapse.
   const isSeekPending = useCallback(() => pendingSeekTargetRef.current !== null, []);
 
   return { isSeekPending, observeTimeUpdate, seek, seekRelative };

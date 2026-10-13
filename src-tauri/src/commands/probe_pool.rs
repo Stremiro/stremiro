@@ -1,7 +1,7 @@
 use super::playback_state::PlaybackStateService;
 use super::stream_fetcher::{
-    fetch_ranked_streams, resolve_stream_ranking_scope, StreamQueryRequest, StreamRankingOverrides,
-    StreamRankingScope,
+    fetch_ranked_streams, resolve_stream_ranking_scope, ResolveFetch, StreamQueryRequest,
+    StreamRankingOverrides, StreamRankingScope,
 };
 use super::stream_resolver::{
     resolve_stream_inner, BestResolvedStream, ProbeError, ResolveStreamError,
@@ -9,7 +9,7 @@ use super::stream_resolver::{
 };
 use super::streaming_helpers::{
     is_legacy_content_key, normalize_http_url, normalize_source_id, normalize_source_key,
-    push_bounded_error, remember_resolved_content_key, stream_dedup_key,
+    push_bounded_error, stream_absolute_episode_targets, stream_dedup_key,
 };
 use super::{normalize_media_id, normalize_non_empty, normalize_stream_media_type};
 use crate::providers::addons::{
@@ -17,20 +17,18 @@ use crate::providers::addons::{
 };
 use futures_util::stream::FuturesOrdered;
 use futures_util::StreamExt;
+use std::collections::HashMap;
 use std::time::Duration;
 use tauri::AppHandle;
 
-/// Timeout for each probe in the best-stream fan-out. Candidates resolve
-/// direct addon URLs only, but keeping the window bounded avoids long
-/// failure chains when multiple candidates are bad.
+/// Per-probe timeout in the best-stream fan-out — bounded so bad candidates don't chain long failures.
 pub(crate) const BEST_STREAM_CANDIDATE_TIMEOUT_SECS: u64 = 10;
 pub(crate) const BEST_STREAM_MAX_CANDIDATES: usize = 8;
+const SAME_HOST_PROBE_SPACING: Duration = Duration::from_millis(150);
 
-/// Normalized stream-command inputs: validated media identity plus the
-/// resolved ranking scope. All three stream commands
-/// (`get_stream_selector_data`, `resolve_best_stream`,
-/// `recover_playback_stream`) normalize id/type, resolve ranking, and
-/// fetch the ranked pool the same way — this is that one path.
+/// Normalized stream-command inputs: validated media identity plus the resolved
+/// ranking scope — the one path shared by all three stream commands
+/// (`get_stream_selector_data`, `resolve_best_stream`, `recover_playback_stream`).
 pub(crate) struct StreamPoolQuery {
     pub media_type: String,
     pub id: String,
@@ -41,9 +39,8 @@ pub(crate) struct StreamPoolQuery {
 }
 
 impl StreamPoolQuery {
-    /// `normalize_media_id` → `normalize_stream_media_type` →
-    /// `resolve_stream_ranking_scope`. `context` labels the validation
-    /// errors ("stream lookup", "stream recovery").
+    /// `normalize_media_id` → `normalize_stream_media_type` → `resolve_stream_ranking_scope`.
+    /// `context` labels validation errors ("stream lookup", "stream recovery").
     pub(crate) fn new(
         media_type: &str,
         id: &str,
@@ -69,8 +66,7 @@ impl StreamPoolQuery {
         })
     }
 
-    /// The outbound fetch request. `fetch_id` is normally `self.id`;
-    /// recovery passes the addon-indexed lookup id on mapped titles.
+    /// The outbound fetch request; recovery passes the addon-indexed lookup id on mapped titles.
     pub(crate) fn request<'a>(&'a self, fetch_id: &'a str) -> StreamQueryRequest<'a> {
         StreamQueryRequest {
             media_type: &self.media_type,
@@ -81,14 +77,14 @@ impl StreamPoolQuery {
         }
     }
 
-    /// `fetch_ranked_streams` on this query. Rows arrive ingress-filtered
-    /// (`prepare_addon_streams`) and coordinator-ranked.
+    /// `fetch_ranked_streams` on this query — rows arrive ingress-filtered and coordinator-ranked.
     pub(crate) async fn fetch_pool(
         &self,
         app: &AppHandle,
         playback_state: &PlaybackStateService,
         provider: &AddonTransport,
         fetch_id: &str,
+        resolve: ResolveFetch<'_>,
     ) -> Result<Vec<AddonStream>, String> {
         let (mut streams, is_final_season) = fetch_ranked_streams(
             app,
@@ -96,21 +92,25 @@ impl StreamPoolQuery {
             provider,
             &self.request(fetch_id),
             &self.ranking,
+            resolve,
         )
         .await?;
-        self.retain_episode_candidates(&mut streams, is_final_season);
+        self.retain_episode_candidates(&mut streams, fetch_id, is_final_season);
         Ok(streams)
     }
 
-    fn retain_episode_candidates(&self, streams: &mut Vec<AddonStream>, is_final_season: bool) {
+    fn retain_episode_candidates(
+        &self,
+        streams: &mut Vec<AddonStream>,
+        fetch_id: &str,
+        is_final_season: bool,
+    ) {
         if self.media_type == "movie" {
             return;
         }
-        // The ranking pair equals the query pair whenever no overrides were
-        // passed (the common resolve/recovery path) — dedup so the regex
-        // scan doesn't run twice per stream. `is_final_season` was computed
-        // for the ranking scope's season; a divergent query season keeps the
-        // conservative `false`.
+        // Ranking pair usually equals the query pair — dedup so the regex scan
+        // doesn't run twice. `is_final_season` was computed for the ranking scope's
+        // season; a divergent query season keeps the conservative `false`.
         let mut targets = [
             self.season.zip(self.episode),
             self.ranking.season.zip(self.ranking.episode),
@@ -118,6 +118,17 @@ impl StreamPoolQuery {
         .into_iter()
         .flatten()
         .collect::<Vec<_>>();
+        targets.extend(
+            stream_absolute_episode_targets(
+                &self.media_type,
+                fetch_id,
+                self.season,
+                self.episode,
+                self.absolute_episode,
+            )
+            .into_iter()
+            .flatten(),
+        );
         targets.dedup();
         let final_season_season = if is_final_season {
             self.ranking.season
@@ -134,9 +145,8 @@ impl StreamPoolQuery {
     }
 }
 
-/// One fetchable-URL gate for every probe path: candidate extraction, the
-/// preferred-position scan, and the resolve pool's retain pass all use it,
-/// so a row that cannot spend a probe never slips into the fan-out.
+/// One fetchable-URL gate shared by candidate extraction, the preferred-position
+/// scan, and the resolve pool's retain pass.
 pub(crate) fn is_probeable_stream(stream: &AddonStream) -> bool {
     stream
         .url
@@ -144,35 +154,30 @@ pub(crate) fn is_probeable_stream(stream: &AddonStream) -> bool {
         .is_some_and(crate::providers::addon_resource::is_fetchable_http_url)
 }
 
-/// Derive serializable probe inputs from a ranked stream before spawning
-/// probes, so no borrowed selector state crosses the concurrency boundary.
+/// Serializable probe inputs — no borrowed selector state crosses the concurrency boundary.
 struct StreamResolveCandidateInput {
     source_id: Option<String>,
     source_name: Option<String>,
     stream_family: Option<String>,
     stream_key: String,
-    content_key: Option<String>,
     direct_url: String,
     request_headers: Vec<(String, String)>,
 }
 
 fn build_candidate_input(stream: AddonStream) -> Option<StreamResolveCandidateInput> {
-    // Same fetchable gate as stream ingress plus the probe: private-literal,
-    // userinfo, and non-http(s) URLs never spend a probe task. The canonical
-    // form is stored so the excluded-URL compare below matches the
-    // normalized recovery URL (raw `HTTPS://X` vs canonical `https://x/`).
+    // Same fetchable gate as ingress: private-literal, userinfo, and non-http(s)
+    // URLs never spend a probe. Canonical form stored so the excluded-URL compare
+    // matches the normalized recovery URL.
     let direct_url = stream.url.as_deref().and_then(normalize_http_url)?;
     if !crate::providers::addon_resource::is_fetchable_http_url(&direct_url) {
         return None;
     }
-    let content_key = stream_dedup_key(&stream);
     let request_headers = stream.request_headers();
     Some(StreamResolveCandidateInput {
         source_id: stream.source_id,
         source_name: stream.source_name,
         stream_family: stream.stream_family,
         stream_key: stream.stream_key,
-        content_key,
         direct_url,
         request_headers,
     })
@@ -182,9 +187,6 @@ fn candidate_resolved_stream(
     candidate: StreamResolveCandidateInput,
     resolved: ResolvedStream,
 ) -> BestResolvedStream {
-    if let Some(content_key) = candidate.content_key {
-        remember_resolved_content_key(&candidate.stream_key, content_key);
-    }
     BestResolvedStream {
         url: resolved.url,
         format: resolved.format,
@@ -202,25 +204,30 @@ type CandidateProbeResult = (
     Result<Result<ResolvedStream, ProbeError>, tokio::time::error::Elapsed>,
 );
 
-async fn probe_candidate(mut candidate: StreamResolveCandidateInput) -> CandidateProbeResult {
-    let result = tokio::time::timeout(
-        Duration::from_secs(BEST_STREAM_CANDIDATE_TIMEOUT_SECS),
+async fn probe_candidate(
+    mut candidate: StreamResolveCandidateInput,
+    delay: Duration,
+    deadline: tokio::time::Instant,
+) -> CandidateProbeResult {
+    let result = tokio::time::timeout_at(deadline, async {
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         resolve_stream_inner(ResolveStreamParams {
             url: std::mem::take(&mut candidate.direct_url),
             request_headers: std::mem::take(&mut candidate.request_headers),
-        }),
-    )
+        })
+        .await
+    })
     .await;
 
     (candidate, result)
 }
 
-/// The caller's preferred stream identity: the exact stream key when it
-/// survives, else the saved source/family. Signed URLs re-digest across
-/// sessions, so a URL-derived key rots even when the same stream is still
-/// listed — the source/family fallback recovers that case. `source_id` (the
-/// stable addon instance) beats `source_name`, which duplicate display
-/// names make ambiguous.
+/// The caller's preferred stream identity: exact stream key when it survives, else
+/// saved source/family — signed URLs re-digest across sessions, so a URL-derived key
+/// rots even when the same stream is still listed. `source_id` beats `source_name`,
+/// which duplicate display names make ambiguous.
 #[derive(Clone, Copy, Default)]
 pub(crate) struct PreferredStreamHint<'a> {
     pub stream_key: Option<&'a str>,
@@ -229,11 +236,9 @@ pub(crate) struct PreferredStreamHint<'a> {
     pub stream_family: Option<&'a str>,
 }
 
-/// A preferred key arrives in two forms: current rows persist the prepared
-/// `s:{hash}` selector key, while rows written before prepared keys persist
-/// the raw `h:`/`uh:` content-dedup key the selector used to carry. Match
-/// either so legacy rows still bind to the exact stream; the dedup-key
-/// recompute is paid only on the legacy prefixes, never per `s:` row.
+/// A preferred key arrives as the prepared `s:{hash}` selector key or, on older
+/// rows, the raw `h:`/`uh:` content-dedup key. Match either so legacy rows still
+/// bind; the dedup-key recompute is paid only on legacy prefixes.
 fn preferred_key_matches(stream: &AddonStream, key: &str) -> bool {
     if stream.stream_key == key {
         return true;
@@ -245,9 +250,8 @@ pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded
     if excluded_keys.is_empty() {
         return;
     }
-    // A legacy `h:`/`uh:` exclusion binds by recomputing the content-dedup
-    // key — derive it once per stream instead of once per key, and skip it
-    // entirely when no legacy key is present.
+    // A legacy `h:`/`uh:` exclusion binds by recomputing the dedup key once per
+    // stream — skipped entirely when no legacy key is present.
     let legacy_keys: Vec<&str> = excluded_keys
         .iter()
         .filter(|key| is_legacy_content_key(key))
@@ -267,14 +271,11 @@ pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded
     });
 }
 
-/// Locate the preferred stream in the freshly fetched pool: exact key first,
-/// then release family, then source identity. Only probeable, non-excluded
-/// rows qualify — a key hit on an unprobeable or excluded stream falls
-/// through to the softer tiers instead of dead-ending. The soft tiers also
-/// refuse a row whose coordinator selection priority trails the pool's best,
-/// so a stale family/source hint cannot jump past better matches; the exact
-/// saved key stays honored regardless. A supplied `source_id` scopes family
-/// hits to that instance and skips the ambiguous display-name tier.
+/// Locate the preferred stream in the fetched pool: exact key, then release family,
+/// then source identity. Only probeable, non-excluded rows qualify — a key hit on a
+/// bad row falls through to softer tiers, which refuse rows whose selection priority
+/// trails the pool's best (the exact saved key stays honored). A `source_id` scopes
+/// family hits and skips the ambiguous name tier.
 fn find_preferred_position(
     streams: &[AddonStream],
     preferred: PreferredStreamHint<'_>,
@@ -288,8 +289,7 @@ fn find_preferred_position(
         return None;
     }
 
-    // One probeability pass: each tier scan below would otherwise re-run
-    // `is_probeable_stream` (a URL parse) per stream per tier.
+    // One probeability pass — tier scans would otherwise re-run `is_probeable_stream` per tier.
     let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
     let eligible = |index: usize, stream: &AddonStream| {
         probeable[index]
@@ -310,9 +310,8 @@ fn find_preferred_position(
     let source_id = preferred.source_id.and_then(normalize_source_id);
     let source_name = preferred.source_name.and_then(normalize_source_key);
 
-    // Every tier below consults `soft_eligible` — when no soft hint exists
-    // the probeable-scan for `best_priority` would be computed and discarded
-    // (recovery always passes a bare `PreferredStreamHint::default()`).
+    // Every tier below consults `soft_eligible` — skip the `best_priority` scan
+    // when no soft hint exists (recovery always passes a bare hint).
     if stream_family.is_none() && source_id.is_none() && source_name.is_none() {
         return None;
     }
@@ -331,9 +330,8 @@ fn find_preferred_position(
             })
     };
 
-    // Stored fields are compared against the already-normalized hints, so a
-    // trim + case-insensitive compare stands in for re-normalizing each row
-    // (equal strings can't exceed the normalizer's length bound).
+    // Stored fields compare against already-normalized hints — a trim +
+    // case-insensitive compare stands in for re-normalizing each row.
     if let Some(family) = stream_family {
         if let Some(position) = streams.iter().enumerate().position(|(index, stream)| {
             soft_eligible(index, stream)
@@ -352,8 +350,7 @@ fn find_preferred_position(
         }
     }
 
-    // Instance id before display name: two addons sharing a name make the
-    // name tier ambiguous, while the id names exactly one instance.
+    // Instance id before display name — two addons sharing a name make the name tier ambiguous.
     if let Some(source_id) = source_id {
         return streams.iter().enumerate().position(|(index, stream)| {
             soft_eligible(index, stream)
@@ -416,41 +413,23 @@ where
     Err(ResolveStreamError::new(kind, message))
 }
 
-/// Fan out candidates concurrently with a shared per-candidate timeout and
-/// consume the results in rank order: the first resolved winner in ranking
-/// order is returned and the queued probe futures are dropped once it
-/// lands. The preferred probe leads the order so the user's prior stream is
-/// the first result considered.
-pub(crate) async fn resolve_ranked_best_stream_candidate(
+fn build_probe_candidates(
     mut streams: Vec<AddonStream>,
     excluded_stream_key: Option<&str>,
     excluded_resolved_url: Option<&str>,
     preferred: PreferredStreamHint<'_>,
-) -> Result<BestResolvedStream, ResolveStreamError> {
+) -> Vec<(StreamResolveCandidateInput, Duration)> {
     let excluded_stream_key = excluded_stream_key.and_then(normalize_non_empty);
     let excluded_resolved_url = excluded_resolved_url.and_then(normalize_non_empty);
-    let mut candidates = FuturesOrdered::new();
-
     if let Some(position) =
         find_preferred_position(&streams, preferred, excluded_stream_key.as_deref())
     {
-        let preferred_stream = streams.remove(position);
-        // `find_preferred_position` only returns `is_probeable_stream` rows —
-        // the same fetchable-URL gate `build_candidate_input` applies — so a
-        // found position always yields a candidate; only the excluded-URL
-        // check can skip it.
-        if let Some(candidate) = build_candidate_input(preferred_stream) {
-            if excluded_resolved_url.as_deref() != Some(candidate.direct_url.as_str()) {
-                // The user's prior/picked stream: its probe heads the ordered
-                // results, so a resolvable preferred stream always wins over
-                // pooled candidates regardless of which settles first.
-                candidates.push_back(probe_candidate(candidate));
-            }
-        }
+        streams[..=position].rotate_right(1);
     }
 
-    // The fetchable gate and exclusions run before the cap so a dead row
-    // cannot consume one of the probe slots.
+    let mut candidates: Vec<(StreamResolveCandidateInput, Duration)> =
+        Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
+    let mut host_counts = HashMap::<String, u32>::new();
     for candidate in streams
         .into_iter()
         .filter(|stream| {
@@ -464,11 +443,48 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
                 .as_deref()
                 .is_none_or(|url| url != candidate.direct_url)
         })
-        .take(BEST_STREAM_MAX_CANDIDATES)
     {
-        candidates.push_back(probe_candidate(candidate));
+        // Equivalent requests share a probe; different auth headers stay separate even on the same URL.
+        if candidates.iter().any(|(existing, _)| {
+            existing.direct_url == candidate.direct_url
+                && existing.request_headers == candidate.request_headers
+        }) {
+            continue;
+        }
+        let url = reqwest::Url::parse(&candidate.direct_url).expect("candidate URL was validated");
+        let host = url.host_str().expect("HTTP candidate has a host");
+        let count = host_counts.entry(host.to_string()).or_default();
+        let delay = SAME_HOST_PROBE_SPACING * *count;
+        *count += 1;
+        candidates.push((candidate, delay));
+        if candidates.len() == BEST_STREAM_MAX_CANDIDATES {
+            break;
+        }
     }
+    candidates
+}
 
+/// Stagger same-host requests within one probe deadline, retaining rank order
+/// and cancelling outstanding probes as soon as the first ranked winner lands.
+pub(crate) async fn resolve_ranked_best_stream_candidate(
+    streams: Vec<AddonStream>,
+    excluded_stream_key: Option<&str>,
+    excluded_resolved_url: Option<&str>,
+    preferred: PreferredStreamHint<'_>,
+) -> Result<BestResolvedStream, ResolveStreamError> {
+    let inputs = build_probe_candidates(
+        streams,
+        excluded_stream_key,
+        excluded_resolved_url,
+        preferred,
+    );
+    let deadline =
+        tokio::time::Instant::now() + Duration::from_secs(BEST_STREAM_CANDIDATE_TIMEOUT_SECS);
+    let candidates: FuturesOrdered<_> = inputs
+        .into_iter()
+        .map(|(candidate, delay)| probe_candidate(candidate, delay, deadline))
+        .collect();
+    let excluded_resolved_url = excluded_resolved_url.and_then(normalize_non_empty);
     resolve_candidate_results(candidates, excluded_resolved_url.as_deref()).await
 }
 

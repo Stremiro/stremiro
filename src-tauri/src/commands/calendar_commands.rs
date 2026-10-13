@@ -5,7 +5,7 @@ use super::store_helpers::{load_library_map, load_watch_statuses_map};
 use super::WatchProgress;
 use crate::providers::{addon_resource::AddonResourceClient, MediaItem};
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
 #[derive(Debug, Deserialize)]
@@ -66,7 +66,7 @@ impl CalendarRange {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarScheduleEvent {
     id: String,
@@ -86,11 +86,21 @@ pub struct CalendarScheduleEvent {
     type_: &'static str,
 }
 
+const MAX_UPCOMING_EVENTS: usize = 8;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CalendarDay {
+    date: String,
+    events: Vec<CalendarScheduleEvent>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CalendarSchedule {
     tracked_count: usize,
-    events: Vec<CalendarScheduleEvent>,
+    days: Vec<CalendarDay>,
+    upcoming: Vec<CalendarScheduleEvent>,
 }
 
 fn calendar_requests(
@@ -218,6 +228,50 @@ fn calendar_events(
     events
 }
 
+fn calendar_schedule(
+    tracked_count: usize,
+    events: Vec<CalendarScheduleEvent>,
+    range: &CalendarRange,
+) -> CalendarSchedule {
+    // `release_date` is a validated `YYYY-MM-DD` local day, so string bounds
+    // and a stable ordinal sort reproduce the client's date-only ordering.
+    let mut upcoming: Vec<_> = events
+        .iter()
+        .filter(|event| {
+            event.release_date.as_str() >= range.upcoming_start.as_str()
+                && event.release_date.as_str() <= range.upcoming_end.as_str()
+        })
+        .cloned()
+        .collect();
+    upcoming.sort_by_key(|event| date_ordinal(&event.release_date));
+    upcoming.truncate(MAX_UPCOMING_EVENTS);
+    let mut days: BTreeMap<String, Vec<CalendarScheduleEvent>> = BTreeMap::new();
+    for event in events {
+        days.entry(event.release_date.clone())
+            .or_default()
+            .push(event);
+    }
+    CalendarSchedule {
+        tracked_count,
+        days: days
+            .into_iter()
+            .map(|(date, mut events)| {
+                // Episodes first (season, episode), then movies by title.
+                events.sort_by_cached_key(|event| {
+                    (
+                        event.type_ != "episode",
+                        event.season.unwrap_or(0),
+                        event.episode.unwrap_or(0),
+                        event.series_title.to_lowercase(),
+                    )
+                });
+                CalendarDay { date, events }
+            })
+            .collect(),
+        upcoming,
+    }
+}
+
 #[command]
 pub async fn get_calendar_events(
     app: AppHandle,
@@ -248,10 +302,11 @@ pub async fn get_calendar_events(
     .await?;
     let tracked_count = requests.len();
     let schedules = fetch_media_schedules(&app, client.inner(), requests).await?;
-    Ok(CalendarSchedule {
+    Ok(calendar_schedule(
         tracked_count,
-        events: calendar_events(schedules, &range),
-    })
+        calendar_events(schedules, &range),
+        &range,
+    ))
 }
 
 #[cfg(test)]
@@ -404,5 +459,91 @@ mod tests {
         );
         assert_eq!(upcoming_only.len(), 1);
         assert_eq!(upcoming_only[0].id, "today");
+    }
+
+    fn event(
+        id: &str,
+        type_: &'static str,
+        date: &str,
+        season: Option<u32>,
+        episode: Option<u32>,
+        series: &str,
+    ) -> CalendarScheduleEvent {
+        CalendarScheduleEvent {
+            id: id.into(),
+            media_id: "tt1".into(),
+            media_type: "series".into(),
+            title: None,
+            series_title: series.into(),
+            season,
+            episode,
+            release_date: date.into(),
+            poster: None,
+            type_,
+        }
+    }
+
+    #[test]
+    fn calendar_schedule_groups_by_day_and_orders_events_within_it() {
+        let schedule = calendar_schedule(
+            0,
+            vec![
+                event("m-beta", "movie", "2026-01-02", None, None, "beta"),
+                event("s1e3", "episode", "2026-01-02", Some(1), Some(3), "Show"),
+                event("s2e1", "episode", "2026-01-02", Some(2), Some(1), "Show"),
+                event("s1e1", "episode", "2026-01-02", Some(1), Some(1), "Show"),
+                event("m-alpha", "movie", "2026-01-02", None, None, "Alpha"),
+                event("prev", "episode", "2026-01-01", Some(9), Some(9), "Show"),
+            ],
+            &range(),
+        );
+        assert_eq!(
+            schedule
+                .days
+                .iter()
+                .map(|day| day.date.as_str())
+                .collect::<Vec<_>>(),
+            vec!["2026-01-01", "2026-01-02"]
+        );
+        assert_eq!(
+            schedule.days[1]
+                .events
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["s1e1", "s1e3", "s2e1", "m-alpha", "m-beta"]
+        );
+    }
+
+    #[test]
+    fn calendar_schedule_upcoming_bounds_cap_and_within_day_stability() {
+        let mut events: Vec<_> = (1..=9)
+            .rev()
+            .map(|episode| {
+                event(
+                    &format!("e{episode}"),
+                    "episode",
+                    "2026-01-05",
+                    Some(1),
+                    Some(episode),
+                    "Show",
+                )
+            })
+            .collect();
+        events.extend([
+            event("first", "episode", "2026-01-02", Some(1), Some(1), "Show"),
+            event("edge", "episode", "2026-01-14", Some(1), Some(1), "Show"),
+            event("before", "episode", "2025-12-31", Some(1), Some(1), "Show"),
+            event("after", "episode", "2026-01-15", Some(1), Some(1), "Show"),
+        ]);
+        let schedule = calendar_schedule(0, events, &range());
+        assert_eq!(
+            schedule
+                .upcoming
+                .iter()
+                .map(|event| event.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "e9", "e8", "e7", "e6", "e5", "e4", "e3"]
+        );
     }
 }

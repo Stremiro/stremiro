@@ -1,7 +1,6 @@
-//! mpv `track-list` reads batched behind one command — one IPC per burst
-//! instead of one per property per track (~150 invokes for a 20-track
-//! file). The staged wrapper's `track-list` node reads still apply, so
-//! per-field stays.
+//! mpv `track-list` reads batched behind one command — one IPC per burst instead of
+//! ~150 invokes for a 20-track file. The staged wrapper's `track-list` node reads
+//! still apply, so per-field stays.
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -28,8 +27,7 @@ impl PlayerTrackType {
 }
 
 /// One `track-list` row, already normalized: `selected` comes from
-/// `current-tracks/{type}/id` (the authoritative selection source — the
-/// per-track `selected` flag is never read), and blank strings are `None`.
+/// `current-tracks/{type}/id` (authoritative — the per-track flag is never read).
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PlayerTrack {
@@ -48,12 +46,10 @@ pub(crate) struct PlayerTrack {
     external_filename: Option<String>,
 }
 
-/// Fresh `current-tracks/{type}/id` values the caller already observed via
-/// property events — fresher than a re-read, so passing them skips two
-/// property reads per refresh. All-or-nothing contract: a `None` field means
-/// "no track of this type selected", NOT "not observed" — a caller that has
-/// only one side must omit the whole struct or the other type's tracks all
-/// report unselected.
+/// Fresh `current-tracks/{type}/id` values the caller observed via property events —
+/// passing them skips two property reads per refresh. All-or-nothing: a `None`
+/// field means "no track of this type selected", NOT "not observed" — a caller with
+/// only one side must omit the whole struct or the other type reports unselected.
 #[derive(Debug, Clone, Copy, Deserialize)]
 pub(crate) struct ObservedTrackIds {
     audio: Option<i64>,

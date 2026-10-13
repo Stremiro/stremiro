@@ -13,33 +13,38 @@ use super::streaming_helpers::{
     normalize_source_id, normalize_source_key, prepare_addon_streams, push_bounded_error,
 };
 use super::{
-    normalize_media_id, normalize_non_empty, normalize_stream_media_type,
-    PlaybackLanguagePreferences,
+    normalize_media_id, normalize_stream_media_type, PlaybackLanguagePreferences,
+    MEDIA_TITLE_MAX_CHARS,
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_manifest::snapshot_supports_request;
 use crate::providers::addons::{AddonStream, AddonTransport, StreamDeliveryKind, StreamResolution};
+use crate::providers::trim_to_max;
 use futures_util::stream::{self, StreamExt};
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::{Duration, Instant};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::AppHandle;
 
-// Primary addon lookups get the most budget, bounded so one unhealthy source
-// cannot dominate selector open time. Matches the resource request budget:
-// a slow-but-alive source must outlive slow international routes without
-// paying the transport-failure cooldown on every selector open.
+// Bounded so one unhealthy source cannot dominate selector open time; matches the
+// resource request budget so a slow-but-alive source avoids the failure cooldown.
 const ADDON_STREAM_FETCH_TIMEOUT_SECS: u64 = 20;
-// Lookup fallbacks are best-effort and fail fast — the first ID already
-// produced nothing usable.
+// Fallbacks fail fast — the first ID already produced nothing usable.
 const ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS: u64 = 5;
 const DEGRADED_SOURCE_LATENCY_MS: u64 = 4_500;
 const ADDON_STREAM_FETCH_CONCURRENCY_LIMIT: usize = 4;
-/// Resolve/recovery callers race a frontend timeout: bound the fan-out so one
-/// hung addon cannot outlive the caller. Past the deadline the merge still
-/// runs on whatever landed; missing addons get the "did not return" summary.
+/// Resolve/recovery callers race a frontend timeout — one hung addon cannot outlive
+/// the caller. Past the deadline the merge runs on whatever landed.
 const RESOLVE_FETCH_DEADLINE: Duration = Duration::from_secs(14);
+
+/// Resolve/recovery fan-out options (bounded by `RESOLVE_FETCH_DEADLINE`).
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ResolveFetch<'a> {
+    /// Prepared key of the stream the probe pool tries first — once an addon
+    /// returns it, slower addons are not awaited.
+    pub settle_on_stream_key: Option<&'a str>,
+}
 const ACTIVE_SOURCE_COOLDOWN_PRIORITY: u8 = 0;
 const SOURCE_COOLDOWN_ERROR_MESSAGE: &str =
     "Temporarily cooling down after recent playback failures.";
@@ -50,10 +55,11 @@ const ALL_SOURCES_COOLDOWN_FATAL_ERROR: &str =
 #[serde(rename_all = "lowercase")]
 pub(crate) enum StreamSourceStatus {
     Healthy,
+    #[serde(rename = "no_results")]
+    NoResults,
     Degraded,
     Offline,
-    /// Still in flight on a progressive snapshot — the chip renders as a
-    /// searching placeholder instead of a red offline dot.
+    /// Still in flight on a progressive snapshot — renders as searching, not offline.
     Pending,
 }
 
@@ -90,6 +96,14 @@ struct StreamResolutionCounts {
 
 #[derive(Default, Serialize)]
 #[serde(rename_all = "camelCase")]
+struct StreamSourceHealthSummary {
+    degraded: usize,
+    offline: usize,
+    pending: usize,
+}
+
+#[derive(Default, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct StreamSelectorStats {
     res_counts: StreamResolutionCounts,
     playable_count: usize,
@@ -97,10 +111,14 @@ struct StreamSelectorStats {
     cached_count: usize,
     batch_count: usize,
     episode_like_count: usize,
+    source_health: StreamSourceHealthSummary,
 }
 
 impl StreamSelectorStats {
-    fn from_streams(streams: &[AddonStream]) -> Self {
+    fn from_snapshot<'a>(
+        streams: &[AddonStream],
+        sources: impl IntoIterator<Item = &'a StreamSourceSummary>,
+    ) -> Self {
         let mut stats = Self::default();
         for stream in streams {
             let presentation = &stream.presentation;
@@ -123,14 +141,21 @@ impl StreamSelectorStats {
             }
         }
         stats.episode_like_count = stats.playable_count - stats.batch_count;
+        for source in sources {
+            match source.status {
+                StreamSourceStatus::Degraded => stats.source_health.degraded += 1,
+                StreamSourceStatus::Offline => stats.source_health.offline += 1,
+                StreamSourceStatus::Pending => stats.source_health.pending += 1,
+                StreamSourceStatus::Healthy | StreamSourceStatus::NoResults => {}
+            }
+        }
         stats
     }
 }
 
 impl Serialize for StreamSelectorData {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Resolve callers reuse this data without serializing it; only selector
-        // payloads need counts, derived from already-prepared presentation facts.
+        // Only selector payloads serialize; counts derive from prepared presentation facts.
         let mut data = serializer.serialize_struct(
             "StreamSelectorData",
             if self.fatal_error_message.is_some() {
@@ -141,7 +166,10 @@ impl Serialize for StreamSelectorData {
         )?;
         data.serialize_field("streams", &self.streams)?;
         data.serialize_field("sourceSummaries", &self.source_summaries)?;
-        data.serialize_field("stats", &StreamSelectorStats::from_streams(&self.streams))?;
+        data.serialize_field(
+            "stats",
+            &StreamSelectorStats::from_snapshot(&self.streams, &self.source_summaries),
+        )?;
         if let Some(message) = &self.fatal_error_message {
             data.serialize_field("fatalErrorMessage", message)?;
         }
@@ -149,9 +177,8 @@ impl Serialize for StreamSelectorData {
     }
 }
 
-/// Borrowed serialize view of `StreamSelectorData` for progressive channel
-/// snapshots: identical wire shape, zero stream clones. Mirrored fields stay
-/// in lockstep via the `selector_snapshot_serializes_like_selector_data` pin.
+/// Borrowed serialize view of `StreamSelectorData` for progressive snapshots:
+/// identical wire shape, zero clones. Lockstep pinned by `selector_snapshot_serializes_like_selector_data`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StreamSelectorSnapshot<'a> {
@@ -163,19 +190,19 @@ struct StreamSelectorSnapshot<'a> {
 }
 
 fn send_selector_snapshot(
-    channel: &Channel<serde_json::Value>,
+    channel: &Channel,
     streams: &[AddonStream],
     source_summaries: Vec<&StreamSourceSummary>,
 ) {
-    // Progressive snapshots never carry a fatal error — the settled command
-    // result owns that field.
-    if let Ok(payload) = serde_json::to_value(StreamSelectorSnapshot {
+    // Progressive snapshots never carry a fatal error — the settled result owns that field.
+    // Straight to the wire string: a `serde_json::Value` detour builds and drops a full tree per snapshot.
+    if let Ok(payload) = serde_json::to_string(&StreamSelectorSnapshot {
         streams,
-        stats: StreamSelectorStats::from_streams(streams),
+        stats: StreamSelectorStats::from_snapshot(streams, source_summaries.iter().copied()),
         source_summaries,
         fatal_error_message: None,
     }) {
-        let _ = channel.send(payload);
+        let _ = channel.send(InvokeResponseBody::Json(payload));
     }
 }
 
@@ -254,8 +281,7 @@ pub(crate) struct StreamRankingScope {
     pub episode: Option<u32>,
 }
 
-/// Optional ranking overrides every stream command accepts: the frontend
-/// can rank against a different title/id than the fetch query uses.
+/// Ranking overrides: the frontend can rank against a different title/id than the fetch query uses.
 pub(crate) struct StreamRankingOverrides {
     pub media_type: Option<String>,
     pub media_id: Option<String>,
@@ -264,9 +290,8 @@ pub(crate) struct StreamRankingOverrides {
     pub episode: Option<u32>,
 }
 
-/// One builder for the coordinator's match context — the progressive
-/// snapshot and the final merge must rank on identical coordinates.
-/// `is_final_season` is the mapping-index fact that lets the episode
+/// One builder for the coordinator's match context — progressive snapshot and final
+/// merge must rank on identical coordinates. `is_final_season` lets the episode
 /// battery resolve numberless "final season" naming claims.
 fn stream_match_context<'a>(
     query: &StreamQueryRequest<'_>,
@@ -306,7 +331,10 @@ pub(crate) fn resolve_stream_ranking_scope(
     Ok(StreamRankingScope {
         media_type,
         media_id,
-        title: overrides.title.as_deref().and_then(normalize_non_empty),
+        title: overrides
+            .title
+            .as_deref()
+            .and_then(|title| trim_to_max(title, MEDIA_TITLE_MAX_CHARS)),
         season: overrides.season.or(fallback_season),
         episode: overrides.episode.or(fallback_episode),
     })
@@ -328,8 +356,7 @@ async fn fetch_prepared_streams_for_addon(
             ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS
         };
 
-        // Snapshot before spawning: a `clear_cache` landing mid-flight
-        // revokes this attempt's right to record a cooldown on timeout.
+        // Snapshot before spawning: a `clear_cache` landing mid-flight revokes this attempt's cooldown right.
         let generation = provider.cache_generation();
         let attempt = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
@@ -363,11 +390,9 @@ async fn fetch_prepared_streams_for_addon(
             }
             Err(_) => {
                 let error = format!("{} timed out after {}s", source_name, timeout_secs);
-                // The dropped get_streams future can't record its own
-                // failure — without this, a hung host re-pays the full
-                // timeout on every selector open. Only the primary attempt
-                // may cool the host: a fallback id's timeout proves nothing
-                // about reachability.
+                // The dropped get_streams future can't record its own failure — a hung
+                // host would re-pay the timeout on every selector open. Only the primary
+                // attempt may cool the host: a fallback id's timeout proves nothing.
                 if index == 0 {
                     provider.note_fetch_failure_for_url(&addon.url, generation);
                 }
@@ -384,9 +409,8 @@ async fn fetch_prepared_streams_for_addon(
                     ],
                 );
                 if index == 0 {
-                    // The cooldown just recorded rejects every remaining
-                    // query id at the contract gate, and its message would
-                    // replace the timeout error — return the real failure.
+                    // The recorded cooldown would reject remaining ids and mask the
+                    // timeout error — return the real failure.
                     return Err(error);
                 }
                 last_error = Some(error);
@@ -401,10 +425,9 @@ async fn fetch_prepared_streams_for_addon(
     Ok(Vec::new())
 }
 
-/// Batched single-store read, off the async worker: health, title
-/// affinities, language prefs, and the final-season fact are fixed inputs
-/// the progressive snapshots reuse. Stream-family priorities depend on the
-/// streams themselves and are fetched incrementally as addons land.
+/// Batched single-store read, off the async worker: health, title affinities, language
+/// prefs, and the final-season fact — fixed inputs the progressive snapshots reuse.
+/// Family priorities depend on the streams and are fetched incrementally per addon.
 async fn snapshot_selector_inputs(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -443,9 +466,7 @@ async fn snapshot_selector_inputs(
         let preferred_title_source_id = service
             .preferred_title_source_id(&app_owned, &media_id_owned, &media_type_owned)
             .unwrap_or_default();
-        // The episode battery's final-season fact rides the same blocking
-        // read (see `PlaybackStateService::episode_is_final_season`): one
-        // more keyed lookup, no extra store hop.
+        // Final-season fact rides the same blocking read — one keyed lookup, no extra hop.
         let is_final_season = service.episode_is_final_season(
             &app_owned,
             &media_type_owned,
@@ -469,9 +490,8 @@ async fn snapshot_selector_inputs(
     .await
 }
 
-/// Fixed ranking inputs snapshot once per selector fetch — the progressive
-/// previews and the settled merge rank against the same maps so the two
-/// orderings can never drift.
+/// Fixed ranking inputs snapshot once per fetch — previews and the settled merge
+/// rank against the same maps so the two orderings can't drift.
 struct SelectorFetchContext<'a> {
     app: &'a AppHandle,
     playback_state: &'a PlaybackStateService,
@@ -535,7 +555,9 @@ async fn fetch_addon_stream_outcome(
 fn summarize_addon_outcome(outcome: &AddonStreamFetchOutcome) -> StreamSourceSummary {
     let status = if outcome.error_message.is_some() {
         StreamSourceStatus::Offline
-    } else if outcome.streams.is_empty() || outcome.latency_ms > DEGRADED_SOURCE_LATENCY_MS {
+    } else if outcome.streams.is_empty() {
+        StreamSourceStatus::NoResults
+    } else if outcome.latency_ms > DEGRADED_SOURCE_LATENCY_MS {
         StreamSourceStatus::Degraded
     } else {
         StreamSourceStatus::Healthy
@@ -562,9 +584,8 @@ fn build_fatal_stream_error(errors: &[String]) -> Option<String> {
     }
 }
 
-/// Fetch priority scores for stream families not yet in `priorities`. The
-/// progressive path calls this per addon arrival — most calls find every
-/// family already scored and skip the store read entirely.
+/// Fetch priority scores for stream families not yet in `priorities`. Called per addon
+/// arrival — most calls find every family already scored and skip the store read.
 async fn ensure_stream_family_priorities(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -610,21 +631,17 @@ async fn ensure_stream_family_priorities(
     Ok(())
 }
 
-/// Returns the selector payload plus the `is_final_season` fact the ranking
-/// snapshot computed — `StreamPoolQuery::fetch_pool` reuses it for the
-/// episode-conflict retain so the pool gate and the ranker read one source
-/// of truth.
-///
-/// `fetch_budget` bounds the whole fan-out; `None` keeps the full per-addon
-/// budgets (selector and party matching, vs bounded resolve/recovery).
+/// Returns the selector payload plus the `is_final_season` fact the ranking snapshot
+/// computed — `StreamPoolQuery::fetch_pool` reuses it so pool gate and ranker share
+/// one source of truth. `resolve` bounds the fan-out for resolve/recovery.
 pub(crate) async fn fetch_stream_selector_data(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
     provider: &AddonTransport,
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
-    progress: Option<&Channel<serde_json::Value>>,
-    fetch_budget: Option<Duration>,
+    progress: Option<&Channel>,
+    resolve: Option<ResolveFetch<'_>>,
 ) -> Result<(StreamSelectorData, bool), String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
 
@@ -648,8 +665,7 @@ pub(crate) async fn fetch_stream_selector_data(
         ));
     }
 
-    // Single pass over enabled addons: capability predicate and health
-    // priority each run once per stream-declaring addon.
+    // Single pass: capability predicate runs once per stream-declaring addon.
     let stream_addons: Vec<(usize, &AddonConfig)> = enabled_addons
         .iter()
         .enumerate()
@@ -683,8 +699,7 @@ pub(crate) async fn fetch_stream_selector_data(
         })
         .collect();
 
-    // One "can query" view — the fetch targets and the source-priority map
-    // both derive from it, so the cooldown predicate runs once per addon.
+    // One "can query" view — fetch targets and the source-priority map both derive from it.
     let active_stream_addons: Vec<(usize, &AddonConfig)> = stream_addons
         .iter()
         .filter(|(_, _, priority)| *priority > ACTIVE_SOURCE_COOLDOWN_PRIORITY)
@@ -692,9 +707,8 @@ pub(crate) async fn fetch_stream_selector_data(
         .collect();
 
     if active_stream_addons.is_empty() {
-        // Metadata-only addons (e.g. pinned Cinemeta) are not stream sources —
-        // listing them as "offline" is noise. An empty stream-addon set
-        // surfaces as empty streams with no fatal error so the UI can prompt.
+        // Metadata-only addons (e.g. pinned Cinemeta) are not stream sources — listing
+        // them "offline" is noise. No stream addons = empty streams, no fatal error.
         let source_summaries = stream_addons
             .iter()
             .map(|(_, addon, _)| summarize_cooldown_skipped_addon(addon))
@@ -737,7 +751,7 @@ pub(crate) async fn fetch_stream_selector_data(
         &query_ids,
         effective_type,
         progress,
-        fetch_budget,
+        resolve,
     )
     .await;
 
@@ -748,24 +762,21 @@ pub(crate) async fn fetch_stream_selector_data(
         stream_family_priorities,
         signal_cache,
     )
-    .await?;
+    .await;
     Ok((data, is_final_season))
 }
 
-/// Fan out to prioritized addons (bounded concurrency); with a progress
-/// channel attached, emit a merged+ranked snapshot per addon landing.
-/// Preview merges arrive in completion order; the final merge walks
-/// declaration order, so the settled list is deterministic. Returns the
-/// per-addon outcomes plus the family priorities and signal memo the final
-/// merge reuses.
+/// Fans out to prioritized addons (bounded concurrency); with a progress channel,
+/// emits a merged+ranked snapshot per addon landing. Preview merges arrive in
+/// completion order; the final merge walks declaration order — deterministic.
 async fn run_progressive_fetch(
     ctx: &SelectorFetchContext<'_>,
     stream_addons: &[(usize, &AddonConfig, u8)],
     prioritized_addons: &[(usize, &AddonConfig)],
     query_ids: &[String],
     effective_type: &str,
-    progress: Option<&Channel<serde_json::Value>>,
-    fetch_budget: Option<Duration>,
+    progress: Option<&Channel>,
+    resolve: Option<ResolveFetch<'_>>,
 ) -> (
     BTreeMap<usize, AddonStreamFetchOutcome>,
     HashMap<String, u8>,
@@ -773,8 +784,7 @@ async fn run_progressive_fetch(
 ) {
     let mut preview_merged: Vec<AddonStream> = Vec::new();
     let mut preview_seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    // Preview buffers only exist for channel callers — resolve/recovery
-    // fetches pass no channel and never read them.
+    // Preview buffers exist only for channel callers — resolve/recovery passes no channel.
     let mut preview_summaries: BTreeMap<usize, StreamSourceSummary> = if progress.is_some() {
         stream_addons
             .iter()
@@ -802,9 +812,8 @@ async fn run_progressive_fetch(
     let mut outcomes: BTreeMap<usize, AddonStreamFetchOutcome> = BTreeMap::new();
 
     if let Some(channel) = progress {
-        // Ship the declared-source roster first: the selector's "searching N
-        // sources" count and filter ids come from these summaries, not from
-        // per-addon responses.
+        // Ship the declared-source roster first: the selector's "searching N sources"
+        // count and filter ids come from these summaries, not per-addon responses.
         send_selector_snapshot(channel, &[], preview_summaries.values().collect());
     }
 
@@ -819,9 +828,9 @@ async fn run_progressive_fetch(
     }))
     .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
 
-    // No budget keeps the full wait (selector/party); resolve/recovery bound
-    // the fan-out so one hung addon cannot outlive their caller.
-    let fetch_deadline = fetch_budget.map(|budget| tokio::time::Instant::now() + budget);
+    // No deadline keeps the full selector wait; resolve/recovery bounds the fan-out.
+    let fetch_deadline = resolve.map(|_| tokio::time::Instant::now() + RESOLVE_FETCH_DEADLINE);
+    let settle_on_stream_key = resolve.and_then(|resolve| resolve.settle_on_stream_key);
 
     loop {
         let next = match fetch_deadline {
@@ -846,10 +855,8 @@ async fn run_progressive_fetch(
             break;
         };
         if let Some(channel) = progress {
-            // A store error only costs this snapshot its family signal — the
-            // fan-out and the final rank still get their own attempt. Score
-            // only the arriving batch; earlier arrivals already covered the
-            // merged set.
+            // A store error only costs this snapshot its family signal. Score only the
+            // arriving batch; earlier arrivals already covered the merged set.
             if let Err(error) = ensure_stream_family_priorities(
                 ctx.app,
                 ctx.playback_state,
@@ -886,7 +893,16 @@ async fn run_progressive_fetch(
                 preview_summaries.values().collect(),
             );
         }
+        let settled = settle_on_stream_key.is_some_and(|key| {
+            outcome
+                .streams
+                .iter()
+                .any(|stream| stream.stream_key == key)
+        });
         outcomes.insert(index, outcome);
+        if settled {
+            break;
+        }
     }
 
     (outcomes, stream_family_priorities, signal_cache)
@@ -900,7 +916,7 @@ async fn merge_selector_outcomes(
     mut outcomes: BTreeMap<usize, AddonStreamFetchOutcome>,
     mut stream_family_priorities: HashMap<String, u8>,
     mut signal_cache: StreamSignalCache,
-) -> Result<StreamSelectorData, String> {
+) -> StreamSelectorData {
     let mut merged: Vec<AddonStream> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut source_summaries = Vec::with_capacity(stream_addons.len());
@@ -933,16 +949,13 @@ async fn merge_selector_outcomes(
         source_summaries.push(summary);
     }
 
-    // The merged set moves through the ranking snapshot and comes back
-    // ranked: the outer binding is consumed exactly once on each path.
+    // The merged set moves through the ranking snapshot and comes back ranked.
     let streams = if merged.is_empty() {
         merged
     } else {
-        // Families the progressive pass already scored are reused; a
-        // non-channel caller finds them all missing and pays the same single
-        // store read. Same tolerance as the progressive path: a wedged store
-        // costs the merge its family signal, not the pool — unscored families
-        // rank on the default.
+        // Progressive-pass scores are reused; a non-channel caller finds them all
+        // missing and pays the same store read. A wedged store costs the family
+        // signal, not the pool — unscored families rank on the default.
         if let Err(error) = ensure_stream_family_priorities(
             ctx.app,
             ctx.playback_state,
@@ -968,7 +981,7 @@ async fn merge_selector_outcomes(
         ranked
     };
 
-    Ok(StreamSelectorData {
+    StreamSelectorData {
         fatal_error_message: if streams.is_empty() {
             build_fatal_stream_error(&fatal_errors)
         } else {
@@ -976,7 +989,7 @@ async fn merge_selector_outcomes(
         },
         source_summaries,
         streams,
-    })
+    }
 }
 
 pub(crate) async fn fetch_ranked_streams(
@@ -985,6 +998,7 @@ pub(crate) async fn fetch_ranked_streams(
     provider: &AddonTransport,
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
+    resolve: ResolveFetch<'_>,
 ) -> Result<(Vec<AddonStream>, bool), String> {
     let (data, is_final_season) = fetch_stream_selector_data(
         app,
@@ -993,7 +1007,7 @@ pub(crate) async fn fetch_ranked_streams(
         query,
         ranking,
         None,
-        Some(RESOLVE_FETCH_DEADLINE),
+        Some(resolve),
     )
     .await?;
 

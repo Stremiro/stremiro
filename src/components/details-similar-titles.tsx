@@ -7,8 +7,7 @@ import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
 
-// Starts the catalog fetch a screen early, so the rail is usually ready
-// before it scrolls into view.
+// Starts the catalog fetch a screen early so the rail is ready before it scrolls in.
 const PREFETCH_ROOT_MARGIN = '600px';
 /** Fewer matches than this reads as filler — the rail hides instead. */
 const MIN_SIMILAR_TITLES = 4;
@@ -41,11 +40,12 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
     data: titles,
     isLoading,
     isError,
+    isFetched,
+    isFetching,
     refetch,
   } = useQuery({
-    // Under the `trending` prefix so invalidateDiscoveryQueries covers it.
-    // Year and genres are in the key so the rail refreshes when full
-    // metadata lands after a placeholder item.
+    // Under the `trending` prefix so invalidateDiscoveryQueries covers it;
+    // year/genres in the key refresh the rail when full metadata lands.
     queryKey: trendingRowQueryKey(
       'similar',
       item.type,
@@ -60,8 +60,8 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
 
   // A failed refetch keeps the last good data — stale cards beat a notice.
   const hasTitles = !!titles && titles.length >= MIN_SIMILAR_TITLES;
-  const showSkeleton = queryEnabled && isLoading && !hasTitles;
-  const showRetry = queryEnabled && isError && !hasTitles;
+  const showSkeleton = queryEnabled && isLoading && !isFetched && !hasTitles;
+  const showRetry = queryEnabled && (isError || (isFetched && isLoading)) && !hasTitles;
 
   return (
     <div ref={anchorRef}>
@@ -85,6 +85,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
           <RetryBanner
             className='mt-2'
             message="Couldn't load recommendations."
+            isRetrying={isFetching}
             onRetry={() => void refetch()}
           />
         </div>

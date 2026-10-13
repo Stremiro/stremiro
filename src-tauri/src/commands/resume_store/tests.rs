@@ -1,4 +1,4 @@
-use super::ResumeStore;
+use super::{ProgressWrite, ResumeStore};
 use crate::commands::watch_history_commands::{
     prepare_episode_watch_changes, validate_history_batch, WatchedEpisode,
 };
@@ -129,6 +129,65 @@ fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
     }
     assert_eq!(store.count_entries().expect("raw row count"), 3);
     assert_eq!(store.count_titles().expect("collapsed title count"), 2);
+}
+
+#[test]
+fn watched_marks_do_not_overwrite_another_canonical_episode_at_a_raw_key() {
+    for requested in [vec![4], vec![4, 15], vec![14, 4], vec![4, 14]] {
+        let path = TempDbPath::new("remapped-key-collision");
+        let mut store = ResumeStore::open(&path).expect("open db");
+        let prior = WatchProgress {
+            type_: "series".to_string(),
+            season: Some(1),
+            episode: Some(4),
+            absolute_season: Some(1),
+            absolute_episode: Some(14),
+            ..sample_progress(1_000, 120.0)
+        };
+        let key = crate::commands::history_helpers::build_history_key(
+            &prior.type_,
+            &prior.id,
+            prior.season,
+            prior.episode,
+        );
+        assert_eq!(key, "series:tt1234567:1:4");
+        store
+            .upsert_progress(&key, &prior)
+            .expect("seed remapped episode");
+        let item = crate::test_helpers::test_media_item("tt1234567", "series");
+        let episodes: Vec<_> = requested
+            .iter()
+            .map(|&episode| WatchedEpisode { season: 1, episode })
+            .collect();
+        let (writes, deletes) = prepare_episode_watch_changes(
+            &item,
+            &episodes,
+            store.load_entries().expect("read rows"),
+            true,
+            2_000,
+        );
+        assert!(deletes.is_empty());
+        assert!(writes
+            .iter()
+            .all(|(_, row)| row.absolute_episode != Some(4)));
+        store.merge_entries(writes).expect("mark watched");
+        let retained = read_entry(&mut store, &key);
+        assert_eq!(retained.absolute_episode, Some(14));
+        assert_eq!(retained.episode, Some(4));
+        assert_eq!(retained.duration, prior.duration);
+        assert_eq!(
+            retained.position,
+            if requested.contains(&14) {
+                prior.duration
+            } else {
+                prior.position
+            },
+        );
+        assert_eq!(
+            store.count_entries().unwrap(),
+            if requested.contains(&15) { 2 } else { 1 }
+        );
+    }
 }
 
 #[test]
@@ -298,11 +357,19 @@ fn stale_progress_write_does_not_regress_resume() {
     let wrote = store
         .upsert_progress("movie:tt1234567", &sample_progress(2000, 900.0))
         .expect("newer write ok");
-    assert!(wrote, "newer row lands");
+    assert_eq!(
+        wrote,
+        ProgressWrite::Written { pruned: false },
+        "newer row lands"
+    );
     let wrote = store
         .upsert_progress("movie:tt1234567", &sample_progress(1000, 100.0))
         .expect("stale write is a no-op, not an error");
-    assert!(!wrote, "recency guard reports no row written");
+    assert_eq!(
+        wrote,
+        ProgressWrite::Skipped,
+        "recency guard reports no row written"
+    );
     let kept = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(kept.last_watched, 2000);
     assert_eq!(kept.position, 900.0);
@@ -371,9 +438,12 @@ fn total_history_is_bounded_to_newest_entries() {
     let mut store = ResumeStore::open(&path).expect("reopen ok");
     let mut newest = sample_progress(9_999_999, 10.0);
     newest.id = "tt9999999".to_string();
-    store
-        .upsert_progress("movie:tt9999999", &newest)
-        .expect("newest write triggers prune");
+    assert_eq!(
+        store
+            .upsert_progress("movie:tt9999999", &newest)
+            .expect("newest write triggers prune"),
+        ProgressWrite::Written { pruned: true }
+    );
     let count = store.count_entries().expect("count ok");
     assert_eq!(count as i64, super::MAX_RESUME_TOTAL_ENTRIES);
     assert!(store.get_entry("movie:tt9999999").expect("read").is_some());
@@ -400,9 +470,15 @@ fn title_prune_keeps_every_watched_mark() {
         partial.type_ = "series".to_string();
         partial.season = Some(2);
         partial.episode = Some(episode);
-        store
+        let outcome = store
             .upsert_progress(&format!("series:tt1234567:2:{episode}"), &partial)
             .expect("write partial");
+        let pruned = i64::from(episode) > super::MAX_RESUME_ROWS_PER_TITLE;
+        assert_eq!(
+            outcome,
+            ProgressWrite::Written { pruned },
+            "episode={episode}"
+        );
     }
 
     let rows = store
@@ -551,6 +627,27 @@ fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
 
     let clamped = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(clamped.position, 0.0);
+}
+
+#[test]
+fn query_step_error_fails_history_read() {
+    let path = TempDbPath::new("steperror");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    store
+        .upsert_progress("movie:tt1234567", &sample_progress(1_000, 300.0))
+        .expect("write good row");
+
+    let error = super::query_progress_rows(
+        &store.connection,
+        "ORDER BY abs(-9223372036854775808)",
+        [],
+        "",
+    )
+    .expect_err("SQLite step errors must fail the read");
+    assert!(
+        error.contains("Failed to query playback resume rows: integer overflow"),
+        "unexpected error: {error}"
+    );
 }
 
 #[test]

@@ -5,9 +5,8 @@ import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR }
 const PLAYER_SHORTCUT_CONTROL_SELECTOR =
   'button, a, [role="button"], [role="menu"], [role="menuitem"], [data-player-interactive]';
 
-// Discrete actions ignore auto-repeat; arrows/volume/speed/frame/sub-delay
-// steps keep repeating so holding ramps. Digits are one-shot percent seeks —
-// holding one would storm identical seeks.
+// Discrete actions ignore auto-repeat (arrows/volume/speed etc. keep ramping).
+// Digits are one-shot percent seeks — a held digit would storm identical seeks.
 const NON_REPEAT_KEYS = new Set([
   ' ',
   'k',
@@ -36,8 +35,7 @@ const NON_REPEAT_KEYS = new Set([
   '9',
 ]);
 
-// A clicked control keeps focus after activation — only its own keys belong
-// to it; everything else stays a media hotkey. Sliders self-consume theirs.
+// A focused control owns only its activation keys; everything else stays a media hotkey. Sliders self-consume theirs.
 function shouldIgnorePlayerHotkeyTarget(target: EventTarget | null, key: string): boolean {
   if (!(target instanceof HTMLElement)) {
     return false;
@@ -128,11 +126,10 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     togglePlay,
   } = options;
 
-  // Effect event: one permanent listener that always reads the latest options.
+  // Effect event: one permanent listener reading latest options.
   const handleKeyDown = useEffectEvent((e: KeyboardEvent) => {
     if (!mountedRef.current) return;
-    // The mini player hands the keyboard back to the page — space/arrows
-    // must not control video while the user browses.
+    // Docked: the page owns keys — space/arrows must not control video.
     if (!isExpanded) return;
     if (document.querySelector(OPEN_DIALOG_SELECTOR)) return;
     // Child-handled keys, IME composition, and modifier chords are never
@@ -141,8 +138,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
 
     const normalizedKey = e.key.toLowerCase();
 
-    // Check key ownership before suppressing repeats: held typing keys and
-    // focused controls' activation keys still belong to those controls.
+    // Check ownership before suppressing repeats — typing keys and control activation keys belong to controls.
     if (normalizedKey === 'escape') {
       if (e.target instanceof HTMLElement && e.target.closest(RADIX_POPPER_CONTENT_SELECTOR)) {
         return;
@@ -158,8 +154,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
 
     // Escape works even with focus inside panels; Radix popper layers own theirs.
     if (normalizedKey === 'escape') {
-      // Topmost layer first: the shortcuts overlay closes before panels,
-      // fullscreen, or player-level Back.
+      // Topmost first: shortcuts overlay, then selector, episodes, fullscreen, then Back.
       if (showShortcuts) {
         closeShortcuts();
         return;
@@ -183,16 +178,14 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       return;
     }
 
-    // `e` toggles the episodes panel — it must close from inside too, so it
-    // intercepts ahead of the open gate below.
+    // `e` must also close the panel from inside, so it intercepts ahead of the open gate.
     if (normalizedKey === 'e' && hasEpisodes && !showStreamSelector && !showShortcuts) {
       e.preventDefault();
       toggleEpisodes();
       return;
     }
 
-    // `?` toggles the help overlay — closes from anywhere but never opens
-    // over the modal selector.
+    // `?` toggles help — closes from anywhere, never opens over the modal selector.
     if (normalizedKey === '?' && !showStreamSelector) {
       e.preventDefault();
       toggleShortcuts();
@@ -297,8 +290,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
         break;
       case 's':
       case 'enter':
-        // The skip CTA matters only while a segment is active — an inactive
-        // window leaves Enter alone so a focused surface keeps native behavior.
+        // Only hijack Enter while a segment is active — otherwise a focused surface keeps native behavior.
         if (skipAction) {
           e.preventDefault();
           skipAction.onSkip();
@@ -310,7 +302,6 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-    // The handler is an effect event — the listener binds once for the
-    // player's lifetime.
+    // Effect event — listener binds once for the player's lifetime.
   }, []);
 }

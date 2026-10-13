@@ -106,7 +106,7 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     assert!(value.get("capabilities").is_none());
     let display = value["displayUrl"].as_str().expect("displayUrl present");
     assert!(!display.contains("sekrit") && !display.contains("user:pass"));
-    assert!(display.contains("[redacted]"));
+    assert_eq!(display, "•••@addon.example/•••/config?token=•••");
 
     let cinemeta_url = normalize_addon_url(super::DEFAULT_CINEMETA_INSTALL_URL)
         .expect("valid default")

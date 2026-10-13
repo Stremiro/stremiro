@@ -1,4 +1,13 @@
-import type { ProfilePreferences, ProfilePreferencesPatch } from '@/lib/api';
+import type {
+  AddonConfig,
+  AddonConfigsOp,
+  HistoryPlaybackPlan,
+  PlaybackLanguagePreferences,
+  ProfilePreferences,
+  ProfilePreferencesPatch,
+  StreamSelectorData,
+} from '@/lib/api';
+import { clamp } from '@/lib/utils';
 
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
@@ -34,13 +43,16 @@ let previewStreamSelectorPreferences = {
   sort: 'smart',
   batch: 'all',
 };
+let previewPlaybackLanguagePreferences: PlaybackLanguagePreferences = {};
+let previewAddonConfigs: AddonConfig[] = [];
+let previewAddonConfigSeq = 0;
 
 const EMPTY_SEARCH_CATALOG_PAGE = {
   items: [],
   nextSkip: null,
 };
 
-const EMPTY_STREAM_SELECTOR_DATA = {
+const EMPTY_STREAM_SELECTOR_DATA: StreamSelectorData = {
   streams: [],
   sourceSummaries: [],
   stats: {
@@ -50,6 +62,7 @@ const EMPTY_STREAM_SELECTOR_DATA = {
     cachedCount: 0,
     batchCount: 0,
     episodeLikeCount: 0,
+    sourceHealth: { degraded: 0, offline: 0, pending: 0 },
   },
 };
 
@@ -61,9 +74,7 @@ const EMPTY_DATA_STATS = {
   watch_statuses_count: 0,
 };
 
-// Mirrors the backend's closed language set so preview renders the real options.
-// Mirrors MOVIE_GENRE_FALLBACK/SERIES_ONLY_GENRES in browse_genre_commands.rs —
-// the backend never returns empty genre lists, so neither should preview.
+// Mirrors MOVIE_GENRE_FALLBACK/SERIES_ONLY_GENRES in browse_genre_commands.rs — the backend never returns empty genre lists.
 const PREVIEW_MOVIE_GENRES = [
   'Action',
   'Adventure',
@@ -93,6 +104,7 @@ const PREVIEW_BROWSE_GENRES = {
   anime: PREVIEW_SERIES_GENRES.filter((genre) => genre.toLowerCase() !== 'animation'),
 };
 
+// Mirrors the backend's closed language set.
 const PREVIEW_SUPPORTED_LANGUAGES = [
   { code: 'en', label: 'English' },
   { code: 'ja', label: 'Japanese' },
@@ -111,8 +123,7 @@ function readStringArg(args: PreviewInvokeArgs, key: string, fallback: string): 
 }
 
 function readMediaType(args: PreviewInvokeArgs): 'movie' | 'series' {
-  // Exact camelCase contract only: accepting snake_case fallbacks here would
-  // hide the IPC naming drift this mock exists to surface.
+  // Exact camelCase only — snake_case fallbacks would hide the IPC naming drift this mock surfaces.
   const value = args?.mediaType;
   if (typeof value !== 'string') {
     return 'movie';
@@ -127,8 +138,7 @@ function readFiniteNumber(source: Record<string, unknown>, key: string): number 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
-// Mirrors `apply_app_ui_preferences_patch`: absent keys keep the current
-// value; present-but-invalid numerics fall to the backend defaults.
+// Mirrors `apply_app_ui_preferences_patch`: absent keys keep current value; invalid numerics fall to defaults.
 function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const current = previewAppUiPreferences;
   const volume = readFiniteNumber(patch, 'playerVolume');
@@ -138,14 +148,8 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const scale = readFiniteNumber(patch, 'subtitleScale');
 
   previewAppUiPreferences = {
-    playerVolume:
-      volume === undefined ? current.playerVolume : Math.max(0, Math.min(100, Math.round(volume))),
-    playerSpeed:
-      speed === undefined
-        ? current.playerSpeed
-        : speed > 0
-          ? Math.max(0.25, Math.min(4, speed))
-          : 1,
+    playerVolume: volume === undefined ? current.playerVolume : clamp(Math.round(volume), 0, 100),
+    playerSpeed: speed === undefined ? current.playerSpeed : speed > 0 ? clamp(speed, 0.25, 4) : 1,
     spoilerProtection:
       typeof patch.spoilerProtection === 'boolean'
         ? patch.spoilerProtection
@@ -157,17 +161,55 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
     autoSkipIntro:
       typeof patch.autoSkipIntro === 'boolean' ? patch.autoSkipIntro : current.autoSkipIntro,
     subtitleDelay:
-      delay === undefined
-        ? current.subtitleDelay
-        : Math.round(Math.max(-5, Math.min(5, delay)) * 10) / 10,
-    subtitlePos: pos === undefined ? current.subtitlePos : Math.max(0, Math.min(100, pos)),
+      delay === undefined ? current.subtitleDelay : Math.round(clamp(delay, -5, 5) * 10) / 10,
+    subtitlePos: pos === undefined ? current.subtitlePos : clamp(pos, 0, 100),
     subtitleScale:
       scale === undefined
         ? current.subtitleScale
         : scale > 0
-          ? Math.round(Math.max(0.25, Math.min(3, scale)) * 20) / 20
+          ? Math.round(clamp(scale, 0.25, 3) * 20) / 20
           : 1.0,
   };
+}
+
+// Mirrors `apply_addon_configs_op` without validation — enough for settings edits to round-trip in preview.
+function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
+  switch (op.kind) {
+    case 'add': {
+      previewAddonConfigSeq += 1;
+      previewAddonConfigs = [
+        ...previewAddonConfigs,
+        {
+          id: `preview-addon-${previewAddonConfigSeq}`,
+          url: op.url,
+          name: '',
+          enabled: true,
+          displayUrl: op.url,
+          pinned: false,
+        },
+      ];
+      return;
+    }
+    case 'remove':
+      previewAddonConfigs = previewAddonConfigs.filter((config) => config.id !== op.id);
+      return;
+    case 'setEnabled':
+      previewAddonConfigs = previewAddonConfigs.map((config) =>
+        config.id === op.id ? { ...config, enabled: op.enabled } : config,
+      );
+      return;
+    case 'reorder': {
+      // reorder_known_ids merge: requested ids first, omitted ids keep relative order at the tail.
+      const byId = new Map(previewAddonConfigs.map((config) => [config.id, config]));
+      const ordered = op.ids.flatMap((id) => {
+        const config = byId.get(id);
+        byId.delete(id);
+        return config ? [config] : [];
+      });
+      previewAddonConfigs = [...ordered, ...byId.values()];
+      return;
+    }
+  }
 }
 
 export async function handlePreviewInvoke<T>(
@@ -240,14 +282,13 @@ export async function handlePreviewInvoke<T>(
     case 'get_skip_times':
       return { segments: [] } as T;
     case 'get_watch_history':
-    case 'get_continue_watching':
-    case 'get_up_next_entries':
+    case 'get_resume_rail':
     case 'get_library':
     case 'get_lists':
     case 'query_similar_titles':
       return [] as T;
     case 'get_calendar_events':
-      return { trackedCount: 0, events: [] } as T;
+      return { trackedCount: 0, days: [], upcoming: [] } as T;
     case 'get_title_watch_progress':
     case 'set_episodes_watched':
       return {
@@ -255,6 +296,16 @@ export async function handlePreviewInvoke<T>(
         continueWatching: [],
         episodeProgress: {},
         watchedEpisodeCeiling: {},
+      } as T;
+    case 'get_details_prefetch_bundle':
+      // No card payload in preview — the mounted details query fetches it.
+      return {
+        progress: {
+          history: [],
+          continueWatching: [],
+          episodeProgress: {},
+          watchedEpisodeCeiling: {},
+        },
       } as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
@@ -269,22 +320,28 @@ export async function handlePreviewInvoke<T>(
       } as T;
     case 'get_playback_language_preferences':
     case 'get_effective_playback_language_preferences':
-      return {} as T;
+      return previewPlaybackLanguagePreferences as T;
     case 'save_playback_language_preference': {
       const language = typeof args?.language === 'string' ? args.language : undefined;
-      return (
-        args?.preferenceKind === 'audio'
-          ? { preferredAudioLanguage: language }
-          : { preferredSubtitleLanguage: language }
-      ) as T;
+      if (args?.preferenceKind === 'audio') {
+        previewPlaybackLanguagePreferences.preferredAudioLanguage = language;
+      } else {
+        previewPlaybackLanguagePreferences.preferredSubtitleLanguage = language;
+      }
+      return previewPlaybackLanguagePreferences as T;
     }
     case 'resolve_preferred_track_selection':
       return {
         selectedMatches: false,
       } as T;
     case 'get_addon_configs':
-    case 'update_addon_configs':
-      return [] as T;
+      return previewAddonConfigs as T;
+    case 'update_addon_configs': {
+      const op =
+        typeof args?.op === 'object' && args.op !== null ? (args.op as AddonConfigsOp) : null;
+      if (op) applyPreviewAddonConfigsOp(op);
+      return previewAddonConfigs as T;
+    }
     case 'inspect_addon_url':
       return {
         configurePage: false,
@@ -338,49 +395,63 @@ export async function handlePreviewInvoke<T>(
         } as T;
       }
 
-      // Preview-only: route state carries opaque identities, never stream
-      // URLs. Mirror the backend's media-id fallback when no saved lookup
-      // identity is available.
+      // Route state carries opaque identities, never stream URLs; mirrors the backend's media-id lookup fallback.
       const target =
         typeof absoluteSeason === 'number' && typeof absoluteEpisode === 'number'
           ? `/player/${mediaType}/${encodeURIComponent(mediaId)}/${absoluteSeason}/${absoluteEpisode}`
           : `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
 
-      return {
+      const state: HistoryPlaybackPlan['state'] = {
+        from,
+        title: typeof item?.title === 'string' ? item.title : undefined,
+        poster: typeof item?.poster === 'string' ? item.poster : undefined,
+        backdrop: typeof item?.backdrop === 'string' ? item.backdrop : undefined,
+        format: typeof item?.last_stream_format === 'string' ? item.last_stream_format : undefined,
+        streamSourceId: typeof item?.source_id === 'string' ? item.source_id : undefined,
+        streamSourceName: typeof item?.source_name === 'string' ? item.source_name : undefined,
+        streamFamily: typeof item?.stream_family === 'string' ? item.stream_family : undefined,
+        selectedStreamKey:
+          typeof item?.last_stream_key === 'string' ? item.last_stream_key : undefined,
+        startTime: typeof item?.resume_start_time === 'number' ? item.resume_start_time : undefined,
+        absoluteSeason,
+        absoluteEpisode,
+        streamSeason: typeof item?.stream_season === 'number' ? item.stream_season : absoluteSeason,
+        streamEpisode:
+          typeof item?.stream_episode === 'number' ? item.stream_episode : absoluteEpisode,
+        resumeFromHistory: true,
+        streamLookupId:
+          typeof item?.last_stream_lookup_id === 'string' && item.last_stream_lookup_id.trim()
+            ? item.last_stream_lookup_id
+            : mediaId,
+      };
+      const plan: HistoryPlaybackPlan = {
         kind: 'player',
         target,
-        state: {
-          from,
-          title: typeof item?.title === 'string' ? item.title : undefined,
-          poster: typeof item?.poster === 'string' ? item.poster : undefined,
-          backdrop: typeof item?.backdrop === 'string' ? item.backdrop : undefined,
-          format:
-            typeof item?.last_stream_format === 'string' ? item.last_stream_format : undefined,
-          streamSourceId: typeof item?.source_id === 'string' ? item.source_id : undefined,
-          streamSourceName: typeof item?.source_name === 'string' ? item.source_name : undefined,
-          streamFamily: typeof item?.stream_family === 'string' ? item.stream_family : undefined,
-          selectedStreamKey:
-            typeof item?.last_stream_key === 'string' ? item.last_stream_key : undefined,
-          startTime:
-            typeof item?.resume_start_time === 'number' ? item.resume_start_time : undefined,
+        state,
+        warmResolveRequest: {
+          mediaType,
+          mediaId: mediaId.trim(),
+          streamLookupId: state.streamLookupId,
+          streamSeason: state.streamSeason,
+          streamEpisode: state.streamEpisode,
           absoluteSeason,
           absoluteEpisode,
-          streamSeason:
-            typeof item?.stream_season === 'number' ? item.stream_season : absoluteSeason,
-          streamEpisode:
-            typeof item?.stream_episode === 'number' ? item.stream_episode : absoluteEpisode,
-          resumeFromHistory: true,
-          streamLookupId:
-            typeof item?.last_stream_lookup_id === 'string' && item.last_stream_lookup_id.trim()
-              ? item.last_stream_lookup_id
-              : mediaId,
+          title: state.title || undefined,
+          preferred: {
+            streamKey: state.selectedStreamKey,
+            sourceId: state.streamSourceId,
+            sourceName: state.streamSourceName,
+            streamFamily: state.streamFamily,
+          },
         },
-      } as T;
+      };
+      return plan as T;
     }
     case 'get_data_stats':
       return EMPTY_DATA_STATS as T;
     case 'save_selected_playback_language_preference':
-      return {} as T;
+      // No scoped row in preview — `effective` stays absent, matching the backend's missing-scope contract.
+      return { preferences: {} } as T;
     case 'save_playback_language_preference_outcome_from_tracks':
       return undefined as T;
     case 'get_supported_languages':

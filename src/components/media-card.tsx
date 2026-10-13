@@ -8,6 +8,7 @@ import {
   type SetStateAction,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -17,6 +18,7 @@ import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { ListIcon } from '@/components/list/list-icons';
 import { RemoteImage } from '@/components/remote-image';
+import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import {
@@ -85,8 +87,7 @@ let lastCardCollapseAt = 0;
 const MIN_PROGRESS_BAR_PERCENT = 2;
 const POPOUT_WIDTH_PX = 270;
 
-// Resting slot width shared by home rails and all browse grids, so cards
-// render pixel-identical everywhere before hover.
+// Resting slot width shared by home rails and browse grids — cards render pixel-identical before hover.
 export const MEDIA_CARD_SLOT_CLASS_NAME = 'w-[170px] md:w-[190px]';
 
 // Includes the 6px top margin; reserve room for status before its query resolves.
@@ -94,10 +95,10 @@ export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 70;
 const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-16 px-0.5 space-y-1';
 const CARD_ICON_BUTTON_CLASS_NAME =
   'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95';
+const CARD_INACTIVE_ICON_BUTTON_CLASS_NAME =
+  'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white';
 
-// Shared rail callbacks for plain MediaCard rows (media-row, similar titles):
-// stable identities so HorizontalMediaRail's key-set memo doesn't re-run on
-// every parent render.
+// Shared rail callbacks for plain MediaCard rows — stable identities keep HorizontalMediaRail's memo from re-running.
 export const mediaCardRailKey = (item: MediaItem) => `${item.type}:${item.id}`;
 export const renderMediaCardRailItem = (item: MediaItem) => <MediaCard item={item} />;
 
@@ -151,8 +152,7 @@ function MediaCardPoster({
 
   return (
     <>
-      {/* Plain anchor + root-bound navigate: a <Link> subscribes to location,
-          so every mounted card would re-render on each search URL reflect. */}
+      {/* Plain anchor + root-bound navigate — a <Link> subscribes to location, so every card would re-render per URL reflect. */}
       <a
         href={detailsPath}
         aria-label={anchorLabel}
@@ -191,7 +191,7 @@ function MediaCardPoster({
 
             {subtitle && (
               <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
-                <div className='rounded-md border border-white/10 bg-black/70 px-1.5 py-[3px] text-[9px] font-semibold uppercase tracking-[0.08em] text-white/85'>
+                <div className='rounded-[5px] border border-white/10 bg-black/75 px-1.5 py-1 text-[10.5px] font-semibold leading-none tabular-nums text-white/90 backdrop-blur-xs'>
                   {subtitle}
                 </div>
               </div>
@@ -200,8 +200,9 @@ function MediaCardPoster({
             <ResumeProgressBar progress={progress} />
 
             {isPlayPending && (
-              <div className='absolute inset-0 z-20 flex items-center justify-center bg-black/35'>
+              <div className='absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150'>
                 <Loader2 className='h-5 w-5 animate-spin text-white/85' />
+                <span className='text-[11.5px] font-medium text-white/80'>Opening…</span>
               </div>
             )}
           </div>
@@ -248,8 +249,7 @@ function useSyncedBooleanState(initialState = false) {
   const stateRef = useRef(state);
 
   const setSyncedState = useCallback((nextState: SetStateAction<boolean>) => {
-    // Resolve against the ref (the synchronous mirror) so the updater stays
-    // pure — the ref already carries the last resolved value under batching.
+    // Resolve against the ref mirror so the updater stays pure under batching.
     const resolvedState = typeof nextState === 'function' ? nextState(stateRef.current) : nextState;
     stateRef.current = resolvedState;
     setState(resolvedState);
@@ -262,8 +262,7 @@ interface MediaCardOverlayProps {
   createListOpen: boolean;
   currentStatus: WatchStatus | null;
   detailsRouteType: PlayerRouteMediaType;
-  /** Set only when the caller already knows membership (library tab) —
-      otherwise the overlay resolves it itself on mount. */
+  /** Set only when the caller already knows membership (library tab) — otherwise the overlay resolves it on mount. */
   isInLibraryOverride?: boolean;
   isPlayPending?: boolean;
   item: MediaItem;
@@ -279,9 +278,7 @@ interface MediaCardOverlayProps {
   subtitle?: string;
 }
 
-// Expanded-only surface: mounting it on hover keeps every resting card free
-// of the details/lists/history observers and the playback hook chain — the
-// per-card cost of a browse grid stays at the poster render.
+// Expanded-only surface — resting cards stay free of the details/lists/history observers and playback hook chain.
 function MediaCardOverlay({
   createListOpen,
   currentStatus,
@@ -300,13 +297,11 @@ function MediaCardOverlay({
   showListPicker,
   subtitle,
 }: MediaCardOverlayProps) {
-  // Where the user expanded the card — read once at mount so the overlay
-  // holds no location subscription.
+  // Where the user expanded the card — read once at mount so the overlay holds no location subscription.
   const [from] = useState(currentPathWithSearch);
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
 
-  // The id guard avoids a doomed IPC (Rust rejects empty ids). Card payload
-  // only: hover needs rating/backdrop/trailer, never the episode array.
+  // The id guard avoids a doomed IPC (Rust rejects empty ids); card payload only — hover never needs episodes.
   const { data: details } = useQuery({
     queryKey: detailsCardQueryKey(detailsRouteType, item.id),
     queryFn: () => api.getMediaCardDetails(detailsRouteType, item.id),
@@ -315,10 +310,11 @@ function MediaCardOverlay({
     gcTime: DETAILS_GC_TIME_MS,
   });
 
-  const { data: lists } = useLists();
+  const listsQuery = useLists();
+  const { data: lists } = listsQuery;
+  const isRetryingLists = listsQuery.isFetched && listsQuery.isLoading;
 
-  // Membership is derived from the already-fetched lists (each carries
-  // `item_ids`) — no second IPC round-trip per expanded card.
+  // Membership derives from the already-fetched lists (each carries `item_ids`) — no second IPC per expanded card.
   const itemListIds = useMemo(
     () => lists?.filter((list) => list.item_ids.includes(item.id)).map((list) => list.id),
     [lists, item.id],
@@ -327,11 +323,9 @@ function MediaCardOverlay({
     enabled: !onPlay,
   });
 
-  // Membership resolves here rather than on the resting card: the poster
-  // never shows it, so browse grids don't carry a per-card library observer.
-  const shouldResolveLibraryMembership = isInLibraryOverride === undefined;
+  // Membership resolves here, not on the resting card — browse grids carry no per-card library observer.
   const { data: resolvedIsInLibrary = false } = useIsItemInLibrary(item.id, {
-    enabled: shouldResolveLibraryMembership,
+    enabled: isInLibraryOverride === undefined,
   });
   const isInLibrary = isInLibraryOverride ?? resolvedIsInLibrary;
 
@@ -387,8 +381,7 @@ function MediaCardOverlay({
 
   return (
     <>
-      {/* Top-anchored popout. Center uses a negative margin rather than
-          translate so the enter zoom never fights it. */}
+      {/* Top-anchored popout — center uses a negative margin, not translate, so the enter zoom never fights it. */}
       <div
         className={cn(
           'absolute top-0 z-20 flex h-fit max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 animate-in fade-in-0 zoom-in-95 duration-200',
@@ -460,7 +453,22 @@ function MediaCardOverlay({
               </div>
 
               <div className='space-y-0.5 max-h-24 overflow-y-auto'>
-                {lists && lists.length > 0 ? (
+                {listsQuery.isError || isRetryingLists ? (
+                  <RetryBanner
+                    className='gap-2 px-2 py-1.5'
+                    message="Couldn't load lists."
+                    isRetrying={listsQuery.isFetching}
+                    onRetry={() => void listsQuery.refetch()}
+                  />
+                ) : listsQuery.isLoading ? (
+                  <p
+                    role='status'
+                    className='flex items-center gap-2 px-2 py-1 text-[11px] text-zinc-400'
+                  >
+                    <Loader2 className='h-3 w-3 animate-spin' />
+                    Loading lists…
+                  </p>
+                ) : lists && lists.length > 0 ? (
                   lists.map((list) => {
                     const isInThisList = itemListIds?.includes(list.id) ?? false;
                     return (
@@ -473,8 +481,7 @@ function MediaCardOverlay({
                         onClick={(e) => {
                           e.preventDefault();
                           e.stopPropagation();
-                          // Same disabled-focus-collapse trap as the library
-                          // button — guard instead of disabling.
+                          // Same disabled-focus-collapse trap as the library button — guard instead of disabling.
                           if (toggleListMembership.isPending) return;
                           toggleListMembership.mutate(list);
                         }}
@@ -489,7 +496,7 @@ function MediaCardOverlay({
                         <span className='text-zinc-600 text-[10px] shrink-0'>
                           {list.item_ids.length}
                         </span>
-                        {isInThisList && <Check className='w-3 h-3 text-emerald-400 shrink-0' />}
+                        {isInThisList && <Check className='w-3 h-3 text-(--accent-act) shrink-0' />}
                       </button>
                     );
                   })
@@ -527,8 +534,7 @@ function MediaCardOverlay({
                       )}
                     />
                   )}
-                  {/* Every other target on a resume card plays — the title is
-                      the details route so there is always a non-play path. */}
+                  {/* Every other target on a resume card plays — the title link is the non-play path to details. */}
                   <a
                     href={detailsPath}
                     title={item.title}
@@ -576,8 +582,8 @@ function MediaCardOverlay({
                   className={cn(
                     CARD_ICON_BUTTON_CLASS_NAME,
                     isInLibrary
-                      ? 'border-emerald-500/20 bg-emerald-500/[0.06] text-emerald-200/80 hover:bg-emerald-500/[0.10] hover:text-emerald-200'
-                      : 'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white',
+                      ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
+                      : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
                     toggleLibrary.isPending && 'cursor-wait opacity-70',
                   )}
                   title={isInLibrary ? 'Remove from library' : 'Add to library'}
@@ -605,7 +611,7 @@ function MediaCardOverlay({
                     CARD_ICON_BUTTON_CLASS_NAME,
                     isInAnyList
                       ? 'border-white/20 bg-white/[0.12] text-white hover:bg-white/[0.16]'
-                      : 'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white',
+                      : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
                   )}
                   title='Add to List'
                   aria-label='Add to List'
@@ -658,24 +664,18 @@ function MediaCardOverlay({
         </div>
       </div>
 
-      {/* Create-list dialog lives in the overlay: it can only open while the
-          card is expanded, and the picker lock holds the card open until the
-          dialog closes. */}
+      {/* Create-list dialog lives in the overlay — the picker lock holds the card open until the dialog closes. */}
       <CreateListDialog
         open={createListOpen}
         onOpenChange={onCreateListOpenChange}
-        onCreated={(newList) => {
-          void addItemToNewList(newList);
-        }}
+        onCreated={addItemToNewList}
       />
     </>
   );
 }
 
-// Memoized: cards render in virtualized grids and rails that re-render on
-// scroll/resize state changes; `item` is referentially stable through
-// TanStack structural sharing, so a pure-props bail-out skips most renders.
-// Call sites must keep `onPlay`/`onRemoveFromContinue` referentially stable.
+// Memoized — `item` is referentially stable via TanStack structural sharing, so a pure-props bail-out skips
+// most re-renders. Callers must keep `onPlay`/`onRemoveFromContinue` referentially stable.
 export const MediaCard = memo(function MediaCard({
   item,
   currentStatusOverride,
@@ -697,6 +697,7 @@ export const MediaCard = memo(function MediaCard({
   const cardRef = useRef<HTMLElement>(null);
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoringFocusRef = useRef(false);
+  const hoverFocusRef = useRef(false);
 
   const clearExpandTimer = useCallback(() => clearTimer(expandTimer), []);
 
@@ -712,8 +713,7 @@ export const MediaCard = memo(function MediaCard({
     setShowListPickerState(false);
   }, [clearExpandTimer, setShowListPickerState]);
 
-  // Pin the popout toward the side with room, measured vs the rail
-  // scrollport when inside one else the window (grids).
+  // Pin the popout toward the side with room, measured vs the rail scrollport or the window (grids).
   const resolvePopoverAlign = useCallback((): PopoverAlign => {
     const card = cardRef.current;
     if (!card || typeof window === 'undefined') {
@@ -742,6 +742,8 @@ export const MediaCard = memo(function MediaCard({
   const scheduleExpand = useCallback(() => {
     // Escape restores poster focus without immediately reopening the card.
     if (expanded || restoringFocusRef.current) return;
+    // Hover focus can inherit an earlier keyboard ring; track its owner here.
+    hoverFocusRef.current = !cardRef.current?.contains(document.activeElement);
     clearExpandTimer();
     const delay =
       Date.now() - lastCardCollapseAt < HOVER_CHAIN_WINDOW_MS
@@ -757,7 +759,11 @@ export const MediaCard = memo(function MediaCard({
   }, [clearExpandTimer, expanded, prefetchDetails, resolvePopoverAlign]);
 
   const handleMouseLeave = useCallback(() => {
-    if (hasLockedCardInteraction()) return;
+    if (
+      hasLockedCardInteraction() ||
+      (!hoverFocusRef.current && cardRef.current?.querySelector(':focus-visible'))
+    )
+      return;
     collapseCard();
   }, [collapseCard, hasLockedCardInteraction]);
 
@@ -766,6 +772,7 @@ export const MediaCard = memo(function MediaCard({
       if (hasLockedCardInteraction()) return;
       const nextFocus = event.relatedTarget;
       if (nextFocus instanceof Node && cardRef.current && cardRef.current.contains(nextFocus)) {
+        hoverFocusRef.current = false;
         return;
       }
       collapseCard();
@@ -799,13 +806,11 @@ export const MediaCard = memo(function MediaCard({
     [setCreateListOpenState, setShowListPickerState],
   );
 
-  // The card isn't a [role="dialog"], so without this a keyboard-opened
-  // overlay leaks Esc to the global browse-back gesture. The global listener
-  // yields to `[data-media-card-expanded]` targets and this collapses —
-  // picker first, then the card. The portaled create-list dialog owns its
-  // own Esc via Radix.
+  // The card isn't a [role="dialog"] — without this a keyboard-opened overlay leaks Esc to the global back
+  // gesture. Collapses picker first, then the card; the portaled create-list dialog owns its own Esc via Radix.
   const handleKeyDown = useCallback(
     (event: ReactKeyboardEvent) => {
+      hoverFocusRef.current = false;
       if (event.key !== 'Escape' || event.defaultPrevented || !expanded) return;
       if (createListOpenRef.current) return;
       event.preventDefault();
@@ -816,8 +821,7 @@ export const MediaCard = memo(function MediaCard({
         return;
       }
       collapseCard();
-      // The overlay unmounts with its focused control — hand focus back to
-      // the resting poster link instead of dropping keyboard users on <body>.
+      // The overlay unmounts with its focused control — hand focus back to the poster link, not <body>.
       window.requestAnimationFrame(() => {
         restoringFocusRef.current = true;
         cardRef.current?.querySelector<HTMLElement>('a[href]')?.focus({ preventScroll: true });
@@ -827,23 +831,22 @@ export const MediaCard = memo(function MediaCard({
     [expanded, collapseCard, createListOpenRef, setShowListPickerState, showListPickerRef],
   );
 
-  // Focus a card's overlay the moment it opens: the resting poster goes
-  // `invisible` on expand, which drops DOM focus to <body> — stranding a
-  // keyboard-opened card's Esc collapse and its action row. The body check
-  // also lets a hover-opened card take focus so Esc works there too, while a
-  // focus owner elsewhere (search box, another card) is never stolen.
-  useEffect(() => {
+  // Transfer focus before the hidden poster blurs and closes the overlay; a focus owner elsewhere stays untouched.
+  useLayoutEffect(() => {
     if (!expanded) return;
-    if (document.activeElement !== document.body) return;
+    if (
+      document.activeElement !== document.body &&
+      !cardRef.current?.contains(document.activeElement)
+    )
+      return;
     const target = cardRef.current?.querySelector<HTMLElement>(
       showListPicker ? '[data-media-card-picker] button' : '[data-media-card-primary]',
     );
     target?.focus({ preventScroll: true });
   }, [expanded, showListPicker]);
 
-  const shouldResolveWatchStatus = currentStatusOverride === undefined;
   const { data: resolvedCurrentStatus = null } = useItemWatchStatus(item.id, {
-    enabled: shouldResolveWatchStatus,
+    enabled: currentStatusOverride === undefined,
   });
   const currentStatus =
     currentStatusOverride !== undefined ? currentStatusOverride : resolvedCurrentStatus;
@@ -852,8 +855,7 @@ export const MediaCard = memo(function MediaCard({
     typeof progress === 'number' && Number.isFinite(progress) ? clamp(progress, 0, 100) : undefined;
 
   return (
-    // Ambient hover/focus listeners drive the preview card's expand/collapse
-    // timing — the card itself stays non-interactive.
+    // Ambient hover/focus listeners drive expand/collapse — the card itself stays non-interactive.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <article
       ref={cardRef}

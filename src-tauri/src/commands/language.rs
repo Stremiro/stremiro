@@ -26,14 +26,12 @@ pub struct TrackLanguageSelectionResolution {
     pub matched_track_id: Option<i64>,
 }
 
-/// The closed language set is a single table: `code` is canonical, `label`
-/// feeds the settings UI, and `aliases` (code first) drives canonicalization
-/// and mpv `alang`/`slang` expansion. Every consumer reads this table so a
-/// new language lands in one place.
+/// Settings, exact language tags, safe metadata tokens and mpv options share one table.
 struct SupportedLanguage {
     code: &'static str,
     label: &'static str,
     aliases: &'static [&'static str],
+    exact_aliases: &'static [&'static str],
 }
 
 const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
@@ -41,46 +39,169 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
         code: "en",
         label: "English",
         aliases: &["en", "eng", "english"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "ja",
         label: "Japanese",
         aliases: &["ja", "jpn", "japanese"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "es",
         label: "Spanish",
         aliases: &["es", "spa", "spanish"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "fr",
         label: "French",
         aliases: &["fr", "fra", "fre", "french"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "de",
         label: "German",
         aliases: &["de", "deu", "ger", "german"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "it",
         label: "Italian",
         aliases: &["it", "ita", "italian"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "pt",
         label: "Portuguese",
-        aliases: &["pt", "por", "portuguese"],
+        aliases: &["pt", "por", "portuguese", "pob"],
+        exact_aliases: &["pt-br"],
     },
     SupportedLanguage {
         code: "ko",
         label: "Korean",
         aliases: &["ko", "kor", "korean"],
+        exact_aliases: &[],
     },
     SupportedLanguage {
         code: "zh",
         label: "Chinese",
         aliases: &["zh", "zho", "chi", "chinese"],
+        exact_aliases: &[],
+    },
+    SupportedLanguage {
+        code: "ru",
+        label: "Russian",
+        aliases: &["rus", "russian"],
+        exact_aliases: &["ru"],
+    },
+    SupportedLanguage {
+        code: "ar",
+        label: "Arabic",
+        aliases: &["ara", "arabic"],
+        exact_aliases: &["ar"],
+    },
+    SupportedLanguage {
+        code: "hi",
+        label: "Hindi",
+        aliases: &["hin", "hindi"],
+        exact_aliases: &["hi"],
+    },
+    SupportedLanguage {
+        code: "nl",
+        label: "Dutch",
+        aliases: &["dut", "nld", "dutch"],
+        exact_aliases: &["nl"],
+    },
+    SupportedLanguage {
+        code: "pl",
+        label: "Polish",
+        aliases: &["pol", "polish"],
+        exact_aliases: &["pl"],
+    },
+    SupportedLanguage {
+        code: "tr",
+        label: "Turkish",
+        aliases: &["tur", "turkish"],
+        exact_aliases: &["tr"],
+    },
+    SupportedLanguage {
+        code: "sv",
+        label: "Swedish",
+        aliases: &["swe", "swedish"],
+        exact_aliases: &["sv"],
+    },
+    SupportedLanguage {
+        code: "no",
+        label: "Norwegian",
+        aliases: &["nor", "nob", "norwegian"],
+        exact_aliases: &["no", "nb"],
+    },
+    SupportedLanguage {
+        code: "da",
+        label: "Danish",
+        aliases: &["dan", "danish"],
+        exact_aliases: &["da"],
+    },
+    SupportedLanguage {
+        code: "fi",
+        label: "Finnish",
+        aliases: &["fin", "finnish"],
+        exact_aliases: &["fi"],
+    },
+    SupportedLanguage {
+        code: "cs",
+        label: "Czech",
+        aliases: &["cze", "ces", "czech"],
+        exact_aliases: &["cs"],
+    },
+    SupportedLanguage {
+        code: "hu",
+        label: "Hungarian",
+        aliases: &["hun", "hungarian"],
+        exact_aliases: &["hu"],
+    },
+    SupportedLanguage {
+        code: "el",
+        label: "Greek",
+        aliases: &["gre", "ell", "greek"],
+        exact_aliases: &["el"],
+    },
+    SupportedLanguage {
+        code: "he",
+        label: "Hebrew",
+        aliases: &["heb", "hebrew"],
+        exact_aliases: &["he"],
+    },
+    SupportedLanguage {
+        code: "th",
+        label: "Thai",
+        aliases: &["tha", "thai"],
+        exact_aliases: &["th"],
+    },
+    SupportedLanguage {
+        code: "vi",
+        label: "Vietnamese",
+        aliases: &["vie", "vietnamese"],
+        exact_aliases: &["vi"],
+    },
+    SupportedLanguage {
+        code: "id",
+        label: "Indonesian",
+        aliases: &["ind", "indonesian"],
+        exact_aliases: &["id"],
+    },
+    SupportedLanguage {
+        code: "uk",
+        label: "Ukrainian",
+        aliases: &["ukr", "ukrainian"],
+        exact_aliases: &["uk"],
+    },
+    SupportedLanguage {
+        code: "ro",
+        label: "Romanian",
+        aliases: &["rum", "ron", "romanian"],
+        exact_aliases: &["ro"],
     },
 ];
 
@@ -126,6 +247,37 @@ fn language_aliases(canonical: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
+fn exact_language_aliases(canonical: &str) -> &'static [&'static str] {
+    SUPPORTED_LANGUAGES
+        .iter()
+        .find(|language| language.code == canonical)
+        .map(|language| language.exact_aliases)
+        .unwrap_or(&[])
+}
+
+pub(crate) fn canonicalize_language_value(value: &str) -> Option<&'static str> {
+    let normalized = value.trim().to_ascii_lowercase();
+    canonicalize_language_token(&normalized)
+        .or_else(|| {
+            SUPPORTED_LANGUAGES
+                .iter()
+                .find(|language| language.exact_aliases.contains(&normalized.as_str()))
+                .map(|language| language.code)
+        })
+        .or_else(|| {
+            let (language, region) = normalized.split_once('-')?;
+            (!region.is_empty())
+                .then(|| canonicalize_language_value(language))
+                .flatten()
+        })
+}
+
+fn is_exact_only_language_alias(value: &str) -> bool {
+    SUPPORTED_LANGUAGES
+        .iter()
+        .any(|language| language.exact_aliases.contains(&value))
+}
+
 fn normalize_lower(value: Option<&str>) -> Option<String> {
     let normalized = value?.trim().to_ascii_lowercase();
     if normalized.is_empty() {
@@ -142,9 +294,8 @@ pub(crate) fn tokenize_language_meta(value: &str) -> Vec<String> {
         .collect()
 }
 
-/// How a token reached a canonical code: `Exact` means the whole value
-/// canonicalized directly (including the subtitle `off` sentinel);
-/// `Inferred` means a per-token scan of a longer string produced the match —
+/// How a token reached a canonical code: `Exact` = the whole value canonicalized
+/// (incl. the `off` sentinel); `Inferred` = a per-token scan of a longer string —
 /// advisory for consumers that persist or auto-apply on the result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -180,7 +331,7 @@ pub(crate) fn classify_language_token(
         };
     }
 
-    if let Some(canonical) = canonicalize_language_token(&normalized) {
+    if let Some(canonical) = canonicalize_language_value(&normalized) {
         return LanguageTokenNormalization {
             normalized: Some(canonical.to_string()),
             confidence: Some(LanguageMatchConfidence::Exact),
@@ -218,18 +369,23 @@ pub(crate) fn normalize_track_language_candidate(
 }
 
 /// mpv matches `alang`/`slang` against container tags (often 639-2/B like
-/// `ger`/`fre`/`chi`), so a preference expands to every alias of the
-/// canonical code, not just the stored token.
+/// `ger`/`fre`/`chi`), so a preference expands to every alias of the canonical code.
 fn mpv_language_priority_list(preferred: Option<&str>) -> Option<String> {
     let normalized = normalize_language_token(preferred, false)?;
-    // `normalized` is always a canonical table code, and every table entry
-    // carries its own code first — the alias list is never empty here.
-    Some(language_aliases(&normalized).join(","))
+    let mut aliases = vec![normalized.as_str()];
+    for alias in language_aliases(&normalized)
+        .iter()
+        .chain(exact_language_aliases(&normalized))
+    {
+        if !aliases.contains(alias) {
+            aliases.push(alias);
+        }
+    }
+    Some(aliases.join(","))
 }
 
-/// Track auto-selection options for mpv init, built from the same canonical
-/// table the preference store sanitizes against — one language source of
-/// truth. `off` is a subtitle-only signal and maps to `sid=no`.
+/// Track auto-selection options for mpv init, built from the canonical table the
+/// preference store sanitizes against. `off` is subtitle-only → `sid=no`.
 pub(crate) fn build_mpv_language_selection_options(
     preferred_audio_language: Option<&str>,
     preferred_subtitle_language: Option<&str>,
@@ -321,13 +477,23 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
         .cloned()
         .collect::<Vec<_>>();
 
-    if normalize_language_token(track.lang.as_deref(), false)
-        .is_some_and(|language| !candidates.contains(&language))
+    let tagged_language = normalize_language_token(track.lang.as_deref(), false);
+    if tagged_language
+        .as_ref()
+        .is_some_and(|language| !candidates.contains(language))
     {
         return 0;
     }
 
-    let mut score = 0;
+    let mut score = if canonicalize_language_value(&lang).is_some() {
+        if lang.contains('-') {
+            100
+        } else {
+            120
+        }
+    } else {
+        0
+    };
 
     for candidate in candidates {
         if lang == *candidate {
@@ -336,7 +502,9 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
             score = score.max(100);
         }
 
-        if title_tokens.iter().any(|token| token == candidate) {
+        if !is_exact_only_language_alias(candidate)
+            && title_tokens.iter().any(|token| token == candidate)
+        {
             score = score.max(80);
         }
     }
@@ -384,25 +552,11 @@ pub(crate) fn infer_track_preferred_language(
     lang: Option<&str>,
     title: Option<&str>,
 ) -> Option<String> {
-    if let Some(normalized_lang) = normalize_lower(lang) {
-        if let Some(canonical) = canonicalize_language_token(&normalized_lang) {
-            return Some(canonical.to_string());
-        }
-
-        for token in tokenize_language_meta(&normalized_lang) {
-            if let Some(canonical) = canonicalize_language_token(&token) {
-                return Some(canonical.to_string());
-            }
-        }
-    }
-
-    for token in title.map(tokenize_language_meta).unwrap_or_default() {
-        if let Some(canonical) = canonicalize_language_token(&token) {
-            return Some(canonical.to_string());
-        }
-    }
-
-    None
+    normalize_language_token(lang, false).or_else(|| {
+        tokenize_language_meta(title?)
+            .iter()
+            .find_map(|token| canonicalize_language_token(token).map(str::to_string))
+    })
 }
 
 pub(crate) fn track_matches_preferred_language(
@@ -425,7 +579,8 @@ pub(crate) fn track_matches_preferred_language(
     candidates.iter().any(|candidate| {
         lang == *candidate
             || lang.starts_with(&format!("{}-", candidate))
-            || title_tokens.iter().any(|token| token == candidate)
+            || (!is_exact_only_language_alias(candidate)
+                && title_tokens.iter().any(|token| token == candidate))
     })
 }
 

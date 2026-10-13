@@ -10,14 +10,11 @@ interface RemoteImageProps {
   loading?: ImgHTMLAttributes<HTMLImageElement>['loading'];
   fetchPriority?: ImgHTMLAttributes<HTMLImageElement>['fetchPriority'];
   onLoad?: ImgHTMLAttributes<HTMLImageElement>['onLoad'];
-  /** Broken artwork hides by default; pass a handler where the caller
-      renders its own fallback, or `null` to leave the element as-is. */
+  /** Broken artwork hides by default; `null` leaves the element as-is, or pass a handler for a custom fallback. */
   onError?: ImgHTMLAttributes<HTMLImageElement>['onError'] | null;
 }
 
-// Shared chrome for remote artwork: async decode, no referrer leak, no
-// native drag ghost, and a hidden element instead of the browser's
-// torn-image glyph.
+// Shared remote-artwork chrome: async decode, no referrer/drag ghost, hidden element over torn-image glyph.
 export function RemoteImage({
   src,
   alt,

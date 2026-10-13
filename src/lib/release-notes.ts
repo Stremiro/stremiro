@@ -1,13 +1,9 @@
-// Markdown-lite shaping for GitHub release bodies — rendered by
-// Settings → Updates. Not a markdown engine: headings, bullets, and inline
-// noise are normalized just enough to read cleanly inside the app's own
-// typography.
+// Markdown-lite shaping for GitHub release bodies (Settings → Updates) — not a markdown engine, just enough normalization to read cleanly.
 
 interface ReleaseNoteBlock {
   kind: 'heading' | 'bullet' | 'text';
   text: string;
-  /** Append index within the parsed body — parsed blocks are immutable,
-      so position alone keeps React keys unique across repeated lines. */
+  /** Append index — blocks are immutable, so position keeps keys unique across repeated lines. */
   key: string;
 }
 

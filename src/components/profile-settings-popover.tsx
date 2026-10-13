@@ -1,4 +1,4 @@
-import { Check, ChevronRight, Settings2, SlidersHorizontal } from 'lucide-react';
+import { Check, ChevronRight, Loader2, Settings2, SlidersHorizontal } from 'lucide-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
@@ -79,6 +79,7 @@ export function ProfileSettingsPopover({
       <PopoverContent
         align='start'
         sideOffset={8}
+        aria-label='Customize profile'
         className='w-72 p-0 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl shadow-black/60 overflow-hidden'
       >
         <div className='px-3.5 pt-3 pb-2.5 border-b border-white/[0.06]'>
@@ -111,20 +112,24 @@ export function ProfileSettingsPopover({
           </div>
 
           <div className='space-y-1'>
-            <label
-              htmlFor='profile-display-name'
-              className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'
-            >
-              Display Name
+            <label htmlFor='profile-display-name' className='text-[12px] font-medium text-zinc-400'>
+              Display name
             </label>
             <Input
               id='profile-display-name'
               value={draftName}
-              // Code-point cap matching Rust's char limit; `maxLength` counts
-              // UTF-16 units and would cut emoji names short.
+              // Code-point cap matching Rust's char limit — `maxLength` counts UTF-16 units.
               onChange={(e) => setDraftName(Array.from(e.target.value).slice(0, 32).join(''))}
               onKeyDown={(e) => {
-                if (e.key === 'Enter') void handleSave();
+                if (
+                  e.key !== 'Enter' ||
+                  e.defaultPrevented ||
+                  e.nativeEvent.isComposing ||
+                  e.repeat
+                )
+                  return;
+                e.preventDefault();
+                void handleSave();
               }}
               placeholder='Enter your name…'
               className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
@@ -145,14 +150,20 @@ export function ProfileSettingsPopover({
           <Button
             size='sm'
             onClick={handleSave}
-            disabled={!draftName.trim() || isSaving}
+            disabled={!draftName.trim()}
+            aria-disabled={isSaving || undefined}
+            aria-busy={isSaving || undefined}
             className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5'
             style={{
               backgroundColor: active,
               color: getAccentTextColor(active),
             }}
           >
-            <Check className='w-3 h-3' />
+            {isSaving ? (
+              <Loader2 aria-hidden='true' className='w-3 h-3 animate-spin' />
+            ) : (
+              <Check aria-hidden='true' className='w-3 h-3' />
+            )}
             {isSaving ? 'Saving…' : 'Save'}
           </Button>
           <button

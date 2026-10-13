@@ -130,6 +130,32 @@ fn flush_dirty_writes_only_changed_stores() {
     let _ = std::fs::remove_file(&path_b);
 }
 
+#[test]
+fn delete_matching_marks_dirty_only_when_keys_are_removed() {
+    let path = temp_store_path("delete-matching");
+    let store = DurableStoreRegistry::default()
+        .open_path(path.clone())
+        .expect("open");
+    store.set("item:a", json!(1));
+    store.set("item:b", json!({ "n": 2 }));
+    store.set("index", json!(["a", "b"]));
+    store.save().expect("save");
+
+    store.delete_matching(|key| key.starts_with("missing:"));
+    assert!(!store.is_dirty());
+
+    store.delete_matching(|key| key.starts_with("item:"));
+    assert!(store.is_dirty());
+    assert_eq!(store.get("item:a"), None);
+    assert_eq!(
+        store.get_typed::<Vec<String>>("index"),
+        Some(vec!["a".into(), "b".into()])
+    );
+    assert_eq!(store.get_typed::<u32>("index"), None);
+
+    let _ = std::fs::remove_file(&path);
+}
+
 /// Windows regression: an exclusive-lock reader (AV/indexer semantics via a
 /// zero-share handle) must fail the rename without tearing the committed
 /// file, and a retry after the handle drops must land cleanly.

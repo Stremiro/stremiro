@@ -13,10 +13,10 @@ use super::streaming_helpers::{
     is_placeholder_no_stream, merge_unique_streams, normalize_source_id, prepare_addon_streams,
     stream_quality_score, stream_resolution_priority, stream_source_priority,
 };
-use super::up_next_commands::build_up_next_entries;
+use super::up_next_commands::{build_resume_rail, build_up_next_entries, UpNextCandidate};
 use super::watch_history_commands::{
-    build_continue_watching_entries, build_title_watch_history_rows, build_title_watch_progress,
-    build_up_next_sources,
+    build_continue_watching_entries, build_title_watch_history_rows,
+    build_title_watch_progress_with_priorities, build_up_next_sources,
 };
 use super::*;
 use crate::providers::addons::{
@@ -221,7 +221,6 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
     );
     assert_eq!(entries.len(), 1);
     let entry = &entries[0];
-    assert_eq!(entry.release_date, "2026-01-03");
     // Released at local midnight, watched earlier and still inside the week
     // window — the "New episode" badge the card used to derive per row.
     assert!(entry.is_new_episode);
@@ -241,7 +240,7 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
     assert_eq!(entry.row.title, "Example");
     let wire = serde_json::to_value(entry).unwrap();
     assert!(wire.get("episodes").is_none());
-    assert_eq!(wire["releaseDate"], "2026-01-03");
+    assert!(wire.get("releaseDate").is_none());
     assert_eq!(wire["isNewEpisode"], true);
 }
 
@@ -297,6 +296,35 @@ fn up_next_does_not_skip_unaired_or_invalid_successor_and_keeps_specials() {
         (entries[0].row.season, entries[0].row.episode),
         (Some(0), Some(4))
     );
+}
+
+#[test]
+fn resume_rail_excludes_resumable_titles_and_interleaves_by_recency() {
+    let up_next = |id: &str, last_watched: u64, is_new_episode: bool| UpNextCandidate {
+        row: mk_watch_progress(id, "series", last_watched),
+        is_new_episode,
+    };
+    let rail = build_resume_rail(
+        vec![
+            mk_watch_progress("tt-resume", "series", 300),
+            mk_watch_progress("tt-movie", "movie", 100),
+        ],
+        vec![
+            up_next("tt-tie", 300, false),
+            up_next("tt-next", 400, true),
+            // Same id as a continue-watching row — excluded from the rail.
+            up_next("tt-resume", 250, false),
+        ],
+    );
+    let ids: Vec<_> = rail.iter().map(|entry| entry.row.id.as_str()).collect();
+    // A recency tie keeps the resume row ahead of the Up Next row.
+    assert_eq!(ids, ["tt-next", "tt-resume", "tt-tie", "tt-movie"]);
+    assert_eq!(rail[0].is_new_episode, Some(true));
+    assert_eq!(rail[1].is_new_episode, None);
+    assert_eq!(rail[2].is_new_episode, Some(false));
+    // Resume rows omit the badge key entirely on the wire.
+    let wire = serde_json::to_value(&rail[1]).unwrap();
+    assert!(wire.get("isNewEpisode").is_none());
 }
 
 fn mk_stream(
@@ -663,6 +691,18 @@ fn prepare_addon_streams_populates_stream_presentation() {
     assert_eq!(presentation.multi_audio_label.as_deref(), Some("DUAL"));
     assert_eq!(presentation.size_label.as_deref(), Some("1.4GB"));
     assert!(presentation.is_batch);
+
+    let decorated = mk_stream(
+        Some("[XY\u{26A1}] SourceName \u{1F1EC}\u{1F1E7}\n4k"),
+        Some("\u{1F4FA} Show S01E05 1080p \u{1F4BE}1.2 GB\u{1F464}5 \u{2699}\u{FE0F} TPB"),
+        Some("https://example.com/video.mkv"),
+        None,
+        None,
+    );
+    let prepared = prepare_addon_streams(vec![decorated], "TestSource", "addon-testsource");
+    let presentation = &prepared[0].presentation;
+    assert_eq!(presentation.source_name, "[XY] SourceName");
+    assert_eq!(presentation.stream_title, "Show S01E05 1080p 1.2 GB 5 TPB");
 }
 
 #[test]
@@ -692,6 +732,20 @@ fn stream_language_bonus_shares_marker_vocabulary_with_badge() {
     for (name, badge) in [
         ("Show 1080p dual.audio", Some("DUAL")),
         ("Show 1080p multi-lang", Some("MULTI")),
+        ("Show 1080p english japanese", Some("DUAL")),
+        ("Show 1080p [EN] [JA]", Some("DUAL")),
+        ("Show 1080p [EN] [JA] [FR]", Some("MULTI")),
+        ("Show Japanese audio English subs", None),
+        ("Show English audio Japanese subtitles", None),
+        ("Show English subs Japanese subbed", None),
+        ("Show [EN] subs [JA] audio", None),
+        ("Show [EN] audio [JA] SUBTITLES [FR] subs", None),
+        (
+            "Show English subs English audio Japanese audio",
+            Some("DUAL"),
+        ),
+        ("Show 1080p multi sub", None),
+        ("Show 1080p multi subtitle", None),
         ("Show 1080p", None),
     ] {
         let stream = mk_stream(
@@ -707,6 +761,89 @@ fn stream_language_bonus_shares_marker_vocabulary_with_badge() {
         assert_eq!(stream.presentation.multi_audio_label.as_deref(), badge);
         let priority = stream_resolution_priority(stream, stream.match_texts().flags);
         assert_eq!(priority.language_bonus, u8::from(badge.is_some()));
+    }
+}
+
+#[test]
+fn stream_language_bonus_reuses_prepared_presentation_on_clones() {
+    let stream = mk_stream(
+        Some("Show 1080p [EN]"),
+        Some("[JA] audio"),
+        Some("https://example.com/video.mkv"),
+        None,
+        None,
+    );
+    let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
+    let mut stream = prepared[0].clone();
+    assert_eq!(
+        stream.presentation.multi_audio_label.as_deref(),
+        Some("DUAL")
+    );
+    assert_eq!(
+        stream_resolution_priority(&stream, stream.match_texts().flags).language_bonus,
+        1
+    );
+
+    stream.presentation.multi_audio_label = None;
+    assert_eq!(
+        stream_resolution_priority(&stream, stream.match_texts().flags).language_bonus,
+        0
+    );
+}
+
+#[test]
+fn capture_quality_loses_to_clean_releases_one_resolution_tier_lower() {
+    for (capture, clean) in [
+        ("show 1080p hdcam", "show 720p web-dl"),
+        ("show 2160p cam", "show 1080p web-dl"),
+        ("show 720p hd-ts", "show 480p web-dl"),
+        ("show 480p screener", "show web-dl"),
+        ("show 2160p cam remux dv atmos hevc", "show 1080p"),
+    ] {
+        assert!(
+            stream_quality_score(detect_stream_flags(capture))
+                < stream_quality_score(detect_stream_flags(clean)),
+            "{capture} vs {clean}"
+        );
+    }
+}
+
+#[test]
+fn stream_size_labels_accept_all_transport_units() {
+    for (raw, expected) in [
+        ("💾21GiB", "21GB"),
+        ("💾1.5TiB", "1.5TB"),
+        ("💾10KiB", "10KB"),
+        ("💾2MiB", "2MB"),
+        ("💾21gib", "21GB"),
+        ("💾2TB", "2TB"),
+    ] {
+        assert_eq!(
+            streaming_helpers::format_stream_size_label(raw, None).as_deref(),
+            Some(expected),
+            "{raw}"
+        );
+    }
+}
+
+#[test]
+fn addon_settings_display_masks_every_query_value_and_encoded_configs() {
+    for (url, expected) in [
+        (
+            "https://addon.example/manifest.json?credential=demo-secret&mode=fast",
+            "addon.example/manifest.json?credential=•••&mode=•••",
+        ),
+        (
+            "https://addon.example/%7B%22credential%22%3A%22demo-secret%22%7D/manifest.json",
+            "addon.example/•••/manifest.json",
+        ),
+    ] {
+        let mut config = cinemeta_addon();
+        config.url = url.to_string();
+        assert_eq!(
+            config_store::AddonConfigView::from_config(config).display_url,
+            expected
+        );
     }
 }
 
@@ -784,6 +921,18 @@ fn stream_family_ignores_episode_number_noise() {
     let family_two = streaming_helpers::derive_stream_family(&underscore_two, source_name);
 
     assert_eq!(family_one, family_two);
+
+    let multi_episode = mk_stream(
+        Some("Alpha Group S01E03E04 1080p WEB-DL"),
+        Some("2.9 GB"),
+        Some("magnet:?xt=urn:btih:alpha-3"),
+        Some("alpha-3"),
+        Some("Show.S01E03-E04.1080p.WEB-DL-GROUP.mkv"),
+    );
+    assert_eq!(
+        streaming_helpers::derive_stream_family(&multi_episode, source_name),
+        streaming_helpers::derive_stream_family(&stream_one, source_name)
+    );
 }
 
 #[test]
@@ -877,7 +1026,8 @@ fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() 
     let second = series_episode_progress(1_000, 1, 7, 600.0, 2_400.0);
     completed.last_stream_key = Some("completed".to_string());
 
-    let progress = build_title_watch_progress(vec![completed, movie, first, second]);
+    let progress =
+        build_title_watch_progress_with_priorities(vec![completed, movie, first, second], None);
 
     assert_eq!(progress.history.len(), 4);
     assert_eq!(progress.history[0].episode, Some(8));
@@ -896,6 +1046,33 @@ fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() 
     );
     assert_eq!(resume.resume_start_time, Some(600.0));
     assert_eq!(progress.continue_watching[1].type_, "movie");
+    // Pre-picked heads mirror the frontend's per-kind `find` scans.
+    assert_eq!(
+        progress.latest_entry.as_ref().map(|row| row.episode),
+        Some(Some(8))
+    );
+    assert_eq!(
+        progress.latest_series_entry.as_ref().map(|row| row.episode),
+        Some(Some(8))
+    );
+    assert_eq!(
+        progress
+            .latest_movie_entry
+            .as_ref()
+            .map(|row| row.type_.as_str()),
+        Some("movie")
+    );
+    assert_eq!(
+        progress.series_resume_entry.as_ref().map(|row| row.episode),
+        Some(Some(3))
+    );
+    assert_eq!(
+        progress
+            .movie_resume_entry
+            .as_ref()
+            .map(|row| row.type_.as_str()),
+        Some("movie")
+    );
 }
 
 #[test]
@@ -910,7 +1087,8 @@ fn title_episode_progress_prefers_canonical_coordinates_and_raw_fill() {
     movie.season = Some(9);
     movie.episode = Some(9);
 
-    let progress = build_title_watch_progress(vec![remapped, movie, canonical]);
+    let progress =
+        build_title_watch_progress_with_priorities(vec![remapped, movie, canonical], None);
 
     // The remapped row's raw key collides with the canonical row's claim —
     // canonical wins it; the remapped row still sits under its own canonical
@@ -935,7 +1113,8 @@ fn watched_episode_ceiling_covers_partial_progress_and_latest_seed() {
     let partial = series_episode_progress(2_000, 2, 5, 600.0, 2_400.0);
     let unwatched = series_episode_progress(1_000, 9, 9, 0.0, 2_400.0);
 
-    let progress = build_title_watch_progress(vec![resume_target, partial, unwatched]);
+    let progress =
+        build_title_watch_progress_with_priorities(vec![resume_target, partial, unwatched], None);
 
     assert_eq!(progress.watched_episode_ceiling[&4], 1);
     assert_eq!(progress.watched_episode_ceiling[&2], 5);
@@ -1748,7 +1927,7 @@ fn choose_continue_watching_entry_prefers_resumable_episode_over_newer_zero_prog
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
 
-    let chosen = build_continue_watching_entries(vec![newer_zero_progress, resumable_episode])
+    let chosen = build_continue_watching_entries(&[newer_zero_progress, resumable_episode])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1764,7 +1943,7 @@ fn choose_continue_watching_entry_prefers_older_resume_over_newer_same_episode_s
     let mut resumable_episode = series_episode_progress(350, 1, 4, 1_020.0, 2_400.0);
     resumable_episode.last_stream_lookup_id = Some("tt7654321".to_string());
 
-    let chosen = build_continue_watching_entries(vec![startup_stub, resumable_episode])
+    let chosen = build_continue_watching_entries(&[startup_stub, resumable_episode])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1779,7 +1958,7 @@ fn choose_continue_watching_entry_keeps_latest_episode_when_no_resumable_candida
 
     let older = series_episode_progress(300, 1, 4, 120.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![latest, older])
+    let chosen = build_continue_watching_entries(&[latest, older])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1795,7 +1974,7 @@ fn choose_continue_watching_entry_prefers_newest_meaningful_episode() {
 
     let newer = series_episode_progress(500, 1, 7, 920.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![newer, deeper_resume])
+    let chosen = build_continue_watching_entries(&[newer, deeper_resume])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1812,7 +1991,7 @@ fn choose_continue_watching_entry_prefers_newest_across_seasons_with_same_episod
 
     let newer_shallower = series_episode_progress(500, 2, 5, 300.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![older_fuller, newer_shallower])
+    let chosen = build_continue_watching_entries(&[older_fuller, newer_shallower])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1830,7 +2009,7 @@ fn choose_continue_watching_entry_rewind_to_earlier_episode_follows_last_watched
 
     let recent_rewind = series_episode_progress(500, 1, 3, 600.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![older_later_episode, recent_rewind])
+    let chosen = build_continue_watching_entries(&[older_later_episode, recent_rewind])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1850,7 +2029,7 @@ fn choose_continue_watching_entry_newer_untagged_row_wins_older_richly_tagged_ro
 
     let untagged = series_episode_progress(500, 1, 7, 920.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![tagged, untagged])
+    let chosen = build_continue_watching_entries(&[tagged, untagged])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1866,13 +2045,13 @@ fn choose_continue_watching_entry_exact_tie_keeps_first_input_row() {
     let first = series_episode_progress(500, 1, 3, 600.0, 2_400.0);
     let second = series_episode_progress(500, 1, 7, 600.0, 2_400.0);
 
-    let chosen = build_continue_watching_entries(vec![first.clone(), second.clone()])
+    let chosen = build_continue_watching_entries(&[first.clone(), second.clone()])
         .into_iter()
         .next()
         .expect("continue watching entry");
     assert_eq!(chosen.episode, Some(3));
 
-    let chosen = build_continue_watching_entries(vec![second, first])
+    let chosen = build_continue_watching_entries(&[second, first])
         .into_iter()
         .next()
         .expect("continue watching entry");
@@ -1934,6 +2113,58 @@ fn choose_exact_watch_progress_entry_ignores_newer_same_episode_startup_stub() {
 
     assert_eq!(chosen.episode, Some(4));
     assert_eq!(chosen.position, 1_020.0);
+}
+
+#[test]
+fn choose_exact_watch_progress_entry_prefers_canonical_claim_over_newer_raw_alias() {
+    for position in [12.0, 320.0] {
+        let mut raw_alias = series_episode_progress(500, 1, 2, 720.0, 2_400.0);
+        raw_alias.absolute_season = Some(2);
+        raw_alias.absolute_episode = Some(12);
+        let mut canonical = series_episode_progress(350, 1, 102, position, 2_400.0);
+        canonical.absolute_episode = Some(2);
+        let chosen = choose_entry(
+            vec![raw_alias, canonical],
+            HistoryEntryQuery::Exact {
+                media_id: "tt7654321",
+                media_type: "series",
+                season: Some(1),
+                episode: Some(2),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(chosen.episode, Some(102));
+        assert_eq!(chosen.absolute_episode, Some(2));
+        assert_eq!(chosen.position, position);
+    }
+}
+
+#[test]
+fn choose_exact_watch_progress_entry_falls_back_to_raw_only_within_matching_scope() {
+    let mut raw_alias = series_episode_progress(500, 1, 2, 720.0, 2_400.0);
+    raw_alias.absolute_season = Some(2);
+    raw_alias.absolute_episode = Some(12);
+    for (id, media_type) in [("another-title", "series"), ("tt7654321", "movie")] {
+        let mut other_scope = series_episode_progress(350, 1, 102, 320.0, 2_400.0);
+        other_scope.id = id.to_string();
+        other_scope.type_ = media_type.to_string();
+        other_scope.absolute_episode = Some(2);
+        let chosen = choose_entry(
+            vec![raw_alias.clone(), other_scope],
+            HistoryEntryQuery::Exact {
+                media_id: "tt7654321",
+                media_type: "series",
+                season: Some(1),
+                episode: Some(2),
+            },
+            None,
+        )
+        .unwrap();
+        assert_eq!(chosen.absolute_season, Some(2));
+        assert_eq!(chosen.absolute_episode, Some(12));
+        assert_eq!(chosen.position, 720.0);
+    }
 }
 
 #[test]
@@ -2157,6 +2388,79 @@ fn backup_paths_must_be_absolute_json_files() {
     // length check rejects this input.
     let overlong = std::env::temp_dir().join(format!("{}.json", "a".repeat(MAX_BACKUP_PATH_LEN)));
     assert!(normalize_backup_path(overlong.to_str().expect("utf-8")).is_none());
+}
+
+#[test]
+fn backup_export_rejects_store_directory_and_descendants_after_canonicalization() {
+    use super::backup_commands::validate_backup_export_path;
+
+    let root = std::env::temp_dir().join(format!("stremiro-export-{}", uuid::Uuid::new_v4()));
+    let store_dir = root.join("app-data");
+    let nested = store_dir.join("nested");
+    std::fs::create_dir_all(&nested).unwrap();
+    let store_path = store_dir.join(SETTINGS_STORE_FILE);
+    for target in [
+        store_path.clone(),
+        store_dir.join(LIBRARY_STORE_FILE),
+        nested.join("backup.json"),
+        nested.join("..").join("backup.json"),
+    ] {
+        assert!(validate_backup_export_path(&target, &store_path).is_err());
+    }
+    #[cfg(windows)]
+    assert!(validate_backup_export_path(
+        &std::path::PathBuf::from(store_path.to_string_lossy().to_ascii_uppercase()),
+        &store_path,
+    )
+    .is_err());
+    assert!(validate_backup_export_path(&root.join("backup.json"), &store_path).is_ok());
+    assert!(validate_backup_export_path(
+        &nested.join("..").join("..").join("backup.json"),
+        &store_path,
+    )
+    .is_ok());
+    assert!(validate_backup_export_path(
+        &root.join("backup.json"),
+        &root.join("absent-app-data").join(SETTINGS_STORE_FILE),
+    )
+    .is_ok());
+    std::fs::remove_dir(nested).unwrap();
+    std::fs::remove_dir(store_dir).unwrap();
+    std::fs::remove_dir(root).unwrap();
+}
+
+#[test]
+fn library_write_ignores_drifted_body_id_and_preserves_genuine_row() {
+    use super::library_commands::prepare_library_write;
+    use super::store_helpers::library_item_key;
+
+    let store = DurableStoreRegistry::default()
+        .open_path(
+            std::env::temp_dir().join(format!("stremiro-library-{}.json", uuid::Uuid::new_v4())),
+        )
+        .unwrap();
+    let genuine = test_media_item("b", "movie");
+    store.set(LIBRARY_INDEX_KEY, serde_json::json!(["a", "b"]));
+    store.set(library_item_key("b"), serde_json::json!(genuine));
+    for stored_id in ["b", " a "] {
+        let mut stored = test_media_item(stored_id, "movie");
+        stored.description = Some("Existing metadata".to_string());
+        store.set(library_item_key("a"), serde_json::json!(stored));
+        let mut incoming = test_media_item(" a ", "movie");
+        incoming.description = None;
+        let (item, index) = prepare_library_write(&store, incoming).unwrap();
+        assert_eq!(item.id, "a");
+        assert_eq!(
+            item.description.as_deref(),
+            (stored_id == " a ").then_some("Existing metadata"),
+        );
+        assert_eq!(index, ["a", "b"]);
+        store.set(library_item_key(&item.id), serde_json::json!(item));
+        assert_eq!(
+            store.get(library_item_key("b")),
+            Some(serde_json::json!(genuine))
+        );
+    }
 }
 
 #[test]

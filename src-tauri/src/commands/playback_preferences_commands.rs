@@ -32,9 +32,8 @@ pub(crate) fn sanitize_language_pref(value: Option<String>, allow_off: bool) -> 
     normalize_backend_language_token(value.as_deref(), allow_off)
 }
 
-/// Save-boundary variant: `None` is an explicit clear, but a supplied value
-/// that fails normalization is rejected rather than silently wiping the
-/// stored preference.
+/// Save-boundary variant: `None` clears, but a supplied value failing normalization
+/// is rejected rather than silently wiping the stored preference.
 fn sanitize_language_pref_for_save(
     value: Option<String>,
     allow_off: bool,
@@ -114,9 +113,8 @@ fn infer_selected_playback_language_preference(
     }
 }
 
-/// Sets (or clears, with `None`) one global language default; the other
-/// field keeps its stored value, so callers never compose a whole snapshot
-/// from state that may be stale after a backup restore.
+/// Sets (or clears) one global language default; the other field keeps its stored
+/// value, so callers never compose a snapshot from post-restore-stale state.
 #[command]
 pub async fn save_playback_language_preference(
     app: AppHandle,
@@ -175,9 +173,8 @@ pub async fn get_effective_playback_language_preferences(
         None => None,
     };
 
-    // One blocking round-trip for defaults plus the scoped merge — a
-    // two-hop form could mix defaults from one instant with a snapshot
-    // from another.
+    // One blocking round-trip for defaults plus the scoped merge — a two-hop
+    // form could mix defaults from one instant with a snapshot from another.
     let app = app.clone();
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
@@ -217,39 +214,81 @@ pub async fn resolve_preferred_track_selection(
     ))
 }
 
+/// The saved global snapshot plus, when a valid title scope was supplied, the merged
+/// effective preferences — the frontend writes both caches from one response.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SavedPlaybackLanguagePreference {
+    pub preferences: PlaybackLanguagePreferences,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub effective: Option<PlaybackLanguagePreferences>,
+}
+
 #[command]
 pub async fn save_selected_playback_language_preference(
     app: AppHandle,
+    playback_state: State<'_, PlaybackStateService>,
     preference_kind: PlaybackLanguagePreferenceKind,
     track: Option<TrackLanguageCandidate>,
     subtitles_off: Option<bool>,
-) -> Result<PlaybackLanguagePreferences, String> {
+    media_type: Option<String>,
+    media_id: Option<String>,
+) -> Result<SavedPlaybackLanguagePreference, String> {
+    // Scope validation mirrors get_effective_playback_language_preferences:
+    // only a valid media_type + media_id pair reaches the scoped merge.
+    let media_id = media_id.as_deref().and_then(normalize_media_id);
+    let media_type = match media_type.as_deref() {
+        Some(value) => Some(
+            normalize_stream_media_type(value, media_id.as_deref())
+                .ok_or_else(|| "Invalid media type for playback language preferences.".to_string())?
+                .to_string(),
+        ),
+        None => None,
+    };
+
+    let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
         let mut preferences = read_playback_language_preferences_from_store(&store);
 
         let track = track.map(normalize_track_language_candidate);
-        // A track with no inferable language is not malformed input — it
-        // simply carries no preference to persist, so the save is a no-op.
-        let Some(selected_language) = infer_selected_playback_language_preference(
+        let selected_language = infer_selected_playback_language_preference(
             preference_kind,
             track.as_ref(),
             subtitles_off.unwrap_or(false),
-        ) else {
-            return Ok(preferences);
-        };
-
-        match preference_kind {
-            PlaybackLanguagePreferenceKind::Audio => {
-                preferences.preferred_audio_language = Some(selected_language);
-            }
-            PlaybackLanguagePreferenceKind::Sub => {
-                preferences.preferred_subtitle_language = Some(selected_language);
+        );
+        let should_persist = selected_language.is_some();
+        if let Some(selected_language) = selected_language {
+            match preference_kind {
+                PlaybackLanguagePreferenceKind::Audio => {
+                    preferences.preferred_audio_language = Some(selected_language);
+                }
+                PlaybackLanguagePreferenceKind::Sub => {
+                    preferences.preferred_subtitle_language = Some(selected_language);
+                }
             }
         }
 
-        persist_playback_language_preferences(&store, &preferences)?;
-        Ok(preferences)
+        // Read the scoped store before committing globals so a failed merge cannot report a persisted save as rejected.
+        let effective = match (media_id.as_deref(), media_type.as_deref()) {
+            (Some(media_id), Some(media_type)) => {
+                Some(service.get_effective_playback_language_preferences(
+                    &app,
+                    Some(media_id),
+                    Some(media_type),
+                    preferences.clone(),
+                )?)
+            }
+            _ => None,
+        };
+        if should_persist {
+            persist_playback_language_preferences(&store, &preferences)?;
+        }
+
+        Ok(SavedPlaybackLanguagePreference {
+            preferences,
+            effective,
+        })
     })
     .await
 }
@@ -280,13 +319,10 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
     );
 
     // No early return on `None, None`: `record_playback_language_preference_outcome`
-    // owns a delete branch for exactly that case — a title whose current tracks
-    // carry no inferable languages drops its per-title override and falls back
-    // to the global preferences.
+    // owns a delete branch for exactly that case — a title with no inferable
+    // languages drops its per-title override and falls back to globals.
 
-    // The outcome write performs blocking store/file IO: route it through the
-    // dedicated blocking pool instead of running it on the async command
-    // worker, matching the other playback_state save paths.
+    // Blocking store/file IO — routed through the dedicated pool like the other playback_state save paths.
     let app = app.clone();
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {

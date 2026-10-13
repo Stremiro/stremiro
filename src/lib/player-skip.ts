@@ -13,3 +13,7 @@ export function getSkipLabel(type: string): string {
 export function getSkippedLabel(type: string): string {
   return `Skipped${segmentLabel(type)}`;
 }
+
+export function isNearMediaEnd(position: number, duration: number): boolean {
+  return duration > 0 && position >= Math.max(0, duration - 1);
+}

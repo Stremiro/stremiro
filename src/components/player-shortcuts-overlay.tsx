@@ -37,7 +37,7 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
         tabIndex={-1}
         aria-label='Close shortcuts'
         onClick={onClose}
-        className='absolute inset-0 cursor-default bg-black/60 backdrop-blur-sm animate-in fade-in duration-200'
+        className='absolute inset-0 cursor-default bg-black/60 animate-in fade-in duration-200'
       />
       {/* The close button is the dialog's only tabbable control, so pinning
           Tab to it is the whole focus trap. */}
@@ -53,7 +53,7 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
           event.preventDefault();
           closeButtonRef.current?.focus();
         }}
-        className='relative w-full max-w-2xl overflow-hidden rounded-2xl border border-white/[0.08] bg-zinc-950/95 shadow-2xl shadow-black/70 backdrop-blur-2xl animate-in fade-in zoom-in-95 duration-200 outline-hidden'
+        className='relative w-full max-w-2xl overflow-hidden rounded-2xl border border-white/[0.08] bg-zinc-950/95 shadow-2xl shadow-black/70 animate-in fade-in zoom-in-95 duration-200 outline-hidden'
       >
         <div className='flex items-center justify-between gap-3 border-b border-white/[0.07] px-5 pb-3 pt-4'>
           <h2 className='text-[15px] font-semibold tracking-tight text-white'>

@@ -5,16 +5,14 @@ import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
 import { clamp, cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
 
-// Presentational player states, memoized like PlayerActionOverlays: props are
-// primitives or stable callbacks so unchanged overlays skip the commit.
+// Presentational player states, memoized like PlayerActionOverlays — unchanged overlays skip the commit.
 
 const ERROR_SECONDARY_BUTTON_CLASS =
   'rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
 /** The expanded player's action lane owns placement above its measured chrome. */
 const EOF_CARD_SLOT_CLASS =
   'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in zoom-in-95 duration-200 motion-reduce:animate-none';
-const EOF_GLASS_CLASS =
-  'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60 backdrop-blur-xl';
+const EOF_GLASS_CLASS = 'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60';
 const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
 
 function EofCardThumbnail({ src }: { src: string }) {
@@ -44,7 +42,7 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
   return (
     <div
       role='alert'
-      className='absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/85 backdrop-blur-md px-6 text-center animate-in fade-in zoom-in-95 duration-200'
+      className='absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/85 px-6 text-center animate-in fade-in zoom-in-95 duration-200'
     >
       <X className='w-12 h-12 text-red-400/90 mb-4' strokeWidth={1.5} />
       <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback Error</h2>
@@ -69,84 +67,95 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
 });
 
 interface PlayerLoadingOverlayProps {
-  isResolving: boolean;
   headline: string;
   detail?: string;
-  /** Title logo carried on the route state — brands the card while the
-      resolve/buffer pipeline runs. */
+  /** Title logo carried on the route state — brands the card while the resolve/buffer pipeline runs. */
   logo?: string;
-  /** Parent holds the mount alive briefly after the loading flag clears so
-      the card dissolves out instead of popping off mid-reveal. */
+  /** Plain-text fallback when no logo is known, so the card always says what is opening. */
+  title?: string;
+  /** Short "S2:E4 · From 23:14" line naming where playback will land. */
+  context?: string;
+  /** Parent holds the mount briefly after the flag clears so the card dissolves out instead of popping off. */
   exiting?: boolean;
   onChooseStream: () => void;
   onBack: () => void;
 }
 
 export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
-  isResolving,
   headline,
   detail,
   logo,
+  title,
+  context,
   exiting,
   onChooseStream,
   onBack,
 }: PlayerLoadingOverlayProps) {
   return (
     <div className='pointer-events-none absolute inset-0 z-50 flex items-center justify-center'>
-      {/* Entrance delay doubles as a debounce: a warm resolve+init can land
-          under ~350ms, so the card unmounts before painting instead of
-          flashing for a frame. `fill-mode-backwards` holds opacity-0 through
-          the delay. */}
+      {/* Entrance delay doubles as a debounce: a warm resolve+init lands under ~350ms, so the card unmounts
+          before painting instead of flashing a frame. `fill-mode-backwards` holds opacity-0 through the delay. */}
       <div
         className={cn(
-          'mx-4 w-full max-w-xs rounded-3xl border border-white/[0.07] bg-zinc-950/70 px-5 py-4 shadow-2xl shadow-black/60 backdrop-blur-2xl',
+          'relative mx-4 w-full max-w-[19rem] overflow-hidden rounded-2xl border border-white/[0.07] bg-zinc-950/75 px-4 pb-3 pt-3.5 shadow-xl shadow-black/50 backdrop-blur-2xl',
           exiting
             ? 'animate-out fade-out zoom-out-95 duration-200 fill-mode-forwards'
             : 'animate-in fade-in zoom-in-95 duration-200 fill-mode-backwards [animation-delay:350ms] motion-reduce:[animation-delay:0ms]',
         )}
       >
-        {isHttpUrl(logo) && (
-          <RemoteImage
-            src={logo}
-            alt=''
-            loading='lazy'
-            className='mb-3.5 h-8 max-w-44 object-contain object-left opacity-90'
-          />
+        {(isHttpUrl(logo) || title || context) && (
+          <div className='mb-3 border-b border-white/[0.06] pb-3'>
+            {isHttpUrl(logo) ? (
+              <RemoteImage
+                src={logo}
+                alt={title ?? ''}
+                loading='lazy'
+                className='h-7 max-w-40 object-contain object-left opacity-90'
+              />
+            ) : (
+              title && (
+                <p className='truncate text-[15px] font-semibold leading-tight text-white'>
+                  {title}
+                </p>
+              )
+            )}
+            {context && (
+              <p className='mt-1.5 truncate text-[12px] font-medium tabular-nums leading-none text-white/55'>
+                {context}
+              </p>
+            )}
+          </div>
         )}
-        <div className='flex items-center gap-3'>
-          <div className='flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl border border-white/[0.06] bg-white/[0.04]'>
-            <Loader2 className='h-4 w-4 animate-spin text-white/80' />
-          </div>
 
+        <div role='status' className='flex items-start gap-2.5'>
+          <Loader2 className='mt-0.5 h-4 w-4 shrink-0 animate-spin text-white/60' />
           <div className='min-w-0 flex-1'>
-            <p className='mb-0.5 text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/35'>
-              {isResolving ? 'Resolving' : 'Starting'}
-            </p>
-            <p className='text-sm font-semibold leading-snug text-white'>{headline}</p>
+            <p className='text-[14px] font-medium leading-snug text-white'>{headline}</p>
+            {detail && (
+              <p className='mt-1 line-clamp-2 text-[12.5px] leading-snug text-white/50'>{detail}</p>
+            )}
           </div>
         </div>
 
-        {detail && <p className='mt-2 text-xs leading-relaxed text-white/45'>{detail}</p>}
-
-        <div className='relative mt-3 h-[3px] overflow-hidden rounded-full bg-white/[0.08]'>
-          <div className='absolute inset-y-0 w-1/3 rounded-full bg-linear-to-r from-transparent via-white/70 to-transparent animate-[progress-slide_1.6s_linear_infinite]' />
-        </div>
-
-        <div className='pointer-events-auto mt-3 flex items-center gap-2'>
+        <div className='pointer-events-auto mt-3 flex items-center gap-1.5 pl-[26px]'>
           <button
             type='button'
             onClick={onChooseStream}
-            className='flex-1 rounded-lg border border-white/15 bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+            className='h-7 rounded-md bg-white/[0.07] px-2.5 text-[12px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
           >
             Choose Stream
           </button>
           <button
             type='button'
             onClick={onBack}
-            className='flex-1 rounded-lg px-3 py-1.5 text-xs font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+            className='h-7 rounded-md px-2.5 text-[12px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
           >
             Go Back
           </button>
+        </div>
+
+        <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
+          <div className='h-full w-1/3 bg-linear-to-r from-transparent via-white/60 to-transparent motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
         </div>
       </div>
     </div>
@@ -156,8 +165,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
 interface PlayerIdleOverlayProps {
   visible: boolean;
   isFullscreen: boolean;
-  /** Title logo — route state first, fetched details as fallback. Falls
-      back to the plain title text. */
+  /** Title logo — route state first, fetched details as fallback; falls back to plain title text. */
   logo?: string;
   title?: string;
   /** e.g. "S2:E10" — omitted for movies. */
@@ -166,8 +174,7 @@ interface PlayerIdleOverlayProps {
   overview?: string;
 }
 
-// Idle "you're watching" card for long zero-input stretches while paused.
-// Timing and dismissal live in usePlayerIdleOverlay.
+// Idle "you're watching" card for zero-input stretches while paused; timing/dismissal live in usePlayerIdleOverlay.
 export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
   visible,
   isFullscreen,
@@ -289,9 +296,8 @@ interface PlayerUpNextCardProps {
 const UP_NEXT_RING_RADIUS = 13;
 const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 
-// EOF "Up Next": mpv ended and a next episode exists — one click (or N) runs
-// the silent auto-resolve and keeps watching. With the auto-play preference
-// on, a countdown ring arms the same action; the cancel chip disarms it.
+// EOF "Up Next": one click (or N) runs the silent auto-resolve. With auto-play on, a countdown ring arms the
+// same action; the cancel chip disarms it.
 export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   episode,
   thumbnail,
@@ -384,16 +390,14 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
 interface PlayerEndCardProps {
   title: string;
   thumbnail?: string;
-  /** 'card' floats above the expanded player's chrome (the Up Next slot);
-      'strip' docks inside the mini player's video surface. */
+  /** 'card' floats above the expanded chrome (the Up Next slot); 'strip' docks inside the mini video surface. */
   variant?: 'card' | 'strip';
   onReplay: () => void;
   onBackToTitle: () => void;
 }
 
-// EOF without a next episode (movies, finales): replay or head back instead
-// of idling on a frozen last frame. The mini strip keeps it visible under
-// hover — the docked chrome has no replay control of its own.
+// EOF without a next episode (movies, finales): replay or head back instead of idling on a frozen last frame.
+// The mini strip keeps it visible under hover — docked chrome has no replay control of its own.
 export const PlayerEndCard = memo(function PlayerEndCard({
   title,
   thumbnail,
@@ -413,7 +417,7 @@ export const PlayerEndCard = memo(function PlayerEndCard({
             e.stopPropagation();
             onReplay();
           }}
-          className='flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 text-left backdrop-blur-md transition-colors duration-200 hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+          className='flex min-h-10 min-w-0 flex-1 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 text-left transition-colors duration-200 hover:bg-black/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
         >
           {thumbnail && (
             <RemoteImage
@@ -435,7 +439,7 @@ export const PlayerEndCard = memo(function PlayerEndCard({
             e.stopPropagation();
             onBackToTitle();
           }}
-          className='flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-black/80 text-white/80 backdrop-blur-md transition-colors duration-200 hover:bg-black/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+          className='flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/15 bg-black/80 text-white/80 transition-colors duration-200 hover:bg-black/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
         >
           <ArrowLeft className='h-3.5 w-3.5' />
         </button>

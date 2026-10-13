@@ -1,9 +1,6 @@
 import { useEffect, useState } from 'react';
 
-// Keeps a subtree mounted briefly after `active` goes false so a CSS exit
-// animation can play. `mounted` gates the render; `exiting` tells the
-// subtree to swap enter classes for exit classes. Re-activating mid-exit
-// cancels the unmount and returns to the visible phase.
+// Keeps a subtree mounted for `exitMs` after `active` goes false so a CSS exit animation plays; re-activating mid-exit cancels the unmount.
 export function useDelayedUnmount(
   active: boolean,
   exitMs = 280,

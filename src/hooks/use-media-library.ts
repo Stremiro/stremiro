@@ -1,33 +1,33 @@
 import { type QueryClient, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
-import { format } from 'date-fns';
+import { Channel } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
-import { useLocalDay } from '@/hooks/use-local-day';
 import {
   api,
   type Episode,
   type MediaItem,
+  type ResumeRailEntry,
   type TitleWatchProgress,
   toMediaItem,
   type UserList,
-  type UpNextCandidate,
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
 import { watchProgressCoordinates } from '@/lib/history-playback';
 import { notifyAction } from '@/lib/notify';
+import { restoreQueryArrayEntry } from '@/lib/optimistic-query';
 import {
-  CONTINUE_WATCHING_QUERY_KEY,
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueriesForTitle,
-  invalidateWatchStatusQueries,
   LIBRARY_QUERY_KEY,
   LISTS_QUERY_KEY,
   LISTS_VIEW_STALE_TIME_MS,
+  RESUME_RAIL_QUERY_KEY,
+  RESUME_SECTION_MIN_STALE_MS,
+  resumeRailQueryKey,
   titleWatchProgressQueryKey,
   TOTAL_WATCH_TIME_QUERY_KEY,
-  UP_NEXT_ENTRIES_QUERY_KEY,
   WATCH_HISTORY_QUERY_KEY,
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
@@ -35,11 +35,9 @@ import {
 import { formatEpisodeHeading } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
-const CONTINUE_WATCHING_STALE_TIME = 1000 * 30;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
 
-// Optimistic status write shared by the details chip group and the library
-// toggle — one updater so both mirrors agree on insert/delete semantics.
+// Optimistic status write shared by the details chip group and library toggle.
 export function setCachedWatchStatus(
   queryClient: QueryClient,
   itemId: string,
@@ -73,8 +71,9 @@ interface UseMediaCollectionActionsOptions {
 }
 
 interface ToggleLibraryMutationContext {
-  previousLibrary?: MediaItem[];
-  previousStatuses?: Record<string, WatchStatus>;
+  itemId?: string;
+  previousLibraryItem?: MediaItem;
+  previousStatus?: WatchStatus | null;
 }
 
 interface UseToggleLibraryItemOptions {
@@ -88,8 +87,8 @@ interface UseRemoveFromContinueWatchingOptions {
   mediaType?: string | null;
 }
 
-// Undo restore: the batch command replays the remove as one bounded write —
-// the generation guard only drops saves that were in flight across the delete.
+// Undo replays the removed rows as one bounded write; the backend generation
+// guard drops any saves that were in flight across the delete.
 async function restoreWatchProgressRows(
   queryClient: QueryClient,
   itemId: string,
@@ -106,8 +105,7 @@ async function restoreWatchProgressRows(
 
 const WATCH_HISTORY_UNDO_DURATION_MS = 6000;
 
-// Shared per-array index — the first card builds the set once per fetch and
-// the rest reuse it.
+// Shared per-array index built once per fetch, reused by all cards.
 const libraryIdSetCache = new WeakMap<MediaItem[], Set<string>>();
 
 function getLibraryIdSet(library: MediaItem[]): Set<string> {
@@ -170,16 +168,36 @@ export function useWatchHistory(options?: SharedCollectionQueryOptions) {
   });
 }
 
-export function useContinueWatching(options?: SharedCollectionQueryOptions) {
+/// Merged home rail: Rust interleaves continue-watching and Up Next from one
+/// snapshot; the channel delivers the local half before schedule fetches resolve.
+export function useResumeRail(
+  localToday: string | undefined,
+  localTodayMs: number | undefined,
+  options?: SharedCollectionQueryOptions,
+) {
+  const queryClient = useQueryClient();
   return useQuery({
-    queryKey: CONTINUE_WATCHING_QUERY_KEY,
-    queryFn: api.getContinueWatching,
-    ...resolveSharedCollectionQueryOptions(options, CONTINUE_WATCHING_STALE_TIME),
+    queryKey: resumeRailQueryKey(localToday),
+    queryFn: ({ signal }) => {
+      if (!localToday || !localTodayMs) {
+        return Promise.reject(new Error('Local day is required to read the resume rail.'));
+      }
+      const channel = new Channel<ResumeRailEntry[]>();
+      // Channel is not an EventTarget — onmessage is its only surface.
+      // eslint-disable-next-line unicorn/prefer-add-event-listener
+      channel.onmessage = (snapshot) => {
+        if (!signal.aborted) {
+          queryClient.setQueryData(resumeRailQueryKey(localToday), snapshot);
+        }
+      };
+      return api.getResumeRail(localToday, localTodayMs, channel);
+    },
+    enabled: (options?.enabled ?? true) && Boolean(localToday) && Boolean(localTodayMs),
+    staleTime: options?.staleTime ?? RESUME_SECTION_MIN_STALE_MS,
   });
 }
 
-/// Saved playback seconds across canonical episodes, which collapsed title
-/// history queries would omit.
+/// Saved playback seconds across canonical episodes.
 export function useTotalWatchTime(options?: SharedCollectionQueryOptions) {
   return useQuery({
     queryKey: TOTAL_WATCH_TIME_QUERY_KEY,
@@ -197,8 +215,7 @@ export function useLists(options?: SharedCollectionQueryOptions) {
   });
 }
 
-/// Shared identity for the per-title resume query — both hooks read the same
-/// key/fn so a `select` variant never forks the cache.
+/// Shared key/fn for the per-title resume query so `select` variants never fork the cache.
 function titleWatchProgressQuery(itemId: string | undefined, enabled: boolean) {
   return {
     queryKey: titleWatchProgressQueryKey(itemId),
@@ -210,8 +227,7 @@ function titleWatchProgressQuery(itemId: string | undefined, enabled: boolean) {
   };
 }
 
-/// Per-title resume snapshot scoped by media id — one indexed read instead
-/// of the full-history scans behind `useWatchHistory`/`useContinueWatching`.
+/// Per-title resume snapshot — one indexed read instead of full-history scans.
 export function useTitleWatchProgress(itemId?: string, options?: SharedCollectionQueryOptions) {
   return useQuery({
     ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
@@ -253,8 +269,8 @@ export function useLatestWatchHistoryEntry(
   itemId?: string,
   options?: UseLatestWatchHistoryEntryOptions,
 ) {
-  // `history` arrives `last_watched` DESC — the latest entry is the first row.
-  const selectLatestEntry = useCallback((progress: TitleWatchProgress) => progress.history[0], []);
+  // `latestEntry` is the backend's `history[0]` pick (`last_watched` DESC).
+  const selectLatestEntry = useCallback((progress: TitleWatchProgress) => progress.latestEntry, []);
 
   return useQuery({
     ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
@@ -273,8 +289,7 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
       }
 
       if (isInLibrary) {
-        // Status is a library attribute: `remove_from_library` clears it in
-        // the same blocking op, so a removed title can't leave an invisible row.
+        // `remove_from_library` also clears the status in the same op.
         await api.removeFromLibrary(item.id);
         return 'removed' as const;
       }
@@ -288,7 +303,9 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
       }
 
       await queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY });
-      const previousLibrary = queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY);
+      const previousLibraryItem = queryClient
+        .getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY)
+        ?.find((entry) => entry.id === item.id);
 
       queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) => {
         if (isInLibrary) {
@@ -298,26 +315,30 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         return [...(old ?? []), toMediaItem(item)];
       });
 
-      let previousStatuses: Record<string, WatchStatus> | undefined;
+      let previousStatus: WatchStatus | null | undefined;
       if (isInLibrary) {
         // Mirror the status clear so the details chip can't show a stale status.
         await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
-        previousStatuses =
-          queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY);
+        previousStatus =
+          queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY)?.[
+            item.id
+          ] ?? null;
         setCachedWatchStatus(queryClient, item.id, null);
       }
 
-      return { previousLibrary, previousStatuses };
+      return { itemId: item.id, previousLibraryItem, previousStatus };
     },
     onError: (_error, _variables, context) => {
-      if (context?.previousLibrary !== undefined) {
-        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, context.previousLibrary);
-      }
-      if (context?.previousStatuses !== undefined) {
-        queryClient.setQueryData<Record<string, WatchStatus>>(
-          WATCH_STATUSES_QUERY_KEY,
-          context.previousStatuses,
+      if (context?.itemId !== undefined) {
+        restoreQueryArrayEntry(
+          queryClient,
+          LIBRARY_QUERY_KEY,
+          context.itemId,
+          context.previousLibraryItem,
         );
+        if (context.previousStatus !== undefined) {
+          setCachedWatchStatus(queryClient, context.itemId, context.previousStatus);
+        }
       }
 
       notifyAction('Failed to update library', { tone: 'error' });
@@ -334,7 +355,6 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
     },
     onSettled: () => {
       void invalidateLibraryQueries(queryClient);
-      void invalidateWatchStatusQueries(queryClient);
     },
   });
 }
@@ -344,10 +364,8 @@ interface UseRemoveTitleWatchHistoryOptions extends UseRemoveFromContinueWatchin
   errorTitle: string;
 }
 
-// Shared whole-title history delete: collapsed surfaces render one row per
-// title — deleting only the displayed row lets it resurface under a different
-// episode. Optimistic filters keep the caches coherent; Undo replays the
-// exact rows the delete returned.
+// Whole-title history delete: collapsed surfaces render one row per title —
+// deleting only the displayed row lets it resurface under a different episode.
 function useRemoveTitleWatchHistory({
   itemId,
   itemTitle,
@@ -369,24 +387,23 @@ function useRemoveTitleWatchHistory({
         throw new Error('Playback history metadata unavailable');
       }
 
-      // The delete returns the exact rows it removed — the Undo snapshot
-      // needs no extra read.
+      // Returns the exact removed rows — the Undo snapshot needs no extra read.
       return api.removeAllFromWatchHistory(itemId, normalizedMediaType);
     },
     onMutate: async () => {
       await Promise.all([
-        queryClient.cancelQueries({ queryKey: CONTINUE_WATCHING_QUERY_KEY }),
+        queryClient.cancelQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] }),
         queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
       ]);
-      const previousContinueWatching = queryClient.getQueryData<WatchProgress[]>(
-        CONTINUE_WATCHING_QUERY_KEY,
-      );
       const previousWatchHistory =
         queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
-      queryClient.setQueryData<WatchProgress[]>(CONTINUE_WATCHING_QUERY_KEY, withoutTitle);
+      // The rail cache holds ResumeRailEntry rows keyed per local day; filter all variants.
+      queryClient.setQueriesData<ResumeRailEntry[]>(
+        { queryKey: [RESUME_RAIL_QUERY_KEY] },
+        (rows?: ResumeRailEntry[]) => rows?.filter((entry) => entry.row.id !== itemId),
+      );
       queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, withoutTitle);
       return {
-        removedContinueWatching: previousContinueWatching?.filter((entry) => entry.id === itemId),
         removedWatchHistory: previousWatchHistory?.filter((entry) => entry.id === itemId),
       };
     },
@@ -403,13 +420,9 @@ function useRemoveTitleWatchHistory({
       });
     },
     onError: (error, _variables, context) => {
-      const removedContinueWatching = context?.removedContinueWatching;
       const removedWatchHistory = context?.removedWatchHistory;
-      if (removedContinueWatching !== undefined) {
-        queryClient.setQueryData<WatchProgress[]>(CONTINUE_WATCHING_QUERY_KEY, (current) =>
-          restore(current, removedContinueWatching),
-        );
-      }
+      // The rail order isn't last_watched-sorted; a refetch restores truth.
+      void queryClient.invalidateQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] });
       if (removedWatchHistory !== undefined) {
         queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (current) =>
           restore(current, removedWatchHistory),
@@ -429,8 +442,7 @@ export function useRemoveFromContinueWatching(options: UseRemoveFromContinueWatc
   });
 }
 
-// Per-title delete for the profile tabs — the same whole-title semantics as
-// the home rail.
+// Per-title delete for the profile tabs — same whole-title semantics as the rail.
 export function useRemoveFromWatchHistory(options: UseRemoveFromContinueWatchingOptions) {
   return useRemoveTitleWatchHistory({
     ...options,
@@ -453,8 +465,7 @@ function watchProgressRowMatchesEpisode(row: WatchProgress, episode: Episode): b
   return season === episode.season && rowEpisode === episode.episode;
 }
 
-// Mutation variables paint instant watched checks; only Rust creates durable
-// completion rows, chooses runtimes and stamps recency.
+// Variables paint instant watched checks; only Rust creates durable rows.
 function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAction: boolean) {
   const queryClient = useQueryClient();
   const progressKey = titleWatchProgressQueryKey(item?.id);
@@ -475,17 +486,26 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
         !episodes.some((episode) => watchProgressRowMatchesEpisode(row, episode));
       queryClient.setQueryData<TitleWatchProgress>(progressKey, (old) => {
         if (!old) return old;
+        // The mirrored single-row picks follow their source list's rule:
+        // resume rows always re-check `keep`; history heads only on unwatch.
+        const keepResumeEntry = (row?: WatchProgress) => (row && !keep(row) ? undefined : row);
+        const keepHistoryEntry = (row?: WatchProgress) => (watched ? row : keepResumeEntry(row));
         return {
           ...old,
           history: watched ? old.history : old.history.filter(keep),
           continueWatching: old.continueWatching.filter(keep),
-          // Unwatch drops the episode map rows too; the spoiler ceiling stays
-          // stale (over-masking is the safe direction) until Rust rebuilds it.
+          // Unwatch drops episode map rows too; the spoiler ceiling stays stale
+          // (over-masking is safe) until Rust rebuilds it.
           episodeProgress: watched
             ? old.episodeProgress
             : Object.fromEntries(
                 Object.entries(old.episodeProgress).filter(([, row]) => keep(row)),
               ),
+          seriesResumeEntry: keepResumeEntry(old.seriesResumeEntry),
+          movieResumeEntry: keepResumeEntry(old.movieResumeEntry),
+          latestSeriesEntry: keepHistoryEntry(old.latestSeriesEntry),
+          latestMovieEntry: keepHistoryEntry(old.latestMovieEntry),
+          latestEntry: keepHistoryEntry(old.latestEntry),
         };
       });
       return { previous };
@@ -531,48 +551,6 @@ export function useMarkSeasonWatched({ item }: UseToggleEpisodeWatchedOptions) {
   return useEpisodesWatchedMutation(item, true);
 }
 
-const UP_NEXT_META_LINE = 'Up next';
-const NEW_EPISODE_META_LINE = 'New episode';
-
-export interface UpNextEntry {
-  row: WatchProgress;
-  metaLine: string;
-}
-
-// Label mapping only — the "aired in the last week" decision is computed in
-// Rust with the successor fold so the rail never re-times it per render.
-function buildUpNextEntries(candidates: readonly UpNextCandidate[]): UpNextEntry[] {
-  return candidates.map(({ row, isNewEpisode }) => ({
-    row,
-    metaLine: isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE,
-  }));
-}
-
-// Rust returns only the next aired episode for each eligible title; the
-// continue-watching exclusion dedups a title the rail already shows.
-export function useUpNextEntries(
-  continueWatching: readonly WatchProgress[],
-  options?: SharedCollectionQueryOptions,
-) {
-  const localDay = useLocalDay();
-  const localToday = format(localDay, 'yyyy-MM-dd');
-  const localTodayMs = localDay.getTime();
-  const selectEntries = useCallback(
-    (candidates: UpNextCandidate[]) => {
-      const resumable = new Set(continueWatching.map((row) => row.id));
-      return buildUpNextEntries(candidates.filter(({ row }) => !resumable.has(row.id)));
-    },
-    [continueWatching],
-  );
-
-  return useQuery({
-    queryKey: [...UP_NEXT_ENTRIES_QUERY_KEY, localToday],
-    queryFn: () => api.getUpNextEntries(localToday, localTodayMs),
-    select: selectEntries,
-    ...resolveSharedCollectionQueryOptions(options, WATCH_HISTORY_STALE_TIME_MS),
-  });
-}
-
 export function useMediaCollectionActions({
   item,
   isInLibrary,
@@ -614,16 +592,18 @@ export function useMediaCollectionActions({
     async (list: UserList) => {
       try {
         await api.addToList(list.id, item);
-        await invalidateListQueries(queryClient);
         notifyAction(`Added to "${list.name}"`, {
           detail: buildOtherListsDescription(lists, itemListIds, list.id) ?? item.title,
           thumb: item.poster,
         });
       } catch {
-        // The list was created successfully; membership can still be retried manually.
+        notifyAction(`List created, but couldn't add "${item.title}"`, {
+          detail: `Try adding it to "${list.name}" again.`,
+          tone: 'error',
+        });
       }
     },
-    [item, itemListIds, lists, queryClient],
+    [item, itemListIds, lists],
   );
 
   return {

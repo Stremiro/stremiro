@@ -10,6 +10,7 @@ import {
   type LucideIcon,
   RotateCcw,
 } from 'lucide-react';
+import type { RefObject } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -55,6 +56,7 @@ export function LibraryToolbar({
   filteredCount,
   search,
   onSearchChange,
+  searchInputRef,
   sort,
   onSortChange,
   viewMode,
@@ -70,6 +72,7 @@ export function LibraryToolbar({
   filteredCount: number;
   search: string;
   onSearchChange: (value: string) => void;
+  searchInputRef: RefObject<HTMLInputElement | null>;
   sort: LibrarySort;
   onSortChange: (sort: LibrarySort) => void;
   viewMode: 'grid' | 'list';
@@ -85,12 +88,13 @@ export function LibraryToolbar({
     <div className='space-y-3'>
       <div className='flex items-center gap-3'>
         <SearchInput
+          inputRef={searchInputRef}
           placeholder='Search library…'
           value={search}
           onValueChange={onSearchChange}
           clearLabel='Clear library search'
           wrapperClassName='flex-1 min-w-0'
-          className='h-10 text-[13px] bg-white/[0.03] border-white/[0.08] text-white placeholder:text-zinc-500 focus-visible:ring-white/20 rounded-lg'
+          className='h-10 text-[13px] bg-white/[0.03] border-white/[0.08] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25 rounded-lg'
         />
         <span className='text-[12px] tabular-nums text-zinc-400 shrink-0' role='status'>
           {filteredCount === libraryCount
@@ -272,7 +276,9 @@ export function ViewToggle({
           title={label}
           aria-label={label}
           aria-pressed={viewMode === mode}
-          onClick={() => onChange(mode)}
+          onClick={() => {
+            if (mode !== viewMode) onChange(mode);
+          }}
           className={cn(
             'flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/30',
             viewMode === mode ? 'accent-active' : 'text-zinc-400 hover:text-zinc-200',

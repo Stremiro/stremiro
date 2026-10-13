@@ -5,7 +5,7 @@ import { lazy, type ReactNode, Suspense, useEffect, useLayoutEffect, useRef } fr
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router';
 import { toast } from 'sonner';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
-import { PartySidebar } from '@/components/party-badge';
+import { Layout } from '@/components/layout';
 import { Toaster } from '@/components/ui/sonner';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { isTauriDesktopRuntime, runScheduledAppUpdateCheck } from '@/lib/app-updater';
@@ -13,13 +13,11 @@ import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
 import { PlayerHost, PlayerRouteRegistrar, PlayerSessionProvider } from '@/lib/player-session';
-import { PartyProvider } from '@/lib/party-session';
 import { routeChunks, warmRouteChunks } from '@/lib/route-chunks';
 import { mpvDestroy } from '@/lib/player-mpv';
 import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
 import { boundedMapSet, withTimeout } from '@/lib/utils';
-import { Layout } from './components/layout';
-import { Home } from './pages/home';
+import { Home } from '@/pages/home';
 
 const Search = lazy(() => routeChunks.search().then((module) => ({ default: module.Search })));
 const Details = lazy(() => routeChunks.details().then((module) => ({ default: module.Details })));
@@ -27,7 +25,6 @@ const Settings = lazy(() =>
   routeChunks.settings().then((module) => ({ default: module.Settings })),
 );
 const Profile = lazy(() => routeChunks.profile().then((module) => ({ default: module.Profile })));
-const Party = lazy(() => routeChunks.party().then((module) => ({ default: module.Party })));
 const Calendar = lazy(() =>
   routeChunks.calendar().then((module) => ({ default: module.Calendar })),
 );
@@ -45,7 +42,7 @@ function RouteSuspense({ children }: { children: ReactNode }) {
   return <Suspense fallback={<ContentRouteLoader />}>{children}</Suspense>;
 }
 
-// A single router subscription at the root feeds every per-item anchor via
+// One root router subscription feeds every per-item anchor via
 // navigateOnAnchorClick, so browse grids hold zero location subscriptions.
 function AppNavigationBinder() {
   const navigate = useNavigate();
@@ -64,12 +61,9 @@ function rememberScrollPosition(map: Map<string, number>, key: string, position:
   boundedMapSet(map, key, position, MAX_SAVED_SCROLL_POSITIONS);
 }
 
-// The window scroller is shared across routes: PUSH lands at the top, POP
-// restores the offset saved under that history entry, and a cross-path
-// REPLACE — the details/player "back" actions — restores the last offset
-// seen on the target path (back to a scrolled grid resumes mid-list).
-// Same-path REPLACE — the search URL reflect — never touches the scroller,
-// or every debounced keystroke would yank the page back to the top.
+// Shared window scroller: PUSH lands at top, POP restores the entry's saved
+// offset, cross-path REPLACE (back actions) restores the target path's offset.
+// Same-path REPLACE (search URL reflect) never touches the scroller.
 function RouteScrollManager() {
   const location = useLocation();
   const navigationType = useNavigationType();
@@ -80,12 +74,11 @@ function RouteScrollManager() {
     pathname: location.pathname,
     path: `${location.pathname}${location.search}`,
   });
-  // Scroll events fired while a navigation commit shrinks the document would
-  // attribute the incoming page's clamped offset to the departing entry.
+  // Paused during commits so a shrinking document doesn't attribute the
+  // incoming page's clamped offset to the departing entry.
   const savePausedRef = useRef(false);
 
-  // Track the offset continuously rather than reading scrollY at commit
-  // time — by then the incoming page may have already clamped it.
+  // Track continuously — at commit time the incoming page may have already clamped scrollY.
   useEffect(() => {
     const record = () => {
       if (savePausedRef.current) return;
@@ -99,8 +92,7 @@ function RouteScrollManager() {
   }, []);
 
   useLayoutEffect(() => {
-    // Feed the navigation mirror first — back gestures consult it to decide
-    // between a POP and an explicit replace.
+    // The navigation mirror feeds back gestures' POP-vs-replace decision.
     const path = `${location.pathname}${location.search}`;
     recordLocationEntry(location.key, path, navigationType);
 
@@ -124,23 +116,18 @@ function RouteScrollManager() {
 
     let restoreFrame: number | undefined;
     if (savedPosition === undefined) {
-      // A POP without a remembered offset still lands at the top — carrying
-      // over the departing page's scroll would open mid-list.
+      // A POP without a remembered offset lands at top, not mid-list.
       window.scrollTo(0, 0);
     } else {
       window.scrollTo(0, savedPosition);
-      // A still-mounting page can clamp the first attempt — retry once the
-      // frame settles.
+      // A still-mounting page can clamp the first attempt — retry after a frame.
       restoreFrame = window.requestAnimationFrame(() => {
         window.scrollTo(0, savedPosition);
       });
     }
 
-    // Land keyboard focus on the new page's landmark. The focused element is
-    // usually unmounted by a PUSH (focus falls to <body>); moving it to the
-    // main region keeps screen readers oriented and gives Tab a sensible
-    // start. POP preserves whatever context history nav restored, same-path
-    // REPLACE keeps the search input, and a live dialog owns its own focus.
+    // Land keyboard focus on the new page's landmark — a PUSH unmounts the
+    // focused element. POP preserves restored context; a live dialog owns focus.
     if (navigationType !== 'POP' && !document.querySelector(OPEN_DIALOG_SELECTOR)) {
       const active = document.activeElement;
       if (!active || active === document.body) {
@@ -157,13 +144,11 @@ function RouteScrollManager() {
   return null;
 }
 
-// The first check waits for startup to settle so it never competes with the
-// initial catalog/profile fetches; afterwards a 6h interval keeps
-// long-running sessions aware of new releases.
+// First check waits for startup to settle; then a 6h interval keeps sessions aware.
 const UPDATE_STARTUP_DELAY_MS = 8_000;
 const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-// While a title plays, announcing polls on this cadence instead — the card
-// overlays fullscreen video and its install path exits the process.
+// During playback, announce polls on this cadence — the card overlays video
+// and its install path exits the process.
 const UPDATE_PLAYBACK_RETRY_MS = 60_000;
 
 function AppUpdateManager() {
@@ -176,8 +161,7 @@ function AppUpdateManager() {
     let disposed = false;
     let playbackRetryTimer: number | null = null;
 
-    // Defer the announce while the expanded player is up: the card would sit
-    // on top of the video and its install path cuts playback.
+    // Defer while the expanded player is up — the card would sit on the video.
     const deferDuringPlayback = () => {
       if (!window.location.pathname.startsWith('/player')) return false;
       playbackRetryTimer ??= window.setTimeout(() => {
@@ -195,8 +179,7 @@ function AppUpdateManager() {
         // Navigation may change while the check is in flight.
         if (!update || disposed || deferDuringPlayback()) return;
 
-        // Persistent card: it reads live update state and morphs
-        // announce → progress → error in place under one toast id.
+        // Persistent card morphs announce → progress → error under one toast id.
         toast.custom(
           () => <AppUpdateCard onViewNotes={() => navigateApp('/settings?section=updates')} />,
           {
@@ -234,9 +217,8 @@ function AppUpdateManager() {
   return null;
 }
 
-// The close barrier owns saving and teardown; failed saves leave playback intact.
-// Every awaited step is bounded: a wedged native op or viewport transition must
-// not trap the window open (the OS reclaims a stuck mpv core at process exit).
+// Close barrier: every awaited step is bounded — a wedged native op or viewport
+// transition must not trap the window open (the OS reclaims mpv at exit).
 const CLOSE_BARRIER_STEP_TIMEOUT_MS = 8_000;
 
 function AppCloseManager() {
@@ -277,12 +259,11 @@ function AppCloseManager() {
           await withTimeout(flushPendingAppWrites(), CLOSE_BARRIER_STEP_TIMEOUT_MS, () => {
             throw new Error('Pending writes did not settle.');
           });
-          // A failed native teardown still closes: vetoing here would wedge the
-          // window open behind an unkillable mpv call, and exit reclaims it.
+          // A failed native teardown still closes — vetoing would wedge the
+          // window behind an unkillable mpv call; exit reclaims it.
           await mpvDestroy().catch(() => undefined);
         } catch {
-          // Veto once so the save can be retried; a persistent failure must not
-          // trap the window open, so the next close quits anyway.
+          // Veto once so the save retries; the next close quits anyway.
           if (!saveFailureVetoed) {
             saveFailureVetoed = true;
             event.preventDefault();
@@ -319,9 +300,7 @@ function AppCloseManager() {
 
 function App() {
   useEffect(() => {
-    // Native-app chrome: no browser context menu or ghost-drag outside real
-    // inputs in any build. Editable text keeps its OS menu and selection;
-    // DevTools stays reachable via keyboard shortcuts.
+    // Native-app chrome: no context menu or ghost-drag outside editable text.
     const isEditable = (target: EventTarget | null) =>
       isEditableTarget(target, '[data-selectable="true"]');
     const handleContextMenu = (event: MouseEvent) => {
@@ -338,8 +317,7 @@ function App() {
     };
   }, []);
 
-  // Warm the lazy route chunks on idle so the first visit to each page never
-  // flashes the content loader — the chunks are local files in the bundle.
+  // Warm lazy route chunks on idle so first visits skip the loader.
   useEffect(() => {
     if (typeof window.requestIdleCallback === 'function') {
       const id = window.requestIdleCallback(warmRouteChunks, { timeout: 4000 });
@@ -351,86 +329,73 @@ function App() {
 
   return (
     <PlayerSessionProvider>
-      <PartyProvider>
-        <Routes>
-          <Route element={<Layout />}>
-            <Route path='/' element={<Home />} />
-            <Route
-              path='/search'
-              element={
-                <RouteSuspense>
-                  <Search />
-                </RouteSuspense>
-              }
-            />
-            <Route
-              path='/details/:type/:id'
-              element={
-                <RouteSuspense>
-                  <Details />
-                </RouteSuspense>
-              }
-            />
-            <Route
-              path='/settings'
-              element={
-                <RouteSuspense>
-                  <Settings />
-                </RouteSuspense>
-              }
-            />
-            <Route
-              path='/profile'
-              element={
-                <RouteSuspense>
-                  <Profile />
-                </RouteSuspense>
-              }
-            />
-            {/* /library is a deep link into Profile's library tab — render it
-              directly so the path survives (Profile reads pathname for its
-              initial tab and the sidebar highlights both paths). */}
-            <Route
-              path='/library'
-              element={
-                <RouteSuspense>
-                  <Profile />
-                </RouteSuspense>
-              }
-            />
-            <Route
-              path='/calendar'
-              element={
-                <RouteSuspense>
-                  <Calendar />
-                </RouteSuspense>
-              }
-            />
-            <Route
-              path='/party'
-              element={
-                <RouteSuspense>
-                  <Party />
-                </RouteSuspense>
-              }
-            />
-            {/* Unknown paths land on Home — a stray deep link should never
-              render a blank shell. */}
-            <Route path='*' element={<Navigate to='/' replace />} />
-          </Route>
-          <Route path='/player/:type/:id' element={<PlayerRouteRegistrar />} />
-          <Route path='/player/:type/:id/:season/:episode' element={<PlayerRouteRegistrar />} />
-        </Routes>
-        {/* Root-level playback session: survives outlet route changes so leaving
-          /player minimizes into the mini player instead of tearing mpv down. */}
-        <PlayerHost />
-        <PartySidebar />
-        <AppNavigationBinder />
-        <RouteScrollManager />
-        <AppCloseManager />
-        <AppUpdateManager />
-        <Toaster />
-      </PartyProvider>
+      <Routes>
+        <Route element={<Layout />}>
+          <Route path='/' element={<Home />} />
+          <Route
+            path='/search'
+            element={
+              <RouteSuspense>
+                <Search />
+              </RouteSuspense>
+            }
+          />
+          <Route
+            path='/details/:type/:id'
+            element={
+              <RouteSuspense>
+                <Details />
+              </RouteSuspense>
+            }
+          />
+          <Route
+            path='/settings'
+            element={
+              <RouteSuspense>
+                <Settings />
+              </RouteSuspense>
+            }
+          />
+          <Route
+            path='/profile'
+            element={
+              <RouteSuspense>
+                <Profile />
+              </RouteSuspense>
+            }
+          />
+          {/* /library is a deep link into Profile's library tab — the path
+              survives so the sidebar can highlight it. */}
+          <Route
+            path='/library'
+            element={
+              <RouteSuspense>
+                <Profile />
+              </RouteSuspense>
+            }
+          />
+          <Route
+            path='/calendar'
+            element={
+              <RouteSuspense>
+                <Calendar />
+              </RouteSuspense>
+            }
+          />
+          {/* Unknown paths land on Home rather than a blank shell. */}
+          <Route path='*' element={<Navigate to='/' replace />} />
+        </Route>
+        <Route path='/player/:type/:id' element={<PlayerRouteRegistrar />} />
+        <Route path='/player/:type/:id/:season/:episode' element={<PlayerRouteRegistrar />} />
+      </Routes>
+      {/* Root-level playback session survives route changes so leaving
+          /player minimizes into the mini player instead of tearing down. */}
+      <PlayerHost />
+      <AppNavigationBinder />
+      <RouteScrollManager />
+      <AppCloseManager />
+      <AppUpdateManager />
+      <Toaster />
     </PlayerSessionProvider>
   );
 }

@@ -6,11 +6,9 @@ use tauri::AppHandle;
 /// fill AppData, but the newest few stay for forensics.
 const MAX_QUARANTINED_STORE_FILES: usize = 3;
 
-/// One-time-per-launch store integrity check: an unparseable store file is
-/// renamed aside (recoverable) instead of silently loading as an empty
-/// domain and being overwritten on the next save, and stale `.partial-*`
-/// temp siblings from an interrupted durable save are removed. Best-effort:
-/// filesystem failures are skipped rather than surfaced.
+/// One-time-per-launch store integrity check: an unparseable store file is renamed
+/// aside (recoverable) instead of loading as an empty domain and being overwritten
+/// on next save; stale `.partial-*` temp siblings are removed. Best-effort.
 pub(crate) fn validate_startup_stores(app: &AppHandle) {
     for file in [
         SETTINGS_STORE_FILE,
@@ -31,9 +29,8 @@ pub(crate) fn validate_startup_stores(app: &AppHandle) {
             .and_then(|stem| stem.to_str())
             .map(|stem| format!("{stem}.corrupt-"));
 
-        // Sweep durable-save temp leftovers before opening the domain, and
-        // bound quarantined corrupt files while the directory listing is
-        // already paid for.
+        // Sweep temp leftovers and bound quarantined corrupt files while the
+        // directory listing is already paid for.
         if let Some(parent) = path.parent() {
             if let Ok(entries) = fs::read_dir(parent) {
                 let mut quarantined = Vec::new();

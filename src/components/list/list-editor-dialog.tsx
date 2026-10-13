@@ -113,8 +113,7 @@ function ListEditorDialog({
               <div className='h-9 w-9 rounded-lg bg-zinc-900 border border-white/10 flex items-center justify-center text-white shrink-0'>
                 <ListIcon iconId={selectedIcon} size={16} />
               </div>
-              {/* eslint-disable jsx-a11y/no-autofocus -- moving focus into
-                  the dialog's primary field is the intended focus target. */}
+              {/* eslint-disable jsx-a11y/no-autofocus -- focus into the primary field is intended. */}
               <Input
                 id={nameInputId}
                 value={name}
@@ -153,7 +152,7 @@ function ListEditorDialog({
 }
 
 interface CreateListDialogProps {
-  onCreated?: (list: UserList) => void;
+  onCreated?: (list: UserList) => Promise<void> | void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
 }
@@ -164,9 +163,9 @@ export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDi
   const createList = useMutation({
     mutationFn: ({ icon, name }: { icon: string; name: string }) => api.createList(name, icon),
     onSuccess: (newList) => {
-      void invalidateListQueries(queryClient);
       notifyAction('List created', { detail: newList.name });
-      onCreated?.(newList);
+      // Refresh after any follow-up write (e.g. adding the item) settles, so lists don't refetch empty first.
+      void Promise.resolve(onCreated?.(newList)).finally(() => invalidateListQueries(queryClient));
       onOpenChange(false);
     },
     onError: () => notifyAction('Failed to create list', { tone: 'error' }),

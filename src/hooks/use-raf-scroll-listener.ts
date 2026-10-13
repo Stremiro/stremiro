@@ -1,9 +1,6 @@
 import { useEffect, useEffectEvent } from 'react';
 
-/** Window scroll listener coalesced to one `onFrame` call per animation
-    frame — scroll events outpace frames, so per-event work would run
-    multiple times within a paint. Fires once on mount so scroll-derived
-    state is correct before the first scroll. */
+/** Scroll listener coalesced to one `onFrame` per animation frame; fires once on mount. */
 export function useRafScrollListener(onFrame: () => void) {
   const onFrameEvent = useEffectEvent(onFrame);
 

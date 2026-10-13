@@ -5,11 +5,12 @@ import {
   FileVideo,
   Loader2,
   Magnet,
+  RotateCcw,
   SlidersHorizontal,
   TriangleAlert,
   X,
 } from 'lucide-react';
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { defaultRangeExtractor, type Range, useVirtualizer } from '@tanstack/react-virtual';
 import {
   Fragment,
   type Dispatch,
@@ -22,12 +23,16 @@ import {
   useState,
 } from 'react';
 import { RemoteImage } from '@/components/remote-image';
+import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
+import { SearchInput } from '@/components/ui/search-input';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useFailedSrc } from '@/hooks/use-failed-src';
+import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import {
   type AddonStream,
+  type AddonStreamResolution,
   type Episode,
   type StreamSelectorBatch,
   type StreamSelectorPreferences,
@@ -37,27 +42,28 @@ import {
   type StreamSelectorStats,
   type StreamSourceSummary,
   type WatchProgress,
+  type TitleWatchProgress,
 } from '@/lib/api';
 import { whenRowMounted } from '@/lib/dom';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
+import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
 import { cn, formatAirDate, formatSeasonEpisode, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
   'h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
 const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 hover:text-zinc-200';
 
-// Filters use the app accent; only sort modes carry per-mode color
-// (violet = 4K badge, emerald = health/cached).
+// Filters use the app accent; only Quality keeps its own hue, echoing the violet 4K badge it sorts by.
 const SORT_MODE_ACTIVE_CLASS: Record<StreamSelectorSort, string> = {
   smart: 'accent-active shadow-xs',
   quality: 'bg-violet-500/25 text-violet-300 shadow-xs',
-  seeds: 'bg-emerald-500/25 text-emerald-300 shadow-xs',
+  seeds: 'accent-active shadow-xs',
 };
 const SORT_MODE_ICON_TINT: Record<StreamSelectorSort, string> = {
   smart: 'text-[var(--accent-nav)]',
   quality: 'text-violet-300/80',
-  seeds: 'text-emerald-300/80',
+  seeds: 'text-[var(--accent-nav)]',
 };
 const SORT_MODE_LABELS: Record<StreamSelectorSort, string> = {
   smart: 'Smart',
@@ -67,10 +73,7 @@ const SORT_MODE_LABELS: Record<StreamSelectorSort, string> = {
 const SORT_MODES = Object.keys(SORT_MODE_LABELS) as StreamSelectorSort[];
 const QUALITY_OPTIONS: ReadonlyArray<[StreamSelectorQuality, string]> = [
   ['all', 'All'],
-  ['4k', '4K'],
-  ['1080p', '1080p'],
-  ['720p', '720p'],
-  ['sd', 'SD'],
+  ...(Object.entries(RESOLUTION_LABELS) as [AddonStreamResolution, string][]),
 ];
 
 interface SegmentOption<T extends string> {
@@ -235,12 +238,11 @@ export function StreamSelectorHeader({
   );
 }
 
-// Matches StreamItem's silhouette so the swap to real rows is a fill-in,
-// not a layout jump.
+// Matches StreamItem's silhouette so the swap to real rows is a fill-in, not a layout jump.
 function StreamRowSkeleton() {
   return (
     <div className='flex items-center gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2.5'>
-      <div className='h-9 w-9 shrink-0 animate-pulse rounded-lg bg-white/[0.05]' />
+      <div className='h-9 w-9 shrink-0 animate-pulse rounded-[10px] bg-white/[0.05]' />
       <div className='min-w-0 flex-1 space-y-1.5'>
         <div className='flex items-center gap-1.5'>
           <div className='h-3 w-28 animate-pulse rounded bg-white/[0.06]' />
@@ -259,19 +261,15 @@ export function StreamListLoadingState({
   chips,
 }: {
   sourceCount: number;
-  /** Per-source health chips once the roster lands — real progress beats
-      anonymous skeletons. Absent before the first snapshot. */
+  /** Per-source health chips once the roster lands — real progress beats anonymous skeletons. */
   chips?: ReactNode;
 }) {
   return (
     <div className='flex h-full min-h-0 flex-col px-3 pt-3'>
       {chips}
-      <div className='mb-3 flex items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-3 py-2'>
-        <Loader2 className='h-3.5 w-3.5 animate-spin text-white/35' />
-        <p
-          role='status'
-          className='text-[11px] font-semibold uppercase tracking-widest text-white/30'
-        >
+      <div className='mb-3 flex items-center gap-2 px-1 py-1'>
+        <Loader2 className='h-3.5 w-3.5 animate-spin text-white/45' />
+        <p role='status' className='text-[12px] font-medium text-zinc-400'>
           {sourceCount > 0
             ? `Searching ${sourceCount} source${sourceCount === 1 ? '' : 's'}…`
             : 'Preparing sources…'}
@@ -324,8 +322,7 @@ function StreamListMessage({
 }: {
   action?: ReactNode;
   body: string;
-  /** Health chips ride the message states so per-source failures stay
-      visible on error/empty outcomes. */
+  /** Health chips ride the message states so per-source failures stay visible on error/empty outcomes. */
   chips?: ReactNode;
   icon?: ReactNode;
   role?: 'alert';
@@ -340,7 +337,7 @@ function StreamListMessage({
       >
         {icon}
         <p className='text-sm'>{title}</p>
-        <p className='text-xs text-zinc-500 leading-relaxed max-w-sm break-words'>{body}</p>
+        <p className='text-xs text-zinc-400 leading-relaxed max-w-sm break-words'>{body}</p>
         {action}
       </div>
     </div>
@@ -399,15 +396,25 @@ export function StreamListEmptyState({
   );
 }
 
-export function StreamListFilteredEmptyState({ onClearFilters }: { onClearFilters: () => void }) {
+export function StreamListFilteredEmptyState({
+  onClearFilters,
+  searchQuery = '',
+}: {
+  onClearFilters: () => void;
+  searchQuery?: string;
+}) {
   return (
     <StreamListMessage
       icon={<FileVideo className='w-8 h-8 opacity-15' />}
-      title='No streams match these filters'
-      body='Try another filter or clear filters to see all streams.'
+      title={searchQuery.trim() ? 'No matching streams' : 'No streams match these filters'}
+      body={
+        searchQuery.trim()
+          ? `No releases match “${searchQuery.trim()}” with the current filters.`
+          : 'Try another filter or show all streams.'
+      }
       action={
         <Button variant='outline' size='sm' onClick={onClearFilters}>
-          Clear filters
+          Show all streams
         </Button>
       }
     />
@@ -429,43 +436,42 @@ export function StreamAddonHealthChips({
   onFiltersChange,
   sourcesStillLoading,
 }: StreamAddonHealthChipsProps) {
-  const failedCount = healthSummary.degraded + healthSummary.offline;
   return (
-    // The roster lands mid-fetch — fading the block in keeps the chip row
-    // from popping under the spinner.
+    // The roster lands mid-fetch — fading in keeps the chip row from popping under the spinner.
     <div className='bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3 animate-in fade-in duration-300'>
       <div className='flex items-center gap-2 flex-wrap'>
         {metrics.map((metric) => {
-          // Chips filter on the addon config id — the same value stamped on
-          // each stream as `sourceId` — so a display name that differs from
-          // the config name can't select a source into a false empty list.
+          // Chips filter on the addon config id (stamped on each stream as `sourceId`) — a differing display
+          // name can't select a source into a false empty list.
           const isSelected = effectiveAddonFilter === metric.id;
           const isPending = sourcesStillLoading && metric.status === 'pending';
           const hasStreams = metric.streamCount > 0;
+          const sourceStatus = isPending
+            ? 'Searching…'
+            : metric.status === 'no_results'
+              ? 'No results for this title'
+              : metric.status === 'degraded'
+                ? 'Slow response'
+                : metric.status === 'offline'
+                  ? 'Unavailable'
+                  : `${metric.streamCount} streams`;
+          const latency =
+            typeof metric.latencyMs === 'number'
+              ? metric.latencyMs < 1000
+                ? `${metric.latencyMs}ms`
+                : `${(metric.latencyMs / 1000).toFixed(1)}s`
+              : null;
 
           return (
             <button
               key={metric.id}
               type='button'
-              // Truncated chips hide the name; keep the full name (and any
-              // fetch error) reachable on hover.
-              title={
-                metric.errorMessage
-                  ? `${metric.name} — ${metric.errorMessage}`
-                  : isPending
-                    ? `${metric.name} — searching…`
-                    : metric.name
-              }
-              // A selected chip whose count drops to 0 in a later snapshot
-              // must stay clickable — and `disabled` would drop focus to
-              // <body> if a focused chip loses its streams mid-fetch.
+              // Truncated chips hide the name — keep the full name (and any fetch error) reachable on hover.
+              title={`${metric.name} — ${metric.errorMessage ?? sourceStatus}${latency ? ` · ${latency}` : ''}`}
+              // A selected chip whose count drops to 0 must stay clickable — `disabled` would drop focus to <body> mid-fetch.
               aria-disabled={(!hasStreams && !isSelected) || undefined}
               aria-pressed={isSelected}
-              aria-label={`${metric.name}: ${
-                isPending
-                  ? 'searching'
-                  : `${metric.streamCount} stream${metric.streamCount === 1 ? '' : 's'}`
-              }${metric.errorMessage ? `, ${metric.errorMessage}` : ''}`}
+              aria-label={`${metric.name}: ${sourceStatus}${metric.errorMessage ? `, ${metric.errorMessage}` : ''}`}
               onClick={() => {
                 if (!hasStreams && !isSelected) return;
                 onFiltersChange((prev) => ({
@@ -479,13 +485,11 @@ export function StreamAddonHealthChips({
                   ? 'accent-lattice-soft'
                   : hasStreams
                     ? 'bg-black/40 text-zinc-300 border-white/10 hover:border-white/20 hover:text-white'
-                    : 'bg-black/40 text-zinc-500 border-white/[0.06] cursor-default opacity-70',
+                    : 'bg-black/40 text-zinc-400 border-white/[0.06] cursor-default',
               )}
             >
               {isPending && <Loader2 className='h-2.5 w-2.5 shrink-0 animate-spin text-zinc-500' />}
-              {/* State lives on the name tint, not a traffic-light dot —
-                  degraded/offline read as muted warnings, everything else
-                  stays neutral. */}
+              {/* State lives on the name tint, not a dot — degraded/offline read as muted warnings. */}
               <span
                 className={cn(
                   'truncate max-w-[90px]',
@@ -500,16 +504,16 @@ export function StreamAddonHealthChips({
                 {metric.name}
               </span>
               {!isPending && (
-                <span className='text-zinc-500 tabular-nums'>{metric.streamCount}</span>
+                <span className='text-zinc-400 tabular-nums'>
+                  {metric.status === 'no_results' ? 'No results' : metric.streamCount}
+                </span>
               )}
-              {typeof metric.latencyMs === 'number' && (
-                <span className='text-zinc-600 tabular-nums'>· {metric.latencyMs}ms</span>
-              )}
+              {latency && <span className='text-zinc-500 tabular-nums'>· {latency}</span>}
             </button>
           );
         })}
 
-        <span className='ml-auto flex items-center gap-1.5 text-[10px] font-medium text-zinc-500 whitespace-nowrap tabular-nums'>
+        <span className='ml-auto flex items-center gap-1.5 text-[10px] font-medium text-zinc-400 whitespace-nowrap tabular-nums'>
           {healthSummary.pending > 0 && sourcesStillLoading && (
             <span className='flex items-center gap-1'>
               <Loader2 className='h-2.5 w-2.5 animate-spin text-zinc-500' />
@@ -519,7 +523,12 @@ export function StreamAddonHealthChips({
           <span>
             {metrics.length} {metrics.length === 1 ? 'source' : 'sources'}
           </span>
-          {failedCount > 0 && <span className='text-red-300/70'>· {failedCount} failed</span>}
+          {healthSummary.degraded > 0 && (
+            <span className='text-amber-200/70'>· {healthSummary.degraded} slow</span>
+          )}
+          {healthSummary.offline > 0 && (
+            <span className='text-red-300/70'>· {healthSummary.offline} unavailable</span>
+          )}
         </span>
       </div>
     </div>
@@ -532,7 +541,9 @@ interface StreamFilterToolbarProps {
   hasActiveFilter: boolean;
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onResetFilters: () => void;
+  onSearchQueryChange: (value: string) => void;
   qualityFilter: StreamSelectorQuality;
+  searchQuery: string;
   showBatchFilter: boolean;
   sortMode: StreamSelectorSort;
   sourceFilter: StreamSelectorSource;
@@ -546,7 +557,9 @@ export function StreamFilterToolbar({
   hasActiveFilter,
   onFiltersChange,
   onResetFilters,
+  onSearchQueryChange,
   qualityFilter,
+  searchQuery,
   showBatchFilter,
   sortMode,
   sourceFilter,
@@ -555,9 +568,41 @@ export function StreamFilterToolbar({
 }: StreamFilterToolbarProps) {
   return (
     <div className='bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'>
+      <div className='mb-2 flex items-center gap-2'>
+        <SearchInput
+          value={searchQuery}
+          onValueChange={onSearchQueryChange}
+          aria-label='Search streams by release, codec or keyword'
+          placeholder='Find a release, codec or keyword…'
+          className='h-8 text-xs bg-black/20 border-white/[0.07]'
+          wrapperClassName='min-w-0 flex-1'
+        />
+        <span className='shrink-0 text-[10px] font-semibold text-zinc-400 tabular-nums whitespace-nowrap'>
+          {filteredCount === totalCount
+            ? `${totalCount} streams`
+            : `${filteredCount} / ${totalCount}`}
+          {stats.p2pCount > 0 && (
+            <span className='hidden sm:inline'>{` · ${stats.playableCount} playable`}</span>
+          )}
+        </span>
+        <button
+          type='button'
+          aria-disabled={!hasActiveFilter || undefined}
+          onClick={() => {
+            if (hasActiveFilter) onResetFilters();
+          }}
+          className={cn(
+            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[12px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
+            hasActiveFilter
+              ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
+              : 'pointer-events-none border-white/[0.07] text-zinc-500',
+          )}
+        >
+          <RotateCcw className='h-3.5 w-3.5' strokeWidth={2.25} />
+          Reset
+        </button>
+      </div>
       <div className='flex items-center gap-2'>
-        {/* Right-edge fade: overflow dims into the pinned block instead of
-            hard-cutting a label. */}
         <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
           <SegmentGroup
             label='Quality filter'
@@ -567,8 +612,7 @@ export function StreamFilterToolbar({
               ([value, label]) => {
                 if (value === 'all') return [{ value, label }];
                 const count = stats.resCounts[value];
-                // The active option stays visible at 0 — hiding it would
-                // leave an invisible filter emptying the list.
+                // The active option stays visible at 0 — hiding it would leave an invisible filter emptying the list.
                 return count > 0 || qualityFilter === value ? [{ value, label, count }] : [];
               },
             )}
@@ -629,25 +673,6 @@ export function StreamFilterToolbar({
             }))}
           />
         </div>
-
-        <div className='ml-auto flex shrink-0 items-center gap-2'>
-          <span className='text-[10px] font-semibold text-zinc-500 tabular-nums whitespace-nowrap'>
-            {filteredCount === totalCount
-              ? `${totalCount} streams`
-              : `${filteredCount} / ${totalCount}`}
-            {stats.p2pCount > 0 && ` · ${stats.playableCount} playable`}
-          </span>
-          <button
-            type='button'
-            aria-disabled={!hasActiveFilter || undefined}
-            onClick={() => {
-              if (hasActiveFilter) onResetFilters();
-            }}
-            className='h-7 rounded-md px-2 text-[10px] font-semibold uppercase tracking-wider text-zinc-500 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30 aria-disabled:pointer-events-none aria-disabled:opacity-40'
-          >
-            Reset
-          </button>
-        </div>
       </div>
     </div>
   );
@@ -681,44 +706,41 @@ export function StreamResolveFeedbackToast({
     <div className='pointer-events-none absolute inset-x-3 bottom-3 z-30 flex justify-center'>
       <div
         role='status'
-        className='animate-in fade-in slide-in-from-bottom-2 duration-200 w-full max-w-sm overflow-hidden rounded-2xl border border-white/10 bg-black/75 shadow-xl backdrop-blur-xl'
+        className='animate-in fade-in slide-in-from-bottom-2 duration-200 relative w-full max-w-xs overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 shadow-lg shadow-black/40 backdrop-blur-xl'
       >
-        <div className='flex items-center gap-3 px-3.5 py-2.5'>
-          {poster && (
+        <div className='flex items-center gap-2.5 py-2 pl-2 pr-1.5'>
+          {poster ? (
             <RemoteImage
               src={poster}
-              className='h-11 w-8 shrink-0 rounded-md border border-white/10 object-cover'
+              className='h-9 w-6 shrink-0 rounded-[5px] object-cover'
               alt=''
             />
+          ) : (
+            <Loader2 className='ml-1 h-3.5 w-3.5 shrink-0 animate-spin text-white/45' />
           )}
 
           <div className='min-w-0 flex-1'>
-            <p className='mb-0.5 text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/35'>
-              Opening Stream
+            <p className='truncate text-[13px] font-medium leading-tight text-white/90'>
+              Opening stream
             </p>
-            <p className='truncate text-sm font-medium leading-tight text-white/90'>
-              {feedback.title}
+            <p className='mt-0.5 truncate text-[11.5px] leading-tight text-white/45'>
+              {[feedback.title, feedback.subtitle].filter(Boolean).join(' · ')}
             </p>
-            {feedback.subtitle && (
-              <p className='truncate text-[11px] leading-snug text-white/40'>{feedback.subtitle}</p>
-            )}
           </div>
-
-          <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin text-white/40' />
 
           <button
             type='button'
             onClick={onCancel}
             title='Cancel opening stream (Esc)'
             aria-keyshortcuts='Escape'
-            className='pointer-events-auto h-7 shrink-0 rounded-md border border-white/10 px-2 text-[10px] font-semibold uppercase tracking-wider text-white/50 transition-colors duration-150 hover:border-white/25 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
+            className='pointer-events-auto h-7 shrink-0 rounded-md px-2.5 text-[12px] font-medium text-white/55 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
           >
             Cancel
           </button>
         </div>
 
-        <div className='relative h-[2px] bg-white/10'>
-          <div className='absolute inset-y-0 w-1/3 bg-white/45 animate-[progress-slide_1.6s_linear_infinite]' />
+        <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
+          <div className='h-full w-1/3 bg-white/50 motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
         </div>
       </div>
     </div>
@@ -734,15 +756,14 @@ interface StreamPackEpisodeListProps {
   onBack: () => void;
   onPick: (episode: Episode) => void;
   progressFor: (episode: Episode) => WatchProgress | undefined;
+  watchedEpisodeCeiling?: TitleWatchProgress['watchedEpisodeCeiling'];
   stream: AddonStream;
   /** Canonical coordinates of the selector's target — the "Current" marker. */
   targetEpisode?: number;
   targetSeason?: number;
 }
 
-// Long-running shows can list hundreds of episodes — a flattened
-// header|episode row model lets the virtualizer keep long packs cheap while
-// season headers stay part of the same scroll.
+// Flattened header|episode row model — the virtualizer keeps long packs cheap with season headers in the same scroll.
 type PackListRow = { type: 'header'; season: number } | { type: 'episode'; episode: Episode };
 
 const PACK_EPISODE_ROW_ESTIMATE_PX = 70;
@@ -750,15 +771,22 @@ const PACK_HEADER_ROW_ESTIMATE_PX = 30;
 const PACK_ROW_GAP_PX = 6;
 const PACK_LIST_VIRTUALIZE_THRESHOLD = 40;
 
+export function focusedRowRange(range: Range, focusedIndex: number): number[] {
+  const indices = defaultRangeExtractor(range);
+  if (focusedIndex >= 0 && focusedIndex < range.count && !indices.includes(focusedIndex)) {
+    indices.push(focusedIndex);
+    indices.sort((left, right) => left - right);
+  }
+  return indices;
+}
+
 function packRowKey(row: PackListRow): string {
   return row.type === 'header'
     ? `season-${row.season}`
     : `${row.episode.season}:${row.episode.episode}`;
 }
 
-// In-selector "inside the pack" view: a batch stream row expands into the
-// season's episode list so the user picks which file to play — same row
-// vocabulary (thumb, E-tag, progress strip) as the player episodes panel.
+// In-selector "inside the pack" view — same row vocabulary (thumb, E-tag, progress strip) as the player episodes panel.
 export function StreamPackEpisodeList({
   backdrop,
   disabled,
@@ -766,10 +794,12 @@ export function StreamPackEpisodeList({
   onBack,
   onPick,
   progressFor,
+  watchedEpisodeCeiling,
   stream,
   targetEpisode,
   targetSeason,
 }: StreamPackEpisodeListProps) {
+  const spoilerProtection = useSpoilerProtection();
   const listRef = useRef<HTMLDivElement | null>(null);
   const multiSeason = useMemo(() => new Set(episodes.map((ep) => ep.season)).size > 1, [episodes]);
   const packTitle = stream.presentation.streamTitle || stream.presentation.sourceName;
@@ -785,8 +815,7 @@ export function StreamPackEpisodeList({
     const flat: PackListRow[] = [];
     let lastSeason: number | null = null;
     for (const episode of episodes) {
-      // Episodes arrive sorted by (season, episode) — a season change is the
-      // group boundary.
+      // Episodes arrive (season, episode)-sorted — a season change is the group boundary.
       if (multiSeason && episode.season !== lastSeason) {
         flat.push({ type: 'header', season: episode.season });
         lastSeason = episode.season;
@@ -796,17 +825,8 @@ export function StreamPackEpisodeList({
     return flat;
   }, [episodes, multiSeason]);
 
-  // Latched at mount like the stream list — a threshold swap mid-session
-  // would rebuild every row's DOM under the focused element.
+  // Latched at mount like the stream list — a threshold swap mid-session would rebuild rows under the focused element.
   const [isVirtualized] = useState(() => rows.length >= PACK_LIST_VIRTUALIZE_THRESHOLD);
-  const virtualizer = useVirtualizer({
-    count: rows.length,
-    getScrollElement: () => listRef.current,
-    estimateSize: (index) =>
-      rows[index]?.type === 'header' ? PACK_HEADER_ROW_ESTIMATE_PX : PACK_EPISODE_ROW_ESTIMATE_PX,
-    overscan: 8,
-    enabled: isVirtualized,
-  });
 
   const firstEpisodeIndex = useMemo(() => rows.findIndex((row) => row.type === 'episode'), [rows]);
   const lastEpisodeIndex = useMemo(
@@ -827,9 +847,21 @@ export function StreamPackEpisodeList({
   const [focusedIndex, setFocusedIndex] = useState(() =>
     targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex),
   );
+  const rangeExtractor = useCallback(
+    (range: Range) => focusedRowRange(range, focusedIndex),
+    [focusedIndex],
+  );
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => listRef.current,
+    estimateSize: (index) =>
+      rows[index]?.type === 'header' ? PACK_HEADER_ROW_ESTIMATE_PX : PACK_EPISODE_ROW_ESTIMATE_PX,
+    rangeExtractor,
+    overscan: 8,
+    enabled: isVirtualized,
+  });
 
-  // A virtual row mounts only after the scroll commit — retry one frame
-  // before giving up, for both the initial anchor and keyboard navigation.
+  // A virtual row mounts only after the scroll commit — retry one frame before giving up.
   const scheduleRowFocus = useCallback((index: number, preventScroll: boolean) => {
     whenRowMounted(
       () => listRef.current,
@@ -896,9 +928,7 @@ export function StreamPackEpisodeList({
     [firstEpisodeIndex, focusRow, focusedIndex, lastEpisodeIndex, rows],
   );
 
-  // Land on the target episode once — the same "current row" anchor the
-  // stream list's open-time focus uses. The picker overlays the stream list,
-  // so DOM focus must move here explicitly or it stays under the overlay.
+  // Land on the target episode once — the picker overlays the stream list, so DOM focus must move here explicitly.
   useEffect(() => {
     const anchor = targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex);
     if (anchor < 0) return;
@@ -919,7 +949,7 @@ export function StreamPackEpisodeList({
       return (
         <p
           className={cn(
-            'px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-600',
+            'px-1 text-[10px] font-semibold uppercase tracking-[0.18em] text-zinc-500',
             index === 0 ? 'pt-0' : 'pt-2',
           )}
         >
@@ -932,6 +962,14 @@ export function StreamPackEpisodeList({
     const isTarget = episodeMatchesCoordinates(ep, targetSeason, targetEpisode);
     const artwork = ep.thumbnail || backdrop;
     const watchEntry = progressFor(ep);
+    const isSpoiler = isEpisodeSpoiler(
+      ep,
+      spoilerProtection,
+      watchedEpisodeCeiling,
+      watchEntry,
+      isTarget,
+    );
+    const episodeTitle = getEpisodeTitle(isSpoiler ? undefined : ep.title, ep.episode);
     const progressPercent = watchEntry
       ? getWatchProgressPercent(watchEntry.position, watchEntry.duration)
       : 0;
@@ -944,9 +982,8 @@ export function StreamPackEpisodeList({
           data-pack-row={index}
           data-current-episode={isTarget ? '' : undefined}
           aria-current={isTarget ? 'true' : undefined}
-          aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)}${ep.title ? ` — ${ep.title}` : ''}`}
-          // aria-disabled, not disabled: a resolving pick must not drop the
-          // row out of the roving tabindex (focus would fall to <body>).
+          aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)} — ${episodeTitle}`}
+          // aria-disabled, not disabled — a resolving pick must not drop the row out of the roving tabindex (focus → <body>).
           aria-disabled={disabled || undefined}
           tabIndex={index === focusedIndex ? 0 : -1}
           onFocus={() => setFocusedIndex(index)}
@@ -958,11 +995,12 @@ export function StreamPackEpisodeList({
             'bg-white/[0.02] border-white/[0.05] transition-all duration-150 cursor-pointer',
             'hover:bg-white/[0.045] hover:border-white/[0.1]',
             'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25',
-            isTarget && 'border-emerald-400/20 bg-emerald-400/[0.04]',
+            isTarget &&
+              'border-[rgb(var(--accent-act-rgb)/0.22)] bg-[rgb(var(--accent-act-rgb)/0.05)]',
           )}
         >
           {isTarget && (
-            <span className='absolute left-0 inset-y-2.5 w-[2px] rounded-full bg-emerald-400/80' />
+            <span className='absolute left-0 inset-y-2.5 w-[2px] rounded-full bg-(--accent-act)' />
           )}
           <div className='relative h-12 w-[84px] shrink-0 overflow-hidden rounded-md bg-zinc-900'>
             <div className='absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-wide text-white/15 bg-zinc-800/50'>
@@ -972,7 +1010,10 @@ export function StreamPackEpisodeList({
               <RemoteImage
                 src={artwork}
                 loading='lazy'
-                className='relative h-full w-full object-cover opacity-80 transition-opacity duration-200 group-hover:opacity-100'
+                className={cn(
+                  'relative h-full w-full object-cover opacity-80 transition-opacity duration-200 group-hover:opacity-100',
+                  isSpoiler && 'scale-110 blur-md',
+                )}
                 alt=''
               />
             )}
@@ -985,22 +1026,22 @@ export function StreamPackEpisodeList({
                 {formatSeasonEpisode(ep.season, ep.episode)}
               </span>
               {isTarget && (
-                <span className='shrink-0 text-[9px] font-semibold uppercase tracking-[0.14em] leading-none text-emerald-300/90'>
+                <span className='shrink-0 text-[10.5px] font-medium leading-none text-(--accent-act)'>
                   Current
                 </span>
               )}
               {watchEntry?.is_watched && (
                 <Check
-                  className='h-3 w-3 shrink-0 text-emerald-400/80'
+                  className='h-3 w-3 shrink-0 text-zinc-400'
                   strokeWidth={3}
                   aria-label='Watched'
                 />
               )}
             </div>
             <p className='mt-0.5 truncate text-[13px] font-medium leading-snug text-zinc-200 transition-colors group-hover:text-white'>
-              {getEpisodeTitle(ep.title, ep.episode)}
+              {episodeTitle}
             </p>
-            {airDate && <p className='mt-0.5 text-[11px] leading-none text-zinc-500'>{airDate}</p>}
+            {airDate && <p className='mt-0.5 text-[11px] leading-none text-zinc-400'>{airDate}</p>}
           </div>
           <ChevronRight
             className='h-4 w-4 shrink-0 text-white/30 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100'
@@ -1037,22 +1078,21 @@ export function StreamPackEpisodeList({
               {packTitle}
             </p>
             {packMeta && (
-              <p className='mt-0.5 truncate text-[11px] leading-snug text-zinc-500'>{packMeta}</p>
+              <p className='mt-0.5 truncate text-[11px] leading-snug text-zinc-400'>{packMeta}</p>
             )}
           </div>
         </div>
-        <p className='mb-2 px-1 text-[11px] font-medium text-zinc-600'>
-          Choose an episode · {episodes.length} in this pack
+        <p className='mb-2 px-1 text-[11px] font-medium text-zinc-500'>
+          Choose an episode · {episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'}
         </p>
       </div>
 
-      {/* Keydown lands here via bubbling from the focused row — the container
-          itself is never the interaction target. */}
+      {/* Keydown lands here via bubbling from the focused row — the container is never the target. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <div
         ref={listRef}
         role='list'
-        aria-label='Episodes in this pack'
+        aria-label='Episodes'
         className={cn(
           'min-h-0 flex-1 overflow-y-auto overscroll-contain px-3',
           isVirtualized ? 'pb-6' : 'space-y-1.5 pb-6',

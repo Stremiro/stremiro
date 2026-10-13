@@ -1,31 +1,25 @@
-use super::language::canonicalize_language_token;
+use super::language::{canonicalize_language_token, canonicalize_language_value};
 use super::normalize_token_text;
-#[cfg(debug_assertions)]
-use super::streaming_helpers::format_stream_size_label;
 use super::streaming_helpers::{
     normalize_source_id, normalize_source_key, stream_language_haystack,
     stream_resolution_priority, stream_source_priority,
 };
 use crate::providers::addons::{
-    stream_episode_match_texts, AddonStream, SelectionPriority, StreamEpisodeMatch,
-    StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary, StreamRecommendationReason,
-    StreamTitleMatch,
+    language_mention_is_audio, stream_episode_match_texts, AddonStream, SelectionPriority,
+    StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary,
+    StreamRecommendationReason, StreamTitleMatch,
 };
 use std::collections::{HashMap, HashSet};
 
-/// Single owner for "no recorded outcome" source-health priority; shared by
-/// the fetcher cooldown gate and the resume donor scan.
+/// "No recorded outcome" health priority; shared by the fetcher cooldown gate and the resume donor scan.
 pub(crate) const DEFAULT_SOURCE_HEALTH_PRIORITY: u8 = 2;
 pub(crate) const DEFAULT_STREAM_FAMILY_PRIORITY: u8 = 2;
 const TITLE_STOP_WORDS: &[&str] = &["a", "an", "and", "of", "on", "the", "to"];
 const TITLE_NEUTRAL_EXTRA_TOKENS: &[&str] = &[
     "arc",
-    // Language/edition tags that must never read as significant title
-    // extras — includes the release-tag spellings `StreamFlags` probes so a
-    // tag-carrying release keeps its title overlap (`ray`/`blu`/`vision`
-    // stay here rather than in `TITLE_BOUNDARY_TOKENS`: they are plausible
-    // title words, so they relieve the extra penalty without stopping
-    // tokenization).
+    // Language/edition tags that must never count as significant title extras.
+    // `ray`/`blu`/`vision` stay here rather than in `TITLE_BOUNDARY_TOKENS`:
+    // plausible title words that relieve the extra penalty without stopping tokenization.
     "audio",
     "batch",
     "blu",
@@ -75,10 +69,9 @@ const TITLE_SPINOFF_TOKENS: &[&str] = &[
     "specials",
     "spinoff",
 ];
-/// Release-tag tokens that stop title tokenization. Must cover every
-/// single-token spelling the `StreamFlags` probes use (or
-/// `TITLE_NEUTRAL_EXTRA_TOKENS` for plausible title words) — a missing one
-/// becomes a significant-extra penalty. `release_tag_spellings_never_count_as_title_extras` pins it.
+/// Release-tag tokens that stop title tokenization. Must cover every single-token
+/// spelling the `StreamFlags` probes use — a missing one becomes a significant-extra
+/// penalty. Pinned by `release_tag_spellings_never_count_as_title_extras`.
 const TITLE_BOUNDARY_TOKENS: &[&str] = &[
     "10bit",
     "aac",
@@ -92,6 +85,7 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
     "bluray",
     "brrip",
     "cam",
+    "camrip",
     "dd",
     "dd5",
     "ddp",
@@ -103,6 +97,7 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
     "dtsx",
     "dv",
     "dvdrip",
+    "dvdscr",
     "eac3",
     "dualaudio",
     "flac",
@@ -110,6 +105,8 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
     "h265",
     "hd",
     "hdcam",
+    "hdtc",
+    "hdts",
     "hdtv",
     "hdr",
     "hdr10",
@@ -130,7 +127,11 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
     "repack",
     "remux",
     "sdr",
+    "screener",
+    "telecine",
+    "telesync",
     "truehd",
+    "ts",
     "uhd",
     "webrip",
     "web",
@@ -147,9 +148,8 @@ pub(crate) struct StreamMatchContext<'a> {
     pub query_episode: Option<u32>,
     pub canonical_season: Option<u32>,
     pub canonical_episode: Option<u32>,
-    /// The mapping-index fact for the requested season: true when it is the
-    /// show's final season. It lets the episode battery resolve numberless
-    /// "final season" naming claims (see `text_matches_requested_season`).
+    /// True when the requested season is the show's final season — lets the episode
+    /// battery resolve numberless "final season" naming claims (`text_matches_requested_season`).
     pub is_final_season: bool,
 }
 
@@ -158,26 +158,22 @@ pub(crate) struct StreamRecommendationInputs<'a> {
     pub addon_source_priorities: &'a HashMap<String, u32>,
     pub source_health_priorities: &'a HashMap<String, u8>,
     pub stream_family_priorities: &'a HashMap<String, u8>,
-    /// The single preferred addon instance for this title scope — the last
-    /// source that succeeded recently, normalized.
+    /// The preferred addon instance for this title scope — last source that succeeded recently, normalized.
     pub preferred_title_source_id: Option<&'a str>,
     pub match_context: StreamMatchContext<'a>,
     pub preferred_audio_language: Option<&'a str>,
     pub preferred_subtitle_language: Option<&'a str>,
 }
 
-/// Sort key computed once per stream so the comparator is a bare tuple
-/// compare. Field order is rank order: episode, season claim, title,
-/// viability, language, health, family, affinity, quality, bonus, addon
-/// order, oversize demotion, swarm stats. Viability outranks reputation and
-/// preference: a stream the player cannot load must never win.
+/// Sort key computed once per stream so the comparator is a bare tuple compare.
+/// Field order is rank order. Viability outranks reputation and preference:
+/// a stream the player cannot load must never win.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StreamRecommendationKey {
     pub episode_match: StreamEpisodeMatchKind,
-    /// Same-tier split from `StreamEpisodeMatch`: a match resting on an
-    /// explicit season claim outranks an assumed one, so a titled
-    /// final-season release cannot lose an Exact tie to a same-numbered
-    /// file of another season, nor win one for the wrong season.
+    /// Same-tier split from `StreamEpisodeMatch`: an explicit season claim outranks
+    /// an assumed one — a titled final-season release can't lose/win an Exact tie
+    /// against a same-numbered file of the wrong season.
     pub season_claim_verified: bool,
     pub title_match: i8,
     pub viability: u8,
@@ -188,8 +184,7 @@ pub(crate) struct StreamRecommendationKey {
     pub quality: i32,
     pub language_bonus: u8,
     pub source_priority: u32,
-    /// Oversize demotion, ordered before swarm stats so a bloated remux
-    /// can't resurface on a tie; `Reverse` because the key sorts descending.
+    /// Oversize demotion before swarm stats so a bloated remux can't resurface on a tie; `Reverse` = descending sort.
     pub oversize: std::cmp::Reverse<bool>,
     pub seeders: u32,
     pub size_bytes: u64,
@@ -211,20 +206,19 @@ fn canonicalize_language_prefs(
     audio: Option<&str>,
     subtitle: Option<&str>,
 ) -> CanonicalLanguagePrefs {
-    let audio = audio.and_then(canonicalize_language_token);
+    let audio = audio.and_then(canonicalize_language_value);
     let subtitle = subtitle.and_then(|value| {
         if value.trim().eq_ignore_ascii_case("off") {
             Some(CanonicalSubtitlePref::Off)
         } else {
-            canonicalize_language_token(value).map(CanonicalSubtitlePref::Lang)
+            canonicalize_language_value(value).map(CanonicalSubtitlePref::Lang)
         }
     });
     CanonicalLanguagePrefs { audio, subtitle }
 }
 
-/// The fetch-constant half of `StreamRecommendationKey` — see
-/// `StreamSignalCache`. Field-for-field identical to the key minus
-/// `family`; `into_key` re-inserts it at its rank position.
+/// The fetch-constant half of `StreamRecommendationKey` — identical minus `family`,
+/// which `into_key` re-inserts at its rank position.
 #[derive(Clone, Copy)]
 struct StreamFixedSignals {
     episode_match: StreamEpisodeMatch,
@@ -262,23 +256,20 @@ impl StreamFixedSignals {
     }
 }
 
-/// Memoized per-stream entry — the rank fields plus the normalized family
-/// key the per-pass family-priority lookup reads.
+/// Memoized per-stream entry: rank fields plus the normalized family key.
 struct CachedStreamSignals {
     fixed: StreamFixedSignals,
     normalized_family: Option<String>,
 }
 
-/// Per-fetch memo of the fetch-constant half of the recommendation key: a
-/// re-sort is a memo hit plus the still-growing family-map lookup and a
-/// tuple compare. Sound only because the cache dies with the fetch that
-/// captured its inputs.
+/// Per-fetch memo of the recommendation key's fetch-constant half: a re-sort is a
+/// memo hit + the still-growing family-map lookup + tuple compare. Sound only
+/// because the cache dies with the fetch that captured its inputs.
 #[derive(Default)]
 pub(crate) struct StreamSignalCache {
     by_stream_key: HashMap<String, CachedStreamSignals>,
     /// Slot for key-less streams so `for_stream` always returns a borrow —
-    /// unprepared rows (tests, fixtures) carry no dedup identity and a ""
-    /// map key would collapse them all into one entry.
+    /// unprepared rows (tests) carry no identity and a "" key would collapse them.
     uncached: Option<CachedStreamSignals>,
 }
 
@@ -316,13 +307,11 @@ fn compute_cached_signals(
     reference: Option<&ReferenceTitle>,
     language_prefs: CanonicalLanguagePrefs,
 ) -> CachedStreamSignals {
-    // One normalization pass per stream: the haystack, instance id, and
-    // family key feed language, bonus, source-priority, health, affinity,
-    // and the per-pass family lookup.
+    // One normalization pass per stream: haystack, instance id, and family key
+    // feed language, bonus, source-priority, health, affinity, and family lookup.
     let haystack = stream_language_haystack(stream);
     let flags = stream.match_texts().flags;
-    // Instance id is the identity for source ordering, health, and title
-    // affinity — display names are shared between addon instances.
+    // Instance id is the identity for source ordering/health/affinity — display names are shared between instances.
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
     let resolution = stream_resolution_priority(stream, flags);
 
@@ -339,7 +328,12 @@ fn compute_cached_signals(
                 reference,
             ),
             viability: resolution.viability,
-            language: stream_language_preference_priority(haystack, language_prefs, flags),
+            language: stream_language_preference_priority(
+                haystack,
+                language_prefs,
+                flags,
+                reference,
+            ),
             health: source_id
                 .as_deref()
                 .and_then(|id| inputs.source_health_priorities.get(id).copied())
@@ -369,8 +363,7 @@ fn stream_recommendation_key(
     signals: &mut StreamSignalCache,
 ) -> StreamRecommendationKey {
     let cached = signals.for_stream(stream, inputs, reference, language_prefs);
-    // Family priority is the one ranking input still growing between
-    // progressive passes — its lookup (not the memo) stays per-pass.
+    // Family priority is the one ranking input still growing between progressive passes — stays per-pass.
     let family = stream_family_priority(
         cached.normalized_family.as_deref(),
         inputs.stream_family_priorities,
@@ -382,6 +375,7 @@ fn stream_language_preference_priority(
     haystack: &str,
     language_prefs: CanonicalLanguagePrefs,
     flags: StreamFlags,
+    reference: Option<&ReferenceTitle>,
 ) -> u8 {
     let preferred_audio_language = language_prefs.audio;
     let preferred_subtitle_language = language_prefs.subtitle;
@@ -390,30 +384,39 @@ fn stream_language_preference_priority(
         return 0;
     }
 
-    // Only two language memberships are needed; track them while tokenizing
-    // instead of allocating a set for every stream.
+    // Track the two language memberships while tokenizing instead of allocating a set per stream.
     let mut audio_matches = false;
     let mut subtitle_matches = false;
     let mut has_dub = false;
     let mut has_subtitle_hint = false;
-    for token in haystack
+    let mut tokens = haystack
         .split(|ch: char| !ch.is_ascii_alphanumeric())
         .filter(|token| !token.is_empty())
-    {
+        .peekable();
+    while let Some(token) = tokens.next() {
         match token {
             "dub" | "dubbed" => has_dub = true,
-            "sub" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
+            "sub" | "subs" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
             _ => {}
         }
-        let canonical = canonicalize_language_token(token).unwrap_or(token);
-        audio_matches |= preferred_audio_language == Some(canonical);
-        subtitle_matches |= matches!(
-            preferred_subtitle_language,
-            Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
-        );
+        if reference.is_some_and(|reference| reference.tokens.contains(token)) {
+            continue;
+        }
+        // Token scans skip exact-only codes (`no`, `hi`, …) that double as ordinary words.
+        let Some(canonical) = canonicalize_language_token(token) else {
+            continue;
+        };
+        let next = tokens.peek().copied();
+        let audio_only = matches!(next, Some("audio" | "dub" | "dubbed"));
+        audio_matches |= language_mention_is_audio(next.unwrap_or(""))
+            && preferred_audio_language == Some(canonical);
+        subtitle_matches |= !audio_only
+            && matches!(
+                preferred_subtitle_language,
+                Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
+            );
     }
-    // Flags come from the shared `StreamFlags` memo so ranking and the
-    // presentation badge score the same vocabulary off the same haystack.
+    // Flags come from the shared `StreamFlags` memo so ranking and the badge score the same vocabulary.
     let has_dual_audio = flags.dual_audio;
     let has_multi_audio = flags.multi_audio;
     let has_multi_sub = flags.multi_sub;
@@ -453,8 +456,7 @@ fn stream_family_priority(
         .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY)
 }
 
-/// Title affinity is binary: the stream's addon instance either is the
-/// title's recently-succeeded preferred source (3) or it isn't (0).
+/// Title affinity is binary: the stream's instance is the title's preferred source (3) or not (0).
 fn stream_title_source_affinity_priority(
     normalized_source_id: Option<&str>,
     preferred_title_source_id: Option<&str>,
@@ -536,8 +538,7 @@ fn stream_episode_relevance_priority(
     // One lowered match-text set serves both coordinate pairs.
     let texts = stream.match_texts();
     // Remapped titles carry a canonical pair distinct from the query pair;
-    // when they are identical (the common no-remap case) the second battery
-    // run is skipped.
+    // when identical (common case) the second battery run is skipped.
     let query_pair = (context.query_season, context.query_episode);
     let canonical_pair = (context.canonical_season, context.canonical_episode);
     let pairs = [
@@ -547,10 +548,9 @@ fn stream_episode_relevance_priority(
 
     for pair in pairs.into_iter().flatten() {
         if let (Some(season), Some(episode)) = pair {
-            // `is_final_season` was computed for the canonical (ranking)
-            // season — a divergent query season must not inherit it or a
-            // numberless "final season" claim verifies against a season it
-            // cannot refer to (the conflict path scopes it the same way).
+            // `is_final_season` was computed for the canonical season — a divergent
+            // query season must not inherit it, or a numberless "final season" claim
+            // verifies against a season it cannot refer to.
             let final_season = context.is_final_season && Some(season) == context.canonical_season;
             best_match = best_match.max(stream_episode_match_texts(
                 texts,
@@ -591,9 +591,8 @@ fn build_reference_title(title: Option<&str>) -> Option<ReferenceTitle> {
     })
 }
 
-/// Leading release-group tag (`[SubsPlease] …`): near-universal on scene and
-/// anime releases, and never part of the title — stripping it keeps the
-/// group name out of the significant-extra penalty for legit matches.
+/// Leading release-group tag (`[SubsPlease] …`): near-universal on releases and never
+/// part of the title — strip it so the group name escapes the significant-extra penalty.
 fn strip_leading_group_tag(candidate: &str) -> &str {
     let trimmed = candidate.trim_start();
     let Some(rest) = trimmed.strip_prefix('[') else {
@@ -660,10 +659,6 @@ fn stream_title_relevance_score(
             2
         };
 
-        if initialism_match {
-            score = score.max(2);
-        }
-
         let has_spin_off_marker = candidate_tokens.iter().copied().any(|token| {
             !reference_tokens.contains(token) && is_spin_off_title_extra(token, media_type)
         });
@@ -684,14 +679,16 @@ fn stream_title_relevance_score(
         }
 
         best_score = best_score.max(score);
+        if best_score == 4 {
+            break;
+        }
     }
 
     best_score
 }
 
-/// Structured episode/title match tiers for the selector badges — the same
-/// thresholds as the free-text reasons, carried as data so the UI never
-/// parses strings.
+/// Structured episode/title match tiers for the selector badges — same thresholds
+/// as the free-text reasons, carried as data so the UI never parses strings.
 fn stream_match_summary(key: &StreamRecommendationKey) -> Option<StreamMatchSummary> {
     let episode = (key.episode_match != StreamEpisodeMatchKind::None).then_some(key.episode_match);
     let title = if key.title_match >= 4 {
@@ -705,8 +702,7 @@ fn stream_match_summary(key: &StreamRecommendationKey) -> Option<StreamMatchSumm
     (episode.is_some() || title.is_some()).then_some(StreamMatchSummary { episode, title })
 }
 
-/// The selector row renders at most this many reason chips; extra kinds
-/// would only add IPC weight.
+/// The selector row renders at most this many reason chips.
 const MAX_RECOMMENDATION_REASONS: usize = 2;
 
 fn recommendation_reasons_from_key(
@@ -754,8 +750,7 @@ fn recommendation_reasons_from_key(
         .take(MAX_RECOMMENDATION_REASONS),
     );
 
-    // "Fallback" only when the row has nothing else going for it — a lone
-    // match badge is already meaningful on its own.
+    // "Fallback" only when the row has nothing else going for it.
     if reasons.is_empty()
         && key.episode_match == StreamEpisodeMatchKind::None
         && key.title_match < 2
@@ -764,39 +759,13 @@ fn recommendation_reasons_from_key(
     }
 }
 
-/// Dev-inspector dump of the whole sort key, in rank order. Compiled out of
-/// release builds entirely — `AddonStream.rank_debug` stays `None` there and
-/// the field never reaches the wire.
-#[cfg(debug_assertions)]
-fn format_rank_debug(key: &StreamRecommendationKey) -> String {
-    format!(
-        "ep={:?}{} title={} via={} lang={} hp={} fam={} aff={} q={} +{} src={} ovr={} seeds={} size={}",
-        key.episode_match,
-        if key.season_claim_verified { "✓" } else { "" },
-        key.title_match,
-        key.viability,
-        key.language,
-        key.health,
-        key.family,
-        key.title_source_affinity,
-        key.quality,
-        key.language_bonus,
-        key.source_priority,
-        key.oversize.0,
-        key.seeders,
-        format_stream_size_label("", Some(key.size_bytes))
-            .unwrap_or_else(|| "-".to_string()),
-    )
-}
-
 pub(crate) fn sort_streams_by_recommendation(
     streams: &mut Vec<AddonStream>,
     inputs: StreamRecommendationInputs<'_>,
     signals: &mut StreamSignalCache,
 ) {
-    // One memoized signals lookup per stream, then sort on the key alone;
-    // Draining moves streams without cloning and preserves the output buffer
-    // for repeated ranking passes as progressive addon results arrive.
+    // Draining moves streams without cloning and keeps the output buffer for the
+    // repeated ranking passes of progressive fetches.
     let reference = build_reference_title(inputs.match_context.title);
     // Canonicalize the preference strings once per ranking pass.
     let language_prefs = canonicalize_language_prefs(
@@ -829,12 +798,6 @@ pub(crate) fn sort_streams_by_recommendation(
             language: key.language,
         });
         recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
-        // Dev-only: ship the sort key so the selector's ranking inspector
-        // can explain the order without re-running the match battery.
-        #[cfg(debug_assertions)]
-        {
-            stream.rank_debug = Some(format_rank_debug(&key));
-        }
         streams.push(stream);
     }
 }

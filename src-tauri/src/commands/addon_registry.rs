@@ -229,7 +229,7 @@ fn catalog_fetch_page_from_source(page: CatalogPage, skip: u32) -> CatalogFetchP
 }
 
 pub(crate) fn merge_catalog_pages(
-    results: Vec<Result<CatalogFetchPage, String>>,
+    results: impl IntoIterator<Item = Result<CatalogFetchPage, String>>,
     empty_error: &str,
 ) -> Result<CatalogFetchPage, String> {
     let mut items = Vec::new();
@@ -266,19 +266,16 @@ pub(crate) fn merge_catalog_pages(
 }
 
 pub(crate) fn merge_catalog_items(
-    results: Vec<Result<Vec<MediaItem>, String>>,
+    results: impl IntoIterator<Item = Result<Vec<MediaItem>, String>>,
     empty_error: &str,
 ) -> Result<Vec<MediaItem>, String> {
     merge_catalog_pages(
-        results
-            .into_iter()
-            .map(|result| {
-                result.map(|items| CatalogFetchPage {
-                    items,
-                    next_skip: None,
-                })
+        results.into_iter().map(|result| {
+            result.map(|items| CatalogFetchPage {
+                items,
+                next_skip: None,
             })
-            .collect(),
+        }),
         empty_error,
     )
     .map(|page| page.items)
@@ -505,8 +502,7 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
             None => merge_catalog_pages(
                 bucket
                     .into_iter()
-                    .map(|result| result.map(|page| catalog_fetch_page_from_source(page, skip)))
-                    .collect(),
+                    .map(|result| result.map(|page| catalog_fetch_page_from_source(page, skip))),
                 "Failed to load catalog.",
             ),
         })
@@ -575,8 +571,7 @@ pub async fn search_catalog_items_for_genres(
             None => merge_catalog_items(
                 bucket
                     .into_iter()
-                    .map(|result| result.map(|page| page.items))
-                    .collect(),
+                    .map(|result| result.map(|page| page.items)),
                 "Failed to search catalog.",
             ),
         })
@@ -723,6 +718,7 @@ pub async fn fetch_meta_details(
 #[serde(rename_all = "camelCase")]
 pub struct SourcedAddonSubtitle {
     pub id: String,
+    pub selection_key: String,
     pub url: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lang: Option<String>,
@@ -799,7 +795,7 @@ pub async fn fetch_addon_subtitles(
 
 fn add_subtitle_if_unique(
     subtitles: &mut Vec<SourcedAddonSubtitle>,
-    seen: &mut HashSet<(String, String, String, String)>,
+    seen: &mut HashSet<String>,
     addon: &AddonConfig,
     item: AddonSubtitle,
 ) {
@@ -810,13 +806,15 @@ fn add_subtitle_if_unique(
         .filter(|value| !value.is_empty())
         .map(str::to_lowercase)
         .unwrap_or_default();
-    let key = (addon.id.clone(), item.id.clone(), item.url.clone(), lang);
-    if !seen.insert(key) {
+    let selection_key = serde_json::to_string(&(&addon.id, &item.id, &item.url, lang))
+        .expect("subtitle identity contains only strings");
+    if !seen.insert(selection_key.clone()) {
         return;
     }
 
     subtitles.push(SourcedAddonSubtitle {
         id: item.id,
+        selection_key,
         url: item.url,
         lang: item.lang,
         label: item.label,

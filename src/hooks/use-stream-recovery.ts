@@ -6,9 +6,7 @@ import { invalidateStreamQueries } from '@/lib/query-invalidation';
 import { applyResolvedStreamToSession, recoverPlayerStream } from '@/lib/resolve-player-stream';
 import { clearTimer, withTimeout } from '@/lib/utils';
 
-// Above the normal backend path (~store op + fetch + probe ≈ 20-30s worst)
-// but far below a wedged invoke: a hung recovery must still release
-// `isResolving` via the finally below and fall through to the error path.
+// Above the normal backend path (~20-30s) but below a wedged invoke — a hung recovery must still release `isResolving`.
 const STREAM_RECOVERY_TIMEOUT_MS = 45_000;
 
 interface UseStreamRecoveryOptions {
@@ -27,8 +25,7 @@ interface UseStreamRecoveryOptions {
   isPlayingRef: RefObject<boolean>;
   mountedRef: RefObject<boolean>;
   errorRef: RefObject<string | null>;
-  // Written with the last playback position right before a failover swap so
-  // the resume controller can continue there instead of rewinding.
+  // Holds the last position before a failover swap so the resume controller continues there.
   failoverResumePositionRef: RefObject<number>;
   stopLoading: (makeTransparent?: boolean) => void;
   setError: (value: string | null) => void;
@@ -69,19 +66,16 @@ export function useStreamRecovery({
   setResolveStatus,
   onSavedStreamUnavailable,
 }: UseStreamRecoveryOptions): UseStreamRecoveryResult {
-  // Local alias for the exclusion identity: the shared winner-apply helper
-  // owns writes, while recovery reads the actual current stream key.
+  // The exclusion identity: winner-apply owns writes, recovery reads the current stream key.
   const { selectedStreamKeyRef } = stream;
   const queryClient = useQueryClient();
   const playbackStartedRef = useRef(false);
   const startupWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startupWatchdogCancelledRef = useRef(false);
   const startupRecoveryAttemptedForRef = useRef<Set<string>>(new Set());
-  // Keys of streams that failed in this episode's chain: excluding only the
-  // latest would let A -> B -> A bounce past a viable third candidate.
+  // Failed keys in this episode's chain — excluding only the latest would let A→B→A bounce past a viable third.
   const failedStreamKeysRef = useRef<Set<string>>(new Set());
-  // Other callers (idle-active, force-show stage) share this recovery — a
-  // watchdog verdict while one is in-flight must not error it out.
+  // Shared with other callers — a watchdog verdict during an in-flight recovery must not error it out.
   const recoveryInFlightRef = useRef(false);
   const recoveryEpochRef = useRef(0);
 
@@ -140,7 +134,7 @@ export function useStreamRecovery({
       recoveryInFlightRef.current = true;
       setError(null);
       setIsResolving(true);
-      setResolveStatus('Playback is taking too long, trying a faster stream...');
+      setResolveStatus('Slow start, trying a faster stream');
 
       try {
         if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
@@ -167,14 +161,13 @@ export function useStreamRecovery({
           () => null,
         );
 
-        // The backend just re-ranked past the failed stream; the selector's
-        // React Query cache must not keep serving the stale ordering.
+        // The backend re-ranked past the failed stream — don't serve the stale ordering from cache.
         void invalidateStreamQueries(queryClient);
 
         if (!isCurrent() || startupWatchdogCancelledRef.current || playbackStartedRef.current) {
           return false;
         }
-        if (stream.lastStreamUrlRef.current !== sourceUrl) return false;
+        if (stream.committedStreamUrlRef.current !== sourceUrl) return false;
 
         if (resolved?.url && resolved.url !== sourceUrl) {
           applyResolvedStreamToSession(stream, resolved);
@@ -195,7 +188,6 @@ export function useStreamRecovery({
     },
     [
       stream,
-      selectedStreamKeyRef,
       absoluteSeason,
       currentTimeRef,
       failoverResumePositionRef,
@@ -207,6 +199,7 @@ export function useStreamRecovery({
       queryClient,
       resolveEpisode,
       resolveSeason,
+      selectedStreamKeyRef,
       setError,
       setIsResolving,
       setResolveStatus,
@@ -218,9 +211,7 @@ export function useStreamRecovery({
     // Recovery bails once playback started, so late dep changes never re-arm.
     if (!stream.activeStreamUrl || playbackStartedRef.current) return;
 
-    // Each armed generation is live: the cleanup sets the cancelled flag, and
-    // this effect re-runs as details/episodes land mid-load — without the
-    // reset the re-armed timer would stay cancelled for the rest of startup.
+    // This effect re-arms as details/episodes land mid-load — reset the flag the cleanup set or the timer stays cancelled.
     startupWatchdogCancelledRef.current = false;
 
     clearTimer(startupWatchdogTimerRef);
@@ -241,15 +232,13 @@ export function useStreamRecovery({
 
       const hasAnyProgress = durationRef.current > 0 || currentTimeRef.current > 0.1;
 
-      // Paused near zero is intentional once the stream proved itself —
-      // pausing doesn't stop demuxing. Paused with zero progress stays a
-      // stall candidate; bail only on the proven-alive case.
+      // Paused with progress means the stream proved alive (pausing doesn't stop demuxing); paused at zero stays a stall candidate.
       if (!isPlayingRef.current && hasAnyProgress) return;
 
       const stalledAtStart = durationRef.current > 0 && currentTimeRef.current <= 0.15;
       if (hasAnyProgress && !stalledAtStart) return;
 
-      const currentUrl = stream.lastStreamUrlRef.current || stream.activeStreamUrl;
+      const currentUrl = stream.committedStreamUrlRef.current;
       if (!currentUrl) return;
 
       void recoverFromSlowStartup(currentUrl, 'startup-timeout').then((didRecover) => {
@@ -259,15 +248,12 @@ export function useStreamRecovery({
           didRecover ||
           !mountedRef.current ||
           playbackStartedRef.current ||
-          // This call returned fast because it was deduped behind an
-          // in-flight recovery — let that attempt reach its own verdict.
+          // Deduped behind an in-flight recovery — let that attempt reach its own verdict.
           recoveryInFlightRef.current
         ) {
           return;
         }
-        // Try the shared recovery path for every launch; only fall back to
-        // manual selection when no alternate resolves. Recovery already
-        // recorded the outcome — a second report would double-count it.
+        // Fall back to manual selection only when no alternate resolves; recovery already recorded the outcome.
         if (isHistoryResume) {
           stopLoading();
           onSavedStreamUnavailable?.();

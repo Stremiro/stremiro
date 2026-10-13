@@ -9,8 +9,7 @@ import {
 
 export type PlayerRouteMediaType = 'movie' | 'series' | 'anime';
 
-// Route state persists for the session, so `from` gets a hard cap — an
-// unbounded value would linger in memory and history. 2048 covers real URLs.
+// Route state persists for the session — cap `from` so an unbounded value can't linger in memory/history.
 const PLAYER_ROUTE_FROM_MAX_CHARS = 2048;
 
 export interface PlayerRouteState {
@@ -32,9 +31,7 @@ export interface PlayerRouteState {
   streamEpisode?: number;
   resumeFromHistory?: boolean;
   streamLookupId?: string;
-  /** The launch page's own origin — when `from` is a details page, this is its
-      inbound `from` (e.g. '/search?q=x'), so Back→details→Back reaches the
-      real origin. */
+  /** The launch page's own origin — when `from` is a details page, this is its inbound `from`, so Back→details→Back reaches the real origin. */
   originFrom?: string;
   from?: string;
   openingStreamName?: string;
@@ -44,8 +41,7 @@ export interface PlayerRouteState {
 export function resolvePlayerRouteMediaType(
   mediaType: string | null | undefined,
 ): PlayerRouteMediaType {
-  // Route segments carry the backend's canonical type — `kitsu:` ids are
-  // mapped to anime inside the Rust history/resume paths.
+  // Route segments carry the canonical type — `kitsu:` ids map to anime in Rust's history/resume paths.
   const normalizedType = normalizeRouteText(mediaType)?.toLowerCase();
 
   if (normalizedType === 'anime') {
@@ -55,8 +51,7 @@ export function resolvePlayerRouteMediaType(
   return normalizedType === 'movie' ? 'movie' : 'series';
 }
 
-/** Details path for an opaque addon id; the id is encoded so `/`, `?` or `#`
-    stay inside its route segment (React Router decodes params). */
+/** Details path for an opaque addon id — encoded so `/`/`?`/`#` stay inside the segment (RR decodes params). */
 export function buildDetailsRoute(mediaType: string | null | undefined, mediaId: string): string {
   return `/details/${resolvePlayerRouteMediaType(mediaType)}/${encodeURIComponent(mediaId)}`;
 }
@@ -73,7 +68,7 @@ export function navigateToDetails(
   });
 }
 
-function normalizeRouteNumber(value: unknown): number | undefined {
+export function normalizeRouteNumber(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
   }
@@ -165,20 +160,13 @@ function buildPlayerRoute(
   return season !== undefined && episode !== undefined ? `${base}/${season}/${episode}` : base;
 }
 
-// The player owns one history slot: hops inside it (episode advance, in-player
-// pick) replace the live entry — a push would leave stale /player coordinates
-// for a later POP to resurrect. A launch from a page still pushes. Evaluated
-// at navigate time — the call site can fire expanded or minimized.
+// The player owns one history slot: in-player hops replace, page launches push — a push
+// inside /player would leave stale coordinates for a later POP to resurrect. Evaluated at navigate time.
 function isPlayerRoutePath(pathname: string): boolean {
   return pathname === '/player' || pathname.startsWith('/player/');
 }
 
-/**
- * One owner for "safe to navigate back to": an internal, non-player path.
- * Rejects non-strings, blank/'null' text, oversized payloads, external values,
- * and `/player` routes — a player target would relaunch the session Back just
- * left. Accepts `unknown` so raw `location.state` validates without a cast.
- */
+/** "Safe to navigate back to" — an internal, non-player path (a player target would relaunch the session Back just left). */
 export function resolveSafeInternalReturnPath(from: unknown): string | undefined {
   const normalized = normalizeRouteText(from);
   if (
@@ -193,15 +181,8 @@ export function resolveSafeInternalReturnPath(from: unknown): string | undefined
   return normalized;
 }
 
-/**
- * Route state for a resolve winner — one owner of the `requested` vs
- * `selected` key contract: `requestedStreamKey` is the caller's own resolve
- * key (the cache entry the player replays); `selectedStreamKey` is the winner
- * — a failover can differ from the pick.
- *
- * The resolved URL never enters route state — opaque identities only, and the
- * player re-resolves a fresh URL on mount.
- */
+/** Route state for a resolve winner: `requestedStreamKey` replays the caller's cached
+    resolve; `selectedStreamKey` is the winner (failover can differ). URL never enters state. */
 function buildResolvedStreamRouteState(
   request: PlayerStreamRequest,
   resolved: BestResolvedStream,
@@ -222,19 +203,14 @@ function buildResolvedStreamRouteState(
     streamSourceName: resolved.sourceName ?? picked?.sourceName,
     title: request.title,
   };
-  // An absent request field must not erase a caller extra — `{...extras,
-  // ...explicit}` would overwrite with `undefined`.
+  // Absent request fields must not erase caller extras — spread would overwrite with `undefined`.
   for (const key of Object.keys(explicit) as (keyof PlayerRouteState)[]) {
     if (explicit[key] === undefined) delete explicit[key];
   }
   return { ...extras, ...explicit };
 }
 
-/**
- * Launch the player for a resolve winner — one owner of prime, route state and
- * history slot. The prime seeds the entry the player replays so mount pays
- * zero resolve; `picked` is the selector pick whose key that replay uses.
- */
+/** Launch the player for a resolve winner — primes the cache entry the player replays so mount pays zero resolve. */
 export function launchResolvedStream(
   navigate: NavigateFunction,
   request: PlayerStreamRequest,

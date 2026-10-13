@@ -91,7 +91,7 @@ export function usePlayerSessionBoundary({
   const { saveProgress } = usePlaybackProgressPersistence({
     mediaId,
     mediaType,
-    title: title || 'Unknown',
+    title,
     poster,
     backdrop,
     absoluteSeason,
@@ -144,22 +144,19 @@ export function usePlayerSessionBoundary({
     saveProgressRef.current = saveProgress;
   }, [saveProgress]);
 
-  // Invalidates after its own save so Continue Watching refetches the final
-  // position; overlapping flushes dedupe in the save queue. Never blocks on
-  // persistence: callers proceed after 2s and the save still lands.
+  // Invalidate after the save so Continue Watching refetches the final position;
+  // overlapping flushes dedupe in the save queue. Capped at 2s — a slow save still lands after.
   const flushPlaybackBeforeNavigation = useCallback(async () => {
     const flush = Promise.resolve(saveProgressRef.current?.()).then(() =>
       invalidatePlaybackHistoryQueriesForTitle(queryClient, mediaId),
     );
-    // A slow save must still invalidate after it lands, even if navigation
-    // already continued at the timeout.
+    // A slow save must still invalidate after it lands.
     await withTimeout(flush, 2000, () => undefined);
   }, [mediaId, queryClient]);
 
   const navigationGuardEnabled = !!mediaType && !!mediaId && !!activeStreamUrl;
 
-  // Single exit flush for session close, remount (episode change) and stream
-  // teardown — reads the latest save through the ref.
+  // Single exit flush for session close, remount, and stream teardown — reads the latest save via ref.
   useEffect(() => {
     if (!navigationGuardEnabled) return;
     return () => {

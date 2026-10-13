@@ -25,9 +25,8 @@ pub async fn set_watch_status(
     // worker, matching the library/history command pattern.
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
-        // The id is a store key: reject malformed input rather than truncate
-        // so two hostile ids can't collide onto one key, and never silently
-        // accept a payload that can't round-trip.
+        // The id is a store key — reject malformed input rather than truncate, so
+        // hostile ids can't collide onto one key or fail to round-trip.
         let item_id = normalize_media_id(&item.id)
             .ok_or_else(|| "Invalid media id for watch status.".to_string())?;
 
@@ -62,9 +61,8 @@ pub async fn set_watch_status(
                 let removed_item = store.delete(watch_status_item_key(&item_id));
                 let original_len = index.len();
                 index.retain(|id| id != &item_id);
-                // Clearing an id that was never tracked is a no-op: skip the
-                // index rewrite + save so callers that pre-clear on library
-                // removal don't pay a store write per remove.
+                // Clearing an untracked id is a no-op — skip the index rewrite + save
+                // so pre-clear-on-library-removal doesn't pay a write per remove.
                 if !removed_item && index.len() == original_len {
                     return Ok(None);
                 }

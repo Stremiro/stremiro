@@ -9,16 +9,14 @@ import {
 } from '@/lib/app-updater';
 import { cn } from '@/lib/utils';
 
-// One shared id: the announce card and every later state (progress, error)
-// update in place instead of stacking a second toast.
+// One shared id so announce → progress → error update the same toast in place.
 export const APP_UPDATE_TOAST_ID = 'app-update-toast';
 
 function dismissAppUpdateToast() {
   toast.dismiss(APP_UPDATE_TOAST_ID);
 }
 
-// Glass zinc surface matching the resolve toast's treatment; the single
-// border/shadow keeps the chrome quiet — color only marks status accents.
+// Glass zinc surface matching the resolve toast; color only marks status accents.
 const CARD_CHROME =
   'relative box-border w-[min(344px,calc(100vw_-_32px))] overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 p-3.5 shadow-2xl backdrop-blur-xl';
 
@@ -117,10 +115,8 @@ function UpdateError({ message, onCheckAgain }: { message: string; onCheckAgain:
 }
 
 /**
- * Persistent update card. Reads live state from `useAppUpdater`, so it
- * morphs announce → download progress → error in place; the process exits
- * on a successful install so no completion state exists. The only
- * useAppUpdater observer on the card — child states receive props.
+ * Persistent update card morphing announce → progress → error in place; a
+ * successful install exits the process, so no completion state exists.
  */
 export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
   const {
@@ -132,8 +128,8 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
     updateState,
   } = useAppUpdater();
 
-  // Self-close once nothing is actionable — e.g. a failed install whose
-  // recovery check found the release already applied or withdrawn.
+  // Self-close once nothing is actionable (e.g. a failed install whose
+  // recovery check found the release already applied or withdrawn).
   useEffect(() => {
     if (!isInstalling && !pendingUpdate && updateState.status === 'up-to-date') {
       dismissAppUpdateToast();
@@ -170,9 +166,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
 
   return (
     <div className={CARD_CHROME}>
-      {/* The one status accent: a hairline + icon badge carry "update"
-          without tinting the surface. Release notes stay in Settings —
-          the toast announces and hands off, nothing more. */}
+      {/* Release notes stay in Settings — the toast announces and hands off. */}
       <span
         aria-hidden='true'
         className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/60 to-transparent'
@@ -195,8 +189,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
         </div>
       </div>
 
-      {/* A failed install that re-armed via the recovery check keeps the
-          update available — surface that the last attempt didn't land. */}
+      {/* A re-armed failed install keeps the update available — surface that the last attempt didn't land. */}
       {updateState.errorMessage ? (
         <p
           title={updateState.errorMessage}
@@ -211,8 +204,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
         <button
           type='button'
           onClick={() => {
-            // Progress + errors flow through updateState; a throw only means
-            // the install failed, which the card already renders.
+            // A throw just means the install failed; the card already renders that.
             void installUpdate(pendingUpdate).catch(() => undefined);
           }}
           className='inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'

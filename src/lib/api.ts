@@ -4,6 +4,7 @@ import { createDiscoveryApi } from '@/lib/api-discovery';
 import { createPlaybackApi } from '@/lib/api-playback';
 import { createStoreApi } from '@/lib/api-store';
 import type { PlayerRouteState } from '@/lib/player-navigation';
+import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
 import type { StreamRankingOptions } from '@/lib/stream-ranking';
 
 export { getErrorKind, getErrorMessage } from '@/lib/api-core';
@@ -17,6 +18,8 @@ export interface MediaItem {
   logo?: string;
   description?: string;
   year?: string;
+  /** Backend-extracted sort year from `year`; absent when none is valid. */
+  primaryYear?: number;
   displayYear?: string;
   genres?: string[];
   type: 'movie' | 'series';
@@ -39,6 +42,11 @@ export interface Episode {
   streamEpisode?: number;
 }
 
+interface MediaSeason {
+  number: number;
+  episodeCount: number;
+}
+
 export interface MediaDetails extends MediaItem {
   imdbId?: string;
   rating?: string;
@@ -48,6 +56,9 @@ export interface MediaDetails extends MediaItem {
   /** Backend-ordered by (season, episode); coordinate ties preserve addon
       order. */
   episodes?: Episode[];
+  /** Backend summary of `episodes`' sorted season runs; absent iff
+      `episodes` is (card payloads drop both). */
+  seasons?: MediaSeason[];
 }
 
 export interface CalendarRange {
@@ -72,14 +83,11 @@ export interface CalendarScheduleEvent {
 
 export interface CalendarSchedule {
   trackedCount: number;
-  events: CalendarScheduleEvent[];
-}
-
-export interface UpNextCandidate {
-  row: WatchProgress;
-  releaseDate: string;
-  /** Aired within the past week and after the last watched timestamp. */
-  isNewEpisode: boolean;
+  /** Days ascending; each day's events backend-sorted (episodes by
+      season/episode, then movies by title). */
+  days: { date: string; events: CalendarScheduleEvent[] }[];
+  /** Date-ascending slice of the upcoming window, capped by the backend. */
+  upcoming: CalendarScheduleEvent[];
 }
 
 export interface UserList {
@@ -87,8 +95,7 @@ export interface UserList {
   name: string;
   icon: string;
   item_ids: string[];
-  // Absent on the `create_list` response (metadata only); populated by
-  // list-with-items reads.
+  // Absent on `create_list` (metadata only); populated by list-with-items reads.
   items?: MediaItem[];
 }
 
@@ -123,9 +130,7 @@ export const WATCH_STATUS_COLORS: Record<
 };
 
 export interface AddonStream {
-  // Raw addon fields (name, title, infoHash, url, fileIdx, behaviorHints)
-  // stay Rust-side: resolution runs by `streamKey`, so proxy-header secrets
-  // and opaque addon data never cross into the webview.
+  // Raw addon fields stay Rust-side — resolution runs by `streamKey`, so secrets never cross into the webview.
   streamKey: string;
   seeders?: number;
   sizeBytes?: number;
@@ -139,8 +144,6 @@ export interface AddonStream {
   recommendationReasons?: AddonStreamRecommendationReason[];
   /** Structured episode/title match tiers for the selector badges. */
   matchSummary?: AddonStreamMatchSummary;
-  /** Dev-only sort-key dump for the ranking inspector — only present in debug builds. */
-  rankDebug?: string;
   /** Backend-prepared presentation facts so the UI can render without reparsing stream text. */
   presentation: AddonStreamPresentation;
 }
@@ -186,7 +189,7 @@ interface AddonStreamPresentation {
   isBatch: boolean;
 }
 
-type StreamSourceHealthStatus = 'healthy' | 'degraded' | 'offline' | 'pending';
+type StreamSourceHealthStatus = 'healthy' | 'no_results' | 'degraded' | 'offline' | 'pending';
 
 export interface StreamSourceSummary {
   id: string;
@@ -204,6 +207,7 @@ export interface StreamSelectorStats {
   cachedCount: number;
   batchCount: number;
   episodeLikeCount: number;
+  sourceHealth: { degraded: number; offline: number; pending: number };
 }
 
 export interface StreamSelectorData {
@@ -215,6 +219,7 @@ export interface StreamSelectorData {
 
 export interface AddonSubtitle {
   id: string;
+  selectionKey: string;
   url: string;
   lang?: string;
   /** Provider-supplied display hint (filename/release name/title) when present. */
@@ -237,14 +242,10 @@ export interface BestResolvedStream {
 }
 
 export interface ResolveBestStreamOptions extends StreamRankingOptions {
-  // Opaque identity of a user-picked or saved stream: probed first, ahead of
-  // ranked candidates. Not a ranking input — kept out of the ranking payload.
+  // User-picked/saved stream identity, probed ahead of ranked candidates — not a ranking input.
   preferredStreamKey?: string;
-  // Saved stream identity for soft-matching when the exact key rotted:
-  // signed URLs re-digest across sessions, so `uh:` keys miss even when the
-  // same stream is still listed under the same source/release. The instance
-  // id beats the display name: duplicate addon names must never soft-match
-  // a sibling instance's stream.
+  // Soft-match hints for when the exact key rotted (signed URLs re-digest, `uh:` keys
+  // miss); instance id beats display name so duplicate addon names can't match a sibling.
   preferredSourceId?: string;
   preferredSourceName?: string;
   preferredStreamFamily?: string;
@@ -280,8 +281,7 @@ export interface RecoverPlaybackStreamOptions extends StreamRankingOptions {
   outcome: Exclude<PlaybackStreamOutcomeReport['outcome'], 'verified'>;
 }
 
-/** Backend genre menu entries per browse tab, in manifest-declared order.
-    `all` is the movie+series union folded the same way as `sameSearchGenre`. */
+/** Backend genre menus per browse tab, manifest order; `all` is the movie+series union folded like `sameSearchGenre`. */
 export interface BrowseGenres {
   all: string[];
   movie: string[];
@@ -304,11 +304,7 @@ export interface AddonUrlInspection {
   duplicateOf?: string;
 }
 
-/**
- * A user-configured addon source compatible with Stremiro's addon pipeline.
- * `displayUrl` is the credential-masked URL computed by the Rust sanitizer —
- * always present on IPC responses, absent from renderer-supplied input.
- */
+/** User-configured addon source. `displayUrl` is Rust's credential-masked URL — present on responses, absent from input. */
 export interface AddonConfig {
   id: string;
   url: string;
@@ -326,6 +322,13 @@ const apiCaches = {
 export interface PlaybackLanguagePreferences {
   preferredAudioLanguage?: string;
   preferredSubtitleLanguage?: string;
+}
+
+/** `save_selected_playback_language_preference` response: post-save global snapshot plus merged
+    effective prefs when scoped — lets callers write the effective cache synchronously. */
+export interface SavedPlaybackLanguagePreference {
+  preferences: PlaybackLanguagePreferences;
+  effective?: PlaybackLanguagePreferences;
 }
 
 export interface SupportedLanguage {
@@ -453,9 +456,7 @@ export type HistoryPlaybackPlanReason = 'missing-episode-context';
 
 interface HistoryPlaybackRouteState extends Omit<
   PlayerRouteState,
-  // Frontend-only launch fields Rust never emits: logo/opening labels are
-  // player-session presentation, `requestedStreamKey`/`originFrom` come from
-  // selector/back-nav state, not the history plan.
+  // Frontend-only launch fields Rust never emits.
   'logo' | 'openingStreamName' | 'openingStreamSource' | 'originFrom' | 'requestedStreamKey'
 > {
   season?: number;
@@ -466,6 +467,7 @@ export interface HistoryPlaybackPlan {
   reason?: HistoryPlaybackPlanReason;
   target: string;
   state: HistoryPlaybackRouteState;
+  warmResolveRequest?: PlayerStreamRequest & { preferred: PreferredStreamIdentity };
 }
 
 export const api = {
@@ -514,8 +516,7 @@ export interface WatchProgress {
   title: string;
   poster?: string;
   backdrop?: string;
-  // Stream URLs are credential-bearing and never persisted or sent over the
-  // wire; resume resolves via the opaque identities below.
+  // Stream URLs are credential-bearing — never persisted; resume resolves via the opaque identities below.
   last_stream_format?: string;
   last_stream_lookup_id?: string;
   last_stream_key?: string;
@@ -529,9 +530,7 @@ export interface WatchProgress {
   has_started_watching?: boolean;
 }
 
-/**
- * All hydrated title rows plus its resumable subset.
- */
+/** All hydrated title rows plus its resumable subset. */
 export interface TitleWatchProgress {
   history: WatchProgress[];
   continueWatching: WatchProgress[];
@@ -539,14 +538,29 @@ export interface TitleWatchProgress {
   episodeProgress: Record<string, WatchProgress>;
   /** Furthest started episode per season — spoiler-mask ceiling. */
   watchedEpisodeCeiling: Record<string, number>;
+  /** Per-kind `continueWatching` picks (series-like vs movie), pre-folded. */
+  seriesResumeEntry?: WatchProgress;
+  movieResumeEntry?: WatchProgress;
+  /** First-of-kind `history` heads and `history[0]` (`last_watched` DESC). */
+  latestSeriesEntry?: WatchProgress;
+  latestMovieEntry?: WatchProgress;
+  latestEntry?: WatchProgress;
 }
 
-/**
- * A single skippable playback segment returned by SkipDB.
- * Types: "intro" | "recap" | "outro" | "preview"
- */
+/** Details-route prefetch in one IPC; `details` is the card shape (no episodes), null on fetch failure. */
+export interface DetailsPrefetchBundle {
+  details?: MediaDetails | null;
+  progress: TitleWatchProgress;
+}
+
+export interface ResumeRailEntry {
+  row: WatchProgress;
+  /** Present only on Up Next rows — the badge flag; absent = resume row. */
+  isNewEpisode?: boolean;
+}
+
+/** A skippable playback segment from SkipDB ("intro" | "recap" | "outro" | "preview"). */
 export interface SkipSegment {
-  /** Segment category identifier */
   type: string;
   /** Segment start in seconds */
   start_time: number;

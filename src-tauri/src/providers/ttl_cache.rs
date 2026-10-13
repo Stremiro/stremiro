@@ -5,8 +5,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-/// Hash a possibly credential-bearing URL into a stable key segment, so
-/// secrets never appear in cache keys or logs.
+/// Hash a possibly credential-bearing URL into a key segment: secrets never reach cache keys or logs.
 pub(crate) fn hash_segment(value: &str) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -19,8 +18,7 @@ struct TtlEntry<V> {
 }
 
 /// Bounded TTL map shared by the stream transport and the resource client.
-/// Eviction: expire-on-read/insert, then soonest-expiring victims so the
-/// entry that triggered the fetch stays.
+/// Eviction: expire-on-read/insert, then soonest-expiring victims (the entry that triggered the fetch stays).
 pub(crate) struct TtlCache<V> {
     entries: Mutex<HashMap<String, TtlEntry<V>>>,
     max_entries: usize,
@@ -49,10 +47,9 @@ impl<V: Clone> TtlCache<V> {
         }
     }
 
-    /// `is_empty` picks the shorter TTL: empty answers are still cached (a
-    /// stream-less title must not re-fan-out per request) but newly indexed
-    /// content surfaces fast. `still_fresh` runs under the entries lock so a
-    /// superseded write (post-`clear_cache`) is dropped, not stored.
+    /// `is_empty` picks the shorter TTL (empty answers still cache so a
+    /// stream-less title doesn't re-fan-out per request); `still_fresh` runs
+    /// under the entries lock so a superseded write is dropped, not stored.
     pub(crate) fn put(&self, key: &str, value: V, is_empty: bool, still_fresh: impl Fn() -> bool) {
         let mut entries = lock_or_recover(&self.entries);
         if !still_fresh() {
@@ -69,8 +66,7 @@ impl<V: Clone> TtlCache<V> {
                 expires_at: Instant::now() + ttl,
             },
         );
-        // Enforce the hard bound without evicting the entry just stored so
-        // the content that triggered this fetch stays cacheable.
+        // Enforce the bound without evicting the entry just stored.
         while entries.len() > self.max_entries {
             let Some(victim) = entries
                 .iter()
@@ -94,10 +90,9 @@ impl<V: Clone> TtlCache<V> {
     }
 }
 
-/// Single-flight registry keyed identically to its sibling cache: callers
-/// for one key wait on the leader and re-read the cache. Orphaned entries
-/// (dropped fetch futures) sweep on insert past the hygiene bound;
-/// `release` removes the key once the caller is provably the last holder.
+/// Single-flight registry keyed like the sibling cache: callers for one key
+/// wait on the leader and re-read the cache. Orphans (dropped fetch futures)
+/// sweep on insert past `sweep_at`.
 pub(crate) struct InFlight {
     locks: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
     sweep_at: usize,
@@ -116,8 +111,7 @@ impl InFlight {
         if locks.len() >= self.sweep_at {
             locks.retain(|_, lock| Arc::strong_count(lock) > 1);
         }
-        // Get-first: `entry` would allocate the key String on every claim,
-        // including repeat hits for an in-flight key.
+        // Get-first: `entry` would allocate the key String even on repeat hits.
         if let Some(lock) = locks.get(key) {
             return lock.clone();
         }
@@ -125,8 +119,8 @@ impl InFlight {
     }
 
     /// Removes the key only while this caller is provably the last holder —
-    /// all under the map mutex, so a `claim` can't slip a waiter in between
-    /// and a stale releaser can't evict a replacement lock.
+    /// under the map mutex, so no waiter slips in and no stale release evicts
+    /// a replacement lock.
     pub(crate) fn release(&self, key: &str, key_lock: &Arc<tokio::sync::Mutex<()>>) {
         let mut locks = lock_or_recover(&self.locks);
         let last_holder = matches!(locks.get(key), Some(mapped) if Arc::ptr_eq(mapped, key_lock))
@@ -137,93 +131,215 @@ impl InFlight {
     }
 }
 
-/// Per-addon transport-failure cooldown shared by the stream transport and
-/// the resource client: a host that exhausted its retries is presumed down,
-/// so sibling fetches fail fast for `ttl`. Session-local — a dead host is
-/// not a persisted condition. Writes are generation-checked so a fetch
-/// started before a `clear_cache` can neither reinstall a wiped cooldown
-/// nor wipe one recorded in the new generation; the failures mutex is taken
-/// before the generation read so ordering vs. the clear's bump is unambiguous.
+/// Min gap between liveness probes on a marked host — bounds an outage to
+/// ~one transport attempt per gap, not one per caller.
+const COOLDOWN_PROBE_GAP: Duration = Duration::from_secs(10);
+
+struct CooldownMark {
+    /// Fast-fail deadline for the mark.
+    until: Instant,
+    /// The next instant a liveness probe may ride through the mark.
+    next_probe_at: Instant,
+    /// A probe claimed the mark and has not finished.
+    probing: bool,
+    /// Monotonic claim id: a stale probe guard cannot release a newer claim.
+    probe_id: u64,
+}
+
+#[derive(Default)]
+struct CooldownTable {
+    marks: HashMap<String, CooldownMark>,
+    probe_seq: u64,
+}
+
+/// `Open` fetches normally; `Probe` carries the single liveness-probe guard; `Cooldown` fast-fails.
+pub(crate) enum CooldownGate<'a> {
+    Open,
+    Probe(CooldownProbe<'a>),
+    Cooldown,
+}
+
+/// RAII release for a probe claim — a cancelled probe must clear `probing` or the key never probes again.
+pub(crate) struct CooldownProbe<'a> {
+    cooldown: &'a FetchFailureCooldown,
+    key: String,
+    probe_id: u64,
+}
+
+impl Drop for CooldownProbe<'_> {
+    fn drop(&mut self) {
+        self.cooldown.release_probe(&self.key, self.probe_id);
+    }
+}
+
+/// Per-addon transport-failure cooldown: a host that exhausted its retries is
+/// presumed down, so sibling fetches fail fast for `ttl`. Session-local.
+///
+/// `gate` admits one liveness probe per mark; other callers keep failing fast.
+/// Any completed response (success *or* content-level `Fatal`) lifts the mark
+/// early; a failed probe re-arms it with `COOLDOWN_PROBE_GAP`. Writes are
+/// generation-checked against `clear_cache` (table mutex taken before the
+/// generation read, so ordering vs. the bump is unambiguous).
 pub(crate) struct FetchFailureCooldown {
-    failures: Mutex<HashMap<String, Instant>>,
+    table: Mutex<CooldownTable>,
     ttl: Duration,
     sweep_at: usize,
 }
 
 impl FetchFailureCooldown {
-    /// `sweep_at` bounds map growth like the in-flight map: expired entries
-    /// drop on read, and a full sweep runs on insert past the bound.
+    /// `sweep_at` bounds map growth: expired entries drop on read; a sweep runs on insert past it.
     pub(crate) fn new(ttl: Duration, sweep_at: usize) -> Self {
         Self {
-            failures: Mutex::new(HashMap::new()),
+            table: Mutex::new(CooldownTable::default()),
             ttl,
             sweep_at,
         }
     }
 
-    /// True while `key` is inside its cooldown window; expired entries drop
-    /// on read.
+    /// True while `key` holds an unexpired mark, regardless of probe state. Expired entries drop on read.
+    #[cfg(test)]
     pub(crate) fn cooling_down(&self, key: &str) -> bool {
-        let mut failures = lock_or_recover(&self.failures);
-        match failures.get(key) {
-            Some(until) if *until > Instant::now() => true,
+        let mut table = lock_or_recover(&self.table);
+        match table.marks.get(key) {
+            Some(mark) if mark.until > Instant::now() => true,
             Some(_) => {
-                failures.remove(key);
+                table.marks.remove(key);
                 false
             }
             None => false,
         }
     }
 
-    /// Record a transport-exhaustion failure for `key`. Only retry-exhausted
-    /// or timed-out fetches reach this — status/size/parse errors are
-    /// content-scoped and belong to the per-key negative cache.
+    /// `Open` when unmarked/expired; on a marked key the first caller past the
+    /// probe window claims `Probe`, the rest get `Cooldown`.
+    pub(crate) fn gate(&self, key: &str) -> CooldownGate<'_> {
+        let mut table = lock_or_recover(&self.table);
+        let now = Instant::now();
+        match table.marks.get(key) {
+            Some(mark) if mark.until > now => {
+                if mark.probing || mark.next_probe_at > now {
+                    return CooldownGate::Cooldown;
+                }
+            }
+            Some(_) => {
+                table.marks.remove(key);
+                return CooldownGate::Open;
+            }
+            None => return CooldownGate::Open,
+        }
+        table.probe_seq += 1;
+        let probe_id = table.probe_seq;
+        let mark = table
+            .marks
+            .get_mut(key)
+            .expect("mark checked present above");
+        mark.probing = true;
+        mark.probe_id = probe_id;
+        CooldownGate::Probe(CooldownProbe {
+            cooldown: self,
+            key: key.to_string(),
+            probe_id,
+        })
+    }
+
+    /// Record a retry-exhausted or timed-out fetch failure for `key` —
+    /// status/size/parse errors are content-scoped and belong to the per-key
+    /// negative cache. The first probe may ride through immediately.
     pub(crate) fn note(&self, key: &str, generation: &AtomicU64, expected: u64) {
-        let mut failures = lock_or_recover(&self.failures);
+        let mut table = lock_or_recover(&self.table);
         if generation.load(Ordering::SeqCst) != expected {
             return;
         }
-        failures.insert(key.to_string(), Instant::now() + self.ttl);
-        if failures.len() > self.sweep_at {
-            let now = Instant::now();
-            failures.retain(|_, until| *until > now);
+        let now = Instant::now();
+        table
+            .marks
+            .entry(key.to_string())
+            .and_modify(|mark| {
+                mark.until = now + self.ttl;
+                if !mark.probing {
+                    mark.next_probe_at = mark.next_probe_at.max(now + COOLDOWN_PROBE_GAP);
+                }
+            })
+            .or_insert_with(|| CooldownMark {
+                until: now + self.ttl,
+                next_probe_at: now,
+                probing: false,
+                probe_id: 0,
+            });
+        if table.marks.len() > self.sweep_at {
+            table.marks.retain(|_, mark| mark.until > now);
         }
     }
 
-    /// Drop `key`'s cooldown after a successful fetch (the host proved
-    /// reachable), unless a `clear_cache` landed meanwhile.
+    /// Re-arm the mark after a failed probe: deadline refreshes, next probe
+    /// waits `COOLDOWN_PROBE_GAP`. A mark lifted meanwhile (sibling success) is
+    /// not reinstalled — the host already proved reachable.
+    pub(crate) fn note_probe_failure(
+        &self,
+        key: &str,
+        probe_id: u64,
+        generation: &AtomicU64,
+        expected: u64,
+    ) {
+        let mut table = lock_or_recover(&self.table);
+        if generation.load(Ordering::SeqCst) != expected {
+            return;
+        }
+        let Some(mark) = table
+            .marks
+            .get_mut(key)
+            .filter(|mark| mark.probe_id == probe_id)
+        else {
+            return;
+        };
+        let now = Instant::now();
+        mark.until = now + self.ttl;
+        mark.next_probe_at = now + COOLDOWN_PROBE_GAP;
+        mark.probing = false;
+        mark.probe_id = 0;
+    }
+
+    /// Release the probe slot only while the claim id still matches — a stale
+    /// guard cannot unlock a newer probe parked at the same key.
+    fn release_probe(&self, key: &str, probe_id: u64) {
+        let mut table = lock_or_recover(&self.table);
+        if let Some(mark) = table.marks.get_mut(key) {
+            if mark.probe_id == probe_id {
+                mark.probing = false;
+            }
+        }
+    }
+
+    /// Drop `key`'s mark after a fetch got a response (host proved reachable),
+    /// unless a `clear_cache` landed meanwhile.
     pub(crate) fn clear_for_success(&self, key: &str, generation: &AtomicU64, expected: u64) {
-        let mut failures = lock_or_recover(&self.failures);
+        let mut table = lock_or_recover(&self.table);
         if generation.load(Ordering::SeqCst) == expected {
-            failures.remove(key);
+            table.marks.remove(key);
         }
     }
 
     /// `clear_cache` wipe — a config change may fix the dead host.
     pub(crate) fn clear(&self) {
-        lock_or_recover(&self.failures).clear();
+        lock_or_recover(&self.table).marks.clear();
     }
 }
 
-/// How one addon fetch attempt ended: `Retryable` is a transient transport
-/// error (send/connect/timeout/mid-stream read) that earns the shared
-/// back-off retry and, on exhaustion, the per-addon cooldown; `Fatal` is
-/// deterministic per request (status, size cap, decode, absent meta) and
-/// lands in the short-TTL negative cache — a content-level failure must not
-/// mark the whole addon dead.
+/// `Retryable` is a transient transport error (send/connect/timeout/read)
+/// earning the back-off retry and, on exhaustion, the per-addon cooldown;
+/// `Fatal` is deterministic per request (status, size cap, decode, absent
+/// meta) and lands in the short-TTL negative cache — a content-level failure
+/// must not mark the whole addon dead.
 pub(crate) enum FetchFailure {
     Retryable(String),
     Fatal(String),
 }
 
-/// The fetch contract the stream transport and resource client both run:
-/// cache hit → negative-cache hit → per-addon cooldown → claim the key's
-/// in-flight lock → re-check all three under it (the leader may have stored
-/// while this caller waited) → `fetch`, retrying `Retryable` outcomes with
-/// the shared back-off. Every writeback is generation-checked, so a
-/// `clear_cache` landing mid-fetch revokes it. `request_timeout` feeds the
-/// burned-timeout check (an attempt that ate the whole budget skips its
-/// retry); `cooldown_message` is the fast-fail text served in the window.
+/// Shared fetch contract: cache hit → negative-cache hit → cooldown gate →
+/// claim in-flight lock → re-check all three under it → `fetch` with back-off
+/// retries. Every writeback is generation-checked, so a `clear_cache` landing
+/// mid-fetch revokes it. `request_timeout` feeds the burned-timeout check;
+/// `cooldown_message` is the fast-fail text.
 pub(crate) struct FetchContract<'a> {
     pub failure_cache: &'a TtlCache<String>,
     pub fetch_failures: &'a FetchFailureCooldown,
@@ -234,9 +350,8 @@ pub(crate) struct FetchContract<'a> {
 }
 
 impl FetchContract<'_> {
-    /// Deterministic per-request failure write with the same generation
-    /// guard as the value caches: a `clear_cache` mid-fetch revokes it.
-    /// `run` owns failure writes; sibling-provider tests reach it directly.
+    /// Negative-cache write with the same generation guard as the value
+    /// caches. `run` owns failure writes; sibling-provider tests reach this.
     pub(super) fn cache_failure(&self, key: &str, error: &str, generation: u64) {
         let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
         if !still_fresh() {
@@ -265,69 +380,96 @@ impl FetchContract<'_> {
         if let Some(error) = self.failure_cache.get(key) {
             return Err(error);
         }
-        // Inside the failure window the fetch would only re-pay
-        // connect/timeout to fail again.
-        if self.fetch_failures.cooling_down(addon_key) {
-            return Err(self.cooldown_message.to_string());
-        }
+        // Inside the window a single probe rides through; the rest fast-fail.
+        let mut probe_guard = match self.fetch_failures.gate(addon_key) {
+            CooldownGate::Cooldown => return Err(self.cooldown_message.to_string()),
+            CooldownGate::Open => None,
+            CooldownGate::Probe(guard) => Some(guard),
+        };
 
-        // Single-flight: a concurrent call may already be fetching this key.
-        // Wait, then re-read the leader's cached result instead of
-        // duplicating the request.
+        // Single-flight: wait on the leader, then re-read its cached result.
         let key_lock = self.in_flight.claim(key);
         let result = {
             let _fetch_permit = key_lock.lock().await;
-            // The leader stored while this caller waited — take its result,
-            // or fail fast on the failure it just recorded instead of
-            // re-running the same doomed fetch.
-            if let Some(cached) = cache.get(key) {
-                Ok(cached)
+            // Re-read the leader's result (or its recorded failure) instead of re-running the fetch.
+            let early = if let Some(cached) = cache.get(key) {
+                Some(Ok(cached))
             } else if let Some(error) = self.failure_cache.get(key) {
-                Err(error)
-            } else if self.fetch_failures.cooling_down(addon_key) {
-                Err(self.cooldown_message.to_string())
+                Some(Err(error))
             } else {
-                // A `clear_cache` after this point revokes this fetch's
-                // right to write back (all writebacks below are
-                // generation-checked).
-                let generation = self.generation.load(Ordering::SeqCst);
-                let mut attempt = 0u8;
-                loop {
-                    if attempt > 0 {
-                        tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
+                // Re-gate unless this caller is the probe itself: the leader
+                // may have marked the addon, or a sibling probe is in flight.
+                match if probe_guard.is_none() {
+                    self.fetch_failures.gate(addon_key)
+                } else {
+                    CooldownGate::Open
+                } {
+                    CooldownGate::Cooldown => Some(Err(self.cooldown_message.to_string())),
+                    CooldownGate::Open => None,
+                    CooldownGate::Probe(guard) => {
+                        probe_guard = Some(guard);
+                        None
                     }
-                    let started_at = Instant::now();
-                    match fetch().await {
-                        Ok(value) => {
-                            // A success proves the host reachable — drop a
-                            // cooldown a concurrent same-addon fetch recorded.
-                            self.fetch_failures.clear_for_success(
-                                addon_key,
-                                self.generation,
-                                generation,
-                            );
-                            // A clear_cache between fetch start and store
-                            // drops the write under the entries lock, so
-                            // post-change callers never read pre-change data.
-                            cache.put(key, value.clone(), is_empty(&value), || {
-                                self.generation.load(Ordering::SeqCst) == generation
-                            });
-                            break Ok(value);
+                }
+            };
+            match early {
+                Some(result) => result,
+                None => {
+                    // A `clear_cache` past here revokes write-back — all writes below are generation-checked.
+                    let generation = self.generation.load(Ordering::SeqCst);
+                    let mut attempt = 0u8;
+                    loop {
+                        if attempt > 0 {
+                            tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
                         }
-                        Err(FetchFailure::Fatal(error)) => {
-                            self.cache_failure(key, &error, generation);
-                            break Err(error);
-                        }
-                        Err(FetchFailure::Retryable(error)) => {
-                            attempt += 1;
-                            let burned_timeout = started_at.elapsed() >= self.request_timeout;
-                            if attempt >= FETCH_ATTEMPTS || burned_timeout {
-                                // Retries exhausted: cool the addon down so
-                                // the next open fails fast (generation-
-                                // checked like the cache writes above).
-                                self.fetch_failures
-                                    .note(addon_key, self.generation, generation);
+                        let started_at = Instant::now();
+                        match fetch().await {
+                            Ok(value) => {
+                                // A success proves the host reachable — lift any concurrent same-addon mark.
+                                self.fetch_failures.clear_for_success(
+                                    addon_key,
+                                    self.generation,
+                                    generation,
+                                );
+                                // A `clear_cache` between fetch and store drops this write under the entries lock.
+                                cache.put(key, value.clone(), is_empty(&value), || {
+                                    self.generation.load(Ordering::SeqCst) == generation
+                                });
+                                break Ok(value);
+                            }
+                            Err(FetchFailure::Fatal(error)) => {
+                                self.cache_failure(key, &error, generation);
+                                // Any response proves the host reachable — lift the transport mark.
+                                self.fetch_failures.clear_for_success(
+                                    addon_key,
+                                    self.generation,
+                                    generation,
+                                );
                                 break Err(error);
+                            }
+                            Err(FetchFailure::Retryable(error)) => {
+                                attempt += 1;
+                                let burned_timeout = started_at.elapsed() >= self.request_timeout;
+                                if attempt >= FETCH_ATTEMPTS || burned_timeout {
+                                    // Retries exhausted: mark the addon
+                                    // (generation-checked); a failed probe
+                                    // re-arms with a gap.
+                                    if let Some(probe) = &probe_guard {
+                                        self.fetch_failures.note_probe_failure(
+                                            addon_key,
+                                            probe.probe_id,
+                                            self.generation,
+                                            generation,
+                                        );
+                                    } else {
+                                        self.fetch_failures.note(
+                                            addon_key,
+                                            self.generation,
+                                            generation,
+                                        );
+                                    }
+                                    break Err(error);
+                                }
                             }
                         }
                     }
@@ -413,5 +555,195 @@ mod tests {
         // The dropped fetch's late release must not remove the replacement.
         inflight.release("k", &stale);
         assert!(mapped_is(&inflight, "k", &replacement));
+    }
+
+    #[test]
+    fn gate_admits_one_probe_through_the_mark_and_fast_fails_the_rest() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Open));
+
+        cooldown.note("k", &generation, 0);
+        assert!(cooldown.cooling_down("k"));
+
+        // The first caller past the mark claims the liveness slot; every
+        // other caller keeps failing fast while it probes.
+        let gate = cooldown.gate("k");
+        assert!(matches!(gate, CooldownGate::Probe(_)));
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Cooldown));
+
+        // Dropping the probe guard frees the slot for the next claim.
+        drop(gate);
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Probe(_)));
+    }
+
+    #[test]
+    fn cancelled_probe_timeout_re_arms_with_a_gap_before_the_next_probe() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+        let gate = cooldown.gate("k");
+        assert!(matches!(gate, CooldownGate::Probe(_)));
+
+        drop(gate);
+        cooldown.note("k", &generation, 0);
+
+        assert!(cooldown.cooling_down("k"));
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Cooldown));
+    }
+
+    #[test]
+    fn late_ordinary_failure_preserves_the_active_probe_claim() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+        let gate = cooldown.gate("k");
+        assert!(matches!(gate, CooldownGate::Probe(_)));
+
+        cooldown.note("k", &generation, 0);
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Cooldown));
+        drop(gate);
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Probe(_)));
+    }
+
+    #[test]
+    fn failed_probe_re_arms_with_a_gap_before_the_next_probe() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+
+        let CooldownGate::Probe(gate) = cooldown.gate("k") else {
+            panic!("probe expected");
+        };
+        cooldown.note_probe_failure("k", gate.probe_id, &generation, 0);
+        drop(gate);
+
+        // The mark re-armed with `COOLDOWN_PROBE_GAP` ahead: probing is
+        // free but the window has not elapsed, so callers still fast-fail.
+        assert!(cooldown.cooling_down("k"));
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Cooldown));
+    }
+
+    #[test]
+    fn failed_probe_does_not_reinstall_a_lifted_mark() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+
+        let CooldownGate::Probe(gate) = cooldown.gate("k") else {
+            panic!("probe expected");
+        };
+        // A sibling's response lifted the mark while this probe flew: the
+        // late failure must not re-mark a proven-reachable host.
+        cooldown.clear_for_success("k", &generation, 0);
+        cooldown.note_probe_failure("k", gate.probe_id, &generation, 0);
+        drop(gate);
+
+        assert!(!cooldown.cooling_down("k"));
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Open));
+    }
+
+    #[test]
+    fn stale_probe_guard_cannot_release_a_newer_claim() {
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let generation = AtomicU64::new(0);
+        cooldown.note("k", &generation, 0);
+
+        let CooldownGate::Probe(stale) = cooldown.gate("k") else {
+            panic!("probe expected");
+        };
+        // The stale claim's mark was replaced (e.g. a clear + fresh note):
+        // its late release must not unlock the newer probe below.
+        cooldown.clear();
+        cooldown.note("k", &generation, 0);
+
+        let fresh = cooldown.gate("k");
+        assert!(matches!(fresh, CooldownGate::Probe(_)));
+        cooldown.note_probe_failure("k", stale.probe_id, &generation, 0);
+        drop(stale);
+        // The new claim is still held — a stale release would have freed it.
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Cooldown));
+        drop(fresh);
+        assert!(matches!(cooldown.gate("k"), CooldownGate::Probe(_)));
+    }
+
+    #[tokio::test]
+    async fn probe_success_lifts_the_mark_early_for_the_next_caller() {
+        let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
+        let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let in_flight = InFlight::new(8);
+        let generation = AtomicU64::new(0);
+        let contract = FetchContract {
+            failure_cache: &failures,
+            fetch_failures: &cooldown,
+            in_flight: &in_flight,
+            generation: &generation,
+            request_timeout: Duration::from_secs(20),
+            cooldown_message: "cooling",
+        };
+
+        let attempts = AtomicU64::new(0);
+        let outcome: Result<u32, String> = contract
+            .run(
+                &cache,
+                "k",
+                "addon",
+                |_| false,
+                || {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    async { Err(FetchFailure::Retryable("down".into())) }
+                },
+            )
+            .await;
+        assert!(outcome.is_err());
+        assert_eq!(attempts.load(Ordering::SeqCst), FETCH_ATTEMPTS as u64);
+        assert!(cooldown.cooling_down("addon"));
+
+        // The first retryable failure marked the addon; the next call rides
+        // through as the liveness probe — and its success lifts the mark.
+        let recovered: Result<u32, String> = contract
+            .run(&cache, "k2", "addon", |_| false, || async { Ok(7u32) })
+            .await;
+        assert_eq!(recovered, Ok(7));
+        assert!(!cooldown.cooling_down("addon"));
+
+        // Mark lifted: callers fetch normally again.
+        let after: Result<u32, String> = contract
+            .run(&cache, "k3", "addon", |_| false, || async { Ok(9u32) })
+            .await;
+        assert_eq!(after, Ok(9));
+    }
+
+    #[tokio::test]
+    async fn fatal_response_during_probe_lifts_the_transport_mark() {
+        let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
+        let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
+        let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+        let in_flight = InFlight::new(8);
+        let generation = AtomicU64::new(0);
+        let contract = FetchContract {
+            failure_cache: &failures,
+            fetch_failures: &cooldown,
+            in_flight: &in_flight,
+            generation: &generation,
+            request_timeout: Duration::from_secs(20),
+            cooldown_message: "cooling",
+        };
+        cooldown.note("addon", &generation, 0);
+
+        // A status/parse failure is still a response — the host answered,
+        // so the transport mark is wrong and must lift.
+        let outcome: Result<u32, String> = contract
+            .run(
+                &cache,
+                "k",
+                "addon",
+                |_| false,
+                || async { Err(FetchFailure::Fatal("404".into())) },
+            )
+            .await;
+        assert!(outcome.is_err());
+        assert!(!cooldown.cooling_down("addon"));
     }
 }

@@ -1,7 +1,9 @@
 use super::{
-    build_mpv_language_selection_options, classify_language_token, infer_track_preferred_language,
-    normalize_language_token, resolve_preferred_track_selection, LanguageMatchConfidence,
-    TrackLanguageCandidate,
+    build_mpv_language_selection_options, canonicalize_language_token, canonicalize_language_value,
+    classify_language_token, infer_track_preferred_language, normalize_language_token,
+    resolve_preferred_track_selection, supported_language_options,
+    track_matches_preferred_language, LanguageMatchConfidence, TrackLanguageCandidate,
+    SUPPORTED_LANGUAGES,
 };
 
 #[test]
@@ -35,12 +37,86 @@ fn mpv_language_selection_options_expand_aliases_and_handle_off() {
     let options = build_mpv_language_selection_options(None, Some("pt-BR"));
     assert_eq!(
         options.get("slang").map(String::as_str),
-        Some("pt,por,portuguese")
+        Some("pt,por,portuguese,pob,pt-br")
     );
     assert_eq!(options.get("subs-fallback").map(String::as_str), Some("no"));
 
     assert!(build_mpv_language_selection_options(None, None).is_empty());
     assert!(build_mpv_language_selection_options(Some("commentary"), Some("x")).is_empty());
+}
+
+#[test]
+fn common_languages_accept_exact_tags_and_safe_aliases_without_title_collisions() {
+    let options = supported_language_options();
+    assert_eq!(options.len(), 28);
+    for language in &SUPPORTED_LANGUAGES[9..] {
+        assert!(options
+            .iter()
+            .any(|option| option.code == language.code && option.label == language.label));
+        for alias in language.exact_aliases {
+            assert_eq!(canonicalize_language_value(alias), Some(language.code));
+            assert_eq!(canonicalize_language_token(alias), None);
+            assert_eq!(
+                normalize_language_token(Some(&format!("{alias} dialogue")), false),
+                None
+            );
+            assert_eq!(infer_track_preferred_language(None, Some(alias)), None);
+            assert!(!track_matches_preferred_language(
+                None,
+                Some(&format!("{alias} dialogue")),
+                language.code
+            ));
+            let track = TrackLanguageCandidate {
+                id: 1,
+                lang: Some(alias.to_string()),
+                title: None,
+                default_track: false,
+                forced: false,
+                hearing_impaired: false,
+            };
+            let resolution = resolve_preferred_track_selection(&[track], Some(language.code), None);
+            assert_eq!(resolution.matched_track_id, Some(1));
+            let title_only = TrackLanguageCandidate {
+                id: 2,
+                lang: None,
+                title: Some(format!("{alias} dialogue")),
+                default_track: false,
+                forced: false,
+                hearing_impaired: false,
+            };
+            assert_eq!(
+                resolve_preferred_track_selection(&[title_only], Some(language.code), None)
+                    .matched_track_id,
+                None
+            );
+        }
+        for alias in language.aliases {
+            assert_eq!(canonicalize_language_token(alias), Some(language.code));
+            assert!(track_matches_preferred_language(
+                None,
+                Some(&format!("{alias} dialogue")),
+                language.code
+            ));
+        }
+    }
+}
+
+#[test]
+fn expanded_mpv_languages_include_container_tags_and_brazilian_portuguese() {
+    for (preference, expected) in [
+        ("ru", "ru,rus,russian"),
+        ("nb-NO", "no,nor,nob,norwegian,nb"),
+        ("nl", "nl,dut,nld,dutch"),
+        ("cs", "cs,cze,ces,czech"),
+        ("pob", "pt,por,portuguese,pob,pt-br"),
+    ] {
+        let options = build_mpv_language_selection_options(Some(preference), Some(preference));
+        assert_eq!(options.get("alang").map(String::as_str), Some(expected));
+        assert_eq!(options.get("slang").map(String::as_str), Some(expected));
+    }
+    for token in ["pob", "pt-BR", "POR"] {
+        assert_eq!(canonicalize_language_value(token), Some("pt"));
+    }
 }
 
 #[test]

@@ -1,8 +1,27 @@
 use super::{
     infer_selected_playback_language_preference, sanitize_language_pref,
-    PlaybackLanguagePreferenceKind,
+    PlaybackLanguagePreferenceKind, SavedPlaybackLanguagePreference,
 };
 use crate::commands::language::TrackLanguageCandidate;
+use crate::commands::PlaybackLanguagePreferences;
+
+#[test]
+fn saved_playback_language_preference_omits_scopeless_effective() {
+    let value = serde_json::to_value(&SavedPlaybackLanguagePreference {
+        preferences: PlaybackLanguagePreferences {
+            preferred_audio_language: Some("en".to_string()),
+            preferred_subtitle_language: Some("off".to_string()),
+        },
+        effective: None,
+    })
+    .unwrap();
+
+    // The scopeless save must not emit an `effective` key — the frontend
+    // only writes the effective cache when the field is present.
+    assert_eq!(value["preferences"]["preferredAudioLanguage"], "en");
+    assert_eq!(value["preferences"]["preferredSubtitleLanguage"], "off");
+    assert!(value.get("effective").is_none());
+}
 
 #[test]
 fn sanitize_language_pref_canonicalizes_known_aliases() {

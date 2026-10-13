@@ -14,22 +14,22 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
+import { restoreQueryArrayEntry } from '@/lib/optimistic-query';
 import {
   invalidateLibraryQueries,
-  invalidateWatchStatusQueries,
   LIBRARY_QUERY_KEY,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 
 interface WatchStatusMutationContext {
-  previousStatuses?: Record<string, WatchStatus>;
-  previousLibrary?: MediaItem[];
+  itemId?: string;
+  previousStatus?: WatchStatus;
+  previousLibraryItem?: MediaItem | null;
 }
 
 // Watch-status read + optimistic setter for the details hero chip group.
-// A status is tracking intent: setting one also writes the title into the
-// library (the profile's only enumeration surface). Clearing a status only
-// clears the label; library membership stays the user's own.
+// Setting a status also writes the title into the library; clearing only
+// clears the label — membership stays the user's own.
 export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
   const queryClient = useQueryClient();
   const itemId = item?.id;
@@ -49,31 +49,35 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
     onMutate: async (status) => {
       if (!itemId) return {};
       await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
-      const previousStatuses =
-        queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY);
+      const previousStatus =
+        queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY)?.[itemId];
       setCachedWatchStatus(queryClient, itemId, status);
 
-      // Mirror the track into the library cache so the profile reflects it
-      // before the refetch lands.
-      let previousLibrary: MediaItem[] | undefined;
+      // Mirror the track into the library cache before the refetch lands.
+      let previousLibraryItem: MediaItem | null | undefined;
       if (status !== null && item && !isInLibrary) {
         await queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY });
-        previousLibrary = queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY);
+        previousLibraryItem =
+          queryClient
+            .getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY)
+            ?.find((entry) => entry.id === itemId) ?? null;
         queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) =>
           old?.some((entry) => entry.id === item.id) ? old : [...(old ?? []), toMediaItem(item)],
         );
       }
-      return { previousStatuses, previousLibrary };
+      return { itemId, previousStatus, previousLibraryItem };
     },
     onError: (_err, _status, context) => {
-      if (context?.previousStatuses !== undefined) {
-        queryClient.setQueryData<Record<string, WatchStatus>>(
-          WATCH_STATUSES_QUERY_KEY,
-          context.previousStatuses,
-        );
-      }
-      if (context?.previousLibrary !== undefined) {
-        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, context.previousLibrary);
+      if (context?.itemId !== undefined) {
+        setCachedWatchStatus(queryClient, context.itemId, context.previousStatus ?? null);
+        if (context.previousLibraryItem !== undefined) {
+          restoreQueryArrayEntry(
+            queryClient,
+            LIBRARY_QUERY_KEY,
+            context.itemId,
+            context.previousLibraryItem,
+          );
+        }
       }
       notifyAction('Failed to update status', { tone: 'error' });
     },
@@ -95,12 +99,10 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
       });
     },
     onSettled: () => {
-      void invalidateWatchStatusQueries(queryClient);
       void invalidateLibraryQueries(queryClient);
     },
   });
 
-  // Expose the membership read too: the details page needs it for the
-  // library toggle, and a second observer would duplicate this one.
+  // Details also needs the membership read for its library toggle.
   return { watchStatus, watchStatusMutation, isInLibrary };
 }

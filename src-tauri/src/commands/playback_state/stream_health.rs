@@ -2,6 +2,7 @@ use super::{
     evict_least_active, insert_sorted_unique, load_advisory_index, playback_title_scope_key,
     PlaybackStateService, PlaybackStreamOutcomeKind, PLAYBACK_STATE_STORE_FILE,
 };
+use crate::commands::history_helpers::normalize_episode_coordinate;
 use crate::commands::stream_coordinator::{
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
@@ -22,13 +23,11 @@ const SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 30;
 const SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 6;
 const STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 60 * 18;
 const STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 7;
-// Hard count bound on top of the recency windows: a 7-day success window
-// alone still lets a heavy session grow the index without limit.
+// Hard count bound on top of the recency windows: a 7-day success window alone
+// still lets a heavy session grow the index without limit.
 const STREAM_FAMILY_INDEX_MAX_ENTRIES: usize = 512;
-/// Same hard bound for the source-health index: `record_stream_outcome`
-/// indexes IPC-supplied source identities, and recency-only pruning lets N
-/// distinct ids grow the index — and every prune's store-read count —
-/// without limit.
+/// Same bound for the source-health index: IPC-supplied source identities plus
+/// recency-only pruning would grow the index (and every prune's reads) without limit.
 const SOURCE_HEALTH_INDEX_MAX_ENTRIES: usize = 512;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -43,14 +42,11 @@ pub(super) struct PlaybackSourceHealthSnapshot {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlaybackStreamFamilySnapshot {
-    /// Owning `type:id` scope: `|` is legal inside a media id, so the
-    /// `{scope}|{family}` snapshot key's prefix alone cannot prove title
-    /// ownership. `None` on snapshots written before this field — they keep
-    /// working by prefix.
+    /// Owning `type:id` scope: `|` is legal inside a media id, so the `{scope}|{family}`
+    /// key's prefix alone can't prove title ownership. `None` on pre-field snapshots.
     #[serde(default)]
     pub scope_key: Option<String>,
-    /// Instance id of the addon that produced the last verified outcome;
-    /// `None` on snapshots written before instance-id health keys.
+    /// Instance id of the last verified addon; `None` on pre-instance-id snapshots.
     #[serde(default)]
     pub source_id: Option<String>,
     pub last_success_at: Option<u64>,
@@ -63,13 +59,11 @@ pub(super) struct PlaybackStreamFamilySnapshot {
     pub cooldown_until: Option<u64>,
 }
 
-/// One playback stream outcome report: the normalized title scope plus the
-/// resolved stream's identity fields that feed the source-health and
-/// stream-family reputation snapshots.
+/// One playback stream outcome report: normalized title scope plus the resolved
+/// stream's identity fields feeding the source-health and family reputation snapshots.
 pub(crate) struct StreamOutcomeReport {
     pub media_id: String,
-    /// Canonical history-namespace type (`movie`/`series`) — `anime` folds to
-    /// `series` before the report is built.
+    /// Canonical history-namespace type (`movie`/`series`) — `anime` folds to `series` upstream.
     pub media_type: &'static str,
     pub season: Option<u32>,
     pub episode: Option<u32>,
@@ -119,9 +113,7 @@ pub(super) fn recent_successful_source(
     {
         return None;
     }
-    // Snapshots written before `source_id` existed contribute no
-    // affinity — guessing an instance from a shared display name
-    // could attribute the preference to the wrong addon.
+    // Pre-`source_id` snapshots contribute no affinity — guessing an instance from a shared display name could misattribute it.
     Some((
         snapshot
             .source_id
@@ -143,9 +135,8 @@ pub(super) fn preferred_title_source_id_from_success(
         .filter(|snapshot_key| playback_snapshot_belongs_to_scope(snapshot_key, scope_key))
         .filter_map(|snapshot_key| {
             let snapshot = load_playback_stream_family_snapshot(store, &snapshot_key)?;
-            // A `|` in the media id can make a foreign scope's key satisfy
-            // the prefix check; the body-written scope is authoritative,
-            // and legacy snapshots predating it pass.
+            // A `|` in the media id can fool the prefix check; the body-written
+            // scope is authoritative, legacy snapshots pass.
             snapshot
                 .scope_key
                 .as_deref()
@@ -208,6 +199,7 @@ fn is_nearby_episode(
         candidate_episode,
     ) {
         (Some(ts), Some(te), Some(cs), Some(ce)) => ts == cs && te.abs_diff(ce) <= 2,
+        (None, None, None, None) => true,
         _ => false,
     }
 }
@@ -271,10 +263,9 @@ pub(super) fn accepts_outcome(
         .is_none_or(|latest| timestamp_ms >= latest)
 }
 
-/// Shared upsert skeleton for the outcome-driven snapshot indexes: the
-/// recency guard runs before any mutation, then index insert → item write →
-/// prune → index write so a new key can't evict itself and the index never
-/// names a missing item. `apply_outcome` owns the per-snapshot field writes.
+/// Shared upsert skeleton for the outcome-driven snapshot indexes: recency guard
+/// first, then index insert → item write → prune → index write so a new key can't
+/// evict itself and the index never names a missing item.
 #[allow(clippy::too_many_arguments)]
 fn upsert_outcome_snapshot<S: Default + Serialize>(
     store: &DurableStore,
@@ -288,11 +279,11 @@ fn upsert_outcome_snapshot<S: Default + Serialize>(
     index_key: &str,
     max_entries: usize,
     prune_index: impl Fn(&DurableStore, &mut Vec<String>),
-) -> Result<(), String> {
+) {
     let mut snapshot = load_snapshot(store, key).unwrap_or_default();
     let (last_success_at, last_failure_at) = outcome_times(&snapshot);
     if !accepts_outcome(last_success_at, last_failure_at, timestamp_ms) {
-        return Ok(());
+        return;
     }
 
     let mut index = load_advisory_index(store, index_key);
@@ -300,14 +291,11 @@ fn upsert_outcome_snapshot<S: Default + Serialize>(
     insert_sorted_unique(&mut index, key);
 
     store.set(item_key(key), json!(snapshot));
-    // The count cap is a hard bound: IPC-supplied identities could otherwise
-    // grow the index between the cadence-gated sweeps.
+    // Hard bound: IPC-supplied identities could grow the index between the cadence-gated sweeps.
     if allow_prune || index.len() > max_entries {
         prune_index(store, &mut index);
     }
     store.set(index_key, json!(index));
-
-    Ok(())
 }
 
 pub(super) fn upsert_source_health_snapshot(
@@ -316,7 +304,7 @@ pub(super) fn upsert_source_health_snapshot(
     outcome: PlaybackStreamOutcomeKind,
     timestamp_ms: u64,
     allow_prune: bool,
-) -> Result<(), String> {
+) {
     upsert_outcome_snapshot(
         store,
         health_key,
@@ -334,9 +322,8 @@ pub(super) fn upsert_source_health_snapshot(
             _ => {
                 snapshot.last_failure_at = Some(timestamp_ms);
                 snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
-                // A single blip must not bench a whole source: the fetcher skips
-                // score-0 sources entirely, so cooldown requires a repeat
-                // failure. The first failure still demotes ranking above.
+                // A single blip must not bench a source — the fetcher skips score-0
+                // sources entirely, so cooldown requires a repeat failure.
                 snapshot.cooldown_until = (snapshot.consecutive_failures >= 2).then(|| {
                     timestamp_ms.saturating_add(match outcome {
                         PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 12,
@@ -355,8 +342,7 @@ pub(super) fn upsert_source_health_snapshot(
     )
 }
 
-/// Failed outcomes must not erase the family's verified attribution; a
-/// verified outcome with no resolvable instance clears it.
+/// Failed outcomes keep the family's verified attribution; a verified outcome with no resolvable instance clears it.
 pub(super) fn update_verified_family_source_id(
     snapshot: &mut PlaybackStreamFamilySnapshot,
     resolved_source_id: Option<String>,
@@ -367,9 +353,8 @@ pub(super) fn update_verified_family_source_id(
     }
 }
 
-/// `stream_family` and `resolved_source_id` arrive already normalized by the
-/// caller (the family key and the health-attributed instance); the remaining
-/// raw fields come straight off the report.
+/// `stream_family` and `resolved_source_id` arrive normalized by the caller;
+/// remaining raw fields come straight off the report.
 pub(super) fn upsert_stream_family_snapshot(
     store: &DurableStore,
     scope_key: &str,
@@ -377,7 +362,7 @@ pub(super) fn upsert_stream_family_snapshot(
     resolved_source_id: Option<String>,
     report: &StreamOutcomeReport,
     allow_prune: bool,
-) -> Result<(), String> {
+) {
     let snapshot_key = playback_stream_family_snapshot_key(scope_key, stream_family);
     upsert_outcome_snapshot(
         store,
@@ -387,9 +372,7 @@ pub(super) fn upsert_stream_family_snapshot(
         load_playback_stream_family_snapshot,
         |snapshot| (snapshot.last_success_at, snapshot.last_failure_at),
         |snapshot| {
-            // `|` is legal inside a media id, so the body records the owning
-            // scope — key-prefix checks alone cannot prove this snapshot's
-            // title.
+            // `|` is legal inside a media id, so the body records the owning scope — key-prefix checks can't prove title.
             snapshot.scope_key = Some(scope_key.to_string());
             update_verified_family_source_id(snapshot, resolved_source_id, report.outcome);
 
@@ -434,10 +417,9 @@ struct SnapshotActivity {
     cooldown_until: Option<u64>,
 }
 
-/// Window-filter + recency-cap prune shared by the source-health and
-/// stream-family indexes: drop entries whose snapshot is missing or has no
-/// activity inside the success/failure windows, then evict the least recently
-/// active survivors past `max_entries`.
+/// Window-filter + recency-cap prune shared by both indexes: drop entries whose
+/// snapshot is missing or has no activity inside the windows, then evict the
+/// least recently active survivors past `max_entries`.
 fn prune_by_recency(
     store: &DurableStore,
     index: &mut Vec<String>,
@@ -482,8 +464,7 @@ fn prune_by_recency(
         keep
     });
 
-    // Index order is key-sorted, so truncation would evict arbitrarily; drop
-    // the least recently active entries instead.
+    // Index order is key-sorted, so truncation would evict arbitrarily — evict least recently active instead.
     if survivors.len() > max_entries {
         let overflow = survivors.len() - max_entries;
         evict_least_active(store, index, survivors, overflow, item_key);
@@ -529,9 +510,8 @@ fn prune_stale_stream_family_entries(store: &DurableStore, stream_family_index: 
     );
 }
 
-/// Batch score lookup shared by the source-health and stream-family read
-/// paths: normalize, dedupe (the map doubles as the seen-set), then one
-/// snapshot load + score per unique key under a single store handle.
+/// Batch score lookup shared by both read paths: normalize, dedupe (map = seen-set),
+/// then one snapshot load + score per unique key under a single store handle.
 fn scored_priorities<'a>(
     items: impl IntoIterator<Item = Option<&'a str>>,
     normalize: impl Fn(&'a str) -> Option<String>,
@@ -552,28 +532,25 @@ fn scored_priorities<'a>(
 }
 
 impl PlaybackStateService {
-    /// Records an outcome against the source-health and stream-family
-    /// reputations. Generation-guarded like `track_progress_guarded`: a
-    /// clear/remove/import racing this write must not let a stale outcome
-    /// repopulate indexes the user just wiped.
+    /// Records an outcome against the source-health and stream-family reputations.
+    /// Generation-guarded like `track_progress_guarded`: a racing clear/remove must
+    /// not let a stale outcome repopulate wiped indexes.
     pub(crate) fn record_stream_outcome(
         &self,
         app: &AppHandle,
-        report: StreamOutcomeReport,
+        mut report: StreamOutcomeReport,
     ) -> Result<(), String> {
+        // IPC-supplied coordinates go straight into the family snapshot — apply the shared ingress bound first.
+        report.season = normalize_episode_coordinate(report.season);
+        report.episode = normalize_episode_coordinate(report.episode);
         let start_generation = self.history_generation();
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
-        // Instance identity for health attribution: outcomes always carry
-        // the resolved stream's `source_id`; a name-only report (legacy
-        // route state) skips the health write rather than guessing an
-        // instance onto a shared display name.
+        // Health attribution uses the resolved stream's `source_id`; a name-only
+        // report (legacy route state) skips the health write rather than guessing.
         let resolved_source_id = report.source_id.as_deref().and_then(normalize_source_id);
-        // `set` mutates the shared in-memory map immediately, so the guard
-        // must run before the first mutation — not only before `save` — or a
-        // clear that already landed leaves resurrected entries for the next
-        // writer's save. The lock serializes the whole section so a
-        // `clear`/`remove_keys` bump+delete can't interleave between this
-        // check and the writes.
+        // `set` mutates the shared map immediately, so the generation guard must run
+        // before the first mutation, not only before `save`. The lock serializes the
+        // whole section so a `clear`/`remove_keys` bump+delete can't interleave.
         let _state_file_guard = self.lock_state_file_write();
         if self.history_generation() != start_generation {
             return Ok(());
@@ -586,7 +563,7 @@ impl PlaybackStateService {
                 report.outcome,
                 report.timestamp_ms,
                 Self::claim_health_prune(&self.source_health_prune_at, report.timestamp_ms),
-            )?;
+            );
         }
 
         if let Some(scope_key) =
@@ -604,45 +581,46 @@ impl PlaybackStateService {
                     resolved_source_id,
                     &report,
                     Self::claim_health_prune(&self.stream_family_prune_at, report.timestamp_ms),
-                )?;
+                );
             }
         }
 
-        // No second generation check here: the `set()` mutations already
-        // landed in the shared map, so an early return would only skip this
-        // command's flush and strand outcome data in memory. The
-        // anti-resurrection guard is the pre-mutation check under the file
-        // lock; whatever landed gets flushed.
+        // No second generation check: the `set()` mutations already landed, so an
+        // early return would just strand outcome data in memory. The anti-resurrection
+        // guard is the pre-mutation check under the file lock; whatever landed gets flushed.
         self.schedule_state_file_save(app);
 
         Ok(())
     }
 
-    /// Single-open batch source-health view: one store handle serves every
-    /// unique instance id, so selector ranking (N unique sources) pays one
-    /// open instead of N. Rows without a `source_id` (pre-v3 history) skip
-    /// to the neutral default downstream rather than sharing a name bucket.
+    /// Single-open batch source-health view — selector ranking pays one open for N
+    /// unique sources. Rows without a `source_id` (pre-v3) get the neutral default
+    /// rather than sharing a name bucket.
     pub(crate) fn source_health_priorities_for_ids<'a>(
         &self,
         app: &AppHandle,
         source_ids: impl IntoIterator<Item = Option<&'a str>>,
     ) -> Result<HashMap<String, u8>, String> {
+        let mut priorities: HashMap<String, u8> = source_ids
+            .into_iter()
+            .flatten()
+            .filter_map(normalize_source_id)
+            .map(|source_id| (source_id, DEFAULT_SOURCE_HEALTH_PRIORITY))
+            .collect();
+        if priorities.is_empty() {
+            return Ok(priorities);
+        }
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
         let now_ms = now_unix_millis();
 
-        Ok(scored_priorities(
-            source_ids,
-            normalize_source_id,
-            |source_id| {
-                let snapshot = load_source_health_snapshot(&store, &source_health_key(source_id));
-                score_source_health_priority(snapshot.as_ref(), now_ms)
-            },
-        ))
+        for (source_id, priority) in &mut priorities {
+            let snapshot = load_source_health_snapshot(&store, &source_health_key(source_id));
+            *priority = score_source_health_priority(snapshot.as_ref(), now_ms);
+        }
+        Ok(priorities)
     }
 
-    /// Single-open batch variant for stream families: one store handle
-    /// serves every unique family for the title scope instead of one open
-    /// per family.
+    /// Single-open batch variant for stream families — one store handle serves every unique family in the title scope.
     pub(crate) fn stream_family_priorities_for_names<'a>(
         &self,
         app: &AppHandle,
@@ -669,10 +647,8 @@ impl PlaybackStateService {
         ))
     }
 
-    /// Single-open read of the title scope's preferred source: the last
-    /// addon instance that succeeded on this title recently. Affinity is a
-    /// single-instance fact, so callers get the id rather than a per-source
-    /// score map.
+    /// Single-open read of the title scope's preferred source: the last addon
+    /// instance that succeeded on this title recently.
     pub(crate) fn preferred_title_source_id(
         &self,
         app: &AppHandle,

@@ -3,13 +3,10 @@ import type { ReactNode } from 'react';
 import { toast } from 'sonner';
 import { cn, hideBrokenImage } from '@/lib/utils';
 
-// Top-center action channel: a compact card that slides down under the
-// titlebar for deliberate "tracked" confirmations — watch status, library,
-// and list membership. Ambient notices (player, progress, background ops)
-// stay on the bottom-center channel so this one stays meaningful.
+// Top-center action channel for deliberate "tracked" confirmations (watch status, library, lists);
+// ambient notices stay on the bottom-center channel.
 //
-// One shared id: a rapid add→remove updates the card in place instead of
-// stacking a second toast over the first.
+// Shared id: a rapid add→remove updates the card in place instead of stacking.
 const ACTION_TOAST_ID = 'action-toast';
 
 interface ActionToastOptions {
@@ -17,8 +14,7 @@ interface ActionToastOptions {
   detail?: ReactNode;
   /** Text-color class for a glowing status dot beside the label. */
   dot?: string;
-  /** Poster/thumbnail for the acted-on title — usually still browser-warm
-      from the surface the action fired on, so it paints instantly. */
+  /** Poster for the acted-on title — usually still browser-warm, so it paints instantly. */
   thumb?: string;
   tone?: 'default' | 'error';
 }
@@ -41,6 +37,7 @@ function ActionToast({
     >
       {thumb ? (
         <img
+          key={thumb}
           src={thumb}
           alt=''
           draggable={false}
@@ -86,10 +83,7 @@ export function notifyAction(label: ReactNode, options?: ActionToastOptions) {
     id: ACTION_TOAST_ID,
     position: 'top-center',
     duration: 2600,
-    // Custom toasts skip sonner's fixed-width chrome, so the li needs the
-    // full column to let the card center inside it — and unstyled drops
-    // the default background/border/shadow the li would otherwise paint
-    // as bars around the card.
+    // `unstyled` drops chrome the li would paint as bars; left/right 0 gives the card the full column to center in.
     unstyled: true,
     style: { left: 0, right: 0 },
   });

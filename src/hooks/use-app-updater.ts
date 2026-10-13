@@ -21,8 +21,7 @@ export function useAppUpdater() {
 
   const { data: updateState } = useQuery({
     queryKey: APP_UPDATE_STATE_QUERY_KEY,
-    // Cache-as-store: a refetch must preserve live state, not reset to
-    // initial — an invalidate mid-install would otherwise wipe progress.
+    // Cache-as-store: a refetch must preserve live state — an invalidate mid-install must not wipe progress.
     queryFn: () =>
       queryClient.getQueryData<ReturnType<typeof getInitialAppUpdateState>>(
         APP_UPDATE_STATE_QUERY_KEY,

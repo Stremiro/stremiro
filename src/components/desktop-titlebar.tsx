@@ -82,8 +82,7 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
   const showBack = canGoBack(location.pathname);
 
   const handleBack = () => {
-    // A `from` equal to the current route is a no-op navigation — fall
-    // through to home instead of dead-ending on the same page.
+    // A `from` equal to the current route dead-ends — fall through to home.
     const currentPath = `${location.pathname}${location.search}`;
     const from = resolveSafeInternalReturnPath(
       (location.state as { from?: unknown } | undefined)?.from,

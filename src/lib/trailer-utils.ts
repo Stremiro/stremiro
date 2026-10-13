@@ -23,10 +23,7 @@ interface YouTubeEmbedOptions {
   playsInline?: boolean;
   rel?: boolean;
   origin?: string;
-  // Hover-preview mode: hide keyboard shortcuts, fullscreen, and annotations,
-  // and enable the JS API so the caller can wait for PLAYING before revealing
-  // the iframe. YouTube always draws title/channel chrome before play, on
-  // pause, and on end — there is no supported parameter that removes it.
+  // Hover-preview: disable kb/fs/annotations + enable JS API (wait for PLAYING before reveal). Title/channel chrome is unavoidable.
   chromeless?: boolean;
 }
 
@@ -70,9 +67,7 @@ function postYouTubePlayerMessage(
   iframe: HTMLIFrameElement,
   payload: Record<string, unknown>,
 ): void {
-  // Least-privilege target: embeds are always built from
-  // YOUTUBE_EMBED_BASE_URL, so a wildcard would also message a swapped
-  // iframe src. Payloads are fixed-shape player commands only.
+  // Least-privilege origin — a wildcard would also message a swapped iframe src.
   iframe.contentWindow?.postMessage(
     JSON.stringify({ channel: 'widget', ...payload }),
     YOUTUBE_EMBED_ORIGIN,

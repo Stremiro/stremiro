@@ -16,8 +16,7 @@ interface DetailsStreamSelectorTarget extends StreamSelectorTarget {
   startTime?: number;
 }
 
-// Stream-selector state machine for the details page: open/close, the params
-// the dialog renders from, and the open paths. The player's Back hands over a
+// Stream-selector state for the details page. The player's Back hands over a
 // "reopen selector" payload — inline on a replace, or via the path-keyed stash
 // on a POP (which can't write history state). The effect consumes it once.
 export function useDetailsStreamSelector({
@@ -34,11 +33,10 @@ export function useDetailsStreamSelector({
 }) {
   const [streamSelectorOpen, setStreamSelectorOpen] = useState(false);
   const [streamTarget, setStreamTarget] = useState<DetailsStreamSelectorTarget | null>(null);
-  // One-shot latch, not render state: it's only read inside the effect, so a
-  // state flag would pay a render per consume.
+  // One-shot latch, not render state — it's only read inside the effect.
   const reopenSelectorConsumedRef = useRef(false);
-  // Mirrors `streamTarget` so `getStreamTargetStartTime` can stay referentially
-  // stable — the selector calls it lazily at pick time, not per render.
+  // Mirrors `streamTarget` so `getStreamTargetStartTime` stays stable — the
+  // selector calls it lazily at pick time.
   const streamTargetRef = useRef<DetailsStreamSelectorTarget | null>(null);
   const setTarget = useCallback((target: DetailsStreamSelectorTarget) => {
     streamTargetRef.current = target;
@@ -55,9 +53,8 @@ export function useDetailsStreamSelector({
   const itemLogo = item?.logo;
   const itemEpisodes = item?.episodes;
 
-  // The details page's own origin — forwarded into the player route so
-  // Back→details→Back reaches the real origin (search, calendar) instead of
-  // dead-ending on the details route itself.
+  // Forwarded into the player route so Back→details→Back reaches the real
+  // origin instead of dead-ending on the details route.
   const rawDetailsFrom = (locationState as DetailsHistoryRouteState | undefined)?.from;
   const detailsOriginFrom = typeof rawDetailsFrom === 'string' ? rawDetailsFrom : undefined;
 
@@ -125,8 +122,7 @@ export function useDetailsStreamSelector({
         episode: target.streamEpisode,
         absoluteSeason: target.absoluteSeason,
         absoluteEpisode: target.absoluteEpisode,
-        // Bare title: the header owns the S/E label itself, and the same
-        // string rides into the player route where chrome adds it again.
+        // Bare title — the header owns the S/E label and player chrome re-adds it.
         title: itemTitle ?? '',
         episodeTitle: episodeInput.title,
         overview: options?.overview,
@@ -136,6 +132,28 @@ export function useDetailsStreamSelector({
       return true;
     },
     [itemId, itemTitle, preferredStreamId, buildBaseTarget, setTarget],
+  );
+
+  // One owner for "open the selector at S/E": episode lookup plus the target payload.
+  const openEpisodeSelectorForCoordinates = useCallback(
+    (season: number, episode: number, startTime?: number): boolean => {
+      const targetEpisode = findEpisodeByCoordinates(itemEpisodes, season, episode);
+      return openEpisodeStreamSelector(
+        {
+          season,
+          episode,
+          title: targetEpisode?.title,
+          streamLookupId: targetEpisode?.streamLookupId,
+          streamSeason: targetEpisode?.streamSeason,
+          streamEpisode: targetEpisode?.streamEpisode,
+        },
+        {
+          overview: targetEpisode?.overview || itemDescription,
+          startTime,
+        },
+      );
+    },
+    [itemEpisodes, itemDescription, openEpisodeStreamSelector],
   );
 
   const openDetailsReopenSelector = useCallback(
@@ -169,24 +187,9 @@ export function useDetailsStreamSelector({
         return false;
       }
 
-      const targetEpisode = findEpisodeByCoordinates(item.episodes, reopenSeason, reopenEpisode);
-
-      return openEpisodeStreamSelector(
-        {
-          season: reopenSeason,
-          episode: reopenEpisode,
-          title: targetEpisode?.title,
-          streamLookupId: targetEpisode?.streamLookupId,
-          streamSeason: targetEpisode?.streamSeason,
-          streamEpisode: targetEpisode?.streamEpisode,
-        },
-        {
-          overview: targetEpisode?.overview || item.description,
-          startTime,
-        },
-      );
+      return openEpisodeSelectorForCoordinates(reopenSeason, reopenEpisode, startTime);
     },
-    [handleWatchMovie, item, openEpisodeStreamSelector, preferredStreamId],
+    [handleWatchMovie, item, openEpisodeSelectorForCoordinates, preferredStreamId],
   );
 
   useEffect(() => {
@@ -195,30 +198,24 @@ export function useDetailsStreamSelector({
     }
 
     const navState = locationState as DetailsHistoryRouteState | undefined;
-    // POP returns can't carry state — the player stashes the same handoff
-    // path-keyed instead.
+    // POP returns can't carry state — the player stashes the handoff path-keyed.
     const handoff = navState?.reopenStreamSelector
       ? navState
       : (takeDetailsReturnState(currentPathWithSearch()) as DetailsHistoryRouteState | undefined);
 
-    if (!handoff?.reopenStreamSelector) return;
+    if (!handoff) return;
 
-    // Surface a dropped handoff: the player asked for the selector but the
-    // episode metadata can't honor it — a silent no-op reads as a broken Back.
     reopenSelectorConsumedRef.current = true;
-    // History state outlives the mount — strip the one-shot fields so a later
-    // remount of this entry can't re-fire the selector, and fold the season
-    // hint in so the episode pane lands on the returned-from coordinates.
+    // Clean POP exits also carry the season; only reopening is conditional.
+    const from = handoff.from ?? navState?.from;
     navigateApp(currentPathWithSearch(), {
       replace: true,
       state: {
-        ...(navState?.from !== undefined ? { from: navState.from } : {}),
+        ...(from !== undefined ? { from } : {}),
         season: handoff.season ?? navState?.season,
       },
     });
-    // The strip above still runs when the selector is already open — a stale
-    // handoff must not hijack it, but it must not outlive this mount either.
-    if (streamTarget || streamSelectorOpen) return;
+    if (!handoff.reopenStreamSelector || streamTarget || streamSelectorOpen) return;
     if (!openDetailsReopenSelector(handoff)) {
       const notice = getHistoryPlaybackFallbackNotice('select-episode');
       toast.error(notice.title, { description: notice.description });
@@ -243,6 +240,7 @@ export function useDetailsStreamSelector({
     streamTarget,
     handleWatchMovie,
     openEpisodeStreamSelector,
+    openEpisodeSelectorForCoordinates,
     handleSelectorClose,
     getStreamTargetStartTime,
   };

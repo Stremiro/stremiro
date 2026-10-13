@@ -1,6 +1,4 @@
-// Single owner for the external-store shape `useSyncExternalStore` consumes:
-// a snapshot plus a listener set. `publish` only notifies on real change, so
-// high-frequency producers (clock ticks, PiP state) never re-render on echoes.
+// `useSyncExternalStore`-shaped store: `publish` only notifies on real change so high-frequency producers never re-render on echoes.
 export interface SubscribableStore<T> {
   getSnapshot: () => T;
   publish: (value: T) => void;

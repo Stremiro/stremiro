@@ -1,6 +1,6 @@
 import { Channel } from '@tauri-apps/api/core';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useTitleWatchProgress } from '@/hooks/use-media-library';
@@ -13,7 +13,7 @@ import {
   type StreamSelectorPreferences,
   type StreamSourceSummary,
 } from '@/lib/api';
-import { getLastUsedStreamIdentity, titleEpisodeProgressMap } from '@/lib/history-playback';
+import { episodeProgressKey } from '@/lib/history-playback';
 import { streamSelectorQueryKey } from '@/lib/query-invalidation';
 import { playerStreamRankingOptions } from '@/lib/resolve-player-stream';
 import { buildStreamRankingCacheKey } from '@/lib/stream-ranking';
@@ -30,6 +30,7 @@ const EMPTY_STREAM_STATS: StreamSelectorStats = {
   cachedCount: 0,
   batchCount: 0,
   episodeLikeCount: 0,
+  sourceHealth: { degraded: 0, offline: 0, pending: 0 },
 };
 
 interface UseStreamSelectorControllerArgs {
@@ -54,8 +55,7 @@ export function useStreamSelectorController({
   const isSeriesLike = isSeriesLikeMediaType(type);
 
   const lookupId = streamId || id;
-  // Media type and id join the session key so titles sharing a lookup id
-  // (kitsu/tt aliases) can't collide as one session.
+  // Type+id join the key so titles sharing a lookup id (kitsu/tt aliases) can't collide.
   const selectorSessionKey = JSON.stringify([
     type,
     id,
@@ -68,9 +68,9 @@ export function useStreamSelectorController({
   const {
     batchFilter,
     filters,
-    hasActiveFilter,
+    hasActiveFilter: hasPreferenceFilter,
     qualityFilter,
-    resetFilters,
+    resetFilters: resetPreferenceFilters,
     setFilters,
     showBatchFilter,
     sortMode,
@@ -82,6 +82,15 @@ export function useStreamSelectorController({
     season,
     selectorSessionKey,
   });
+  const [searchQuery, setSearchQuery] = useState('');
+  useEffect(() => {
+    setSearchQuery('');
+  }, [open, selectorSessionKey]);
+  const resetFilters = useCallback(() => {
+    setSearchQuery('');
+    resetPreferenceFilters();
+  }, [resetPreferenceFilters]);
+  const hasActiveFilter = hasPreferenceFilter || searchQuery.trim().length > 0;
   const compactOverview = useMemo(() => {
     if (!overview) return '';
     const normalized = overview.replace(/\s+/g, ' ').trim();
@@ -140,8 +149,7 @@ export function useStreamSelectorController({
     absoluteEpisode,
     buildStreamRankingCacheKey(rankingOptions),
   );
-  // Channels can't be cancelled — an abandoned invoke keeps emitting
-  // snapshots into the same query key. A per-fetch generation drops them.
+  // Channels can't be cancelled — an abandoned invoke keeps emitting; a per-fetch generation drops stale snapshots.
   const selectorFetchGenerationRef = useRef(0);
   const {
     data: streamSelectorData,
@@ -151,9 +159,7 @@ export function useStreamSelectorController({
   } = useQuery({
     queryKey: selectorQueryKey,
     queryFn: ({ signal }) => {
-      // The backend emits a merged+ranked snapshot per addon — write each
-      // into the cache so rows appear progressively. The invoke result stays
-      // the authoritative final payload.
+      // The backend emits a merged+ranked snapshot per addon — cache each so rows appear progressively.
       const generation = ++selectorFetchGenerationRef.current;
       const onProgress = new Channel<StreamSelectorData>();
       // Channel is not an EventTarget — onmessage is its only surface.
@@ -182,27 +188,17 @@ export function useStreamSelectorController({
 
   const addonHealthMetrics = streamSelectorData?.sourceSummaries ?? EMPTY_SOURCE_SUMMARIES;
 
-  // Only stream-declaring addons are real "sources": `sourceSummaries` covers
-  // exactly the addons queried, so the count and the filter can't drift.
-  // Preferences saved before the id-keyed filter may hold the display name —
-  // the name→id map translates once here.
-  const { streamSourceAddonIds, addonIdByName, streamSourceCount } = useMemo(() => {
+  // sourceSummaries covers exactly the queried addons so count and filter can't drift.
+  const { streamSourceAddonIds, streamSourceCount } = useMemo(() => {
     const ids = new Set<string>();
-    const byName = new Map<string, string>();
-    for (const summary of addonHealthMetrics) {
-      ids.add(summary.id);
-      const key = summary.name.trim().toLowerCase();
-      if (key && !byName.has(key)) byName.set(key, summary.id);
-    }
-    return { streamSourceAddonIds: ids, addonIdByName: byName, streamSourceCount: ids.size };
+    for (const summary of addonHealthMetrics) ids.add(summary.id);
+    return { streamSourceAddonIds: ids, streamSourceCount: ids.size };
   }, [addonHealthMetrics]);
 
   const effectiveAddonFilter = useMemo(() => {
     const raw = filters.addon.trim();
-    if (raw === 'all' || raw.length === 0) return 'all';
-    if (streamSourceAddonIds.has(raw)) return raw;
-    return addonIdByName.get(raw.toLowerCase()) ?? 'all';
-  }, [addonIdByName, streamSourceAddonIds, filters.addon]);
+    return streamSourceAddonIds.has(raw) ? raw : 'all';
+  }, [streamSourceAddonIds, filters.addon]);
 
   const effectiveFilters = useMemo<StreamSelectorPreferences>(() => {
     const addonUnchanged = effectiveAddonFilter === filters.addon;
@@ -218,36 +214,33 @@ export function useStreamSelectorController({
     };
   }, [effectiveAddonFilter, filters, showBatchFilter]);
 
-  // Last-used stream identity — badge the row the title last played so a
-  // reopening user can re-pick what worked.
+  // Badge the row the title last played so a reopening user can re-pick what worked.
   const { data: titleProgress } = useTitleWatchProgress(id, {
     enabled: open && isOnline && Boolean(id),
   });
-  const { lastStreamKey, lastStreamFamily } = useMemo(
-    () =>
-      getLastUsedStreamIdentity(
-        titleProgress?.history,
-        type,
-        absoluteSeason ?? season,
-        absoluteEpisode ?? episode,
-      ),
-    [absoluteEpisode, absoluteSeason, episode, season, titleProgress, type],
-  );
-  // Per-episode watch rows — the pack picker reads resume points and
-  // progress from the same snapshot as the badge.
-  const episodeProgressMap = useMemo(
-    () => titleEpisodeProgressMap(titleProgress?.episodeProgress),
-    [titleProgress?.episodeProgress],
-  );
-  // Filter/sort run synchronously so clicks feel instant; Rust stays the
-  // ranking authority for `smart` order.
+  // Exact episode targets read the per-episode map; anything else takes the newest same-kind head.
+  const lastStreamEntry = useMemo(() => {
+    const targetSeason = absoluteSeason ?? season;
+    const targetEpisode = absoluteEpisode ?? episode;
+    const exact =
+      isSeriesLike && id && targetSeason !== undefined && targetEpisode !== undefined
+        ? titleProgress?.episodeProgress?.[episodeProgressKey(id, targetSeason, targetEpisode)]
+        : undefined;
+    return (
+      exact ?? (isSeriesLike ? titleProgress?.latestSeriesEntry : titleProgress?.latestMovieEntry)
+    );
+  }, [absoluteEpisode, absoluteSeason, episode, id, isSeriesLike, season, titleProgress]);
+  const lastStreamKey = lastStreamEntry?.last_stream_key || undefined;
+  const lastStreamFamily = lastStreamEntry?.stream_family || undefined;
+  // Per-episode watch rows — the pack picker reads resume points from the same snapshot as the badge.
+  const episodeProgress = titleProgress?.episodeProgress;
+  // Synchronous filter/sort so clicks feel instant; Rust stays the `smart` ranking authority.
   const sortedStreams = useMemo(
-    () => filterSelectorStreams(streams, effectiveFilters),
-    [streams, effectiveFilters],
+    () => filterSelectorStreams(streams, effectiveFilters, searchQuery),
+    [streams, effectiveFilters, searchQuery],
   );
 
-  // A failed addon-config read must not masquerade as "no addons enabled" —
-  // surface it as the retryable error it is once nothing is still loading.
+  // A failed addon-config read must not masquerade as "no addons" — surface it as a retryable error once loading settles.
   const fatalAddonError =
     streams.length === 0
       ? (streamSelectorData?.fatalErrorMessage ??
@@ -256,8 +249,7 @@ export function useStreamSelectorController({
         null)
       : null;
 
-  // Cache snapshots do not end the query's fetch. Its fetch state also
-  // settles on error/cancel, even when the last snapshot is incomplete.
+  // Snapshots don't end the fetch; fetch state settles on error/cancel even with an incomplete last snapshot.
   const isLoading =
     streams.length === 0 &&
     !fatalAddonError &&
@@ -267,20 +259,6 @@ export function useStreamSelectorController({
     void refetchAddonConfigs();
     void refetchStreamSelectorData();
   }, [refetchAddonConfigs, refetchStreamSelectorData]);
-
-  const healthSummary = useMemo(() => {
-    let degraded = 0;
-    let offline = 0;
-    let pending = 0;
-
-    for (const metric of addonHealthMetrics) {
-      if (metric.status === 'degraded') degraded += 1;
-      else if (metric.status === 'offline') offline += 1;
-      else if (metric.status === 'pending') pending += 1;
-    }
-
-    return { degraded, offline, pending };
-  }, [addonHealthMetrics]);
 
   const sourcesStillLoading = !fatalAddonError && isFetchingStreamSelectorData;
 
@@ -301,7 +279,8 @@ export function useStreamSelectorController({
     compactOverview,
     effectiveAddonFilter,
     hasEnabledAddons,
-    episodeProgressMap,
+    episodeProgress,
+    watchedEpisodeCeiling: titleProgress?.watchedEpisodeCeiling,
     fatalAddonError,
     lastStreamKey,
     lastStreamFamily,
@@ -311,7 +290,7 @@ export function useStreamSelectorController({
     handleRequestClose,
     handleSelectStream,
     hasActiveFilter,
-    healthSummary,
+    healthSummary: streamStats.sourceHealth,
     isAnyResolving,
     isLoading,
     isLoadingAddonConfigs,
@@ -320,6 +299,8 @@ export function useStreamSelectorController({
     refetchStreams,
     resetFilters,
     selectorSessionKey,
+    searchQuery,
+    setSearchQuery,
     setFilters,
     showBatchFilter,
     sortMode,

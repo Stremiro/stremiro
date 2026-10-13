@@ -41,9 +41,18 @@ type TrackChangeHandler = (
   options?: TrackChangeOptions,
 ) => Promise<boolean>;
 
+// Stable stand-in while the effective query has no data — Rust emits canonical tokens, consumers normalize at use.
+const EMPTY_PLAYBACK_LANGUAGE_PREFERENCES: PlaybackLanguagePreferences = {};
+
 interface TrackAutoApplyAttemptState {
   fingerprint: string | null;
   count: number;
+}
+
+interface ManualTrackPreference {
+  id: number | 'no';
+  generation: number;
+  language: string | null;
 }
 
 interface SelectionWaiter {
@@ -60,10 +69,6 @@ interface UsePlayerTrackControllerArgs {
   isLoading: boolean;
   isResolving: boolean;
   resetKey: string;
-}
-
-function normalizeStoredPreference(value?: string | null): string | undefined {
-  return normalizeLanguageToken(value) || undefined;
 }
 
 function resetTrackAutoApplyAttempts(): Record<TrackType, TrackAutoApplyAttemptState> {
@@ -116,7 +121,12 @@ export function usePlayerTrackController({
   const autoApplyAttemptStateRef = useRef<Record<TrackType, TrackAutoApplyAttemptState>>(
     resetTrackAutoApplyAttempts(),
   );
-  const preferenceFingerprintRef = useRef<string | null>(null);
+  const previousPreferencesRef = useRef<Record<TrackType, string> | null>(null);
+  const manualTrackPreferencesRef = useRef<Record<TrackType, ManualTrackPreference | null>>({
+    audio: null,
+    sub: null,
+  });
+  const [preferenceSaveEpoch, setPreferenceSaveEpoch] = useState({ audio: 0, sub: 0 });
   const lastRecordedTrackOutcomeRef = useRef<string | null>(null);
 
   const resetTrackSelectionObservations = useCallback(() => {
@@ -136,10 +146,6 @@ export function usePlayerTrackController({
     setAudioTracks([]);
     setSubTracks([]);
   });
-
-  useEffect(() => {
-    resetTrackListState();
-  }, [activeStreamUrl]);
 
   const activeAudioTrack = useMemo(
     () => audioTracks.find((track) => !!track.selected) ?? null,
@@ -331,37 +337,17 @@ export function usePlayerTrackController({
     });
   }, []);
 
-  const {
-    globalPlaybackLanguagePreferences,
-    effectivePlaybackLanguagePreferences,
-    saveGlobalPlaybackLanguagePreferenceSelection,
-  } = usePlaybackLanguagePreferences({ mediaId, mediaType });
+  const { effectivePlaybackLanguagePreferences, saveGlobalPlaybackLanguagePreferenceSelection } =
+    usePlaybackLanguagePreferences({ mediaId, mediaType });
 
-  // Same precedence as Rust `merge_playback_language_preferences` (global
-  // wins, scoped fills gaps). Folded here rather than read from the effective
-  // query alone because the global cache carries a just-saved pick before the
-  // effective query refetches; auto-apply must never revert to the old one.
-  const playbackLanguagePreferences = useMemo<PlaybackLanguagePreferences>(
-    () => ({
-      preferredAudioLanguage:
-        normalizeStoredPreference(globalPlaybackLanguagePreferences?.preferredAudioLanguage) ??
-        normalizeStoredPreference(effectivePlaybackLanguagePreferences?.preferredAudioLanguage),
-      preferredSubtitleLanguage:
-        normalizeStoredPreference(globalPlaybackLanguagePreferences?.preferredSubtitleLanguage) ??
-        normalizeStoredPreference(effectivePlaybackLanguagePreferences?.preferredSubtitleLanguage),
-    }),
-    [
-      effectivePlaybackLanguagePreferences?.preferredAudioLanguage,
-      effectivePlaybackLanguagePreferences?.preferredSubtitleLanguage,
-      globalPlaybackLanguagePreferences?.preferredAudioLanguage,
-      globalPlaybackLanguagePreferences?.preferredSubtitleLanguage,
-    ],
-  );
+  // The save response writes the effective cache before its queue resolves — read it directly rather than folding global over it.
+  const playbackLanguagePreferences =
+    effectivePlaybackLanguagePreferences ?? EMPTY_PLAYBACK_LANGUAGE_PREFERENCES;
 
-  const resetAutoApplyState = useCallback(() => {
-    autoAppliedTrackPrefsRef.current = { audio: null, sub: null };
-    autoApplyingTrackPrefsRef.current = { audio: false, sub: false };
-    autoApplyAttemptStateRef.current = resetTrackAutoApplyAttempts();
+  const resetAutoApplyState = useCallback((type: TrackType) => {
+    autoAppliedTrackPrefsRef.current[type] = null;
+    autoApplyingTrackPrefsRef.current[type] = false;
+    autoApplyAttemptStateRef.current[type] = { fingerprint: null, count: 0 };
   }, []);
 
   const hasReachedAttemptLimit = useCallback((type: TrackType, fingerprint: string) => {
@@ -383,40 +369,17 @@ export function usePlayerTrackController({
     autoAppliedTrackPrefsRef.current[type] = fingerprint;
   }, []);
 
-  const persistSelectedTrackPreference = useCallback(
-    (type: TrackType, id: number | 'no', explicitTrack?: Track) => {
-      if (type === 'audio') {
-        const selectedAudioTrack = explicitTrack ?? audioTracks.find((track) => track.id === id);
-        void saveGlobalPlaybackLanguagePreferenceSelection(
-          'audio',
-          selectedAudioTrack ? toTrackLanguageCandidate(selectedAudioTrack) : undefined,
-        ).catch(() => undefined);
-        return;
-      }
-
-      if (id === 'no') {
-        void saveGlobalPlaybackLanguagePreferenceSelection('sub', undefined, {
-          subtitlesOff: true,
-        }).catch(() => undefined);
-        return;
-      }
-
-      const selectedSubtitleTrack = explicitTrack ?? subTracks.find((track) => track.id === id);
-      void saveGlobalPlaybackLanguagePreferenceSelection(
-        'sub',
-        selectedSubtitleTrack ? toTrackLanguageCandidate(selectedSubtitleTrack) : undefined,
-      ).catch(() => undefined);
-    },
-    [audioTracks, saveGlobalPlaybackLanguagePreferenceSelection, subTracks],
-  );
-
-  // Shared persist+guard tail: save the selection, then mark the fingerprint
-  // applied. The save lands async; until it propagates the auto-apply effect
-  // still sees the stale preference and would revert (visible flicker).
   const persistTrackSelection = useCallback(
     (type: TrackType, id: number | 'no', explicitTrack?: Track) => {
-      persistSelectedTrackPreference(type, id, explicitTrack);
-
+      const selectedTrack =
+        explicitTrack ??
+        trackListRef.current.find((track) => track.type === type && track.id === id);
+      const manual: ManualTrackPreference = {
+        id,
+        generation: trackRefreshGenerationRef.current,
+        language: null,
+      };
+      manualTrackPreferencesRef.current[type] = manual;
       const storedPreference = normalizeLanguageToken(
         type === 'audio'
           ? playbackLanguagePreferences.preferredAudioLanguage
@@ -429,14 +392,43 @@ export function usePlayerTrackController({
           trackListRef.current.filter((track) => track.type === type),
         ),
       );
+      void saveGlobalPlaybackLanguagePreferenceSelection(
+        type,
+        selectedTrack ? toTrackLanguageCandidate(selectedTrack) : undefined,
+        { subtitlesOff: type === 'sub' && id === 'no' },
+      )
+        .then((saved) => {
+          if (
+            manual.generation !== trackRefreshGenerationRef.current ||
+            manualTrackPreferencesRef.current[type] !== manual
+          )
+            return;
+          // Use Rust's canonical token from the acknowledgement, including inferred/aliased track languages.
+          manual.language = normalizeLanguageToken(
+            type === 'audio' ? saved.preferredAudioLanguage : saved.preferredSubtitleLanguage,
+          );
+        })
+        .catch(() => {
+          if (
+            manual.generation === trackRefreshGenerationRef.current &&
+            manualTrackPreferencesRef.current[type] === manual
+          )
+            manualTrackPreferencesRef.current[type] = null;
+        })
+        .finally(() => {
+          if (
+            manual.generation === trackRefreshGenerationRef.current &&
+            (manualTrackPreferencesRef.current[type] === manual ||
+              manualTrackPreferencesRef.current[type] === null)
+          )
+            setPreferenceSaveEpoch((epoch) => ({ ...epoch, [type]: epoch[type] + 1 }));
+        });
     },
-    [markApplied, persistSelectedTrackPreference, playbackLanguagePreferences],
+    [markApplied, saveGlobalPlaybackLanguagePreferenceSelection, playbackLanguagePreferences],
   );
 
-  // Single track-switch path: property write → confirm → persist; failures
-  // toast unless `silent`. Callers hold `trackSwitching[type]` for their whole
-  // span — the addon path's sub-add + verify must also block auto-apply, so
-  // the flag can't live inside this helper.
+  // Single switch path: write → confirm → persist; failures toast unless `silent`.
+  // Callers hold `trackSwitching[type]` for their whole span — the addon path's add+verify must also block auto-apply.
   const requestTrackSwitch = useCallback(
     async (
       type: TrackType,
@@ -637,29 +629,49 @@ export function usePlayerTrackController({
   );
 
   useEffect(() => {
-    resetAutoApplyState();
+    resetAutoApplyState('audio');
+    resetAutoApplyState('sub');
+    previousPreferencesRef.current = null;
+    manualTrackPreferencesRef.current = { audio: null, sub: null };
   }, [resetKey, resetAutoApplyState]);
 
   useEffect(() => {
-    const nextPreferenceFingerprint = JSON.stringify([
-      normalizeLanguageToken(playbackLanguagePreferences.preferredAudioLanguage),
-      normalizeLanguageToken(playbackLanguagePreferences.preferredSubtitleLanguage),
-    ]);
-
-    if (preferenceFingerprintRef.current === null) {
-      preferenceFingerprintRef.current = nextPreferenceFingerprint;
+    const nextPreferences = {
+      audio: normalizeLanguageToken(playbackLanguagePreferences.preferredAudioLanguage),
+      sub: normalizeLanguageToken(playbackLanguagePreferences.preferredSubtitleLanguage),
+    };
+    const previous = previousPreferencesRef.current;
+    if (previous === null) {
+      previousPreferencesRef.current = nextPreferences;
       return;
     }
-
-    if (preferenceFingerprintRef.current === nextPreferenceFingerprint) {
-      return;
+    for (const type of ['audio', 'sub'] as const) {
+      const manual = manualTrackPreferencesRef.current[type];
+      // Cache publication precedes save settlement; defer this type until its canonical acknowledgement arrives.
+      if (manual?.language === null) continue;
+      if (
+        manual?.language === nextPreferences[type] &&
+        doesTrackSelectionMatch(trackListRef.current, type, manual.id)
+      ) {
+        markApplied(
+          type,
+          buildTrackAutoApplyFingerprint(
+            nextPreferences[type],
+            trackListRef.current.filter((track) => track.type === type),
+          ),
+        );
+      } else if (previous[type] !== nextPreferences[type]) {
+        manualTrackPreferencesRef.current[type] = null;
+        resetAutoApplyState(type);
+      }
+      previous[type] = nextPreferences[type];
     }
-
-    preferenceFingerprintRef.current = nextPreferenceFingerprint;
-    resetAutoApplyState();
   }, [
     playbackLanguagePreferences.preferredAudioLanguage,
     playbackLanguagePreferences.preferredSubtitleLanguage,
+    preferenceSaveEpoch.audio,
+    preferenceSaveEpoch.sub,
+    markApplied,
     resetAutoApplyState,
   ]);
 
@@ -722,6 +734,7 @@ export function usePlayerTrackController({
   const isAutoApplyHandled = useCallback(
     (kind: TrackType, fingerprint: string) => {
       return (
+        manualTrackPreferencesRef.current[kind]?.language === null ||
         autoAppliedTrackPrefsRef.current[kind] === fingerprint ||
         autoApplyingTrackPrefsRef.current[kind] ||
         hasReachedAttemptLimit(kind, fingerprint)
@@ -759,6 +772,7 @@ export function usePlayerTrackController({
     isLoading,
     launchPreferredTrackAutoApply,
     playbackLanguagePreferences.preferredAudioLanguage,
+    preferenceSaveEpoch.audio,
     trackSwitching.audio,
   ]);
 
@@ -808,17 +822,18 @@ export function usePlayerTrackController({
     launchPreferredTrackAutoApply,
     markApplied,
     playbackLanguagePreferences.preferredSubtitleLanguage,
+    preferenceSaveEpoch.sub,
     setTrack,
     subTracks,
     trackSwitching.sub,
   ]);
 
   useEffect(() => {
-    lastRecordedTrackOutcomeRef.current = null;
-  }, [activeStreamUrl, mediaId, mediaType]);
-
-  useEffect(() => {
     if (!hasPlaybackStarted || isLoading || isResolving || !mediaId || isLocalMediaId(mediaId)) {
+      return;
+    }
+    // Duration can mark playback ready before the first track read — an empty outcome would delete this title's learned languages.
+    if (audioTracks.length === 0 && subTracks.length === 0) {
       return;
     }
 
@@ -848,15 +863,19 @@ export function usePlayerTrackController({
     activeAudioTrack,
     activeStreamUrl,
     activeSubTrack,
+    audioTracks.length,
     hasPlaybackStarted,
     isLoading,
     isResolving,
     mediaId,
     mediaType,
+    subTracks.length,
     subtitlesOff,
   ]);
 
   useEffect(() => {
+    resetTrackListState();
+    lastRecordedTrackOutcomeRef.current = null;
     trackSwitchingRef.current = { audio: false, sub: false };
     // Drop stale bursts and selection observations from the previous session.
     trackRefreshGenerationRef.current += 1;

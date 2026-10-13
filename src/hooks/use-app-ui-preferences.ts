@@ -1,7 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect } from 'react';
 
-import { type AppUiPreferences, type AppUiPreferencesPatch, api } from '@/lib/api';
+import { type AppUiPreferences, type AppUiPreferencesPatch, api, getErrorMessage } from '@/lib/api';
+import { notifyAction } from '@/lib/notify';
 import {
   claimOptimisticQueryWrite,
   runOptimisticQueryMutation,
@@ -27,15 +28,12 @@ export function registerAppUiPreferenceFlusher(flush: () => void): () => void {
 async function flushAppUiPreferenceWrites(): Promise<void> {
   // Drain player buffers into one shared IPC batch before the app write barrier.
   for (const flush of preferenceFlushers) flush();
-  // A patch landing mid-drain (a debounce timer or unmount flush racing the
-  // barrier) re-arms `flushPendingPreferences` — keep draining until no
-  // pending flush survives a full settle, or close/export strands it on a
-  // timer that never runs.
+  // A patch landing mid-drain re-arms flushPendingPreferences — keep draining
+  // until none survives a settle, or close/export strands it on a dead timer.
   for (;;) {
     const pending = flushPendingPreferences;
     if (!pending) break;
-    // Sequential on purpose: the settle must observe the tail the drain
-    // just registered — `Promise.all` would race it.
+    // Sequential: the settle must observe the tail the drain just registered.
     // eslint-disable-next-line no-await-in-loop
     await pending();
     // eslint-disable-next-line no-await-in-loop
@@ -56,8 +54,7 @@ const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   autoSkipIntro: false,
 };
 
-// Shared query wrapper: a `select` observer sees only its slice, so surfaces
-// reading one flag stop re-rendering on unrelated preference writes.
+// Shared query wrapper so `select` observers only re-render on their slice.
 function useAppUiPreferencesQuery<T = AppUiPreferences>(
   select?: (preferences: AppUiPreferences) => T,
 ) {
@@ -71,8 +68,7 @@ function useAppUiPreferencesQuery<T = AppUiPreferences>(
   });
 }
 
-/// Single-flag observer so unrelated preference writes don't re-render
-/// surfaces that only gate on spoiler protection.
+/// Spoiler-protection flag observer — unrelated writes don't re-render it.
 export function useSpoilerProtection(): boolean {
   const preferencesQuery = useAppUiPreferencesQuery((preferences) => preferences.spoilerProtection);
   return preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES.spoilerProtection;
@@ -102,23 +98,26 @@ export function useAppUiPreferences() {
     const latest =
       queryClient.getQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY) ??
       DEFAULT_APP_UI_PREFERENCES;
-    await runOptimisticQueryMutation({
-      mutate: api.saveAppUiPreferences,
-      optimisticData: { ...latest, ...mergedPatch },
-      queryClient,
-      queryKey: APP_UI_PREFERENCES_QUERY_KEY,
-      variables: mergedPatch,
-    });
+    try {
+      await runOptimisticQueryMutation({
+        mutate: api.saveAppUiPreferences,
+        optimisticData: { ...latest, ...mergedPatch },
+        queryClient,
+        queryKey: APP_UI_PREFERENCES_QUERY_KEY,
+        variables: mergedPatch,
+      });
+    } catch (error) {
+      notifyAction('Failed to save preferences', { detail: getErrorMessage(error), tone: 'error' });
+      throw error;
+    }
   }, [queryClient]);
 
-  // Cache data stays out of the callback dependencies so optimistic updates
-  // cannot rerun cleanup and flush a gesture before its timer settles.
+  // Cache stays out of deps so an optimistic update can't re-run cleanup and flush a gesture early.
   const updatePreferences = useCallback(
     (patch: AppUiPreferencesPatch) => {
       claimOptimisticQueryWrite(APP_UI_PREFERENCES_QUERY_KEY);
       void queryClient.cancelQueries({ queryKey: APP_UI_PREFERENCES_QUERY_KEY, exact: true });
-      // Compose on the latest cache value: two patches inside one render
-      // cycle must not drop each other's optimistic fields.
+      // Compose on the latest cache value so two patches in one render cycle don't drop each other's fields.
       queryClient.setQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY, (old) => ({
         ...(old ?? DEFAULT_APP_UI_PREFERENCES),
         ...patch,
@@ -139,8 +138,7 @@ export function useAppUiPreferences() {
 
   return {
     preferences: currentPreferences,
-    // Placeholder defaults stand in until hydration lands — controls that
-    // write whole fields should hold off so an early gesture can't flap.
+    // Controls writing whole fields should hold off while placeholder defaults stand in, so an early gesture can't flap.
     isHydrating: preferencesQuery.isPlaceholderData,
     updatePreferences,
   };

@@ -4,7 +4,7 @@ use super::media_normalization::normalize_media_item;
 use super::search_commands::{
     query_search_catalog_for_request, SearchCatalogPage, SearchCatalogRequest,
 };
-use crate::providers::{addon_resource::AddonResourceClient, MediaItem};
+use crate::providers::{addon_resource::AddonResourceClient, first_ascii_year_run, MediaItem};
 use futures_util::future::join_all;
 use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle, State};
@@ -34,16 +34,7 @@ fn lower_genres(item: &MediaItem) -> HashSet<String> {
 fn primary_year(item: &MediaItem) -> Option<u32> {
     // Preserve the recommendation policy's first four-digit year, including
     // historical dates outside the search catalog's narrower year bounds.
-    item.year
-        .as_ref()?
-        .as_bytes()
-        .windows(4)
-        .find(|window| window.iter().all(u8::is_ascii_digit))
-        .map(|digits| {
-            digits
-                .iter()
-                .fold(0, |year, digit| year * 10 + u32::from(digit - b'0'))
-        })
+    item.year.as_deref().and_then(first_ascii_year_run)
 }
 
 struct RankedTitle {
@@ -175,9 +166,8 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     seeds
 }
 
-/// Fetch and rank inside Rust: seed selection reads the same manifest
-/// snapshot the catalog fetch uses, candidate pages never enter the WebView,
-/// and only the bounded recommendation rail crosses IPC.
+/// Fetch and rank inside Rust: seed selection reads the same manifest snapshot the
+/// catalog fetch uses; only the bounded recommendation rail crosses IPC.
 #[command]
 pub async fn query_similar_titles(
     app: AppHandle,

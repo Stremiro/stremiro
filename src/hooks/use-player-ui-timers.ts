@@ -16,15 +16,12 @@ const OSD_CLEAR_DELAY_MS = 120;
 interface UsePlayerUiTimersArgs {
   isPlayingRef: RefObject<boolean>;
   mountedRef: RefObject<boolean>;
-  /** The OSD overlay only mounts in the expanded player — while docked, every
-   * seek/volume/track gesture would otherwise churn state for an overlay
-   * that cannot paint. */
+  /** OSD overlay only mounts in the expanded player — docked gestures must not churn its state. */
   osdEnabled: boolean;
   setOsdAction: Dispatch<SetStateAction<PlayerOsdAction | null>>;
   setOsdVisible: Dispatch<SetStateAction<boolean>>;
   setShowControls: Dispatch<SetStateAction<boolean>>;
-  /** Re-arms the auto-hide instead of hiding while it returns true (pointer
-      resting on the chrome, a popover open). */
+  /** While true, re-arms auto-hide instead of hiding (pointer on chrome, popover open). */
   shouldHoldControls?: () => boolean;
 }
 
@@ -88,8 +85,7 @@ export function usePlayerUiTimers({
         return;
       }
 
-      // Still inside the visible window: swap content in place. A hide/show
-      // cycle per wheel tick or held arrow reads as flicker.
+      // Swap content in place while still visible — a hide/show cycle per wheel tick reads as flicker.
       const alreadyVisible = osdTimerRef.current !== null;
       clearOsdTimers();
 
@@ -118,8 +114,7 @@ export function usePlayerUiTimers({
     [clearOsdTimers, osdEnabled, setOsdAction, setOsdVisible],
   );
 
-  // One owner for the message-OSD shape — every announcement is the same
-  // { kind: 'message', text, icon } literal.
+  // Every announcement is the same { kind: 'message', text, icon } literal.
   const announce = useCallback(
     (text: string, icon?: PlayerOsdMessageIcon) => {
       triggerOsd({ kind: 'message', text, icon });

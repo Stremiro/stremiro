@@ -14,7 +14,7 @@ import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { PROFILE_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 
-export type { AccentTargets, LocalProfile, LocalProfileUpdate, ProfileViewMode };
+export type { AccentTargets, LocalProfile, LocalProfileUpdate };
 
 const DEFAULT_ACCENT_TARGETS: AccentTargets = {
   navigation: true,
@@ -60,8 +60,7 @@ const FALLBACK_PROFILE_ACCENT: ReturnType<typeof selectProfileAccent> = {
   accentTargets: DEFAULT_PROFILE.accentTargets,
 };
 
-/// Accent-only observer for always-mounted chrome (Layout): re-renders only
-/// when the accent fields change, not on username or view-mode writes.
+/// Accent-only observer for always-mounted chrome — skips username/view-mode re-renders.
 export function useProfileAccent(): ReturnType<typeof selectProfileAccent> {
   const profilePreferencesQuery = useProfilePreferencesQuery(selectProfileAccent);
   return profilePreferencesQuery.data ?? FALLBACK_PROFILE_ACCENT;
@@ -72,8 +71,7 @@ const selectProfileAvatar = (preferences: ProfilePreferences) => {
   return { username, avatar };
 };
 
-/// Identity slice for the sidebar's Profile button — accent/view-mode writes
-/// leave it untouched.
+/// Identity slice for the sidebar Profile button — ignores accent/view-mode writes.
 export function useProfileAvatar(): ReturnType<typeof selectProfileAvatar> | undefined {
   return useProfilePreferencesQuery(selectProfileAvatar).data;
 }
@@ -92,8 +90,7 @@ export function useLocalProfile() {
   const persistPreferences = useCallback(
     (patch: ProfilePreferencesPatch) => {
       const operation = (async () => {
-        // Hydrate the optimistic display; Rust applies only the edited fields
-        // to the latest persisted profile under the store gate.
+        // Rust applies only the edited fields to the persisted profile under the store gate.
         await queryClient.ensureQueryData({
           queryKey: PROFILE_PREFERENCES_QUERY_KEY,
           queryFn: api.getProfilePreferences,
@@ -118,7 +115,7 @@ export function useLocalProfile() {
           variables: patch,
         });
       })();
-      // Track hydration too: a backup can start before the IPC write is queued.
+      // Track hydration too — a backup can start before the IPC write is queued.
       return trackPendingAppWrite(operation);
     },
     [queryClient, saveProfilePrefs],

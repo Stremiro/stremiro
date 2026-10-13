@@ -18,9 +18,8 @@ pub(super) const PLAYBACK_EPISODE_MAPPING_INDEX_KEY: &str = "playback_episode_ma
 pub(super) const PLAYBACK_EPISODE_MAPPING_ITEM_PREFIX: &str = "playback_episode_mapping_item:";
 pub(super) const PLAYBACK_EPISODE_MAPPING_DIGEST_ITEM_PREFIX: &str =
     "playback_episode_mapping_digest_item:";
-/// Hard bound for cached episode-coordinate mappings. Health indexes prune by
-/// recency; mappings are keyed per episode and would otherwise grow without
-/// bound as the user browses more series.
+/// Hard bound for cached episode-coordinate mappings — keyed per episode, they would
+/// otherwise grow without bound as the user browses.
 const PLAYBACK_EPISODE_MAPPING_MAX_ENTRIES: usize = 2_000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -69,8 +68,7 @@ pub(super) fn playback_episode_mapping_digest_item_key(scope_key: &str) -> Strin
     )
 }
 
-/// Split `{scope}:{season}:{episode}` into `(scope, season)` reading from
-/// the right — media ids may themselves contain `:`.
+/// Splits `{scope}:{season}:{episode}` into `(scope, season)` reading from the right — media ids may contain `:`.
 fn split_episode_snapshot_key(key: &str) -> Option<(&str, &str)> {
     let episode_split = key.rfind(':')?;
     let season_split = key[..episode_split].rfind(':')?;
@@ -87,12 +85,9 @@ fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
     split_episode_snapshot_key(key)?.1.parse::<u32>().ok()
 }
 
-/// Highest canonical season the title's cached episode mappings cover. The
-/// episode battery resolves numberless "final season" naming claims through
-/// it: a requested season at or beyond the max is the only season such a
-/// claim can refer to. An unmapped title yields `None` — the caller degrades
-/// to "not final", so final-season-named releases lose their loose-match
-/// credit and same-episode pools still rank by quality.
+/// Highest canonical season the title's cached mappings cover. The episode battery
+/// resolves numberless "final season" claims through it: a requested season at/beyond
+/// the max is the only season such a claim can refer to. `None` → caller degrades to "not final".
 pub(super) fn max_mapped_canonical_season(
     index_keys: &[String],
     media_type: &str,
@@ -106,17 +101,15 @@ pub(super) fn max_mapped_canonical_season(
         .max()
 }
 
-/// Digest plus the last details-open that verified it. `seen_at` feeds the
-/// cap prune's recency so actively opened titles outlive browsed-once ones;
-/// without it an active title would evict on its first-write age.
+/// Digest plus the last details-open that verified it. `seen_at` feeds the cap prune's
+/// recency so actively opened titles outlive browsed-once ones.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub(super) struct EpisodeMappingDigestRecord {
     pub(super) digest: u64,
     pub(super) seen_at: u64,
 }
 
-/// Reads both the current record shape and legacy bare-u64 digests (seen_at
-/// 0 keeps those prune-able until the next open rewrites the record).
+/// Reads both the current record shape and legacy bare-u64 digests (seen_at 0 keeps them prune-able).
 fn read_episode_mapping_digest(value: serde_json::Value) -> Option<(u64, u64)> {
     if let Some(digest) = value.as_u64() {
         return Some((digest, 0));
@@ -126,10 +119,9 @@ fn read_episode_mapping_digest(value: serde_json::Value) -> Option<(u64, u64)> {
         .map(|record| (record.digest, record.seen_at))
 }
 
-/// Fingerprint of every input `build_episode_mapping_snapshot` reads, so a
-/// details re-open with an unchanged episode list skips the per-episode
-/// store read/compare loop. Persisted per title; a mismatch (or eviction)
-/// simply costs one rescan, never a wrong result.
+/// Fingerprint of every input `build_episode_mapping_snapshot` reads, so a re-open
+/// with an unchanged episode list skips the per-episode read/compare loop.
+/// Persisted per title; a mismatch (or eviction) costs one rescan, never a wrong result.
 pub(super) fn episode_mappings_digest(
     media_type: &str,
     media_id: &str,
@@ -150,9 +142,7 @@ pub(super) fn episode_mappings_digest(
     hasher.finish()
 }
 
-/// Digest short-circuit for `cache_episode_mappings`: a stored digest equal
-/// to the just-computed one proves every item was already written, so the
-/// per-episode read/compare loop is skipped entirely.
+/// Digest short-circuit for `cache_episode_mappings`: a matching stored digest proves every item was already written.
 pub(super) fn stored_episode_mapping_digest_matches(
     store: &DurableStore,
     digest_key: &str,
@@ -175,20 +165,21 @@ pub(super) fn stored_episode_mapping_digest_matches(
     matches
 }
 
-/// Diff pass for `cache_episode_mappings`: walk episodes against stored
-/// snapshots, queue changed item writes, and register every snapshot key in
-/// the sorted index. The caller applies the queued writes only after a
-/// second generation check so a racing clear cannot land orphaned items.
-/// Returns the queued `(item key, snapshot)` writes plus whether the index
-/// gained a key.
-pub(super) fn collect_episode_mapping_writes(
+/// Diff pass for `cache_episode_mappings`: queues changed item writes and registers
+/// every snapshot key in the sorted index. The caller applies the writes only after
+/// a second generation check so a racing clear can't land orphaned items.
+pub(super) fn collect_episode_mapping_writes<'a>(
     store: &DurableStore,
     media_type: &str,
     media_id: &str,
     episodes: &[Episode],
-    snapshots: &[PlaybackEpisodeMappingSnapshot],
+    snapshots: &'a [PlaybackEpisodeMappingSnapshot],
     episode_mapping_index: &mut Vec<String>,
-) -> (Vec<(String, PlaybackEpisodeMappingSnapshot)>, bool) {
+) -> (
+    Vec<(String, &'a PlaybackEpisodeMappingSnapshot)>,
+    Vec<String>,
+    bool,
+) {
     let mut snapshot_keys = Vec::with_capacity(episodes.len().min(snapshots.len()));
     let mut pending_writes = Vec::new();
 
@@ -203,22 +194,34 @@ pub(super) fn collect_episode_mapping_writes(
             .is_none_or(|existing| !episode_mapping_snapshot_matches(&existing, next_snapshot));
 
         if needs_write {
-            pending_writes.push((snapshot_key.clone(), next_snapshot.clone()));
+            pending_writes.push((snapshot_key.clone(), next_snapshot));
         }
         snapshot_keys.push(snapshot_key);
     }
 
-    let changed = merge_sorted_unique(episode_mapping_index, snapshot_keys);
-    (pending_writes, changed)
+    snapshot_keys.sort_unstable();
+    snapshot_keys.dedup();
+    let scope_key = format!("{media_type}:{media_id}");
+    let mut pending_deletes = Vec::new();
+    if !snapshot_keys.is_empty() {
+        episode_mapping_index.retain(|key| {
+            let stale = episode_mapping_scope_key(key) == Some(scope_key.as_str())
+                && snapshot_keys.binary_search(key).is_err();
+            if stale {
+                pending_deletes.push(key.clone());
+            }
+            !stale
+        });
+    }
+    let mut changed = !pending_deletes.is_empty();
+    changed |= merge_sorted_unique(episode_mapping_index, snapshot_keys);
+    (pending_writes, pending_deletes, changed)
 }
 
 /// Cap prune for `cache_episode_mappings`: evicts oldest index entries by
-/// max(item `updated_at`, scope digest `seen_at`) and deletes the digest of
-/// every scope that lost an item — a surviving digest would suppress the
-/// rewrite those evicted items need on the next details open. Returns
-/// whether the index changed and whether this title's own digest was
-/// invalidated (its entries evicted), in which case the caller must not
-/// re-arm it.
+/// max(item `updated_at`, scope digest `seen_at`) and deletes the digest of every
+/// scope that lost an item — a surviving digest would suppress the rewrite those
+/// items need. Returns (index changed, own digest invalidated → caller must not re-arm it).
 pub(super) fn prune_episode_mapping_index(
     store: &DurableStore,
     episode_mapping_index: &mut Vec<String>,
@@ -250,9 +253,8 @@ pub(super) fn prune_episode_mapping_index(
             let item_updated = load_playback_episode_mapping_snapshot(store, key)
                 .map(|snapshot| snapshot.updated_at)
                 .unwrap_or(0);
-            // Item timestamps only move when coordinates change, so recency
-            // for the cap also rides the scope digest's `seen_at` — an
-            // actively opened title must not evict on its first-write age.
+            // Item timestamps only move when coordinates change, so recency also rides
+            // the scope digest's `seen_at` — an active title must not evict on write age.
             let scope_seen = episode_mapping_scope_key(key)
                 .and_then(|scope| scope_seen_at.get(scope))
                 .copied()
@@ -309,17 +311,35 @@ fn episode_mapping_snapshot_matches(
         && left.source_episode == right.source_episode
 }
 
+fn mapped_canonical_season_is_final(
+    store: &DurableStore,
+    media_type: &str,
+    media_id: &str,
+    season: u32,
+) -> bool {
+    let Some(scope_key) = super::playback_title_scope_key(Some(media_type), Some(media_id)) else {
+        return false;
+    };
+    // Any partial eviction removes the digest, so surviving keys cannot prove the final season.
+    if store
+        .get(playback_episode_mapping_digest_item_key(&scope_key))
+        .and_then(read_episode_mapping_digest)
+        .is_none()
+    {
+        return false;
+    }
+    let index = load_advisory_index(store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
+    max_mapped_canonical_season(&index, media_type, media_id)
+        .is_some_and(|max_season| season >= max_season)
+}
+
 impl PlaybackStateService {
-    /// Caches the canonical→source coordinate mapping for every episode and
-    /// returns the snapshots it resolved so callers enrich or look up
-    /// coordinates without a second store pass. `None` means the title's
-    /// scope inputs failed normalization, in which case no mapping exists.
-    ///
-    /// A per-title digest of the mapping inputs short-circuits repeat opens:
-    /// unchanged episode lists pay one small store read instead of a read +
-    /// JSON parse per episode. The digest lives in the same store it
-    /// describes, written under the same generation-guarded section, and is
-    /// deleted for any scope whose entries the cap prune evicts.
+    /// Caches the canonical→source coordinate mapping for every episode and returns
+    /// the resolved snapshots so callers skip a second store pass. `None` = the
+    /// scope inputs failed normalization.
+    /// A per-title digest short-circuits repeat opens (unchanged lists pay one small
+    /// read); it lives in the store under the same generation-guarded section and
+    /// is deleted for any scope whose entries the cap prune evicts.
     pub(crate) fn cache_episode_mappings(
         &self,
         app: &AppHandle,
@@ -336,12 +356,12 @@ impl PlaybackStateService {
         };
 
         if episodes.is_empty() {
+            // Empty addon metadata does not prove that previously mapped episodes were removed.
             return Ok(Some(Vec::new()));
         }
 
-        // Snapshots are a pure function of the episode list: compute them up
-        // front so they are returned even when the write is skipped or a
-        // racing clear drops it.
+        // Snapshots are a pure function of the episode list — compute up front so
+        // they're returned even when the write is skipped or a racing clear drops it.
         let normalized_fallback_lookup_id = fallback_lookup_id.and_then(normalize_media_id);
         let updated_at = now_unix_millis();
         let snapshots: Vec<PlaybackEpisodeMappingSnapshot> = episodes
@@ -367,26 +387,23 @@ impl PlaybackStateService {
 
         let start_generation = self.history_generation();
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
-        // `clear` wipes episode-mapping keys with history; a mapping fetch
-        // racing it must not repopulate them (same in-memory `set` hazard
-        // as `record_stream_outcome`). The lock makes the check-vs-write
-        // sequence atomic against `clear`/`remove_keys`.
+        // `clear` wipes episode-mapping keys with history; a racing fetch must not
+        // repopulate them (same `set` hazard as `record_stream_outcome`). The lock
+        // makes check-vs-write atomic against `clear`/`remove_keys`.
         let _state_file_guard = self.lock_state_file_write();
         if self.history_generation() != start_generation {
             return Ok(Some(snapshots));
         }
 
-        // Unchanged inputs: the stored digest proves every item was already
-        // written, so skip the per-episode read/compare loop entirely. The
-        // seen_at refresh lands in the shared in-memory map and rides the
-        // next writer's flush — no save of its own.
+        // Digest match proves every item was already written. The seen_at refresh
+        // lands in the in-memory map and rides the next writer's flush — no save of its own.
         if stored_episode_mapping_digest_matches(&store, &digest_key, digest, updated_at) {
             return Ok(Some(snapshots));
         }
 
         let mut episode_mapping_index =
             load_advisory_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
-        let (pending_writes, mut changed) = collect_episode_mapping_writes(
+        let (pending_writes, pending_deletes, mut changed) = collect_episode_mapping_writes(
             &store,
             media_type,
             &media_id,
@@ -395,10 +412,12 @@ impl PlaybackStateService {
             &mut episode_mapping_index,
         );
 
-        // Item writes apply only after a second generation check: a clear
-        // that bumped while this pass scanned cannot land orphaned items.
+        // Item writes apply only after a second generation check — a clear that bumped mid-scan can't land orphaned items.
         if self.history_generation() != start_generation {
             return Ok(Some(snapshots));
+        }
+        for snapshot_key in pending_deletes {
+            store.delete(playback_episode_mapping_item_key(&snapshot_key));
         }
         if !pending_writes.is_empty() {
             changed = true;
@@ -461,9 +480,8 @@ impl PlaybackStateService {
         ))
     }
 
-    /// Whether the requested canonical season is the show's final season,
-    /// per the cached episode-mapping index. Blocking store read: callers
-    /// run it on the blocking pool (`run_blocking_store_op`).
+    /// Whether the requested canonical season is the show's final season, per the
+    /// cached mapping index. Blocking store read — callers run it on `run_blocking_store_op`.
     pub(crate) fn episode_is_final_season(
         &self,
         app: &AppHandle,
@@ -483,9 +501,7 @@ impl PlaybackStateService {
             );
             return false;
         };
-        let index = load_advisory_index(&store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
-        max_mapped_canonical_season(&index, media_type, media_id)
-            .is_some_and(|max_season| season >= max_season)
+        mapped_canonical_season_is_final(&store, media_type, media_id, season)
     }
 }
 

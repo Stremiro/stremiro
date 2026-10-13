@@ -33,9 +33,8 @@ impl PendingAppUpdate {
 /// A stalled connection otherwise wedges `check()` (and the check lock every
 /// later check queues behind) for the rest of the session.
 const UPDATE_CHECK_TIMEOUT: Duration = Duration::from_secs(30);
-/// reqwest's per-request timeout is total-duration, so it cannot bound a
-/// legitimately long download — instead a watchdog aborts when no chunk has
-/// arrived for this long.
+/// reqwest's timeout is total-duration and can't bound a legit long download —
+/// instead a watchdog aborts when no chunk has arrived for this long.
 const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
 const UPDATE_DOWNLOAD_WATCHDOG_TICK: Duration = Duration::from_secs(15);
 
@@ -161,8 +160,7 @@ pub async fn install_app_update(
     let mut downloaded_bytes = 0_u64;
     let mut last_reported_percent = None::<u64>;
     // One stall clock shared by all three sites: chunk arrivals and the
-    // install-phase transition reset it, the watchdog reads it — three
-    // names for one `Instant` hid that they are the same cell.
+    // install-phase transition reset it, the watchdog reads it.
     let last_activity_at = Arc::new(Mutex::new(Instant::now()));
     let chunk_activity_at = last_activity_at.clone();
     let install_activity_at = last_activity_at.clone();
@@ -197,13 +195,11 @@ pub async fn install_app_update(
             }
         },
         move || {
-            // Download is done: reset the stall clock so the watchdog below
-            // measures install-time silence from here, not from the last
-            // downloaded byte.
+            // Download done: reset the stall clock so the watchdog measures
+            // install-time silence from here, not the last downloaded byte.
             *lock_or_recover(&install_activity_at) = Instant::now();
             // On Windows the process exits inside `download_and_install`, so
-            // RunEvent::Exit may never run — retry any failed durable-store
-            // saves here while the app is still alive.
+            // RunEvent::Exit may never run — retry failed durable-store saves here.
             if let Some(registry) = finish_app.try_state::<crate::commands::DurableStoreRegistry>()
             {
                 if let Err(error) = registry.flush_dirty() {
@@ -247,8 +243,7 @@ pub async fn install_app_update(
         )
     })?;
 
-    // On Windows `download_and_install` never returns on success: the plugin
-    // spawns the NSIS installer and exits the process (the installer's
-    // restart-after-install flag owns relaunch).
+    // On Windows `download_and_install` never returns on success — the plugin
+    // spawns the NSIS installer and exits (its restart flag owns relaunch).
     Ok(())
 }

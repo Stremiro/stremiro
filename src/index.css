@@ -311,14 +311,7 @@
     }
   }
 
-  /* Ambient activity: while a page flags work on html[data-ambient-active]
-     (see useAmbientActivity) the accent dot fields drift — the top-left
-     shimmers diagonally, the bottom-right marches horizontally with a soft
-     pulse, reading as a quiet loading bar. The fields translate a layer
-     oversized past the viewport edge (see layout.tsx): transform stays
-     compositor-side, unlike a background-position drift that repaints two
-     full-viewport layers every frame. Shifts are whole 8px tiles, so every
-     loop is seamless. */
+  /* Transform keeps oversized dot layers compositor-side; whole 8px tile shifts loop seamlessly. */
   @keyframes ambient-dots-drift {
     to {
       transform: translate(8px, 8px);

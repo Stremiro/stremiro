@@ -19,6 +19,7 @@ import {
   type ApiCacheGroups,
   bumpWatchProgressEpoch,
   clearProviderDataCaches,
+  withStreamingCacheClear,
 } from '@/lib/api-cache';
 import type { InvokeApi } from '@/lib/api-core';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
@@ -28,8 +29,7 @@ interface StoreApiContext {
   caches: ApiCacheGroups;
 }
 
-/** Library/list rows persist only `MediaItem` fields — a `MediaDetails`
-    caller must not ship its episode/cast/trailer arrays over IPC. */
+/** Persist only `MediaItem` fields — a `MediaDetails` caller must not ship episode/cast/trailer arrays over IPC. */
 export function toMediaItem({
   id,
   title,
@@ -38,11 +38,24 @@ export function toMediaItem({
   logo,
   description,
   year,
+  primaryYear,
   displayYear,
   genres,
   type,
 }: MediaItem): MediaItem {
-  return { id, title, poster, backdrop, logo, description, year, displayYear, genres, type };
+  return {
+    id,
+    title,
+    poster,
+    backdrop,
+    logo,
+    description,
+    year,
+    primaryYear,
+    displayYear,
+    genres,
+    type,
+  };
 }
 
 export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
@@ -53,8 +66,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     getAddonConfigs,
     inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
     updateAddonConfigs: (op: AddonConfigsOp) =>
-      // Track the full write (including the cache-clear continuation) so a
-      // close/export during a settings save waits on it — and sees failure.
+      // Track the full write incl. cache-clear so a close/export during save waits on it — and sees failure.
       trackPendingAppWrite(
         (async () => {
           const saved = await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
@@ -70,8 +82,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     getProfilePreferences: () => safeInvoke<ProfilePreferences>('get_profile_preferences'),
     saveProfilePreferences: (patch: ProfilePreferencesPatch) =>
       safeInvoke<ProfilePreferences>('save_profile_preferences', {
-        // Undefined means removal to the UI, but omitted fields mean preserve
-        // to Rust. Send explicit null only when the avatar was actually edited.
+        // Omitted fields preserve in Rust; send explicit null only when the avatar was actually edited.
         patch: 'avatar' in patch ? { ...patch, avatar: patch.avatar ?? null } : patch,
       }),
     getStreamSelectorPreferences: () =>
@@ -112,11 +123,12 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     },
     getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
     getDataStats: () => safeInvoke<DataStats>('get_data_stats'),
-    // Bump before the IPC lands: a progress save queued across this clear
-    // must not resurrect a wiped row when it flushes.
+    // Bump before the IPC lands — a queued progress save must not resurrect a wiped row.
     clearWatchHistory: () => {
       bumpWatchProgressEpoch();
-      return write<void>('clear_watch_history');
+      return trackPendingAppWrite(
+        withStreamingCacheClear(caches, safeInvoke<void>('clear_watch_history')),
+      );
     },
     clearLibrary: () => write<void>('clear_library'),
     clearAllLists: () => write<void>('clear_all_lists'),

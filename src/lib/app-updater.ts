@@ -11,8 +11,7 @@ export const APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY = [
 ] as const;
 const APP_UPDATE_PROGRESS_EVENT = 'app-update-progress';
 
-// Release links resolve against the same repo the updater endpoint polls
-// (plugins.updater.endpoints in tauri.conf.json).
+// Release links resolve against the repo the updater endpoint polls (tauri.conf.json endpoints).
 const APP_RELEASES_URL = 'https://github.com/stremiro/stremiro/releases';
 
 export function appReleaseTagUrl(version: string): string {
@@ -25,9 +24,7 @@ export interface AppUpdateHandle {
   date?: string | null;
 }
 
-// Mirrors the `phase`-tagged `AppUpdateProgress` enum emitted by Rust.
-// (No 'restarting' phase: on Windows the plugin exits the process once the
-// installer launches, so no event lands after 'installing'.)
+// Mirrors Rust's `phase`-tagged AppUpdateProgress — no 'restarting' phase: Windows exits once the installer launches.
 export type AppUpdateProgress =
   | { phase: 'downloading'; downloadedBytes: number; totalBytes: number | null }
   | { phase: 'installing' };
@@ -83,8 +80,7 @@ function writeAppUpdateState(
 }
 
 export function isUpdateReady(state?: Pick<AppUpdateState, 'status' | 'update'> | null): boolean {
-  // A known update stays "ready" through a background re-check (status flips
-  // to 'checking' for a moment) so the badge and install button never flicker.
+  // A known update stays "ready" through a background re-check so the badge/button never flicker.
   return state?.update != null && state.status !== 'up-to-date' && state.status !== 'error';
 }
 
@@ -128,10 +124,7 @@ export async function saveLastNotifiedAppUpdateVersion(
 ): Promise<string | null> {
   if (!isTauriDesktopRuntime()) return null;
 
-  // Let IPC failures propagate: callers recording the result as "saved"
-  // (the optimistic cache write) must not treat a write that never landed
-  // as success — a swallowed failure would masquerade as "never notified"
-  // and re-announce the same release.
+  // Let failures propagate — a swallowed one would masquerade as "never notified" and re-announce the same release.
   return invoke<string | null>('save_last_notified_app_update_version', {
     version,
   });
@@ -179,8 +172,7 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
         queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
       }
 
-      // The check can resolve after an install started — never let it stomp
-      // the 'installing' status, progress, or handle.
+      // A late check must not stomp an in-progress install's status/progress/handle.
       writeAppUpdateState(queryClient, (current) =>
         current.status === 'installing'
           ? current
@@ -221,14 +213,11 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
   return activeCheckPromise;
 }
 
-// Startup and interval checks funnel through here: the update is returned
-// only when this version has not been announced yet, so a long-running
-// session notifies exactly once per release.
+// Scheduled checks funnel here — returns the update only when this version hasn't been announced (once per release).
 export async function runScheduledAppUpdateCheck(
   queryClient: QueryClient,
 ): Promise<AppUpdateHandle | null> {
-  // Toasting + mark-notified during an install would both flash the banner
-  // mid-download and permanently mute the version if the install then fails.
+  // Notify during install would flash the banner mid-download and permanently mute the version if it fails.
   if (readAppUpdateState(queryClient).status === 'installing') return null;
 
   const update = await runAppUpdateCheck(queryClient);
@@ -243,8 +232,7 @@ export async function runScheduledAppUpdateCheck(
   return lastNotifiedVersion === update.version ? null : update;
 }
 
-// Low-level invoke: owns only the progress listener lifetime around the
-// pinned-version install call; dedup, state, and recovery live above.
+// Low-level invoke: owns only the progress listener lifetime; dedup, state, and recovery live above.
 async function installAppUpdate(
   version: string,
   onProgress: (progress: AppUpdateProgress) => void,
@@ -256,8 +244,7 @@ async function installAppUpdate(
   });
 
   try {
-    // `version` pins the install to the handle the UI presented — a check
-    // that swapped in a newer release is rejected, not silently installed.
+    // `version` pins the install to the presented handle — a newer release is rejected, not silently installed.
     await invoke('install_app_update', { version });
   } finally {
     unlisten();
@@ -268,8 +255,7 @@ export async function runAppUpdateInstall(
   queryClient: QueryClient,
   targetUpdate: AppUpdateHandle,
 ): Promise<void> {
-  // Whole-operation dedup: every caller joins the in-flight install and sees
-  // the same settle — one invoke, one recovery check, one error.
+  // Whole-operation dedup: every caller joins the in-flight install and sees the same settle.
   if (activeInstallPromise) {
     return activeInstallPromise;
   }
@@ -290,23 +276,17 @@ export async function runAppUpdateInstall(
     }));
 
     try {
-      // A check still in flight could swap the pending handle after install
-      // starts; its error is already rendered, so the rejection is swallowed.
+      // An in-flight check could swap the pending handle; its error is already rendered, so the rejection is swallowed.
       if (activeCheckPromise) {
         await activeCheckPromise.catch(() => undefined);
       }
 
-      // Settle current writes before downloading; periodic playback saves
-      // continue during download. A failure aborts into the normal recovery
-      // path instead of installing with a write still queued.
+      // Settle current writes before downloading; a failure aborts into normal recovery rather than installing mid-write.
       await flushPendingAppWrites();
 
-      // On Windows the backend exits the process once the installer launches,
-      // so this await only resolves on failure — there is no post-success write.
+      // Windows exits the process once the installer launches — this await only resolves on failure.
       await installAppUpdate(targetUpdate.version, (progress) => {
-        // Periodic watch-progress/preference saves keep running during the
-        // download; flush again as the installer launches so writes debounced
-        // inside that window aren't lost when the process exits.
+        // Saves keep running during the download — flush again at install-launch so debounced writes aren't lost at exit.
         if (progress.phase === 'installing') {
           void flushPendingAppWrites().catch(() => undefined);
         }
@@ -335,8 +315,7 @@ export async function runAppUpdateInstall(
         queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
       }
 
-      // A failed install consumes the backend handle: never retain the stale
-      // target as available. Only a fresh recovery check can re-arm retry.
+      // A failed install consumes the backend handle — only a fresh recovery check can re-arm retry.
       if (recoveredCheckSucceeded && recoveredUpdate) {
         writeAppUpdateState(queryClient, (current) => ({
           ...current,
@@ -358,8 +337,7 @@ export async function runAppUpdateInstall(
           errorMessage: null,
         }));
       } else {
-        // Rust install failures already carry the "run another update check"
-        // hint — don't append it a second time.
+        // Rust failures already carry the "run another check" hint — don't append it twice.
         writeAppUpdateState(queryClient, (current) => ({
           ...current,
           isSupported: true,

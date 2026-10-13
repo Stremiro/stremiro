@@ -1,6 +1,35 @@
-use super::{build_media_schedule, subtitle_lookup_id};
+use super::{build_media_schedule, subtitle_lookup_id, DetailsPrefetchBundle};
 use crate::commands::media_normalization::{normalize_media_details, normalize_media_item};
-use crate::providers::{Episode, MediaDetails};
+use crate::commands::watch_history_commands::TitleWatchProgress;
+use crate::providers::{Episode, MediaDetails, MediaSeason};
+
+#[test]
+fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress() {
+    let bundle = DetailsPrefetchBundle {
+        details: None,
+        progress: TitleWatchProgress {
+            history: Vec::new(),
+            continue_watching: Vec::new(),
+            episode_progress: std::collections::HashMap::new(),
+            watched_episode_ceiling: std::collections::HashMap::new(),
+            series_resume_entry: None,
+            movie_resume_entry: None,
+            latest_series_entry: None,
+            latest_movie_entry: None,
+            latest_entry: None,
+        },
+    };
+
+    let value = serde_json::to_value(&bundle).unwrap();
+    // `details` always serializes (null on a degraded prefetch); the
+    // progress shape must stay identical to `get_title_watch_progress`.
+    assert_eq!(value["details"], serde_json::Value::Null);
+    assert_eq!(value["progress"]["continueWatching"], serde_json::json!([]));
+    assert_eq!(
+        value["progress"]["watchedEpisodeCeiling"],
+        serde_json::json!({})
+    );
+}
 
 #[test]
 fn subtitle_lookup_preserves_scoped_ids_and_appends_only_complete_coordinates() {
@@ -68,6 +97,10 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
             thumbnail: Some(format!("{} tail", "t".repeat(2047))),
             ..episode("ep1", 1, 1, Some("2024-02-30"))
         }]),
+        seasons: Some(vec![MediaSeason {
+            number: 1,
+            episode_count: 1,
+        }]),
     };
     let once = normalize_media_details(details, "tt1");
     let twice = normalize_media_details(once.clone(), "tt1");
@@ -133,6 +166,10 @@ fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
             },
             episode("ep-2", 1, 2, None),
         ]),
+        seasons: Some(vec![MediaSeason {
+            number: 1,
+            episode_count: 5,
+        }]),
     };
     let original = serde_json::to_value(&details).unwrap();
     let schedule = build_media_schedule(&details, "kitsu:123", true);
@@ -177,6 +214,7 @@ fn build_media_schedule_keeps_movie_release_date_without_episode_payload() {
         genres: None,
         trailers: None,
         episodes: Some(vec![episode("unexpected", 1, 1, Some("2024-01-01"))]),
+        seasons: None,
     };
     let schedule = build_media_schedule(&details, "requested-movie", false);
 

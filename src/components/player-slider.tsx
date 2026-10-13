@@ -3,9 +3,8 @@ import React from 'react';
 import { cn } from '@/lib/utils';
 
 interface PlayerSliderProps extends React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> {
-  /** 'bar' matches the playback progress bar: a blocky rounded track with an
-      always-visible nub thumb instead of the pill track's hover-grow. */
-  variant?: 'pill' | 'bar';
+  /** 'bar' (volume): thin round track with an always-visible round thumb. 'pill': hairline track, slim nub shown on hover/focus/scrub. 'track' (mini seek): the bar alone, no thumb or hover change. */
+  variant?: 'pill' | 'bar' | 'track';
 }
 
 export const PlayerSlider = React.forwardRef<
@@ -35,10 +34,12 @@ export const PlayerSlider = React.forwardRef<
     >
       <SliderPrimitive.Track
         className={cn(
-          'relative w-full grow overflow-hidden',
-          variant === 'bar'
-            ? 'h-2 rounded-[3px] bg-white/[0.16] transition-[height] duration-150 group-hover/slider:h-[10px] group-focus-within/slider:h-[10px] motion-reduce:transition-none'
-            : 'h-[5px] rounded-full bg-white/15 transition-[height] duration-150 group-hover/slider:h-[7px]',
+          'relative w-full grow overflow-hidden rounded-full bg-white/20',
+          variant === 'bar' && 'h-1',
+          variant === 'track' &&
+            'h-1 group-has-[:focus-visible]/slider:ring-2 group-has-[:focus-visible]/slider:ring-white/60',
+          variant === 'pill' &&
+            'h-[3px] transition-[height] duration-150 group-hover/slider:h-[5px] group-focus-within/slider:h-[5px] motion-reduce:transition-none',
         )}
       >
         <SliderPrimitive.Range className='absolute h-full bg-white' />
@@ -49,14 +50,16 @@ export const PlayerSlider = React.forwardRef<
         aria-label={ariaLabel}
         aria-valuetext={ariaValueText}
         className={cn(
-          'block cursor-pointer',
-          variant === 'bar'
-            ? // Blocky nub — the playback bar's playhead shape at slider scale.
-              'h-[14px] w-[6px] rounded-[2px] bg-white shadow-[0_1px_4px_rgba(0,0,0,0.5)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-black'
-            : // Pill thumb stays invisible until hover/focus/scrub (touch has no
-              // hover — without the active state the handle is invisible for the
-              // whole drag).
-              'h-4 w-4 rounded-full bg-white shadow-[0_1px_4px_rgba(0,0,0,0.5)] opacity-0 transition-opacity duration-150 group-hover/slider:opacity-100 group-focus-within/slider:opacity-100 active:opacity-100 motion-reduce:transition-none',
+          'block cursor-pointer focus-visible:outline-none',
+          variant !== 'track' &&
+            'bg-white focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black',
+          variant === 'bar' &&
+            'h-3 w-3 rounded-full shadow-[0_1px_4px_rgba(0,0,0,0.5)] transition-transform duration-150 group-hover/slider:scale-110 motion-reduce:transition-none',
+          // Touch has no hover — active keeps the nub visible for the whole drag.
+          variant === 'pill' &&
+            'h-[10px] w-[3px] rounded-full shadow-[0_1px_3px_rgba(0,0,0,0.5)] opacity-0 transition-opacity duration-150 group-hover/slider:opacity-100 group-focus-within/slider:opacity-100 active:opacity-100 motion-reduce:transition-none',
+          // Invisible but kept: the thumb is the focusable role=slider; focus shows on the track instead.
+          variant === 'track' && 'h-3 w-0',
         )}
       />
     </SliderPrimitive.Root>

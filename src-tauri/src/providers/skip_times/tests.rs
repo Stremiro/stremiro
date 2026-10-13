@@ -1,7 +1,26 @@
 use super::{
-    collect_skip_db_segments, normalize_skip_segments, SkipDbSegmentEntry, SkipDbSegmentsResponse,
-    SkipSegment,
+    collect_skip_db_segments, normalize_skip_segments, skip_times_body_failure, SkipDbSegmentEntry,
+    SkipDbSegmentsResponse, SkipSegment, TRANSIENT_ERROR,
 };
+
+#[test]
+fn skipdb_body_failures_distinguish_transient_reads_from_oversize_payloads() {
+    assert_eq!(
+        skip_times_body_failure(crate::providers::BoundedBodyError::Read(
+            "disconnect".to_string()
+        ))
+        .unwrap_err(),
+        TRANSIENT_ERROR
+    );
+    assert!(
+        skip_times_body_failure(crate::providers::BoundedBodyError::TooLarge(
+            "oversize".to_string()
+        ))
+        .unwrap()
+        .segments
+        .is_empty()
+    );
+}
 
 #[test]
 fn normalize_skip_segments_merges_adjacent_same_type_entries() {
@@ -116,7 +135,7 @@ fn skipdb_response_converts_ms_and_keeps_all_submitted_segments() {
     };
 
     let segment = entry(response.segments.intro)
-        .into_segment("intro")
+        .into_segment("intro", None)
         .expect("intro converts");
     assert_eq!(
         segment,
@@ -129,12 +148,12 @@ fn skipdb_response_converts_ms_and_keeps_all_submitted_segments() {
 
     assert!(
         entry(response.segments.outro)
-            .into_segment("outro")
+            .into_segment("outro", None)
             .is_some(),
         "agnostic matches carry the canonical submitted cut and always convert"
     );
     assert!(entry(response.segments.preview)
-        .into_segment("preview")
+        .into_segment("preview", None)
         .is_some());
 }
 
@@ -153,7 +172,7 @@ fn skipdb_malformed_entry_drops_only_that_segment() {
     )
     .expect("malformed entries must not fail the response decode");
 
-    let segments = collect_skip_db_segments(response.segments);
+    let segments = collect_skip_db_segments(response.segments, None);
     assert_eq!(
         segments,
         vec![SkipSegment {
@@ -173,18 +192,25 @@ fn skipdb_out_of_range_entry_is_dropped() {
         end_ms: Some(2760000.0),
         match_: Some("out-of-range".to_string()),
     };
-    assert!(entry.into_segment("preview").is_none());
+    assert!(entry.into_segment("preview", Some(2820.0)).is_none());
 }
 
 #[test]
-fn skipdb_entry_without_match_or_end_is_dropped() {
-    // An end-less outro row only gets a real end when the request carries a
-    // stream duration (the API substitutes duration_ms); without it there is
-    // no usable cut.
-    let entry = SkipDbSegmentEntry {
+fn skipdb_end_less_outro_runs_to_requested_duration_only() {
+    let end_less = || SkipDbSegmentEntry {
         start_ms: 2700000.0,
         end_ms: None,
         match_: None,
     };
-    assert!(entry.into_segment("outro").is_none());
+    assert_eq!(
+        end_less().into_segment("outro", Some(2820.0)),
+        Some(SkipSegment {
+            type_: "outro".to_string(),
+            start_time: 2700.0,
+            end_time: 2820.0,
+        }),
+    );
+    // Without a stream duration there is no usable cut, and only outros run to the end.
+    assert!(end_less().into_segment("outro", None).is_none());
+    assert!(end_less().into_segment("preview", Some(2820.0)).is_none());
 }

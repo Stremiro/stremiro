@@ -5,7 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "deep-link:allow-get-current",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "https://github.com/*" }, { "url": "https://*.github.com/*" }]

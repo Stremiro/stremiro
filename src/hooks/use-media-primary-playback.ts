@@ -1,19 +1,13 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import {
-  api,
-  type HistoryPlaybackPlan,
-  type HistoryPlaybackPlanReason,
-  type MediaItem,
-  type WatchProgress,
-} from '@/lib/api';
-import { prefetchDetailsRouteData, prefetchFullDetailsData } from '@/lib/details-prefetch';
+import { type HistoryPlaybackPlanReason, type MediaItem, type WatchProgress } from '@/lib/api';
+import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
-import { applyHistoryPlaybackPlan, watchProgressCoordinates } from '@/lib/history-playback';
+import { openHistoryPlaybackPlan, watchProgressCoordinates } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
   buildDetailsRoute,
@@ -21,7 +15,7 @@ import {
   type PlayerRouteMediaType,
   resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import { formatSeasonEpisode } from '@/lib/utils';
+import { formatSeasonEpisode, isSeriesLikeMediaType } from '@/lib/utils';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
 type EpisodeSelectionReason = 'no-history' | HistoryPlaybackPlanReason;
@@ -43,7 +37,7 @@ function getPrimaryPlaybackLabel(
   resumeDetail?: string,
 ): string {
   if (isResolving) {
-    return 'Resolving…';
+    return 'Opening…';
   }
 
   if (!item) {
@@ -55,8 +49,7 @@ function getPrimaryPlaybackLabel(
       return hasResumePath ? 'Continue' : 'Start Watching';
     }
 
-    // Episode resumes name their target — "Continue S2:E4" beats a bare
-    // "Continue" that says nothing about where playback lands.
+    // Episode resumes name their target — "Continue S2:E4" beats a bare "Continue".
     return hasResumePath ? `Continue${resumeDetail ? ` ${resumeDetail}` : ''}` : 'Start Watching';
   }
 
@@ -91,13 +84,14 @@ export function useMediaPrimaryPlayback({
   const { session, presentation } = usePlayerSession();
   const playbackType: PlayerRouteMediaType = resolvePlayerRouteMediaType(item?.type);
   const activeSession =
-    presentation === 'mini' && session?.id === item?.id && session?.type === playbackType
+    presentation === 'mini' &&
+    session?.id === item?.id &&
+    (session?.type === playbackType ||
+      (isSeriesLikeMediaType(session?.type) && isSeriesLikeMediaType(playbackType)))
       ? session
       : null;
   const [isResolvingPrimaryAction, setIsResolvingPrimaryAction] = useState(false);
-  // "Resolving" appears only after a slow resolve (rising edge delayed) and
-  // clears the instant resolution ends — a trailing hold would flash the
-  // label over the screen the action just opened.
+  // Delay only the rising edge; completion clears feedback immediately.
   const [showResolvingFeedback, setShowResolvingFeedback] = useState(false);
   useEffect(() => {
     if (!isResolvingPrimaryAction) {
@@ -109,8 +103,15 @@ export function useMediaPrimaryPlayback({
   }, [isResolvingPrimaryAction]);
   const isMountedRef = useMountedRef();
   const primaryActionInFlightRef = useRef(false);
+  const primaryActionGenerationRef = useRef(0);
   const itemId = item?.id;
   const itemType = item?.type;
+  useLayoutEffect(() => {
+    // A title change frees the button; only a newer Play supersedes an explicit click.
+    primaryActionInFlightRef.current = false;
+    setIsResolvingPrimaryAction(false);
+    setShowResolvingFeedback(false);
+  }, [itemId, itemType]);
 
   const navigateToDetails = useCallback(() => {
     if (!itemId || !itemType) {
@@ -124,36 +125,6 @@ export function useMediaPrimaryPlayback({
     navigate(buildDetailsRoute(playbackType, itemId), { state: { from } });
   }, [from, itemId, itemType, navigate, playbackType, queryClient]);
 
-  const runActionWithFeedback = useCallback(
-    async (action: () => void | Promise<void>, errorTitle: string) => {
-      setIsResolvingPrimaryAction(true);
-
-      try {
-        await action();
-        return true;
-      } catch (error) {
-        toast.error(errorTitle, {
-          description: error instanceof Error ? error.message : 'Please try again.',
-        });
-        return false;
-      } finally {
-        if (isMountedRef.current) {
-          setIsResolvingPrimaryAction(false);
-        }
-      }
-    },
-    [isMountedRef],
-  );
-
-  const handleHistoryPlaybackPlan = useCallback(
-    (plan: HistoryPlaybackPlan) =>
-      applyHistoryPlaybackPlan(navigate, plan, {
-        onSelectEpisode,
-        isCancelled: () => !isMountedRef.current,
-      }),
-    [isMountedRef, navigate, onSelectEpisode],
-  );
-
   const handlePrimaryAction = useCallback(async () => {
     if (!item || primaryActionInFlightRef.current) {
       return;
@@ -163,27 +134,25 @@ export function useMediaPrimaryPlayback({
       return;
     }
 
-    // Most paths below end in a player mount — start the lazy chunk fetch
-    // while history/episode resolution runs.
-    warmPlayerChunk();
     primaryActionInFlightRef.current = true;
+    const generation = ++primaryActionGenerationRef.current;
+    const isCurrentAction = () =>
+      isMountedRef.current && generation === primaryActionGenerationRef.current;
     try {
       if (historyEntry) {
-        await runActionWithFeedback(
-          async () => {
-            // Same overlap as continue watching: the player's episode-mapping
-            // gate waits on full details for series-like titles.
-            prefetchFullDetailsData(queryClient, {
-              mediaId: historyEntry.id,
-              mediaType: historyEntry.type_,
-            });
-            const plan = await api.buildHistoryPlaybackPlan(historyEntry, from);
-            await handleHistoryPlaybackPlan(plan);
-          },
+        setIsResolvingPrimaryAction(true);
+        await openHistoryPlaybackPlan(
+          navigate,
+          historyEntry,
+          from,
           getHistoryPlaybackErrorTitle(surface, item),
+          queryClient,
+          { onSelectEpisode, isCancelled: () => !isCurrentAction() },
         );
         return;
       }
+
+      warmPlayerChunk();
 
       if (item.type !== 'movie') {
         if (onSelectEpisode) {
@@ -196,7 +165,15 @@ export function useMediaPrimaryPlayback({
       }
 
       if (onPlayMovieWithoutHistory) {
-        await runActionWithFeedback(onPlayMovieWithoutHistory, 'Failed to start playback');
+        setIsResolvingPrimaryAction(true);
+        try {
+          await onPlayMovieWithoutHistory();
+        } catch (error) {
+          if (!isCurrentAction()) return;
+          toast.error('Failed to start playback', {
+            description: error instanceof Error ? error.message : 'Please try again.',
+          });
+        }
         return;
       }
 
@@ -204,59 +181,46 @@ export function useMediaPrimaryPlayback({
       const toastId = toast.loading('Finding best stream…', { description: item.title });
 
       try {
-        // Same command as the player path, with ranking context so title
-        // affinity and language prefs score instead of falling back to zero.
+        // Same resolve as the player path; ranking context lets title affinity and language prefs score.
         const request = {
           mediaType: playbackType,
           mediaId: item.id,
-          // Pin the id the prime keys under: without it the player's replay
-          // chain prefers `details.imdbId` and misses the primed entry on
-          // aliased titles (kitsu/tt).
+          // Pin the prime-key id — the player's replay prefers `details.imdbId` and misses primed entries on aliased titles (kitsu/tt).
           streamLookupId: item.id,
           title: item.title,
         };
         const resolved = await resolvePlayerStream(request);
 
         toast.dismiss(toastId);
+        if (!isCurrentAction()) return;
 
         if (!resolved.url) {
           toast.error('No streams found', { description: item.title });
-          if (isMountedRef.current) {
-            navigateToDetails();
-          }
+          navigateToDetails();
           return;
         }
-
-        // The resolve can take seconds; if the initiating surface unmounted
-        // meanwhile, navigating would yank the user away from wherever they
-        // went (the selector's own path guards this with attempt ids).
-        if (isMountedRef.current) {
-          launchResolvedStream(navigate, request, resolved, {
-            backdrop: item.backdrop,
-            from,
-            poster: item.poster,
-          });
-        }
+        launchResolvedStream(navigate, request, resolved, {
+          backdrop: item.backdrop,
+          from,
+          poster: item.poster,
+        });
       } catch {
         toast.dismiss(toastId);
+        if (!isCurrentAction()) return;
         toast.error('Could not resolve stream', {
           description: 'Opening details page instead…',
         });
-        if (isMountedRef.current) {
-          navigateToDetails();
-        }
-      } finally {
-        if (isMountedRef.current) {
-          setIsResolvingPrimaryAction(false);
-        }
+        navigateToDetails();
       }
     } finally {
-      primaryActionInFlightRef.current = false;
+      if (isCurrentAction()) {
+        primaryActionInFlightRef.current = false;
+        setIsResolvingPrimaryAction(false);
+      }
     }
   }, [
     activeSession,
     from,
-    handleHistoryPlaybackPlan,
     historyEntry,
     isMountedRef,
     item,
@@ -266,7 +230,6 @@ export function useMediaPrimaryPlayback({
     onSelectEpisode,
     playbackType,
     queryClient,
-    runActionWithFeedback,
     surface,
   ]);
 

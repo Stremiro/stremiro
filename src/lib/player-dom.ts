@@ -1,6 +1,4 @@
-// Player-surface DOM utilities: interactive-region hit-testing plus the
-// document-level cursor/background mutations the player applies while
-// expanded. Kept in lib so the page component stays declarative.
+// Player-surface DOM utilities: hit-testing plus document-level cursor/background mutations while expanded.
 
 import type { MouseEvent } from 'react';
 
@@ -25,8 +23,7 @@ export function blurActivePlayerControl(): void {
   }
 }
 
-// body, documentElement, and #root all need the color — a partial write
-// leaves the page background bleeding through mpv's transparent frame.
+// All three need the color — a partial write leaves the page background bleeding through mpv's transparent frame.
 function setSurfaceBackground(value: string): void {
   document.body.style.backgroundColor = value;
   document.documentElement.style.backgroundColor = value;

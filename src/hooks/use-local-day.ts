@@ -1,8 +1,7 @@
 import { addDays, startOfDay } from 'date-fns';
 import { useSyncExternalStore } from 'react';
 
-// One midnight clock for the whole app: every mounted consumer used to arm
-// its own timer plus visibility/focus listeners.
+// Single shared midnight-rollover clock; consumers subscribe rather than arming their own timers.
 let currentDay = startOfDay(new Date());
 const listeners = new Set<() => void>();
 let timer = 0;
@@ -34,7 +33,7 @@ function onReturnToView() {
 
 function subscribe(listener: () => void) {
   if (listeners.size === 0) {
-    // Catch up a day that rolled while nobody was listening, then arm.
+    // Catch up a missed rollover, then arm.
     updateDay();
     scheduleMidnight();
     document.addEventListener('visibilitychange', onReturnToView);

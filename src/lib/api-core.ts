@@ -23,8 +23,7 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-/** `kind` tag of a structured Rust command error (carried as the `cause`
-    of the Error `safeInvoke` throws). */
+/** `kind` tag of a structured Rust command error (carried as the Error's `cause`). */
 export function getErrorKind(error: unknown): string | undefined {
   const cause = error instanceof Error ? error.cause : error;
   if (typeof cause !== 'object' || cause === null) return undefined;
@@ -33,20 +32,14 @@ export function getErrorKind(error: unknown): string | undefined {
 }
 
 export async function safeInvoke<T>(command: string, args?: object): Promise<T> {
-  // Tauri #[command] exposes Rust params to JS in camelCase by default
-  // (Rust `media_type` <-> JS `mediaType`, Rust `type_` <-> JS `type`).
-  // Keep every flat invoke key camelCase here; nested struct payloads follow
-  // their own serde renames (usually camelCase too, e.g. SearchCatalogRequest).
-  // `object` keeps structured payloads (e.g. PlaybackStreamOutcomeReport)
-  // passable without per-site `as unknown as Record` erasure; the single
-  // narrowing cast below is the only invoke-boundary cast.
+  // Tauri #[command] maps Rust params to camelCase JS keys (media_type→mediaType,
+  // type_→type); nested struct payloads follow their own serde renames.
   try {
     if (isTauriDesktopRuntime()) {
       return await invoke<T>(command, args as Record<string, unknown> | undefined);
     }
 
-    // Browser preview is a dev-only workflow: gating on DEV keeps the
-    // Rust-mirroring mock fork out of production builds entirely.
+    // DEV gate keeps the browser-preview mock fork out of production builds.
     if (isDev) {
       console.warn(`[Preview] invoking ${command}`);
       const { handlePreviewInvoke } = await import('@/lib/api-preview-mocks');
@@ -59,7 +52,6 @@ export async function safeInvoke<T>(command: string, args?: object): Promise<T> 
     throw new Error(message || 'Unknown error (empty message)', { cause: error });
   }
 
-  // Outside the try: this isn't an invoke failure, so it must not be
-  // dev-logged as one or re-wrapped with itself as its own cause.
+  // Outside the try — not an invoke failure, must not be dev-logged/re-wrapped as one.
   throw new Error(`Command "${command}" requires the Tauri desktop runtime.`);
 }

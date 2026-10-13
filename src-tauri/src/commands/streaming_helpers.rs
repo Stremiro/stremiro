@@ -2,19 +2,20 @@ use super::config_store::AddonConfig;
 use super::history_helpers::STREAM_KEY_MAX_CHARS;
 use crate::providers::addon_resource::is_magnet_url;
 use crate::providers::addons::{
-    normalize_separators, stream_contains_batch_texts, AddonStream, StreamDeliveryKind,
-    StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution, StreamResolutionTier,
+    language_mention_is_audio, normalize_separators, stream_contains_batch_texts, AddonStream,
+    StreamDeliveryKind, StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution,
+    StreamResolutionTier,
 };
 use crate::providers::{non_blank, push_unique};
 use regex::Regex;
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, VecDeque};
-use std::sync::{LazyLock, Mutex, PoisonError};
+use std::collections::HashMap;
+use std::sync::LazyLock;
 
 static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i)",
-        r"\bs\d{1,2}e\d{1,4}\b",
+        r"\bs\d{1,2}e\d{1,4}(?:-?e\d{1,4})*\b",
         r"|\b\d{1,2}x\d{1,4}\b",
         r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
         r"|\b#\d{1,4}\b",
@@ -29,26 +30,30 @@ static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("valid stream family non-word regex"));
 static STREAM_LANGUAGE_TAG_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[[A-Z]{2,3}\]").expect("valid stream language tag regex"));
+/// Emoji/pictograph blocks addons decorate names with, plus joiners and variation selectors.
+const STREAM_PICTOGRAPH_CLASS: &str = r"\x{1F000}-\x{1FAFF}\x{2300}-\x{23FF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{200D}\x{20E3}\x{FE0E}\x{FE0F}\x{E0020}-\x{E007F}";
 static STREAM_META_ONLY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"[\x{26A1}\x{2B07}\x{1F4BE}\x{1F464}\x{1F331}\s\[\]|]")
+    Regex::new(&format!(r"[{STREAM_PICTOGRAPH_CLASS}\s\[\]|]"))
         .expect("valid stream meta-only regex")
 });
-static STREAM_LEADING_META_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[\x{26A1}\x{2B07}\x{1F4BE}\x{1F464}\x{1F331}\s]+")
-        .expect("valid stream leading meta regex")
+static STREAM_PICTOGRAPH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!("[{STREAM_PICTOGRAPH_CLASS}]+")).expect("valid stream pictograph regex")
 });
+static STREAM_BRACKET_PADDING_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"([\[(])\s+|\s+([\])])").expect("valid stream bracket padding regex")
+});
+static STREAM_EMPTY_BRACKETS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[\]|\(\)").expect("valid stream empty brackets regex"));
 static STREAM_FILENAME_HINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)([\w].*\d{3,4}p|S\d{1,2}E\d{1,4})").expect("valid stream filename hint regex")
 });
 static STREAM_SIZE_LABEL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)([\d.]+)\s*(GB|MB|GiB|MiB)\b").expect("valid stream size label regex")
+    Regex::new(r"(?i)([\d.]+)\s*([KMGT]i?B)\b").expect("valid stream size label regex")
 });
 
 fn normalize_stream_family_component(value: &str) -> Option<String> {
-    // `_` is a word character and defeats the `\b` anchors below — map it
-    // to a space first (the `normalize_separators` pitfall), or
-    // `_`-joined release names keep episode/size tokens and fragment the
-    // family key per episode.
+    // `_` is a word char and defeats the `\b` anchors below — normalize separators
+    // first or `_`-joined release names keep episode/size tokens and fragment the key.
     let value = normalize_separators(value);
     let normalized = STREAM_FAMILY_EPISODE_REGEX.replace_all(&value, " ");
     let normalized = STREAM_FAMILY_SIZE_REGEX.replace_all(&normalized, " ");
@@ -68,28 +73,22 @@ fn normalize_stream_family_component(value: &str) -> Option<String> {
     }
 }
 
-/// Single-stream wrapper for tests — production batches go through
-/// `derive_stream_family_normalized` with the source normalized once.
+/// Test wrapper — production batches call `derive_stream_family_normalized` directly.
 #[cfg(test)]
 pub(crate) fn derive_stream_family(stream: &AddonStream, source_name: &str) -> Option<String> {
     let normalized_source = normalize_stream_family_component(source_name)?;
-    derive_stream_family_normalized(stream, &normalized_source)
+    Some(derive_stream_family_normalized(stream, &normalized_source))
 }
 
-/// `derive_stream_family` with the source component already normalized —
-/// `prepare_addon_streams` computes it once per batch instead of re-running
-/// the 3-regex normalize on every stream of the same addon.
-fn derive_stream_family_normalized(
-    stream: &AddonStream,
-    normalized_source: &str,
-) -> Option<String> {
+/// Source component already normalized — `prepare_addon_streams` computes it once per batch.
+fn derive_stream_family_normalized(stream: &AddonStream, normalized_source: &str) -> String {
     if let Some(binge_group) = stream
         .behavior_hints
         .as_ref()
         .and_then(|hints| hints.binge_group.as_deref())
         .and_then(normalize_stream_family_component)
     {
-        return Some(format!("{}|binge:{}", normalized_source, binge_group));
+        return format!("{}|binge:{}", normalized_source, binge_group);
     }
 
     let hint = stream
@@ -100,20 +99,21 @@ fn derive_stream_family_normalized(
         .or(stream.title.as_deref())
         .and_then(normalize_stream_family_component);
 
-    hint.map(|value| format!("{}|release:{}", normalized_source, value))
-        .or_else(|| {
+    hint.map_or_else(
+        || {
             let delivery = match stream_delivery_kind(stream) {
                 StreamDeliveryKind::Cached => "cached",
                 StreamDeliveryKind::Http => "http",
                 StreamDeliveryKind::PeerToPeer => "p2p",
             };
-            Some(format!("{}|delivery:{}", normalized_source, delivery))
-        })
+            format!("{}|delivery:{}", normalized_source, delivery)
+        },
+        |value| format!("{}|release:{}", normalized_source, value),
+    )
 }
 
 fn stream_delivery_kind(stream: &AddonStream) -> StreamDeliveryKind {
-    // The cache hint is advisory text; without a direct HTTP URL the row can
-    // only be resolved as P2P, whatever the addon claims.
+    // Without a direct HTTP URL the row resolves as P2P whatever the `cached` hint claims.
     if !stream.url.as_deref().is_some_and(is_http_url) {
         StreamDeliveryKind::PeerToPeer
     } else if stream.cached {
@@ -137,8 +137,7 @@ pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
 }
 
 pub(crate) fn is_http_url(input: &str) -> bool {
-    // Scheme probe only — `normalize_http_url` would allocate a re-serialized
-    // String per call just to drop it.
+    // Scheme probe only — `normalize_http_url` would allocate a String per call just to drop it.
     let trimmed = input.trim();
     !trimmed.is_empty()
         && reqwest::Url::parse(trimmed)
@@ -147,7 +146,6 @@ pub(crate) fn is_http_url(input: &str) -> bool {
 }
 
 pub(crate) fn has_playable_stream_source(stream: &AddonStream) -> bool {
-    // One URL parse per stream — is_http_url/magnet-check/normalize share it.
     if stream.info_hash.as_deref().is_some_and(non_blank) {
         return true;
     }
@@ -167,8 +165,7 @@ pub(crate) fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
     let texts = stream.match_texts();
     let name = texts.name.as_deref().unwrap_or("");
     let title = texts.title.as_deref().unwrap_or("");
-    // `no_streams_available` is an underscore literal in provider payloads;
-    // the match text normalizes `_` to a space, so probe the spaced form.
+    // `no_streams_available` arrives as an underscore literal; match texts normalize `_` to space.
     let filename = texts.filename.as_deref().unwrap_or("");
 
     name.contains("[blocked]")
@@ -178,15 +175,12 @@ pub(crate) fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
         || filename.contains("no streams available")
 }
 
-/// The hash segment of an `h:` dedup key is capped so `h:{hash}:{file_idx}`
-/// fits `STREAM_KEY_MAX_CHARS` — the key persists as `last_stream_key` and is
-/// truncated there. Real btih/btmh values are far shorter; only hostile
-/// payloads reach this.
+/// Hash segment cap so `h:{hash}:{file_idx}` fits `STREAM_KEY_MAX_CHARS` (persisted as
+/// `last_stream_key`). Real btih/btmh values are far shorter; only hostile payloads reach this.
 const STREAM_HASH_KEY_MAX_CHARS: usize = STREAM_KEY_MAX_CHARS - 16;
 
 fn stream_hash_dedup_key(hash: String, file_idx: Option<u32>) -> String {
-    // Byte length bounds char count from above — an already-short hash is
-    // its own truncation, skip the rebuilding collect.
+    // Byte length bounds char count from above — a short hash skips the rebuilding collect.
     let hash: String = if hash.len() <= STREAM_HASH_KEY_MAX_CHARS {
         hash
     } else {
@@ -206,18 +200,14 @@ pub(crate) fn stream_dedup_key(stream: &AddonStream) -> Option<String> {
         return Some(stream_hash_dedup_key(hash, stream.file_idx));
     }
 
-    // Magnet-only streams (URL but no `info_hash` — allowed by the addon
-    // spec) reuse the `xt` hash as the `h:` identity so they dedupe against
-    // field-carrying duplicates; the URL branch below rejects non-http(s).
+    // Magnet-only streams (URL but no `info_hash` — allowed by the addon spec) reuse the
+    // `xt` hash as the `h:` identity so they dedupe against field-carrying duplicates.
     if let Some(hash) = stream.url.as_deref().and_then(magnet_xt_hash) {
         return Some(stream_hash_dedup_key(hash, stream.file_idx));
     }
 
-    // Same canonicalization as `normalize_http_url`, plus the per-file index:
-    // URL variants of one file dedupe to a single selector row while distinct
-    // files stay separate. The URL is hashed because `stream_key` is
-    // webview-facing/persisted and a normalized URL can still carry
-    // signed-query credentials.
+    // URL variants of one file dedupe together; distinct file_idx stay separate. The URL is
+    // hashed — `stream_key` is webview-facing/persisted and may carry signed-query credentials.
     stream
         .url
         .as_deref()
@@ -231,9 +221,8 @@ pub(crate) fn stream_dedup_key(stream: &AddonStream) -> Option<String> {
         })
 }
 
-/// `xt` content hash from a `magnet:` URL (`urn:btih:`/`urn:btmh:`), lowercased,
-/// or `None` for non-magnet or xt-less URLs. The hash is content-derived, not
-/// credential-bearing, so it is safe to use as a persisted dedup identity.
+/// `xt` content hash from a `magnet:` URL (`urn:btih:`/`urn:btmh:`), lowercased.
+/// Content-derived (not credential-bearing), so safe as a persisted dedup identity.
 fn magnet_xt_hash(url: &str) -> Option<String> {
     let trimmed = url.trim();
     if !is_magnet_url(trimmed) {
@@ -253,9 +242,8 @@ fn magnet_xt_hash(url: &str) -> Option<String> {
         .find(|hash| !hash.is_empty())
 }
 
-/// Stable 64-bit stream-URL fingerprint: first 8 bytes of SHA-256 over the
-/// canonicalized URL, hex-encoded. Truncation is safe at selector scale —
-/// streams per title are bounded well below the birthday bound — and the
+/// 64-bit stream-URL fingerprint: first 8 bytes of SHA-256 over the canonicalized URL.
+/// Truncation is safe — streams per title sit far below the birthday bound — and the
 /// digest is irreversible, so dedup keys carry no credential material.
 fn stream_url_key_digest(normalized_url: &str) -> u64 {
     let digest = Sha256::digest(normalized_url.as_bytes());
@@ -264,10 +252,8 @@ fn stream_url_key_digest(normalized_url: &str) -> u64 {
         .fold(0u64, |acc, byte| (acc << 8) | u64::from(*byte))
 }
 
-/// Canonical stream-URL form for deduplication: lowercase host, sorted query
-/// (known tracking keys dropped), credentials/fragment cleared. Returns `None`
-/// for unparseable URLs so the caller skips the row instead of keying on raw
-/// attacker-controlled bytes.
+/// Canonical stream-URL form for dedup: lowercase host, sorted query (tracking keys dropped),
+/// credentials/fragment cleared. `None` for unparseable URLs — never key on raw attacker bytes.
 fn normalize_stream_dedup_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -311,8 +297,7 @@ fn normalize_stream_dedup_url(raw: &str) -> Option<String> {
     Some(parsed.to_string())
 }
 
-/// Resolution points for the composite quality score — the score side of
-/// the shared `StreamResolutionTier` classifier (`StreamMatchText::flags`).
+/// Resolution points for the composite quality score (`StreamMatchText::flags` classifier).
 fn stream_resolution_quality_points(tier: StreamResolutionTier) -> i32 {
     match tier {
         StreamResolutionTier::P2160 => 400,
@@ -328,8 +313,7 @@ fn stream_resolution(tier: StreamResolutionTier) -> StreamResolution {
         StreamResolutionTier::P2160 => StreamResolution::P2160,
         StreamResolutionTier::P1080 => StreamResolution::P1080,
         StreamResolutionTier::P720 => StreamResolution::P720,
-        // The badge enum stops at three tiers: 480p ranks above SD but
-        // still presents as SD.
+        // Badge enum stops at three tiers: 480p ranks above SD but presents as SD.
         StreamResolutionTier::P480 | StreamResolutionTier::Sd => StreamResolution::Sd,
     }
 }
@@ -393,22 +377,18 @@ pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) 
             .get(1)
             .map(|capture| capture.as_str())
             .unwrap_or_default();
-        let unit = match captures
+        let unit = captures
             .get(2)
             .map(|capture| capture.as_str())
             .unwrap_or_default()
-        {
-            unit if unit.eq_ignore_ascii_case("gib") => "GB".to_string(),
-            unit if unit.eq_ignore_ascii_case("mib") => "MB".to_string(),
-            unit => unit.to_ascii_uppercase(),
-        };
+            .to_ascii_uppercase()
+            .replace('I', "");
 
         return Some(format!("{}{}", amount, unit));
     }
 
     size_bytes.map(|size_bytes| {
-        // Display-only GB label for a `u64` byte count; precision loss past
-        // 2^53 only affects the fractional digit of absurd sizes.
+        // Display-only; precision loss past 2^53 only affects the fractional digit.
         #[allow(clippy::cast_precision_loss)]
         let gb = size_bytes as f64 / 1_073_741_824.0;
         if gb >= 1.0 {
@@ -419,28 +399,55 @@ pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) 
     })
 }
 
+/// Display-only cleanup: drops addon emoji decoration. Pictographs become spaces first
+/// so `💾1.2GB👤5` cannot fuse into `1.2GB5`.
+fn strip_display_pictographs(value: &str) -> String {
+    let spaced = STREAM_PICTOGRAPH_REGEX.replace_all(value, " ");
+    let spaced = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
+    let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&spaced, "${1}${2}");
+    let cleaned = STREAM_EMPTY_BRACKETS_REGEX.replace_all(&unpadded, " ");
+    cleaned
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace())
+        .to_string()
+}
+
+fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, bool) {
+    let language_tag_count = [stream.name.as_deref(), stream.title.as_deref()]
+        .into_iter()
+        .flatten()
+        .map(|text| {
+            STREAM_LANGUAGE_TAG_REGEX
+                .find_iter(text)
+                .filter(|matched| language_mention_is_audio(&text[matched.end()..]))
+                .count()
+        })
+        .sum::<usize>();
+    (
+        language_tag_count == 2 || flags.dual_audio || flags.english_japanese_pair,
+        language_tag_count > 2 || flags.multi_audio,
+    )
+}
+
 fn build_stream_presentation(stream: &AddonStream) -> StreamPresentation {
-    let (raw_source_name, stream_title) = get_display_lines(stream);
-    let source_name = STREAM_LEADING_META_REGEX
-        .replace(&raw_source_name, "")
-        .trim()
-        .to_string();
+    let (raw_source_name, raw_stream_title) = get_display_lines(stream);
+    let source_name = strip_display_pictographs(&raw_source_name);
+    let stream_title = match strip_display_pictographs(&raw_stream_title) {
+        cleaned if cleaned.is_empty() => raw_stream_title,
+        cleaned => cleaned,
+    };
     let raw_text = format!(
         "{} {}",
         stream.name.as_deref().unwrap_or(""),
         stream.title.as_deref().unwrap_or("")
     );
-    // Reuse the stream's cached lowered match text (see `match_texts`) — no
-    // quality marker spans the `name`/`title` join or distinguishes on `_`.
-    // Release-tag probes come pre-computed on `texts.flags`; only the
-    // case-sensitive `[EN]`-style tag count still probes the raw text.
     let texts = stream.match_texts();
     let flags = texts.flags;
-    let language_tag_count = STREAM_LANGUAGE_TAG_REGEX.find_iter(&raw_text).count();
 
     let is_dts = !flags.dts_hd && flags.dts;
-    let is_dual_audio = language_tag_count == 2 || flags.dual_audio || flags.english_japanese_pair;
-    let is_multi_audio = language_tag_count > 2 || flags.multi_audio || flags.multi_sub;
+    let (is_dual_audio, is_multi_audio) = stream_audio_evidence(stream, flags);
     let delivery_kind = stream_delivery_kind(stream);
 
     StreamPresentation {
@@ -453,8 +460,7 @@ fn build_stream_presentation(stream: &AddonStream) -> StreamPresentation {
         resolution: stream_resolution(flags.resolution),
         delivery_kind,
         delivery_label: match delivery_kind {
-            // Provider-neutral wording: the wire `cached` flag carries no
-            // resolver-service identity, so never render a branded badge.
+            // Wire `cached` flag carries no resolver-service identity — never a branded badge.
             StreamDeliveryKind::Cached => "Cached".to_string(),
             StreamDeliveryKind::Http => "HTTP".to_string(),
             StreamDeliveryKind::PeerToPeer => "P2P".to_string(),
@@ -513,16 +519,13 @@ pub(crate) fn prepare_addon_streams(
     let mut prepared = Vec::with_capacity(streams.len());
 
     for mut stream in streams {
-        // Cheap playable-source probe first: the placeholder test allocates
-        // lowered match texts, so it only runs on rows that could play.
+        // Playable-source probe first — the placeholder test allocates lowered match texts.
         if !has_playable_stream_source(&stream) || is_placeholder_no_stream(&stream) {
             continue;
         }
 
-        // The prepared key doubles as the opaque `stream_key` identity used by
-        // selector picks, saved-stream resume, and recovery exclusion — one
-        // canonicalization per stream instead of a second keying pass in
-        // `merge_unique_streams`.
+        // The prepared key doubles as the opaque `stream_key` used by selector picks,
+        // saved-stream resume, and recovery exclusion.
         let Some(dedup_key) = prepared_stream_key(&stream, &source_id) else {
             continue;
         };
@@ -531,7 +534,7 @@ pub(crate) fn prepare_addon_streams(
         stream.source_id = Some(source_id.clone());
         stream.stream_family = normalized_source
             .as_deref()
-            .and_then(|source| derive_stream_family_normalized(&stream, source));
+            .map(|source| derive_stream_family_normalized(&stream, source));
         stream.stream_key = dedup_key;
         stream.presentation = build_stream_presentation(&stream);
         prepared.push(stream);
@@ -540,12 +543,9 @@ pub(crate) fn prepare_addon_streams(
     prepared
 }
 
-/// Prepared identity key: content identity plus the serving source and
-/// transport shape (direct URL and required request headers). The composite
-/// is hashed so `stream_key` stays opaque — raw URLs can carry signed
-/// credentials and header values are secrets. Same addon + same transport
-/// still dedupes; different instances, delivery kinds, URLs, or headers
-/// do not.
+/// Prepared identity key: content identity + source + transport shape (direct URL, request
+/// headers), hashed so `stream_key` stays opaque — URLs may carry signed credentials and
+/// header values are secrets. Same addon + same transport dedupes; anything else does not.
 fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> {
     let content_key = stream_dedup_key(stream)?;
     let direct_url = stream.url.as_deref().and_then(normalize_http_url);
@@ -559,58 +559,26 @@ fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> 
     Some(format!("s:{:x}", hasher.finalize()))
 }
 
-/// Content identity (`stream_dedup_key`) of recently resolved winners, by
-/// prepared key. Prepared keys differ per addon instance and transport, so
-/// cross-device comparison (watch party source matching) needs the identity
-/// a different addon serving the same file would share. Opaque keys only.
-static RESOLVED_CONTENT_KEYS: Mutex<VecDeque<(String, String)>> = Mutex::new(VecDeque::new());
-const RESOLVED_CONTENT_KEYS_MAX: usize = 64;
-
-pub(crate) fn remember_resolved_content_key(stream_key: &str, content_key: String) {
-    let mut keys = RESOLVED_CONTENT_KEYS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    keys.retain(|(key, _)| key != stream_key);
-    if keys.len() >= RESOLVED_CONTENT_KEYS_MAX {
-        keys.pop_front();
-    }
-    keys.push_back((stream_key.to_string(), content_key));
-}
-
-pub(crate) fn resolved_content_key(stream_key: &str) -> Option<String> {
-    RESOLVED_CONTENT_KEYS
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .iter()
-        .find(|(key, _)| key == stream_key)
-        .map(|(_, content_key)| content_key.clone())
-}
-
-/// Prepared selector key (`s:{sha256}`) — the form `prepare_addon_streams`
-/// writes to `stream_key` and fresh resume rows persist.
+/// Prepared selector key (`s:{sha256}`) — the form fresh resume rows persist.
 pub(crate) fn is_prepared_stream_key(key: &str) -> bool {
     key.starts_with("s:")
 }
 
-/// Legacy content-dedup key forms from `stream_dedup_key` — the `h:`
-/// info-hash and `uh:` URL-digest shapes rows persisted before prepared
-/// keys. Resume binds these by recomputing the dedup key; the prepared form
-/// matches by equality.
+/// Legacy `h:`/`uh:` dedup-key forms persisted before prepared keys existed.
+/// Resume binds these by recomputing the dedup key; prepared keys match by equality.
 pub(crate) fn is_legacy_content_key(key: &str) -> bool {
     key.starts_with("h:") || key.starts_with("uh:")
 }
 
-/// Every stream-key form that may persist as `last_stream_key`: opaque hash
-/// identities only — the legacy `u:` form embedded the normalized URL
-/// verbatim and stays excluded. Single owner so producers and resume/probe
-/// consumers can't drift.
+/// Every stream-key form that may persist as `last_stream_key`: opaque hash identities
+/// only — the legacy `u:` form embedded the raw URL and stays excluded. Single owner so
+/// producers and resume/probe consumers can't drift.
 pub(crate) fn is_persistable_stream_key(key: &str) -> bool {
     is_prepared_stream_key(key) || is_legacy_content_key(key)
 }
 
-/// Bounded per-source error aggregation shared by the fan-out merges: keep
-/// the first few failures, drop the rest — one owner so every caller joins
-/// and caps identically.
+/// Bounded per-source error aggregation shared by the fan-out merges: keep the first
+/// few failures so every caller joins and caps identically.
 const MAX_SUMMARIZED_ERRORS: usize = 3;
 
 pub(crate) fn push_bounded_error(errors: &mut Vec<String>, error: impl Into<String>) {
@@ -626,7 +594,6 @@ pub(crate) fn merge_unique_streams(
 ) {
     for stream in streams {
         // `prepare_addon_streams` already keyed the stream; recompute nothing.
-        // Owned batches move accepted rows instead of deep-cloning them.
         if !stream.stream_key.is_empty() && seen.insert(stream.stream_key.clone()) {
             merged.push(stream);
         }
@@ -650,6 +617,22 @@ pub(crate) fn infer_stream_mime(url: &str) -> &'static str {
     }
 }
 
+pub(crate) fn stream_absolute_episode_targets(
+    media_type: &str,
+    id: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+    absolute_episode: Option<u32>,
+) -> Option<[(u32, u32); 2]> {
+    if !matches!(media_type, "anime" | "series") || !id.starts_with("tt") {
+        return None;
+    }
+    let season = season?;
+    let episode = episode?;
+    let absolute_episode = absolute_episode.filter(|absolute| *absolute != episode)?;
+    Some([(season, absolute_episode), (1, absolute_episode)])
+}
+
 pub(crate) fn build_stream_query_ids(
     media_type: &str,
     id: &str,
@@ -665,27 +648,26 @@ pub(crate) fn build_stream_query_ids(
 
     if media_type == "anime" || media_type == "series" {
         if id.starts_with("tt") {
-            // IMDB-routed anime and series share one fallback family: addons
-            // index long-running titles differently (absolute numbering under
-            // the real or season-1 slot; season 0 for specials). Both types
-            // try absolute coordinates; anime additionally retries
-            // season-1-relative and season-0 forms.
+            // Addons index long-running IMDB titles differently: absolute numbering under
+            // the real or season-1 slot, season 0 for specials. Both media types try
+            // absolute coordinates; anime additionally retries season-1 and season-0 forms.
             if media_type == "anime" && s != 1 {
                 push_unique(&mut ids, &format!("{}:1:{}", id, e));
             }
-            if let Some(abs_ep) = absolute_episode.filter(|abs_ep| *abs_ep != e) {
-                push_unique(&mut ids, &format!("{}:{}:{}", id, s, abs_ep));
-                push_unique(&mut ids, &format!("{}:1:{}", id, abs_ep));
+            if let Some(targets) =
+                stream_absolute_episode_targets(media_type, id, season, episode, absolute_episode)
+            {
+                for (target_season, target_episode) in targets {
+                    push_unique(&mut ids, &format!("{id}:{target_season}:{target_episode}"));
+                }
             }
             if media_type == "anime" {
                 push_unique(&mut ids, &format!("{}:0:{}", id, e));
             }
         } else if media_type == "anime" {
-            // Namespaced anime ids (kitsu:, …) index episodes flat —
-            // `{id}:{episode}` — so the canonical `{id}:{s}:{e}` probe above
-            // misses them entirely. Retry the bare-episode and
-            // absolute-episode forms in the same id space; the per-addon
-            // id-prefix gate still decides who receives each id.
+            // Namespaced anime ids (kitsu:, …) index episodes flat — `{id}:{episode}` —
+            // so the `{id}:{s}:{e}` probe above misses them. Retry bare-episode and
+            // absolute-episode forms; the per-addon id-prefix gate still filters.
             push_unique(&mut ids, &format!("{}:{}", id, e));
             if let Some(abs_ep) = absolute_episode.filter(|abs_ep| *abs_ep != e) {
                 push_unique(&mut ids, &format!("{}:{}", id, abs_ep));
@@ -704,8 +686,7 @@ pub(crate) fn build_addon_source_priority_map<'a>(
     let mut priorities = HashMap::new();
 
     for (idx, addon) in addons.iter().enumerate() {
-        // Instance ids are the ordering key: two addons sharing a display
-        // name must keep independent user-order ranks.
+        // Instance ids are the ordering key — addons sharing a display name keep independent ranks.
         let Some(normalized) = normalize_source_id(&addon.id) else {
             continue;
         };
@@ -727,23 +708,22 @@ pub(crate) fn stream_source_priority(
         .unwrap_or(0)
 }
 
-/// Single owner for source-identity normalization: trim, drop empties, ASCII
-/// lowercase, char-bound. Callers normalize once and share the result across
-/// ranking lookups. The bound matters because normalized values persist as
-/// snapshot keys — an unbounded IPC `source_name`/`stream_family` would land
-/// in `playback_state.json` verbatim.
+/// Source-identity normalization: trim, drop empties, char-bound. The bound matters —
+/// normalized values persist as snapshot keys, so an unbounded IPC `source_name`/
+/// `stream_family` would land in `playback_state.json` verbatim.
 const SOURCE_IDENTITY_MAX_CHARS: usize = 256;
 
-/// Display-name key: the instance id's trim/empty/bound gate, then ASCII
-/// lowercase (display names match case-insensitively; ids don't).
+/// Display-name key: id gate plus ASCII lowercase (display names match case-insensitively; ids don't).
 pub(crate) fn normalize_source_key(value: &str) -> Option<String> {
-    normalize_source_id(value).map(|id| id.to_ascii_lowercase())
+    normalize_source_id(value).map(|mut id| {
+        id.make_ascii_lowercase();
+        id
+    })
 }
 
-/// Stable addon-instance identity: the addon-config id (`AddonConfig.id`).
-/// Unlike `normalize_source_key` this is case-sensitive — ids are opaque
-/// exact strings (usually the normalized transport URL), not display names.
-/// Trim + bound only. Same 256-char bound as the display-key path above.
+/// Stable addon-instance identity (`AddonConfig.id`). Unlike `normalize_source_key` this
+/// is case-sensitive — ids are opaque exact strings (usually the transport URL), not
+/// display names. Trim + bound only.
 pub(crate) fn normalize_source_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.chars().count() > SOURCE_IDENTITY_MAX_CHARS {
@@ -753,30 +733,24 @@ pub(crate) fn normalize_source_id(value: &str) -> Option<String> {
     }
 }
 
-/// Persisted source-health index/item suffix for an instance id. The `id:`
-/// marker keeps the instance keyspace distinct from display names.
+/// Persisted source-health key suffix for an instance id — `id:` keeps the keyspace distinct from display names.
 pub(crate) fn source_health_key(source_id: &str) -> String {
     format!("id:{source_id}")
 }
 
-/// Single owner for the `name + title` language haystack, shared by the
-/// language-preference and audio-bonus scores. Backed by the stream's
-/// cached match text so callers never re-lowercase (or re-join).
+/// The `name + title` language haystack, shared by the language-preference and
+/// audio-bonus scores. Backed by the cached match text so callers never re-lowercase.
 pub(crate) fn stream_language_haystack(stream: &AddonStream) -> &str {
     stream.match_texts().name_title_haystack()
 }
 
-/// Composite quality score over the stream's flag memo. Higher = better.
-/// Sole owner of the quality constants, shared with the presentation badge
-/// (`StreamMatchText::flags`) so a DV/DD+/HEVC label earns the same class of
-/// points here.
+/// Composite quality score over the stream's flag memo; sole owner of the quality
+/// constants, shared with the presentation badge (`StreamMatchText::flags`).
 pub(crate) fn stream_quality_score(flags: StreamFlags) -> i32 {
     let mut score = 0;
 
-    // ── Resolution ────────────────────────────────────────────────────
     score += stream_resolution_quality_points(flags.resolution);
 
-    // ── Source quality (release type) ─────────────────────────────────
     score += match flags.release {
         StreamReleaseKind::Remux => 35,
         StreamReleaseKind::BluRay => 30,
@@ -786,7 +760,6 @@ pub(crate) fn stream_quality_score(flags: StreamFlags) -> i32 {
         StreamReleaseKind::Other => 0,
     };
 
-    // ── HDR / Dolby Vision ────────────────────────────────────────────
     if flags.dolby_vision {
         score += 55;
     } else if flags.hdr10_plus {
@@ -795,7 +768,6 @@ pub(crate) fn stream_quality_score(flags: StreamFlags) -> i32 {
         score += 50;
     }
 
-    // ── Audio quality ─────────────────────────────────────────────────
     if flags.atmos {
         score += 15;
     } else if flags.dts_hd {
@@ -806,24 +778,24 @@ pub(crate) fn stream_quality_score(flags: StreamFlags) -> i32 {
         score += 8;
     }
 
-    // ── Efficient encoding bonus ───────────────────────────────────────
     if flags.hevc {
         score += 5;
+    }
+
+    if flags.capture_release {
+        score -= 250;
     }
 
     score
 }
 
-/// Oversize demotion thresholds: past the cap a stream ranks below at-limit
-/// peers in its own tier (4K gets the larger cap — remux sizes are inherent).
-/// The coordinator applies it through `stream_resolution_priority`.
+/// Oversize demotion thresholds: past the cap a stream ranks below at-limit peers in its
+/// tier (4K gets the larger cap — remux sizes are inherent). Applied via `stream_resolution_priority`.
 const OVERSIZE_LIMIT_BYTES: u64 = 15 * 1024 * 1024 * 1024;
 const OVERSIZE_LIMIT_BYTES_UHD: u64 = 20 * 1024 * 1024 * 1024;
 
-/// The resolution/delivery half of the coordinator's recommendation key —
-/// viability, quality, audio bonus, oversize flag, and swarm stats computed
-/// in one pass. Not itself ordered: `StreamRecommendationKey` is the sort
-/// key; `oversize` here is a flag, not a rank position.
+/// The resolution/delivery half of the coordinator's recommendation key. Not itself
+/// ordered: `StreamRecommendationKey` is the sort key; `oversize` is a flag, not a rank.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct StreamResolutionPriority {
     pub viability: u8,
@@ -838,10 +810,9 @@ pub(crate) fn stream_resolution_priority(
     stream: &AddonStream,
     flags: StreamFlags,
 ) -> StreamResolutionPriority {
-    // Reuse the delivery kind computed once in `prepare_addon_streams`.
-    // A magnet-only stream (URL `xt`, no `info_hash` field) shares the
-    // `h:` dedup identity with the field-carrying spelling, so it earns
-    // the same viability — otherwise arrival order decides the rank input.
+    // A magnet-only stream (URL `xt`, no `info_hash` field) shares the `h:` dedup
+    // identity with the field-carrying spelling, so it earns the same viability —
+    // otherwise arrival order decides the rank input.
     let has_info_hash = stream.info_hash.as_deref().is_some_and(non_blank)
         || stream.url.as_deref().and_then(magnet_xt_hash).is_some();
 
@@ -859,6 +830,13 @@ pub(crate) fn stream_resolution_priority(
     };
 
     let size_bytes = stream.size_bytes.unwrap_or(0);
+    // Prepared streams already carry the evidence; unprepared rows have no delivery label.
+    let has_audio_bonus = if stream.presentation.delivery_label.is_empty() {
+        let (dual_audio, multi_audio) = stream_audio_evidence(stream, flags);
+        dual_audio || multi_audio
+    } else {
+        stream.presentation.multi_audio_label.is_some()
+    };
     let oversize_limit = if matches!(stream.presentation.resolution, StreamResolution::P2160) {
         OVERSIZE_LIMIT_BYTES_UHD
     } else {
@@ -868,9 +846,7 @@ pub(crate) fn stream_resolution_priority(
     StreamResolutionPriority {
         viability,
         quality: stream_quality_score(flags),
-        // Shared `StreamFlags` vocabulary — the DUAL/MULTI badge and this
-        // bonus must never disagree.
-        language_bonus: u8::from(flags.dual_audio || flags.multi_audio),
+        language_bonus: u8::from(has_audio_bonus),
         oversize: size_bytes > oversize_limit,
         seeders: stream.seeders.unwrap_or(0),
         size_bytes,

@@ -1,5 +1,5 @@
 import { Search, X } from 'lucide-react';
-import { useRef } from 'react';
+import { type RefObject, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
@@ -12,6 +12,7 @@ interface SearchInputProps {
   clearLabel?: string;
   className?: string;
   wrapperClassName?: string;
+  inputRef?: RefObject<HTMLInputElement | null>;
 }
 
 export function SearchInput({
@@ -22,8 +23,10 @@ export function SearchInput({
   clearLabel = 'Clear search',
   className,
   wrapperClassName,
+  inputRef: suppliedInputRef,
 }: SearchInputProps) {
-  const inputRef = useRef<HTMLInputElement>(null);
+  const localInputRef = useRef<HTMLInputElement>(null);
+  const inputRef = suppliedInputRef ?? localInputRef;
   return (
     <div className={cn('relative', wrapperClassName)}>
       <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none' />
@@ -35,8 +38,7 @@ export function SearchInput({
         aria-label={ariaLabel ?? placeholder}
         className={cn('pl-9 pr-8', className)}
         onKeyDown={(e) => {
-          // Progressive dismissal: Esc clears the text, then blurs the field
-          // so page-level Esc (back) becomes the next step.
+          // Progressive dismissal: Esc clears text, then blurs so page-level Esc (back) becomes the next step.
           if (e.key !== 'Escape' || e.defaultPrevented || e.nativeEvent.isComposing) return;
           e.preventDefault();
           e.stopPropagation();

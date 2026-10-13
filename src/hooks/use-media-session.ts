@@ -66,8 +66,8 @@ export function useMediaSession({
     return () => {
       navigator.mediaSession.metadata = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- artwork joined below
-  }, [supported, title, artist, (artworkSrcs ?? []).join('|')]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- artwork compared structurally below
+  }, [supported, title, artist, JSON.stringify(artworkSrcs ?? [])]);
 
   useEffect(() => {
     if (!supported) return;

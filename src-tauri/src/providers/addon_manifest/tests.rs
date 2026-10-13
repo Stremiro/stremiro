@@ -5,6 +5,48 @@ fn parse(json: &str) -> AddonManifest {
 }
 
 #[test]
+fn repeated_resource_declarations_preserve_paired_scopes_and_dedupe_identical_rows() {
+    let snapshot = parse(
+        r#"{
+            "name": "Scoped streams",
+            "resources": [
+                {"name":"stream","types":["movie"],"idPrefixes":["tt"]},
+                {"name":"stream","types":["series"],"idPrefixes":["kitsu:"]},
+                {"name":"stream","types":["movie"],"idPrefixes":["tt"]}
+            ]
+        }"#,
+    );
+    assert_eq!(snapshot.resources.len(), 2);
+    for (media_type, media_id, allowed) in [
+        ("movie", "tt123", true),
+        ("series", "kitsu:42", true),
+        ("movie", "kitsu:42", false),
+        ("series", "tt123", false),
+    ] {
+        assert_eq!(
+            snapshot_supports_request(&snapshot, "stream", media_type, media_id),
+            allowed
+        );
+    }
+    let stored = serde_json::to_value(&snapshot).unwrap();
+    assert_eq!(
+        stored["resources"][1],
+        serde_json::json!({"name":"stream","types":["series"],"idPrefixes":["kitsu:"]})
+    );
+    assert_eq!(
+        serde_json::from_value::<AddonManifest>(stored).unwrap(),
+        snapshot
+    );
+    let legacy: AddonManifest = serde_json::from_str(
+        r#"{"name":"Legacy","resources":[{"name":"stream","types":["movie"],"idPrefixes":["tt"]}]}"#,
+    )
+    .unwrap();
+    assert!(snapshot_supports_request(
+        &legacy, "stream", "movie", "tt123"
+    ));
+}
+
+#[test]
 fn parse_cinemeta_like_manifest_classifies_catalog_and_meta() {
     let snapshot = parse(
         r#"{

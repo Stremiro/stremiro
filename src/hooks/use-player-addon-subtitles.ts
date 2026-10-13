@@ -4,12 +4,7 @@ import { toast } from 'sonner';
 
 import type { PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
 import { type AddonSubtitle, api, getErrorMessage } from '@/lib/api';
-import {
-  addonSubtitleKey,
-  buildTrackLabelMap,
-  isExternalSubtitleTrack,
-  type Track,
-} from '@/lib/player-track-utils';
+import { buildTrackLabelMap, isExternalSubtitleTrack, type Track } from '@/lib/player-track-utils';
 import { addonSubtitlesQueryKey } from '@/lib/query-invalidation';
 import { nonBlank } from '@/lib/utils';
 
@@ -52,9 +47,7 @@ export function usePlayerAddonSubtitles({
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
 
-  // Addon subtitles fetch lazily on first menu open. Addon-sub identity is
-  // bound to the loaded file's track-list — external tracks die with the
-  // stream, so the active/loading keys reset with it.
+  // External tracks die with the stream, so addon-sub identity resets on each new active URL.
   useEffect(() => {
     subtitleSessionEpochRef.current += 1;
     setPickedAddonSubtitleId(null);
@@ -64,8 +57,7 @@ export function usePlayerAddonSubtitles({
     };
   }, [activeStreamUrl]);
 
-  // Normalized once so the query key matches the trimmed values the API
-  // layer sends — untrimmed keys would split one request into two entries.
+  // Trimmed so the query key matches what the API sends — untrimmed keys would fork the cache entry.
   const lookupMediaType = effectiveResolveMediaType.trim();
   const lookupMediaId = (streamLookupId || id)?.trim();
   const subtitlesEnabled = subtitleMenuOpened && lookupMediaType !== '' && !!lookupMediaId;
@@ -96,20 +88,17 @@ export function usePlayerAddonSubtitles({
   // `isError` only after retries exhaust; a disabled query never reports.
   const addonSubtitlesError =
     subtitlesEnabled && subtitlesQuery.isError ? getErrorMessage(subtitlesQuery.error) : undefined;
-  // Distinguishes "lookup ran and returned nothing" from "never asked" —
-  // the empty-state hint must not render before the first request.
+  // Distinguishes "asked, got nothing" from "never asked" — gates the empty-state hint.
   const addonSubtitlesQueried = subtitlesEnabled;
 
   const handleSelectAddonSubtitle = useCallback(
     async (subtitle: AddonSubtitle) => {
       if (addonSubtitleLoadingId || !mountedRef.current) return;
-      const subtitleKey = addonSubtitleKey(subtitle);
+      const subtitleKey = subtitle.selectionKey;
       const epoch = subtitleSessionEpochRef.current;
       setAddonSubtitleLoadingId(subtitleKey);
       try {
-        // The track controller owns the mpv side: URL reuse via
-        // external-filename, the single-switch gate, fetch polling, and
-        // preference persistence that keeps auto-apply from reverting.
+        // The track controller owns the mpv side: URL reuse, single-switch gate, fetch polling, preference persistence.
         const selected = await selectAddonSubtitle(subtitle);
         if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
         if (!selected) {
@@ -127,8 +116,7 @@ export function usePlayerAddonSubtitles({
     [addonSubtitleLoadingId, announce, mountedRef, selectAddonSubtitle],
   );
 
-  // Stable props for the memoized selectors — the controls overlay re-renders
-  // on every time update, so inline closures here would defeat the memo.
+  // Stable callback — the controls overlay re-renders per time update, so inline closures would defeat its memo.
   const handleSubTrackSelect = useCallback(
     (trackType: 'sub', trackId: number | 'no', options?: { persistPreference?: boolean }) => {
       const epoch = subtitleSessionEpochRef.current;
@@ -144,14 +132,10 @@ export function usePlayerAddonSubtitles({
     [announce, mountedRef, setTrack, subTracks],
   );
 
-  // Follow the popover rather than latching open: a closed menu stops the
-  // addon query's refetch eligibility — its cached data still paints on the
-  // next open, so reopening stays instant.
+  // Menu-open state follows the popover: a closed menu stops refetch eligibility while cached data still paints on reopen.
 
-  // The addon checkmark is derived from mpv truth: only one sid can be
-  // selected, so the row follows the selected external track whether it got
-  // there from this menu, a restored preference, or `cycle sub`. The explicit
-  // pick only disambiguates rows that resolve to the same external track.
+  // Checkmark derives from mpv truth (one selected sid), so the row follows the
+  // selected external track; the explicit pick only disambiguates rows matching the same track.
   const activeAddonSubtitleId = useMemo(() => {
     const selectedExternal = subTracks.find(
       (track) => track.type === 'sub' && track.selected && track.external,
@@ -161,9 +145,9 @@ export function usePlayerAddonSubtitles({
       isExternalSubtitleTrack(selectedExternal, subtitle),
     );
     if (matches.length === 0) return null;
-    return matches.some((subtitle) => addonSubtitleKey(subtitle) === pickedAddonSubtitleId)
+    return matches.some((subtitle) => subtitle.selectionKey === pickedAddonSubtitleId)
       ? pickedAddonSubtitleId
-      : addonSubtitleKey(matches[0]);
+      : matches[0].selectionKey;
   }, [addonSubtitles, pickedAddonSubtitleId, subTracks]);
 
   return {

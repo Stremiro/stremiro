@@ -7,13 +7,12 @@ import {
   Rewind,
   SkipForward,
   Subtitles,
-  Users,
 } from 'lucide-react';
 import { memo } from 'react';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
-export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' | 'skip' | 'party';
+export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' | 'skip';
 
 const MESSAGE_ICONS: Record<PlayerOsdMessageIcon, LucideIcon> = {
   history: History,
@@ -21,7 +20,6 @@ const MESSAGE_ICONS: Record<PlayerOsdMessageIcon, LucideIcon> = {
   gauge: Gauge,
   audio: Music,
   skip: SkipForward,
-  party: Users,
 };
 
 export type PlayerOsdAction =
@@ -40,8 +38,7 @@ interface PlayerOsdOverlayProps {
   isResolving: boolean;
 }
 
-// Memoized: props stay stable between OSD events. The live region stays mounted while idle —
-// remounting the node between announcements can drop screen-reader output.
+// Memoized between OSD events. The live region stays mounted while idle — remounting can drop screen-reader output.
 export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
   action,
   visible,
@@ -61,7 +58,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       aria-atomic='true'
     >
       {action?.kind === 'seek' && !suppressed && (
-        <div className='flex items-center gap-3 rounded-2xl border border-white/15 bg-black/50 px-6 py-3.5 shadow-xl backdrop-blur-2xl'>
+        <div className='flex items-center gap-3 rounded-2xl border border-white/15 bg-black/50 px-6 py-3.5 shadow-xl'>
           {action.direction === 'forward' && (
             <FastForward className='h-5 w-5 text-white/90' strokeWidth={2.5} />
           )}
@@ -78,7 +75,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       )}
 
       {action?.kind === 'volume' && !suppressed && (
-        <div className='flex min-w-[130px] flex-col items-center gap-2.5 rounded-2xl border border-white/15 bg-black/50 px-5 py-3.5 shadow-xl backdrop-blur-2xl'>
+        <div className='flex min-w-[130px] flex-col items-center gap-2.5 rounded-2xl border border-white/15 bg-black/50 px-5 py-3.5 shadow-xl'>
           <div className='flex items-center gap-2'>
             <PlayerVolumeIcon
               muted={action.level === 0}
@@ -100,7 +97,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       )}
 
       {action?.kind === 'message' && !suppressed && (
-        <div className='flex items-center gap-2.5 rounded-full border border-white/10 bg-black/55 px-4 py-2 shadow-xl backdrop-blur-2xl'>
+        <div className='flex items-center gap-2.5 rounded-full border border-white/10 bg-black/55 px-4 py-2 shadow-xl'>
           {MessageIcon && (
             <MessageIcon className='h-3.5 w-3.5 shrink-0 text-white/60' strokeWidth={2.25} />
           )}

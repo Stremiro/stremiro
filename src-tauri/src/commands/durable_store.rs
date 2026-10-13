@@ -1,6 +1,5 @@
-//! App-owned durable JSON stores: shared in-memory maps committed
-//! atomically on `save`/exit; file locations and `{key: value}` schema
-//! unchanged from the previous `tauri-plugin-store` backend.
+//! App-owned durable JSON stores: shared in-memory maps committed atomically on
+//! `save`/exit; file locations and `{key: value}` schema unchanged from `tauri-plugin-store`.
 
 use serde_json::Value;
 use std::collections::HashMap;
@@ -11,9 +10,8 @@ use tauri::{AppHandle, Manager};
 
 use crate::providers::lock_or_recover;
 
-/// Windows AV/indexer scans and handles opened without delete sharing lock
-/// a file for milliseconds and fail fs ops with ACCESS_DENIED or
-/// SHARING_VIOLATION — retry briefly instead of failing the command on them.
+/// Windows AV/indexer scans briefly lock files and fail fs ops with
+/// ACCESS_DENIED/SHARING_VIOLATION — retry briefly instead of failing the command.
 fn is_transient_fs_lock(error: &std::io::Error) -> bool {
     matches!(error.raw_os_error(), Some(5) | Some(32))
 }
@@ -33,11 +31,9 @@ fn retry_transient_fs<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io:
     }
 }
 
-/// Clears the read-only flag on a store file: Windows `MoveFileEx` cannot
-/// replace a read-only destination, so a stale flag fails every save with
-/// ACCESS_DENIED. A flag this app never sets is stale state, not intent.
-/// The clippy lint guards the Unix world-writable footgun — unreachable on
-/// this Windows-only build.
+/// Clears the read-only flag on a store file — Windows `MoveFileEx` can't replace a
+/// read-only destination, and a flag this app never sets is stale state, not intent.
+/// The clippy lint guards a Unix footgun unreachable on this Windows-only build.
 #[allow(clippy::permissions_set_readonly_false)]
 fn clear_readonly_flag(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
@@ -73,9 +69,8 @@ pub(crate) struct DurableStoreRegistry {
 }
 
 impl DurableStoreRegistry {
-    /// First open reads the file under the registry lock; a missing file
-    /// starts empty, invalid data errors and is never cached so a later
-    /// open retries the real disk state.
+    /// First open reads under the registry lock; a missing file starts empty,
+    /// invalid data errors and is never cached so a later open retries disk state.
     pub(super) fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
         let mut stores = lock_or_recover(&self.stores);
         if let Some(store) = stores.get(&path) {
@@ -115,9 +110,8 @@ struct StoreData {
     dirty: bool,
 }
 
-/// Store files are flat `{key: value}` objects: empty bytes, invalid JSON,
-/// and non-object payloads are all rejected — a torn or foreign file never
-/// loads as an empty domain.
+/// Store files are flat `{key: value}` objects — empty bytes, invalid JSON, and
+/// non-object payloads are rejected so a torn or foreign file never loads as empty.
 fn parse_store_bytes(bytes: &[u8], path: &Path) -> Result<HashMap<String, Value>, String> {
     serde_json::from_slice(bytes)
         .map_err(|error| format!("Invalid store file {}: {}", path.display(), error))
@@ -152,8 +146,8 @@ impl DurableStore {
         &self,
         key: impl AsRef<str>,
     ) -> Option<T> {
-        self.get(key)
-            .and_then(|value| serde_json::from_value(value).ok())
+        let data = lock_or_recover(&self.data);
+        T::deserialize(data.entries.get(key.as_ref())?).ok()
     }
 
     pub(crate) fn set(&self, key: impl Into<String>, value: Value) {
@@ -175,12 +169,13 @@ impl DurableStore {
         false
     }
 
-    pub(crate) fn keys(&self) -> Vec<String> {
-        lock_or_recover(&self.data)
-            .entries
-            .keys()
-            .cloned()
-            .collect()
+    pub(crate) fn delete_matching(&self, mut matches: impl FnMut(&str) -> bool) {
+        let mut data = lock_or_recover(&self.data);
+        let before = data.entries.len();
+        data.entries.retain(|key, _| !matches(key));
+        if data.entries.len() != before {
+            data.dirty = true;
+        }
     }
 
     #[cfg(test)]
@@ -188,9 +183,8 @@ impl DurableStore {
         lock_or_recover(&self.data).dirty
     }
 
-    /// Atomic commit with the map lock held through serialize+rename;
-    /// `dirty` stays set on failure so the exit flush can retry.
-    /// A clean store no-ops — no serialize, no IO, no file creation.
+    /// Atomic commit with the map lock held through serialize+rename; `dirty` stays
+    /// set on failure so the exit flush can retry. A clean store no-ops.
     pub(crate) fn save(&self) -> Result<(), String> {
         let mut data = lock_or_recover(&self.data);
         if !data.dirty {
@@ -206,9 +200,8 @@ impl DurableStore {
     }
 }
 
-/// The one atomic commit for stores and exports: fsync a self-created
-/// `.partial-*` sibling, then rename it over the destination. Read-only
-/// clearing is for app-owned files; callers own the parent directory.
+/// The one atomic commit for stores and exports: fsync a self-created `.partial-*`
+/// sibling, then rename over the destination. Callers own the parent directory.
 pub(crate) fn write_atomic_file(
     path: &Path,
     bytes: &[u8],

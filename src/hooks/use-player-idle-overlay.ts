@@ -2,15 +2,12 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 
 import { clearTimer, type TimerHandle } from '@/lib/utils';
 
-// A zero-input stretch past this delay surfaces the idle title card over a
-// dimmed frame; any input — pointer, key, wheel, touch — dismisses it.
+// Zero input for this delay surfaces the idle title card; any input dismisses it.
 const PLAYER_IDLE_OVERLAY_DELAY_MS = 10_000;
-// Steady pointermove streams would churn a clear/setTimeout pair per event —
-// the same rate-limit the controls wake path applies.
+// Throttles steady pointermove streams — same rate as the controls wake path.
 const IDLE_POINTERMOVE_THROTTLE_MS = 300;
 
-// React's surface click dismisses the card before this window listener runs;
-// waking on pointerdown would let the subsequent click resume playback.
+// Wake on 'click', not pointerdown — a pointerdown wake would let the ensuing click resume playback under the card.
 const IDLE_ACTIVITY_EVENTS = ['pointermove', 'click', 'keydown', 'wheel'];
 
 interface UsePlayerIdleOverlayOptions {
@@ -47,8 +44,7 @@ export function usePlayerIdleOverlay({ enabled, mountedRef }: UsePlayerIdleOverl
     [armIdleTimer, enabled, mountedRef],
   );
 
-  // The surface click handler wakes through this so the first click dismisses
-  // the card instead of toggling pause under it.
+  // Surface clicks wake through this so the first click dismisses the card, not toggles pause.
   const wake = useCallback(() => noteActivity(false), [noteActivity]);
 
   useEffect(() => {

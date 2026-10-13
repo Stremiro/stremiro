@@ -5,9 +5,8 @@ export const BEST_STREAM_CACHE_TTL_MS = 1000 * 60 * 8;
 // UI query keys use the Rust `normalize_query` bound.
 const SEARCH_QUERY_MAX_CHARS = 120;
 
-// Canonical search text shared by cache keys and the IPC payload so the two
-// can never drift. The bound counts Unicode scalars like Rust `chars()`
-// — a UTF-16 slice could split a surrogate pair and diverge key vs sent.
+// Canonical search text shared by cache keys and IPC payload. Bound counts Unicode
+// scalars like Rust `chars()` — a UTF-16 slice could split a surrogate pair.
 export function canonicalizeSearchText(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed) return undefined;
@@ -81,8 +80,7 @@ function setTimedCache<T>(
   pruneTimedCache(cache);
 }
 
-// Miss is `undefined`, not a falsy check, so a valid falsy payload
-// (e.g. `false`, `0`, `''`) is served from cache instead of re-fetched.
+// Miss is `undefined`, not falsy — valid falsy payloads (false, 0, '') still serve from cache.
 function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
   const now = Date.now();
   const cached = cache.get(key);
@@ -112,8 +110,7 @@ export function runCachedRequest<T>(
 
   const request = load()
     .then((result) => {
-      // Only the key's current owner publishes: a clear or a prime since this
-      // request started revokes it, so a late response cannot overwrite either.
+      // Only the key's current owner publishes — a clear/prime since request start revokes it.
       if (cache.inFlight.get(cacheKey) === request) {
         setTimedCache(cache.values, cacheKey, result, cache.ttlMs);
       }
@@ -135,9 +132,7 @@ export function primeCachedRequest<T>(cache: RequestCache<T>, cacheKey: string, 
   setTimedCache(cache.values, cacheKey, value, cache.ttlMs);
 }
 
-// Streaming writes always clear the best-stream cache — re-ranks and
-// cooldowns server-side must not be re-served from TTL. The invariant lives
-// here so call sites can't forget the tail.
+// Streaming writes always clear the best-stream cache — server re-ranks/cooldowns must not be re-served from TTL.
 export function withStreamingCacheClear<T>(
   caches: ApiCacheGroups,
   request: Promise<T>,
@@ -159,8 +154,7 @@ export function buildStreamCacheKey(
   episode?: number,
   absoluteEpisode?: number,
 ): string {
-  // Structural encoding, not a delimiter join: `normalize_media_id` permits
-  // `|` in ids, so a joined key can alias distinct tuples.
+  // Structural encoding, not a join — `normalize_media_id` permits `|` in ids, so joined keys can alias.
   return JSON.stringify([
     type.trim().toLowerCase(),
     id.trim(),
@@ -170,11 +164,8 @@ export function buildStreamCacheKey(
   ]);
 }
 
-// Watch-history delete epoch: a `saveWatchProgress` write queued before a
-// remove/clear must not resurrect the row once the delete lands. The
-// backend bumps its own history generation on destructive writes; this
-// mirrors it for the frontend's serialized save queue — the persistence
-// hook snapshots the epoch at enqueue and skips writes that crossed one.
+// Watch-history delete epoch mirroring the backend's history generation: a save queued before
+// a remove/clear must not resurrect the row — the persistence hook snapshots at enqueue and skips crossed writes.
 let watchProgressEpoch = 0;
 export function getWatchProgressEpoch(): number {
   return watchProgressEpoch;

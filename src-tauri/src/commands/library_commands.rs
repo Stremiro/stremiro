@@ -26,7 +26,8 @@ pub(super) fn prepare_library_write(
     })?;
     let existing = store
         .get_typed(library_item_key(&item.id))
-        .and_then(normalize_library_item);
+        .and_then(normalize_library_item)
+        .filter(|existing| existing.id == item.id);
     let item = if let Some(existing) = existing {
         merge_library_item(existing, item)
     } else {
@@ -65,13 +66,11 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
 
         let mut index = load_library_index(&store)?;
 
-        // Watch status is a library attribute: clear it in the same blocking
-        // op so a removed title can't leave an invisible status row. Both stores and both
-        // indexes are opened and validated before any delete/set/save, so a
-        // corrupt status index fails before the library entry is touched.
-        // Statuses are committed first: a leftover status without its library
-        // row is the harmful half — the details self-heal can resurrect the
-        // title — while a library row without a status is benign.
+        // Watch status is a library attribute — clear it in the same blocking op so
+        // a removed title can't leave an invisible status row. Both stores/indexes
+        // are validated before any mutation, so a corrupt status index fails first.
+        // Statuses commit first: a leftover status (resurrectable by the details
+        // self-heal) is the harmful half; a library row without a status is benign.
         let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
         let mut status_index = load_watch_status_index(&status_store)?;
 

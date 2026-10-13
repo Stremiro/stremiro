@@ -134,6 +134,20 @@ fn build_resource_url_encodes_id_and_extras() {
         url,
         "https://v3-cinemeta.strem.io/meta/series/tt0944947%3A1%3A2.json"
     );
+    let id = "界".repeat(MAX_ID_CHARS);
+    assert!(crate::commands::normalize_media_id(&id).is_some());
+    let lookup = format!("{id}:{}:{}", u32::MAX, u32::MAX);
+    for resource in ["stream", "subtitles"] {
+        let url = build_resource_url("https://example.com", resource, "series", &lookup, &[])
+            .expect("maximum lookup id");
+        assert_eq!(
+            url,
+            format!(
+                "https://example.com/{resource}/series/{}.json",
+                encode(&lookup)
+            )
+        );
+    }
 }
 
 #[test]
@@ -331,6 +345,16 @@ fn parse_meta_orders_episodes_by_season_episode_with_stable_duplicates() {
             "tt1:2:1"
         ]
     );
+
+    // The season summary mirrors those contiguous sorted runs.
+    let seasons = details.seasons.expect("seasons");
+    assert_eq!(
+        seasons
+            .iter()
+            .map(|season| (season.number, season.episode_count))
+            .collect::<Vec<_>>(),
+        [(0, 2), (1, 3), (2, 1)]
+    );
 }
 
 #[test]
@@ -361,18 +385,26 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
     let lite = meta_for_shape(hit.as_ref(), false);
     let full = meta_for_shape(hit.as_ref(), true);
     assert!(lite.episodes.is_none());
+    assert!(lite.seasons.is_none());
     assert_eq!(full.episodes.as_ref().map(Vec::len), Some(2));
+    // The parse-derived season summary rides the full shape only.
+    assert_eq!(
+        serde_json::to_value(&full.seasons).expect("serialize seasons"),
+        serde_json::json!([{ "number": 1, "episodeCount": 2 }])
+    );
 
     // Shaping never mutates the cached entry — full hits stay servable.
     let still_cached = client.meta_cache.get("meta:x").expect("cached meta");
     assert!(Arc::ptr_eq(&hit, &still_cached));
     assert!(still_cached.episodes.is_some());
 
-    // Lite and full disagree only on `episodes` — every other serialized
-    // field is identical.
+    // Lite and full disagree only on `episodes`/`seasons` — every other
+    // serialized field is identical.
     let lite_json = serde_json::to_value(&lite).expect("serialize lite");
     let mut full_json = serde_json::to_value(&full).expect("serialize full");
-    full_json.as_object_mut().unwrap().remove("episodes");
+    let full_object = full_json.as_object_mut().unwrap();
+    full_object.remove("episodes");
+    full_object.remove("seasons");
     assert_eq!(lite_json, full_json);
 }
 

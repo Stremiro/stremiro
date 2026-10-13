@@ -64,9 +64,7 @@ export function WindowVirtualizedGrid<T>({
     containerWidth: 0,
   }));
   const shouldVirtualize = items.length >= virtualizationThreshold;
-  // Metrics (column count + container width) feed both virtualized and
-  // plain-grid rendering, so the grid owns their always-on resize wiring;
-  // the virtualization-only scroll margin comes from the shared hook.
+  // Metrics feed both plain and virtualized rendering, so the grid owns the resize wiring; the virtualized-only scroll margin comes from the hook.
   const scrollMargin = useWindowScrollMargin(containerRef, shouldVirtualize);
 
   const updateMetrics = useCallback(() => {
@@ -92,8 +90,7 @@ export function WindowVirtualizedGrid<T>({
     const container = containerRef.current;
     if (!container || typeof ResizeObserver === 'undefined') return;
 
-    // The grid is viewport-fluid, so a window resize that changes metrics
-    // always resizes the container — the observer owns every resync.
+    // Viewport-fluid — any metric-changing resize also resizes the container, so the observer owns every resync.
     const resizeObserver = new ResizeObserver(updateMetrics);
     resizeObserver.observe(container);
 

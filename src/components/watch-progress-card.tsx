@@ -1,5 +1,4 @@
 import { memo, type MouseEvent, useCallback, useMemo } from 'react';
-import { MediaCard } from '@/components/media-card';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import type { WatchProgress } from '@/lib/api';
 import {
@@ -9,20 +8,19 @@ import {
   watchProgressMediaItem,
 } from '@/lib/history-playback';
 import { formatSeasonEpisode } from '@/lib/utils';
+import { MediaCard } from './media-card';
 
 interface WatchProgressCardProps {
   item: WatchProgress;
   /** Overrides the "time left" line (e.g. up-next cards have no progress). */
   metaLine?: string;
-  /** The remove mutation differs per surface (watch history vs. continue
-      watching) — callers keep owning it. */
+  /** Remove mutation differs per surface (history vs. continue watching) — callers own it. */
   onRemove?: () => void;
   /** Toast title when the playback-plan lookup fails. */
   playErrorTitle: string;
 }
 
-// WatchProgress → MediaCard adapter shared by the home resume rail and the
-// profile history/continue-watching grids.
+// WatchProgress → MediaCard adapter for the resume rail and history grid.
 export const WatchProgressCard = memo(function WatchProgressCard({
   item,
   metaLine: metaLineOverride,

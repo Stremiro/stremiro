@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, ChevronLeft, ChevronRight, Loader2, Play, Plus, Star } from 'lucide-react';
+import { Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Plus, Star } from 'lucide-react';
 import { memo, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
@@ -43,10 +43,18 @@ const HERO_TRANSITION_DURATION_MS = 300;
 interface HeroCarouselIndicatorsProps {
   activeIndex: number;
   itemCount: number;
+  isRotationPaused: boolean;
   onSelect: (index: number) => void;
+  onToggleRotation: () => void;
 }
 
-function HeroCarouselIndicators({ activeIndex, itemCount, onSelect }: HeroCarouselIndicatorsProps) {
+function HeroCarouselIndicators({
+  activeIndex,
+  itemCount,
+  isRotationPaused,
+  onSelect,
+  onToggleRotation,
+}: HeroCarouselIndicatorsProps) {
   if (itemCount <= 1) {
     return null;
   }
@@ -55,11 +63,11 @@ function HeroCarouselIndicators({ activeIndex, itemCount, onSelect }: HeroCarous
   const goToNext = () => onSelect((activeIndex + 1) % itemCount);
   const progressPercent = ((activeIndex + 1) / itemCount) * 100;
   const arrowButtonClassName =
-    'flex h-8 w-8 items-center justify-center rounded-md text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
+    'flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
 
   return (
     <div
-      className='absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex -translate-x-1/2 items-center gap-3 transition-opacity duration-300'
+      className='absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex w-max max-w-[calc(100vw-76px)] -translate-x-1/2 items-center gap-3 transition-opacity duration-300'
       style={{ opacity: 'calc(1 - var(--hero-scroll-opacity, 0) * 2)' }}
     >
       <button
@@ -86,6 +94,16 @@ function HeroCarouselIndicators({ activeIndex, itemCount, onSelect }: HeroCarous
         className={arrowButtonClassName}
       >
         <ChevronRight className='h-3.5 w-3.5' />
+      </button>
+      <button
+        type='button'
+        aria-label={isRotationPaused ? 'Resume automatic rotation' : 'Pause automatic rotation'}
+        aria-pressed={isRotationPaused}
+        title={isRotationPaused ? 'Resume automatic rotation' : 'Pause automatic rotation'}
+        onClick={onToggleRotation}
+        className={cn(arrowButtonClassName, 'motion-reduce:hidden')}
+      >
+        {isRotationPaused ? <Play className='h-3.5 w-3.5' /> : <Pause className='h-3.5 w-3.5' />}
       </button>
     </div>
   );
@@ -169,8 +187,7 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
     }
 
     const interval = window.setInterval(() => {
-      // Skip ticks while the window is hidden/minimized — no visible slide
-      // change is missed, and the next visible tick resumes rotation.
+      // Skip ticks while hidden/minimized — the next visible tick resumes rotation without a missed change.
       if (!document.hidden) {
         advanceSlide();
       }
@@ -197,18 +214,17 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const [isHovered, setIsHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
   const [isOffscreen, setIsOffscreen] = useState(false);
+  const [isRotationPaused, setIsRotationPaused] = useState(false);
   const from = currentPathWithSearch();
   const sectionRef = useRef<HTMLElement | null>(null);
   const { activeIndex, handleSelect, isTransitioning } = useHeroCarouselState({
     itemCount: items.length,
-    // Offscreen slides rotate state nobody can see; reduced-motion users get
-    // manual control only. Both hold the rotation without touching arrows.
-    isPaused: isHovered || hasFocus || isOffscreen || prefersReducedMotion(),
+    // Offscreen slides rotate state nobody can see; reduced-motion users get manual control only.
+    isPaused: isRotationPaused || isHovered || hasFocus || isOffscreen || prefersReducedMotion(),
   });
 
-  // The hero scrolls off under the rails — don't keep advancing (and
-  // repainting the crossfade) while nothing is watching it. The section only
-  // mounts once items exist, so a cold load re-runs this when they land.
+  // Don't advance or repaint the crossfade while the hero is scrolled off under the rails. The section mounts
+  // only once items exist, so a cold load re-runs this when they land.
   const hasItems = items.length > 0;
   useEffect(() => {
     const node = sectionRef.current;
@@ -227,8 +243,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const [logoUrl, onLogoError] = useFailedSrc(isHttpUrl(item?.logo) ? item?.logo : null);
 
   const { data: heroDetails } = useQuery({
-    // Card payload (rating/backdrop, no episodes): the hero never renders
-    // episode data, so it must not pay for up to 2000 episode objects.
+    // Card payload only (no episodes) — the hero never renders episode data and must not pay for it.
     queryKey: detailsCardQueryKey(activeHeroDetailsType, activeHeroItemId),
     queryFn: () =>
       activeHeroItemId
@@ -240,8 +255,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   });
 
   useRafScrollListener(() => {
-    // Direct style write keeps React out of the scroll path — a setState
-    // here would re-render the whole hero on every scroll frame.
+    // Direct style write — a setState here would re-render the whole hero on every scroll frame.
     sectionRef.current?.style.setProperty(
       '--hero-scroll-opacity',
       String(Math.min(window.scrollY / 600, 0.9)),
@@ -259,14 +273,12 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
     const candidateItems = nextItem === previousItem ? [nextItem] : [nextItem, previousItem];
 
     for (const candidate of candidateItems) {
-      // Also warms the title's watch-progress snapshot so the next slide's
-      // primary button lands with its Resume label already settled.
+      // Also warms watch-progress so the next slide's primary button lands with its Resume label settled.
       prefetchDetailsRouteData(queryClient, {
         mediaId: candidate.id,
         mediaType: candidate.type,
       });
-      // Warm the adjacent backdrops so rotation never flashes an empty frame
-      // while the next image decodes — a plain Image probe, no React state.
+      // Warm adjacent backdrops so rotation never flashes an empty frame — a plain Image probe, no React state.
       const backdrop = candidate.backdrop || candidate.poster;
       if (backdrop && isHttpUrl(backdrop)) {
         const probe = new Image();
@@ -281,8 +293,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const { data: isInLibrary = false } = useIsItemInLibrary(item?.id);
   const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
   const { data: historyEntry } = useLatestWatchHistoryEntry(activeHeroItemId);
-  // Same primary-action pipeline as MediaCard: resume history, resolve+play a
-  // movie outright, or land on details for a series with no watch context.
+  // Same primary-action pipeline as MediaCard: resume, resolve+play a movie, or land on details for a series.
   const primaryPlayback = useMediaPrimaryPlayback({
     from,
     historyEntry,
@@ -317,9 +328,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         setHasFocus(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget));
       }}
     >
-      {/* Scroll dim — opacity-only, no backdrop blur: a fullscreen
-          backdrop-filter repaints on every scroll frame even at opacity 0.
-          The accent wash below reuses the same var. */}
+      {/* Scroll dim is opacity-only — a fullscreen backdrop-filter repaints every scroll frame even at
+          opacity 0. The accent wash below reuses the same var. */}
       <div
         className='absolute inset-0 bg-black/60 pointer-events-none transition-opacity duration-300 ease-out z-[5]'
         style={{ opacity: 'var(--hero-scroll-opacity, 0)' }}
@@ -334,7 +344,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         }}
       />
 
-      {/* Background image with crossfade */}
       <div
         className={cn(
           'absolute inset-0 transition-opacity duration-300 ease-in-out',
@@ -355,23 +364,13 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
             <div className='absolute inset-0 bg-linear-to-r from-black/80 via-black/25 to-transparent' />
             <div className='absolute inset-0 bg-linear-to-t from-black via-black/35 to-transparent' />
             <div className='absolute inset-x-0 top-0 h-36 bg-linear-to-b from-black/70 to-transparent' />
-            {/* Bottom dissolve: multi-stop fade, a masked frost lip that
-                blurs only the last ~80px (small region, fades upward so no
-                hard blur line), and a faint accent haze. */}
+            {/* Bottom dissolve: multi-stop fade plus a faint accent haze. */}
             <div
               aria-hidden='true'
               className='absolute inset-x-0 bottom-0 h-56 pointer-events-none'
               style={{
                 background:
                   'linear-gradient(to top, black 0%, rgb(0 0 0 / 0.72) 32%, rgb(0 0 0 / 0.26) 62%, transparent 100%)',
-              }}
-            />
-            <div
-              aria-hidden='true'
-              className='absolute inset-x-0 bottom-0 h-20 pointer-events-none backdrop-blur-[3px]'
-              style={{
-                maskImage: 'linear-gradient(to top, black 10%, transparent 92%)',
-                WebkitMaskImage: 'linear-gradient(to top, black 10%, transparent 92%)',
               }}
             />
             <div
@@ -389,8 +388,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       {/* Visible area wrapper — content offset past sidebar, image bleeds behind it */}
       <div className='absolute inset-0 z-10'>
         <div className='relative w-full h-full'>
-          {/* Content — bottom-padded past the rail overlap (-mt-* on the home
-              rails) so actions/indicators never sit under the first cards. */}
+          {/* Bottom-padded past the rail overlap (-mt-* on home rails) so actions never sit under the first cards. */}
           <div
             className={cn(
               'absolute inset-0 flex items-end transition-[opacity,translate] duration-300 ease-in-out px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16',
@@ -401,7 +399,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
               className='flex w-full items-end justify-between gap-10'
               style={{ opacity: 'calc(1 - var(--hero-scroll-opacity, 0))' }}
             >
-              {/* Left: logo, meta pills, actions */}
               <div className='flex min-w-0 max-w-2xl flex-col items-start text-left'>
                 <Link
                   to={detailsPath}
@@ -439,7 +436,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   )}
                 </div>
 
-                {/* Mobile / tablet synopsis */}
                 {item.description && (
                   <p className='mt-4 max-w-xl text-[13.5px] leading-[1.65] text-zinc-200/85 line-clamp-2 animate-in fade-in duration-700 delay-150 lg:hidden'>
                     {item.description}
@@ -467,39 +463,44 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
                     title={isInLibrary ? 'Remove from library' : 'Add to library'}
                     aria-pressed={isInLibrary}
+                    aria-busy={toggleLibrary.isPending || undefined}
                     className={cn(
                       'h-11 w-11 shrink-0 rounded-lg border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-wait',
                       isInLibrary
                         ? 'border-white/30 bg-white/15 text-white hover:bg-white/20 hover:text-white'
                         : 'border-white/20 bg-black/25 text-white/80 hover:border-white/35 hover:bg-white/10 hover:text-white',
                     )}
-                    // Guard, not `disabled`: disabling the focused button
-                    // blurs it, which unpauses the carousel mid-click.
+                    // Guard, not `disabled` — disabling the focused button blurs it, unpausing the carousel mid-click.
                     aria-disabled={toggleLibrary.isPending || undefined}
                     onClick={() => {
                       if (!toggleLibrary.isPending) toggleLibrary.mutate();
                     }}
                   >
-                    {isInLibrary ? <Check className='h-4 w-4' /> : <Plus className='h-4 w-4' />}
+                    {toggleLibrary.isPending ? (
+                      <Loader2 aria-hidden='true' className='h-4 w-4 animate-spin' />
+                    ) : isInLibrary ? (
+                      <Check className='h-4 w-4' />
+                    ) : (
+                      <Plus className='h-4 w-4' />
+                    )}
                   </Button>
                 </div>
               </div>
 
-              {/* Right: synopsis + genres (desktop) */}
-              <div className='hidden w-full max-w-md shrink-0 flex-col items-end text-right animate-in fade-in duration-700 delay-150 lg:flex'>
+              <div className='hidden w-[36%] max-w-md shrink-0 flex-col items-end text-right animate-in fade-in duration-700 delay-150 lg:flex'>
                 {item.description && (
                   <p className='text-[13.5px] leading-[1.7] text-zinc-100/80 line-clamp-4 [text-shadow:0_2px_16px_rgba(0,0,0,0.8)]'>
                     {item.description}
                   </p>
                 )}
                 {genrePills.length > 0 && (
-                  <div className='mt-4 flex items-center justify-end gap-1.5'>
+                  <div className='mt-4 flex flex-wrap items-center justify-end gap-1.5'>
                     {genrePills.map((genre) => (
                       <Link
                         key={genre}
                         to={searchGenrePath(item.type, genre)}
                         title={`Browse ${genre}`}
-                        className='rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[12px] font-medium text-white/75 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white'
+                        className='rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[12px] font-medium text-white/75 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
                       >
                         {genre}
                       </Link>
@@ -515,7 +516,9 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       <HeroCarouselIndicators
         activeIndex={activeIndex}
         itemCount={items.length}
+        isRotationPaused={isRotationPaused}
         onSelect={handleSelect}
+        onToggleRotation={() => setIsRotationPaused((paused) => !paused)}
       />
     </section>
   );

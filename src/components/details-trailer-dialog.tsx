@@ -1,3 +1,4 @@
+import { Loader2 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 
 interface DetailsTrailerDialogProps {
@@ -19,12 +20,17 @@ export function DetailsTrailerDialog({
         <DialogTitle className='sr-only'>{title} — Trailer</DialogTitle>
         <DialogDescription className='sr-only'>Trailer video for {title}.</DialogDescription>
         {trailerUrl && (
-          <div className='aspect-video w-full'>
+          <div className='relative aspect-video w-full'>
+            {/* Sits under the iframe until the embed paints over it. */}
+            <Loader2
+              aria-hidden='true'
+              className='absolute inset-0 m-auto h-6 w-6 animate-spin text-zinc-600 motion-reduce:animate-none'
+            />
             {/* eslint-disable react/iframe-missing-sandbox -- the embed needs
                 scripts+same-origin to function; the sandbox still bounds
                 top-level navigation, forms, and downloads. */}
             <iframe
-              className='block h-full w-full border-0'
+              className='relative block h-full w-full border-0'
               src={trailerUrl}
               title={`${title} — Trailer`}
               sandbox='allow-scripts allow-same-origin allow-presentation allow-popups'

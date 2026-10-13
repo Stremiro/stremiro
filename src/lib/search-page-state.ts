@@ -9,7 +9,7 @@ export type SearchMediaType = 'all' | 'movie' | 'series' | 'anime';
 // year) via yearFrom/yearTo, not a manifest catalog id.
 export type SearchFeed = 'popular' | 'featured' | 'new';
 
-export function resolveSearchUrlType(value: string | null): SearchMediaType {
+function resolveSearchUrlType(value: string | null): SearchMediaType {
   return value === 'movie' || value === 'series' || value === 'anime' ? value : 'all';
 }
 
@@ -23,11 +23,11 @@ export function searchGenreOptions(
   return browseGenres ? browseGenres[mediaType] : [];
 }
 
-export function resolveSearchUrlFeed(value: string | null): SearchFeed {
+function resolveSearchUrlFeed(value: string | null): SearchFeed {
   return value === 'featured' || value === 'new' ? value : 'popular';
 }
 
-export function resolveSearchUrlGenre(value: string | null): string | undefined {
+function resolveSearchUrlGenre(value: string | null): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
 }
@@ -43,4 +43,35 @@ export function sameSearchGenre(a: string | undefined, b: string | undefined): b
     on param names or encoding. */
 export function searchGenrePath(mediaType: string, genre: string): string {
   return `/search?type=${mediaType}&genre=${encodeURIComponent(genre)}`;
+}
+
+export interface SearchFacets {
+  query: string;
+  type: SearchMediaType;
+  feed: SearchFeed;
+  genre?: string;
+}
+
+export function readSearchFacets(params: URLSearchParams): SearchFacets {
+  return {
+    query: params.get('q') ?? '',
+    type: resolveSearchUrlType(params.get('type')),
+    feed: resolveSearchUrlFeed(params.get('feed')),
+    genre: resolveSearchUrlGenre(params.get('genre')),
+  };
+}
+
+// Session-only memory of the last Search URL so the sidebar and `/` reopen it.
+let lastSearchParams = '';
+
+export function rememberSearchParams(params: URLSearchParams): void {
+  lastSearchParams = params.toString();
+}
+
+export function lastSearchPath(): string {
+  return lastSearchParams ? `/search?${lastSearchParams}` : '/search';
+}
+
+export function lastSearchFacets(): SearchFacets {
+  return readSearchFacets(new URLSearchParams(lastSearchParams));
 }

@@ -8,13 +8,10 @@ import {
   invalidatePlaybackLanguageQueries,
   PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { isLocalMediaId } from '@/lib/utils';
 
 const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 
-// The persisted store is global, so write serialization is module-level:
-// the query read awaits this queue so a refetch never lands over a pending
-// save with stale store values.
+// Module-level save queue — the store is global, and reads await it so a refetch can't land over a pending save.
 let saveQueue = Promise.resolve<PlaybackLanguagePreferences | undefined>(undefined);
 const pendingLanguagePatches = new Set<PlaybackLanguagePreferences>();
 
@@ -60,8 +57,7 @@ function enqueueSave(
     return savedPreferences;
   });
   saveQueue = queuedSave.catch(() => undefined);
-  // The internal queue recovers so later saves keep serializing; the raw
-  // operation is what the app barrier tracks for strict settlement.
+  // The queue swallows so later saves serialize; the raw op is what the app barrier tracks.
   return trackPendingAppWrite(queuedSave);
 }
 
@@ -76,10 +72,7 @@ export function usePlaybackLanguagePreferences({
 }: UsePlaybackLanguagePreferencesOptions = {}) {
   const queryClient = useQueryClient();
 
-  const {
-    data: fetchedGlobalPlaybackLanguagePreferences,
-    isLoading: isLoadingGlobalPlaybackLanguagePreferences,
-  } = useQuery({
+  const globalPlaybackLanguagePreferencesQuery = useQuery({
     queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
     queryFn: async () => {
       await saveQueue;
@@ -88,10 +81,11 @@ export function usePlaybackLanguagePreferences({
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 
+  // Runs for 'local' too — the scoped merge falls back to global defaults, which local sessions should auto-apply.
   const { data: effectivePlaybackLanguagePreferences } = useQuery({
     queryKey: effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
     queryFn: () => api.getEffectivePlaybackLanguagePreferences(mediaType, mediaId),
-    enabled: !!mediaId && !isLocalMediaId(mediaId),
+    enabled: !!mediaId,
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 
@@ -120,15 +114,31 @@ export function usePlaybackLanguagePreferences({
       options?: { subtitlesOff?: boolean },
     ) =>
       enqueueSave(queryClient, () =>
-        api.saveSelectedPlaybackLanguagePreference(preferenceKind, track, options?.subtitlesOff),
+        api
+          .saveSelectedPlaybackLanguagePreference(preferenceKind, track, {
+            subtitlesOff: options?.subtitlesOff,
+            mediaType,
+            mediaId,
+          })
+          .then((response) => {
+            // Seed the effective cache from the save response so consumers never see the pre-save snapshot.
+            if (response.effective) {
+              queryClient.setQueryData(
+                effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
+                response.effective,
+              );
+            }
+            return response.preferences;
+          }),
       ),
-    [queryClient],
+    [mediaId, mediaType, queryClient],
   );
 
   return {
     effectivePlaybackLanguagePreferences,
-    globalPlaybackLanguagePreferences: fetchedGlobalPlaybackLanguagePreferences,
-    isLoadingGlobalPlaybackLanguagePreferences,
+    globalPlaybackLanguagePreferences: globalPlaybackLanguagePreferencesQuery.data,
+    globalPlaybackLanguagePreferencesQuery,
+    isLoadingGlobalPlaybackLanguagePreferences: globalPlaybackLanguagePreferencesQuery.isLoading,
     saveGlobalPlaybackLanguagePreference,
     saveGlobalPlaybackLanguagePreferenceSelection,
   };

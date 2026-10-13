@@ -330,6 +330,54 @@ fn stream_episode_match_kind_detects_episode_ranges() {
 }
 
 #[test]
+fn bare_anime_episode_ranges_are_not_exact_or_unbounded_packs() {
+    for (name, start, end) in [
+        ("[Group] Show - 01-12 Batch [2160p]", 1, 12),
+        ("[Group] Show - 01~12 [2160p]", 1, 12),
+        ("[Group] Show - 1-12.1080p", 1, 12),
+        ("[Group] Show - 1000-1012 [1080p]", 1000, 1012),
+    ] {
+        let stream = named_stream(name);
+        for episode in [start, start + 5, end] {
+            assert_eq!(
+                stream_episode_match_kind(&stream, 1, episode),
+                StreamEpisodeMatchKind::EpisodeRange,
+                "{name}, episode={episode}"
+            );
+            assert!(!stream_conflicts(&stream, &[(1, episode)]), "{name}");
+        }
+        assert_eq!(
+            stream_episode_match_kind(&stream, 1, end + 1),
+            StreamEpisodeMatchKind::None,
+            "{name}"
+        );
+        assert!(stream_conflicts(&stream, &[(1, end + 1)]), "{name}");
+        assert!(stream_contains_batch(&stream), "{name}");
+    }
+    for (name, episode) in [
+        ("Show - 1080p", 1080),
+        ("Show - 2019-2020", 2019),
+        ("Show - 01-12GB", 1),
+        ("Show - 01-12 GB", 1),
+        ("Show - 01-12.5 GB", 1),
+    ] {
+        let stream = named_stream(name);
+        assert_eq!(
+            stream_episode_match_kind(&stream, 1, episode),
+            StreamEpisodeMatchKind::None,
+            "{name}"
+        );
+        assert!(!stream_contains_batch(&stream), "{name}");
+        assert!(!stream_conflicts(&stream, &[(1, 5)]), "{name}");
+    }
+    let stream = named_stream("[Group] Show - 05 - 720p");
+    assert_eq!(
+        stream_episode_match_kind(&stream, 1, 5),
+        StreamEpisodeMatchKind::Exact
+    );
+}
+
+#[test]
 fn stream_episode_range_endpoints_are_not_standalone_exact_tokens() {
     for name in [
         "Show.S01E03-E07.1080p",
@@ -337,6 +385,7 @@ fn stream_episode_range_endpoints_are_not_standalone_exact_tokens() {
         "Show.Season.1.Episode.03-07.1080p",
     ] {
         let stream = named_stream(name);
+        assert!(stream_contains_batch(&stream), "{name}");
         for episode in [3, 4, 7] {
             assert_eq!(
                 stream_episode_match_kind(&stream, 1, episode),
@@ -351,6 +400,75 @@ fn stream_episode_range_endpoints_are_not_standalone_exact_tokens() {
             );
         }
     }
+}
+
+#[test]
+fn unicode_numeric_claims_do_not_panic_or_match_episode_ranges() {
+    for name in [
+        "Show.١x01-02.1080p",
+        "Show.1x١-02.1080p",
+        "Show.1x01-٢.1080p",
+        "Show.1x01-١x02.1080p",
+        "Show.1x01-1x٢.1080p",
+        "Show.S١E01-E02.1080p",
+        "Show.S01E١-E02.1080p",
+        "Show.S01E01-E٢.1080p",
+        "Show.Season.١-٢.Episode.١-٢",
+        "Show.Season.١.Episode.١",
+        "Show - ١-٢",
+    ] {
+        let stream = named_stream(name);
+        for (season, episode) in [(1, 1), (1, 2), (2, 1)] {
+            assert_ne!(
+                stream_episode_match_kind(&stream, season, episode),
+                StreamEpisodeMatchKind::EpisodeRange,
+                "{name}"
+            );
+            let _ = episode_matches_text(name, season, episode);
+            let _ = stream_conflicts(&stream, &[(season, episode)]);
+        }
+    }
+}
+
+#[test]
+fn cross_season_x_ranges_compare_complete_endpoints() {
+    for name in ["Show.1x20-2x03", "Show.2x03~1x20.Batch"] {
+        let stream = named_stream(name);
+        assert!(stream_contains_batch(&stream), "{name}");
+        for (season, episode, matches) in [
+            (1, 3, false),
+            (1, 19, false),
+            (1, 20, true),
+            (1, 25, true),
+            (2, 1, true),
+            (2, 3, true),
+            (2, 4, false),
+            (3, 1, false),
+        ] {
+            let matched = stream_episode_match(&stream, season, episode, false);
+            assert_eq!(
+                matched.kind,
+                if matches {
+                    StreamEpisodeMatchKind::EpisodeRange
+                } else {
+                    StreamEpisodeMatchKind::None
+                },
+                "{name}, {season}x{episode}"
+            );
+            assert_eq!(matched.season_claim_verified, matches, "{name}");
+            assert_eq!(
+                stream_conflicts(&stream, &[(season, episode)]),
+                !matches,
+                "{name}"
+            );
+        }
+    }
+    let stream = named_stream("Show.1x20-3x03");
+    assert_eq!(
+        stream_episode_match_kind(&stream, 2, 5),
+        StreamEpisodeMatchKind::EpisodeRange
+    );
+    assert!(!stream_conflicts(&stream, &[(2, 5)]));
 }
 
 #[test]
@@ -410,6 +528,39 @@ fn episode_claim_gate_evaluates_episode_ranges() {
     let bare = named_stream("Show.E03-E07.1080p");
     assert!(!stream_conflicts(&bare, &[(1, 5)]));
     assert!(stream_conflicts(&bare, &[(1, 8)]));
+
+    let double = named_stream("Show.S01E05E06.1080p");
+    assert!(!stream_conflicts(&double, &[(1, 6)]));
+    assert!(stream_conflicts(&double, &[(1, 7)]));
+    assert!(stream_conflicts(&double, &[(2, 5)]));
+
+    let mixed = named_stream("Show.S01E03-E07.S01E08.1080p");
+    assert!(!stream_conflicts(&mixed, &[(1, 8)]));
+    assert!(stream_conflicts(&mixed, &[(1, 9)]));
+    assert_eq!(
+        stream_episode_match_kind(&mixed, 1, 8),
+        StreamEpisodeMatchKind::Exact
+    );
+    for episode in [5, 6] {
+        assert_eq!(
+            stream_episode_match_kind(&double, 1, episode),
+            StreamEpisodeMatchKind::EpisodeRange,
+            "episode={episode}"
+        );
+    }
+    for name in [
+        "Show.S01E01-E03.Batch.2160p",
+        "Show.S01.Episode.01-03.Batch.2160p",
+        "Show.1x01-1x03.Batch.2160p",
+    ] {
+        let stream = named_stream(name);
+        assert_eq!(
+            stream_episode_match_kind(&stream, 1, 5),
+            StreamEpisodeMatchKind::None,
+            "{name}"
+        );
+        assert!(stream_conflicts(&stream, &[(1, 5)]), "{name}");
+    }
 }
 
 #[test]
@@ -515,6 +666,43 @@ fn lightning_hint_marks_cached_and_download_arrow_opts_out() {
 }
 
 #[test]
+fn hydration_parses_grouped_seeders_without_truncating_decimals() {
+    for (text, expected) in [
+        ("👤1,234", Some(1234)),
+        ("👤 1.234", Some(1234)),
+        ("👤1,234,567", Some(1_234_567)),
+        ("👤1234", Some(1234)),
+        ("👤 12", Some(12)),
+        ("👤 12.5", None),
+        ("👤 1,23", None),
+        ("👤 1,234.56", None),
+        ("👤 1,2345", None),
+        ("👤 1.2345", None),
+    ] {
+        let mut stream = named_stream(text);
+        AddonTransport::hydrate_stream(&mut stream);
+        assert_eq!(stream.seeders, expected, "{text}");
+    }
+}
+
+#[test]
+fn hydration_parses_emoji_binary_sizes_in_every_supported_unit() {
+    for (text, expected) in [
+        ("💾21GiB", 21 * 1024_u64.pow(3)),
+        ("💾1.5TiB", 3 * 1024_u64.pow(4) / 2),
+        ("💾10KiB", 10 * 1024),
+        ("💾2MiB", 2 * 1024_u64.pow(2)),
+        ("💾21gib", 21 * 1024_u64.pow(3)),
+        ("💾2GB", 2 * 1024_u64.pow(3)),
+        ("21 gib", 21 * 1024_u64.pow(3)),
+    ] {
+        let mut stream = named_stream(text);
+        AddonTransport::hydrate_stream(&mut stream);
+        assert_eq!(stream.size_bytes, Some(expected), "{text}");
+    }
+}
+
+#[test]
 fn decode_stream_items_skips_malformed_siblings() {
     let bytes = br#"{"streams": [
             {"name": "Valid", "infoHash": "abc123"},
@@ -561,12 +749,19 @@ fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
             "url": "https://example.com/file.mp4",
             "seeders": 999999,
             "sizeBytes": 99999999999,
-            "source_name": "Spoofed Source"
+            "source_name": "Spoofed Source",
+            "sourceId": 42,
+            "streamFamily": ["spoofed"],
+            "streamKey": null
         }]}"#;
     let streams = decode_stream_items(bytes).expect("decodes");
     let stream = &streams[0];
     assert_eq!(stream.seeders, None);
     assert_eq!(stream.size_bytes, None);
+    assert_eq!(stream.source_name, None);
+    assert_eq!(stream.source_id, None);
+    assert_eq!(stream.stream_family, None);
+    assert!(stream.stream_key.is_empty());
     assert_eq!(stream.url.as_deref(), Some("https://example.com/file.mp4"));
 }
 
@@ -750,6 +945,34 @@ fn sanitize_redacts_signed_query_keys_and_path_config_blobs() {
         ));
     assert!(!redacted.contains(blob), "{redacted}");
     assert!(redacted.contains("/[redacted-path]/"), "{redacted}");
+    for blob in [
+        "%7B%22credential%22%3A%22demo-secret%22%7D",
+        "long~opaque~configuration~demo-secret",
+    ] {
+        assert_eq!(
+            sanitize_addon_log(&format!("https://addon.example/{blob}/manifest.json")),
+            "https://addon.example/[redacted-path]/manifest.json",
+            "{blob}"
+        );
+    }
+    assert_eq!(
+        sanitize_addon_log(
+            "https://addon.example/manifest.json?credential=demo-secret&mode=fast&empty=#section"
+        ),
+        "https://addon.example/manifest.json?credential=[redacted]&mode=[redacted]&empty=#section"
+    );
+    assert_eq!(
+        sanitize_addon_log(
+            "https://addon.example/manifest.json?credential=abc/def%7Eghi&custom=value"
+        ),
+        "https://addon.example/manifest.json?credential=[redacted]&custom=[redacted]"
+    );
+    assert_eq!(
+        sanitize_addon_log(
+            "https://addon.example/providers=a,b|quality=480p|service=0123456789abcdef0123/manifest.json"
+        ),
+        "https://addon.example/providers=a,b|quality=480p|service=[redacted]/manifest.json"
+    );
 }
 
 #[test]
@@ -954,6 +1177,17 @@ fn release_flags_reject_lookalike_tokens() {
 
     let flags = flags_for("Show.S01E01.1080p.5.1 GB.WEB-DL");
     assert!(!flags.surround);
+    for text in [
+        "camera",
+        "camp",
+        "webcast",
+        "show.ts",
+        "show.tc",
+        "hdcaster",
+        "typescript",
+    ] {
+        assert!(!flags_for(text).capture_release, "{text}");
+    }
     let flags = flags_for("Show.S01E01.1080p.7.1 GB.WEB-DL");
     assert!(!flags.surround);
 }
@@ -964,6 +1198,15 @@ fn release_flags_keep_real_markers() {
     assert!(flags.hdr);
     assert!(flags.surround);
     assert_eq!(flags.resolution, StreamResolutionTier::P2160);
+    for marker in [
+        "CAM", "CAMRip", "HDCAM", "HD-CAM", "TELESYNC", "HDTS", "HD-TS", "TELECINE", "HDTC",
+        "SCREENER", "DVDSCR",
+    ] {
+        assert!(
+            flags_for(&format!("Show.{marker}.[1080p]")).capture_release,
+            "{marker}"
+        );
+    }
 
     let flags = flags_for("Show.4K.HDR.WEB-DL");
     assert!(flags.hdr);

@@ -4,9 +4,8 @@ use serde::Serialize;
 use std::collections::HashSet;
 use tauri::{command, AppHandle};
 
-// Cinemeta's declared genre sets. Only used when no enabled addon manifest
-// enumerates genre options: the manifest options are the source of truth
-// whenever they exist (and while manifests are still being classified).
+// Cinemeta's declared genre sets — fallback only; manifest-declared options are
+// the source of truth whenever they exist (including mid-classification).
 const MOVIE_GENRE_FALLBACK: [&str; 19] = [
     "Action",
     "Adventure",
@@ -49,9 +48,8 @@ fn is_year_option(value: &str) -> bool {
     value.len() == 4 && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
-/// Union of manifest-declared `genre` extra options across enabled addons
-/// for one catalog type, deduped ASCII-case-insensitively (first spelling
-/// wins), with Cinemeta's list as the fallback.
+/// Union of manifest-declared `genre` extra options across enabled addons for one
+/// catalog type, deduped case-insensitively (first spelling wins); Cinemeta is the fallback.
 fn collect_catalog_genres(addons: &[AddonConfig], catalog_type: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut options = Vec::new();

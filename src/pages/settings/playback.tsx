@@ -1,7 +1,8 @@
 import { Check, ChevronDown, Loader2 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { toast } from 'sonner';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -10,6 +11,7 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
 import {
   api,
@@ -95,14 +97,24 @@ function LanguageSelector({
         </DropdownMenuTrigger>
         <DropdownMenuContent
           align='start'
-          className='w-(--radix-dropdown-menu-trigger-width) bg-zinc-950 border-white/10'
+          className='w-(--radix-dropdown-menu-trigger-width) bg-zinc-950 border-white/10 backdrop-blur-none'
         >
-          <DropdownMenuItem onClick={() => onChange('')} className={LANGUAGE_MENU_ITEM_CLASS}>
+          <DropdownMenuItem
+            role='menuitemradio'
+            aria-checked={!normalized}
+            onClick={() => onChange('')}
+            className={LANGUAGE_MENU_ITEM_CLASS}
+          >
             <MenuCheck active={!normalized} />
             Auto
           </DropdownMenuItem>
           {kind === 'subtitle' && (
-            <DropdownMenuItem onClick={() => onChange('off')} className={LANGUAGE_MENU_ITEM_CLASS}>
+            <DropdownMenuItem
+              role='menuitemradio'
+              aria-checked={normalized === 'off'}
+              onClick={() => onChange('off')}
+              className={LANGUAGE_MENU_ITEM_CLASS}
+            >
               <MenuCheck active={normalized === 'off'} />
               Off
             </DropdownMenuItem>
@@ -110,6 +122,8 @@ function LanguageSelector({
           {options.map((option) => (
             <DropdownMenuItem
               key={option.code}
+              role='menuitemradio'
+              aria-checked={normalized === option.code}
               onClick={() => onChange(option.code)}
               className={LANGUAGE_MENU_ITEM_CLASS}
             >
@@ -123,27 +137,27 @@ function LanguageSelector({
   );
 }
 
-// Selections persist on pick — the write queue in the hook serializes rapid
-// changes and Rust updates only the picked field, so the two selectors can
-// be toggled back-to-back without clobbering each other.
+// Picks persist immediately; the hook's write queue serializes rapid changes
+// so back-to-back selector toggles can't clobber each other.
 function PlaybackLanguageConfig() {
   const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved'>('idle');
   const pendingSavesRef = useRef(0);
   const savedResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Clears the reset timer on unmount and flags late promise winners.
+  const mountedRef = useMountedRef(() => clearTimer(savedResetTimerRef));
   const {
     globalPlaybackLanguagePreferences,
+    globalPlaybackLanguagePreferencesQuery,
     isLoadingGlobalPlaybackLanguagePreferences,
     saveGlobalPlaybackLanguagePreference,
   } = usePlaybackLanguagePreferences();
   // The closed set lives in Rust; the query is effectively static per run.
-  const { data: languageOptions } = useQuery({
+  const languageOptionsQuery = useQuery({
     queryKey: SUPPORTED_LANGUAGES_QUERY_KEY,
     queryFn: api.getSupportedLanguages,
     staleTime: Number.POSITIVE_INFINITY,
   });
-  const options = languageOptions ?? [];
-
-  useEffect(() => () => clearTimer(savedResetTimerRef), []);
+  const options = languageOptionsQuery.data ?? [];
 
   const handleLanguageChange = (kind: 'audio' | 'subtitle', value: string) => {
     const next = normalizeLanguageToken(value) || undefined;
@@ -158,6 +172,7 @@ function PlaybackLanguageConfig() {
       .then(() => {
         pendingSavesRef.current -= 1;
         if (pendingSavesRef.current > 0) return;
+        if (!mountedRef.current) return;
         setSaveState('saved');
         savedResetTimerRef.current = setTimeout(() => {
           savedResetTimerRef.current = null;
@@ -172,6 +187,27 @@ function PlaybackLanguageConfig() {
       });
   };
 
+  if (
+    globalPlaybackLanguagePreferencesQuery.isError ||
+    (globalPlaybackLanguagePreferencesQuery.isFetched &&
+      globalPlaybackLanguagePreferencesQuery.isLoading) ||
+    languageOptionsQuery.isError ||
+    (languageOptionsQuery.isFetched && languageOptionsQuery.isLoading)
+  ) {
+    return (
+      <RetryBanner
+        message="Couldn't load playback languages."
+        isRetrying={
+          globalPlaybackLanguagePreferencesQuery.isFetching || languageOptionsQuery.isFetching
+        }
+        onRetry={() => {
+          void globalPlaybackLanguagePreferencesQuery.refetch();
+          void languageOptionsQuery.refetch();
+        }}
+      />
+    );
+  }
+
   return (
     <div className='space-y-3'>
       <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
@@ -180,7 +216,7 @@ function PlaybackLanguageConfig() {
           value={globalPlaybackLanguagePreferences?.preferredAudioLanguage ?? ''}
           kind='audio'
           options={options}
-          disabled={isLoadingGlobalPlaybackLanguagePreferences}
+          disabled={isLoadingGlobalPlaybackLanguagePreferences || languageOptionsQuery.isLoading}
           onChange={(value) => handleLanguageChange('audio', value)}
         />
         <LanguageSelector
@@ -188,7 +224,7 @@ function PlaybackLanguageConfig() {
           value={globalPlaybackLanguagePreferences?.preferredSubtitleLanguage ?? ''}
           kind='subtitle'
           options={options}
-          disabled={isLoadingGlobalPlaybackLanguagePreferences}
+          disabled={isLoadingGlobalPlaybackLanguagePreferences || languageOptionsQuery.isLoading}
           onChange={(value) => handleLanguageChange('subtitle', value)}
         />
       </div>

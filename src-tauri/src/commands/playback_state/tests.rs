@@ -118,6 +118,63 @@ fn stream_family_snapshot(
 }
 
 #[test]
+fn movie_stream_family_priority_rewards_success_and_penalizes_failure_within_title_scope() {
+    let now = 100_000;
+    let success = stream_family_snapshot(None, Some(99_000), None);
+    assert_eq!(
+        score_stream_family_priority(Some(&success), None, None, now),
+        4
+    );
+    assert_eq!(
+        score_stream_family_priority(Some(&success), Some(1), Some(1), now),
+        DEFAULT_STREAM_FAMILY_PRIORITY
+    );
+    let mut failure = stream_family_snapshot(None, None, Some(99_500));
+    failure.consecutive_failures = 1;
+    failure.cooldown_until = Some(110_000);
+    assert_eq!(
+        score_stream_family_priority(Some(&failure), None, None, now),
+        0
+    );
+    failure.cooldown_until = None;
+    assert_eq!(
+        score_stream_family_priority(Some(&failure), None, None, now),
+        1
+    );
+    assert_eq!(
+        score_stream_family_priority(Some(&failure), None, Some(1), now),
+        DEFAULT_STREAM_FAMILY_PRIORITY
+    );
+    assert_eq!(
+        score_stream_family_priority(
+            Some(&success),
+            None,
+            None,
+            99_000 + 1000 * 60 * 60 * 24 * 7 + 1
+        ),
+        DEFAULT_STREAM_FAMILY_PRIORITY
+    );
+    let mut series = success;
+    series.last_success_season = Some(1);
+    series.last_success_episode = Some(5);
+    for (season, episode, expected) in [
+        (Some(1), Some(7), 4),
+        (Some(1), Some(8), DEFAULT_STREAM_FAMILY_PRIORITY),
+        (Some(2), Some(5), DEFAULT_STREAM_FAMILY_PRIORITY),
+        (None, None, DEFAULT_STREAM_FAMILY_PRIORITY),
+    ] {
+        assert_eq!(
+            score_stream_family_priority(Some(&series), season, episode, now),
+            expected
+        );
+    }
+    assert_ne!(
+        super::stream_health::playback_stream_family_snapshot_key("movie:tt1", "release"),
+        super::stream_health::playback_stream_family_snapshot_key("movie:tt2", "release")
+    );
+}
+
+#[test]
 fn stream_family_source_id_only_moves_on_verified_outcomes() {
     let mut snapshot =
         stream_family_snapshot(Some("https://addon-a/manifest.json"), Some(50_000), None);
@@ -403,7 +460,7 @@ fn deleted_history_snapshot_cannot_repopulate_coalescing_cache() {
         ..test_progress()
     };
     let generation = service.history_generation();
-    service.mark_history_persisted(key.clone(), progress.clone(), generation);
+    service.mark_history_persisted([(key.clone(), progress.clone())], false, generation);
     assert!(service.should_skip_history_write(&key, &progress, None));
 
     let mut persisted = crate::providers::lock_or_recover(&service.persisted_history);
@@ -411,7 +468,11 @@ fn deleted_history_snapshot_cannot_repopulate_coalescing_cache() {
     let pending_key = key.clone();
     let pending_progress = progress.clone();
     let pending = std::thread::spawn(move || {
-        pending_service.mark_history_persisted(pending_key, pending_progress, generation);
+        pending_service.mark_history_persisted(
+            [(pending_key, pending_progress)],
+            false,
+            generation,
+        );
     });
     service.bump_history_generation();
     persisted.clear();
@@ -419,6 +480,13 @@ fn deleted_history_snapshot_cannot_repopulate_coalescing_cache() {
     pending.join().expect("pending save completion");
 
     assert!(!service.should_skip_history_write(&key, &progress, None));
-    service.mark_history_persisted(key.clone(), progress.clone(), service.history_generation());
+    let generation = service.history_generation();
+    service.mark_history_persisted([(key.clone(), progress.clone())], false, generation);
     assert!(service.should_skip_history_write(&key, &progress, None));
+
+    // A write whose cap pruning deleted rows drops every cached snapshot.
+    let other_key = "movie:tt456".to_string();
+    service.mark_history_persisted([(other_key.clone(), progress.clone())], true, generation);
+    assert!(!service.should_skip_history_write(&key, &progress, None));
+    assert!(!service.should_skip_history_write(&other_key, &progress, None));
 }

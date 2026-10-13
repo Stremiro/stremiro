@@ -18,19 +18,18 @@ interface TechBadge {
   cls: string;
 }
 
-type StreamMatchBadgeKind = 'episode' | 'range' | 'season' | 'title';
+export type StreamMatchBadgeKind = 'episode' | 'range' | 'season' | 'title' | 'title_partial';
 
 export interface StreamMatchBadge {
   kind: StreamMatchBadgeKind;
   label: string;
-  /** Slim dot+label vocabulary — the tier color lives on the dot and text,
-      no chip chrome, so a row of signals reads as one quiet line. */
-  textCls: string;
-  dotCls: string;
+  /** Only the exact-episode badge carries the profile accent; weaker tiers stay neutral. */
+  cls: string;
 }
 
-// Structured match tiers computed once in the Rust coordinator — the UI only
-// styles them, never re-derives match facts from stream text.
+const MATCH_BADGE_NEUTRAL_CLASS = 'border-white/[0.1] bg-white/[0.04] text-zinc-200';
+
+// Match tiers come from the Rust coordinator; the UI styles, never re-derives.
 export function buildStreamMatchBadges(stream: AddonStream): StreamMatchBadge[] {
   const summary = stream.matchSummary;
   if (!summary) return [];
@@ -40,105 +39,88 @@ export function buildStreamMatchBadges(stream: AddonStream): StreamMatchBadge[] 
     case 'exact':
       badges.push({
         kind: 'episode',
-        label: 'Episode match',
-        textCls: 'text-emerald-300/90',
-        dotCls: 'bg-emerald-400',
+        label: 'Exact episode',
+        cls: 'accent-lattice-soft',
       });
       break;
     case 'episode_range':
-      badges.push({
-        kind: 'range',
-        label: 'Ep. in range',
-        textCls: 'text-sky-300/90',
-        dotCls: 'bg-sky-400',
-      });
+      badges.push({ kind: 'range', label: 'Includes episode', cls: MATCH_BADGE_NEUTRAL_CLASS });
       break;
     case 'season_pack':
-      badges.push({
-        kind: 'season',
-        label: 'Season pack',
-        textCls: 'text-amber-300/90',
-        dotCls: 'bg-amber-400',
-      });
+      badges.push({ kind: 'season', label: 'Season pack', cls: MATCH_BADGE_NEUTRAL_CLASS });
       break;
   }
 
   if (summary.title === 'close') {
-    badges.push({
-      kind: 'title',
-      label: 'Title match',
-      textCls: 'text-violet-300/90',
-      dotCls: 'bg-violet-400',
-    });
+    badges.push({ kind: 'title', label: 'Title match', cls: MATCH_BADGE_NEUTRAL_CLASS });
   } else if (summary.title === 'partial') {
     badges.push({
-      kind: 'title',
-      label: 'Title match',
-      textCls: 'text-zinc-400',
-      dotCls: 'bg-zinc-500',
+      kind: 'title_partial',
+      label: 'Similar title',
+      cls: 'border-white/[0.08] bg-transparent text-zinc-400',
     });
   }
 
   return badges;
 }
 
-// Episode-match tier that earns the card's corner dot-field accent.
-// Title-only matches get the badge but no accent so the signal stays meaningful.
-export type StreamMatchTier = 'exact' | 'episode_range' | 'season_pack';
+// Tier that earns the card's corner accent: episode tiers win, else a close
+// title match (the strongest fact a movie row can have). Partial stays unaccented.
+export type StreamMatchTier = 'exact' | 'episode_range' | 'season_pack' | 'title';
 
 export function streamMatchTier(stream: AddonStream): StreamMatchTier | null {
-  switch (stream.matchSummary?.episode) {
+  const summary = stream.matchSummary;
+  switch (summary?.episode) {
     case 'exact':
     case 'episode_range':
     case 'season_pack':
-      return stream.matchSummary.episode;
+      return summary.episode;
     default:
-      return null;
+      return summary?.title === 'close' ? 'title' : null;
   }
 }
 
 export interface StreamReasonChip {
   kind: AddonStreamRecommendationReason;
   label: string;
-  /** Caution reasons render amber-muted so "why it ranks" reads at a glance. */
-  caution: boolean;
+  /** Positive reasons take the action accent and caution reasons amber, so "why it ranks" reads at a glance. */
+  tone: 'positive' | 'caution' | 'neutral';
 }
 
 const REASON_CHIPS: { [K in AddonStreamRecommendationReason]: StreamReasonChip & { kind: K } } = {
-  verified_source: { kind: 'verified_source', label: 'Verified source', caution: false },
-  source_issues: { kind: 'source_issues', label: 'Recent source issues', caution: true },
-  source_cooling: { kind: 'source_cooling', label: 'Source cooling down', caution: true },
+  verified_source: { kind: 'verified_source', label: 'Verified source', tone: 'positive' },
+  source_issues: { kind: 'source_issues', label: 'Recent source issues', tone: 'caution' },
+  source_cooling: { kind: 'source_cooling', label: 'Source cooling down', tone: 'caution' },
   proven_release_group: {
     kind: 'proven_release_group',
     label: 'Proven release group',
-    caution: false,
+    tone: 'positive',
   },
   release_group_issues: {
     kind: 'release_group_issues',
     label: 'Release group had issues',
-    caution: true,
+    tone: 'caution',
   },
   release_group_cooling: {
     kind: 'release_group_cooling',
     label: 'Release group cooling down',
-    caution: true,
+    tone: 'caution',
   },
   title_affinity: {
     kind: 'title_affinity',
     label: 'Previously worked on this title',
-    caution: false,
+    tone: 'positive',
   },
-  language_match: { kind: 'language_match', label: 'Matches language prefs', caution: false },
-  language_flexible: { kind: 'language_flexible', label: 'Flexible audio/subs', caution: false },
-  top_quality: { kind: 'top_quality', label: 'Top quality', caution: false },
-  good_quality: { kind: 'good_quality', label: 'Good quality', caution: false },
-  preferred_source: { kind: 'preferred_source', label: 'Preferred source', caution: false },
-  fallback: { kind: 'fallback', label: 'Fallback', caution: false },
+  language_match: { kind: 'language_match', label: 'Matches language prefs', tone: 'positive' },
+  language_flexible: { kind: 'language_flexible', label: 'Flexible audio/subs', tone: 'positive' },
+  top_quality: { kind: 'top_quality', label: 'Top quality', tone: 'positive' },
+  good_quality: { kind: 'good_quality', label: 'Good quality', tone: 'positive' },
+  preferred_source: { kind: 'preferred_source', label: 'Preferred source', tone: 'positive' },
+  fallback: { kind: 'fallback', label: 'Fallback', tone: 'neutral' },
 };
 
 export function buildStreamReasonChips(stream: AddonStream): StreamReasonChip[] {
-  // The wire can carry a reason newer than this build's map — drop unknowns
-  // instead of rendering a hole in the chip row.
+  // Wire may carry a reason newer than this build's map — drop unknowns.
   return (stream.recommendationReasons ?? []).flatMap((kind) => REASON_CHIPS[kind] ?? []);
 }
 
@@ -153,20 +135,20 @@ const SELECTOR_RES_RANK: Record<AddonStreamResolution, number> = {
 export function filterSelectorStreams(
   streams: readonly AddonStream[],
   filters: StreamSelectorPreferences,
+  searchQuery = '',
 ): AddonStream[] {
   const { quality, source, addon, sort, batch } = filters;
-  // `addon` carries the addon config id (same value as `StreamSourceSummary.id`
-  // on the chips and `stream.sourceId` on each row) — identity filtering can
-  // never drift from the name the UI happens to display.
+  // `addon` is the addon config id (`StreamSourceSummary.id` / `stream.sourceId`),
+  // so filtering can't drift from the displayed name.
   const filterByAddon = addon !== 'all';
   const filterByQuality = quality !== 'all';
   const filterCachedOnly = source === 'cached';
   const filterEpisodesOnly = batch === 'episodes';
   const filterPacksOnly = batch === 'packs';
+  const searchTerms = searchQuery.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
-  // P2P-capable rows can't be resolved by this build, but hiding them made
-  // rich addons look nearly empty versus Stremio. They stay in the list —
-  // partitioned below playable rows so dead entries never bury live ones.
+  // P2P rows can't be resolved but stay listed (hiding them empties rich
+  // addons) — partitioned below playable rows.
   const playable: AddonStream[] = [];
   const p2p: AddonStream[] = [];
   for (const stream of streams) {
@@ -175,12 +157,28 @@ export function filterSelectorStreams(
     if (filterByAddon && stream.sourceId !== addon) continue;
     if (filterEpisodesOnly && stream.presentation.isBatch) continue;
     if (filterPacksOnly && !stream.presentation.isBatch) continue;
+    if (searchTerms.length > 0) {
+      const presentation = stream.presentation;
+      const text = [
+        stream.sourceName,
+        presentation.streamTitle,
+        presentation.sourceName,
+        presentation.codecLabel,
+        presentation.hdrLabel,
+        presentation.audioLabel,
+        presentation.multiAudioLabel,
+        presentation.sizeLabel,
+        presentation.resolution,
+      ]
+        .join(' ')
+        .toLowerCase();
+      if (!searchTerms.every((term) => text.includes(term))) continue;
+    }
     (stream.presentation.isInstantlyPlayable ? playable : p2p).push(stream);
   }
 
   if (sort === 'smart') {
-    // Backend order is already authoritative within each partition — a
-    // subsequence of a sorted list stays sorted.
+    // Backend order is authoritative within each partition.
     return [...playable, ...p2p];
   }
 
@@ -206,20 +204,28 @@ export function filterSelectorStreams(
   return [...playable, ...p2p];
 }
 
-// Only decision-grade facts earn a badge; codec/audio details live in the
-// meta line where they read as text instead of competing as chips.
+/** One owner for the resolution vocabulary: tech badges, quality filter options and resolve feedback. */
+export const RESOLUTION_LABELS: Record<AddonStreamResolution, string> = {
+  '4k': '4K',
+  '1080p': '1080p',
+  '720p': '720p',
+  sd: 'SD',
+};
+
+const RESOLUTION_BADGE_CLASSES: Record<AddonStreamResolution, string> = {
+  '4k': 'bg-violet-400/[0.12] text-violet-100 border-violet-300/20',
+  '1080p': 'bg-white/[0.07] text-zinc-100 border-white/[0.1]',
+  '720p': 'bg-white/[0.04] text-zinc-300 border-white/[0.07]',
+  sd: 'bg-white/[0.03] text-zinc-400 border-white/[0.06]',
+};
+
+// Only decision-grade facts earn a badge; codec/audio details live in the meta line.
 export function buildStreamTechBadges(stream: AddonStream): TechBadge[] {
   const resolution = stream.presentation.resolution;
   const hdrLabel = stream.presentation.hdrLabel ?? null;
 
   const techBadges: TechBadge[] = [
-    resolution === '4k'
-      ? { label: '4K', cls: 'bg-violet-400/15 text-violet-200 border-violet-300/25' }
-      : resolution === '1080p'
-        ? { label: '1080p', cls: 'bg-white/[0.08] text-white/85 border-white/[0.12]' }
-        : resolution === '720p'
-          ? { label: '720p', cls: 'bg-white/[0.05] text-zinc-300 border-white/[0.08]' }
-          : { label: 'SD', cls: 'bg-white/[0.04] text-zinc-500 border-white/[0.06]' },
+    { label: RESOLUTION_LABELS[resolution], cls: RESOLUTION_BADGE_CLASSES[resolution] },
   ];
 
   if (hdrLabel) {
@@ -227,16 +233,16 @@ export function buildStreamTechBadges(stream: AddonStream): TechBadge[] {
       label: hdrLabel,
       cls:
         hdrLabel === 'DV'
-          ? 'bg-fuchsia-400/15 text-fuchsia-200 border-fuchsia-300/25'
-          : 'bg-amber-400/15 text-amber-200 border-amber-300/25',
+          ? 'bg-fuchsia-400/[0.12] text-fuchsia-100 border-fuchsia-300/20'
+          : 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',
     });
   }
-  // A `matchSummary.episode` badge already carries the pack fact in a
-  // styled chip — only batch rows with no episode claim need the tech badge.
+  // An episode match badge already carries the pack fact; only batch rows
+  // without one need this badge.
   if (stream.presentation.isBatch && !stream.matchSummary?.episode) {
     techBadges.push({
-      label: 'PACK',
-      cls: 'bg-amber-400/15 text-amber-200 border-amber-300/25',
+      label: 'Pack',
+      cls: 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',
     });
   }
 

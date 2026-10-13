@@ -53,9 +53,7 @@ pub(crate) struct AddonManifest {
     pub name: String,
     #[serde(default)]
     pub resources: Vec<AddonResourceCapability>,
-    // Manifest-level `types`/`idPrefixes` are parse-time inheritance inputs
-    // only — every consumer reads the resource-level copies, so they are not
-    // retained on the snapshot.
+    // Manifest-level `types`/`idPrefixes` are inheritance inputs — consumers read the resource-level copies.
     #[serde(default)]
     pub catalogs: Vec<AddonCatalogCapability>,
 }
@@ -87,10 +85,8 @@ where
     deserialize_item_list::<D, String>(deserializer)
 }
 
-/// `Some` only when the field carries a real list: an explicit `null` must
-/// behave like an absent key (inherit from the manifest) — not like a
-/// declared-empty list, which means "serve nothing" for `types` and the
-/// "any id" opt-out for `idPrefixes`.
+/// `Some` only for a real list: explicit `null` behaves like an absent key
+/// (inherit), unlike a declared-empty list ("serve nothing" for `types`, "any id" for `idPrefixes`).
 fn deserialize_optional_string_list<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
@@ -208,11 +204,8 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
     let mut extras = Vec::new();
     let mut seen_extras = std::collections::HashSet::new();
 
-    // `extra` (object list) and `extraSupported` (bare names) are
-    // complementary declarations — option-bearing extras live in the
-    // former while names like `search`/`skip` often appear only in the
-    // latter. Merge both (objects win the dedupe on name collision so
-    // their options survive); picking one would lose capabilities.
+    // `extra` (objects) and `extraSupported` (bare names) are complementary —
+    // merge both; objects win dedupe so their options survive.
     let extra_source = raw
         .extra
         .into_iter()
@@ -229,8 +222,7 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
         else {
             continue;
         };
-        // Extra names match case-insensitively at request time, so dedupe
-        // them the same way (`Genre` + `genre` is one extra, not two).
+        // Extra names match case-insensitively at request time — dedupe the same way.
         if !seen_extras.insert(name.to_ascii_lowercase()) {
             continue;
         }
@@ -294,10 +286,8 @@ fn normalize_resource(
             types: types
                 .map(|values| normalize_opaque_list(values, MAX_TYPE_CHARS, MAX_TYPES))
                 .unwrap_or_else(|| manifest_types.to_vec()),
-            // An absent resource-level `idPrefixes` inherits the manifest's,
-            // like `types` above: otherwise a `tt`-prefixed addon would get
-            // queried for `kitsu:`/`local:` ids it cannot serve. An explicit
-            // empty list stays the "serves any id" opt-out.
+            // Absent `idPrefixes` inherits the manifest's like `types` — else a
+            // `tt` addon gets queried for `kitsu:`/`local:` ids. Explicit empty = "any id".
             id_prefixes: id_prefixes
                 .map(|values| normalize_opaque_list(values, MAX_PREFIX_CHARS, MAX_PREFIXES))
                 .unwrap_or_else(|| manifest_prefixes.to_vec()),
@@ -317,12 +307,11 @@ pub(crate) fn parse_addon_manifest(bytes: &[u8]) -> Result<AddonManifest, String
     let id_prefixes = normalize_opaque_list(raw.id_prefixes, MAX_PREFIX_CHARS, MAX_PREFIXES);
 
     let mut resources = Vec::new();
-    let mut seen_resources = std::collections::HashSet::new();
     for raw_resource in raw.resources {
         let Some(resource) = normalize_resource(raw_resource, &types, &id_prefixes) else {
             continue;
         };
-        if !seen_resources.insert(resource.name.clone()) {
+        if resources.contains(&resource) {
             continue;
         }
         resources.push(resource);
@@ -375,43 +364,26 @@ pub(crate) fn snapshot_supports_request(
         return false;
     }
 
-    let Some(capability) = snapshot
-        .resources
-        .iter()
-        .find(|item| item.name == resource_name)
-    else {
-        return false;
-    };
-
-    if capability.types.is_empty()
-        || !capability
-            .types
-            .iter()
-            .any(|item| item.eq_ignore_ascii_case(&media_type))
-    {
-        return false;
-    }
-
-    if resource_name == "catalog" {
-        return true;
-    }
-
-    capability.id_prefixes.is_empty() || {
-        capability.id_prefixes.iter().any(|prefix| {
-            media_id
-                .get(..prefix.len())
-                .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
-        })
-    }
+    snapshot.resources.iter().any(|capability| {
+        capability.name == resource_name
+            && capability
+                .types
+                .iter()
+                .any(|item| item.eq_ignore_ascii_case(&media_type))
+            && (resource_name == "catalog"
+                || capability.id_prefixes.is_empty()
+                || capability.id_prefixes.iter().any(|prefix| {
+                    media_id
+                        .get(..prefix.len())
+                        .is_some_and(|head| head.eq_ignore_ascii_case(prefix))
+                }))
+    })
 }
 
 pub(crate) fn snapshot_is_classified(snapshot: &AddonManifest) -> bool {
-    // A display-only snapshot (name without any capability declaration) must
-    // not count as classified: it would otherwise block all catalog/meta/
-    // search routing while never triggering a refetch. `catalogs[]` counts on
-    // its own — the (type, id) pair is the strongest capability statement a
-    // manifest makes, and catalogs-only manifests legitimately omit the
-    // redundant `resources` entry.
+    // A name-only snapshot isn't classified — it would block routing while
+    // never triggering a refetch. `catalogs[]` counts on its own (catalogs-only
+    // manifests legitimately omit `resources`).
     non_blank(&snapshot.name) && (!snapshot.resources.is_empty() || !snapshot.catalogs.is_empty())
 }
 

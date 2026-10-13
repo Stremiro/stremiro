@@ -11,9 +11,8 @@ import { Sidebar } from './sidebar';
 // Soft neutral rendered in place of the accent on surfaces the user opted out.
 const NEUTRAL_ACCENT = '#d4d4d8';
 
-// A route render crash must not unmount the tree above it — PlayerHost and
-// the docked mini player live outside the outlet. Contain the failure to
-// the page; navigation resets the boundary via the location key.
+// A route render crash must not unmount PlayerHost and the docked mini player —
+// contain failure to the page; navigation resets the boundary via location key.
 class RouteErrorBoundary extends Component<
   { resetKey: string; children: ReactNode },
   { hasError: boolean; resetKey: string }
@@ -78,13 +77,11 @@ export function Layout() {
   const glowScale = clamp(accentIntensity, 0, 100) / 100;
 
   // Browse-page keys: `/`/`Ctrl+K` to search, Esc/Backspace/Alt+← for back.
-  // Subscription-free (window listener + bound navigate), so Layout's render
-  // cost is unchanged. Player routes never mount Layout — its richer hotkey
-  // map owns the keyboard there.
+  // Player routes never mount Layout — its own hotkey map owns the keyboard.
   useBrowseHotkeys();
 
-  // Layout effect: the accent vars must be on <html> before first paint — a
-  // passive effect would flash the white fallback for one frame on launch.
+  // Accent vars must land on <html> before first paint — a passive effect would
+  // flash the white fallback for one frame on launch.
   useLayoutEffect(() => {
     const root = document.documentElement;
     root.style.setProperty('--app-accent', accent);
@@ -109,12 +106,9 @@ export function Layout() {
     <>
       <DesktopTitlebar />
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
-      {/* App-wide ambient tint driven by the profile accent color and glow scale.
-          Pure radial gradients with no blur filter: blur on viewport-sized layers
-          gets clipped by overflow-hidden and quantizes into visible rings on
-          WebView2. Mid stops smooth the falloff into 8-bit panels. Alpha rides
-          var(--app-glow) so the settings slider previews live — always mounted,
-          transparent at 0. */}
+      {/* Ambient accent tint. Radial gradients only — blur on viewport layers
+          clips and quantizes into visible rings on WebView2. Alpha rides
+          var(--app-glow) so the settings slider previews live (always mounted). */}
       <div aria-hidden='true' data-mini-mask className='pointer-events-none fixed inset-0 z-0'>
         <div
           className='absolute inset-0'
@@ -122,13 +116,9 @@ export function Layout() {
             background: `radial-gradient(55% 42% at 12% 0%, rgb(var(--app-accent-rgb) / calc(0.09 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.045 * var(--app-glow))) 42%, transparent 70%), radial-gradient(36% 28% at 94% 112%, rgb(var(--app-accent-rgb) / calc(0.04 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 45%, transparent 72%)`,
           }}
         />
-        {/* Subtle dot halftone confined to the frame edges breaks up any
-          remaining banding without adding a fullscreen filter pass. Both
-          fields end off-screen before content like the calendar grid,
-          whose translucent cells would otherwise let the dots read as an
-          overlay on the dates. Each field is its own element so the
-          ambient-activity cue can drift them independently — the top-left
-          shimmers while the bottom-right marches like a loading bar. */}
+        {/* Dot halftone at the frame edges breaks up banding without a
+          fullscreen filter. Fields end off-screen before content like the
+          calendar grid; separate elements so ambient-activity drifts each. */}
         <div
           // Slack past the viewport lets the composited drift translate land
           // without exposing an unpainted edge (see ambient-dots keyframes).
@@ -150,8 +140,8 @@ export function Layout() {
           }}
         />
       </div>
-      {/* Dithering grain behind page content with the ambient: it dithers the gradients
-          shining through translucent panels without ever sitting over text. */}
+      {/* Dithering grain behind page content — dithers gradients through
+          translucent panels without sitting over text. */}
       <div
         aria-hidden='true'
         data-mini-mask

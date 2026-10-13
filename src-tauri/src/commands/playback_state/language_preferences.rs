@@ -1,12 +1,12 @@
 use super::{
-    insert_sorted_unique, load_advisory_index, playback_title_scope_key, prune_index_to_cap,
-    PlaybackStateService, PLAYBACK_STATE_STORE_FILE,
+    insert_sorted_unique, load_advisory_index, merge_sorted_unique, playback_title_scope_key,
+    prune_index_to_cap, PlaybackStateService, PLAYBACK_STATE_STORE_FILE,
 };
 use crate::commands::playback_preferences_commands::sanitize_language_pref;
 use crate::commands::{DurableStore, PlaybackLanguagePreferences};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::AppHandle;
 
 pub(super) const PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY: &str =
@@ -59,11 +59,10 @@ pub(super) fn merge_playback_language_preferences(
         preferred_subtitle_language,
     } = defaults;
 
-    // Explicit global preferences win; the scoped snapshot only fills a
-    // field the defaults leave unset. Both sides bypass the write-path
-    // sanitizer if the store file was hand-edited or corrupt — re-sanitize
-    // on merge so a raw token can never surface as an effective preference;
-    // a corrupt value falls back to the (also re-checked) other side.
+    // Explicit globals win; the scoped snapshot only fills fields the defaults
+    // leave unset. Both sides can bypass the write-path sanitizer if the store
+    // was hand-edited or corrupt — re-sanitize on merge so a raw token can never
+    // surface as an effective preference.
     PlaybackLanguagePreferences {
         preferred_audio_language: sanitize_language_pref(preferred_audio_language, false).or_else(
             || {
@@ -128,11 +127,10 @@ impl PlaybackStateService {
         if self.history_generation() != start_generation {
             return Ok(());
         }
-        // The index load must live inside the critical section like every
-        // sibling writer: a load taken pre-lock can be preempted by another
-        // outcome write, and the write-back below would then drop that
-        // sibling's entry — orphaning an item that `clear` only reaches via
-        // the index.
+        // The index load must live inside the critical section like every sibling
+        // writer: a pre-lock load can be preempted by another outcome write, and the
+        // write-back below would drop that sibling's entry — orphaning an item
+        // `clear` only reaches via the index.
         let mut preferences_index =
             load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
 
@@ -148,18 +146,15 @@ impl PlaybackStateService {
                 PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
                 json!(preferences_index),
             );
-            // Debounced like the sibling outcome writer: per-title language
-            // prefs are advisory and a track-cycling burst must not pay a
-            // whole-file save per selection.
+            // Debounced like the sibling outcome writer — a track-cycling burst must not pay a whole-file save per selection.
             self.schedule_state_file_save(app);
             return Ok(());
         }
 
         insert_sorted_unique(&mut preferences_index, &scope_key);
 
-        // The item is written before pruning: a new key with no stored
-        // snapshot ranks as `updated_at = 0`, so pruning first would evict the
-        // pick being recorded and orphan its item outside the index.
+        // Item written before pruning: a new key ranks `updated_at = 0`, so pruning
+        // first would evict the pick being recorded and orphan its item.
         store.set(
             playback_language_preferences_item_key(&scope_key),
             json!(PlaybackLanguagePreferencesSnapshot {
@@ -199,10 +194,9 @@ impl PlaybackStateService {
         )
     }
 
-    /// Backup restore: fills titles with no learned preference yet — a pick
-    /// made on this device always wins. Keys re-derive through the live scope
-    /// normalizer and values through the language sanitizer, so a hostile
-    /// backup can't plant keys or tokens the write path would reject.
+    /// Backup restore: fills titles with no learned preference yet — a pick made on
+    /// this device always wins. Keys and values re-derive through the live
+    /// normalizers so a hostile backup can't plant what the write path rejects.
     pub(crate) fn import_title_language_preferences(
         &self,
         app: &AppHandle,
@@ -216,7 +210,9 @@ impl PlaybackStateService {
         let mut preferences_index =
             load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);
         let now = crate::commands::now_unix_millis();
-        let mut imported = 0usize;
+        // Accepted keys merge into the sorted index once at the end instead
+        // of one shifting insert per row (imports can carry 10k entries).
+        let mut accepted = HashSet::new();
 
         for (key, value) in entries {
             let Some(scope_key) = key.split_once(':').and_then(|(media_type, media_id)| {
@@ -235,7 +231,8 @@ impl PlaybackStateService {
             if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
                 continue;
             }
-            if !insert_sorted_unique(&mut preferences_index, &scope_key) {
+            if accepted.contains(&scope_key) || preferences_index.binary_search(&scope_key).is_ok()
+            {
                 continue;
             }
             store.set(
@@ -246,12 +243,14 @@ impl PlaybackStateService {
                     updated_at: snapshot.updated_at.min(now),
                 }),
             );
-            imported += 1;
+            accepted.insert(scope_key);
         }
 
+        let imported = accepted.len();
         if imported == 0 {
             return Ok(0);
         }
+        merge_sorted_unique(&mut preferences_index, accepted.into_iter().collect());
         prune_language_preferences_index(&store, &mut preferences_index);
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,

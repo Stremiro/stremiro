@@ -14,10 +14,7 @@ export function isSeriesLikeMediaType(value?: string | null): boolean {
 
 export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 
-/** Browse-page content-column insets that clear the fixed left sidebar
-    (pl 84→92px = 60px rail + gutter). Concatenated, never `cn()`-merged —
-    separate left/right padding: a combined `lg:px-*` would override
-    `lg:pl-[92px]` under tailwind-merge and pull the column under the sidebar. */
+/** Content-column insets clearing the fixed sidebar; never `cn()`-merge — `lg:px-*` would override `lg:pl-[92px]` under tailwind-merge. */
 export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
 
 /** `#rrggbb` to `"r g b"` for use inside `rgb()`/`rgba()` with CSS vars. */
@@ -46,8 +43,7 @@ export function nonBlank(value?: string | null): string | undefined {
   return value?.trim() || undefined;
 }
 
-/** 'local' is the sentinel media id for playback without a catalog title —
-    resume, language-preference and stream-health persistence all skip it. */
+/** 'local' = playback without a catalog title — resume/language/stream-health persistence all skip it. */
 export function isLocalMediaId(mediaId?: string | null): boolean {
   return mediaId === 'local';
 }
@@ -66,10 +62,7 @@ export function clearTimer(timerRef: { current: TimerHandle | null }) {
   timerRef.current = null;
 }
 
-/** Insert-or-refresh into a recency-ordered `Map` bounded to `max` entries:
-    delete+set re-inserts so recency is insertion order, then the oldest key
-    is evicted at capacity — a plain `set` would leave a revisited entry in
-    its first-seen slot and evict live entries before stale ones. */
+/** LRU-ish insert-or-refresh into a `Map` bounded to `max` — delete+set re-inserts so revisits count as recent. */
 export function boundedMapSet<K, V>(map: Map<K, V>, key: K, value: V, max: number) {
   map.delete(key);
   map.set(key, value);
@@ -79,10 +72,7 @@ export function boundedMapSet<K, V>(map: Map<K, V>, key: K, value: V, max: numbe
   }
 }
 
-/** Serial operation queue: each `enqueue` runs after the previous settles.
-    The stored tail is recovered so one failure can't wedge later work —
-    callers get the raw result (errors propagate) while `pending` stays
-    awaitable for lifecycle barriers. */
+/** Serial queue; the stored tail is recovered so one failure can't wedge later work — errors still propagate to the caller. */
 export function createSerialTaskQueue() {
   let tail: Promise<void> = Promise.resolve();
   return {
@@ -95,10 +85,7 @@ export function createSerialTaskQueue() {
   };
 }
 
-/** `Promise.race` with a self-clearing timer: `onTimeout` supplies the
- * settled value — throw inside it to reject. The timer is always cleared
- * when the race settles so a lost race cannot fire late; `work` is never
- * cancelled. */
+/** `Promise.race` + self-clearing timer; `onTimeout` supplies the settled value (throw to reject). `work` is never cancelled. */
 export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T): Promise<T> {
   let timer: TimerHandle | undefined;
   const timeout = new Promise<T>((resolve, reject) => {
@@ -113,15 +100,12 @@ export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T)
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
-/** True when the OS asks for reduced motion — JS-driven motion (smooth
- * scrolls) should go instant; CSS animation/transition is covered by the
- * global guard in index.css. */
+/** OS reduced-motion check — JS-driven motion (smooth scrolls) goes instant; CSS is covered by the index.css guard. */
 export function prefersReducedMotion(): boolean {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
-/** `ScrollBehavior` honoring reduced motion — single owner for the
-    `prefersReducedMotion() ? 'auto' : 'smooth'` policy at scroll call sites. */
+/** `ScrollBehavior` honoring reduced motion. */
 export function scrollBehavior(): ScrollBehavior {
   return prefersReducedMotion() ? 'auto' : 'smooth';
 }
@@ -152,9 +136,7 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** True for renderable remote art — single owner for poster/backdrop/logo
-    guards. Mirrors the backend `is_fetchable_http_url` (http|https): addon
-    artwork persisted as http:// must not render as the no-art fallback. */
+/** Renderable remote art check — mirrors backend `is_fetchable_http_url`; http:// addon art must not render as no-art. */
 export function isHttpUrl(value?: string | null): value is string {
   return !!value && /^https?:\/\//.test(value);
 }
@@ -180,14 +162,10 @@ export function formatEpisodeHeading(
   return [formatSeasonEpisode(season, episode), title].filter(Boolean).join(' · ');
 }
 
-/** Leading `YYYY-MM-DD` of an air/release timestamp. Addons send either a
-    bare date or a full ISO datetime — both mean "this calendar day", so the
-    date part is authoritative and any trailing time/offset is noise. */
+/** Leading `YYYY-MM-DD` of an air/release timestamp — addons send bare date or ISO datetime, both mean "this calendar day". */
 const ISO_DATE_PREFIX = /^(\d{4})-(\d{2})-(\d{2})/;
 
-/** Local-day parse for schedule/air dates — single owner. `parseISO` on a
-    Z-suffixed datetime (`2013-04-21T00:00:00Z`) lands on the previous day for
-    users west of UTC, shifting air dates one calendar day back. */
+/** Local-day parse for schedule/air dates — `parseISO` on a `Z` datetime lands on the previous day west of UTC. */
 export function parseLocalScheduleDate(value?: string | null): Date | null {
   if (!value) return null;
   const match = ISO_DATE_PREFIX.exec(value.trim());
@@ -212,8 +190,7 @@ export function isAiredByLocalDay(releaseDate: string | null | undefined, localD
   return airDate === undefined || airDate <= localDayMs;
 }
 
-/** Episode air-date line: absolute for aired episodes ("Apr 7, 2013" — the
-    calendar's vocabulary), compact countdown ("in 3d") for unaired ones. */
+/** Air-date line: absolute for aired ("Apr 7, 2013"), compact countdown ("in 3d") for unaired. */
 export function formatAirDate(value?: string | null): string | null {
   if (!value) return null;
   const date = parseLocalScheduleDate(value);
@@ -232,8 +209,7 @@ export function mediaTypeLabel(type?: string | null): string {
   return type === 'series' ? 'TV Series' : 'Movie';
 }
 
-/** Card/hero genre pills — the catalog's genres are already painted, so a
-    late details payload must not swap pill text under the user's eyes. */
+/** Genre pills — catalog genres are already painted, so a late details payload must not swap the text. */
 export function primaryGenrePills(
   catalogGenres: string[] | undefined,
   detailsGenres: string[] | undefined,

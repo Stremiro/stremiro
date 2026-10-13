@@ -9,11 +9,23 @@ interface RunOptimisticQueryMutationOptions<TData, TVariables> {
   variables: TVariables;
 }
 
+export function restoreQueryArrayEntry<T extends { id: string }>(
+  queryClient: QueryClient,
+  queryKey: QueryKey,
+  itemId: string,
+  previousEntry: T | null | undefined,
+): void {
+  queryClient.setQueryData<T[]>(queryKey, (current) => {
+    if (!previousEntry) return current?.filter((entry) => entry.id !== itemId);
+    return current?.some((entry) => entry.id === itemId)
+      ? current.map((entry) => (entry.id === itemId ? previousEntry : entry))
+      : [...(current ?? []), previousEntry];
+  });
+}
+
 // Serialize native writes per query key; only the newest write owns the cache.
 const writeTails = new Map<string, Promise<unknown>>();
-// Monotonic write generations per key: a refetch racing the write chain can
-// overwrite the optimistic marker with stale server data, so ownership is
-// "latest requested write" — never payload identity.
+// Monotonic write generations: a racing refetch can overwrite the optimistic marker, so ownership is "latest write", never payload identity.
 const writeGenerations = new Map<string, number>();
 let nextWriteGeneration = 0;
 

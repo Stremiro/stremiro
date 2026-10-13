@@ -7,8 +7,8 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { GripVertical, Loader2, Plus, Trash2 } from 'lucide-react';
-import { type ReactNode, useCallback, useMemo, useRef, useState } from 'react';
+import { Check, GripVertical, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
+import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -43,43 +43,104 @@ interface AddonRowProps {
   onRemove?: (id: string) => void;
 }
 
+const ADDON_ICON_BUTTON_CLASS =
+  'flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35';
+const ADDON_COPIED_FEEDBACK_MS = 1600;
+
+function addonMonogram(name: string) {
+  return name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?';
+}
+
 function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: AddonRowProps) {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(false), ADDON_COPIED_FEEDBACK_MS);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  const handleCopyLink = async () => {
+    try {
+      await navigator.clipboard.writeText(addon.url);
+      setCopied(true);
+      toast.success('Addon link copied');
+    } catch {
+      toast.error('Could not copy addon link');
+    }
+  };
+
   return (
     <>
       {handle}
-      <div className={cn('min-w-0 flex-1 transition-opacity', !addon.enabled && 'opacity-45')}>
-        <div className='flex items-center gap-2'>
-          <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
-            {addon.name}
-          </span>
-          {pinned ? (
-            <span className='shrink-0 rounded-md border border-white/10 bg-white/[0.06] px-1.5 py-px text-[9.5px] font-bold uppercase tracking-wider text-zinc-400'>
-              Default
-            </span>
-          ) : null}
-        </div>
-        <p
-          data-selectable='true'
-          title={addon.displayUrl}
-          className='mt-1 truncate font-mono text-[11.5px] leading-none text-zinc-500'
+      <div
+        className={cn(
+          'flex min-w-0 flex-1 items-center gap-3 transition-opacity',
+          !addon.enabled && 'opacity-45',
+        )}
+      >
+        <span
+          aria-hidden='true'
+          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
         >
-          {addon.displayUrl}
-        </p>
+          {addonMonogram(addon.name)}
+        </span>
+        <div className='min-w-0 flex-1'>
+          <div className='flex min-w-0 items-center gap-2'>
+            <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
+              {addon.name}
+            </span>
+            {pinned ? (
+              <span className='shrink-0 rounded-[5px] bg-white/[0.05] px-1.5 py-px text-[10.5px] font-medium text-zinc-400 ring-1 ring-inset ring-white/[0.07]'>
+                Default
+              </span>
+            ) : null}
+          </div>
+          <p
+            data-selectable='true'
+            title={addon.displayUrl}
+            className='mt-1 truncate font-mono text-[11.5px] leading-tight text-zinc-500'
+          >
+            {addon.displayUrl}
+          </p>
+        </div>
       </div>
 
-      <div className='flex shrink-0 items-center gap-1.5'>
-        {!pinned && onRemove && (
+      {/* Fixed slots keep controls column-aligned; pinned rows reserve the remove slot. */}
+      <div className='col-start-2 flex shrink-0 items-center justify-self-end gap-1'>
+        <button
+          type='button'
+          title={copied ? 'Copied' : 'Copy addon link'}
+          aria-label={`Copy ${addon.name} addon link`}
+          onClick={() => void handleCopyLink()}
+          className={cn(
+            ADDON_ICON_BUTTON_CLASS,
+            copied ? 'text-(--accent-act)' : 'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+          )}
+        >
+          {copied ? (
+            <Check aria-hidden='true' className='h-4 w-4' />
+          ) : (
+            <Link2 aria-hidden='true' className='h-4 w-4' />
+          )}
+        </button>
+        {!pinned && onRemove ? (
           <button
             type='button'
             title='Remove'
             aria-label={`Remove ${addon.name}`}
             onClick={() => onRemove(addon.id)}
             disabled={isWorking}
-            className='flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 opacity-100 transition-colors hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+            className={cn(
+              ADDON_ICON_BUTTON_CLASS,
+              'text-zinc-500 hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100',
+            )}
           >
-            <Trash2 className='h-4 w-4' />
+            <Trash2 aria-hidden='true' className='h-4 w-4' />
           </button>
+        ) : (
+          <span aria-hidden='true' className='h-8 w-8' />
         )}
+        <span aria-hidden='true' className='mx-2 h-5 w-px bg-white/[0.07]' />
         <SettingsSwitch
           ariaLabel={addon.enabled ? `Disable ${addon.name}` : `Enable ${addon.name}`}
           checked={addon.enabled}
@@ -92,7 +153,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
 }
 
 const ADDON_ROW_CLASS =
-  'group/row flex items-center gap-3 px-5 py-3.5 transition-colors hover:bg-white/[0.02]';
+  'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-2 px-4 py-3.5 transition-colors hover:bg-white/[0.02] sm:flex sm:gap-3 sm:px-5';
 
 function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
@@ -153,7 +214,14 @@ export function StreamingSources() {
   const [newUrl, setNewUrl] = useState('');
   const newUrlInputRef = useRef<HTMLInputElement | null>(null);
 
-  const { data: addons = [], isLoading, isLoadingError, isRefetching, refetch } = useAddonConfigs();
+  const {
+    data: addons = [],
+    isLoading,
+    isLoadingError,
+    isFetched,
+    isFetching,
+    refetch,
+  } = useAddonConfigs();
 
   const saveMutation = useMutation({
     mutationFn: api.updateAddonConfigs,
@@ -168,8 +236,7 @@ export function StreamingSources() {
 
   const sensors = useSortableSensors();
 
-  // Rust judges the add box with the normalizer the save path stores with,
-  // so validity, configure-page and duplicate verdicts can't drift from it.
+  // Rust judges the add box with the save path's normalizer, so verdicts can't drift.
   const trimmedNewUrl = newUrl.trim();
   const debouncedNewUrl = useDebounce(trimmedNewUrl, ADDON_URL_INSPECT_DEBOUNCE_MS);
   const installedAddonUrls = useMemo(() => addons.map((addon) => addon.url), [addons]);
@@ -224,8 +291,7 @@ export function StreamingSources() {
   };
 
   const handleAddUrl = () => {
-    // Enter bypasses the disabled button and can land mid-debounce; Rust
-    // re-judges validity, configure pages and duplicates at commit.
+    // Enter bypasses the disabled button mid-debounce; Rust re-judges at commit.
     if (isWorking || !trimmedNewUrl) return;
 
     const knownIds = new Set(addons.map((addon) => addon.id));
@@ -253,8 +319,9 @@ export function StreamingSources() {
         description='Cinemeta (metadata) and OpenSubtitles (subtitles) are pinned defaults. Drag other addons to set stream priority.'
         action={
           addons.length > 0 ? (
-            <span className='text-[12px] tabular-nums text-zinc-400'>
-              {activeCount}/{addons.length} active
+            <span className='inline-flex items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11.5px] font-medium tabular-nums text-zinc-300 ring-1 ring-inset ring-white/[0.07]'>
+              <span aria-hidden='true' className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
+              {activeCount} of {addons.length} active
             </span>
           ) : undefined
         }
@@ -262,20 +329,26 @@ export function StreamingSources() {
 
       <div className='border-b border-white/[0.06] px-5 py-4'>
         <div className='flex flex-col gap-2 sm:flex-row'>
-          <Input
-            ref={newUrlInputRef}
-            aria-label='Addon manifest URL'
-            aria-describedby='addon-url-hint'
-            aria-invalid={!!trimmedNewUrl && !!inspection && !normalizedNewUrl}
-            placeholder='https://addon.host/.../manifest.json'
-            value={newUrl}
-            onChange={(e) => setNewUrl(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') handleAddUrl();
-            }}
-            disabled={isWorking}
-            className='h-10 flex-1 rounded-lg border-white/[0.08] bg-white/[0.04] px-3.5 font-mono text-[13px] focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
-          />
+          <div className='relative flex-1'>
+            <Link2
+              aria-hidden='true'
+              className='pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500'
+            />
+            <Input
+              ref={newUrlInputRef}
+              aria-label='Addon manifest URL'
+              aria-describedby='addon-url-hint'
+              aria-invalid={!!trimmedNewUrl && !!inspection && !normalizedNewUrl}
+              placeholder='https://addon.host/.../manifest.json'
+              value={newUrl}
+              onChange={(e) => setNewUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.nativeEvent.isComposing) handleAddUrl();
+              }}
+              disabled={isWorking}
+              className='h-10 rounded-lg border-white/[0.08] bg-white/[0.04] pl-10 pr-3.5 font-mono text-[13px] transition-colors placeholder:text-zinc-600 focus-visible:border-(--accent-nav)/35 focus-visible:ring-1 focus-visible:ring-(--accent-nav)/25 focus-visible:ring-offset-0'
+            />
+          </div>
           <Button
             size='sm'
             onClick={handleAddUrl}
@@ -334,22 +407,21 @@ export function StreamingSources() {
         )}
       </div>
 
-      {isLoading ? (
+      {isLoading && !isFetched ? (
         <SettingsBody className='flex items-center gap-3 text-[13px] text-zinc-500'>
           <Loader2 className='h-4 w-4 animate-spin' />
           Loading sources…
         </SettingsBody>
-      ) : isLoadingError ? (
+      ) : isLoadingError || (isFetched && isLoading) ? (
         <SettingsBody>
           <RetryBanner
             message="Couldn't load your sources."
             onRetry={() => void refetch()}
-            isRetrying={isRefetching}
+            isRetrying={isFetching}
           />
         </SettingsBody>
       ) : (
-        // No empty state: the backend always pins the default addons, so a
-        // successful load can never return an empty list.
+        // No empty state: the backend always pins default addons.
         <div className='divide-y divide-white/[0.05]'>
           {pinnedAddons.map((addon) => (
             <PinnedAddonRow

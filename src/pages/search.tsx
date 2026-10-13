@@ -1,3 +1,4 @@
+import { useQueryClient } from '@tanstack/react-query';
 import {
   ArrowUp,
   Check,
@@ -34,7 +35,7 @@ import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
 import { navigateAppBack } from '@/lib/navigation';
-import { searchCatalogKey } from '@/lib/search-catalog';
+import { prefetchSearchCatalog, searchCatalogKey } from '@/lib/search-catalog';
 import {
   sameSearchGenre,
   searchGenreOptions,
@@ -43,16 +44,14 @@ import {
 } from '@/lib/search-page-state';
 import { cn, scrollBehavior } from '@/lib/utils';
 
-// Results fill every row edge to edge at near-home size: columns grow from
-// the 170px home minimum, so wide screens fit a full row (9+ on large
-// displays) with no trailing empty slot.
+// Results fill every row edge to edge: auto-fill columns grow from the 170px
+// home minimum so wide screens fit a full row with no trailing empty slot.
 const SEARCH_RESULTS_CLASS_NAME =
   'grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-x-4 gap-y-8 sm:grid-cols-[repeat(auto-fill,minmax(170px,1fr))]';
 const SEARCH_RESULT_ITEM_CLASS_NAME = 'min-w-0';
 
-// The virtualized grid needs a numeric column count; this mirrors the
-// auto-fill minmax() rules above (16px column gap, 150px min below the sm
-// breakpoint, 170px at sm+) so both render paths produce identical columns.
+// Mirrors the auto-fill minmax() rules above so the virtualizer's column count
+// matches the CSS grid exactly.
 const SEARCH_GRID_GAP_PX = 16;
 const SEARCH_GRID_ROW_GAP_PX = 32;
 const SEARCH_GRID_SM_BREAKPOINT_PX = 640;
@@ -155,16 +154,18 @@ interface SearchResultsProps {
   isFetching: boolean;
   isFetchingNextPage: boolean;
   isOnline: boolean;
+  isPlaceholderData: boolean;
+  isRetryingInitialLoad: boolean;
   onResetFilters: () => void;
+  onClearSearch: () => void;
   refetch: () => void;
   results: MediaItem[];
   showSkeleton: boolean;
   trimmedDebouncedQuery: string;
 }
 
-// Memoized so a keystroke in the input only re-renders the header — the
-// virtualized grid (virtualizer math + every mounted card) is untouched
-// until a prop that actually describes the results changes.
+// Memoized so a keystroke only re-renders the header — the virtualized grid
+// is untouched until a results-describing prop changes.
 const SearchResults = memo(function SearchResults({
   activeGenre,
   errorObj,
@@ -176,7 +177,10 @@ const SearchResults = memo(function SearchResults({
   isFetching,
   isFetchingNextPage,
   isOnline,
+  isPlaceholderData,
+  isRetryingInitialLoad,
   onResetFilters,
+  onClearSearch,
   refetch,
   results,
   showSkeleton,
@@ -186,10 +190,8 @@ const SearchResults = memo(function SearchResults({
   const loadMoreRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const sentinel = loadMoreRef.current;
-    // `isError` must gate observation, not just re-run the effect: a failed
-    // next-page leaves the sentinel in view, and re-observing would refire
-    // `fetchNextPage` in a loop. The explicit retry button stays the only
-    // recovery while the query sits in error.
+    // `isError` must gate observation: a failed next-page leaves the sentinel
+    // in view and re-observing would refire `fetchNextPage` in a loop.
     if (!sentinel || !isOnline || !hasNextPage || isError || isFetching) {
       return;
     }
@@ -227,26 +229,31 @@ const SearchResults = memo(function SearchResults({
     );
   }
 
-  // A failed next-page fetch keeps the loaded grid — the full error panel is
-  // only for a query that produced nothing at all.
-  if (isError && results.length === 0) {
+  // A failed next-page keeps the loaded grid; the full panel is only for a
+  // query that produced nothing.
+  if ((isError || isRetryingInitialLoad) && results.length === 0) {
     return (
       <SearchPanel
-        role='alert'
-        title='Failed to load content'
-        description={getErrorMessage(errorObj)}
+        role={isRetryingInitialLoad ? 'status' : 'alert'}
+        title={isRetryingInitialLoad ? 'Loading content…' : 'Failed to load content'}
+        description={
+          isRetryingInitialLoad ? 'Trying the request again.' : getErrorMessage(errorObj)
+        }
         action={
           <button
             type='button'
-            // Guard, not `disabled` — the refetch disables the focused
-            // button, which would drop keyboard focus to <body>.
+            // Keep the recovery button mounted and focusable while it retries.
             aria-disabled={isFetching || undefined}
+            aria-busy={isFetching || undefined}
             onClick={() => {
               if (!isFetching) void refetch();
             }}
-            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4')}
+            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4 inline-flex items-center gap-2')}
           >
-            Try again
+            {isRetryingInitialLoad && (
+              <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
+            )}
+            {isRetryingInitialLoad ? 'Trying again…' : 'Try again'}
           </button>
         }
       />
@@ -273,8 +280,6 @@ const SearchResults = memo(function SearchResults({
               : 'Try changing the category.'
         }
         action={
-          // A text-query miss offers nothing to reset — only surfaces when a
-          // facet (type/feed/genre) is part of the empty result.
           hasActiveFilters ? (
             <button
               type='button'
@@ -283,6 +288,14 @@ const SearchResults = memo(function SearchResults({
             >
               Reset filters
             </button>
+          ) : trimmedDebouncedQuery ? (
+            <button
+              type='button'
+              onClick={onClearSearch}
+              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4')}
+            >
+              Clear search
+            </button>
           ) : undefined
         }
       />
@@ -290,14 +303,12 @@ const SearchResults = memo(function SearchResults({
   }
 
   return (
-    // keepPreviousData leaves the old grid mounted while the next query
-    // resolves; the dim + aria-busy signal the refresh without a layout jump.
+    // keepPreviousData leaves the old grid mounted; dim + aria-busy signal the
+    // refresh. It dims only while the previous facet's results stand in;
+    // background refreshes of the current facet stay full-opacity.
     <div
       aria-busy={isFetching || undefined}
-      className={cn(
-        'transition-opacity duration-200',
-        isFetching && !isFetchingNextPage && 'opacity-60',
-      )}
+      className={cn('transition-opacity duration-200', isPlaceholderData && 'opacity-60')}
     >
       {!isOnline && (
         <div
@@ -364,6 +375,7 @@ function includesGenre(options: readonly string[], genre: string) {
 
 export function Search() {
   const isOnline = useOnlineStatus();
+  const queryClient = useQueryClient();
   useDocumentTitle('Search');
   const {
     activeFeed,
@@ -385,25 +397,25 @@ export function Search() {
     fetchNextPage,
     hasNextPage,
     isError,
+    isFetched,
     isFetchNextPageError,
     isFetching,
     isFetchingNextPage,
     isLoading,
+    isPlaceholderData,
     refetch,
     results,
   } = useSearchResults({ query: debouncedQuery, activeType, activeFeed, activeGenre, isOnline });
 
-  // Genre menu entries are manifest-driven: the union of `genre` extra
-  // options the enabled addons declare for the active catalog type
-  // (Cinemeta first), computed in Rust.
+  // Manifest-driven union of `genre` extra options the enabled addons declare
+  // for the active catalog type (Cinemeta first), computed in Rust.
   const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
-  // `all` unions the movie and series genre sets (dedupe inside the helper).
+  // `all` unions the movie and series genre sets.
   const genreOptions = useMemo(
     () => searchGenreOptions(browseGenres, activeType),
     [browseGenres, activeType],
   );
-  // A deep-linked genre the manifests don't enumerate still gets an entry so
-  // the active filter is never invisible.
+  // A deep-linked genre the manifests don't enumerate still gets an entry.
   const menuGenres = useMemo(
     () =>
       activeGenre && !includesGenre(genreOptions, activeGenre)
@@ -412,35 +424,59 @@ export function Search() {
     [activeGenre, genreOptions],
   );
 
+  // A genre the next type's catalogs don't offer would strand an empty grid.
+  const isGenreCompatible = (nextType: SearchMediaType) =>
+    !activeGenre ||
+    !browseGenres ||
+    nextType === activeType ||
+    includesGenre(searchGenreOptions(browseGenres, nextType), activeGenre);
+
   const selectType = (nextType: SearchMediaType) => {
-    // A genre the next type's catalogs don't offer would strand an empty grid.
-    const clearIncompatibleGenre = Boolean(
-      activeGenre &&
-      browseGenres &&
-      nextType !== activeType &&
-      !includesGenre(searchGenreOptions(browseGenres, nextType), activeGenre),
-    );
-    handleTypeChange(nextType, clearIncompatibleGenre);
+    handleTypeChange(nextType, !isGenreCompatible(nextType));
     // A no-op re-click changes nothing — don't bounce the scroll position.
     if (nextType !== activeType) resetScroll();
   };
 
-  // One stable handler so `SearchResults`' memo isn't defeated by an inline
-  // arrow — shared by the header Reset pill and the empty-state action.
+  // Hover/focus intent warms the next tab's catalog so the switch lands fast.
+  const prefetchType = (nextType: SearchMediaType) => {
+    if (!isOnline || nextType === activeType) return;
+    prefetchSearchCatalog(queryClient, {
+      query: debouncedQuery,
+      type: nextType,
+      feed: activeFeed,
+      genre: isGenreCompatible(nextType) ? activeGenre : undefined,
+    });
+  };
+
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  // Restored text is selected on land so typing replaces it.
+  useEffect(() => {
+    const input = searchInputRef.current;
+    if (input?.value) input.select();
+  }, []);
+  const handleClearSearch = useCallback(() => {
+    setQuery('');
+    searchInputRef.current?.focus({ preventScroll: true });
+    resetScroll();
+  }, [setQuery]);
+
+  // Stable handler shared by the header Reset pill and the empty-state action.
   const handleResetFilters = useCallback(() => {
     if (!hasActiveFilters) return;
     resetFilters();
+    searchInputRef.current?.focus({ preventScroll: true });
     resetScroll();
   }, [hasActiveFilters, resetFilters]);
 
-  const searchInputRef = useRef<HTMLInputElement>(null);
-  const showSkeleton = !isError && (isLoading || (isFetching && results.length === 0));
-  const isBrowsing = trimmedDebouncedQuery.length === 0;
+  const isRetryingInitialLoad = isFetched && isLoading;
+  const showSkeleton =
+    !isRetryingInitialLoad && !isError && (isLoading || (isFetching && results.length === 0));
+  const isBrowsing = query.trim().length === 0;
+  const isUpdating = isOnline && (query.trim() !== trimmedDebouncedQuery || isPlaceholderData);
   const activeFeedLabel =
     SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed)?.label ?? 'Trending';
 
-  // Ambient "working" cue: any catalog fetch — facet switch, fresh query,
-  // pagination — drifts the accent dot fields while results resolve.
+  // Ambient "working" cue: any catalog fetch drifts the accent dot fields.
   useAmbientActivity(isFetching);
 
   // Long catalogs deserve a quick way back to the filters.
@@ -457,15 +493,16 @@ export function Search() {
                 {isBrowsing ? 'Discover' : 'Search'}
               </h1>
             </div>
-            {results.length > 0 ? (
+            {results.length > 0 || isUpdating ? (
               // <output> is an implicit live region — silence it during page
-              // appends so each fetch doesn't announce the growing count.
+              // appends so fetches don't announce the growing count.
               <output
-                aria-live={isFetchingNextPage ? 'off' : 'polite'}
+                aria-live={isUpdating || isFetchingNextPage ? 'off' : 'polite'}
                 className='shrink-0 text-[13px] tabular-nums text-zinc-500'
               >
-                {results.length} {isBrowsing ? 'title' : 'result'}
-                {results.length === 1 ? '' : 's'}
+                {isUpdating
+                  ? 'Updating…'
+                  : `${results.length} ${isBrowsing ? 'title' : 'result'}${results.length === 1 ? '' : 's'}`}
               </output>
             ) : null}
           </div>
@@ -484,7 +521,7 @@ export function Search() {
               aria-label='Search movies, shows, and anime'
               data-search-input
               ref={searchInputRef}
-              className='h-11 w-full rounded-lg border-white/[0.08] bg-white/[0.04] pl-11 pr-20 text-[14px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.06] focus-visible:border-white/20 focus-visible:bg-white/[0.06] focus-visible:ring-0'
+              className='h-11 w-full rounded-lg border-white/[0.08] bg-white/[0.04] pl-11 pr-20 text-[14px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onKeyDown={(event) => {
@@ -496,15 +533,13 @@ export function Search() {
                   event.metaKey
                 )
                   return;
-                // Not a form submit — Enter's only job is dismissing the
-                // software keyboard.
+                // Not a form submit — Enter only dismisses the software keyboard.
                 if (event.key === 'Enter') {
                   event.preventDefault();
                   event.currentTarget.blur();
                   return;
                 }
-                // Progressive dismissal: Esc clears the text, then becomes
-                // the app-level back gesture once the box is empty.
+                // Progressive dismissal: Esc clears text, then becomes back.
                 if (event.key !== 'Escape') return;
                 event.preventDefault();
                 event.stopPropagation();
@@ -519,8 +554,8 @@ export function Search() {
             {/* eslint-enable jsx-a11y/no-autofocus */}
             <SearchIcon className='pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-zinc-500' />
             <div className='absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1.5'>
-              {isFetching && !isFetchingNextPage ? (
-                <Loader2 className='h-4 w-4 animate-spin text-zinc-500' />
+              {isUpdating ? (
+                <Loader2 aria-hidden='true' className='h-4 w-4 animate-spin text-(--accent-nav)' />
               ) : null}
               {query ? (
                 <button
@@ -528,12 +563,7 @@ export function Search() {
                   aria-label='Clear search'
                   title='Clear search (Esc)'
                   className='flex h-8 w-8 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
-                  onClick={() => {
-                    setQuery('');
-                    // The button unmounts with the text — keep focus in the
-                    // field instead of dropping it to <body>.
-                    searchInputRef.current?.focus();
-                  }}
+                  onClick={handleClearSearch}
                 >
                   <X className='h-3.5 w-3.5' />
                 </button>
@@ -589,6 +619,7 @@ export function Search() {
                         aria-checked={isActive}
                         title={genre}
                         onSelect={() => {
+                          if (isActive) return;
                           handleGenreChange(genre);
                           resetScroll();
                         }}
@@ -616,6 +647,8 @@ export function Search() {
                   type='button'
                   aria-pressed={activeType === option.id}
                   onClick={() => selectType(option.id)}
+                  onPointerEnter={() => prefetchType(option.id)}
+                  onFocus={() => prefetchType(option.id)}
                   className={cn(
                     'inline-flex h-7 shrink-0 items-center justify-center rounded-md px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
                     activeType === option.id
@@ -633,10 +666,9 @@ export function Search() {
 
             <div className='flex flex-wrap items-center justify-center gap-2 justify-self-end lg:justify-end'>
               <DropdownMenu modal={false}>
-                {/* aria-disabled + guards, not `disabled`: a native-disabled
-                  button swallows pointer events, so the "why is it off"
-                  tooltip could never appear. Radix respects defaultPrevented
-                  on pointerdown/keydown, so the guards keep it closed. */}
+                {/* aria-disabled + guards, not `disabled`: native-disabled swallows
+                  pointer events (tooltip would never show); Radix respects
+                  defaultPrevented, so the guards keep it closed. */}
                 <DropdownMenuTrigger asChild>
                   <button
                     type='button'
@@ -692,8 +724,7 @@ export function Search() {
                 </DropdownMenuContent>
               </DropdownMenu>
 
-              {/* Always rendered so it can't shove the facet controls left on
-                appear: idle it sits dimmed, active it matches the pills. */}
+              {/* Always rendered so appearing can't shove the facet controls. */}
               <button
                 type='button'
                 onClick={handleResetFilters}
@@ -701,9 +732,10 @@ export function Search() {
                 title='Reset all filters'
                 className={cn(
                   SEARCH_FACET_BUTTON_CLASS,
+                  'border-white/[0.08] bg-white/[0.04] text-zinc-300',
                   hasActiveFilters
-                    ? 'border-white/[0.08] bg-white/[0.04] text-zinc-300 hover:bg-white/[0.07] hover:text-white'
-                    : 'cursor-default border-transparent text-zinc-700',
+                    ? 'hover:bg-white/[0.07] hover:text-white'
+                    : 'cursor-default opacity-40',
                 )}
               >
                 <RotateCcw className='h-3.5 w-3.5' />
@@ -725,7 +757,10 @@ export function Search() {
             isFetching={isFetching}
             isFetchingNextPage={isFetchingNextPage}
             isOnline={isOnline}
+            isPlaceholderData={isPlaceholderData}
+            isRetryingInitialLoad={isRetryingInitialLoad}
             onResetFilters={handleResetFilters}
+            onClearSearch={handleClearSearch}
             refetch={refetch}
             results={results}
             showSkeleton={showSkeleton}

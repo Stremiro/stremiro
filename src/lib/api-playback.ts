@@ -7,13 +7,14 @@ import type {
   PlaybackStreamOutcomeReport,
   RecoverPlaybackStreamOptions,
   ResolveBestStreamOptions,
+  SavedPlaybackLanguagePreference,
   SkipTimesResult,
   StreamSelectorData,
   SupportedLanguage,
   TitleWatchProgress,
   TrackLanguageCandidate,
   TrackLanguageSelectionResolution,
-  UpNextCandidate,
+  ResumeRailEntry,
   WatchProgress,
 } from '@/lib/api';
 import {
@@ -39,8 +40,7 @@ interface PlaybackApiContext {
   caches: PlaybackApiCaches;
 }
 
-// One fold for the four preferred-identity hints: the cache key and the
-// IPC payload must agree on what counts as "absent".
+// One fold for the four preferred-identity hints so cache key and IPC payload agree on "absent".
 function normalizePreferredStreamHints(hints: {
   preferredStreamKey?: string;
   preferredSourceId?: string;
@@ -55,10 +55,8 @@ function normalizePreferredStreamHints(hints: {
   };
 }
 
-// Single composer for best-stream keys; selector relies on RQ + Rust.
-// Every input that can change the resolved winner must appear here:
-// content coordinates, ranking options, and all four preferred-identity
-// hints — a preferred key, source, or family that differs must miss.
+// Single composer for best-stream keys: every input that can change the winner
+// must appear — coordinates, ranking options, all four preferred hints.
 function bestStreamCacheKey(
   type: string,
   id: string,
@@ -89,8 +87,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       options: StreamRankingOptions | undefined,
       onProgress: Channel<StreamSelectorData>,
     ) =>
-      // No TS cache: React Query owns the UI entry, Rust owns ranking/cache.
-      // `onProgress` receives merged+ranked snapshots as each addon lands.
+      // No TS cache — RQ owns the UI entry, Rust owns ranking/cache. `onProgress` gets merged+ranked snapshots per addon.
       safeInvoke<StreamSelectorData>('get_stream_selector_data', {
         mediaType: type.trim(),
         id: id.trim(),
@@ -153,8 +150,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         }),
       );
     },
-    /** Seeds a resolved stream under the exact request key the player replays;
-        the key covers every preferred hint, so mismatched options miss. */
+    /** Seeds a resolved stream under the exact key the player replays; mismatched options miss. */
     primeBestStream: (
       type: string,
       id: string,
@@ -193,9 +189,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       const trimmedType = mediaType.trim();
       const trimmedId = mediaId.trim();
 
-      // The backend just recorded the failure and re-ranked; drop cached
-      // best-stream entries so a later resolve can't re-serve the
-      // just-failed candidate from TTL cache.
+      // The backend re-ranked past the failure — drop cached entries so a later resolve can't re-serve the failed candidate.
       return withStreamingCacheClear(
         caches,
         safeInvoke<BestResolvedStream | null>('recover_playback_stream', {
@@ -245,14 +239,16 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     saveSelectedPlaybackLanguagePreference: (
       preferenceKind: 'audio' | 'sub',
       track?: TrackLanguageCandidate,
-      subtitlesOff?: boolean,
+      options?: { subtitlesOff?: boolean; mediaType?: string; mediaId?: string },
     ) =>
       withStreamingCacheClear(
         caches,
-        safeInvoke<PlaybackLanguagePreferences>('save_selected_playback_language_preference', {
+        safeInvoke<SavedPlaybackLanguagePreference>('save_selected_playback_language_preference', {
           preferenceKind,
           track,
-          subtitlesOff,
+          subtitlesOff: options?.subtitlesOff,
+          mediaType: options?.mediaType,
+          mediaId: options?.mediaId,
         }),
       ),
     savePlaybackLanguagePreferenceOutcomeFromTracks: (
@@ -274,9 +270,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         }),
       ),
     getSupportedLanguages: () => safeInvoke<SupportedLanguage[]>('get_supported_languages'),
-    // Backend cooldowns change on every report: drop cached rankings so the
-    // next selector fetch re-ranks instead of re-serving the just-failed
-    // source from TTL cache.
+    // Cooldowns change on every report — drop cached rankings so the next fetch re-ranks.
     reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
       withStreamingCacheClear(caches, safeInvoke<void>('report_playback_stream_outcome', report)),
     saveWatchProgress: (progress: WatchProgress) =>
@@ -284,9 +278,17 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     saveWatchProgressBatch: (rows: WatchProgress[]) =>
       trackPendingAppWrite(safeInvoke<void>('save_watch_progress_batch', { rows })),
     getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
-    getContinueWatching: () => safeInvoke<WatchProgress[]>('get_continue_watching'),
-    getUpNextEntries: (localToday: string, localTodayMs: number) =>
-      safeInvoke<UpNextCandidate[]>('get_up_next_entries', { localToday, localTodayMs }),
+    // Progressive rail: `onProgress` gets the local half early; the result is the merged rail.
+    getResumeRail: (
+      localToday: string,
+      localTodayMs: number,
+      onProgress: Channel<ResumeRailEntry[]>,
+    ) =>
+      safeInvoke<ResumeRailEntry[]>('get_resume_rail', {
+        localToday,
+        localTodayMs,
+        onProgress,
+      }),
     getTitleWatchProgress: (id: string) =>
       safeInvoke<TitleWatchProgress>('get_title_watch_progress', { id }),
     getTotalWatchTimeSecs: () => safeInvoke<number>('get_total_watch_time_secs'),
@@ -299,9 +301,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         season,
         episode,
       }),
-    // Bump before the IPC lands: a progress save queued across this delete
-    // must not resurrect the row when it flushes. The delete returns the rows
-    // it removed — the Undo snapshot needs no second read or dedupe mirror.
+    // Bump before the IPC lands — a queued save must not resurrect the row. Delete returns removed rows for the Undo snapshot.
     removeAllFromWatchHistory: (id: string, type: string) => {
       bumpWatchProgressEpoch();
       return trackPendingAppWrite(

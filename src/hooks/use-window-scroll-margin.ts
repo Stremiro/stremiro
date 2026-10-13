@@ -1,12 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useState, type RefObject } from 'react';
 
-/**
- * Distance from the document top to the container's top edge, in window
- * coordinates. `useWindowVirtualizer` positions rows relative to the window,
- * so lists below the fold render misplaced without this margin. Measured on
- * layout and resize; sub-pixel deltas are suppressed so observer feedback
- * never loops. Inert while `shouldVirtualize` is false.
- */
+/** Container top in window coords — `useWindowVirtualizer` needs it for below-the-fold lists.
+    Sub-pixel deltas suppressed so observer feedback never loops. Inert while `shouldVirtualize` is false. */
 export function useWindowScrollMargin(
   containerRef: RefObject<HTMLDivElement | null>,
   shouldVirtualize: boolean,
@@ -39,8 +34,7 @@ export function useWindowScrollMargin(
 
     window.addEventListener('resize', handleResize, { passive: true });
 
-    // Body resizes arrive in bursts (image decode settling, infinite-scroll
-    // appends) — collapse them into one measure per frame.
+    // Burst body resizes (image decode, infinite-scroll appends) coalesce to one measure per frame.
     let measureFrame: number | null = null;
     const scheduleMeasure = () => {
       if (measureFrame !== null) return;
@@ -57,9 +51,7 @@ export function useWindowScrollMargin(
 
     if (resizeObserver && containerRef.current) {
       resizeObserver.observe(containerRef.current);
-      // Content above the container (hero media settling, banners) moves the
-      // margin without resizing the container itself — watch the body so
-      // those shifts still re-measure.
+      // Content above (hero media, banners) shifts the margin without resizing the container — watch the body too.
       resizeObserver.observe(document.body);
     }
 

@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
-import { EpisodeCard } from '@/components/details-episode-card';
+import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
 import { DetailsTrailerDialog } from '@/components/details-trailer-dialog';
@@ -45,12 +45,11 @@ import {
   WATCH_STATUS_LABELS,
   type WatchStatus,
 } from '@/lib/api';
-import { episodeMatchesCoordinates, findEpisodeByCoordinates } from '@/lib/episode-stream-target';
+import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import {
   episodeProgressKey,
-  getPlayableResumeStartTime,
+  formatWatchRemaining,
   getWatchProgressPercent,
-  titleEpisodeProgressMap,
   watchProgressCoordinates,
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
@@ -117,9 +116,8 @@ function DetailsContent() {
     queryKey: detailsQueryKey(baseRouteType, baseRouteId),
     queryFn: () => api.getMediaDetails(baseRouteType, baseRouteId),
     enabled: !!baseRouteId,
-    // Card-prefetch bridge: hover intent already fetched the metadata-only
-    // payload under its own key — paint the hero immediately while the full
-    // episode payload lands.
+    // Card-prefetch bridge: paint the hero from hover intent's metadata-only
+    // payload while the full episode payload lands.
     placeholderData: () =>
       queryClient.getQueryData<MediaDetails>(detailsCardQueryKey(baseRouteType, baseRouteId)),
     staleTime: DETAILS_STALE_TIME_MS,
@@ -137,23 +135,10 @@ function DetailsContent() {
     isError: watchHistoryError,
     refetch: retryWatchHistory,
   } = useTitleWatchProgress(baseRouteId, { staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS });
-  const watchHistory = titleProgress?.history;
-  const continueWatching = titleProgress?.continueWatching;
-
-  const episodeProgressMap = useMemo(
-    () => titleEpisodeProgressMap(titleProgress?.episodeProgress),
-    [titleProgress?.episodeProgress],
-  );
-  // Rows arrive `last_watched` DESC — the first row of each kind is its
-  // latest. The backend bakes the per-episode index; these stay thin picks.
-  const movieProgress = useMemo(
-    () => watchHistory?.find((entry) => entry.type_ === 'movie') ?? null,
-    [watchHistory],
-  );
-  const latestSeriesProgress = useMemo(
-    () => watchHistory?.find((entry) => isSeriesLikeMediaType(entry.type_)) ?? null,
-    [watchHistory],
-  );
+  const episodeProgress = titleProgress?.episodeProgress;
+  // `latestSeriesEntry` is the backend's first series-like row of the
+  // `last_watched` DESC history list.
+  const latestSeriesProgress = titleProgress?.latestSeriesEntry ?? null;
   const latestSeriesProgressCoords = useMemo(
     () => watchProgressCoordinates(latestSeriesProgress),
     [latestSeriesProgress],
@@ -161,15 +146,12 @@ function DetailsContent() {
 
   const isLoadingWatchHistoryForItem = item?.type === 'series' && isLoadingWatchHistory;
 
-  // The resumable Continue Watching row owns the "Continue S/E" action — the
-  // pane must hint the same season or the action's season check can hide it.
-  // The latest history row only wins when nothing is resumable: a watched
-  // S2 finale shouldn't open the pane on S2 while the resume row sits in S1.
+  // The resumable row owns "Continue S/E" — the pane must hint the same season.
+  // The latest history row only wins when nothing is resumable; Rust only
+  // lists rows with a playable resume point here.
   const seriesProgress =
-    item?.type === 'series'
-      ? (continueWatching?.find((entry) => isSeriesLikeMediaType(entry.type_)) ?? null)
-      : null;
-  const seriesCanResume = getPlayableResumeStartTime(seriesProgress) !== undefined;
+    item?.type === 'series' ? (titleProgress?.seriesResumeEntry ?? null) : null;
+  const seriesCanResume = seriesProgress !== null;
   const { season: seriesResumeSeason, episode: seriesResumeEpisode } =
     watchProgressCoordinates(seriesProgress);
   const resumeEpisodeCoords = useMemo(
@@ -187,9 +169,8 @@ function DetailsContent() {
   } = useDetailsWatchStatus(item);
   const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
 
-  // Season 0 (specials) is valid: accept only real numbers — serde absent
-  // keys arrive as undefined, and `Number(null)` would read a missing season
-  // as "Specials".
+  // Season 0 (specials) is valid; only accept real numbers — `Number(null)`
+  // would read a missing season as Specials.
   const rawLocationSeason = (location.state as { season?: unknown } | null)?.season;
   const locationSeason =
     typeof rawLocationSeason === 'number' && Number.isFinite(rawLocationSeason)
@@ -241,9 +222,8 @@ function DetailsContent() {
 
   const hasEpisodesSection = item?.type === 'series' && (item?.episodes?.length ?? 0) > 0;
 
-  // "Read more" only exists when the clamp actually bites — short blurbs
-  // never see a dead toggle. Re-measures on resize and description change;
-  // while expanded the last clamped verdict is kept so "Show less" stays.
+  // "Read more" only exists when the clamp actually bites; while expanded the
+  // last verdict is kept so "Show less" stays.
   useEffect(() => {
     if (descriptionExpanded) return;
     const element = descriptionRef.current;
@@ -286,9 +266,7 @@ function DetailsContent() {
     const targets: Episode[] = [];
     let watched = 0;
     for (const ep of seasonEpisodes) {
-      const storedRow = episodeProgressMap.get(
-        episodeProgressKey(baseRouteId, ep.season, ep.episode),
-      );
+      const storedRow = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
       if (optimisticEpisodeWatched(ep) ?? !!storedRow?.is_watched) {
         watched += 1;
         continue;
@@ -296,7 +274,7 @@ function DetailsContent() {
       if (isAiredByLocalDay(ep.releaseDate, localDayMs)) targets.push(ep);
     }
     return { seasonWatchedCount: watched, seasonWatchTargets: targets };
-  }, [seasonEpisodes, episodeProgressMap, localDayMs, baseRouteId, optimisticEpisodeWatched]);
+  }, [seasonEpisodes, episodeProgress, localDayMs, baseRouteId, optimisticEpisodeWatched]);
 
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
   const {
@@ -304,6 +282,7 @@ function DetailsContent() {
     streamTarget,
     handleWatchMovie,
     openEpisodeStreamSelector,
+    openEpisodeSelectorForCoordinates,
     handleSelectorClose,
     getStreamTargetStartTime,
   } = useDetailsStreamSelector({
@@ -313,45 +292,34 @@ function DetailsContent() {
     locationState: location.state,
   });
 
-  // Spoiler protection: episodes past the furthest watched one get blurred
-  // thumbnails and hidden descriptions. The backend folds the ceiling into
-  // the payload (canonical coords, started rows plus the latest-row seed).
-  const maxWatchedEpisodeInSeason =
-    spoilerProtection && selectedSeason !== null
-      ? (titleProgress?.watchedEpisodeCeiling[selectedSeason] ?? null)
-      : null;
-
   const handleWatchEpisode = useCallback(
     (ep: Episode) => {
       if (!item) return;
 
-      const startTime = getPlayableResumeStartTime(
-        episodeProgressMap.get(episodeProgressKey(baseRouteId, ep.season, ep.episode)),
-      );
+      const startTime =
+        episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)]
+          ?.resume_start_time;
       openEpisodeStreamSelector(ep, {
         overview: ep.overview || item.description,
         startTime,
       });
     },
-    [episodeProgressMap, item, baseRouteId, openEpisodeStreamSelector],
+    [episodeProgress, item, baseRouteId, openEpisodeStreamSelector],
   );
 
-  // Destructured `mutate` keeps `handleToggleEpisodeWatched` referentially
-  // stable — the mutation object itself is re-allocated per render and would
-  // defeat `EpisodeCard`'s memo.
+  // Destructured `mutate` keeps this stable — the mutation object is
+  // re-allocated per render and would defeat `EpisodeCard`'s memo.
   const handleToggleEpisodeWatched = useCallback(
     (ep: Episode) => {
       if (!item || episodeWatchedPending || markSeasonWatched.isPending) return;
-      const epProgress = episodeProgressMap.get(
-        episodeProgressKey(baseRouteId, ep.season, ep.episode),
-      );
+      const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
       mutateEpisodeWatched({
         episodes: [ep],
         watched: !epProgress?.is_watched,
       });
     },
     [
-      episodeProgressMap,
+      episodeProgress,
       item,
       baseRouteId,
       mutateEpisodeWatched,
@@ -360,19 +328,25 @@ function DetailsContent() {
     ],
   );
 
-  const progress = item?.type === 'movie' ? movieProgress : null;
-
-  const movieCanResume = getPlayableResumeStartTime(progress) !== undefined;
   const primaryPlaybackHistoryEntry =
-    item?.type === 'movie'
-      ? progress && movieCanResume
-        ? progress
-        : null
-      : seriesProgress && seriesCanResume
-        ? seriesProgress
-        : null;
+    item?.type === 'movie' ? (titleProgress?.movieResumeEntry ?? null) : seriesProgress;
+
+  const resumePercent = primaryPlaybackHistoryEntry
+    ? getWatchProgressPercent(
+        primaryPlaybackHistoryEntry.position,
+        primaryPlaybackHistoryEntry.duration,
+      )
+    : 0;
+  const resumeRemaining =
+    primaryPlaybackHistoryEntry && resumePercent > 0
+      ? formatWatchRemaining(
+          primaryPlaybackHistoryEntry.position,
+          primaryPlaybackHistoryEntry.duration,
+        )
+      : null;
 
   const scrollToEpisodes = useCallback(() => {
+    document.getElementById('details-episodes-heading')?.focus({ preventScroll: true });
     document.getElementById('episodes-section')?.scrollIntoView({ behavior: scrollBehavior() });
   }, []);
 
@@ -385,8 +359,7 @@ function DetailsContent() {
     surface: 'details',
   });
 
-  // The play button's resume branch needs the title-progress read — a click
-  // inside its (short) load window would fall back to "no history" behavior.
+  // The play button's resume branch needs the title-progress read.
   const historyUnavailable =
     !primaryPlayback.canReturnToActivePlayer && !titleProgress && watchHistoryError;
   const historyPending =
@@ -401,10 +374,8 @@ function DetailsContent() {
   const primaryActionPending =
     primaryPlayback.isResolvingPrimaryAction || historyPending || episodeActionPending;
 
-  // "Start over" replays the resume target from the beginning. The explicit
-  // `startTime: 1` rides the existing player contract: a positive value
-  // suppresses the progress-fetch resume, and anything under
-  // MIN_RESUME_POSITION_SECS means "from the beginning" — no seek at all.
+  // "Start over" replays the resume target from the beginning: `startTime: 1`
+  // rides the player contract — under MIN_RESUME_POSITION_SECS means no seek.
   const handleStartOver = useCallback(() => {
     if (!item || !primaryPlaybackHistoryEntry) return;
     const startTime = 1;
@@ -416,31 +387,16 @@ function DetailsContent() {
 
     const { season, episode } = watchProgressCoordinates(primaryPlaybackHistoryEntry);
     if (season === undefined || episode === undefined) return;
-    const targetEpisode = findEpisodeByCoordinates(item.episodes, season, episode);
-    openEpisodeStreamSelector(
-      {
-        season,
-        episode,
-        title: targetEpisode?.title,
-        streamLookupId: targetEpisode?.streamLookupId,
-        streamSeason: targetEpisode?.streamSeason,
-        streamEpisode: targetEpisode?.streamEpisode,
-      },
-      {
-        overview: targetEpisode?.overview || item.description,
-        startTime,
-      },
-    );
-  }, [handleWatchMovie, item, openEpisodeStreamSelector, primaryPlaybackHistoryEntry]);
+    openEpisodeSelectorForCoordinates(season, episode, startTime);
+  }, [handleWatchMovie, item, openEpisodeSelectorForCoordinates, primaryPlaybackHistoryEntry]);
 
   const handleRetryDetails = () => {
     if (!baseRouteId || isFetching) return;
     void queryClient.invalidateQueries({ queryKey: detailsQueryKey(baseRouteType, baseRouteId) });
   };
 
-  // Center the resume episode once per landing on its season. Filtering or
-  // paging re-creates `visibleEpisodes`, and re-centering on each of those
-  // would yank the page away from wherever the user scrolled while typing.
+  // Center the resume episode once per landing — re-centering on each
+  // `visibleEpisodes` re-creation would yank the page mid-typing.
   const centeredResumeLandingRef = useRef<string | null>(null);
   useEffect(() => {
     if (!resumeEpisodeCoords || selectedSeason !== resumeEpisodeCoords.season) {
@@ -457,8 +413,7 @@ function DetailsContent() {
     if (centeredResumeLandingRef.current === landingKey) return;
 
     const timer = window.setTimeout(() => {
-      // Latched only once the scroll runs: a timer cancelled by a dep change
-      // inside the delay must still get its landing.
+      // Latch only once the scroll runs — a cancelled timer must still get its landing.
       centeredResumeLandingRef.current = landingKey;
       resumeEpisodeRef.current?.scrollIntoView({
         block: 'center',
@@ -723,9 +678,8 @@ function DetailsContent() {
                     </button>
                   )}
 
-                  {/* History resolves over IPC after first paint — the
-                      trailing slot keeps its late arrival from pushing the
-                      library/trailer buttons sideways. */}
+                  {/* History resolves over IPC after first paint — the trailing
+                      slot keeps its late arrival from shoving the other buttons. */}
                   {primaryPlaybackHistoryEntry && (
                     <button
                       type='button'
@@ -741,6 +695,20 @@ function DetailsContent() {
                     </button>
                   )}
                 </div>
+
+                {resumeRemaining && (
+                  <div className='flex basis-full items-center gap-2.5 pt-1 animate-in fade-in duration-200'>
+                    <div className='h-[3px] w-32 overflow-hidden rounded-full bg-white/15'>
+                      <div
+                        className='h-full rounded-full bg-(--accent-prog)'
+                        style={{ width: `${resumePercent}%` }}
+                      />
+                    </div>
+                    <span className='text-[12px] font-medium tabular-nums text-white/60'>
+                      {resumeRemaining}
+                    </span>
+                  </div>
+                )}
               </div>
 
               <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
@@ -762,8 +730,7 @@ function DetailsContent() {
                       <button
                         key={status}
                         type='button'
-                        // aria-disabled, not disabled: a disabled button drops
-                        // keyboard focus to <body> mid-mutation.
+                        // aria-disabled, not disabled: disabled drops keyboard focus to <body> mid-mutation.
                         aria-disabled={watchStatusMutation.isPending || undefined}
                         aria-pressed={isActive}
                         title={isActive ? 'Clear status' : undefined}
@@ -775,7 +742,7 @@ function DetailsContent() {
                         className={cn(
                           'flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
                           isActive
-                            ? cn(colors.bg, colors.text, colors.border)
+                            ? cn(colors.bg, colors.text, colors.border, 'hover:brightness-125')
                             : 'border-transparent text-white/70 hover:bg-white/[0.08] hover:text-white',
                           watchStatusMutation.isPending && 'cursor-wait',
                         )}
@@ -797,7 +764,7 @@ function DetailsContent() {
               {item.cast && item.cast.length > 0 && (
                 <div className='pt-6 max-w-3xl'>
                   <div className='flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px] md:text-[14px]'>
-                    <span className='font-semibold text-white/50 mr-1'>Starring:</span>
+                    <span className='font-semibold text-white/65 mr-1'>Starring:</span>
                     {(castExpanded ? item.cast : item.cast.slice(0, 5)).map((actor, i, cast) => (
                       <span key={actor} className='flex items-center'>
                         <span className='text-zinc-300'>{actor}</span>
@@ -825,7 +792,13 @@ function DetailsContent() {
       {hasEpisodesSection && (
         <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} py-8`}>
           <div className='w-full flex flex-col gap-4 animate-in fade-in duration-300'>
-            <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>Episodes</h2>
+            <h2
+              id='details-episodes-heading'
+              tabIndex={-1}
+              className='text-[17px] font-semibold tracking-[-0.02em] text-white focus:outline-hidden'
+            >
+              Episodes
+            </h2>
             {localSeasonEntries.length > 1 && (
               <div className='w-full'>
                 <SeasonSwitcher
@@ -905,9 +878,7 @@ function DetailsContent() {
                   >
                     <button
                       type='button'
-                      // aria-disabled, not disabled: paging to the edge
-                      // disables the focused button and drops focus to
-                      // <body>, ending keyboard navigation mid-row.
+                      // aria-disabled, not disabled: an edge page would drop the focused button to <body>.
                       aria-disabled={!hasPreviousEpisodes || undefined}
                       onClick={() => {
                         if (hasPreviousEpisodes) changeEpisodePage('previous');
@@ -939,15 +910,23 @@ function DetailsContent() {
                 {shouldShowEpisodeProgressSkeleton ? (
                   EPISODE_SKELETON_TILES
                 ) : visibleEpisodes.length === 0 && episodeSearch.trim() ? (
-                  <p className='col-span-full py-14 text-center text-sm text-zinc-400'>
-                    No episodes match &ldquo;
-                    {episodeSearch}&rdquo;
-                  </p>
+                  <div className='col-span-full flex flex-col items-center gap-3 py-14 text-center'>
+                    <p className='text-sm text-zinc-400'>
+                      No episodes match &ldquo;
+                      {episodeSearch}&rdquo;
+                    </p>
+                    <button
+                      type='button'
+                      onClick={() => setEpisodeSearch('')}
+                      className='h-8 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+                    >
+                      Clear search
+                    </button>
+                  </div>
                 ) : (
                   visibleEpisodes.map((ep) => {
-                    const epProgress = episodeProgressMap.get(
-                      episodeProgressKey(baseRouteId, ep.season, ep.episode),
-                    );
+                    const epProgress =
+                      episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
                     const optimisticWatched = optimisticEpisodeWatched(ep);
                     const progressPercent =
                       optimisticWatched !== undefined
@@ -967,11 +946,12 @@ function DetailsContent() {
                         key={ep.id}
                         episode={ep}
                         isResume={isResumeEp}
-                        isSpoiler={
-                          maxWatchedEpisodeInSeason !== null &&
-                          !epProgress?.has_started_watching &&
-                          ep.episode > maxWatchedEpisodeInSeason
-                        }
+                        isSpoiler={isEpisodeSpoiler(
+                          ep,
+                          spoilerProtection,
+                          titleProgress?.watchedEpisodeCeiling,
+                          epProgress,
+                        )}
                         isWatched={optimisticWatched ?? !!epProgress?.is_watched}
                         isWatchedPending={episodeWatchedPending || markSeasonWatched.isPending}
                         progressPercent={progressPercent}
@@ -988,8 +968,7 @@ function DetailsContent() {
         </div>
       )}
 
-      {/* Card placeholder paints the hero before the episode payload lands —
-          shimmer the episode grid so the section doesn't pop in cold. */}
+      {/* Shimmer the episode grid while the card placeholder's hero is up. */}
       {!hasEpisodesSection && isPlaceholderData && item.type === 'series' && (
         <div className={`${DETAILS_COLUMN_CLASS} py-8`}>
           <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'>
@@ -1000,8 +979,7 @@ function DetailsContent() {
 
       <DetailsSimilarTitles item={item} contentInsetsClassName={DETAILS_COLUMN_CLASS} />
 
-      {/* Target stays mounted after close so Radix can play the exit
-          animation; `open` alone drives the dialog state. */}
+      {/* Target stays mounted after close so Radix plays the exit animation. */}
       {streamTarget && (
         <StreamSelector
           open={streamSelectorOpen}

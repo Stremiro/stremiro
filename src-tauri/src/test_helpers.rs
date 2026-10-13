@@ -29,7 +29,6 @@ pub(crate) fn test_stream() -> AddonStream {
         stream_key: String::new(),
         recommendation_reasons: Vec::new(),
         match_summary: None,
-        rank_debug: None,
         selection_priority: None,
         presentation: StreamPresentation::default(),
         match_text: std::sync::OnceLock::new(),

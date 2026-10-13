@@ -37,17 +37,16 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{command, AppHandle, Manager, State};
 
-/// Backup imports are untrusted input: reject oversized payloads before parsing
-/// or allocating per-record state (mirrors the 512 KiB manifest/stream body caps).
+/// Backup imports are untrusted input: reject oversized payloads before
+/// parsing/allocating (mirrors the 512 KiB manifest/stream body caps).
 pub(super) const MAX_IMPORT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMPORT_HISTORY: usize = 10_000;
 const MAX_IMPORT_LIBRARY: usize = 10_000;
 const MAX_IMPORT_LISTS: usize = 500;
 const MAX_IMPORT_STATUSES: usize = 10_000;
 const MAX_IMPORT_TITLE_LANGUAGES: usize = 10_000;
-/// Backup file paths come from the save/open dialog as absolute `.json`
-/// paths. The backend re-checks that contract so direct IPC calls cannot
-/// silently turn export/import into arbitrary relative-path file access.
+/// Backup paths come from the save/open dialog as absolute `.json` paths; re-checked
+/// here so direct IPC calls can't turn export/import into relative-path file access.
 pub(super) const MAX_BACKUP_PATH_LEN: usize = 1024;
 
 pub(super) fn normalize_backup_path(input: &str) -> Option<String> {
@@ -57,8 +56,7 @@ pub(super) fn normalize_backup_path(input: &str) -> Option<String> {
         || trimmed.len() > MAX_BACKUP_PATH_LEN
         || trimmed.contains('\0')
         || !std::path::Path::new(trimmed).is_absolute()
-        // Byte-level suffix check: a trailing multibyte char cannot alias
-        // `.json`, and `str` indexing could land mid-codepoint.
+        // Byte-level suffix check — `str` indexing could land mid-codepoint.
         || !trimmed
             .as_bytes()
             .get(trimmed.len().saturating_sub(JSON_EXTENSION.len())..)
@@ -69,9 +67,43 @@ pub(super) fn normalize_backup_path(input: &str) -> Option<String> {
     Some(trimmed.to_string())
 }
 
-/// Single size bound for backup payloads in both directions: what export
-/// writes must be what import accepts, and a too-large snapshot fails before
-/// it replaces a destination file.
+pub(super) fn validate_backup_export_path(
+    target: &std::path::Path,
+    store_path: &std::path::Path,
+) -> Result<(), String> {
+    let target_parent = target
+        .parent()
+        .ok_or_else(|| "Export path has no parent directory.".to_string())?;
+    let target_parent = std::fs::canonicalize(target_parent).map_err(|error| error.to_string())?;
+    let store_parent = store_path
+        .parent()
+        .ok_or_else(|| "App store path has no parent directory.".to_string())?;
+    let store_parent = match std::fs::canonicalize(store_parent) {
+        Ok(parent) => parent,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.to_string()),
+    };
+    let inside_store = target_parent.ancestors().any(|parent| {
+        #[cfg(windows)]
+        {
+            parent
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&store_parent.as_os_str().to_string_lossy())
+        }
+        #[cfg(not(windows))]
+        {
+            parent == store_parent
+        }
+    });
+    if inside_store {
+        return Err("Backup export cannot write inside the app data directory.".to_string());
+    }
+    Ok(())
+}
+
+/// Single size bound for backup payloads in both directions — what export writes
+/// must be what import accepts.
 pub(super) fn validate_backup_size(len: usize) -> Result<(), String> {
     if len > MAX_IMPORT_BYTES {
         return Err(format!(
@@ -82,13 +114,10 @@ pub(super) fn validate_backup_size(len: usize) -> Result<(), String> {
     Ok(())
 }
 
-// ─── Data Backup & Restore ────────────────────────────────────────────────────
-
 /// Full data snapshot used for backup export.
 #[derive(Debug, Serialize)]
 pub struct AppDataExport {
-    /// Schema version; currently `1`. `settings` is an additive section, so
-    /// backups written before it existed still import.
+    /// Schema version (`1`); `settings` is additive so pre-settings backups still import.
     pub version: u32,
     /// Unix timestamp (milliseconds) when the backup was created.
     pub exported_at: u64,
@@ -99,28 +128,23 @@ pub struct AppDataExport {
     pub settings: AppSettingsExport,
 }
 
-/// Addons, preferences, profile, and learned language picks — everything the
-/// settings store and per-title language memory hold besides transient
-/// update-notification state.
+/// Addons, preferences, profile, and learned language picks — everything the settings
+/// store and per-title language memory hold besides transient update-notification state.
 #[derive(Debug, Serialize)]
 pub struct AppSettingsExport {
-    /// Capability snapshots are stripped: restore never trusts them and they
-    /// re-classify from the manifest.
+    /// Capability snapshots stripped: restore re-classifies from the manifest.
     pub addon_configs: Vec<AddonConfig>,
     pub app_ui_preferences: AppUiPreferences,
     pub profile_preferences: ProfilePreferences,
-    /// Absent until the user first touches the selector filters, so a restore
-    /// doesn't mark an untouched selector as configured.
+    /// Absent until the user touches selector filters — a restore shouldn't mark an untouched selector as configured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_selector_preferences: Option<StreamSelectorPreferences>,
     pub playback_language_preferences: PlaybackLanguagePreferences,
     pub title_language_preferences: BTreeMap<String, PlaybackLanguagePreferencesSnapshot>,
 }
 
-/// Restore-side decode view of [`AppDataExport`]: sections arrive as raw
-/// `Value`s so one malformed record drops only itself instead of voiding the
-/// whole backup. Envelope fields stay strict — a file without `version` is
-/// not a backup.
+/// Restore-side decode view of [`AppDataExport`]: sections arrive as raw `Value`s so one
+/// malformed record drops only itself. Envelope fields stay strict — no `version`, no backup.
 #[derive(Debug, Deserialize)]
 struct AppDataImportPayload {
     version: u32,
@@ -180,9 +204,8 @@ pub(super) fn validate_import_capacity<'a>(
     Ok(())
 }
 
-/// Parses the backup's list section once, before any store mutation:
-/// malformed records skip, known ids keep the local list, valid unused ids
-/// are preserved, the rest get fresh `list_*` ids; live item/list caps apply.
+/// Parses the backup's list section before any store mutation: malformed records skip,
+/// known ids keep the local list, the rest get fresh `list_*` ids; live caps apply.
 pub(super) fn prepare_import_lists(
     raw_lists: Vec<Value>,
     existing_order: &[String],
@@ -193,9 +216,8 @@ pub(super) fn prepare_import_lists(
         let Ok(list) = serde_json::from_value::<UserListWithItems>(list) else {
             continue;
         };
-        // Normalize the incoming id once: the skip and preserve checks below
-        // must agree, otherwise a padded id misses the skip and re-imports
-        // as a duplicate under a fresh uuid.
+        // Normalize the incoming id once: the skip and preserve checks must agree —
+        // a padded id would re-import as a duplicate under a fresh uuid.
         let normalized_id = normalize_non_empty(&list.id);
         if normalized_id
             .as_ref()
@@ -203,9 +225,8 @@ pub(super) fn prepare_import_lists(
         {
             continue; // list already present — skip to keep user edits
         }
-        // Backup names/icons are untrusted: the shared ingress rule trims,
-        // bounds, and skips empty names — a malformed record drops only
-        // itself, even when its item payload would breach the cap.
+        // Backup names/icons are untrusted: shared ingress rule trims, bounds, and
+        // skips empty names so a malformed record drops only itself.
         let Some(import_name) = normalize_list_name(&list.name) else {
             continue;
         };
@@ -232,8 +253,7 @@ pub(super) fn prepare_import_lists(
             .as_deref()
             .and_then(normalize_list_id)
             .unwrap_or_else(|| format!("list_{}", uuid::Uuid::new_v4().simple()));
-        // Remember both identities: repeated invalid backup ids must also
-        // fold into the prepared list after receiving a fresh safe id.
+        // Repeated invalid backup ids fold into the prepared list after the fresh id.
         if let Some(id) = normalized_id {
             known_ids.insert(id);
         }
@@ -278,9 +298,8 @@ fn export_settings(
     })
 }
 
-/// Settings restore replaces preferences and profile (a restore is the point
-/// of importing them), while addons and learned per-title language picks
-/// merge: installed addons and picks made on this device are kept.
+/// Settings restore replaces preferences and profile, while addons and learned
+/// per-title language picks merge — installed addons and device picks are kept.
 fn import_settings(
     app: &AppHandle,
     service: &PlaybackStateService,
@@ -341,9 +360,8 @@ fn import_settings(
     Ok((addons_imported, restored || titles_imported > 0))
 }
 
-/// Serialises all persisted user data to a pretty-printed JSON string that the
-/// frontend can offer as a file download. Internal helper: the only callers
-/// are the file-path command wrappers, so it is not part of the IPC surface.
+/// Serialises all persisted user data to pretty-printed JSON for a file download.
+/// Internal helper — only the file-path command wrappers call it; not IPC surface.
 pub(crate) async fn export_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
@@ -352,10 +370,8 @@ pub(crate) async fn export_app_data(
         let app = app.clone();
         let service = playback_state.inner().clone();
         move || {
-            // ― history (all individual entries, undeduped) ——————————————————————
-            // Only opaque stream-key identities may leave the app.
-            // A failed history read must fail the export — silently shipping a
-            // backup with zero history is only discovered on restore.
+            // Only opaque stream-key identities may leave the app. A failed history read
+            // must fail the export — a backup with zero history is only noticed on restore.
             let history: Vec<WatchProgress> = service
                 .load_resume_entries(&app)?
                 .into_iter()
@@ -367,11 +383,9 @@ pub(crate) async fn export_app_data(
                 })
                 .collect();
 
-            // ― library ——————————————————————————————————————————————————————————
             let lib_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
             let library: Vec<MediaItem> = load_library_map(&lib_store)?.into_values().collect();
 
-            // ― custom lists ——————————————————————————————————————————————————————
             let lists_store = super::open_store(&app, LISTS_STORE_FILE)?;
             let order = load_lists_order(&lists_store)?;
             let mut lists: Vec<UserListWithItems> = Vec::with_capacity(order.len());
@@ -381,15 +395,9 @@ pub(crate) async fn export_app_data(
                 };
                 let mut items: Vec<MediaItem> = Vec::with_capacity(list.item_ids.len());
                 for item_id in &list.item_ids {
-                    let Some(item_val) = lists_store.get(list_item_store_key(list_id, item_id))
-                    else {
-                        continue;
-                    };
-                    // Exported payloads re-run store
-                    // normalization: a tampered store can't leak
-                    // unbounded or hostile fields into a backup.
-                    if let Some(item) = serde_json::from_value::<MediaItem>(item_val)
-                        .ok()
+                    // Re-run store normalization: a tampered store can't leak hostile fields into a backup.
+                    if let Some(item) = lists_store
+                        .get_typed::<MediaItem>(list_item_store_key(list_id, item_id))
                         .and_then(normalize_library_item)
                     {
                         items.push(item);
@@ -408,7 +416,6 @@ pub(crate) async fn export_app_data(
                 });
             }
 
-            // ― watch statuses ————————————————————————————————————————————————————
             let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
             let watch_statuses = load_watch_statuses_map(&status_store)?;
 
@@ -428,19 +435,10 @@ pub(crate) async fn export_app_data(
     .await
 }
 
-/// Merges a previously exported JSON backup into the current data stores.
-///
-/// Merge strategy (non-destructive — existing data is never deleted):
-/// - **History**: entries with a newer `last_watched` timestamp overwrite older ones.
-/// - **Library**: items absent by ID are added; existing items are kept unchanged.
-/// - **Lists**: lists whose ID is not present are appended — the incoming ID is
-///   kept when valid and unused, otherwise a fresh UUID is assigned.
-/// - **Watch statuses**: statuses for IDs not currently recorded are added.
-/// - **Settings**: see [`import_settings`] — preferences and profile are
-///   restored, addons and learned language picks merge.
-///
-/// Internal helper: only reached through `import_app_data_from_file`, which
-/// owns the IPC-facing path validation and byte cap.
+/// Merges an exported JSON backup into the current data stores. Non-destructive:
+/// history keeps the newer `last_watched`; library, lists, and watch statuses only
+/// add absent ids; settings restore preferences/profile; addons and language picks merge.
+/// Internal helper — reached via `import_app_data_from_file`, which owns path validation.
 pub(crate) async fn import_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
@@ -448,8 +446,7 @@ pub(crate) async fn import_app_data(
 ) -> Result<ImportResult, String> {
     validate_backup_size(data.len())?;
 
-    // Backup parsing plus every store/SQLite merge runs off the async worker:
-    // 5 MiB JSON parsing and full-table rewrites must not stall other commands.
+    // Off the async worker: 5 MiB JSON parsing and full-table rewrites must not stall other commands.
     let service = playback_state.inner().clone();
     let app_owned = app.clone();
     let result = run_blocking_store_op(move || {
@@ -477,8 +474,7 @@ pub(crate) async fn import_app_data(
         if result.as_ref().map_or(true, |result| {
             result.addons_imported > 0 || result.settings_restored
         }) {
-            // A later write can fail after earlier domains changed. Clear at
-            // the actual completion, including work whose caller timed out.
+            // Clear caches at actual completion — a later write can fail after earlier domains changed.
             app.state::<AddonTransport>().clear_cache();
             app.state::<AddonResourceClient>().clear_cache();
         }
@@ -494,21 +490,18 @@ fn import_app_data_entries(
     service: &PlaybackStateService,
     export: AppDataImportPayload,
 ) -> Result<ImportResult, String> {
-    // Preflight before the first mutation: every touched store file must
-    // parse and the live library/status/list capacities must hold.
+    // Preflight before the first mutation: every touched store file must parse and capacities must hold.
     let lib_store = super::open_store(app, LIBRARY_STORE_FILE)?;
     let existing_library_index = load_library_index(&lib_store)?;
     let status_store = super::open_store(app, WATCH_STATUS_STORE_FILE)?;
     let existing_status_index = load_watch_status_index(&status_store)?;
     let lists_store = super::open_store(app, LISTS_STORE_FILE)?;
     let existing_order = load_lists_order(&lists_store)?;
-    // `import_settings` and the title-language merge reopen these through
-    // the registry cache; opening them now just validates their files first.
+    // `import_settings` reopens these via the registry cache; opening now validates the files first.
     super::open_store(app, SETTINGS_STORE_FILE)?;
     super::open_store(app, super::playback_state::PLAYBACK_STATE_STORE_FILE)?;
 
-    // Incoming records normalize once and serve both the capacity check and
-    // the merge, so nothing re-parses raw backup values mid-write.
+    // Normalize incoming records once — they serve both the capacity check and the merge.
     let incoming_library: Vec<MediaItem> = export
         .library
         .into_iter()
@@ -525,9 +518,8 @@ fn import_app_data_entries(
         "library",
     )?;
 
-    // Store-key bound, same as the live path: overlong ids are dropped, not
-    // truncated, so two hostile ids can't collide onto one key. The first
-    // normalized row wins a repeated id, matching the vacant merge below.
+    // Same store-key bound as the live path: overlong ids drop, not truncate, so two
+    // hostile ids can't collide onto one key. First normalized row wins a repeated id.
     let mut seen_status_ids = HashSet::with_capacity(export.watch_statuses.len());
     let incoming_statuses: Vec<(String, String)> = export
         .watch_statuses
@@ -549,7 +541,6 @@ fn import_app_data_entries(
 
     let prepared_lists = prepare_import_lists(export.lists, &existing_order)?;
 
-    // ― history ——————————————————————————————————————————————————————————
     let mut history_entries = Vec::with_capacity(export.history.len());
     for item in export.history {
         let Some(sanitized) = serde_json::from_value::<WatchProgress>(item)
@@ -568,7 +559,6 @@ fn import_app_data_entries(
     }
     let history_imported = service.merge_history_entries(app, history_entries)?;
 
-    // ― library ——————————————————————————————————————————————————————————
     let mut lib_map = load_library_map(&lib_store)?;
     let mut library_imported = 0usize;
     for normalized in incoming_library {
@@ -587,7 +577,6 @@ fn import_app_data_entries(
         &lib_map,
     )?;
 
-    // ― lists ————————————————————————————————————————————————————————————
     let mut new_order = existing_order;
     let mut lists_imported = 0usize;
 
@@ -611,7 +600,6 @@ fn import_app_data_entries(
     lists_store.set(LISTS_ORDER_KEY, json!(new_order));
     lists_store.save()?;
 
-    // ― watch statuses ————————————————————————————————————————————————————
     let mut statuses = load_watch_statuses_map(&status_store)?;
     let mut statuses_imported = 0usize;
     for (clean_id, clean_status) in incoming_statuses {
@@ -640,27 +628,25 @@ fn import_app_data_entries(
     })
 }
 
-/// Exports all app data and writes it to the provided path.
-///
-/// The write is atomic: the payload lands in a sibling temp file that is
-/// fsynced and renamed over the target, so a crash mid-export can never
-/// leave a torn file where the last good backup was.
+/// Exports all app data and writes it to `path`. Atomic: temp file fsynced and renamed
+/// over the target, so a crash mid-export can't leave a torn file.
 #[command]
 pub async fn export_app_data_to_file(app: AppHandle, path: String) -> Result<(), String> {
     let target_path = normalize_backup_path(&path)
         .ok_or_else(|| "Export path must be an absolute .json file path.".to_string())?;
     let payload = export_app_data(app.clone(), app.state::<PlaybackStateService>()).await?;
-    // Reject before touching the destination: a snapshot this importer could
-    // never read back must not replace the last good backup.
+    // Reject before touching the destination: an unreadable snapshot must not replace the last good backup.
     validate_backup_size(payload.len())?;
     let target_path = std::path::PathBuf::from(target_path);
-    // The snapshot ran inside `run_blocking_store_op`; the external file
-    // write rides the blocking pool on its own so no store lock is held
-    // across user-path IO.
+    let store_path = super::durable_store::resolve_store_path(&app, SETTINGS_STORE_FILE)?;
+    // File write rides the blocking pool separately so no store lock is held across user-path IO.
     super::run_blocking_op(
         tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
         "Backup export timed out.",
-        move || super::write_atomic_file(&target_path, payload.as_bytes(), false),
+        move || {
+            validate_backup_export_path(&target_path, &store_path)?;
+            super::write_atomic_file(&target_path, payload.as_bytes(), false)
+        },
     )
     .await
 }
@@ -673,8 +659,7 @@ pub async fn import_app_data_from_file(
 ) -> Result<ImportResult, String> {
     let source_path = normalize_backup_path(&path)
         .ok_or_else(|| "Import path must be an absolute .json file path.".to_string())?;
-    // External file IO must not hold the store gate. The capped read avoids
-    // TOCTOU/RAM overshoot; `import_app_data` rechecks before parsing.
+    // File IO must not hold the store gate; capped read avoids TOCTOU/RAM overshoot.
     let data = super::run_blocking_op(
         tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
         "Backup import timed out.",

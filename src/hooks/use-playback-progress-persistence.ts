@@ -69,7 +69,7 @@ export function usePlaybackProgressPersistence({
       position: currentTimeRef.current,
       duration: durationRef.current,
       last_watched: Date.now(),
-      title: title || 'Unknown',
+      title,
       poster,
       backdrop,
       // URLs never persist; resume uses lookup/key/source identities.
@@ -100,22 +100,17 @@ export function usePlaybackProgressPersistence({
     selectedStreamKeyRef,
   ]);
 
-  // Returns the raw chained operation so lifecycle callers (native close,
-  // updater install, backup) can observe a failed final save; the queue
-  // itself still swallows so later saves keep serializing. The backend owns
-  // the startup-stub gate and write coalescing (`should_skip_watch_progress_save`).
+  // Returns the raw op so lifecycle callers (native close, updater, backup) observe a failed
+  // final save; the queue swallows so saves serialize. Rust owns the stub gate/coalescing (should_skip_watch_progress_save).
   const persistProgress = useCallback((): Promise<void> => {
     const payload = buildWatchProgressPayload();
-    // Nothing to write — still hand back the tail so a close waits on
-    // whatever an earlier trigger already queued.
+    // Nothing to write — return the tail so a close still waits on queued saves.
     if (!payload) return saveQueueRef.current;
 
-    // The epoch snapshot fences deletes: a remove/clear issued while this
-    // write is queued must not let it resurrect the row — the backend
-    // generation guard only covers saves already in flight.
+    // Epoch snapshot fences deletes: a remove/clear queued after this write must not
+    // resurrect the row (the backend generation guard only covers in-flight saves).
     const enqueuedEpoch = getWatchProgressEpoch();
-    // Exclude the trigger time so overlapping exit saves share one operation.
-    // Only the queue tail can join: an intervening changed snapshot must still save.
+    // Excludes last_watched so overlapping exit saves share one op; a changed snapshot must still save.
     const fingerprint = JSON.stringify([
       stream.activeStreamUrl,
       enqueuedEpoch,
@@ -136,8 +131,7 @@ export function usePlaybackProgressPersistence({
     saveQueueRef.current = operation.catch(() => {
       if (import.meta.env.DEV) console.warn('[player] watch progress persist failed');
     });
-    // Global tracking covers this final operation after the player unmounts:
-    // the hook's own flusher only runs while it is still registered.
+    // Global tracking covers the op after player unmount — the hook flusher only runs while registered.
     return trackPendingAppWrite(operation);
   }, [buildWatchProgressPayload, stream.activeStreamUrl]);
 
@@ -147,14 +141,12 @@ export function usePlaybackProgressPersistence({
     [persistProgress],
   );
 
-  // Register the strict flush: a close/update/backup sees the raw
-  // operation, while the fire-and-forget callers above stay swallowing.
+  // Strict flush: close/update/backup sees the raw op; fire-and-forget callers stay swallowing.
   useEffect(() => registerPendingAppWriteFlusher(persistProgress), [persistProgress]);
 
   useEffect(() => {
     if (!isPlaying) return;
-    // A playing tick moves the position well past Rust's coalescing delta,
-    // so every interval save lands; stalled ticks coalesce in Rust.
+    // Playing ticks move past Rust's coalescing delta so every interval save lands; stalled ticks coalesce in Rust.
     const interval = window.setInterval(() => {
       void saveProgress();
     }, 15_000);
@@ -194,8 +186,7 @@ export function usePlaybackProgressPersistence({
     }
   }, [saveProgress, isPlaying]);
 
-  // Exit flushes are owned by the session boundary (reads the latest save via
-  // ref) — an unmount effect here would re-fire on every identity change.
+  // Exit flushes live in the session boundary — an unmount effect here would re-fire on every identity change.
   return {
     saveProgress,
   };

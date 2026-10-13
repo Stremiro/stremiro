@@ -2,21 +2,15 @@ import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { ResolvedStreamSession } from '@/lib/resolve-player-stream';
 import { nonBlank } from '@/lib/utils';
 
-/**
- * The stream-identity bundle one playback session owns: the resolved URL and
- * headers, the winner key, and the identity refs resolve/recovery/persist
- * read or write. Downstream hooks take the session as a single arg so new
- * identity state can't drift across their signatures.
- */
+/** Stream-identity bundle one playback session owns — passed downstream as a single arg so new identity state can't drift across signatures. */
 export interface PlayerStreamSession extends ResolvedStreamSession {
   activeStreamUrl?: string;
   activeStreamMpvHttpHeaderFields?: string;
   activeStreamKey?: string;
-  /** Resolved winner's source name, or the route-carried pick pre-resolve —
-      the reactive counterpart of `activeStreamSourceNameRef` for render. */
+  /** Resolved winner's source name (route pick pre-resolve) — reactive counterpart of `activeStreamSourceNameRef`. */
   activeStreamSourceName?: string;
   streamLookupIdRef: RefObject<string | undefined>;
-  lastStreamUrlRef: RefObject<string | undefined>;
+  committedStreamUrlRef: RefObject<string | undefined>;
 }
 
 interface UsePlayerStreamSessionArgs {
@@ -31,8 +25,7 @@ interface UsePlayerStreamSessionArgs {
   episode?: number;
 }
 
-// Signed URL + headers stay in a ref, never React state — that removes them
-// from inspection/serialization surfaces entirely.
+// Signed URL + headers stay in a ref, never React state — keeps them off inspection/serialization surfaces.
 interface StreamSecrets {
   url?: string;
   mpvHttpHeaderFields?: string;
@@ -56,8 +49,7 @@ export function usePlayerStreamSession({
   season,
   episode,
 }: UsePlayerStreamSessionArgs): PlayerStreamSession {
-  // Routes carry identities only (URLs stripped); the seed is lookup identity
-  // plus episode coordinates so advancing drops the previous episode's secrets.
+  // Routes carry identities only (URLs stripped); seed includes episode coordinates so advancing drops prior secrets.
   const routeSeed = JSON.stringify([
     routeFormat ?? '',
     routeSourceId?.trim() ?? '',
@@ -83,27 +75,23 @@ export function usePlayerStreamSession({
     activeOverride && heldSecrets && heldSecrets.routeSeed === routeSeed ? heldSecrets : null;
   const activeStreamUrl = activeSecrets?.url;
   const activeStreamMpvHttpHeaderFields = activeSecrets?.mpvHttpHeaderFields;
-  // Winner key from the last resolve/recovery; falls back to the route-carried
-  // selector pick on a fresh session.
+  // Winner key from the last resolve/recovery; falls back to the route pick on a fresh session.
   const activeStreamKey = activeOverride?.streamKey ?? routeSelectedStreamKey?.trim();
-  // Same lifecycle as `activeStreamSourceNameRef` — the seeding effect re-arms
-  // the route name whenever no stream URL is active.
+  // Same lifecycle as `activeStreamSourceNameRef` — the seeding effect re-arms the route name with no active URL.
   const activeStreamSourceName =
     activeStreamUrl === undefined ? nonBlank(routeSourceName) : activeOverride?.sourceName;
-  const lastStreamUrlRef = useRef(activeStreamUrl);
+  const committedStreamUrlRef = useRef(activeStreamUrl);
   const activeStreamFormatRef = useRef<string | undefined>(routeFormat);
   const activeStreamSourceIdRef = useRef<string | undefined>(routeSourceId);
   const activeStreamSourceNameRef = useRef<string | undefined>(routeSourceName);
   const activeStreamFamilyRef = useRef<string | undefined>(routeStreamFamily);
-  // First render seeds the route value only — the player.tsx effect is the
-  // sole writer after that, persisting the richer lookup id once details land.
+  // Seeded from route only — the player.tsx effect is the sole writer once details land.
   const streamLookupIdRef = useRef<string | undefined>(streamLookupId || mediaId || undefined);
   const selectedStreamKeyRef = useRef<string | undefined>(routeSelectedStreamKey);
 
   useEffect(() => {
     routeSeedRef.current = routeSeed;
-    // A new seed is a new session — drop held secrets so a stale signed URL
-    // can't replay under different coordinates.
+    // A new seed is a new session — drop held secrets so a stale signed URL can't replay under new coordinates.
     secretsRef.current = null;
     setSessionStreamOverride(null);
   }, [routeSeed]);
@@ -121,8 +109,7 @@ export function usePlayerStreamSession({
         mpvHttpHeaderFields: nextMpvHttpHeaderFields,
         routeSeed: seed,
       };
-      // Fresh object every call — recovery can re-resolve under the same seed
-      // with a different URL and consumers must still re-render.
+      // Fresh object each call — a same-seed re-resolve with a new URL must still re-render.
       setSessionStreamOverride({
         streamKey: nextStreamKey,
         sourceName: nonBlank(nextSourceName),
@@ -133,12 +120,11 @@ export function usePlayerStreamSession({
   );
 
   useEffect(() => {
-    lastStreamUrlRef.current = activeStreamUrl;
+    committedStreamUrlRef.current = activeStreamUrl;
   }, [activeStreamUrl]);
 
   useEffect(() => {
-    // Route identity seeds the refs only until a stream URL is active — after
-    // a resolve lands, `applyResolvedStreamToSession` owns them.
+    // Route identity seeds the refs only until a stream activates; after resolve, `applyResolvedStreamToSession` owns them.
     if (activeStreamUrl !== undefined) return;
     activeStreamFormatRef.current = routeFormat;
     activeStreamSourceIdRef.current = nonBlank(routeSourceId);
@@ -156,8 +142,7 @@ export function usePlayerStreamSession({
     selectedStreamKeyRef.current = nonBlank(routeSelectedStreamKey) || selectedStreamKeyRef.current;
   }, [routeSelectedStreamKey]);
 
-  // Memoized so `stream` is dep-safe downstream — the bundle only changes
-  // identity when a state-derived field does.
+  // Memoized so `stream` stays dep-safe — identity changes only with a state-derived field.
   return useMemo(
     () => ({
       activeStreamUrl,
@@ -171,7 +156,7 @@ export function usePlayerStreamSession({
       activeStreamFamilyRef,
       streamLookupIdRef,
       selectedStreamKeyRef,
-      lastStreamUrlRef,
+      committedStreamUrlRef,
     }),
     [
       activeStreamUrl,
@@ -185,7 +170,7 @@ export function usePlayerStreamSession({
       activeStreamFamilyRef,
       streamLookupIdRef,
       selectedStreamKeyRef,
-      lastStreamUrlRef,
+      committedStreamUrlRef,
     ],
   );
 }

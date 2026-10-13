@@ -4,7 +4,7 @@ use super::ttl_cache::{
 use super::{
     addon_manifest::{snapshot_supports_request, AddonCatalogCapability, AddonManifest},
     build_provider_http_client, normalize_media_year, strip_manifest_suffix, trim_to_max,
-    BoundedBodyError, Episode, MediaDetails, MediaItem, Trailer,
+    BoundedBodyError, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -14,16 +14,13 @@ use std::sync::Arc;
 use std::time::Duration;
 use urlencoding::encode;
 
-/// Measured 2026-09-03 (decompressed JSON): series `top` ~537KB,
-/// series `imdbRating` ~533KB, series `top` + `genre=Animation` ~695KB.
-/// 2MiB keeps a hard bound (~3x headroom) while fitting real catalog pages.
+/// 2MiB bound, ~3x headroom over measured catalog pages (decompressed,
+/// 2026-09-03): series `top` ~537KB, `top` + `genre=Animation` ~695KB.
 const CATALOG_MAX_BYTES: usize = 2 * 1024 * 1024;
 const META_MAX_BYTES: usize = 4 * 1024 * 1024;
 const SUBTITLE_MAX_BYTES: usize = 512 * 1024;
-/// Per-request budget for catalog/meta/subtitle payloads. Catalog pages run
-/// ~0.5-0.7MiB decompressed, so a tight budget misreads slow international
-/// routes as dead hosts; 20s keeps genuine reachability failures bounded by
-/// the post-failure cooldown below.
+/// Catalog pages run ~0.5-0.7MiB decompressed — a tighter timeout misreads
+/// slow international routes as dead hosts.
 const RESOURCE_TIMEOUT_SECS: u64 = 20;
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
@@ -32,35 +29,28 @@ const MAX_CAST: usize = 64;
 const MAX_GENRES: usize = 32;
 const MAX_STRING_CHARS: usize = 2_048;
 const MAX_ID_CHARS: usize = 256;
+const MAX_LOOKUP_ID_CHARS: usize = MAX_ID_CHARS + 2 * (1 + 10);
 const MAX_EXTRA_NAME_CHARS: usize = 64;
 const MAX_EXTRA_VALUE_CHARS: usize = 256;
 const MAX_EXTRAS: usize = 16;
 const MAX_SUBTITLE_LABEL_CHARS: usize = 256;
 
-/// TTLs mirror the stream transport cache: addon payloads are stable for
-/// minutes, and a successful-but-empty answer gets a shorter window so newly
-/// indexed content surfaces quickly.
+/// Addon payloads are stable for minutes; empty answers get the shorter window so new content surfaces fast.
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(180);
 const RESOURCE_CACHE_EMPTY_TTL: Duration = Duration::from_secs(30);
 const META_CACHE_MAX_ENTRIES: usize = 48;
 const CATALOG_CACHE_MAX_ENTRIES: usize = 48;
 const SUBTITLE_CACHE_MAX_ENTRIES: usize = 64;
-/// Single-flight map hygiene bound. A fetch future dropped mid-flight (an
-/// outer caller timeout) never releases its key, so inserts sweep orphans
-/// once the map grows past this — same contract as the stream transport.
+/// A dropped fetch future never releases its key; inserts sweep orphans past this bound.
 const RESOURCE_IN_FLIGHT_SWEEP_AT: usize = 64;
-/// Per-addon transport-failure cooldown: a host that just failed to answer
-/// is presumed down, so catalog/meta/subtitle fetches fail fast for the
-/// window instead of re-paying connect+timeout on every browse page or
-/// details open. Session-local; the map mechanics live in
-/// `FetchFailureCooldown`, shared with the stream transport.
+/// Per-addon transport-failure cooldown: a host that failed to answer is
+/// presumed down, so fetches fail fast for this window. Session-local;
+/// mechanics in `FetchFailureCooldown`.
 const RESOURCE_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
 /// Negative-cache bound for deterministic per-request failures.
 const RESOURCE_FAILURE_CACHE_MAX_ENTRIES: usize = 64;
 
-/// Hash-keyed cache identity: the request URL embeds the addon's configured
-/// base (possibly credential-bearing), so keys keep only a hash segment —
-/// the stream cache's config-segment policy applied to the whole request.
+/// The request URL embeds the (possibly credential-bearing) addon base, so cache keys keep only a hash segment.
 fn resource_cache_key(resource: &str, url: &str) -> String {
     format!("{resource}:{}", hash_segment(url))
 }
@@ -78,9 +68,8 @@ pub(crate) struct CatalogPage {
     pub items: Vec<MediaItem>,
 }
 
-/// Lean catalog-card shape. Search endpoints return full meta objects here
-/// (cast, links, trailers, behavior hints); decoding only card fields keeps
-/// memory proportional to what browse renders.
+/// Card-only decode — search endpoints return full meta objects, so decoding
+/// only card fields keeps memory proportional to what browse renders.
 #[derive(Debug, Deserialize, Default)]
 struct CatalogItemJson {
     #[serde(default)]
@@ -109,8 +98,7 @@ struct CatalogItemJson {
 
 #[derive(Debug, Deserialize, Default)]
 struct CatalogResponse {
-    // Raw `Value` entries: one non-object row in a catalog page must not
-    // fail the whole `metas` decode — each item parses per-entry below.
+    // Per-entry `Value`: one non-object row must not fail the whole `metas` decode.
     #[serde(default)]
     metas: Vec<Value>,
 }
@@ -131,10 +119,8 @@ struct SubtitleItem {
     lang: Option<String>,
 }
 
-/// Provider-agnostic display hints, first non-empty wins. Addons label
-/// subtitle entries differently (`subtitleFileName` on OpenSubtitles-style
-/// payloads, `title`/`name` elsewhere); surfacing one keeps same-language
-/// entries distinguishable.
+/// Display-hint keys, first non-empty wins — addons label subtitle entries
+/// differently (`subtitleFileName`, `title`, `name`, …).
 const SUBTITLE_LABEL_KEYS: [&str; 8] = [
     "label",
     "title",
@@ -173,28 +159,20 @@ pub(crate) struct AddonResourceClient {
     meta_cache: TtlCache<Arc<MediaDetails>>,
     catalog_cache: TtlCache<CatalogPage>,
     subtitle_cache: TtlCache<Vec<AddonSubtitle>>,
-    /// Per-addon transport-failure cooldown keyed by base-URL hash — same
-    /// contract as the stream transport's `fetch_failures`.
+    /// Per-addon cooldown keyed by base-URL hash — same contract as the transport's `fetch_failures`.
     fetch_failures: FetchFailureCooldown,
-    /// Short-TTL negative cache keyed like the resource caches: a
-    /// deterministic failure (status, size cap, decode, missing meta)
-    /// replays identically for the same request, so a browse re-open or
-    /// details retry fails fast instead of re-paying the round-trip.
+    /// Short-TTL negative cache — a deterministic failure (status, size cap,
+    /// decode, missing meta) replays identically for the same request.
     failure_cache: TtlCache<String>,
-    /// Single-flight locks keyed by request URL: concurrent callers for one
-    /// resource (details page + schedule refresh, selector + auto-resolve)
-    /// wait on the leader and re-read the cache instead of duplicating the
-    /// fetch + parse.
+    /// Single-flight locks keyed by request URL — followers wait on the
+    /// leader and re-read the cache.
     in_flight: InFlight,
-    /// Bumped by `clear_cache`: a fetch started before a config change must
-    /// not repopulate cleared entries on completion.
+    /// Bumped by `clear_cache`: in-flight fetches must not repopulate cleared entries.
     generation: AtomicU64,
 }
 
-/// Card and full shapes share the cached full entry; the lite shape is
-/// rebuilt field-by-field so a card hit never copies the discarded
-/// `episodes`/`cast` (a new `MediaDetails` field fails this literal, forcing
-/// a lite-vs-full decision).
+/// Lite shape rebuilt field-by-field so a card hit never copies the discarded
+/// `episodes`/`cast`; a new `MediaDetails` field fails this literal on purpose.
 pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetails {
     if include_episodes {
         return details.clone();
@@ -216,6 +194,7 @@ pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> 
         genres: details.genres.clone(),
         trailers: details.trailers.clone(),
         episodes: None,
+        seasons: None,
     }
 }
 
@@ -242,8 +221,7 @@ impl AddonResourceClient {
                 RESOURCE_FETCH_FAILURE_TTL,
                 RESOURCE_IN_FLIGHT_SWEEP_AT,
             ),
-            // Failures always take the short empty TTL: a fixed addon or a
-            // corrected request recovers within seconds, not minutes.
+            // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
                 RESOURCE_FAILURE_CACHE_MAX_ENTRIES,
                 RESOURCE_CACHE_EMPTY_TTL,
@@ -254,9 +232,8 @@ impl AddonResourceClient {
         }
     }
 
-    /// Clear all resource caches (e.g. the addon set changed). Bumps the
-    /// generation first so in-flight fetches cannot repopulate them.
-    /// Failure cooldowns clear too: a config change may fix the dead host.
+    /// Clear all resource caches (e.g. addon set changed): bump the generation
+    /// first so in-flight fetches can't repopulate; cooldowns clear too.
     pub(crate) fn clear_cache(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.meta_cache.clear();
@@ -266,8 +243,7 @@ impl AddonResourceClient {
         self.fetch_failures.clear();
     }
 
-    /// The shared cache/single-flight/retry contract with this client's
-    /// guards and resource policy (timeout, cooldown message).
+    /// Shared fetch contract wired with this client's caches and resource policy.
     fn fetch_contract(&self) -> FetchContract<'_> {
         FetchContract {
             failure_cache: &self.failure_cache,
@@ -327,8 +303,7 @@ impl AddonResourceClient {
                 &self.meta_cache,
                 &cache_key,
                 &addon_key,
-                // Meta is success-or-error: parse failures return before this
-                // point, so a stored entry always earns the full TTL.
+                // Meta is success-or-error: a stored entry always earns the full TTL.
                 |_| false,
                 || async {
                     let what = format!("meta {type_}/{id}");
@@ -417,10 +392,8 @@ pub(crate) fn catalog_supports_request(
         ));
     }
 
-    // `search` is a hard capability gate: an undeclaring catalog ignores the
-    // term and echoes its normal rows back as bogus results. Other undeclared
-    // extras are advisory — callers re-filter locally, so a missing
-    // `genre`/`skip` declaration must not drop a servable source.
+    // `search` is a hard capability gate (an undeclaring catalog echoes bogus
+    // rows); other extras are advisory — callers re-filter locally.
     if extras
         .iter()
         .any(|extra| extra.name.eq_ignore_ascii_case("search"))
@@ -457,9 +430,8 @@ pub(crate) fn snapshot_catalog<'a>(
     })
 }
 
-/// Canonical stored catalog id for a case-insensitive match, so fetched URLs
-/// use the manifest's own casing instead of echoing caller casing (`TOP`
-/// would otherwise 404 on case-sensitive upstreams).
+/// Canonical catalog id for a case-insensitive match, so fetched URLs use the
+/// manifest's own casing (caller casing can 404 on case-sensitive upstreams).
 pub(crate) fn resolve_canonical_catalog_id(
     snapshot: &AddonManifest,
     type_: &str,
@@ -474,9 +446,7 @@ pub(crate) fn snapshot_supports_catalog(
     catalog_id: &str,
     extras: &[CatalogExtra],
 ) -> Result<(), String> {
-    // `catalogs[]` is the authoritative declaration: the (type, id) pair is
-    // the strongest capability statement a manifest makes, and a
-    // catalogs-only manifest may omit the redundant `resources` entry.
+    // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
     let Some(catalog) = snapshot_catalog(snapshot, type_, catalog_id) else {
         return Err(format!(
             "Addon does not declare catalog {catalog_id} for type {type_}."
@@ -518,8 +488,7 @@ fn json_string_list(value: Option<&Value>, max_items: usize) -> Option<Vec<Strin
 
 fn json_u32(value: Option<&Value>) -> Option<u32> {
     match value {
-        // Reject on overflow: a wrapping `as u32` would alias episodes
-        // (e.g. 2^32+5 -> 5) and corrupt season/episode mappings.
+        // Reject on overflow: a wrapping cast would corrupt season/episode mappings.
         Some(Value::Number(number)) => number.as_u64().and_then(|value| u32::try_from(value).ok()),
         Some(Value::String(text)) => text.trim().parse().ok(),
         _ => None,
@@ -571,9 +540,7 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
     let id = json_string(value.get("id")?)?;
     let title = json_string(value.get("name")?)?;
     let type_ = json_string(value.get("type")?)?;
-    // `imdb_id` is an opaque lookup id (persisted as episode-mapping
-    // `source_lookup_id` and embedded in stream query paths), so it shares
-    // `id`'s bound rather than the looser generic-string cap.
+    // `imdb_id` is a lookup id embedded in stream query paths — it shares `id`'s bound.
     let imdb_id = if id.starts_with("tt") {
         Some(id.chars().take(MAX_ID_CHARS).collect())
     } else {
@@ -581,6 +548,10 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
             .or_else(|| json_string_field(&value, "imdbId"))
             .and_then(|value| trim_to_max(&value, MAX_ID_CHARS))
     };
+
+    // `seasons` is populated iff `episodes` is, so the lite shape drops both together.
+    let episodes = parse_episodes(value.get("videos"));
+    let seasons = episodes.as_deref().map(media_seasons_from_episodes);
 
     Some(MediaDetails {
         id: id.chars().take(MAX_ID_CHARS).collect(),
@@ -594,9 +565,8 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
             json_string_field(&value, "releaseInfo"),
         ),
         display_year: None,
-        // Raw `released` (full ISO date) is the schedule source of truth —
-        // normalization folds it into release_date; the year-only fallback
-        // keeps metas without a released stamp working.
+        // Raw `released` ISO date is the schedule source of truth; the
+        // year-only fallback keeps unstamped metas working.
         release_date: json_string_field(&value, "released"),
         type_,
         description: json_string_field(&value, "description"),
@@ -606,20 +576,29 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
         genres: json_string_list(value.get("genre"), MAX_GENRES)
             .or_else(|| json_string_list(value.get("genres"), MAX_GENRES)),
         trailers: parse_trailers(value.get("trailers")),
-        // Episode shaping for lite responses happens post-cache in
-        // `meta_for_shape` — the parse always carries the full list.
-        episodes: parse_episodes(value.get("videos")),
+        // Lite-shape trimming happens post-cache in `meta_for_shape`.
+        episodes,
+        seasons,
     })
+}
+
+/// One entry per contiguous season run; input must already be (season, episode)-sorted.
+fn media_seasons_from_episodes(episodes: &[Episode]) -> Vec<MediaSeason> {
+    episodes
+        .chunk_by(|left, right| left.season == right.season)
+        .map(|run| MediaSeason {
+            number: run[0].season,
+            episode_count: u32::try_from(run.len()).unwrap_or(u32::MAX),
+        })
+        .collect()
 }
 
 fn json_string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(json_string)
 }
 
-/// True for the strict 11-char YouTube video token (`[A-Za-z0-9_-]`), the
-/// only value ever interpolated into a trailer watch URL. Mirrors the
-/// frontend `isValidYouTubeVideoId` gate so a malicious `source` cannot
-/// smuggle extra query parameters or markup through the interpolated URL.
+/// Strict 11-char YouTube token (`[A-Za-z0-9_-]`) — mirrors the frontend
+/// `isValidYouTubeVideoId` gate so `source` can't smuggle URL params/markup.
 fn is_youtube_video_token(source: &str) -> bool {
     source.len() == 11
         && source
@@ -627,10 +606,8 @@ fn is_youtube_video_token(source: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
 }
 
-/// Image fields reach the webview `<img>` pipeline, so they share the same
-/// ingress gate as subtitles and streams (http(s) only, no credentials, no
-/// non-routable IP literal). A rejected URL degrades to no artwork rather
-/// than dropping the whole catalog/meta row.
+/// Image fields reach the webview `<img>`, so they share the subtitle/stream
+/// ingress gate; a rejected URL degrades to no artwork, not a dropped row.
 fn sanitize_image_url_opt(url: Option<String>) -> Option<String> {
     url.filter(|value| is_fetchable_http_url(value))
 }
@@ -647,10 +624,7 @@ fn parse_trailers(value: Option<&Value>) -> Option<Vec<Trailer>> {
     let trailers: Vec<Trailer> = items
         .iter()
         .filter_map(|item| {
-            // Addon-controlled video tokens reach the browser `<iframe>` src:
-            // accept the strict 11-char YouTube token only. A raw `source`
-            // like `x&evil=` would otherwise escape into extra URL
-            // parameters or attacker markup.
+            // Video tokens reach the browser `<iframe>` src: strict 11-char YouTube token only.
             let source = json_string_field(item, "source")?;
             if !is_youtube_video_token(&source) {
                 return None;
@@ -696,16 +670,14 @@ fn parse_episodes(value: Option<&Value>) -> Option<Vec<Episode>> {
         .take(MAX_EPISODES)
         .collect();
 
-    // Sort after the cap to preserve surviving rows; stable coordinate ties keep addon order.
-    // Consumers use this cached order over IPC.
+    // Sort after the cap; ties keep addon order. Consumers read this cached order over IPC.
     episodes.sort_by_key(|episode| (episode.season, episode.episode));
 
     (!episodes.is_empty()).then_some(episodes)
 }
 
 fn parse_subtitle_item(value: Value) -> Option<AddonSubtitle> {
-    // Read the display hint off the raw payload before `from_value` consumes
-    // it; `SubtitleItem` only owns the protocol fields.
+    // Read the display hint before `from_value` consumes the payload.
     let label = SUBTITLE_LABEL_KEYS
         .iter()
         .find_map(|key| json_string_field(&value, key))
@@ -715,10 +687,8 @@ fn parse_subtitle_item(value: Value) -> Option<AddonSubtitle> {
     let id = trim_to_max(parsed.id.as_deref().unwrap_or(""), MAX_ID_CHARS)
         .unwrap_or_else(|| url.clone());
 
-    // mpv fetches subtitle URLs itself, outside the backend redirect, size,
-    // and hop policy: gate scheme, embedded credentials, and non-routable IP
-    // literals here so a malicious subtitle payload cannot aim the player at
-    // loopback, LAN, or metadata endpoints.
+    // mpv fetches subtitle URLs itself, outside the backend redirect/size
+    // policy — gate here so a payload can't aim the player at loopback/LAN/metadata IPs.
     if !is_fetchable_http_url(&url) {
         return None;
     }
@@ -734,18 +704,16 @@ fn parse_subtitle_item(value: Value) -> Option<AddonSubtitle> {
     })
 }
 
-/// Magnet URLs are stream identifiers, not fetch targets — they carry no
-/// SSRF surface, so every gate that would drop non-http(s) schemes must
-/// recognize them first. Single owner for the scheme probe.
+/// Magnet URLs are identifiers, not fetch targets: no SSRF surface, so
+/// scheme-rejecting gates must recognize them first.
 pub(crate) fn is_magnet_url(url: &str) -> bool {
     url.trim()
         .get(..7)
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:"))
 }
 
-/// Backend gate for player-fetchable http(s) URLs before they reach a
-/// privileged fetch path (mpv subtitle/stream fetch or direct-stream probe).
-/// HTTP(S) only, no embedded credentials, and no non-routable IP literal host.
+/// Gate for player-fetchable URLs before a privileged fetch path (mpv
+/// subtitle/stream fetch, direct-stream probe): http(s) only, no credentials, no non-routable IP literal.
 pub(crate) fn is_fetchable_http_url(url: &str) -> bool {
     let Ok(parsed) = reqwest::Url::parse(url) else {
         return false;
@@ -759,9 +727,9 @@ pub(crate) fn is_fetchable_http_url(url: &str) -> bool {
     !crate::providers::fetch_policy::is_blocked_ip_literal(host)
 }
 
-fn encode_path_segment(value: &str) -> Result<String, String> {
-    let trimmed = trim_to_max(value, MAX_ID_CHARS)
-        .ok_or_else(|| "Addon resource path is empty.".to_string())?;
+fn encode_path_segment(value: &str, max_chars: usize) -> Result<String, String> {
+    let trimmed =
+        trim_to_max(value, max_chars).ok_or_else(|| "Addon resource path is empty.".to_string())?;
     Ok(encode(&trimmed).into_owned())
 }
 
@@ -790,9 +758,9 @@ pub(crate) fn build_resource_url(
     let trimmed_path = parsed.path().trim_end_matches('/');
     let base_path = strip_manifest_suffix(trimmed_path);
 
-    let resource = encode_path_segment(resource)?;
-    let type_ = encode_path_segment(type_)?;
-    let id = encode_path_segment(id)?;
+    let resource = encode_path_segment(resource, MAX_ID_CHARS)?;
+    let type_ = encode_path_segment(type_, MAX_ID_CHARS)?;
+    let id = encode_path_segment(id, MAX_LOOKUP_ID_CHARS)?;
     let extra_segment = if extras.is_empty() {
         None
     } else if extras.len() > MAX_EXTRAS {

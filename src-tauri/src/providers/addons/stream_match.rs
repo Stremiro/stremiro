@@ -1,11 +1,10 @@
 use super::AddonStream;
 use regex::Regex;
 use serde::Serialize;
+use std::borrow::Cow;
 use std::sync::LazyLock;
 
-// Release-tag flag vocabulary — the `StreamFlags` probes below. Kept beside
-// the match battery so every regex over the lowered stream fields lives in
-// one module.
+// Release-tag flag vocabulary — every regex over the lowered stream fields lives in this module.
 static STREAM_DV_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bdv\b").expect("valid stream dv regex"));
 static STREAM_AV1_REGEX: LazyLock<Regex> =
@@ -23,38 +22,36 @@ static STREAM_ENGLISH_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\beng(?:lish)?\b").expect("valid stream english regex"));
 static STREAM_JAPANESE_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bjap(?:anese)?\b").expect("valid stream japanese regex"));
-// `hdr\d*` keeps "HDR"/"HDR10" while rejecting "HDRip" (a capture-format
-// tag, not HDR video) — a raw `contains("hdr")` misclassifies it.
+static STREAM_CAPTURE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"\b(?:cam|camrip|hdcam|hd-cam|telesync|hdts|hd-ts|telecine|hdtc|screener|dvdscr)\b")
+        .expect("valid stream capture regex")
+});
+// `hdr\d*` rejects "HDRip" (capture format, not HDR) — `contains("hdr")` misclassifies it.
 static STREAM_HDR_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bhdr\d*\b").expect("valid stream hdr regex"));
-// `\b4k\b` rejects non-resolution tokens like "4Kids" dubs that a raw
-// `contains("4k")` misclassified as P2160.
+// `\b4k\b` rejects "4Kids" dubs that `contains("4k")` misclassified as P2160.
 static STREAM_4K_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b4k\b").expect("valid stream 4k regex"));
-// Size text ("5.1 GB") is not a channel layout: strip `[57].1<size>` spans
-// before probing, since `\b5\.1\b` alone cannot tell audio from bytes.
+// Strip `[57].1<size>` spans before probing — size text isn't a channel layout.
 static STREAM_SURROUND_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b[57]\.1\b").expect("valid stream surround regex"));
 static STREAM_SURROUND_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)[57]\.1\s*(?:k|m|g|t)i?b\b").expect("valid stream surround size regex")
 });
 
-/// Detects season packs, batch downloads, and multi-episode collections.
-/// Intentionally conservative to avoid false positives on single-episode streams.
+/// Detects season packs/batches/multi-episode collections — intentionally
+/// conservative against single-episode false positives.
 pub(super) static BATCH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i)(?:",
-        // Explicit batch/pack keywords. Word separators accept dots and
-        // underscores too: release names are rarely space-separated
-        // ("Show.Complete.Series.1080p").
+        // Batch/pack keywords; separators accept dots/underscores ("Show.Complete.Series").
         r"\bbatch\b",
         r"|\bcomplete[\s._-]+(?:series|season|pack|collection)\b",
         r"|\bseason[\s._-]*pack\b",
         r"|\bfull[\s._-]+(?:season|series)\b",
         // Season ranges: S01-S23, S01~S05
         r"|\bs\d{1,2}[\s._]*[-~][\s._]*s\d{1,2}\b",
-        // Episode ranges requiring BOTH E/EP markers to avoid
-        // false-matching titles like "S15E52 - 1080p"
+        // Episode ranges require BOTH E/EP markers ("S15E52 - 1080p" must not match)
         r"|\b(?:e|ep)\d{1,4}[\s._]*[-~][\s._]*(?:e|ep)\d{1,4}\b",
         // Keyword ranges: "Season 1-23", "Episode.1-24"
         r"|\bseason[\s._]*\d+[\s._]*[-~&][\s._]*(?:season[\s._]*)?\d+\b",
@@ -64,13 +61,21 @@ pub(super) static BATCH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid batch regex")
 });
 
+// Also covers dashless scene multi-episode files (`S01E05E06`).
 static SEASON_EPISODE_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\bs0*(\d{1,2})e0*(\d{1,4})\s*[-~]\s*e?0*(\d{1,4})\b")
+    Regex::new(r"(?i)\bs0*(\d{1,2})e0*(\d{1,4})(?:\s*[-~]\s*e?|e)0*(\d{1,4})\b")
         .expect("valid season episode range regex")
 });
 static X_SEASON_EPISODE_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b0*(\d{1,2})x0*(\d{1,4})\s*[-~]\s*(?:0*\d{1,2}x)?0*(\d{1,4})\b")
+    Regex::new(r"(?i)\b0*(\d{1,2})x0*(\d{1,4})\s*[-~]\s*(?:0*(\d{1,2})x)?0*(\d{1,4})\b")
         .expect("valid x season episode range regex")
+});
+static BARE_EPISODE_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r" - (\d{1,4})\s*[-~]\s*(\d{1,4})\b").expect("valid bare episode range regex")
+});
+static BARE_EPISODE_METADATA_SUFFIX_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:p\b|(?:\.\d+)?\s*[KMGT]i?B\b)")
+        .expect("valid bare episode metadata suffix regex")
 });
 static EPISODE_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
@@ -87,9 +92,8 @@ static SEASON_RANGE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static SEASON_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bseason[\s._]*0*(\d{1,2})\b").expect("valid season token regex")
 });
-// Bare `S01` without an `E` segment: how packs are usually named
-// ("Show.S01.COMPLETE"). The trailing `\b` is a word boundary, so `S01E05`
-// (no boundary before `e`) and `S0105` never produce a bare-season capture.
+// Bare `S01` without an `E` segment — pack naming ("Show.S01.COMPLETE"); the
+// trailing `\b` keeps `S01E05`/`S0105` from capturing a bare season.
 static BARE_SEASON_TOKEN_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\bs0*(\d{1,2})\b").expect("valid bare season token regex"));
 static SEASON_EPISODE_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -98,21 +102,18 @@ static SEASON_EPISODE_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 static X_EPISODE_TOKEN_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b0*(\d{1,2})x\d{1,4}\b").expect("valid x episode token regex")
 });
-// Loose episode keyword forms: "episode 5", "Episode.05", "ep_5", "ep5".
-// One regex covers every separator instead of a probe per spelling; the
-// captured number is compared, so `ep5` never matches inside `ep52`.
+// Loose episode forms ("episode 5", "ep_5", "ep5") — the captured number is
+// compared, so `ep5` never matches inside `ep52`.
 static LOOSE_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:episode|ep)[\s._-]*0*(\d{1,4})\b").expect("valid loose episode regex")
 });
-// Bare `E05` split from its season ("Show.S01.E05"). Gated on an explicit
-// matching season marker so stray `e5`-shaped tokens (model numbers, codec
-// fragments) can't produce a match where no season was declared.
+// Bare `E05` split from its season ("Show.S01.E05"); gated on a season marker
+// so stray `e5`-shaped tokens can't match with no season declared.
 static BARE_E_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\be[\s._-]*0*(\d{1,4})\b").expect("valid bare-e episode regex")
 });
-// Pack vocabulary that only counts alongside a season marker: bare
-// `complete`/`collection`/`pack` alone appear in movie titles
-// ("Complete Unknown"), but "S01 Complete" is unambiguously a pack.
+// Pack words count only alongside a season marker: bare `complete`/`pack`
+// appear in movie titles ("Complete Unknown"), "S01 Complete" is a pack.
 static PACK_KEYWORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:batch|complete|collection|pack)\b").expect("valid pack keyword regex")
 });
@@ -120,12 +121,9 @@ static SEASON_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bseason[\s._]*0*\d{1,2}\b|\bs0*\d{1,2}\b|\b0*\d{1,2}x\d{1,4}\b")
         .expect("valid season marker regex")
 });
-// Named season claims release groups use instead of numbers. Ordinal forms
-// ("2nd Season") resolve to their number; "final season" claims the show's
-// last season, which only the caller's final-season fact can verify. Titled
-// final seasons ("… - The Final Season - 04") carry no numeric claim —
-// without these the loose absolute dash form cross-matches every season
-// with a same-numbered episode.
+// Named season claims release groups use instead of numbers: ordinals resolve
+// to their number; a numberless "final season" claim needs the caller's
+// final-season fact — it must not cross-bind to every season.
 static FINAL_SEASON_MARKER_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\bfinal[\s._-]*season\b").expect("valid final season marker regex")
 });
@@ -140,9 +138,8 @@ static ORDINAL_SEASON_WORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid ordinal season word regex")
 });
 
-// Match-tier *values* serialize snake_case (`season_pack`, `episode_range`)
-// while the carrier fields stay camelCase (`matchSummary`) — the selector's
-// badges, dot-field tier map, and aria strings all key on that contract.
+// Tier values serialize snake_case while carrier fields stay camelCase —
+// the selector's badges/tier map key on that contract.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum StreamEpisodeMatchKind {
@@ -182,6 +179,30 @@ fn parse_captured_u32(captures: &regex::Captures<'_>, index: usize) -> Option<u3
     captures.get(index)?.as_str().parse::<u32>().ok()
 }
 
+fn bare_episode_suffix_is_metadata(suffix: &str) -> bool {
+    BARE_EPISODE_METADATA_SUFFIX_REGEX.is_match(suffix)
+}
+
+fn bare_episode_ranges(text: &str) -> impl Iterator<Item = regex::Captures<'_>> {
+    BARE_EPISODE_RANGE_REGEX
+        .captures_iter(text)
+        .filter(|captures| {
+            let start = parse_captured_u32(captures, 1).unwrap_or_default();
+            let end = parse_captured_u32(captures, 2).unwrap_or_default();
+            let suffix = &text[captures.get(0).expect("range match").end()..];
+            // Year spans and decimal/unit-bearing size spans are not episode claims.
+            !((1900..=2099).contains(&start) && (1900..=2099).contains(&end))
+                && !bare_episode_suffix_is_metadata(suffix)
+        })
+}
+
+fn has_episode_range(text: &str) -> bool {
+    SEASON_EPISODE_RANGE_REGEX.is_match(text)
+        || X_SEASON_EPISODE_RANGE_REGEX.is_match(text)
+        || EPISODE_RANGE_REGEX.is_match(text)
+        || bare_episode_ranges(text).next().is_some()
+}
+
 fn ordinal_season_word_number(word: &str) -> Option<u32> {
     match word.to_ascii_lowercase().as_str() {
         "first" => Some(1),
@@ -197,20 +218,17 @@ fn ordinal_season_word_number(word: &str) -> Option<u32> {
     }
 }
 
-/// `None` = no season claim; `Some(true)` = a claim matches the request;
-/// `Some(false)` = a different season is claimed. Named claims join the
-/// numeric markers: ordinals resolve to their number, and a numberless
-/// "final season" claim matches only when `final_season` targets the show's
-/// last season. `Some(false)` keeps loose absolute-number episode forms from
-/// cross-matching a titled release of another season.
+/// `None` = no season claim; `Some(true)` = matches; `Some(false)` = a
+/// different season claimed — which stops loose absolute-number episode forms
+/// cross-matching another season's titled release. A numberless "final
+/// season" claim matches only when `final_season` targets the last season.
 pub(super) fn text_matches_requested_season(
     text: &str,
     requested_season: u32,
     final_season: bool,
 ) -> Option<bool> {
-    // Regexes are `(?i)`: no lowercase copy needed for season detection.
+    // Regexes are `(?i)`; any matching claim settles the answer early.
     let mut saw_explicit_season = false;
-    let mut saw_matching_season = false;
 
     for captures in SEASON_RANGE_REGEX.captures_iter(text) {
         let Some(start) = parse_captured_u32(&captures, 1) else {
@@ -222,13 +240,28 @@ pub(super) fn text_matches_requested_season(
 
         saw_explicit_season = true;
         if range_contains(requested_season, start, end) {
-            saw_matching_season = true;
+            return Some(true);
+        }
+    }
+
+    for captures in X_SEASON_EPISODE_RANGE_REGEX.captures_iter(text) {
+        let Some(start) = parse_captured_u32(&captures, 1) else {
+            continue;
+        };
+        let Some(end) = captures
+            .get(3)
+            .map_or(Some(start), |capture| capture.as_str().parse::<u32>().ok())
+        else {
+            continue;
+        };
+        saw_explicit_season = true;
+        if range_contains(requested_season, start, end) {
+            return Some(true);
         }
     }
 
     for regex in [
         &*SEASON_EPISODE_RANGE_REGEX,
-        &*X_SEASON_EPISODE_RANGE_REGEX,
         &*SEASON_EPISODE_TOKEN_REGEX,
         &*X_EPISODE_TOKEN_REGEX,
         &*SEASON_TOKEN_REGEX,
@@ -241,7 +274,7 @@ pub(super) fn text_matches_requested_season(
 
             saw_explicit_season = true;
             if candidate_season == requested_season {
-                saw_matching_season = true;
+                return Some(true);
             }
         }
     }
@@ -250,7 +283,7 @@ pub(super) fn text_matches_requested_season(
         if let Some(candidate_season) = parse_captured_u32(&captures, 1) {
             saw_explicit_season = true;
             if candidate_season == requested_season {
-                saw_matching_season = true;
+                return Some(true);
             }
         }
     }
@@ -263,49 +296,94 @@ pub(super) fn text_matches_requested_season(
         {
             saw_explicit_season = true;
             if candidate_season == requested_season {
-                saw_matching_season = true;
+                return Some(true);
             }
         }
     }
 
     if FINAL_SEASON_MARKER_REGEX.is_match(text) {
-        saw_explicit_season = true;
-        if final_season {
-            saw_matching_season = true;
-        }
+        return Some(final_season);
     }
 
-    if !saw_explicit_season {
-        None
+    saw_explicit_season.then_some(false)
+}
+
+/// Blanks every episode-range claim so only standalone episode tokens remain.
+fn strip_episode_ranges(text: &str) -> Cow<'_, str> {
+    let mut stripped = Cow::Borrowed(text);
+    for regex in [
+        &*SEASON_EPISODE_RANGE_REGEX,
+        &*X_SEASON_EPISODE_RANGE_REGEX,
+        &*EPISODE_RANGE_REGEX,
+    ] {
+        let replaced = match regex.replace_all(&stripped, " ") {
+            Cow::Owned(replaced) => Some(replaced),
+            Cow::Borrowed(_) => None,
+        };
+        if let Some(replaced) = replaced {
+            stripped = Cow::Owned(replaced);
+        }
+    }
+    let mut bare_stripped = None;
+    let mut last_end = 0;
+    for captures in bare_episode_ranges(&stripped) {
+        let matched = captures.get(0).expect("range match");
+        let result = bare_stripped.get_or_insert_with(|| String::with_capacity(stripped.len()));
+        result.push_str(&stripped[last_end..matched.start()]);
+        result.push(' ');
+        last_end = matched.end();
+    }
+    if let Some(mut result) = bare_stripped {
+        result.push_str(&stripped[last_end..]);
+        Cow::Owned(result)
     } else {
-        Some(saw_matching_season)
+        stripped
     }
 }
 
 /// `season_context` is the caller's `text_matches_requested_season` result
-/// for this field, so the season regex family runs once per (field, season)
-/// instead of inside every probe.
+/// for this field — the season regex family runs once per (field, season).
 fn episode_range_contains_text(
     text: &str,
     season: u32,
     episode: u32,
     season_context: Option<bool>,
 ) -> bool {
-    for regex in [&*SEASON_EPISODE_RANGE_REGEX, &*X_SEASON_EPISODE_RANGE_REGEX] {
-        for captures in regex.captures_iter(text) {
-            let Some(candidate_season) = parse_captured_u32(&captures, 1) else {
-                continue;
-            };
-            let Some(start_episode) = parse_captured_u32(&captures, 2) else {
-                continue;
-            };
-            let Some(end_episode) = parse_captured_u32(&captures, 3) else {
-                continue;
-            };
+    for captures in SEASON_EPISODE_RANGE_REGEX.captures_iter(text) {
+        let Some(candidate_season) = parse_captured_u32(&captures, 1) else {
+            continue;
+        };
+        let Some(start_episode) = parse_captured_u32(&captures, 2) else {
+            continue;
+        };
+        let Some(end_episode) = parse_captured_u32(&captures, 3) else {
+            continue;
+        };
 
-            if candidate_season == season && range_contains(episode, start_episode, end_episode) {
-                return true;
-            }
+        if candidate_season == season && range_contains(episode, start_episode, end_episode) {
+            return true;
+        }
+    }
+
+    for captures in X_SEASON_EPISODE_RANGE_REGEX.captures_iter(text) {
+        let Some(start_season) = parse_captured_u32(&captures, 1) else {
+            continue;
+        };
+        let Some(start_episode) = parse_captured_u32(&captures, 2) else {
+            continue;
+        };
+        let Some(end_season) = captures.get(3).map_or(Some(start_season), |capture| {
+            capture.as_str().parse::<u32>().ok()
+        }) else {
+            continue;
+        };
+        let Some(end_episode) = parse_captured_u32(&captures, 4) else {
+            continue;
+        };
+        let start = (start_season, start_episode);
+        let end = (end_season, end_episode);
+        if (start.min(end)..=start.max(end)).contains(&(season, episode)) {
+            return true;
         }
     }
 
@@ -313,7 +391,10 @@ fn episode_range_contains_text(
         return false;
     }
 
-    for captures in EPISODE_RANGE_REGEX.captures_iter(text) {
+    for captures in EPISODE_RANGE_REGEX
+        .captures_iter(text)
+        .chain(bare_episode_ranges(text))
+    {
         let Some(start_episode) = parse_captured_u32(&captures, 1) else {
             continue;
         };
@@ -329,10 +410,8 @@ fn episode_range_contains_text(
     false
 }
 
-/// `contains` plus digit boundaries. Every probe ends in the episode
-/// number, so a trailing digit means a larger episode (`s1e1` inside
-/// `s1e10`). Only the `NxNN` probes start with a digit, so only they need
-/// the leading check (`1x01` inside `11x01`).
+/// `contains` plus digit boundaries: a trailing digit means a larger episode
+/// (`s1e1` in `s1e10`); only `NxNN` probes need the leading check (`1x01` in `11x01`).
 fn contains_episode_token(t: &str, needle: &str, leading_boundary: bool) -> bool {
     let bytes = t.as_bytes();
     let mut search_from = 0;
@@ -349,10 +428,29 @@ fn contains_episode_token(t: &str, needle: &str, leading_boundary: bool) -> bool
     false
 }
 
-/// Check whether lowered stream text explicitly mentions the requested
-/// episode. Handles long-running series (ep 1000+) and multiple naming
-/// conventions. `season_context` is the caller's
-/// `text_matches_requested_season` result for this field.
+fn contains_absolute_episode_token(text: &str, needle: &str) -> bool {
+    text.match_indices(needle).any(|(start, _)| {
+        let suffix = &text[start + needle.len()..];
+        let trimmed = suffix.trim_start();
+        let range_end = trimmed
+            .strip_prefix('-')
+            .or_else(|| trimmed.strip_prefix('~'));
+        !suffix.as_bytes().first().is_some_and(u8::is_ascii_digit)
+            && !bare_episode_suffix_is_metadata(suffix)
+            // ` - 05 - 720p` is an episode then a resolution, not a range end.
+            && !range_end.is_some_and(|end| {
+                let end = end.trim_start();
+                let digits = end.bytes().take_while(u8::is_ascii_digit).count();
+                let rest = &end.as_bytes()[digits..];
+                let is_resolution =
+                    rest.first() == Some(&b'p') && !rest.get(1).is_some_and(u8::is_ascii_alphanumeric);
+                digits > 0 && !is_resolution
+            })
+    })
+}
+
+/// True when lowered stream text names the requested episode (handles ep 1000+
+/// forms). `season_context` is the caller's `text_matches_requested_season` result.
 pub(super) fn episode_matches_lowered(
     t: &str,
     season: u32,
@@ -363,8 +461,7 @@ pub(super) fn episode_matches_lowered(
 
     let mut buf = String::with_capacity(20);
 
-    // S15E52 (zero-padded) and mixed-padding forms (`S1E05`, `S01E5`) —
-    // release groups pad season and episode independently.
+    // `SxE` probes: groups pad season and episode independently (`S1E05`, `S01E5`).
     let _ = write!(buf, "s{:02}e{:02}", season, episode);
     if contains_episode_token(t, buf.as_str(), false) {
         return true;
@@ -388,10 +485,8 @@ pub(super) fn episode_matches_lowered(
         return true;
     }
 
-    // 15x52 / 1x1000 — `{:02}` never truncates, so it also covers 3+ digit
-    // episodes common in long-running anime. The second probe adds the
-    // unpadded `1x5` form; only `NxNN` probes can sit inside a larger
-    // season number, so they keep the leading digit boundary.
+    // `NxNN` probes — `{:02}` never truncates so 3+ digit episodes are
+    // covered; they keep the leading digit boundary.
     buf.clear();
     let _ = write!(buf, "{}x{:02}", season, episode);
     if contains_episode_token(t, buf.as_str(), true) {
@@ -424,18 +519,17 @@ pub(super) fn episode_matches_lowered(
         }
     }
 
-    // " - 052" / " - 07" / " - 1000" — common absolute-numbered episode
-    // form for anime release groups. `{:03}` already covers every episode
-    // >= 100 unpadded; `{:02}` adds the two-digit form for episodes < 100.
+    // Anime absolute-number form (" - 052" / " - 07" / " - 1000"); `{:03}`
+    // covers >= 100, `{:02}` adds the two-digit form.
     buf.clear();
     let _ = write!(buf, " - {:03}", episode);
-    if contains_episode_token(t, buf.as_str(), false) {
+    if contains_absolute_episode_token(t, buf.as_str()) {
         return true;
     }
     if episode < 100 {
         buf.clear();
         let _ = write!(buf, " - {:02}", episode);
-        if contains_episode_token(t, buf.as_str(), false) {
+        if contains_absolute_episode_token(t, buf.as_str()) {
             return true;
         }
     }
@@ -450,9 +544,8 @@ pub(super) fn episode_matches_lowered(
     false
 }
 
-/// `_` is a word character, so it defeats `\b` in every match regex — but
-/// release groups use it as a separator ("Show_S01_Complete"). Map it to a
-/// space once so all probes and regexes see the same token boundaries.
+/// `_` defeats `\b` (it's a word char) but groups use it as a separator —
+/// map to a space once so every probe sees the same token boundaries.
 pub(crate) fn normalize_separators(text: &str) -> std::borrow::Cow<'_, str> {
     if text.contains('_') {
         std::borrow::Cow::Owned(text.replace('_', " "))
@@ -461,23 +554,20 @@ pub(crate) fn normalize_separators(text: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// One field counts as batch text when it trips the strict batch regex or
-/// pairs a pack keyword with a season marker ("Show S01 Complete"). The
-/// keyword alone is not enough — movie titles carry it too.
+/// Batch text = strict batch regex, or a pack keyword beside a season marker
+/// ("Show S01 Complete") — the keyword alone appears in movie titles too.
 fn is_batch_text(text: &str) -> bool {
     BATCH_REGEX.is_match(text)
+        || has_episode_range(text)
         || (PACK_KEYWORD_REGEX.is_match(text) && SEASON_MARKER_REGEX.is_match(text))
 }
 
-/// Batch check on pre-normalized text: the `(?i)` regexes behave identically
-/// on the lowered fields, so the per-field memo filled in `lower` answers
-/// without re-running the regex battery.
+/// Batch check over the per-field memo filled in `lower` — no regex re-run.
 pub(crate) fn stream_contains_batch_texts(texts: &StreamMatchText) -> bool {
     texts.batch.name || texts.batch.title || texts.batch.filename
 }
 
-/// Resolution tier shared by the quality score and the presentation badge —
-/// one classifier so the two cannot drift.
+/// Resolution tier shared by quality score and presentation badge — one classifier.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum StreamResolutionTier {
     P2160,
@@ -502,8 +592,7 @@ fn stream_resolution_tier(lower_text: &str) -> StreamResolutionTier {
     }
 }
 
-/// Release-type tier for the quality score — the `else if` precedence of
-/// the probe chain made data: the first matching kind wins.
+/// Release-type tier for the quality score; first matching kind wins.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) enum StreamReleaseKind {
     Remux,
@@ -516,28 +605,26 @@ pub(crate) enum StreamReleaseKind {
 }
 
 /// Release-tag flags computed once over the lowered `name + " " + title`
-/// haystack in `StreamMatchText::lower` — single owner of the vocabulary the
-/// presentation badge, quality score, and language probes all read. Flags
-/// are raw probes; precedence lives in the consumers' else-if chains.
+/// haystack — raw probes; precedence lives in the consumers' else-if chains.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct StreamFlags {
     // Audio-language markers: ranking bonus, language score, DUAL/MULTI badge.
     pub dual_audio: bool,
     pub multi_audio: bool,
     pub multi_sub: bool,
-    /// An explicit English+Japanese pair is badge-side dual-audio evidence.
+    /// An explicit English+Japanese pair is dual-audio evidence.
     pub english_japanese_pair: bool,
     /// Resolution tier for the badge label, quality points, and oversize class.
     pub resolution: StreamResolutionTier,
     /// Release-type tier scored by the composite quality score.
     pub release: StreamReleaseKind,
+    pub capture_release: bool,
     pub dolby_vision: bool,
     pub hdr10_plus: bool,
     pub hdr: bool,
     /// TrueHD folds into Atmos for both badge and score.
     pub atmos: bool,
-    /// `dts-hd`/`dts-x`/`dtsx`; the plain `dts` flag stays raw — consumers
-    /// gate it on `!dts_hd` where their precedence requires.
+    /// `dts-hd`/`dts-x`/`dtsx`; `dts` stays raw — consumers gate it on `!dts_hd`.
     pub dts_hd: bool,
     pub dts: bool,
     /// eac3/dd+/ddp/dd5.1 — union of the score and badge spellings.
@@ -550,12 +637,22 @@ pub(crate) struct StreamFlags {
     pub av1: bool,
 }
 
-/// One probe pass over the lowered `name + " " + title` haystack — see
-/// `StreamFlags`. Expects already-lowered, separator-normalized text
-/// (`StreamMatchText` fields); callers with raw text must lower it first.
+pub(crate) fn language_mention_is_audio(suffix: &str) -> bool {
+    let next = suffix
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .find(|token| !token.is_empty());
+    !next.is_some_and(|token| {
+        ["sub", "subs", "subbed", "subtitle", "subtitles"]
+            .iter()
+            .any(|label| token.eq_ignore_ascii_case(label))
+    })
+}
+
+/// One probe pass over the lowered haystack — expects `StreamMatchText` field
+/// text (already lowered and separator-normalized).
 pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
     let release = if haystack.contains("remux") {
-        // `bdremux` is covered: it contains the `remux` substring.
+        // `bdremux` is covered via the `remux` substring.
         StreamReleaseKind::Remux
     } else if haystack.contains("bluray")
         || haystack.contains("blu-ray")
@@ -580,10 +677,15 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
         multi_audio: STREAM_MULTI_AUDIO_REGEX.is_match(haystack)
             || STREAM_MULTI_LANG_REGEX.is_match(haystack),
         multi_sub: STREAM_MULTI_SUB_REGEX.is_match(haystack),
-        english_japanese_pair: STREAM_ENGLISH_REGEX.is_match(haystack)
-            && STREAM_JAPANESE_REGEX.is_match(haystack),
+        english_japanese_pair: STREAM_ENGLISH_REGEX
+            .find_iter(haystack)
+            .any(|matched| language_mention_is_audio(&haystack[matched.end()..]))
+            && STREAM_JAPANESE_REGEX
+                .find_iter(haystack)
+                .any(|matched| language_mention_is_audio(&haystack[matched.end()..])),
         resolution: stream_resolution_tier(haystack),
         release,
+        capture_release: STREAM_CAPTURE_REGEX.is_match(haystack),
         dolby_vision: haystack.contains("dolby vision")
             || haystack.contains("dovi")
             || STREAM_DV_REGEX.is_match(haystack),
@@ -609,26 +711,22 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
     }
 }
 
-/// Lowercased, separator-normalized copies of the three matchable stream
-/// fields — `contains` patterns and `(?i)` regexes behave identically on
-/// lowered text, so one build serves every probe.
+/// Lowered, separator-normalized copies of the three matchable stream fields —
+/// one build serves every probe (`contains`/`(?i)` behave identically on lowered text).
 #[derive(Debug, Clone)]
 pub(crate) struct StreamMatchText {
     pub(crate) name: Option<String>,
     pub(crate) title: Option<String>,
     pub(crate) filename: Option<String>,
-    /// `name + " " + title` joined once so language/quality probes never
-    /// re-allocate the haystack per pass.
+    /// Joined once so probes never re-allocate the haystack per pass.
     name_title: String,
-    /// Per-field batch memo filled in `lower` — the SeasonPack tier re-asks
-    /// per coordinate pair without re-running the strict batch regexes.
+    /// Per-field batch memo filled in `lower` — SeasonPack re-asks per coordinate without re-running regexes.
     batch: BatchTextFlags,
     /// Release-tag memo over `name_title`, filled once in `lower`.
     pub(crate) flags: StreamFlags,
 }
 
-/// Batch-text memo for `StreamMatchText`'s three fields — see `is_batch_text`
-/// for what counts as batch text.
+/// Batch-text memo for `StreamMatchText`'s three fields — see `is_batch_text`.
 #[derive(Debug, Clone, Copy, Default)]
 struct BatchTextFlags {
     name: bool,
@@ -668,16 +766,13 @@ impl StreamMatchText {
         }
     }
 
-    /// `name + " " + title` haystack for the language/quality probes,
-    /// already lowered and separator-normalized.
+    /// The joined `name + " " + title` haystack, already lowered and normalized.
     pub(crate) fn name_title_haystack(&self) -> &str {
         &self.name_title
     }
 
-    /// (field text, season context, batch memo) pairs — the season regex
-    /// family runs once per field, not per probe. `final_season` is the
-    /// caller's request fact (see `text_matches_requested_season`).
-    /// Absent-field slots stay `None`.
+    /// (field text, season context, batch memo) per field — the season regexes
+    /// run once per field, not per probe. Absent fields stay `None`.
     pub(super) fn fields_with_season_context(
         &self,
         season: u32,
@@ -699,10 +794,9 @@ impl StreamMatchText {
     }
 }
 
-/// Episode-match tier plus whether the winning tier rested on an explicit
-/// season claim. Same-tier ties split on the claim: a release naming its
-/// season ("S01E04") outranks an assumed absolute-number match ("… - 04"),
-/// so same-numbered files of different seasons can't swap places on quality.
+/// Episode-match tier plus whether it rested on an explicit season claim —
+/// same-tier ties favor the named season ("S01E04") over an assumed
+/// absolute-number match ("… - 04").
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct StreamEpisodeMatch {
     pub kind: StreamEpisodeMatchKind,
@@ -717,29 +811,30 @@ pub(crate) fn stream_episode_match_texts(
 ) -> StreamEpisodeMatch {
     let fields = texts.fields_with_season_context(season, final_season);
 
-    // Exact/range scans read every matching field instead of stopping at
-    // the first so the claim bit reflects the best evidence available.
+    // Keep scanning matching fields until one carries a verified season claim.
     let mut matched_exact = false;
-    let mut exact_claim_verified = false;
     for (text, season_context, _) in fields.iter().flatten() {
-        // Range endpoints are not standalone exact tokens; separate tokens
-        // outside the range still take precedence. Stripping can only remove
-        // matches, so the regex passes run only once the raw text matches.
+        // Range endpoints aren't standalone tokens — strip ranges, then re-probe.
         if !episode_matches_lowered(text, season, episode, *season_context) {
             continue;
         }
-        let standalone = SEASON_EPISODE_RANGE_REGEX.replace_all(text, " ");
-        let standalone = X_SEASON_EPISODE_RANGE_REGEX.replace_all(&standalone, " ");
-        let standalone = EPISODE_RANGE_REGEX.replace_all(&standalone, " ");
-        if episode_matches_lowered(&standalone, season, episode, *season_context) {
+        let standalone = strip_episode_ranges(text);
+        if matches!(standalone, Cow::Borrowed(_))
+            || episode_matches_lowered(&standalone, season, episode, *season_context)
+        {
+            if matches!(*season_context, Some(true)) {
+                return StreamEpisodeMatch {
+                    kind: StreamEpisodeMatchKind::Exact,
+                    season_claim_verified: true,
+                };
+            }
             matched_exact = true;
-            exact_claim_verified |= matches!(*season_context, Some(true));
         }
     }
     if matched_exact {
         return StreamEpisodeMatch {
             kind: StreamEpisodeMatchKind::Exact,
-            season_claim_verified: exact_claim_verified,
+            season_claim_verified: false,
         };
     }
 
@@ -758,19 +853,17 @@ pub(crate) fn stream_episode_match_texts(
         };
     }
 
-    // SeasonPack: a batch field whose own season marker matches the target
-    // ("S03 Complete" for S03E07), or a season-less batch field ("Complete
-    // Series") provided no other field declares a different season. A batch
-    // field naming a different season ("S02 Pack" for S01E05) is evidence
-    // against, not for.
+    // SeasonPack = a batch field whose own season marker matches the target
+    // ("S03 Complete" for S03E07), or a season-less batch field when no field
+    // declares a different season.
     let mut batch_with_matching_season = false;
     let mut batch_without_season = false;
     let mut conflicting_season = false;
-    for (_, season_context, is_batch) in fields.iter().flatten() {
+    for (text, season_context, is_batch) in fields.iter().flatten() {
         if matches!(season_context, Some(false)) {
             conflicting_season = true;
         }
-        if *is_batch {
+        if *is_batch && !has_episode_range(text) {
             match season_context {
                 Some(true) => batch_with_matching_season = true,
                 Some(false) => {}
@@ -797,8 +890,7 @@ pub(crate) fn stream_episode_match_texts(
     }
 }
 
-/// Text-invariant claim probes for `numeric_episode_claim_matches` —
-/// computed once per text instead of once per (text, target) pair.
+/// Text-invariant claim probes — computed once per text, not per (text, target).
 struct EpisodeClaimProfile {
     has_season: bool,
     has_episode: bool,
@@ -806,34 +898,32 @@ struct EpisodeClaimProfile {
 }
 
 fn episode_claim_profile(text: &str) -> Option<EpisodeClaimProfile> {
-    let has_season = [
-        &*SEASON_RANGE_REGEX,
-        &*SEASON_EPISODE_TOKEN_REGEX,
-        &*X_EPISODE_TOKEN_REGEX,
-        &*SEASON_TOKEN_REGEX,
-        &*BARE_SEASON_TOKEN_REGEX,
-    ]
-    .iter()
-    .any(|regex| regex.is_match(text));
-    let has_episode = [
-        &*SEASON_EPISODE_TOKEN_REGEX,
-        &*X_EPISODE_TOKEN_REGEX,
-        &*LOOSE_EPISODE_REGEX,
-        &*EPISODE_RANGE_REGEX,
-    ]
-    .iter()
-    .any(|regex| regex.is_match(text))
+    // A range claims both season and episode; dashless `S01E05E06` trips no `\b` token below.
+    let has_season_episode_range =
+        SEASON_EPISODE_RANGE_REGEX.is_match(text) || X_SEASON_EPISODE_RANGE_REGEX.is_match(text);
+    let has_range = has_episode_range(text);
+    let has_season = has_season_episode_range
+        || [
+            &*SEASON_RANGE_REGEX,
+            &*SEASON_EPISODE_TOKEN_REGEX,
+            &*X_EPISODE_TOKEN_REGEX,
+            &*SEASON_TOKEN_REGEX,
+            &*BARE_SEASON_TOKEN_REGEX,
+        ]
+        .iter()
+        .any(|regex| regex.is_match(text));
+    let has_episode = has_range
+        || [
+            &*SEASON_EPISODE_TOKEN_REGEX,
+            &*X_EPISODE_TOKEN_REGEX,
+            &*LOOSE_EPISODE_REGEX,
+        ]
+        .iter()
+        .any(|regex| regex.is_match(text))
         || (has_season && BARE_E_EPISODE_REGEX.is_match(text));
     if !has_season && !has_episode {
         return None;
     }
-    let has_range = [
-        &*SEASON_EPISODE_RANGE_REGEX,
-        &*X_SEASON_EPISODE_RANGE_REGEX,
-        &*EPISODE_RANGE_REGEX,
-    ]
-    .iter()
-    .any(|regex| regex.is_match(text));
     Some(EpisodeClaimProfile {
         has_season,
         has_episode,
@@ -853,7 +943,14 @@ fn numeric_episode_claim_matches(
         return false;
     }
     if profile.has_range {
-        return episode_range_contains_text(text, season, episode, season_context);
+        // A standalone token beside a range still claims its episode.
+        return episode_range_contains_text(text, season, episode, season_context)
+            || episode_matches_lowered(
+                &strip_episode_ranges(text),
+                season,
+                episode,
+                season_context,
+            );
     }
     if profile.has_episode {
         episode_matches_lowered(text, season, episode, season_context)
@@ -862,9 +959,8 @@ fn numeric_episode_claim_matches(
     }
 }
 
-/// `final_season_season` is the target season the caller's `is_final_season`
-/// fact was computed for; other target seasons keep the conservative `false`
-/// so a numberless "final season" claim never cross-binds.
+/// `final_season_season` scopes the caller's final-season fact to its target
+/// season; other targets keep `false` so a numberless claim can't cross-bind.
 pub(crate) fn stream_conflicts_with_episode_targets(
     texts: &StreamMatchText,
     targets: &[(u32, u32)],

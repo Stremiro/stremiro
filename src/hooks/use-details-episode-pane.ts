@@ -1,21 +1,16 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { LocalSeasonEntry } from '@/components/details-season-switcher';
+import { useEffectiveEpisodeSearch } from '@/hooks/use-episode-search';
 import { type Episode, type MediaDetails } from '@/lib/api';
-import {
-  EPISODE_SEARCH_MIN_COUNT,
-  filterEpisodesBySearchQuery,
-  useEffectiveEpisodeSearch,
-} from '@/lib/episode-search';
+import { EPISODE_SEARCH_MIN_COUNT, filterEpisodesBySearchQuery } from '@/lib/episode-search';
 import { boundedMapSet, clamp } from '@/lib/utils';
 
 const EPISODE_DISPLAY_PAGE_SIZE = 8;
 const EMPTY_EPISODES: Episode[] = [];
 
-// Per-season page memory across remounts: leaving for an episode/player and
-// coming back remounts details, resetting component state to page 0 — the map
-// lands the user on the page they left. Bounded FIFO so the session map can't
-// accumulate an entry per title×season visited.
+// Per-season page memory across remounts: details remounts on player return and
+// would reset to page 0. Bounded FIFO so the map can't grow per title×season.
 const EPISODE_PAGE_MEMORY_MAX = 256;
 const episodePageMemory = new Map<string, number>();
 
@@ -30,8 +25,7 @@ function formatSeasonShortLabel(seasonNumber: number): string {
 interface UseDetailsEpisodePaneArgs {
   item?: MediaDetails;
   effectiveRouteId: string;
-  /// `location.key` — identifies this navigation, so a user season pick
-  /// can't leak onto a fresh navigation to the same title.
+  /// `location.key` — identifies this navigation, so a season pick can't leak onto a fresh navigation to the same title.
   locationKey: string;
   locationSeason: number | null;
   resumeSeason?: number;
@@ -43,8 +37,7 @@ interface UseDetailsEpisodePaneResult {
   seasonCount: number;
   selectedSeason: number | null;
   localSeasonEntries: LocalSeasonEntry[];
-  /** All episodes in the selected season — the page's watched-count fold
-      iterates this instead of re-filtering `item.episodes`. */
+  /** All episodes in the selected season (the watched-count fold iterates this). */
   seasonEpisodes: Episode[];
   visibleEpisodes: Episode[];
   episodeSearch: string;
@@ -71,17 +64,15 @@ export function useDetailsEpisodePane({
   resumeEpisode,
   isLoadingWatchHistory,
 }: UseDetailsEpisodePaneArgs): UseDetailsEpisodePaneResult {
-  // Keyed by navigation like `episodePageOverride` is keyed by title+season:
-  // the parent only keys on `${type}-${id}`, so a fresh navigation to the same
-  // title must not inherit a stale season pick.
+  // Keyed by navigation: a fresh navigation to the same title must not inherit
+  // a stale season pick.
   const [userSeasonSelection, setUserSeasonSelection] = useState<{
     key: string;
     season: number;
   } | null>(null);
   const userSelectedSeason =
     userSeasonSelection?.key === locationKey ? userSeasonSelection.season : null;
-  // Keyed like the season pick above: a fresh navigation to the same title
-  // must not inherit the previous visit's search text.
+  // Keyed like the season pick above so fresh navigation doesn't inherit search text.
   const [episodeSearchState, setEpisodeSearchState] = useState<{
     key: string;
     value: string;
@@ -99,9 +90,8 @@ export function useDetailsEpisodePane({
       }),
     [locationKey],
   );
-  // Render trigger only — `episodePageMemory` owns persistence; the override
-  // exists so a page change re-renders before the map read below. Keyed so a
-  // stale override can't leak onto a different title/season.
+  // Render trigger only — `episodePageMemory` owns persistence; keyed so a stale
+  // override can't leak onto a different title/season.
   const [episodePageOverride, setEpisodePageOverride] = useState<{
     key: string;
     page: number;
@@ -114,23 +104,11 @@ export function useDetailsEpisodePane({
     (typeof resumeSeason === 'number' ? resumeSeason : null);
   const hasEpisodeSearch = effectiveEpisodeSearch.length > 0;
 
-  // Episodes arrive (season, episode)-sorted from the backend — grouping
-  // preserves that order and season keys insert already ascending.
-  const { seasons, episodesBySeason } = useMemo(() => {
-    const grouped = new Map<number, Episode[]>();
-    for (const episode of item?.episodes ?? []) {
-      const seasonEpisodes = grouped.get(episode.season);
-      if (seasonEpisodes) {
-        seasonEpisodes.push(episode);
-      } else {
-        grouped.set(episode.season, [episode]);
-      }
-    }
-    return {
-      seasons: Array.from(grouped.keys()),
-      episodesBySeason: grouped,
-    };
-  }, [item?.episodes]);
+  // `item.seasons` is the backend summary of sorted `episodes`; numbers ascend.
+  const seasons = useMemo(
+    () => item?.seasons?.map((season) => season.number) ?? [],
+    [item?.seasons],
+  );
 
   const selectedSeason = useMemo(() => {
     if (selectedSeasonHint !== null && seasons.includes(selectedSeasonHint)) {
@@ -140,13 +118,15 @@ export function useDetailsEpisodePane({
     return seasons.includes(1) ? 1 : seasons[0];
   }, [selectedSeasonHint, seasons]);
 
-  const localSeasonEntries = useMemo(() => {
-    return seasons.map((seasonNumber) => ({
-      number: seasonNumber,
-      shortLabel: formatSeasonShortLabel(seasonNumber),
-      episodeCount: episodesBySeason.get(seasonNumber)?.length ?? 0,
-    }));
-  }, [episodesBySeason, seasons]);
+  const localSeasonEntries = useMemo(
+    () =>
+      (item?.seasons ?? []).map((season) => ({
+        number: season.number,
+        shortLabel: formatSeasonShortLabel(season.number),
+        episodeCount: season.episodeCount,
+      })),
+    [item?.seasons],
+  );
 
   const resumeEpisodeForSelectedSeason =
     item?.type === 'series' &&
@@ -155,19 +135,25 @@ export function useDetailsEpisodePane({
       ? resumeEpisode
       : null;
 
-  // Key on the route id, not `item.id`: it's stable from mount (no mid-load
-  // key flip when metadata lands) and matches the identity the progress
-  // reads/writes use.
+  // Key on the route id, not `item.id`: stable from mount (no flip when metadata
+  // lands) and matches the identity progress reads/writes use.
   const currentEpisodeSeasonKey = `${effectiveRouteId || 'unknown'}:${selectedSeason ?? 'none'}`;
   const episodePageKey = hasEpisodeSearch
     ? JSON.stringify([currentEpisodeSeasonKey, effectiveEpisodeSearch])
     : currentEpisodeSeasonKey;
-  const seasonEpisodes =
-    selectedSeason === null
-      ? EMPTY_EPISODES
-      : (episodesBySeason.get(selectedSeason) ?? EMPTY_EPISODES);
-  const resumeEpisodeIndex = seasonEpisodes.findIndex(
-    (episode) => episode.episode === resumeEpisodeForSelectedSeason,
+  const seasonEpisodes = useMemo(
+    () =>
+      selectedSeason === null
+        ? EMPTY_EPISODES
+        : (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === selectedSeason),
+    [item?.episodes, selectedSeason],
+  );
+  const resumeEpisodeIndex = useMemo(
+    () =>
+      resumeEpisodeForSelectedSeason === null
+        ? -1
+        : seasonEpisodes.findIndex((episode) => episode.episode === resumeEpisodeForSelectedSeason),
+    [resumeEpisodeForSelectedSeason, seasonEpisodes],
   );
   const defaultEpisodePageIndex =
     resumeEpisodeIndex >= 0 ? Math.floor(resumeEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : 0;
@@ -182,9 +168,7 @@ export function useDetailsEpisodePane({
     [effectiveEpisodeSearch, seasonEpisodes],
   );
 
-  const totalEpisodeCount = hasEpisodeSearch
-    ? searchFilteredEpisodes.length
-    : seasonEpisodes.length;
+  const totalEpisodeCount = searchFilteredEpisodes.length;
   const totalEpisodePages = Math.max(1, Math.ceil(totalEpisodeCount / EPISODE_DISPLAY_PAGE_SIZE));
   const activeEpisodePageIndex = Math.min(requestedEpisodePageIndex, totalEpisodePages - 1);
 
@@ -207,11 +191,9 @@ export function useDetailsEpisodePane({
   );
 
   const visibleEpisodes = useMemo(() => {
-    if (selectedSeason === null) return [];
-
     const start = activeEpisodePageIndex * EPISODE_DISPLAY_PAGE_SIZE;
     return searchFilteredEpisodes.slice(start, start + EPISODE_DISPLAY_PAGE_SIZE);
-  }, [activeEpisodePageIndex, searchFilteredEpisodes, selectedSeason]);
+  }, [activeEpisodePageIndex, searchFilteredEpisodes]);
 
   const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const hasPreviousEpisodes = activeEpisodePageIndex > 0;

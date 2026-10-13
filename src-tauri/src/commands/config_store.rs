@@ -8,13 +8,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
-/// Default registry install URL, reused in user-facing "no catalog/meta
-/// addon" errors so the hint never drifts from the seeded default.
+/// Default registry install URL, reused in user-facing "no catalog/meta addon" errors.
 pub(crate) const DEFAULT_CINEMETA_INSTALL_URL: &str =
     "stremio://v3-cinemeta.strem.io/manifest.json";
 const DEFAULT_CINEMETA_ADDON_NAME: &str = "Cinemeta";
-/// OpenSubtitles ships as a second pinned default — broad subtitle-language
-/// coverage out of the box. Order matters: index = pinned registry slot.
+/// Second pinned default. Order matters: index = pinned registry slot.
 pub(crate) const DEFAULT_OPENSUBTITLES_INSTALL_URL: &str =
     "stremio://opensubtitles-v3.strem.io/manifest.json";
 const DEFAULT_OPENSUBTITLES_ADDON_NAME: &str = "OpenSubtitles";
@@ -35,8 +33,7 @@ const PLAYER_VOLUME_DEFAULT: u32 = 75;
 const PLAYER_SPEED_DEFAULT: f64 = 1.0;
 const PLAYER_SPEED_MIN: f64 = 0.25;
 const PLAYER_SPEED_MAX: f64 = 4.0;
-// Subtitle tuning bounds mirror the player's apply-time quantizers
-// (`use-subtitle-adjustments.ts`): delay quantized to 0.1s, scale to 0.05.
+// Subtitle tuning bounds mirror the player's apply-time quantizers (`use-subtitle-adjustments.ts`).
 const SUBTITLE_DELAY_DEFAULT: f64 = 0.0;
 const SUBTITLE_DELAY_MAX_ABS: f64 = 5.0;
 const SUBTITLE_POS_DEFAULT: f64 = 100.0;
@@ -45,8 +42,7 @@ const SUBTITLE_SCALE_MIN: f64 = 0.25;
 const SUBTITLE_SCALE_MAX: f64 = 3.0;
 const PROFILE_NAME_MAX_CHARS: usize = 32;
 const PROFILE_ACCENT_INTENSITY_DEFAULT: u8 = 100;
-// The renderer downsizes uploads to a 256px WebP (~40KB encoded); the cap
-// only bounds what a misbehaving writer can park in the preferences blob.
+// Renderer downsizes uploads to ~40KB; the cap only bounds a misbehaving writer.
 const PROFILE_AVATAR_MAX_CHARS: usize = 512 * 1024;
 const PROFILE_AVATAR_PREFIXES: [&str; 3] = [
     "data:image/webp;base64,",
@@ -55,8 +51,7 @@ const PROFILE_AVATAR_PREFIXES: [&str; 3] = [
 ];
 const STREAM_SELECTOR_ADDON_MAX_CHARS: usize = 160;
 
-/// Bumped on every addon-registry write so memoized parsed snapshots are
-/// dropped the moment stored config changes.
+/// Bumped on every addon-registry write so memoized parsed snapshots drop the moment config changes.
 static ADDON_CONFIGS_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 pub(crate) fn addon_configs_generation() -> u64 {
@@ -69,9 +64,8 @@ pub struct AddonConfig {
     pub url: String,
     pub name: String,
     pub enabled: bool,
-    // A corrupt stored snapshot degrades to `None` (re-classified on the
-    // next fetch) instead of dropping the whole addon config — the strict
-    // `AddonManifest` decode would otherwise poison every config read.
+    // A corrupt snapshot degrades to `None` (re-classified next fetch) rather than
+    // poisoning every config read via the strict `AddonManifest` decode.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -80,9 +74,8 @@ pub struct AddonConfig {
     pub capabilities: Option<AddonManifest>,
 }
 
-/// Per-field tolerance on stored blobs: one malformed value drops to `None`
-/// instead of failing the whole struct decode — a strict `Option<T>` field
-/// would reset every sibling preference to defaults on a single bad write.
+/// Per-field tolerance on stored blobs: one malformed value drops to `None` instead
+/// of resetting every sibling preference to defaults on a single bad write.
 fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -92,13 +85,10 @@ where
         .and_then(|value| serde_json::from_value::<T>(value).ok()))
 }
 
-/// IPC view of an [`AddonConfig`]: `display_url` is the credential-masked URL
-/// for UI surfaces, computed by the same `sanitize_addon_log` pipeline that
-/// guards logs and errors — one redaction implementation, so a renderer-side
-/// masker cannot drift and leak a user key. Output-only: renderer-supplied
-/// values are ignored on save and the masked string is never persisted.
-/// The manifest snapshot stays Rust-side: genre menus and catalog routing
-/// are computed from it here.
+/// IPC view of an [`AddonConfig`]: `display_url` is the credential-masked URL computed
+/// by the same `sanitize_addon_log` pipeline that guards logs — one redaction
+/// implementation so a renderer-side masker can't drift and leak a user key.
+/// Output-only; the masked string is never persisted.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonConfigView {
@@ -111,9 +101,20 @@ pub struct AddonConfigView {
     pub pinned: bool,
 }
 
+/// Readable masked URL: `https://` implied, redaction markers collapse to `•••`.
+fn addon_display_url(url: &str) -> String {
+    let masked = sanitize_addon_log(url);
+    masked
+        .strip_prefix("https://")
+        .unwrap_or(&masked)
+        .replace("[redacted-userinfo]", "•••")
+        .replace("[redacted-path]", "•••")
+        .replace("[redacted]", "•••")
+}
+
 impl AddonConfigView {
     pub(crate) fn from_config(config: AddonConfig) -> Self {
-        let display_url = sanitize_addon_log(&config.url);
+        let display_url = addon_display_url(&config.url);
         let pinned = is_pinned_default_addon_url(&config.url);
         Self {
             id: config.id,
@@ -132,21 +133,15 @@ pub struct AppUiPreferences {
     pub player_volume: u32,
     pub player_speed: f64,
     pub spoiler_protection: bool,
-    /// Subtitle sync/position/scale tuning — persisted so it survives the
-    /// per-episode player remount where a release group's offset is constant.
+    /// Subtitle tuning persisted across the per-episode player remount (a release group's offset is constant).
     pub subtitle_delay: f64,
     pub subtitle_pos: f64,
     pub subtitle_scale: f64,
-    /// Opt-in EOF auto-advance: the Up Next card runs a countdown instead of
-    /// waiting for a click. Off by default — auto-advance is a surprise the
-    /// user must choose.
+    /// Opt-in EOF auto-advance (Up Next countdown). Off by default — auto-advance is a surprise the user must choose.
     pub auto_play_next: bool,
-    /// Opt-OUT muted trailer embed on hover-expanded cards. On by default —
-    /// disabling must never change behavior for existing users.
+    /// Opt-OUT muted trailer embed on hover cards. On by default — disabling must never change existing users' behavior.
     pub trailer_previews: bool,
-    /// Opt-in auto-skip: SkipDB intro/recap segments seek to the segment end
-    /// on entry. Off by default — jumping content uninvited is a surprise the
-    /// user must choose. Outros/previews and the next-episode tail stay manual.
+    /// Opt-in auto-skip of SkipDB intro/recap segments. Off by default — jumping content uninvited is a surprise.
     pub auto_skip_intro: bool,
 }
 
@@ -180,8 +175,7 @@ pub struct AppUiPreferencesPatch {
     pub auto_skip_intro: Option<bool>,
 }
 
-/// Which UI surfaces follow the profile accent — opt-out flags default to on
-/// so stores written before the flags existed keep their current look.
+/// Which surfaces follow the profile accent — flags default on so pre-flag stores keep their look.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccentTargets {
@@ -493,8 +487,7 @@ fn normalize_profile_view_mode(value: Option<&str>) -> ProfileViewMode {
     }
 }
 
-// Missing flags default on: a store written before a given target existed
-// should keep the behavior it was used with, not flip surfaces neutral.
+// Missing flags default on — a pre-flag store keeps the behavior it was used with.
 fn normalize_accent_targets(value: Option<StoredAccentTargets>) -> AccentTargets {
     let Some(targets) = value else {
         return AccentTargets::default();
@@ -635,16 +628,14 @@ fn normalize_stored_app_ui_preferences(preferences: StoredAppUiPreferences) -> A
         subtitle_pos: normalize_subtitle_pos(preferences.subtitle_pos),
         subtitle_scale: normalize_subtitle_scale(preferences.subtitle_scale),
         auto_play_next: preferences.auto_play_next.unwrap_or(false),
-        // Missing key = a store written before the toggle shipped — keep
-        // previews on, matching the behavior that store was used with.
+        // Missing key = pre-toggle store — keep previews on, matching its behavior.
         trailer_previews: preferences.trailer_previews.unwrap_or(true),
         // Opt-in: missing keys on old stores keep auto-skip off.
         auto_skip_intro: preferences.auto_skip_intro.unwrap_or(false),
     }
 }
 
-/// Lenient decode shared by the store loaders and backup restore: stored
-/// blobs and backup files are both untrusted JSON.
+/// Lenient decode shared by store loaders and backup restore — both are untrusted JSON.
 pub(crate) fn parse_profile_preferences(value: Value) -> Option<ProfilePreferences> {
     serde_json::from_value::<StoredProfilePreferences>(value)
         .ok()
@@ -698,8 +689,7 @@ pub(crate) fn save_app_ui_preferences_to_store(
     store.set(APP_UI_PREFERENCES_KEY, serde_json::json!(preferences));
 }
 
-/// Returns whether the store actually changed so callers can skip the
-/// disk write on a no-op clear (the common "still up to date" path).
+/// Returns whether the store changed so callers skip the disk write on a no-op clear.
 pub(crate) fn save_last_notified_app_update_version_to_store(
     store: &DurableStore,
     version: Option<String>,
@@ -785,8 +775,7 @@ fn normalize_stored_stream_selector_preferences(
     }
 }
 
-/// One store read for the `(preferences, initialized)` pair the getter
-/// command returns — the two halves share the same key.
+/// One store read for the `(preferences, initialized)` pair — both halves share the same key.
 pub(crate) fn load_stream_selector_preferences_state(
     store: &DurableStore,
 ) -> (StreamSelectorPreferences, bool) {
@@ -869,9 +858,8 @@ pub(crate) fn normalize_addon_url(config: &str) -> Result<Option<String>, String
         return Err("Addon URL must include a valid host.".to_string());
     }
 
-    // Addon URLs persist in the registry and travel in diagnostics: strip
-    // embedded credentials instead of storing them. Query/path config data
-    // is preserved; only the userinfo authority section is purged.
+    // Addon URLs persist and travel in diagnostics — strip embedded credentials;
+    // query/path config data is preserved.
     if !parsed.username().is_empty() || parsed.password().is_some() {
         parsed.set_username("").ok();
         parsed.set_password(None).ok();
@@ -966,8 +954,7 @@ fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
     })
 }
 
-/// Same URL identity `pin_default_addons` pins by — normalized once, since the
-/// check runs per addon config on every `get_addon_configs` response.
+/// Same URL identity `pin_default_addons` pins by — normalized once since the check runs per config.
 static NORMALIZED_DEFAULT_ADDON_URLS: LazyLock<Vec<String>> = LazyLock::new(|| {
     DEFAULT_ADDON_INSTALLS
         .iter()
@@ -981,16 +968,14 @@ pub(super) fn is_pinned_default_addon_url(url: &str) -> bool {
         .any(|default| default == url)
 }
 
-/// Default addons are pinned: each entry in `DEFAULT_ADDON_INSTALLS` always
-/// occupies its index in the registry and cannot be removed. An explicit user
-/// disable (`enabled: false`) is preserved; only the toggle is user-controlled.
+/// Default addons are pinned: each `DEFAULT_ADDON_INSTALLS` entry always occupies its
+/// index and can't be removed. A user's `enabled: false` toggle is preserved.
 fn pin_default_addons(mut configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
     for (index, (install_url, name)) in DEFAULT_ADDON_INSTALLS.iter().enumerate() {
         let Some(default) = default_addon_config(install_url, name) else {
             continue;
         };
-        // A stored copy keeps the user's toggle/name/snapshot; a missing one
-        // is seeded enabled.
+        // A stored copy keeps the user's toggle/name/snapshot; a missing one seeds enabled.
         let pinned = match configs.iter().position(|config| config.url == default.url) {
             Some(position) => configs.remove(position),
             None => default,
@@ -1001,8 +986,7 @@ fn pin_default_addons(mut configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
 }
 
 pub(crate) fn resolve_addon_configs(stored_configs: Option<Vec<AddonConfig>>) -> Vec<AddonConfig> {
-    // A missing registry is first-run: normalizing an empty list is a no-op
-    // and the pin pass seeds both defaults.
+    // A missing registry is first-run — the pin pass seeds both defaults.
     pin_default_addons(normalize_loaded_addon_configs(
         stored_configs.unwrap_or_default(),
     ))
@@ -1019,8 +1003,7 @@ pub(crate) fn load_addon_configs(store: &DurableStore) -> Vec<AddonConfig> {
 
 pub(crate) fn save_addon_configs_to_store(store: &DurableStore, configs: &[AddonConfig]) {
     store.set(ADDON_CONFIGS_KEY, serde_json::json!(configs));
-    // Bump after `set` so a reader that observes the new generation always
-    // re-reads data that already includes this write.
+    // Bump after `set` so a reader observing the new generation re-reads data including this write.
     ADDON_CONFIGS_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 

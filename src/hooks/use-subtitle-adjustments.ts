@@ -10,8 +10,7 @@ type SubtitlePreferenceValues = Pick<
   'subtitleDelay' | 'subtitlePos' | 'subtitleScale'
 >;
 
-/** The triple mpv receives at stream load — lifecycle reads the ref at apply
-    time so a mid-init pref hydration can never bind stale defaults. */
+/** The triple mpv receives at stream load — read at apply time so mid-init hydration can't bind stale values. */
 export interface SubtitleAdjustmentSettings {
   delay: number;
   pos: number;
@@ -24,11 +23,8 @@ interface UseSubtitleAdjustmentsArgs {
   scheduleMpvSet: MpvSetScheduler;
 }
 
-// Subtitle fine-tuning state + mpv pushes for the player subtitle popover.
-// Values are clamped/quantized here so every entry point (sliders, hotkeys,
-// reset) converges on the same mpv-safe numbers; `scheduleMpvSet` is the
-// shared rAF coalescer so drags don't storm the IPC. Settings persist via
-// app-UI prefs so tuning survives the per-episode remount.
+// Subtitle fine-tuning for the player popover: all entry points clamp/quantize here so they
+// converge on mpv-safe numbers; `scheduleMpvSet` coalesces drags; prefs persist via app-UI prefs.
 export function useSubtitleAdjustments({
   preferences,
   updatePreferences,
@@ -38,16 +34,14 @@ export function useSubtitleAdjustments({
   const [subtitlePos, setSubtitlePos] = useState(preferences.subtitlePos);
   const [subtitleScale, setSubtitleScale] = useState(preferences.subtitleScale);
 
-  // What mpv should be running: doubles as the lifecycle's load-time read and
-  // the echo guard — a pref equal to this was our own write coming back.
+  // What mpv should run: lifecycle load-time read + echo guard — a pref equal to this was our own write.
   const settingsRef: RefObject<SubtitleAdjustmentSettings> = useRef({
     delay: preferences.subtitleDelay,
     pos: preferences.subtitlePos,
     scale: preferences.subtitleScale,
   });
 
-  // External pref writes (initial hydration) apply only when
-  // they differ from our last write — the same echo guard volume uses.
+  // External writes (hydration) apply only when they differ from our last write — same echo guard as volume.
   useEffect(() => {
     const current = settingsRef.current;
     if (
@@ -75,13 +69,10 @@ export function useSubtitleAdjustments({
     scheduleMpvSet,
   ]);
 
-  // Slider ticks fire per pointermove; `updatePreferences` writes the RQ
-  // cache synchronously, so a direct call re-renders every pref subscriber
-  // (the whole player tree) per tick.
+  // Slider ticks fire per pointermove — `updatePreferences` re-renders the whole player tree, so debounce it.
   const schedulePrefsPersist = useDebouncedPrefsPersist(updatePreferences);
 
-  // Returns the applied (clamped/quantized) value so callers echoing it —
-  // e.g. the `z`/`x` hotkey OSD — never drift from what mpv received.
+  // Returns the applied value so echoing callers (z/x hotkey OSD) never drift from what mpv got.
   const applySubtitleDelay = useCallback(
     (value: number): number => {
       const next = Math.round(clamp(value, -5, 5) * 10) / 10;

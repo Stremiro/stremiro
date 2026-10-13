@@ -7,9 +7,9 @@ import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
+import { RetryBanner } from './retry-banner';
 
-// Shared empty list so an unloaded query keeps one array identity — a fresh
-// `[]` per render would defeat the rail's items-identity scroll reset.
+// One empty-list identity — a fresh `[]` per render would defeat the rail's items-identity scroll reset.
 const EMPTY_ITEMS: MediaItem[] = [];
 
 interface GenreFilterConfig {
@@ -25,9 +25,7 @@ interface MediaRowProps {
   titleHref?: string;
   queryKey: string[];
   queryFn: () => Promise<MediaItem[]>;
-  /** Freshness for this row's catalog entry. A parent sharing the same
-      query key (e.g. the home hero) must pass its own value so the pair
-      can't drift into two refetch cadences for one entry. */
+  /** Freshness for this row's catalog entry — a parent sharing the query key (home hero) must pass its own so the pair can't drift. */
   staleTime?: number;
   enabled?: boolean;
   genreFilter?: GenreFilterConfig;
@@ -46,6 +44,7 @@ export function MediaRow({
     data = EMPTY_ITEMS,
     isFetching,
     isLoading,
+    isFetched,
     isPlaceholderData,
     error,
     refetch,
@@ -54,24 +53,29 @@ export function MediaRow({
     queryFn,
     staleTime,
     enabled,
-    // Genre switches swap the query key — keep the previous rail visible
-    // while the new catalog fetches instead of flashing a skeleton row.
+    // Genre switches swap the query key — keep the previous rail visible instead of flashing skeletons.
     placeholderData: enabled ? keepPreviousData : undefined,
   });
 
   const genreTabs = genreFilter ? (
-    <div className='flex items-center gap-5 overflow-x-auto border-b border-white/[0.06] pr-2 scrollbar-hide'>
+    <div
+      role='group'
+      aria-label={`${title} genres`}
+      className='flex items-center gap-5 overflow-x-auto border-b border-white/[0.06] pr-2 scrollbar-hide'
+    >
       {genreFilter.options.map((genre) => {
         const isActive = genreFilter.active === genre;
         return (
           <button
             key={genre}
             type='button'
-            onClick={() => genreFilter.onChange(genre)}
+            onClick={() => {
+              if (!isActive) genreFilter.onChange(genre);
+            }}
             aria-pressed={isActive}
             className={cn(
-              'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
-              isActive ? 'text-white' : 'text-zinc-500 hover:text-zinc-200',
+              'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/60',
+              isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200',
             )}
           >
             {genre}
@@ -96,7 +100,7 @@ export function MediaRow({
       <div
         className={cn(
           HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
-          'pt-4 flex items-center gap-3 text-[13px] text-zinc-400',
+          'pt-4 flex flex-wrap items-center gap-3 text-[13px] text-zinc-400',
         )}
       >
         {notice}
@@ -108,30 +112,19 @@ export function MediaRow({
     return genreFilter ? renderNotice(<p>Reconnect to browse this catalog.</p>) : null;
   }
 
-  // A failed refetch can still hold placeholder data — keep the stale rail
-  // (and the genre tabs, the user's way back to working content) instead of
-  // deleting the row. Only a failure with nothing to show gets a retry row.
-  if (error && data.length === 0) {
+  // A failed refetch can still hold placeholder data — keep the stale rail + genre tabs; only a failure with nothing to show gets retry.
+  if ((error || (isFetched && isLoading)) && data.length === 0) {
     return renderNotice(
-      <>
-        <p role='alert'>Couldn't load this row.</p>
-        <button
-          type='button'
-          className='h-9 shrink-0 rounded-md border border-white/[0.08] px-3 text-xs font-medium text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-200 transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-wait aria-disabled:opacity-50'
-          aria-disabled={isFetching || undefined}
-          onClick={() => {
-            if (!isFetching) void refetch();
-          }}
-        >
-          Retry
-        </button>
-      </>,
+      <RetryBanner
+        className='w-full max-w-xl'
+        message="Couldn't load this row."
+        isRetrying={isFetching}
+        onRetry={() => void refetch()}
+      />,
     );
   }
 
-  // An empty catalog row is dead space — hide it. Rows carrying a genre
-  // filter keep their tabs mounted (they're the way back to a non-empty
-  // result) and show a compact hint instead of a blank scroller.
+  // An empty row is dead space — hide it. Genre-filtered rows keep their tabs (the way back) with a compact hint.
   if (!isLoading && data.length === 0) {
     if (!genreFilter) return null;
     return renderNotice(
@@ -149,7 +142,7 @@ export function MediaRow({
         titleHref ? (
           <Link
             to={titleHref}
-            className='group/rail-title inline-flex items-center gap-0.5 rounded-xs transition-colors hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
+            className='group/rail-title inline-flex items-center gap-0.5 rounded-xs transition-colors hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--accent-nav)/60'
           >
             {title}
             <ChevronRight className='h-4 w-4 text-zinc-600 transition-all duration-150 group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-400' />
@@ -158,9 +151,7 @@ export function MediaRow({
           title
         )
       }
-      // Scroll memory keyed by the catalog query: stable across remounts, and
-      // genre switches land in their own slot instead of inheriting a foreign
-      // position.
+      // Scroll memory keyed by the query — stable across remounts, genre switches land in their own slot.
       railId={`media-row:${queryKey.join(':')}`}
       items={data}
       isLoading={isLoading}

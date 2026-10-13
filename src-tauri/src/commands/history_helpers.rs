@@ -19,23 +19,18 @@ const WATCH_PROGRESS_LOW_CONFIDENCE_EARLY_POSITION_SECS: f64 = 90.0;
 const WATCH_PROGRESS_LOW_CONFIDENCE_PROGRESS_RATIO: f64 = 0.08;
 const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
 const WATCH_PROGRESS_BETTER_RESUME_PROGRESS_RATIO_DELTA: f64 = 0.12;
-/// Clock-skew tolerance for `last_watched`: live saves stamp backend time,
-/// so a timestamp beyond now plus this skew comes from a skewed clock or a
-/// crafted backup. Without clamping, one far-future row permanently wins the
-/// `excluded.last_watched >=` recency guard and all later real saves drop.
+/// Clock-skew tolerance for `last_watched`: without clamping, one far-future row
+/// permanently wins the `excluded.last_watched >=` recency guard and drops later saves.
 const WATCH_PROGRESS_FUTURE_SKEW_MS: u64 = 5 * 60 * 1000;
-/// Char bounds for free-text watch-progress fields: opaque stream identities
-/// are fixed-shape digests and source names are addon labels, so anything
-/// past these caps is malformed input, not a real value.
+/// Char bounds for free-text watch-progress fields — past these caps is malformed input, not a real value.
 const STREAM_FORMAT_MAX_CHARS: usize = 64;
 pub(crate) const STREAM_KEY_MAX_CHARS: usize = 128;
 const STREAM_LOOKUP_ID_MAX_CHARS: usize = 256;
 const SOURCE_NAME_MAX_CHARS: usize = 256;
 const SOURCE_ID_MAX_CHARS: usize = 256;
 const STREAM_FAMILY_MAX_CHARS: usize = 512;
-/// Sane bound for season/episode coordinates: real catalogs never approach
-/// this, so larger values are corrupt input, not data. `0` stays valid —
-/// specials and the `series:{id}:0:0` movie-fallback key both use it.
+/// Bound for season/episode coordinates: real catalogs never approach this.
+/// `0` stays valid — specials and the `series:{id}:0:0` movie-fallback key use it.
 const EPISODE_COORDINATE_MAX: u32 = 100_000;
 /// No real title runs a week; larger finite values are corrupt input.
 const WATCH_PROGRESS_MAX_SECS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
@@ -44,9 +39,8 @@ pub(crate) fn normalize_episode_coordinate(value: Option<u32>) -> Option<u32> {
     value.filter(|coordinate| *coordinate <= EPISODE_COORDINATE_MAX)
 }
 
-/// History-row identity is the `(type, id, season, episode)` tuple — the
-/// `movie:{id}` / `series:{id}:{s}:{e}` store key is this backend's
-/// serialization of it; any frontend key shape is a separate concern.
+/// History-row identity is `(type, id, season, episode)` — the `movie:{id}` /
+/// `series:{id}:{s}:{e}` store key is this backend's serialization of it.
 pub(crate) fn build_history_key(
     canonical_type: &str,
     id: &str,
@@ -65,30 +59,25 @@ pub(crate) fn build_history_key(
     }
 }
 
-/// Stream URLs are credential-bearing and short-lived: no watch-progress
-/// payload may persist them. Resume re-resolves through the opaque
-/// lookup/key/source identities instead, so every URL is dropped here.
+/// Stream URLs are credential-bearing and short-lived: no watch-progress payload may
+/// persist them. Resume re-resolves through opaque lookup/key/source identities instead.
 pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<WatchProgress> {
-    // The id is a store key: reject rather than truncate so two hostile ids
-    // can't collide onto one key. An empty id collapses every row onto one
-    // `movie:`/`series:0:0` key; the live save path rejects it, so imports
-    // must drop it too.
+    // The id is a store key: reject rather than truncate so hostile ids can't collide.
+    // An empty id collapses every row onto one `movie:`/`series:0:0` key.
     progress.id = normalize_media_id(&progress.id)?;
     progress.type_ = normalize_watch_progress_type(&progress.type_)?.to_string();
     progress.resume_start_time = None;
     progress.is_watched = false;
     progress.has_started_watching = false;
 
-    // A far-future timestamp would permanently win recency guards and freeze
-    // out every later save; clamp to backend now instead of dropping the row.
+    // A far-future timestamp would permanently win recency guards — clamp to backend now.
     let now = now_unix_millis();
     if progress.last_watched > now.saturating_add(WATCH_PROGRESS_FUTURE_SKEW_MS) {
         progress.last_watched = now;
     }
 
-    // Out-of-range coordinates would persist into `series:{id}:{s}:{e}` keys
-    // as garbage rows; corrupt coordinates degrade to absent rather than
-    // writing a key that can never match a real episode.
+    // Out-of-range coordinates degrade to absent rather than persisting a key
+    // that can never match a real episode.
     progress.season = normalize_episode_coordinate(progress.season);
     progress.episode = normalize_episode_coordinate(progress.episode);
     progress.absolute_season = normalize_episode_coordinate(progress.absolute_season);
@@ -97,9 +86,8 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     progress.stream_episode = normalize_episode_coordinate(progress.stream_episode);
 
     hydrate_watch_progress_coordinates(&mut progress);
-    // Non-finite floats (NaN, ±inf) serialize to JSON null and silently drop
-    // the row on read; clamp rather than persist a value that can't round-trip.
-    // A finite but absurd value would overflow the hours-watched sum.
+    // Non-finite floats serialize to JSON null and drop the row on read — clamp
+    // rather than persist a value that can't round-trip.
     if !progress.position.is_finite() || progress.position < 0.0 {
         progress.position = 0.0;
     }
@@ -112,8 +100,7 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
         progress.position = progress.duration;
     }
 
-    // Match the live save path, which stores `Untitled` for empty titles, so
-    // exports round-trip through imports without polluting blank rows.
+    // Sole owner of the persisted `Untitled` fallback — live saves and imports both funnel through here.
     progress.title = trim_to_max(&progress.title, MEDIA_TITLE_MAX_CHARS)
         .unwrap_or_else(|| "Untitled".to_string());
     progress.poster = progress.poster.and_then(|s| normalize_media_image_url(&s));
@@ -124,10 +111,8 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
         bound_optional(progress.last_stream_format, STREAM_FORMAT_MAX_CHARS);
     progress.last_stream_lookup_id =
         bound_optional(progress.last_stream_lookup_id, STREAM_LOOKUP_ID_MAX_CHARS);
-    // Legacy `u:`-prefixed keys embed the normalized stream URL verbatim
-    // (signed query credentials included); only opaque hash identities may
-    // cross the boundary — the `h:`/`uh:` content keys and the `s:` prepared
-    // selector key (a SHA-256 over content key + source + transport).
+    // Only opaque hash identities (`h:`/`uh:`/`s:`) may persist — legacy `u:` keys
+    // embed the normalized URL verbatim, signed credentials included.
     progress.last_stream_key = bound_optional(progress.last_stream_key, STREAM_KEY_MAX_CHARS)
         .filter(|key| is_persistable_stream_key(key));
     progress.source_name = bound_optional(progress.source_name, SOURCE_NAME_MAX_CHARS);
@@ -222,9 +207,8 @@ fn matches_exact_watch_progress_episode(
 ) -> bool {
     match (season, episode) {
         (Some(season), Some(episode)) => {
-            (watch_progress_absolute_season(item) == Some(season)
-                && watch_progress_absolute_episode(item) == Some(episode))
-                || (item.season == Some(season) && item.episode == Some(episode))
+            watch_progress_absolute_season(item) == Some(season)
+                && watch_progress_absolute_episode(item) == Some(episode)
         }
         (None, None) => !is_series_like_watch_progress(item),
         _ => false,
@@ -280,8 +264,7 @@ fn has_stream_family_watch_progress(item: &WatchProgress) -> bool {
 }
 
 fn has_source_binding_watch_progress(item: &WatchProgress) -> bool {
-    // Opaque identities only: stream URLs never persist (sanitized to None),
-    // so binding must not depend on a URL being present.
+    // Opaque identities only — stream URLs never persist, so binding can't depend on one.
     has_usable_resume_lookup_id(item)
         || has_stream_key_watch_progress(item)
         || has_source_identity_watch_progress(item)
@@ -300,8 +283,7 @@ fn watch_progress_source_priority(
 }
 
 fn same_source_watch_progress(left: &WatchProgress, right: &WatchProgress) -> bool {
-    // Instance ids are the identity of record; once both rows carry one
-    // the display name is presentation-only.
+    // Instance ids are the identity of record; once both carry one, display name is presentation-only.
     if let (Some(left_id), Some(right_id)) = (
         left.source_id.as_deref().and_then(normalize_source_id),
         right.source_id.as_deref().and_then(normalize_source_id),
@@ -309,8 +291,7 @@ fn same_source_watch_progress(left: &WatchProgress, right: &WatchProgress) -> bo
         return left_id == right_id;
     }
 
-    // Rows saved before `source_id` existed fall back to exact
-    // display-name equality — the pre-instance-id semantics — rather than
+    // Pre-`source_id` rows fall back to exact display-name equality rather than
     // treating every id-less pair as the same source.
     match (
         left.source_name.as_deref().and_then(normalize_source_key),
@@ -327,8 +308,7 @@ fn replace_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchP
     target.source_name = donor.source_name.clone();
     target.source_id = donor.source_id.clone();
     target.stream_family = donor.stream_family.clone();
-    // Stream URLs are credential-bearing and short-lived: donor URLs are
-    // never copied, so merge results stay free of durable URLs.
+    // Donor URLs are never copied — merge results stay free of credential-bearing URLs.
     target.last_stream_format = donor.last_stream_format.clone();
 }
 
@@ -346,9 +326,8 @@ fn merge_missing_source_metadata_from_donor(target: &mut WatchProgress, donor: &
     if !has_stream_family_watch_progress(target) && has_stream_family_watch_progress(donor) {
         target.stream_family = donor.stream_family.clone();
     }
-    // Stream URLs are credential-bearing and short-lived: formats ride along
-    // with opaque identities, but donor URLs are never merged into the target.
-    // The target carries no URL by construction, so gate on the format itself.
+    // Formats ride along with opaque identities; donor URLs never merge.
+    // The target carries no URL by construction — gate on the format itself.
     if target.last_stream_format.is_none() && donor.last_stream_format.is_some() {
         target.last_stream_format = donor.last_stream_format.clone();
     }
@@ -394,8 +373,8 @@ fn is_watched_progress(item: &WatchProgress) -> bool {
         && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
 }
 
-/// Keep the latest title metadata and recency, but advance from the furthest
-/// watched canonical episode so rewatches cannot suggest an already seen one.
+/// Keeps latest title metadata/recency but advances from the furthest watched
+/// canonical episode so rewatches can't suggest an already-seen one.
 pub(crate) fn choose_up_next_source(
     items: Vec<WatchProgress>,
     source_health_priorities: &HashMap<String, u8>,
@@ -437,8 +416,7 @@ pub(crate) fn choose_up_next_source(
     Some(source)
 }
 
-/// Below this fraction a row hasn't meaningfully started: spoiler masking and
-/// the furthest-watched scan share the boundary.
+/// Below this fraction a row hasn't meaningfully started — spoiler masking and the furthest-watched scan share it.
 fn has_started_watching_progress(item: &WatchProgress) -> bool {
     item.position.is_finite()
         && item.duration.is_finite()
@@ -446,9 +424,8 @@ fn has_started_watching_progress(item: &WatchProgress) -> bool {
         && item.position / item.duration > WATCH_PROGRESS_STARTED_RATIO
 }
 
-/// The one read-side annotation pass: resume offer, watched mark, and
-/// started flag come from the same policy the backend decides with, so the UI
-/// never re-derives thresholds.
+/// The one read-side annotation pass: resume offer, watched mark, and started flag —
+/// the UI never re-derives thresholds.
 pub(crate) fn with_progress_annotations(mut item: WatchProgress) -> WatchProgress {
     item.resume_start_time = playable_resume_start_time(&item);
     item.is_watched = is_watched_progress(&item);
@@ -518,13 +495,10 @@ pub(crate) fn hydrate_watch_progress_lookup_id(item: &mut WatchProgress) {
     }
 }
 
-/// Ordering comparator shared by the per-title continue-watching chooser and
-/// the global continue-watching list: low-confidence resume positions
-/// (startup stubs) demote below meaningful ones, then newest `last_watched`
-/// wins — no weighted tie-break, so richer metadata on an older row can never
-/// outrank a fresher resume in the same confidence tier.
-/// Watched ratios only inform the startup-confidence check; they contribute
-/// no ranking points.
+/// Ordering comparator shared by the per-title and global continue-watching choosers:
+/// low-confidence resume positions (startup stubs) demote below meaningful ones, then
+/// newest `last_watched` wins — no tie-break, so richer metadata never outranks a
+/// fresher resume in the same confidence tier.
 pub(crate) fn compare_continue_watching(
     left: &WatchProgress,
     right: &WatchProgress,
@@ -647,9 +621,7 @@ fn merge_watch_progress_from_donor(
     }
 }
 
-/// Which entry a caller wants out of one title's history rows: the latest
-/// row with donor metadata merged or the latest row matching exact episode
-/// coordinates.
+/// Which entry a caller wants out of one title's rows: latest with donor metadata merged, or latest matching exact episode coordinates.
 pub(crate) enum HistoryEntryQuery<'a> {
     Latest,
     Exact {
@@ -678,17 +650,26 @@ pub(crate) fn choose_entry(
             if normalized_id.is_empty() {
                 return None;
             }
-            choose_latest_entry(
-                items
-                    .into_iter()
-                    .filter(|item| {
-                        item.id == normalized_id
-                            && normalize_watch_progress_type(&item.type_) == Some(normalized_type)
-                            && matches_exact_watch_progress_episode(item, season, episode)
-                    })
-                    .collect(),
-                source_health_priorities,
-            )
+            let mut candidates: Vec<_> = items
+                .into_iter()
+                .filter(|item| {
+                    item.id == normalized_id
+                        && normalize_watch_progress_type(&item.type_) == Some(normalized_type)
+                })
+                .collect();
+            let has_canonical_match = candidates
+                .iter()
+                .any(|item| matches_exact_watch_progress_episode(item, season, episode));
+            // Raw coordinates may alias another episode's canonical claim, including for donors.
+            candidates.retain(|item| {
+                matches_exact_watch_progress_episode(item, season, episode)
+                    || (!has_canonical_match
+                        && season.is_some()
+                        && episode.is_some()
+                        && item.season == season
+                        && item.episode == episode)
+            });
+            choose_latest_entry(candidates, source_health_priorities)
         }
     }
 }
@@ -697,21 +678,33 @@ fn choose_latest_entry(
     items: Vec<WatchProgress>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> Option<WatchProgress> {
-    // `min_by_key` keeps stable-sort tie semantics (first row wins) without
-    // the full ordering pass — the donor sort below re-orders anyway.
-    let mut chosen = items
+    // `min_by_key` keeps stable-sort tie semantics (first wins) without the full ordering pass.
+    let chosen = items
         .iter()
         .min_by_key(|item| std::cmp::Reverse(item.last_watched))?
         .clone();
+    Some(merge_watch_progress_donors(
+        chosen,
+        items,
+        source_health_priorities,
+    ))
+}
+
+/// The donor-merge half of `choose_latest_entry`, shared with the per-episode claimant
+/// map: hydrate the seed, then fold co-claimants (quality-sorted, `last_watched` ties)
+/// through `merge_watch_progress_from_donor`. Non-series seeds never take donors.
+pub(crate) fn merge_watch_progress_donors(
+    mut chosen: WatchProgress,
+    mut donors: Vec<WatchProgress>,
+    source_health_priorities: Option<&HashMap<String, u8>>,
+) -> WatchProgress {
     hydrate_watch_progress_lookup_id(&mut chosen);
 
     if !is_series_like_watch_progress(&chosen) {
-        return Some(chosen);
+        return chosen;
     }
 
-    // The donor scan always runs for series rows — sanitization strips the
-    // persisted stream URL to NULL, so no "complete snapshot" early-exit.
-    let mut donors = items;
+    // Donor scan always runs for series rows — sanitization strips the persisted stream URL, so no early-exit.
     donors.sort_by_cached_key(|donor| {
         std::cmp::Reverse((
             watch_progress_quality_score(&chosen, donor, source_health_priorities),
@@ -725,7 +718,7 @@ fn choose_latest_entry(
     }
 
     hydrate_watch_progress_lookup_id(&mut chosen);
-    Some(chosen)
+    chosen
 }
 
 pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {

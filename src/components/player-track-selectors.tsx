@@ -4,11 +4,10 @@ import { CHROME_ICON_BUTTON_CLASS, CHROME_POPOVER_CLASS } from '@/components/pla
 import { PlayerSlider } from '@/components/player-slider';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import type { AddonSubtitle } from '@/lib/api';
-import { addonSubtitleKey, buildTrackLabelMap, type Track } from '@/lib/player-track-utils';
+import { buildTrackLabelMap, type Track } from '@/lib/player-track-utils';
 import { clamp, cn } from '@/lib/utils';
 
-// Provider-agnostic noise reduction on the subtitle hint: dropping the
-// container extension keeps release names readable for any addon.
+// Dropping the container extension keeps addon-provided release names readable for any provider.
 const SUBTITLE_FILE_EXTENSION_RE = /\.(srt|ass|ssa|vtt|sub|idx|smi|txt)$/i;
 
 // Stable default — a fresh `[]` literal would defeat this component's memo.
@@ -138,7 +137,7 @@ interface SubtitleTrackSelectorProps {
   addonSubtitlesError?: string;
   /** True once the addon-subtitle lookup has actually run — gates the empty-state hint. */
   addonSubtitlesQueried?: boolean;
-  /** Key from `addonSubtitleKey`. */
+  /** Rust-authored subtitle selection key. */
   activeAddonSubtitleId?: string | null;
   addonSubtitleLoadingId?: string | null;
   onSelectAddonSubtitle?: (subtitle: AddonSubtitle) => void;
@@ -173,13 +172,11 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   const subtitlesShownOff = !selectedSubTrack;
   const subStateLabel = subtitlesShownOff ? 'Off' : (selectedSubLabel ?? 'On');
   const hasNonDefaultSettings = subtitleDelay !== 0 || subtitlePos !== 100 || subtitleScale !== 1.0;
-  // Tabbed card: stream tracks and addon subtitles share one bounded list,
-  // so a long addon result set never pushes the settings rows out of view.
+  // Tabbed card — both lists share one bounded region so a long addon result set can't push settings out of view.
   const [view, setView] = useState<'tracks' | 'addons'>('tracks');
 
   const handleOpenChange = (open: boolean) => {
-    // Reopen on the tab that owns the active pick — an addon-selected
-    // subtitle should be visible (checked) the moment the menu opens.
+    // Reopen on the tab owning the active pick — an addon-selected subtitle shows checked immediately.
     if (open) setView(activeAddonSubtitleId ? 'addons' : 'tracks');
     onOpenChange?.(open);
   };
@@ -216,7 +213,6 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Pinned header — stays outside the scroll region. */}
         <div className='flex min-h-9 shrink-0 items-center justify-between px-2.5'>
           <h4 className='text-xs font-semibold text-zinc-300'>Subtitles</h4>
           {hasNonDefaultSettings && (
@@ -241,7 +237,6 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           />
         </div>
 
-        {/* View switch: stream-provided tracks vs addon-provided subtitles. */}
         {onSelectAddonSubtitle && (
           <div className='mx-1 mb-1.5 flex shrink-0 rounded-lg bg-white/[0.05] p-0.5'>
             <button
@@ -281,8 +276,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           </div>
         )}
 
-        {/* The list yields to pinned settings. At very short heights the
-            whole card can scroll too, so no control becomes unreachable. */}
+        {/* The list yields to pinned settings; at very short heights the whole card scrolls so no control is unreachable. */}
         <div className='min-h-20 max-h-[42vh] overflow-y-auto'>
           {view === 'addons' && onSelectAddonSubtitle ? (
             <div className='space-y-px'>
@@ -313,7 +307,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                     ?.trim()
                     .replace(SUBTITLE_FILE_EXTENSION_RE, '')
                     .trim();
-                  const subtitleKey = addonSubtitleKey(subtitle);
+                  const subtitleKey = subtitle.selectionKey;
                   const isActive = activeAddonSubtitleId === subtitleKey;
                   const isLoading = addonSubtitleLoadingId === subtitleKey;
                   const titleText = `${langCode ? `${langCode} · ` : ''}${
@@ -381,8 +375,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           )}
         </div>
 
-        {/* Settings - only show if tracks exist; pinned below the list so a
-            long addon result set never pushes them out of reach. */}
+        {/* Settings — only when a track is selected; pinned below the list so a long result set can't push them away. */}
         {selectedSubTrack && (
           <div className='mx-2.5 mt-2 shrink-0 border-t border-white/[0.07] pt-2 pb-1.5'>
             <p className='mb-2 text-[11px] leading-relaxed text-zinc-400'>

@@ -7,9 +7,7 @@ import {
   BROWSE_GENRES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 
-/// One owner for the addon-config registry read — the stream-selector source
-/// filter and settings share the same key, stale time, and queryFn so a
-/// `select`-free duplicate can't fork the entry.
+/// Single addon-config registry read shared by stream-selector filter and settings — one key/queryFn so no forked cache entry.
 export function useAddonConfigs(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: ADDON_CONFIGS_QUERY_KEY,
@@ -19,8 +17,7 @@ export function useAddonConfigs(options?: { enabled?: boolean }) {
   });
 }
 
-/// Manifest-driven genre menus for home and search, computed in Rust from
-/// the enabled addons. Same stale time as the registry they derive from.
+/// Genre menus for home/search, computed in Rust from enabled addons; same stale time as the registry.
 export function useBrowseGenres(options?: { enabled?: boolean }) {
   return useQuery({
     queryKey: BROWSE_GENRES_QUERY_KEY,

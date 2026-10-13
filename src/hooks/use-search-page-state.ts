@@ -3,24 +3,23 @@ import { useSearchParams } from 'react-router';
 
 import { useDebounce } from '@/hooks/use-debounce';
 import {
-  resolveSearchUrlFeed,
-  resolveSearchUrlGenre,
-  resolveSearchUrlType,
-  sameSearchGenre,
+  readSearchFacets,
+  rememberSearchParams,
   type SearchFeed,
   type SearchMediaType,
 } from '@/lib/search-page-state';
 
-// Minimal search-page state: query text (debounced for transport) plus the
-// browse facets. The URL carries `?q=`, `?type=`, `?feed=`, and `?genre=` so a
-// filtered browse is deterministic and restorable; the backend applies safe
-// defaults for everything omitted.
+// Search-page state: debounced query text plus browse facets. The URL carries
+// `?q=`, `?type=`, `?feed=`, `?genre=`; the backend defaults anything omitted.
 export function useSearchPageState() {
   const [searchParams, setSearchParams] = useSearchParams();
   const urlQuery = searchParams.get('q') || '';
-  const activeType = resolveSearchUrlType(searchParams.get('type'));
-  const activeFeed = resolveSearchUrlFeed(searchParams.get('feed'));
-  const activeGenre = resolveSearchUrlGenre(searchParams.get('genre'));
+  const { type: activeType, feed: activeFeed, genre: activeGenre } = readSearchFacets(searchParams);
+
+  // Remember the last Search URL so the sidebar and `/` hotkey reopen it.
+  useEffect(() => {
+    rememberSearchParams(searchParams);
+  }, [searchParams]);
 
   const [query, setQuery] = useState(urlQuery);
   const debouncedInput = useDebounce(query, 250);
@@ -29,9 +28,8 @@ export function useSearchPageState() {
   const trimmedQuery = query.trim();
   const trimmedDebouncedQuery = debouncedQuery.trim();
 
-  // Adopt the URL only when navigation itself changed it (back/forward, deep
-  // links) — keying this on `query` too would wipe every keystroke with the
-  // stale URL value. The trim-equality guard keeps an in-flight trailing space.
+  // Adopt the URL only when navigation changed it — keying on `query` too would
+  // wipe keystrokes. The trim-equality guard keeps an in-flight trailing space.
   useEffect(() => {
     setQuery((current) => (current.trim() === urlQuery ? current : urlQuery));
   }, [urlQuery]);
@@ -48,14 +46,11 @@ export function useSearchPageState() {
     [searchParams, setSearchParams],
   );
 
-  // Reflect state back into the URL without growing history entries. Cloning
-  // the current params preserves unknown/future keys. The settle guard skips
-  // reflection while the debounce lags behind raw input, so typing or a fresh
-  // navigation is never overwritten by the stale debounced value.
+  // Reflect state back into the URL without growing history entries; cloning
+  // preserves unknown keys. The guards below skip reflection while the
+  // debounce still lags raw input or a navigation-side `q` change is pending.
   const lastReflectedUrlQueryRef = useRef(urlQuery);
   useEffect(() => {
-    // A `q` change since the last run came from navigation itself, so the
-    // still-stale debounced value must not be written back over it.
     if (urlQuery !== lastReflectedUrlQueryRef.current) {
       lastReflectedUrlQueryRef.current = urlQuery;
       return;
@@ -95,17 +90,9 @@ export function useSearchPageState() {
     [updateSearchParams],
   );
 
-  // Re-selecting the active genre clears it; compare exactly as the menu does.
   const handleGenreChange = useCallback(
     (genre: string) => {
-      updateSearchParams((params) => {
-        const current = resolveSearchUrlGenre(params.get('genre'));
-        if (sameSearchGenre(current, genre)) {
-          params.delete('genre');
-        } else {
-          params.set('genre', genre);
-        }
-      });
+      updateSearchParams((params) => params.set('genre', genre));
     },
     [updateSearchParams],
   );

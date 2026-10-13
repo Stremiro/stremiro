@@ -2,11 +2,11 @@ import type { QueryClient } from '@tanstack/react-query';
 import type { CalendarRange } from '@/lib/api';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
-export const CONTINUE_WATCHING_QUERY_KEY = ['continue-watching'] as const;
-export const UP_NEXT_ENTRIES_QUERY_KEY = [
-  ...CONTINUE_WATCHING_QUERY_KEY,
-  'up-next-entries',
-] as const;
+// Rust interleaves continue-watching + Up Next from one snapshot, keyed per local day.
+export const RESUME_RAIL_QUERY_KEY = 'resume-rail';
+export function resumeRailQueryKey(localToday: string | undefined) {
+  return [RESUME_RAIL_QUERY_KEY, localToday ?? ''] as const;
+}
 export const WATCH_HISTORY_QUERY_KEY = ['watch-history'] as const;
 const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
 export const TOTAL_WATCH_TIME_QUERY_KEY = ['total-watch-time'] as const;
@@ -14,7 +14,7 @@ export const LISTS_QUERY_KEY = ['lists'] as const;
 export const WATCH_STATUSES_QUERY_KEY = ['watch-statuses'] as const;
 const CALENDAR_EVENTS_QUERY_KEY = ['calendar-events'] as const;
 export const DATA_STATS_QUERY_KEY = ['dataStats'] as const;
-// One entry, one cadence — profile chip and data manager share this query.
+// Profile chip and data manager share this query — one cadence.
 export const DATA_STATS_STALE_TIME_MS = 1000 * 30;
 export const PROFILE_PREFERENCES_QUERY_KEY = ['profilePreferences'] as const;
 export const APP_UI_PREFERENCES_QUERY_KEY = ['appUiPreferences'] as const;
@@ -28,16 +28,18 @@ const DETAILS_QUERY_KEY = ['details'] as const;
 // Shared addon-config entry so settings saves refresh the selector.
 export const ADDON_CONFIGS_QUERY_KEY = ['addonConfigs'] as const;
 export const ADDON_CONFIGS_STALE_TIME_MS = 1000 * 60 * 5;
-/** The installed URLs ride in the key: the duplicate verdict depends on them. */
+/** Installed URLs ride in the key; the duplicate verdict depends on them. */
 export function addonUrlInspectionQueryKey(url: string, installedUrls: readonly string[]) {
   return ['addonUrlInspection', url, installedUrls] as const;
 }
 // Derived from the addon registry's manifests; refreshed with discovery.
 export const BROWSE_GENRES_QUERY_KEY = ['browseGenres'] as const;
 export const SEARCH_CATALOG_QUERY_KEY = ['search-catalog'] as const;
+export const SEARCH_CATALOG_GC_TIME_MS = 1000 * 60 * 10;
+// stale == GC so a cached multi-page browse is never refetched page-by-page on revisit; expiry restarts at page 1.
+export const SEARCH_CATALOG_STALE_TIME_MS = SEARCH_CATALOG_GC_TIME_MS;
 export const CALENDAR_EVENTS_STALE_TIME_MS = 1000 * 60 * 60;
-// Home's rails key under this prefix and invalidateDiscoveryQueries sweeps
-// by it — rename-safety needs one owner.
+// Home rails key under this prefix; invalidateDiscoveryQueries sweeps by it.
 const TRENDING_QUERY_KEY = ['trending'] as const;
 export function trendingRowQueryKey(row: string, ...coords: string[]) {
   return [...TRENDING_QUERY_KEY, row, ...coords];
@@ -59,14 +61,12 @@ async function invalidateQuery(
 }
 
 function refreshScheduleQueries(queryClient: QueryClient) {
-  // Schedule views may fetch remote metadata; durable write/exit barriers
-  // wait for the local history refresh, without waiting for those providers.
+  // Nonblocking: write/exit barriers await local history, not remote providers.
   void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
-  void invalidateQuery(queryClient, UP_NEXT_ENTRIES_QUERY_KEY);
+  void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
 }
 
-// Per-title resume reads key on the trimmed id so details and card-hover
-// share one cache entry.
+// Trimmed id so details and card-hover share one cache entry.
 export function titleWatchProgressQueryKey(itemId: string | undefined) {
   return [...TITLE_WATCH_PROGRESS_QUERY_KEY, itemId?.trim()] as const;
 }
@@ -91,19 +91,16 @@ export function calendarEventsQueryKey(range: CalendarRange) {
   ] as const;
 }
 
-// Shared details lifetimes so views agree instead of refetching apart.
-// GC at 1h: full details payloads carry episode arrays, so a browsed title
-// shouldn't hold its heaviest payload for hours after unmount.
+// Shared lifetimes so views agree. GC at 1h: episode arrays are the heaviest payload.
 export const DETAILS_STALE_TIME_MS = 1000 * 60 * 30;
 export const DETAILS_GC_TIME_MS = 1000 * 60 * 60;
 
-// Skip data changes rarely; prefetch shares lifetime with the player read.
+// Skip data changes rarely; one lookup per episode and stream duration per session.
 export const SKIP_TIMES_STALE_TIME_MS = 1000 * 60 * 60 * 12;
 export const SKIP_TIMES_GC_TIME_MS = 1000 * 60 * 60 * 24;
 
-// IMDb ids (`tt` + digits) are the only lookup key SkipDB accepts. Mirrors
-// the backend `normalize_imdb_id` bound so an unkeyable id never enables the
-// query at all.
+// SkipDB only accepts IMDb ids; mirrors backend `normalize_imdb_id` so an
+// unkeyable id never enables the query.
 const SKIP_TIMES_IMDB_ID_PATTERN = /^tt\d{1,30}$/i;
 
 export function resolveSkipTimesImdbAnchor(
@@ -120,8 +117,7 @@ export function resolveSkipTimesImdbAnchor(
   return undefined;
 }
 
-// The skip key includes the duration bucket — SkipDB shifts segments to fit
-// the reported duration, so matched data is only valid for that duration.
+// SkipDB shifts segments to fit the reported duration, so the key buckets by it.
 export function skipTimesQueryKey(
   mediaType: string | undefined,
   id: string | undefined,
@@ -133,27 +129,27 @@ export function skipTimesQueryKey(
   return ['skip-times', mediaType, id, season, episode, imdbId ?? '', durationSecs ?? 0] as const;
 }
 
-// Catalog row freshness — MediaRow's default and any parent sharing a row's
-// key (e.g. the home hero) must agree so one entry never carries two cadences.
+// Shared by MediaRow's default and parents keying the same row (e.g. home hero).
 export const MEDIA_ROW_STALE_TIME_MS = 1000 * 60 * 10;
 
 // Full-list views refresh slower than collections.
 export const LISTS_VIEW_STALE_TIME_MS = 1000 * 30;
 
-// Page-level history views refresh slower than the card-row default — same
-// 3-minute policy, one owner.
+// Page-level history views refresh slower than the card-row default.
 export const WATCH_HISTORY_VIEW_STALE_TIME_MS = 1000 * 60 * 3;
 
-// Per-row/per-title history freshness — shared by the collection hooks and
-// hero-slide prefetches so one entry never carries two cadences.
+// Shared by the collection hooks and hero-slide prefetches.
 export const WATCH_HISTORY_STALE_TIME_MS = 1000 * 30;
 
+// One merged rail cadence for the home snapshot.
+export const RESUME_SECTION_MIN_STALE_MS = 1000 * 30;
+
 export async function invalidateLibraryQueries(queryClient: QueryClient) {
-  // library_count lives inside the stats payload — the data manager refetches
-  // when library membership changes.
-  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
+  // Watch status is a library attribute; refresh shared dependents once.
+  refreshScheduleQueries(queryClient);
   await Promise.all([
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }
@@ -164,7 +160,6 @@ async function invalidateHistoryCollections(
   refetchTitleProgress = true,
 ) {
   await Promise.all([
-    invalidateQuery(queryClient, CONTINUE_WATCHING_QUERY_KEY, true),
     invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
     queryClient.invalidateQueries({
       queryKey: itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
@@ -180,9 +175,8 @@ export async function invalidatePlaybackHistoryQueries(queryClient: QueryClient)
   await invalidateHistoryCollections(queryClient);
 }
 
-// Title-scoped variant: single-title removes/restores and player flushes need
-// only the two collections plus this title's snapshot — a prefix sweep would
-// refetch every cached title entry.
+// Title-scoped variant for single-title removes/restores and player flushes —
+// a prefix sweep would refetch every cached title entry.
 export async function invalidatePlaybackHistoryQueriesForTitle(
   queryClient: QueryClient,
   itemId: string | undefined,
@@ -193,8 +187,7 @@ export async function invalidatePlaybackHistoryQueriesForTitle(
 }
 
 export async function invalidateListQueries(queryClient: QueryClient) {
-  // lists_count lives inside the stats payload — the profile chip and data
-  // manager both refetch when lists change.
+  // lists_count lives inside the stats payload.
   await Promise.all([
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
@@ -202,12 +195,15 @@ export async function invalidateListQueries(queryClient: QueryClient) {
 }
 
 export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
+  // watch_statuses_count lives inside the stats payload.
   refreshScheduleQueries(queryClient);
-  await invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY);
+  await Promise.all([
+    invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
+    invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
+  ]);
 }
 
-// Selector pages key under the streams prefix so invalidateStreamQueries
-// sweeps them — rename-safety needs one owner (the `trending` precedent).
+// Selector pages key under the streams prefix so invalidateStreamQueries sweeps them.
 export function streamSelectorQueryKey(
   type: string | undefined,
   lookupId: string | undefined,
@@ -244,8 +240,7 @@ export function addonSubtitlesQueryKey(
 }
 
 export async function invalidateStreamQueries(queryClient: QueryClient) {
-  // Addon subtitles are an addon resource — a changed addon set drops the
-  // cached subtitle lists alongside stream caches.
+  // Addon subtitles are an addon resource; a changed addon set drops them too.
   await Promise.all([
     invalidateQuery(queryClient, STREAMS_QUERY_KEY),
     invalidateQuery(queryClient, ADDON_SUBTITLES_QUERY_KEY),
@@ -253,11 +248,11 @@ export async function invalidateStreamQueries(queryClient: QueryClient) {
 }
 
 export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
-  // Provider caches clear too — RQ must not serve the previous addon set.
+  // Provider caches clear too; RQ must not serve the previous addon set.
   await Promise.all([
     invalidateQuery(queryClient, DETAILS_QUERY_KEY),
     invalidateQuery(queryClient, SEARCH_CATALOG_QUERY_KEY),
-    invalidateQuery(queryClient, UP_NEXT_ENTRIES_QUERY_KEY),
+    invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]),
     invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY),
     invalidateQuery(queryClient, TRENDING_QUERY_KEY),
     invalidateQuery(queryClient, BROWSE_GENRES_QUERY_KEY),
@@ -271,15 +266,10 @@ export async function invalidatePlaybackLanguageQueries(queryClient: QueryClient
   ]);
 }
 
-// Backup restore rewrites preferences, profile, and the addon registry in one
-// pass — every surface built from them refetches.
+// The restore flow already resets the profile/selector/language/addon snapshots itself — this covers the rest.
 async function invalidateSettingsQueries(queryClient: QueryClient) {
   await Promise.all([
     invalidateQuery(queryClient, APP_UI_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, PROFILE_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, STREAM_SELECTOR_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, ADDON_CONFIGS_QUERY_KEY),
     invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
     invalidateStreamQueries(queryClient),
     invalidateDiscoveryQueries(queryClient),

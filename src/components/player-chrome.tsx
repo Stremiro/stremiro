@@ -11,7 +11,7 @@ import {
   Rewind,
   SkipForward,
 } from 'lucide-react';
-import { memo, type ReactNode, type Ref } from 'react';
+import { memo, type Ref, useState } from 'react';
 import { CHROME_ICON_BUTTON_CLASS, CHROME_POPOVER_CLASS } from '@/components/player-chrome-styles';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerSlider } from '@/components/player-slider';
@@ -22,8 +22,7 @@ import type { AddonSubtitle } from '@/lib/api';
 import type { Track } from '@/lib/player-track-utils';
 import { cn, formatSeasonEpisode } from '@/lib/utils';
 
-// The preset ladder is shared: the popover renders it and the `[`/`]`
-// hotkeys step through it — one owner keeps the two from drifting.
+// Preset ladder shared by the popover and the `[`/`]` hotkeys — one owner keeps them from drifting.
 export const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
 interface PlayerTopChromeProps {
@@ -37,14 +36,11 @@ interface PlayerTopChromeProps {
   /** Live source label — reflects failover swaps, not just the launch pick. */
   streamSourceName?: string;
   isFullscreen: boolean;
-  /** Extra trailing controls; pass a stable element to keep the memo bailout. */
-  actions?: ReactNode;
   onBack: () => Promise<void>;
   onToggleFullscreen: () => Promise<void>;
 }
 
-// Memoized: the player re-renders on every time-pos tick, so chrome subtrees
-// with no tick-dependent props must bail out ~3x per second.
+// Memoized — the player re-renders per time-pos tick, so chrome subtrees with no tick-dependent props must bail out.
 export const PlayerTopChrome = memo(function PlayerTopChrome({
   chromeRef,
   title,
@@ -54,7 +50,6 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   episodeTitle,
   streamSourceName,
   isFullscreen,
-  actions,
   onBack,
   onToggleFullscreen,
 }: PlayerTopChromeProps) {
@@ -90,7 +85,6 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
           <p className='text-xs text-white/50 mt-0.5 truncate'>{secondaryParts.join(' · ')}</p>
         )}
       </div>
-      {actions}
       <button
         type='button'
         onClick={(e) => {
@@ -163,8 +157,7 @@ interface PlayerControlsRowProps {
   ) => void;
 }
 
-// Memoized like the sibling selectors/panel: every prop is a primitive or a
-// stable callback, so the ~200-element controls row skips every playback tick.
+// Memoized like the sibling selectors/panel — primitive/stable props let the controls row skip playback ticks.
 export const PlayerControlsRow = memo(function PlayerControlsRow({
   onTogglePip,
   isPlaying,
@@ -206,12 +199,12 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   onApplySubtitleScale,
   onSelectSubTrack,
 }: PlayerControlsRowProps) {
+  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const volumeIsSilent = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
   return (
     <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 pt-1'>
       <div className='flex min-w-0 max-w-full flex-wrap items-center gap-1'>
-        {/* Rewind 10s */}
         <button
           type='button'
           aria-label='Rewind 10 seconds'
@@ -225,7 +218,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           <Rewind className='w-[18px] h-[18px]' strokeWidth={2.5} />
         </button>
 
-        {/* Play / Pause */}
         <button
           type='button'
           aria-label={isPlaying ? 'Pause' : 'Play'}
@@ -243,7 +235,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           )}
         </button>
 
-        {/* Forward 10s */}
         <button
           type='button'
           aria-label='Forward 10 seconds'
@@ -257,7 +248,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           <FastForward className='w-[18px] h-[18px]' strokeWidth={2.5} />
         </button>
 
-        {/* Next Episode */}
         {canGoNext && (
           <button
             type='button'
@@ -274,13 +264,11 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </button>
         )}
 
-        {/* A compact, always-visible rail reserves its space: hover/focus
-            and pointer capture can never push adjacent controls around. */}
+        {/* Always-visible volume rail reserves its space — hover/focus and pointer capture can't push adjacent controls. */}
         <div
           data-player-interactive
           className='flex shrink-0 items-center gap-1.5 pr-1'
-          // Interactive regions swallow the ambient wheel handler — scrolling
-          // over the cluster still adjusts volume, like hovering the icon.
+          // Interactive regions swallow the ambient wheel handler — scrolling here still adjusts volume.
           onWheel={(e) => {
             if (e.deltaY === 0) return;
             e.stopPropagation();
@@ -324,8 +312,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </span>
         </div>
 
-        {/* Speed */}
-        <Popover>
+        <Popover open={speedMenuOpen} onOpenChange={setSpeedMenuOpen}>
           <PopoverTrigger asChild>
             <button
               type='button'
@@ -362,7 +349,10 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
                   key={s}
                   type='button'
                   aria-pressed={s === playbackSpeed}
-                  onClick={() => onSpeedChange(s)}
+                  onClick={() => {
+                    onSpeedChange(s);
+                    setSpeedMenuOpen(false);
+                  }}
                   className={cn(
                     'flex h-9 items-center justify-between rounded-md px-2.5 text-left text-xs tabular-nums transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30',
                     s === playbackSpeed
@@ -379,12 +369,10 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
       </div>
 
       <div className='ml-auto flex shrink-0 items-center gap-1'>
-        {/* Episodes List Toggle */}
         {hasEpisodes && (
           <PlayerEpisodesToggleButton open={episodesOpen} onToggle={onToggleEpisodes} />
         )}
 
-        {/* Stream / Quality Hot-Swap */}
         {canChooseStream && (
           <button
             type='button'
@@ -402,14 +390,12 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </button>
         )}
 
-        {/* Audio Track Selector */}
         <AudioTrackSelector
           audioTracks={audioTracks}
           trackSwitching={trackSwitching}
           onSelectTrack={onSelectAudioTrack}
         />
 
-        {/* Subtitle Track Selector */}
         <SubtitleTrackSelector
           subTracks={subTracks}
           trackSwitching={trackSwitching}

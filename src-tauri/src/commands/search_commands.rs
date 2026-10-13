@@ -113,9 +113,8 @@ impl SearchYearRange {
         self.year_from.is_some() || self.year_to.is_some()
     }
 
-    /// A single pinned year can be served by a provider `year` catalog (whose
-    /// required `genre` extra carries the year) instead of client-filtering a
-    /// feed catalog page-by-page. Ranges stay on the feed path.
+    /// A single pinned year can be served by a provider `year` catalog instead of
+    /// client-filtering a feed page-by-page. Ranges stay on the feed path.
     fn single_year(self) -> Option<u32> {
         match (self.year_from, self.year_to) {
             (Some(from), Some(to)) if from == to => Some(from),
@@ -336,9 +335,9 @@ fn browse_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<String> 
     }
 }
 
-/// Genres sent as Cinemeta `genre` extras. Anime plus extra filters fetches those
-/// extras and keeps titles that also declare Animation, instead of unioning the
-/// full Animation catalog with unrelated live-action catalogs.
+/// Genres sent as Cinemeta `genre` extras. Anime plus extra filters fetches the
+/// extras and keeps titles also declaring Animation, instead of unioning the full
+/// Animation catalog with unrelated live-action catalogs.
 fn catalog_fetch_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<String> {
     let injected = browse_genres(media_type, genres);
     match media_type {
@@ -382,10 +381,8 @@ fn apply_browse_filters(
     items
 }
 
-/// Keep pulling provider pages until the response is a usable grid page.
-/// Sparse intersections (e.g. anime + Crime) keep only a few titles per
-/// provider page; returning them one page at a time made the grid trickle in
-/// a few titles per round-trip instead of filling a row.
+/// Keep pulling provider pages until the response fills a usable grid page —
+/// sparse intersections (e.g. anime + Crime) keep only a few titles per page.
 const MIN_BROWSE_FILL_ITEMS: usize = 24;
 
 fn should_continue_browse_fetch(item_count: usize, next_skip: Option<u32>, fetches: usize) -> bool {
@@ -422,9 +419,8 @@ async fn fetch_query_results(
             .collect()
     };
 
-    // One shared pool for the whole (genre × source) fan-out: each genre's
-    // outcome stays isolated for the merge below while total concurrency
-    // stays at `ADDON_RESOURCE_CONCURRENCY` instead of multiplying per genre.
+    // One shared pool for the (genre × source) fan-out: per-genre outcomes stay
+    // isolated while total concurrency stays at `ADDON_RESOURCE_CONCURRENCY`.
     let outcomes = super::addon_registry::search_catalog_items_for_genres(
         app,
         client,
@@ -447,11 +443,9 @@ fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
     items
 }
 
-/// Genre enforcement for text search, where a provider may honor `search`
-/// while ignoring `genre`. Search hits often carry no genres at all (Cinemeta
-/// returns none), so only a declared list can disqualify one — strict
-/// matching would empty every anime or genre-filtered search. Expects
-/// normalized items (empty lists collapse to `None`).
+/// Genre enforcement for text search, where a provider may honor `search` while
+/// ignoring `genre`. Hits often carry no genres (Cinemeta returns none), so only a
+/// declared list can disqualify — strict matching would empty every filtered search.
 fn retain_search_items_matching_genres(
     mut items: Vec<MediaItem>,
     genres: &[String],
@@ -482,10 +476,9 @@ fn catalog_browse_extras(genre: Option<&str>, skip: u32) -> Vec<CatalogExtra> {
     extras
 }
 
-/// Provider year catalog (`genre=<year>`, required extra) applies only to a
-/// single pinned year on the default Popular feed with no genre filters.
-/// Featured keeps its feed ordering with a client-side year filter, anime
-/// keeps its Animation-category routing, and ranges stay on the feed path.
+/// Provider year catalog (`genre=<year>` required extra) applies only to a single
+/// pinned year on the default Popular feed with no genre filters — Featured keeps
+/// feed ordering, anime keeps Animation routing, ranges stay on the feed path.
 fn browse_year_catalog(
     feed: SearchFeed,
     media_type: SearchMediaType,
@@ -514,10 +507,8 @@ async fn fetch_registry_browse_page(
     let media_type = media_type.catalog_type();
 
     if genres.len() > 1 {
-        // One store snapshot for the whole fan-out; per-genre selection
-        // failures still resolve per genre so one bad genre cannot fail the
-        // merge that tolerates partial errors. The fetches share a single
-        // `ADDON_RESOURCE_CONCURRENCY` pool across genres.
+        // One store snapshot for the fan-out; per-genre selection failures resolve
+        // per genre so one bad genre can't fail the partial-tolerant merge.
         let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
         let groups = genres
             .iter()
@@ -579,12 +570,10 @@ async fn fetch_browse_page(
         .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
     let feed = criteria.feed;
     let fetch_genres = catalog_fetch_genres(media_type, &criteria.genres);
-    // Prefer the provider `year` catalog for a single pinned year. When no
-    // enabled addon declares it (e.g. a replacement metadata addon with only
-    // feed catalogs), use the feed path with a client-side filter. `skip` is
-    // a cursor into one result space for the whole browse, so the space is
-    // decided once by capability: a fetch outcome cannot flip it or the
-    // client would resume with a foreign cursor.
+    // Prefer the provider `year` catalog for a single pinned year; when no enabled
+    // addon declares it, use the feed path with a client-side filter. `skip` is a
+    // cursor into one result space, so the space is decided once by capability —
+    // a fetch outcome cannot flip it or the client resumes with a foreign cursor.
     let mut year_catalog =
         browse_year_catalog(feed, media_type, &fetch_genres, criteria.year_range);
     let mut skip = criteria.skip;

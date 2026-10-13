@@ -56,9 +56,7 @@ export function usePlayerAutoResolve({
 }: UsePlayerAutoResolveOptions) {
   const [resolveAttemptNonce, setResolveAttemptNonce] = useState(0);
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
-  // Ref, not state: `isResolving` in the dep array made each attempt cancel
-  // itself — setting it true re-ran the effect, cleanup flipped `cancelled`,
-  // and the settled IPC result was discarded forever (infinite resolve loop).
+  // Ref, not state — `isResolving` as a dep made each attempt cancel itself (infinite resolve loop).
   const resolveInFlightRef = useRef(false);
 
   useEffect(() => {
@@ -104,10 +102,8 @@ export function usePlayerAutoResolve({
             absoluteEpisode: resolvedAbsoluteEpisode,
             title,
             preferred: {
-              // Replay the clicked key verbatim; for generic resolves the
-              // source/family soft-match hints identify the user's prior
-              // stream when its `uh:` key rotted between sessions. Hints fork
-              // the cache key, so they're omitted when a replay key exists.
+              // Replay the clicked key verbatim; otherwise source/family hints soft-match
+              // the prior stream (`uh:` keys rot). Hints fork the cache key — omitted when a replay key exists.
               streamKey: routeRequestedStreamKey ?? routeSelectedStreamKey,
               sourceId: routeRequestedStreamKey
                 ? undefined
@@ -120,10 +116,8 @@ export function usePlayerAutoResolve({
                 : stream.activeStreamFamilyRef.current,
             },
           }),
-          // Backend worst case is ~14s fetch + 10s parallel probe. Keep the
-          // frontend above that so slow addons resolve instead of
-          // false-timing-out and orphaning backend work.
-          25_000,
+          // Allow store reads, ranking and IPC beyond the 14s fetch + 10s probe.
+          35_000,
           () => {
             throw new Error('Stream resolution timed out. The addon may be unreachable.');
           },
@@ -143,14 +137,11 @@ export function usePlayerAutoResolve({
           return;
         }
       } finally {
-        // Every terminal path releases the latch and bumps the nonce so the
-        // guards re-run once — a dep-change cleanup mid-attempt cannot strand
-        // the next attempt behind a stale in-flight flag.
+        // Release the latch and bump the nonce so the guards re-run once — a mid-attempt cleanup can't strand the next attempt.
         resolveInFlightRef.current = false;
         if (mountedRef.current) setResolveAttemptNonce((nonce) => nonce + 1);
       }
-      // Cancelled or superseded: late winners and timeouts must never clobber
-      // a newer pick, but the newest attempt still releases `isResolving`.
+      // Late winners/timeouts must not clobber a newer pick, but the newest attempt still releases `isResolving`.
       if (mountedRef.current && attemptGen === autoResolveGenRef.current) {
         setIsResolving(false);
         setResolveStatus('');

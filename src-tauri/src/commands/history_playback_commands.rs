@@ -1,6 +1,7 @@
 use super::history_helpers::{
-    choose_entry, playable_resume_start_time, sanitize_watch_progress,
-    watch_progress_absolute_episode, watch_progress_absolute_season, HistoryEntryQuery,
+    choose_entry, is_series_like_watch_progress, playable_resume_start_time,
+    sanitize_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
+    HistoryEntryQuery,
 };
 use super::media_commands::resolve_episode_stream_mapping_inner;
 use super::playback_state::PlaybackStateService;
@@ -24,9 +25,8 @@ enum HistoryPlaybackPlanReason {
 
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
-// Every Option serializes absent — not null — so route-state consumers never
-// have to distinguish "missing" from a real zero (`Number(null) === 0` turned
-// an absent season into season 0 "Specials").
+// Every Option serializes absent, not null — route-state consumers never
+// distinguish "missing" from a real zero (`Number(null) === 0` → season 0 "Specials").
 struct HistoryPlaybackRouteState {
     #[serde(skip_serializing_if = "Option::is_none")]
     from: Option<String>,
@@ -72,9 +72,45 @@ pub struct HistoryPlaybackPlan {
     reason: Option<HistoryPlaybackPlanReason>,
     target: String,
     state: HistoryPlaybackRouteState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warm_resolve_request: Option<HistoryWarmResolveRequest>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryWarmResolveRequest {
+    media_type: HistoryPlaybackMediaType,
+    media_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_lookup_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_season: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_episode: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    absolute_season: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    absolute_episode: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    preferred: HistoryPreferredStreamIdentity,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HistoryPreferredStreamIdentity {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream_family: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
 enum HistoryPlaybackMediaType {
     Movie,
     Series,
@@ -135,19 +171,17 @@ fn has_explicit_stream_episode_context(item: &WatchProgress) -> bool {
     item.stream_season.is_some() && item.stream_episode.is_some()
 }
 
-/// Any anime item whose media id is not already in the tt lookup space can
-/// map to different stream coordinates (legacy kitsu: rows resolve to tt
-/// seasons/episodes), so a saved item with no lookup id cannot treat
-/// absolute coords as stream coords.
+/// Anime items whose media id is outside the tt lookup space can map to different
+/// stream coordinates (legacy kitsu: rows resolve to tt seasons/episodes), so a
+/// saved item with no lookup id cannot treat absolute coords as stream coords.
 fn is_mapped_anime_history_item(item: &WatchProgress) -> bool {
     normalize_history_media_type(item) == HistoryPlaybackMediaType::Anime
         && !item.id.trim().starts_with("tt")
 }
 
 /// WatchProgress-side twin of `episode_navigation::build_source_episode_coordinates`:
-/// the same stream→absolute fold, extended with the anime-mapping deferral
-/// (`stream_*` may hold absolute coords on legacy kitsu rows, so items with
-/// no explicit stream context wait for the episode mapping instead).
+/// the same stream→absolute fold plus anime-mapping deferral (`stream_*` may hold
+/// absolute coords on legacy kitsu rows — such items wait for the episode mapping).
 fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
     let absolute_season = watch_progress_absolute_season(item);
     let absolute_episode = watch_progress_absolute_episode(item);
@@ -185,9 +219,8 @@ fn has_episode_context(item: &WatchProgress) -> bool {
     context.absolute_season.is_some() && context.absolute_episode.is_some()
 }
 
-/// Resume never depends on a persisted stream URL: the opaque lookup id is
-/// enough to re-resolve a fresh playable URL on player mount, and the media
-/// id itself is the fallback when no saved lookup id survives.
+/// Resume never depends on a persisted stream URL — the opaque lookup id re-resolves
+/// a fresh playable URL on player mount; the media id is the fallback.
 fn get_immediate_stream_lookup_id(item: &WatchProgress) -> String {
     normalize_saved_value(item.last_stream_lookup_id.as_deref())
         .unwrap_or_else(|| item.id.trim().to_string())
@@ -234,6 +267,7 @@ fn build_details_plan(item: &WatchProgress, from: Option<String>) -> HistoryPlay
             season: get_episode_context(item).absolute_season,
             ..HistoryPlaybackRouteState::default()
         },
+        warm_resolve_request: None,
     }
 }
 
@@ -242,34 +276,58 @@ fn build_player_plan(
     from: Option<String>,
     context: ResolvedHistoryEpisodeContext,
 ) -> HistoryPlaybackPlan {
+    let media_type = normalize_history_media_type(item);
+    let state = HistoryPlaybackRouteState {
+        from,
+        title: normalize_saved_value(Some(item.title.as_str())),
+        poster: item.poster.clone(),
+        backdrop: item.backdrop.clone(),
+        format: normalize_saved_value(item.last_stream_format.as_deref()),
+        stream_source_id: normalize_saved_value(item.source_id.as_deref()),
+        stream_source_name: normalize_saved_value(item.source_name.as_deref()),
+        stream_family: normalize_saved_value(item.stream_family.as_deref()),
+        selected_stream_key: normalize_saved_value(item.last_stream_key.as_deref()),
+        start_time: playable_resume_start_time(item),
+        absolute_season: context.absolute_season,
+        absolute_episode: context.absolute_episode,
+        stream_season: context.stream_season,
+        stream_episode: context.stream_episode,
+        resume_from_history: Some(true),
+        stream_lookup_id: Some(context.stream_lookup_id),
+        ..HistoryPlaybackRouteState::default()
+    };
+    // A coordinate-less series warm cannot join the player's mapped replay request.
+    let warm_resolve_request = (!(media_type != HistoryPlaybackMediaType::Movie
+        && (state.absolute_season.is_some() || state.absolute_episode.is_some())
+        && state.stream_season.is_none()
+        && state.stream_episode.is_none()))
+    .then(|| HistoryWarmResolveRequest {
+        media_type,
+        media_id: item.id.trim().to_string(),
+        stream_lookup_id: state.stream_lookup_id.clone(),
+        stream_season: state.stream_season,
+        stream_episode: state.stream_episode,
+        absolute_season: state.absolute_season,
+        absolute_episode: state.absolute_episode,
+        title: state.title.clone(),
+        preferred: HistoryPreferredStreamIdentity {
+            stream_key: state.selected_stream_key.clone(),
+            source_id: state.stream_source_id.clone(),
+            source_name: state.stream_source_name.clone(),
+            stream_family: state.stream_family.clone(),
+        },
+    });
     HistoryPlaybackPlan {
         kind: HistoryPlaybackPlanKind::Player,
         reason: None,
         target: build_player_route(
-            normalize_history_media_type(item),
+            media_type,
             &item.id,
             context.absolute_season,
             context.absolute_episode,
         ),
-        state: HistoryPlaybackRouteState {
-            from,
-            title: normalize_saved_value(Some(item.title.as_str())),
-            poster: item.poster.clone(),
-            backdrop: item.backdrop.clone(),
-            format: normalize_saved_value(item.last_stream_format.as_deref()),
-            stream_source_id: normalize_saved_value(item.source_id.as_deref()),
-            stream_source_name: normalize_saved_value(item.source_name.as_deref()),
-            stream_family: normalize_saved_value(item.stream_family.as_deref()),
-            selected_stream_key: normalize_saved_value(item.last_stream_key.as_deref()),
-            start_time: playable_resume_start_time(item),
-            absolute_season: context.absolute_season,
-            absolute_episode: context.absolute_episode,
-            stream_season: context.stream_season,
-            stream_episode: context.stream_episode,
-            resume_from_history: Some(true),
-            stream_lookup_id: Some(context.stream_lookup_id),
-            ..HistoryPlaybackRouteState::default()
-        },
+        state,
+        warm_resolve_request,
     }
 }
 
@@ -295,10 +353,16 @@ fn get_latest_history_playback_item(
         .into_iter()
         .map(|(_, item)| item)
         .collect::<Vec<_>>();
-    let source_health = playback_state.source_health_priorities_for_ids(
-        app,
-        items.iter().map(|entry| entry.source_id.as_deref()),
-    )?;
+    // Health only ranks series donors; movie rows return before it is read,
+    // so movies skip the `playback_state.json` open entirely.
+    let source_health = is_series_like_watch_progress(item)
+        .then(|| {
+            playback_state.source_health_priorities_for_ids(
+                app,
+                items.iter().map(|entry| entry.source_id.as_deref()),
+            )
+        })
+        .transpose()?;
     let context = get_episode_context(item);
 
     if let Some(mut latest) = choose_entry(
@@ -309,7 +373,7 @@ fn get_latest_history_playback_item(
             season: context.absolute_season,
             episode: context.absolute_episode,
         },
-        Some(&source_health),
+        source_health.as_ref(),
     ) {
         merge_latest_history_metadata(item, &mut latest);
         return Ok(latest);
@@ -326,10 +390,9 @@ async fn resolve_history_episode_context(
 ) -> Result<Option<ResolvedHistoryEpisodeContext>, String> {
     let base_context = get_episode_context(item);
     let stream_lookup_id = get_immediate_stream_lookup_id(item);
-    // Canonical coords without a stream pair resolve through the persisted
-    // episode mapping; everything else uses the base context as-is. A
-    // mapping-lookup failure must surface (store read, meta fetch) — only a
-    // genuinely absent mapping degrades to the details plan.
+    // Canonical coords without a stream pair resolve through the persisted episode
+    // mapping; a lookup failure must surface — only a genuinely absent mapping
+    // degrades to the details plan.
     let missing_stream_coords =
         base_context.stream_season.is_none() || base_context.stream_episode.is_none();
 
@@ -447,6 +510,13 @@ mod tests {
         assert_eq!(plan.target, "/player/movie/tt99");
         assert_eq!(plan.state.stream_lookup_id.as_deref(), Some("tt99"));
         assert_eq!(plan.state.start_time, Some(120.0));
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
+            serde_json::json!({
+                "mediaType": "movie", "mediaId": "tt99", "streamLookupId": "tt99",
+                "title": "Example", "preferred": {},
+            })
+        );
 
         let mut series = progress_item("tt9", "series");
         series.season = Some(1);
@@ -492,13 +562,29 @@ mod tests {
         assert_eq!(plan.state.stream_source_name.as_deref(), Some("CDN A"));
         assert_eq!(plan.state.stream_family.as_deref(), Some("cdn|release:x"));
         assert_eq!(plan.state.stream_lookup_id.as_deref(), Some("tt7654321"));
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
+            serde_json::json!({
+                "mediaType": "series", "mediaId": "tt9", "streamLookupId": "tt7654321",
+                "streamSeason": 1, "streamEpisode": 5, "absoluteSeason": 1, "absoluteEpisode": 5,
+                "title": "Example",
+                "preferred": {
+                    "streamKey": "s:saved", "sourceId": "addon-a",
+                    "sourceName": "CDN A", "streamFamily": "cdn|release:x",
+                },
+            })
+        );
     }
 
     #[test]
     fn player_plan_omits_start_time_without_playable_resume() {
-        let item = progress_item("tt99", "movie");
+        let mut item = progress_item("tt99", "movie");
+        item.title = " ".to_string();
         let plan = build_player_plan(&item, None, context_for(&item));
         assert_eq!(plan.state.start_time, None);
+        assert!(serde_json::to_value(&plan).unwrap()["warmResolveRequest"]
+            .get("title")
+            .is_none());
 
         let mut completed = progress_item("tt99", "movie");
         completed.position = 590.0;
@@ -522,6 +608,15 @@ mod tests {
         assert_eq!(plan.target, "/player/series/tt9/0/0");
         assert_eq!(plan.state.absolute_season, Some(0));
         assert_eq!(plan.state.absolute_episode, Some(0));
+        let warm = serde_json::to_value(&plan).unwrap()["warmResolveRequest"].clone();
+        for field in [
+            "absoluteSeason",
+            "absoluteEpisode",
+            "streamSeason",
+            "streamEpisode",
+        ] {
+            assert_eq!(warm[field], 0);
+        }
     }
 
     #[test]
@@ -540,6 +635,10 @@ mod tests {
         assert_eq!(plan.target, "/details/series/tt9");
         assert_eq!(plan.state.season, Some(2));
         assert_eq!(plan.state.from.as_deref(), Some("/continue"));
+        assert!(serde_json::to_value(&plan)
+            .unwrap()
+            .get("warmResolveRequest")
+            .is_none());
     }
 
     #[test]
@@ -556,6 +655,34 @@ mod tests {
         assert_eq!(context.absolute_episode, Some(12));
         assert_eq!(context.stream_season, None);
         assert_eq!(context.stream_episode, None);
+        let plan = build_player_plan(&item, None, context_for(&item));
+        assert!(serde_json::to_value(&plan)
+            .unwrap()
+            .get("warmResolveRequest")
+            .is_none());
+
+        item.id = "kitsu:42/part%?#".to_string();
+        let plan = build_player_plan(
+            &item,
+            None,
+            ResolvedHistoryEpisodeContext {
+                absolute_season: Some(1),
+                absolute_episode: Some(12),
+                stream_season: Some(2),
+                stream_episode: Some(3),
+                stream_lookup_id: "tt7654321".to_string(),
+            },
+        );
+        assert_eq!(plan.target, "/player/anime/kitsu%3A42%2Fpart%25%3F%23/1/12");
+        assert_eq!(
+            serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
+            serde_json::json!({
+                "mediaType": "anime", "mediaId": "kitsu:42/part%?#",
+                "streamLookupId": "tt7654321", "streamSeason": 2, "streamEpisode": 3,
+                "absoluteSeason": 1, "absoluteEpisode": 12,
+                "title": "Example", "preferred": {},
+            })
+        );
     }
 
     #[test]

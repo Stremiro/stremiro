@@ -56,20 +56,6 @@ export function buildTrackAutoApplyFingerprint(preferredLanguage: string, tracks
   ]);
 }
 
-export function addonSubtitleKey(subtitle: {
-  id: string;
-  sourceId?: string;
-  url: string;
-  lang?: string;
-}): string {
-  return JSON.stringify([
-    subtitle.sourceId ?? '',
-    subtitle.id,
-    subtitle.url,
-    normalizeLanguageToken(subtitle.lang),
-  ]);
-}
-
 export function addonSubtitleTitleArg(subtitle: { id: string; label?: string }): string {
   return nonBlank(subtitle.label) || subtitle.id;
 }
@@ -135,9 +121,7 @@ export function doesTrackSelectionMatch(
 function formatTrackLabel(track: Track): string {
   const lang = track.lang?.toUpperCase();
   const title = track.title;
-  // Muxers write opaque titles ("Stereo 1", "Track 2") while mpv separately
-  // reports the declared language — lead with `lang` when the title doesn't
-  // already say it so same-titled tracks stay distinguishable.
+  // Muxers write opaque titles ("Stereo 1") while mpv reports the language separately — lead with `lang` unless the title already says it.
   const base =
     title && lang
       ? title.toLowerCase().includes(lang.toLowerCase())

@@ -2,6 +2,7 @@ import { useMemo } from 'react';
 import {
   type PlayerRouteMediaType,
   type PlayerRouteState,
+  normalizeRouteNumber,
   resolvePlayerRouteMediaType,
   sanitizePlayerRouteState,
 } from '@/lib/player-navigation';
@@ -12,10 +13,10 @@ function parseNonNegativeInt(value: string | number | undefined): number | undef
     if (!value) return undefined;
     const parsed = Number.parseInt(value, 10);
     // Season/episode 0 are valid coordinates (specials).
-    return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
+    return normalizeRouteNumber(parsed);
   }
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? Math.trunc(value)
+    ? normalizeRouteNumber(value)
     : undefined;
 }
 
@@ -31,7 +32,7 @@ export function usePlayerRouteState() {
     const state = sanitizePlayerRouteState(launchState as PlayerRouteState | null);
     const routeSeason = parseNonNegativeInt(season);
     const routeEpisode = parseNonNegativeInt(episode);
-    // Sanitized state fields are already number|undefined — no second parse.
+    // Sanitized state fields need no second parse.
     const routeAbsoluteSeason = state.absoluteSeason ?? routeSeason;
     const routeAbsoluteEpisode = state.absoluteEpisode ?? routeEpisode;
     const routeStreamSeason = state.streamSeason;
@@ -59,8 +60,7 @@ export function usePlayerRouteState() {
       openingStreamName: state.openingStreamName,
       openingStreamSource: state.openingStreamSource,
       title: state.title || 'Unknown Title',
-      // Raw route title for resolve inputs — the 'Unknown Title' display
-      // fallback must not enter ranking options or the best-stream key.
+      // Raw route title — the 'Unknown Title' display fallback must not enter ranking or the best-stream key.
       resolveTitle: state.title,
       poster: state.poster,
       backdrop: state.backdrop,

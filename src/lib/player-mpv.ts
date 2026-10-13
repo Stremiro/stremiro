@@ -2,9 +2,7 @@ import { invoke } from '@tauri-apps/api/core';
 import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
 import type { Track } from '@/lib/player-track-utils';
 
-// mpv IPC goes through the allowlisted `player_mpv_*` commands, not the
-// plugin's raw permissions — the webview only reaches the verbs and
-// properties the backend admits.
+// mpv IPC goes through the allowlisted `player_mpv_*` commands — the webview only reaches backend-admitted verbs/properties.
 export function mpvCommand(
   name: string,
   args: readonly (string | number | boolean)[] = [],
@@ -12,8 +10,7 @@ export function mpvCommand(
   return invoke('player_mpv_command', { name, args: [...args] });
 }
 
-/** Rust appends the `alang`/`slang`/selection options for these languages
-    from the canonical language table. */
+/** Rust appends `alang`/`slang`/selection options from the canonical language table. */
 interface MpvInitOptions {
   initialVolume: number;
   initialMuted: boolean;
@@ -55,16 +52,12 @@ export function setMpvProperties(
   return invoke('player_mpv_set_properties', { properties });
 }
 
-/** `cycle` steps aid/sid to the next track — the hotkey path's switch write.
-    Resolves after mpv applies the selection, so a follow-up read reports the
-    landed id. */
+/** `cycle` steps aid/sid — resolves after mpv applies, so a follow-up read reports the landed id. */
 export async function cycleMpvTrack(type: 'audio' | 'sub'): Promise<void> {
   await mpvCommand('cycle', [type === 'audio' ? 'aid' : 'sub']);
 }
 
-/** mpv `sub-add <url> [flags [title [lang]]]` — `lang` is appended only when
-    present. Resolves when mpv accepts the command; the track lands in
-    `track-list` only after mpv fetches it. */
+/** mpv `sub-add <url> [flags [title [lang]]]` — resolves at command accept; the track lands in `track-list` only after mpv fetches it. */
 export async function addSubtitleTrack(url: string, title: string, lang?: string): Promise<void> {
   const args = [url, 'select', title];
   const normalizedLang = lang?.trim();
@@ -72,20 +65,11 @@ export async function addSubtitleTrack(url: string, title: string, lang?: string
   await mpvCommand('sub-add', args);
 }
 
-async function readMpvProperty<T>(
-  name: string,
-  format: 'int64' | 'string' | 'flag' | 'double',
-): Promise<T | null> {
-  try {
-    return await mpvGetProperty<T | null>(name, format);
-  } catch {
-    return null;
-  }
+export function seekAbsoluteSeconds(seconds: number): Promise<void> {
+  return mpvCommand('seek', [seconds.toString(), 'absolute']);
 }
 
-/** One IPC reads both playhead seconds and demuxer cache ahead. Individual
-    unavailable properties remain null; IPC failure is a silent no-op during
-    teardown. */
+/** One IPC reads playhead seconds + demuxer cache ahead; IPC failure is a silent no-op during teardown. */
 export async function readPlaybackPositionProbe(durationSecs: number): Promise<{
   timePos: number | null;
   bufferedAhead: number | null;
@@ -98,15 +82,14 @@ export async function readPlaybackPositionProbe(durationSecs: number): Promise<{
   }
 }
 
-// Single-id poll for switch confirmation: 1 IPC vs a full list read.
-// Throws on IPC failure so callers retry; genuine "off" resolves to null.
+// Single-id poll (1 IPC vs full list); throws on IPC failure so callers retry — genuine "off" is null.
 export async function readSelectedTrackId(type: 'audio' | 'sub'): Promise<number | null> {
   return mpvGetProperty<number | null>(`current-tracks/${type}/id`, 'int64');
 }
 
 /** Poll the count alone — 1 IPC — for callers waiting on track-list growth. */
 export function readPlayerTrackCount(): Promise<number | null> {
-  return readMpvProperty<number>('track-list/count', 'int64');
+  return mpvGetProperty<number>('track-list/count', 'int64').catch(() => null);
 }
 
 export function readPlayerTrackList(

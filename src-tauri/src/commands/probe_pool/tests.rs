@@ -1,7 +1,8 @@
 use super::{
-    build_candidate_input, find_preferred_position, resolve_candidate_results,
-    resolve_ranked_best_stream_candidate, CandidateProbeResult, PreferredStreamHint, ProbeError,
-    ResolveStreamErrorKind, ResolvedStream, StreamPoolQuery, StreamResolveCandidateInput,
+    build_candidate_input, build_probe_candidates, find_preferred_position, probe_candidate,
+    resolve_candidate_results, resolve_ranked_best_stream_candidate, CandidateProbeResult,
+    PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream, StreamPoolQuery,
+    StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES, SAME_HOST_PROBE_SPACING,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
 use crate::providers::addons::{AddonStream, SelectionPriority, StreamEpisodeMatchKind};
@@ -26,9 +27,8 @@ fn probeable_stream(stream_key: &str, info_hash: Option<&str>) -> AddonStream {
 
 #[test]
 fn candidate_input_moves_identity_and_preserves_probe_fields() {
-    let mut stream = probeable_stream("s:prepared", Some("ABC123"));
+    let mut stream = probeable_stream("s:prepared", None);
     stream.url = Some("HTTPS://CDN.EXAMPLE/file.mkv".to_string());
-    stream.file_idx = Some(7);
     stream.source_id = Some("addon-instance".to_string());
     stream.source_name = Some("Addon Name".to_string());
     stream.stream_family = Some("release:group".to_string());
@@ -56,7 +56,6 @@ fn candidate_input_moves_identity_and_preserves_probe_fields() {
         identity
     );
     assert_eq!(candidate.direct_url, "https://cdn.example/file.mkv");
-    assert_eq!(candidate.content_key.as_deref(), Some("h:abc123:7"));
     assert_eq!(
         candidate.request_headers,
         vec![("Referer".to_string(), "https://site.example/".to_string())]
@@ -71,6 +70,66 @@ fn candidate_input_moves_identity_and_preserves_probe_fields() {
         stream.url = Some(url.to_string());
         assert!(build_candidate_input(stream).is_none(), "{url}");
     }
+}
+
+#[test]
+fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
+    let streams = (0..12)
+        .map(|index| {
+            let mut stream = probeable_stream(&format!("s:{index}"), None);
+            let host = if index == 1 {
+                "other.example"
+            } else {
+                "cdn.example"
+            };
+            stream.url = Some(format!("https://{host}/{index}.mkv"));
+            stream
+        })
+        .collect();
+    let plan = build_probe_candidates(streams, None, None, hint("s:10"));
+    assert_eq!(plan.len(), BEST_STREAM_MAX_CANDIDATES);
+    assert_eq!(
+        plan.iter()
+            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .collect::<Vec<_>>(),
+        ["s:10", "s:0", "s:1", "s:2", "s:3", "s:4", "s:5", "s:6"]
+    );
+    assert_eq!(
+        plan.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
+        [0, 1, 0, 2, 3, 4, 5, 6].map(|slot| SAME_HOST_PROBE_SPACING * slot)
+    );
+}
+
+#[test]
+fn probe_plan_deduplicates_requests_without_collapsing_auth_or_spending_slots_on_exclusions() {
+    let mut preferred = probeable_stream("s:preferred", None);
+    preferred.url = Some("HTTPS://CDN.EXAMPLE/file.mkv".to_string());
+    let mut authenticated = probeable_stream("s:auth", None);
+    authenticated.behavior_hints = Some(
+        serde_json::from_value(serde_json::json!({
+            "proxyHeaders": {"request": {"Authorization": "Bearer fixture"}}
+        }))
+        .unwrap(),
+    );
+    let mut excluded_url = probeable_stream("s:excluded-url", None);
+    excluded_url.url = Some("https://cdn.example/excluded.mkv".to_string());
+    let plan = build_probe_candidates(
+        vec![
+            probeable_stream("s:duplicate", None),
+            probeable_stream("s:excluded-key", None),
+            excluded_url,
+            authenticated,
+            preferred,
+        ],
+        Some("s:excluded-key"),
+        Some("https://cdn.example/excluded.mkv"),
+        hint("s:preferred"),
+    );
+    assert_eq!(plan.len(), 2);
+    assert_eq!(plan[0].0.stream_key, "s:preferred");
+    assert_eq!(plan[1].0.stream_key, "s:auth");
+    assert!(plan[0].0.request_headers.is_empty());
+    assert_eq!(plan[1].0.request_headers.len(), 1);
 }
 
 fn hint(stream_key: &'static str) -> PreferredStreamHint<'static> {
@@ -368,7 +427,7 @@ fn retain_episode_candidates_drops_conflicting_claims_keeps_order() {
     wrong.name = Some("Show.S02E05.1080p".to_string());
 
     let mut streams = vec![correct, unknown, wrong];
-    query.retain_episode_candidates(&mut streams, false);
+    query.retain_episode_candidates(&mut streams, &query.id, false);
 
     assert_eq!(
         streams
@@ -380,13 +439,67 @@ fn retain_episode_candidates_drops_conflicting_claims_keeps_order() {
 }
 
 #[test]
+fn retain_episode_candidates_keeps_queried_absolute_episode_fallbacks() {
+    for media_type in ["series", "anime"] {
+        let mut query = pool_query(media_type, Some(2), Some(3));
+        query.absolute_episode = Some(27);
+        let mut streams = [(2, 3), (2, 27), (1, 27), (1, 28)]
+            .into_iter()
+            .map(|(season, episode)| {
+                let mut stream = probeable_stream(&format!("s:{season}:{episode}"), None);
+                stream.name = Some(format!("Show.S{season:02}E{episode:02}.1080p"));
+                stream
+            })
+            .collect::<Vec<_>>();
+
+        query.retain_episode_candidates(&mut streams, &query.id, false);
+
+        assert_eq!(
+            streams
+                .iter()
+                .map(|stream| stream.stream_key.as_str())
+                .collect::<Vec<_>>(),
+            ["s:2:3", "s:2:27", "s:1:27"],
+            "{media_type}"
+        );
+    }
+}
+
+#[test]
+fn retain_episode_candidates_limits_absolute_targets_to_the_fetch_id() {
+    for (media_type, id, fetch_id, absolute_episode, retained) in [
+        ("series", "tt123", "tt123", Some(27), 1),
+        ("series", "tt123", "tt123", None, 0),
+        ("series", "tt123", "tt123", Some(3), 0),
+        ("series", "tt123", "kitsu:123", Some(27), 0),
+        ("anime", "kitsu:123", "tt123", Some(27), 1),
+        ("anime", "kitsu:123", "kitsu:123", Some(27), 0),
+    ] {
+        let mut query = pool_query(media_type, Some(2), Some(3));
+        query.id = id.to_string();
+        query.absolute_episode = absolute_episode;
+        let mut stream = probeable_stream("s:absolute", None);
+        stream.name = Some("Show.S01E27.1080p".to_string());
+        let mut streams = vec![stream];
+
+        query.retain_episode_candidates(&mut streams, fetch_id, false);
+
+        assert_eq!(
+            streams.len(),
+            retained,
+            "{media_type} {id} {fetch_id} {absolute_episode:?}"
+        );
+    }
+}
+
+#[test]
 fn retain_episode_candidates_wrong_only_pool_leaves_no_preferred_match() {
     let query = pool_query("series", Some(1), Some(5));
     let mut wrong = probeable_stream("s:bad", None);
     wrong.name = Some("Show.S02E05.1080p".to_string());
     let mut streams = vec![wrong];
 
-    query.retain_episode_candidates(&mut streams, false);
+    query.retain_episode_candidates(&mut streams, &query.id, false);
 
     assert!(streams.is_empty());
     assert_eq!(find_preferred_position(&streams, hint("s:bad"), None), None);
@@ -399,7 +512,7 @@ fn retain_episode_candidates_bypasses_movies() {
     stream.name = Some("Show.S02E05.1080p".to_string());
     let mut streams = vec![stream];
 
-    query.retain_episode_candidates(&mut streams, false);
+    query.retain_episode_candidates(&mut streams, &query.id, false);
 
     assert_eq!(streams.len(), 1);
 }
@@ -431,7 +544,6 @@ fn candidate_input(source_name: &str, stream_key: &str) -> StreamResolveCandidat
         source_name: Some(source_name.to_string()),
         stream_family: None,
         stream_key: stream_key.to_string(),
-        content_key: None,
         direct_url: format!("https://cdn.example/{stream_key}.mkv"),
         request_headers: Vec::new(),
     }
@@ -447,6 +559,23 @@ fn resolved(url: &str) -> ResolvedStream {
 
 type FakeProbeInner = Pin<Box<dyn Future<Output = Result<ResolvedStream, ProbeError>>>>;
 
+#[tokio::test]
+async fn probe_stagger_wait_obeys_the_shared_deadline() {
+    let candidate = candidate_input("delayed", "s:delayed");
+    let original_url = candidate.direct_url.clone();
+    let (candidate, result) = probe_candidate(
+        candidate,
+        Duration::from_secs(1),
+        tokio::time::Instant::now() + Duration::from_millis(1),
+    )
+    .await;
+    assert!(result.is_err());
+    assert_eq!(
+        candidate.direct_url, original_url,
+        "the probe never started"
+    );
+}
+
 async fn fake_probe(
     candidate: StreamResolveCandidateInput,
     timeout: Duration,
@@ -459,10 +588,8 @@ async fn fake_probe(
 #[tokio::test]
 async fn candidate_results_consume_in_rank_order() {
     let mut candidates = FuturesOrdered::new();
-    let mut ranked_first = candidate_input("slow-a", "s:rank-order-a");
-    ranked_first.content_key = Some("h:rank-order:0".to_string());
     candidates.push_back(fake_probe(
-        ranked_first,
+        candidate_input("slow-a", "s:rank-order-a"),
         Duration::from_secs(1),
         Box::pin(async {
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -481,11 +608,6 @@ async fn candidate_results_consume_in_rank_order() {
 
     assert_eq!(winner.url, "https://cdn.example/a.mkv");
     assert_eq!(winner.stream_key.as_deref(), Some("s:rank-order-a"));
-    // The winner's provider-independent identity stays resolvable by its key.
-    assert_eq!(
-        crate::commands::resolved_content_key("s:rank-order-a").as_deref(),
-        Some("h:rank-order:0")
-    );
 }
 
 #[tokio::test]

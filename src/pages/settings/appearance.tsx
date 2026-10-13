@@ -44,8 +44,7 @@ const TINT_TARGETS: ReadonlyArray<{
   },
 ];
 
-// Miniature of each accent surface, bound to the same scoped CSS vars the
-// real surfaces consume — color picks and toggles preview here live.
+// Miniatures bound to the same scoped CSS vars the real surfaces consume.
 function TintPreview() {
   return (
     <div className='flex flex-wrap items-center gap-x-5 gap-y-2 py-1'>
@@ -80,9 +79,8 @@ function TintPreview() {
   );
 }
 
-// Appearance applies live: preset/hex writes commit the moment the value is
-// valid, and the glow slider persists once per gesture (`onValueCommit`) so a
-// drag never bursts IPC writes. The whole app is the preview.
+// Appearance applies live: writes commit when valid; the glow slider persists
+// once per gesture (`onValueCommit`) so a drag never bursts IPC writes.
 export function AppearanceSettings() {
   const { profile, updateProfile } = useLocalProfile();
   const [draftAccentColor, setDraftAccentColor] = useState<string>();

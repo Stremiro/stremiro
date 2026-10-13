@@ -2,7 +2,6 @@ import { formatDistanceToNow } from 'date-fns';
 import { Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
 import { useNavigate } from 'react-router';
-import { mediaCardRailKey } from '@/components/media-card';
 import { RemoteImage } from '@/components/remote-image';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
@@ -15,24 +14,17 @@ import {
   type MediaItem,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
-  WATCH_STATUSES,
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
-import { getWatchProgressPercent, watchProgressCoordinates } from '@/lib/history-playback';
+import {
+  getWatchProgressPercent,
+  watchProgressCoordinates,
+  watchProgressItemKey,
+} from '@/lib/history-playback';
 import { navigateToDetails } from '@/lib/player-navigation';
 import { cn, formatSeasonEpisode, mediaTypeLabel } from '@/lib/utils';
-
-export function isWatchStatusValue(value: string): value is WatchStatus {
-  return (WATCH_STATUSES as readonly string[]).includes(value);
-}
-
-// Canonical row key on normalized coords — shared by the grid/list views so
-// switching modes keeps virtualizer identity for the same row.
-export function watchProgressItemKey(item: WatchProgress): string {
-  const { season, episode } = watchProgressCoordinates(item);
-  return `${item.type_}-${item.id}-${season ?? ''}-${episode ?? ''}`;
-}
+import { mediaCardRailKey } from './media-card';
 
 function PosterThumb({
   poster,
@@ -67,7 +59,7 @@ export function LibraryList({
   watchStatuses,
 }: {
   items: MediaItem[];
-  watchStatuses?: Record<string, string>;
+  watchStatuses?: Record<string, WatchStatus>;
 }) {
   return (
     <WindowVirtualizedStack
@@ -84,7 +76,7 @@ const LibraryListRow = memo(function LibraryListRow({
   status,
 }: {
   item: MediaItem;
-  status?: string;
+  status?: WatchStatus;
 }) {
   const navigate = useNavigate();
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
@@ -112,7 +104,7 @@ const LibraryListRow = memo(function LibraryListRow({
             <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
           )}
           <span className='text-[11px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
-          {status && isWatchStatusValue(status) && (
+          {status && (
             <span className={cn('text-[11px] font-medium', WATCH_STATUS_COLORS[status].text)}>
               {WATCH_STATUS_LABELS[status]}
             </span>

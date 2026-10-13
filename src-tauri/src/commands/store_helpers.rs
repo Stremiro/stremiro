@@ -15,9 +15,8 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     item.type_ = normalize_watch_progress_type(&item.type_)?.to_string();
 
     item.id = id;
-    // Field bounds + year normalization live in the single media
-    // normalizer; the library adds one rule — a titleless item cannot
-    // render a row, so it is rejected rather than persisted.
+    // Field bounds + year normalization live in the shared media normalizer;
+    // the library adds one rule — a titleless item can't render a row.
     let item = normalize_media_item(item);
     (!item.title.is_empty()).then_some(item)
 }
@@ -50,9 +49,8 @@ pub(super) fn library_item_key(item_id: &str) -> String {
     format!("{}{}", LIBRARY_ITEM_PREFIX, item_id)
 }
 
-/// The two coordinates of an index+item store domain: the sorted index
-/// header and the per-item key builder. Bundled so the generic index ops
-/// below cannot mix domains' keys.
+/// The two coordinates of an index+item store domain — bundled so the generic
+/// index ops below can't mix domains' keys.
 #[derive(Clone, Copy)]
 pub(super) struct IndexStoreLayout {
     pub index_key: &'static str,
@@ -64,9 +62,8 @@ pub(super) const LIBRARY_LAYOUT: IndexStoreLayout = IndexStoreLayout {
     item_key: library_item_key,
 };
 
-/// Single write path for index+item stores: drop item keys present in
-/// `previous_index` but absent from `map`, write every map entry, persist the
-/// sorted index, and save once.
+/// Single write path for index+item stores: drop items absent from `map`,
+/// write every entry, persist the sorted index, save once.
 pub(super) fn persist_index_map<T: serde::Serialize>(
     store: &DurableStore,
     layout: IndexStoreLayout,
@@ -89,24 +86,15 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
     Ok(index)
 }
 
-/// Shared prefix-sweep clear for index/item store domains: deletes every key
-/// under `prefixes`, resets each index/order key, and saves once. Prefix
-/// sweep, not index-driven enumeration: a corrupt index parses as empty and
-/// would orphan item rows nothing else scans — key space is the only
-/// complete enumeration.
+/// Shared prefix-sweep clear for index/item domains: deletes every key under
+/// `prefixes`, resets index/order keys, saves once. Prefix sweep, not index-driven
+/// enumeration — a corrupt index parses as empty and would orphan item rows.
 pub(super) fn clear_index_domain(
     store: &DurableStore,
     prefixes: &[&str],
     index_keys: &[&str],
 ) -> Result<(), String> {
-    let item_keys: Vec<String> = store
-        .keys()
-        .into_iter()
-        .filter(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)))
-        .collect();
-    for key in item_keys {
-        store.delete(key);
-    }
+    store.delete_matching(|key| prefixes.iter().any(|prefix| key.starts_with(prefix)));
     for index_key in index_keys {
         store.set(*index_key, json!(Vec::<String>::new()));
     }
@@ -114,10 +102,8 @@ pub(super) fn clear_index_domain(
     Ok(())
 }
 
-/// Index/order arrays decode member-by-member: one corrupt (non-string)
-/// entry must not orphan every item row behind an empty index — the item
-/// keys still resolve directly, and a rewritten empty index would strand
-/// them permanently.
+/// Index/order arrays decode member-by-member — one corrupt entry must not
+/// orphan every item row behind an empty index.
 pub(crate) fn decode_string_list(value: serde_json::Value) -> Option<Vec<String>> {
     let serde_json::Value::Array(members) = value else {
         return None;
@@ -133,10 +119,9 @@ pub(crate) fn decode_string_list(value: serde_json::Value) -> Option<Vec<String>
     )
 }
 
-/// Index read for the current index+item store shape: an absent index is an
-/// empty domain, a stored non-array is corrupt, and a non-empty array that
-/// decodes to zero strings is corrupt — erroring there keeps a later library
-/// or status save from silently overwriting the corrupt index.
+/// Index read: absent is an empty domain; a stored non-array or a non-empty array
+/// decoding to zero strings is corrupt — erroring keeps a later save from silently
+/// overwriting the corrupt index.
 pub(super) fn load_index(store: &DurableStore, index_key: &str) -> Result<Vec<String>, String> {
     let Some(value) = store.get(index_key) else {
         return Ok(Vec::new());
@@ -151,9 +136,8 @@ pub(super) fn load_index(store: &DurableStore, index_key: &str) -> Result<Vec<St
     Ok(index)
 }
 
-/// Index-driven map load with read-repair: missing/malformed items and key
-/// drift mark the store `modified`, then one persist call drops stale item
-/// keys and rewrites index + items in a single save.
+/// Index-driven map load with read-repair: missing/malformed items and key drift
+/// mark `modified`, then one persist drops stale items and rewrites index + items.
 fn load_index_map<T, N, M>(
     store: &DurableStore,
     layout: IndexStoreLayout,
@@ -170,13 +154,8 @@ where
     let mut modified = false;
 
     for item_id in &index {
-        let Some(value) = store.get((layout.item_key)(item_id)) else {
-            modified = true;
-            continue;
-        };
-
-        let Some((key, normalized)) = serde_json::from_value::<T>(value)
-            .ok()
+        let Some((key, normalized)) = store
+            .get_typed::<T>((layout.item_key)(item_id))
             .and_then(|parsed| normalize(item_id, parsed))
         else {
             modified = true;
@@ -224,10 +203,9 @@ pub(super) const WATCH_STATUS_LAYOUT: IndexStoreLayout = IndexStoreLayout {
     item_key: watch_status_item_key,
 };
 
-/// Rust is the single authority for watch-status values. The frontend already
-/// sends the `WatchStatus` union (`watching`/`watched`/`plan_to_watch`/
-/// `dropped`); direct IPC, legacy stores, and backup imports are untrusted and
-/// must funnel through here so arbitrary strings can never persist.
+/// Rust is the single authority for watch-status values (`watching`/`watched`/
+/// `plan_to_watch`/`dropped`) — IPC, legacy stores, and backups funnel through
+/// here so arbitrary strings never persist.
 pub(crate) fn normalize_watch_status(value: &str) -> Option<String> {
     match value.trim().to_ascii_lowercase().as_str() {
         "watching" => Some("watching".to_string()),

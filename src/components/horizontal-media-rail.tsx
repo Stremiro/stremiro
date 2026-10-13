@@ -25,8 +25,7 @@ function rememberRailScrollPosition(railId: string, position: number): void {
 const RAIL_MAX_ITEMS = 48;
 
 interface HorizontalMediaRailProps<T> {
-  /** Concatenated, never `cn()`-merged — column classes may pair `lg:pl-*`
-      with `lg:px-*`, which tailwind-merge would collapse. */
+  /** Concatenated, never `cn()`-merged — tailwind-merge would collapse `lg:pl-*`+`lg:px-*` pairs. */
   contentInsetsClassName?: string;
   getItemKey: (item: T, index: number) => Key;
   headerContent?: ReactNode;
@@ -140,7 +139,10 @@ export function HorizontalMediaRail<T>({
     : undefined;
 
   return (
-    <section className={cn('py-4 relative group/section', sectionClassName)}>
+    <section
+      aria-busy={isLoading || isPlaceholderData || undefined}
+      className={cn('py-4 relative group/section', sectionClassName)}
+    >
       <div className={`${contentInsetsClassName} mb-3`}>
         <div className='flex min-h-9 items-center justify-between mb-3'>
           <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>{title}</h2>

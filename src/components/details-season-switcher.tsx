@@ -31,7 +31,7 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
   const activeIndex = localSeasons.findIndex((season) => season.number === activeSeason);
 
   // ResizeObserver only watches the container box — a changed season count
-  // can change scrollWidth without it, so resync on set changes explicitly.
+  // changes scrollWidth without it.
   useEffect(() => {
     syncScrollState();
   }, [localSeasons.length, syncScrollState]);
@@ -116,7 +116,9 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
                   : 'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
               )}
               style={isActive ? { backgroundColor: 'var(--accent-nav)' } : undefined}
-              onClick={() => onLocalSeason(season.number)}
+              onClick={() => {
+                if (!isActive) onLocalSeason(season.number);
+              }}
             >
               {season.shortLabel}
               {season.episodeCount > 0 && (

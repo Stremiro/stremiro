@@ -42,13 +42,11 @@ const MINI_MAX_WIDTH_PX = 420;
 const MINI_WIDTH_RATIO = 0.26;
 const MINI_BEZEL_PX = 3;
 const MINI_EDGE_PAD_PX = 14;
-// Bounds derive from the shared chrome constants so a rail/titlebar resize
-// can't desync drag bounds from the video margin math.
+// Bounds derive from shared chrome constants so a rail/titlebar resize can't desync drag bounds from margin math.
 const MINI_LEFT_BOUND_PX = PLAYER_SIDEBAR_WIDTH_PX + 8;
 const MINI_TOP_BOUND_PX = PLAYER_TITLEBAR_HEIGHT_PX + 4;
 const DRAG_CLICK_TOLERANCE_PX = 6;
-// Two video taps inside this window expand — pointer capture retargets the
-// browser's dblclick, so pairing happens on pointer-up.
+// Two video taps inside this window expand — pointer capture retargets dblclick, so pairing happens on pointer-up.
 const DOUBLE_TAP_MS = 320;
 const SNAP_RADIUS_PX = 150;
 const SNAP_DURATION_MS = 200;
@@ -56,8 +54,7 @@ const FLASH_DURATION_MS = 550;
 // Dock entrance FLIP — same duration as the decorative keyframe it replaces.
 const DOCK_FLIP_MS = 260;
 const DOCK_FLIP_EASING = 'cubic-bezier(0.33, 1, 0.68, 1)';
-// The margin IPC lands a frame or two after the last rect report; the cover
-// stays up so the surface is never seen chasing.
+// The margin IPC lands a frame or two after the last rect report; the cover stays up so the surface is never seen chasing.
 const SURFACE_SETTLE_MS = 180;
 
 // Discrete actions ignore auto-repeat; arrows keep repeating.
@@ -126,9 +123,8 @@ function easeOutCubic(t: number): number {
 const MINI_ICON_BUTTON_CLASS =
   'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60';
 
-// The expand/close icons render twice (hover chrome and the error/empty
-// overlay), so the buttons live here once.
-function MiniExpandButton({ onClick, className }: { onClick: () => void; className?: string }) {
+// Expand/close render twice (hover chrome + error/empty overlay), so the buttons live here once.
+function MiniExpandButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       type='button'
@@ -136,45 +132,43 @@ function MiniExpandButton({ onClick, className }: { onClick: () => void; classNa
       aria-keyshortcuts='f'
       title='Back to player (F)'
       onClick={onClick}
-      className={cn(MINI_ICON_BUTTON_CLASS, className)}
+      className={MINI_ICON_BUTTON_CLASS}
     >
       <Maximize2 className='h-3.5 w-3.5' strokeWidth={2.25} />
     </button>
   );
 }
 
-// Dragging is pointer-only, so this button is the keyboard path to moving an
-// overlay that can cover content — each press glides to the next corner.
-function MiniSnapButton({ onClick, className }: { onClick: () => void; className?: string }) {
+// Dragging is pointer-only — this button is the keyboard path; each press glides to the next corner.
+function MiniSnapButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       type='button'
       aria-label='Move mini player to another corner'
       title='Move to another corner'
       onClick={onClick}
-      className={cn(MINI_ICON_BUTTON_CLASS, className)}
+      className={MINI_ICON_BUTTON_CLASS}
     >
       <Move className='h-3.5 w-3.5' strokeWidth={2.25} />
     </button>
   );
 }
 
-function MiniCloseButton({ onClick, className }: { onClick: () => void; className?: string }) {
+function MiniCloseButton({ onClick }: { onClick: () => void }) {
   return (
     <button
       type='button'
       aria-label='Close mini player'
       title='Close'
       onClick={onClick}
-      className={cn(MINI_ICON_BUTTON_CLASS, 'hover:bg-red-500/25 hover:text-red-200', className)}
+      className={cn(MINI_ICON_BUTTON_CLASS, 'hover:bg-red-500/25 hover:text-red-200')}
     >
       <X className='h-3.5 w-3.5' strokeWidth={2.25} />
     </button>
   );
 }
 
-// Title + episode suffix — the motion cover, hover chrome, and status
-// overlay each tint it differently.
+// Title + episode suffix — the motion cover, hover chrome, and status overlay each tint it differently.
 function MiniTitle({ title, episodeLabel }: { title: string; episodeLabel?: string }) {
   return (
     <>
@@ -184,30 +178,31 @@ function MiniTitle({ title, episodeLabel }: { title: string; episodeLabel?: stri
   );
 }
 
-// -- Tick leaves -------------------------------------------------------------
-// The only nodes subscribed to the playback clock and seek-preview store —
-// a ~3 Hz tick or a drag re-renders a leaf, not the whole chrome tree.
+// -- Tick leaves: the only clock/seek-preview subscribers — a ~3 Hz tick or drag re-renders a leaf, not the chrome tree.
 
-/**
- * Scrub-preview store scoped to the mini player — only the tick leaves
- * subscribe, so a drag never re-renders the portal root.
- */
+/** Scrub-preview store scoped to the mini player — a drag never re-renders the portal root. */
 type SeekPreviewStore = SubscribableStore<number | null>;
+const subscribeWhileHidden = () => () => {};
 
 function useMiniDisplayTime(
   clock: PlaybackClock,
   duration: number,
   seekPreviewStore: SeekPreviewStore,
+  active = true,
 ): number {
-  const currentTime = useSyncExternalStore(clock.subscribe, clock.getSnapshot);
   const seekPreview = useSyncExternalStore(
     seekPreviewStore.subscribe,
     seekPreviewStore.getSnapshot,
+  );
+  const currentTime = useSyncExternalStore(
+    active || seekPreview !== null ? clock.subscribe : subscribeWhileHidden,
+    clock.getSnapshot,
   );
   return Math.min(seekPreview ?? currentTime, duration > 0 ? duration : currentTime);
 }
 
 interface MiniPlayerTickProps {
+  active?: boolean;
   clock: PlaybackClock;
   duration: number;
   seekPreviewStore: SeekPreviewStore;
@@ -231,11 +226,12 @@ const MiniPlayerHairline = memo(function MiniPlayerHairline({
 });
 
 const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
+  active,
   clock,
   duration,
   seekPreviewStore,
 }: MiniPlayerTickProps) {
-  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore);
+  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
   return (
     <span className='shrink-0 text-[11px] tabular-nums text-white/80'>
       {formatTime(displayTime)}
@@ -249,14 +245,16 @@ interface MiniPlayerSeekSliderProps extends MiniPlayerTickProps {
 }
 
 const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
+  active,
   clock,
   duration,
   seekPreviewStore,
   onSeek,
 }: MiniPlayerSeekSliderProps) {
-  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore);
+  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
   return (
     <PlayerSlider
+      variant='track'
       aria-label='Seek'
       value={[Math.max(0, displayTime)]}
       max={Math.max(duration, 1)}
@@ -277,7 +275,6 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
 });
 
 interface MiniPlayerProps {
-  partyControl?: React.ReactNode;
   title: string;
   episodeLabel?: string;
   backdrop?: string;
@@ -304,8 +301,7 @@ interface MiniPlayerProps {
   initialPosition?: MiniPlayerPosition | null;
   /** Expanded surface rect at dock time — the frame FLIPs from it into the docked corner. */
   dockOrigin?: MiniVideoRect | null;
-  /** True only on the expanded→mini transition: keyboard minimize orphans
-      focus on unmounted chrome, so the fresh dock claims it. */
+  /** True only on the expanded→mini transition: keyboard minimize orphans focus on unmounted chrome, so the fresh dock claims it. */
   claimFocusOnMount?: boolean;
   onVideoRectChange: (rect: MiniVideoRect | null) => Promise<boolean> | void;
   onPositionChange: (position: MiniPlayerPosition) => void;
@@ -324,7 +320,6 @@ interface MiniPlayerProps {
 }
 
 export const MiniPlayer = memo(function MiniPlayer({
-  partyControl,
   title,
   episodeLabel,
   backdrop,
@@ -361,11 +356,13 @@ export const MiniPlayer = memo(function MiniPlayer({
 }: MiniPlayerProps) {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const videoSurfaceRef = useRef<HTMLDivElement | null>(null);
+  const pendingFocusClaimRef = useRef(claimFocusOnMount);
+  const [hovered, setHovered] = useState(false);
+  const [hasFocus, setHasFocus] = useState(false);
   const positionRef = useRef<MiniPlayerPosition | null>(null);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
   if (positionRef.current === null) {
-    // A saved position can outlive its viewport — clamp at init so the first
-    // paint is already in bounds; the mount re-clamp runs a frame too late.
+    // A saved position can outlive its viewport — clamp at init; the mount re-clamp runs a frame too late.
     positionRef.current = clampMiniPosition(
       initialPosition ?? defaultMiniPosition(metrics),
       metrics,
@@ -385,17 +382,14 @@ export const MiniPlayer = memo(function MiniPlayer({
   // External store, not state — per-pointermove publishes reach only the tick leaves.
   const seekPreviewStore = useMemo(() => createSubscribableStore<number | null>(null), []);
   const [isMoving, setIsMoving] = useState(false);
-  // Mount veiled when a live surface exists: the mask hole punches before the
-  // first margin IPC lands, and without the cover that gap shows a wrong-cropped
-  // slice. The exiting instance dissolves over live video — never veiled.
+  // Mount veiled when a live surface exists — the mask hole beats the first margin IPC, and an uncovered gap
+  // shows a wrong-cropped slice. The exiting instance dissolves over live video — never veiled.
   const [isSettling, setIsSettling] = useState(hasVideo && !exiting);
-  // One-shot dock entrance: with a live surface the frame FLIPs from the
-  // expanded rect into the corner instead of popping while the surface
-  // teleports later. Reduced-motion and videoless mounts use the plain keyframe.
+  // One-shot dock entrance: FLIP the frame from the expanded rect so the surface doesn't visibly teleport later;
+  // reduced-motion/videoless mounts use the plain keyframe.
   const [dockFlipFrom] = useState<MiniVideoRect | null>(() => {
     if (exiting || !hasVideo || !dockOrigin || prefersReducedMotion()) return null;
-    // A collapsed-surface margin (overlays shrink it to a sliver) is not a
-    // valid FLIP source — fly only from a rect larger than the dock target.
+    // A collapsed-surface margin (overlays shrink it to a sliver) is not a valid FLIP source.
     const fitted = fitRectToAspect(dockOrigin, metrics.frameWidth / metrics.videoHeight);
     return fitted.width > metrics.frameWidth ? fitted : null;
   });
@@ -404,8 +398,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const [flash, setFlash] = useState<{ kind: 'play' | 'pause'; id: number } | null>(null);
   const flashTimerRef = useRef<number | null>(null);
   const flashIdRef = useRef(0);
-  // Toggle intent for the flash icon — the prop can't keep up inside the
-  // double-tap window, so taps alternate off this value.
+  // Toggle intent for the flash icon — the prop can't keep up inside the double-tap window.
   const flashKindRef = useRef<'play' | 'pause' | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const landingRef = useRef(false);
@@ -413,8 +406,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const renderPosition = positionRef.current;
   const anchors = useMemo(() => snapAnchors(metrics), [metrics]);
 
-  // The reported hole is the video's content box (frame minus bezel): the
-  // painted border covers the rim and the hole's square corners.
+  // The reported hole is the video's content box (frame minus bezel); the painted border covers the rim and square corners.
   const reportVideoRect = useCallback(() => {
     const position = positionRef.current;
     if (!position) return;
@@ -446,15 +438,14 @@ export const MiniPlayer = memo(function MiniPlayer({
       const next = clampMiniPosition(position, metrics);
       positionRef.current = next;
       if (frameRef.current) {
-        // Whole-pixel translates avoid subpixel jitter against the mask hole.
         frameRef.current.style.transform = `translate3d(${Math.round(next.x)}px, ${Math.round(next.y)}px, 0)`;
       }
+      return next;
     },
     [metrics],
   );
 
-  // Drop the motion cover only after the last margin IPC lands — earlier
-  // reveals the surface mid-chase.
+  // Drop the motion cover only after the last margin IPC lands — earlier reveals the surface mid-chase.
   const startSurfaceSettle = useCallback(() => {
     setIsSettling(true);
     clearTimer(settleTimerRef);
@@ -469,19 +460,15 @@ export const MiniPlayer = memo(function MiniPlayer({
     startSurfaceSettle();
   }, [startSurfaceSettle]);
 
-  // Abort the dock FLIP on resize: dropping isDocking cancels the flight and
-  // snaps back through the render path; the mount effect re-clamps it.
-  // Dependency-free so it can sit in the mount effect's dep list.
+  // Resize aborts the dock FLIP (render path snaps back); dependency-free so it fits the mount effect's dep list.
   const cancelDockFlip = useCallback(() => {
     setIsDocking(false);
   }, []);
 
-  // Click-to-toggle fires immediately; a double-click just toggles twice
-  // (net: unchanged) before the expand lands.
+  // Click-to-toggle fires immediately; a double-click toggles twice (net: unchanged) before expand lands.
   const triggerPlaybackFlash = useCallback(() => {
-    // The icon confirms the requested state, not mpv's: a second tap inside
-    // the double-tap window fires before the pause round-trip updates
-    // `isPlaying`, so intent alternates off the last icon shown.
+    // Icon shows requested state, not mpv's — a second tap inside the double-tap window beats the pause
+    // round-trip, so intent alternates off the last icon shown.
     const kind =
       flashKindRef.current === null
         ? isPlaying
@@ -500,24 +487,22 @@ export const MiniPlayer = memo(function MiniPlayer({
     }, FLASH_DURATION_MS);
   }, [isPlaying]);
 
-  // mpv's state beats tracked intent: once the echo lands, the next tap
-  // seeds from the real prop again.
+  // mpv's state beats tracked intent: once the echo lands, the next tap seeds from the real prop again.
   useEffect(() => {
     flashKindRef.current = null;
   }, [isPlaying]);
 
-  // Eased glide toward a snap anchor — each frame re-reports the rect so the
-  // mpv surface tracks the motion. Reduced-motion skips it (CSS can't reach rAF).
+  // Eased glide to a snap anchor — each frame re-reports the rect so mpv tracks the motion; reduced-motion skips it (CSS can't reach rAF).
   const animateTo = useCallback(
     (target: MiniPlayerPosition) => {
       cancelSnap();
       const start = positionRef.current;
       if (!start) return;
       if (prefersReducedMotion()) {
-        applyPosition(target);
+        const landed = applyPosition(target);
         reportVideoRect();
         endMotion();
-        onPositionChange(target);
+        onPositionChange(landed);
         return;
       }
       const startTime = performance.now();
@@ -534,7 +519,7 @@ export const MiniPlayer = memo(function MiniPlayer({
         } else {
           snapFrameRef.current = null;
           endMotion();
-          onPositionChange(target);
+          if (positionRef.current) onPositionChange(positionRef.current);
         }
       };
       snapFrameRef.current = window.requestAnimationFrame(step);
@@ -549,29 +534,23 @@ export const MiniPlayer = memo(function MiniPlayer({
     ],
   );
 
-  // Latest-binding for rect callbacks read from teardown and the FLIP's
-  // landing: a rebuilt prop identity must never restart the flight through a
-  // stale closure. The write must precede the effects that read the ref.
+  // Callback churn must not restart the dock flight.
   const rectOpsRef = useRef({ reportVideoRect, onVideoRectChange });
   useEffect(() => {
     rectOpsRef.current = { reportVideoRect, onVideoRectChange };
   });
 
-  // Mount + metrics changes: re-clamp and report the live video rect. The dock
-  // FLIP owns transform and reports while in flight — this must not fight it.
+  // The dock flight owns geometry until landing.
   useEffect(() => {
     if (isDocking) return;
     if (positionRef.current) {
-      applyPosition(positionRef.current);
+      onPositionChange(applyPosition(positionRef.current));
     }
     reportVideoRect();
-  }, [applyPosition, reportVideoRect, isDocking]);
+  }, [applyPosition, reportVideoRect, isDocking, onPositionChange]);
 
-  // Dock entrance: a compositor-driven WAAPI flight uniformly scales the
-  // frame from the expanded rect into the corner — no per-frame rect reports
-  // or margin IPC. The opaque motion cover hides the interior while it
-  // flies, so the margins and mask hole move once on landing, and the cover
-  // drops as soon as that landing hole is verified.
+  // Dock entrance: a WAAPI flight scales the frame from the expanded rect — no per-frame rect reports or margin
+  // IPC. The motion cover hides the interior until the landing hole is verified.
   useLayoutEffect(() => {
     if (!isDocking || !dockFlipFrom) return;
     const frame = frameRef.current;
@@ -618,23 +597,20 @@ export const MiniPlayer = memo(function MiniPlayer({
     };
   }, [isDocking, dockFlipFrom, metrics, applyPosition, onPositionChange, startSurfaceSettle]);
 
-  // A keyboard minimize orphans focus on unmounted chrome — claim it for the
-  // frame. The exiting instance never steals focus; a remount already docked
-  // doesn't either; the claim waits for landing so the ring isn't scaled.
+  // Retain the mount-only claim through parent updates during docking.
   useEffect(() => {
-    if (exiting || !claimFocusOnMount || isDocking) return;
+    if (exiting || !pendingFocusClaimRef.current || isDocking) return;
+    pendingFocusClaimRef.current = false;
     const active = document.activeElement;
     if (active === document.body || active === document.documentElement || active === null) {
       videoSurfaceRef.current?.focus({ preventScroll: true });
     }
-  }, [exiting, claimFocusOnMount, isDocking]);
+  }, [exiting, isDocking]);
 
-  // The surface going live while minimized (or a resize) starts a margin
-  // chase — cover it until margins settle. The dock FLIP holds its own
-  // cover; the exiting instance never veils.
+  // A live surface or resize starts a margin chase — cover until margins settle; the dock FLIP holds its own
+  // cover and the exiting instance never veils.
   useEffect(() => {
-    // A just-landed FLIP owns its reveal via the hole verification — arming
-    // the fixed cover here would only extend it.
+    // A just-landed FLIP owns its reveal via hole verification — arming the fixed cover would only extend it.
     if (landingRef.current) {
       landingRef.current = false;
       return;
@@ -644,19 +620,23 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   useEffect(() => {
     const handleResize = () => {
-      // A resize invalidates the FLIP's fixed endpoints — snap to the dock
-      // rect and let the metrics update re-clamp it.
+      // Stop old-geometry frames before the new metrics clamp/report.
+      cancelSnap();
+      if (reportFrameRef.current !== null) {
+        window.cancelAnimationFrame(reportFrameRef.current);
+        reportFrameRef.current = null;
+      }
+      if (!dragStateRef.current) setIsMoving(false);
+      setSnapTargetIndex(null);
       cancelDockFlip();
       setMetrics(computeMiniMetrics());
       startSurfaceSettle();
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [cancelDockFlip, startSurfaceSettle]);
+  }, [cancelDockFlip, cancelSnap, startSurfaceSettle]);
 
-  // Unmount-only teardown, kept out of the listener effect: a rebuilt
-  // `onVideoRectChange` identity would kill an in-flight snap/settle mid-life —
-  // a dropped snap rAF leaves `isMoving` stuck with its opaque cover.
+  // Unmount-only teardown — a rebuilt `onVideoRectChange` mid-life would kill an in-flight snap.
   useEffect(() => {
     return () => {
       if (reportFrameRef.current !== null) {
@@ -695,13 +675,11 @@ export const MiniPlayer = memo(function MiniPlayer({
     [cancelSnap],
   );
 
-  // Keyboard/pointer-free move: hop to the next corner using the same eased
-  // glide and margin-chase cover a pointer drag's snap would produce.
+  // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
   const snapToNextAnchor = useCallback(() => {
     const position = positionRef.current;
     if (!position || anchors.length === 0) return;
-    // Nearest corner without the drag magnet's radius cap — the cycle must
-    // advance even from a free-floating position.
+    // Nearest corner without the drag magnet's radius cap — the cycle must advance from a free-floating position.
     let nearest = 0;
     let bestDistance = Infinity;
     anchors.forEach((anchor, index) => {
@@ -715,8 +693,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
   }, [anchors, animateTo]);
 
-  // Nearest snap anchor within the magnet radius — drives the release glide
-  // and the ghost outline while dragging.
+  // Nearest snap anchor within the magnet radius — drives the release glide and the drag ghost outline.
   const findSnapAnchorIndex = useCallback(
     (position: MiniPlayerPosition): number | null => {
       let bestIndex: number | null = null;
@@ -785,8 +762,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           setIsMoving(false);
           onPositionChange(position);
           if (drag.videoClick) {
-            // A second tap inside the window is a double-click: undo the
-            // first tap's toggle (net-zero) and expand.
+            // A second tap inside the window is a double-click: undo the first tap's toggle (net-zero) and expand.
             const now = performance.now();
             const isDoubleTap = now - lastVideoTapAtRef.current < DOUBLE_TAP_MS;
             lastVideoTapAtRef.current = isDoubleTap ? 0 : now;
@@ -818,8 +794,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       const drag = releaseDrag(event);
       if (!drag) return;
       if (drag.moved) {
-        // A cancelled drag still owns its end position: flush the rect
-        // report and persist so a remount lands where the drag ended.
+        // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
         reportVideoRect();
         endMotion();
         const position = positionRef.current;
@@ -839,9 +814,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     };
   }, [isMoving]);
 
-  // Scroll nudges volume, Shift+scroll seeks — same contract as the expanded
-  // player. React binds wheel passively, so this native listener owns the
-  // adjust and keeps the page behind from scrolling.
+  // Scroll = volume, Shift+scroll = seek (expanded-player contract); React binds wheel passively, so a native listener owns preventDefault.
   useEffect(() => {
     const surface = videoSurfaceRef.current;
     if (!surface) return;
@@ -860,8 +833,7 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   const handleVideoSurfaceKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // Scoped to the focused frame. Child-handled, composing, or
-      // modifier-chord keys are never media shortcuts.
+      // Scoped to the focused frame — child-handled, composing, or modifier-chord keys are never media shortcuts.
       if (
         event.defaultPrevented ||
         event.nativeEvent.isComposing ||
@@ -876,15 +848,12 @@ export const MiniPlayer = memo(function MiniPlayer({
       if (keyTarget instanceof HTMLElement && keyTarget !== event.currentTarget) {
         // Text inputs own every key outright.
         if (isEditableTarget(keyTarget)) return;
-        // A focused control keeps only its activation keys — sliders
-        // self-consume arrows via Radix (defaultPrevented above), so k/m/
-        // arrows/etc. stay media shortcuts. Matches the expanded player's
-        // contract instead of dropping every key on a focused child.
+        // A focused control keeps only its activation keys — sliders self-consume arrows via Radix
+        // (defaultPrevented above). Matches the expanded player's contract.
         if ((key === ' ' || key === 'enter') && keyTarget.closest('button, a')) {
           return;
         }
       }
-      // Discrete actions ignore auto-repeat; arrows keep repeating below.
       if (event.repeat && MINI_NON_REPEAT_KEYS.has(key)) {
         event.preventDefault();
         event.stopPropagation();
@@ -949,6 +918,13 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   const snapGhostAnchor = snapTargetIndex !== null ? anchors[snapTargetIndex] : null;
   const showLiveSurface = hasVideo && !error;
+  const controlsActive =
+    showLiveSurface &&
+    !exiting &&
+    !isMoving &&
+    !isDocking &&
+    !isSettling &&
+    (hovered || hasFocus || !isPlaying || isWorking || !!upNext || endOfMedia);
   const effectivelyMuted = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
 
@@ -957,9 +933,9 @@ export const MiniPlayer = memo(function MiniPlayer({
       ref={frameRef}
       role='dialog'
       aria-label='Mini player'
+      inert={exiting || isDocking}
       className={cn(
-        // will-change hint: the frame's transform is rewritten per
-        // pointermove via direct style writes.
+        // will-change: the frame's transform is rewritten per pointermove via direct style writes.
         'fixed left-0 top-0 z-[45] touch-none select-none will-change-transform',
         isMoving ? 'cursor-grabbing' : 'cursor-grab',
         (exiting || isDocking) && 'pointer-events-none',
@@ -968,8 +944,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       style={{
         width: metrics.frameWidth,
         height: metrics.videoHeight,
-        // While the dock FLIP owns the transform, the render value holds the
-        // first-frame delta.
+        // While the dock FLIP owns the transform, the render value holds the first-frame delta.
         transform:
           isDocking && dockFlipFrom
             ? `translate3d(${Math.round(dockFlipFrom.x)}px, ${Math.round(dockFlipFrom.y)}px, 0) scale(${(dockFlipFrom.width / metrics.frameWidth).toFixed(4)})`
@@ -982,26 +957,28 @@ export const MiniPlayer = memo(function MiniPlayer({
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
+      onPointerEnter={() => setHovered(true)}
+      onPointerLeave={() => setHovered(false)}
+      onFocusCapture={() => setHasFocus(true)}
+      onBlurCapture={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setHasFocus(false);
+      }}
     >
-      {/* Inner wrapper owns the entrance animation so outer-frame drag
-          transforms are never overridden. Stays transparent — a fill would
-          cover the mask hole below. */}
+      {/* Inner wrapper owns the entrance animation so outer-frame drag transforms are never overridden;
+          stays transparent — a fill would cover the mask hole below. */}
       <div
         className={cn(
           'group/mini overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
-          // A FLIPped mount already entered — the pop-in would restart at the
-          // dock rect and read as a second pop.
+          // A FLIPped mount already entered — the pop-in would restart at the dock rect and read as a second pop.
           exiting ? 'animate-mini-undock' : dockFlipFrom ? '' : 'animate-mini-dock',
           isMoving
             ? 'scale-[1.025] shadow-[0_0_0_1px_rgba(255,255,255,0.14),0_40px_80px_-20px_rgba(0,0,0,0.95)]'
             : 'shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_24px_56px_-16px_rgba(0,0,0,0.9)] hover:shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_28px_64px_-16px_rgba(0,0,0,0.92)]',
         )}
       >
-        {/* Video surface: the transparent interior reveals mpv behind the
-            webview. The painted border is the bezel covering the mask hole's
-            rim and square corners; overflow-hidden clips children to its
-            inner edge so square overlays never bleed over the corner curve. */}
-        {/* This focusable media region scopes hotkeys without making its controls children of a button. */}
+        {/* Video surface: the transparent interior reveals mpv behind the webview; the painted border is the
+            bezel covering the mask hole's rim, and overflow-hidden clips children to its inner edge. */}
+        {/* Focusable media region scopes hotkeys without making controls children of a button. */}
         {/* eslint-disable jsx-a11y/no-noninteractive-tabindex */}
         {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
         <div
@@ -1011,12 +988,11 @@ export const MiniPlayer = memo(function MiniPlayer({
           tabIndex={0}
           aria-label={`Mini player: ${title}. Space to play or pause, F to expand.`}
           onKeyDown={handleVideoSurfaceKeyDown}
-          className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
           style={{ height: metrics.videoHeight }}
         >
           {/* eslint-enable jsx-a11y/no-noninteractive-tabindex */}
-          {/* Motion cover: mpv margins chase the DOM rect over async IPC, so
-              an opaque poster hides the surface while the frame moves. */}
+          {/* Motion cover: mpv margins chase the DOM rect over async IPC — an opaque poster hides the surface mid-move. */}
           <div
             aria-hidden='true'
             className={cn(
@@ -1069,16 +1045,14 @@ export const MiniPlayer = memo(function MiniPlayer({
           {skipAction && showLiveSurface && isPlaying && !upNext && !endOfMedia && (
             <button
               type='button'
-              // Same rest-state contract as the Up Next strip — the docked
-              // chrome owns the action under hover/focus; `s` fires it from
-              // the focused surface.
+              // Same rest-state contract as the Up Next strip — docked chrome owns the action under hover/focus.
               tabIndex={-1}
               onClick={(e) => {
                 e.stopPropagation();
                 skipAction.onSkip();
               }}
               aria-keyshortcuts='s'
-              className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 backdrop-blur-md transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
+              className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
             >
               <FastForward className='h-3 w-3 shrink-0 text-white/90' strokeWidth={2.5} />
               <span className='text-xs font-medium leading-tight text-white'>
@@ -1087,8 +1061,7 @@ export const MiniPlayer = memo(function MiniPlayer({
             </button>
           )}
 
-          {/* EOF without next: the end card in strip form. Never fades — the
-              docked chrome has no replay control of its own. */}
+          {/* EOF without next: the end card in strip form — never fades; docked chrome has no replay control. */}
           {endOfMedia && showLiveSurface && (
             <PlayerEndCard
               variant='strip'
@@ -1121,25 +1094,25 @@ export const MiniPlayer = memo(function MiniPlayer({
             <div
               className={cn(
                 'pointer-events-none absolute inset-0 z-20 flex flex-col justify-between transition-opacity duration-200',
-                isMoving || isDocking || isSettling
-                  ? 'opacity-0'
-                  : !isPlaying || isWorking || upNext || endOfMedia
-                    ? 'opacity-100'
-                    : 'opacity-0 group-hover/mini:opacity-100 group-focus-within/mini:opacity-100',
+                controlsActive ? 'opacity-100' : 'opacity-0',
               )}
             >
               {/* Empty space on the title scrim still passes through to drag. */}
-              <div className='flex items-center gap-1 bg-linear-to-b from-black/85 via-black/40 to-transparent px-1.5 pb-4 pt-1.5'>
-                <MiniExpandButton onClick={onExpand} className='pointer-events-auto' />
-                <MiniSnapButton onClick={snapToNextAnchor} className='pointer-events-auto' />
+              <div
+                className={cn(
+                  'flex items-center gap-1 bg-linear-to-b from-black/85 via-black/40 to-transparent px-1.5 pb-4 pt-1.5',
+                  controlsActive && 'pointer-events-auto',
+                )}
+              >
+                <MiniExpandButton onClick={onExpand} />
+                <MiniSnapButton onClick={snapToNextAnchor} />
                 <p
                   className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'
                   title={title}
                 >
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>
-                {partyControl}
-                <MiniCloseButton onClick={onClose} className='pointer-events-auto' />
+                <MiniCloseButton onClick={onClose} />
               </div>
 
               {/* Movies and finales use the replay strip instead. */}
@@ -1147,9 +1120,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                 <div
                   className={cn(
                     'bg-linear-to-t from-black/90 via-black/60 to-transparent px-2.5 pb-2 pt-5',
-                    !isPlaying || isWorking || upNext
-                      ? 'pointer-events-auto'
-                      : 'group-hover/mini:pointer-events-auto group-focus-within/mini:pointer-events-auto',
+                    controlsActive && 'pointer-events-auto',
                   )}
                 >
                   <div className='flex min-w-0 items-center justify-between gap-2'>
@@ -1164,17 +1135,19 @@ export const MiniPlayer = memo(function MiniPlayer({
                         Up next · {upNext.label}
                       </button>
                     ) : (
-                      <span className='text-[11px] text-white/65'>
-                        {!isPlaying ? 'Paused' : ''}
+                      <span className='min-w-0 truncate text-[11px] text-white/65'>
+                        {isWorking ? 'Loading…' : !isPlaying ? 'Paused' : ''}
                       </span>
                     )}
                     <MiniPlayerTimeLabel
+                      active={controlsActive}
                       clock={clock}
                       duration={duration}
                       seekPreviewStore={seekPreviewStore}
                     />
                   </div>
                   <MiniPlayerSeekSlider
+                    active={controlsActive}
                     clock={clock}
                     duration={duration}
                     seekPreviewStore={seekPreviewStore}
@@ -1217,8 +1190,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                       </button>
                     )}
 
-                    {/* Hover-state skip: the resting chip fades under the
-                        chrome, so the action lives here while hovered. */}
+                    {/* Hover-state skip: the resting chip fades under the chrome. */}
                     {skipAction && (
                       <button
                         type='button'
@@ -1280,8 +1252,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                 error && 'cursor-pointer',
               )}
             >
-              {/* Full-surface expand target on error — rendered before the
-                  chrome buttons so they stay clickable. */}
+              {/* Full-surface expand target on error — rendered before the chrome buttons so they stay clickable. */}
               {error && (
                 <button
                   type='button'
@@ -1304,11 +1275,9 @@ export const MiniPlayer = memo(function MiniPlayer({
                   <MiniExpandButton onClick={onExpand} />
                   <MiniSnapButton onClick={snapToNextAnchor} />
                 </div>
-                {partyControl}
                 <MiniCloseButton onClick={onClose} />
               </div>
-              {/* Pointer-transparent — rendered last, this center block would
-                  otherwise cover the buttons and expand target above. */}
+              {/* Pointer-transparent — rendered last, it would otherwise cover the buttons/expand target above. */}
               <div className='pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center'>
                 {error ? (
                   <>
@@ -1336,8 +1305,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     </div>
   );
 
-  // Portaled to body: the chrome renders above the layers carrying the mask
-  // hole. The snap ghost sits one layer under the frame.
+  // Portaled to body so the chrome sits above the mask-hole layers; the snap ghost sits one layer under the frame.
   return createPortal(
     <>
       {snapGhostAnchor && (

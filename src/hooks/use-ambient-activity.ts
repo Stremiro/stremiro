@@ -1,9 +1,6 @@
 import { useEffect } from 'react';
 
-// Ambient activity signal: a page flags meaningful async work on `<html>` and
-// the layout's accent dots animate off it — a silent "working" cue with zero
-// per-page plumbing. A refcount keeps overlapping surfaces from clearing
-// each other's flag.
+// Refcounted "working" flag on <html> — pages set it during async work and the layout's accent dots animate off it.
 const AMBIENT_ACTIVE_ATTR = 'data-ambient-active';
 let ambientActiveCount = 0;
 

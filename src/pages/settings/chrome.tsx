@@ -15,7 +15,7 @@ export function SettingsGroup({
   return (
     <section
       className={cn(
-        'overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.015]',
+        'overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/45 shadow-[inset_0_1px_0_rgba(255,255,255,0.035),0_8px_28px_-20px_rgba(0,0,0,0.65)]',
         className,
       )}
     >
@@ -34,11 +34,13 @@ export function SettingsGroupHeader({
   title: string;
 }) {
   return (
-    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4'>
+    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] bg-white/[0.02] px-5 py-4'>
       <div className='min-w-0 flex-1 basis-48'>
         <h2 className='text-[15px] font-medium tracking-tight text-white'>{title}</h2>
         {description ? (
-          <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>{description}</p>
+          <p className='mt-1 max-w-prose text-[13px] leading-relaxed text-zinc-400'>
+            {description}
+          </p>
         ) : null}
       </div>
       {action ? <div className='shrink-0'>{action}</div> : null}
@@ -97,15 +99,15 @@ export function SettingsSwitch({
       disabled={disabled}
       onClick={onChange}
       className={cn(
-        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
-        !checked && 'bg-zinc-800',
+        'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
+        !checked && 'bg-zinc-800 enabled:hover:bg-zinc-700',
         disabled && 'cursor-not-allowed opacity-50',
       )}
       style={checked ? { backgroundColor: 'var(--accent-act)' } : undefined}
     >
       <span
         className={cn(
-          'inline-block h-[18px] w-[18px] rounded-full transition-[translate,background-color] duration-150 motion-reduce:transition-none',
+          'inline-block h-[18px] w-[18px] rounded-full shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-[translate,background-color] duration-150 motion-reduce:transition-none',
           checked ? 'translate-x-[22px] bg-(--on-accent-act)' : 'translate-x-0.5 bg-zinc-400',
         )}
       />

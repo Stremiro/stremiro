@@ -1,7 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -14,6 +14,7 @@ import {
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueries,
+  invalidatePlaybackLanguageQueries,
   invalidateStoredDataQueries,
   invalidateWatchStatusQueries,
   PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
@@ -22,6 +23,8 @@ import {
 } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 import { SETTINGS_OUTLINE_BUTTON_CLASS, SettingsGroup, SettingsGroupHeader } from './chrome';
+
+const CLEAR_CONFIRM_TIMEOUT_MS = 8_000;
 
 interface DataCategory {
   key: 'history' | 'library' | 'lists' | 'statuses';
@@ -75,13 +78,10 @@ function BackupRestore() {
       try {
         result = await api.importAppDataFromFile(selected);
       } finally {
-        // Whole-snapshot writers (profile, selector prefs, the addon list)
-        // compose writes from cached state — reset, not just invalidate, so
-        // a settings write landing before the refetch can't re-persist
-        // pre-import values over the restore. The addon reset also gates the
-        // list editor (`isLoading` → `isWorking`) until the fresh registry
-        // lands. Language prefs are per-field Rust writes; their reset only
-        // drops the stale display value.
+        // Whole-snapshot writers (profile, selector prefs, addon list) compose
+        // writes from cached state — reset, not just invalidate, so a settings
+        // write can't re-persist pre-import values over the restore. The addon
+        // reset also gates the list editor until the fresh registry lands.
         // Failed restores may have persisted earlier domains before failing.
         const settingsChanged = result?.settings_restored ?? true;
         if (settingsChanged) {
@@ -190,6 +190,7 @@ function DataManager() {
 
   const clearMutation = useMutation({
     mutationFn: async (cat: DataCategory) => {
+      await flushPendingAppWrites();
       await cat.clearFn();
       return cat;
     },
@@ -204,15 +205,43 @@ function DataManager() {
     },
   });
 
+  useEffect(() => {
+    if (!confirmKey || clearMutation.isPending) return;
+    const timer = window.setTimeout(() => setConfirmKey(null), CLEAR_CONFIRM_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [clearMutation.isPending, confirmKey]);
+
+  // Two-step confirm focus: arming lands on Cancel (a double Enter must never
+  // hit "Clear permanently"); disarming with lost focus returns to the row's
+  // Clear button.
+  const previousConfirmKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    const armedKey = previousConfirmKeyRef.current;
+    previousConfirmKeyRef.current = confirmKey;
+    const row = document.querySelector<HTMLElement>(`[data-clear-row="${confirmKey ?? armedKey}"]`);
+    if (confirmKey) {
+      row?.querySelector<HTMLElement>('[data-clear-cancel]')?.focus();
+    } else if (armedKey && (!document.activeElement || document.activeElement === document.body)) {
+      row?.querySelector<HTMLElement>('[data-clear-arm]')?.focus();
+    }
+  }, [confirmKey]);
+
   const categories: DataCategory[] = [
     {
       key: 'history',
       label: 'Watch history',
-      description: 'Viewed episodes, movies and progress data.',
+      description:
+        'Watched episodes and movies, resume progress, and per-title audio, subtitle and source picks.',
       count: stats?.history_count,
       unit: 'entries',
       clearFn: api.clearWatchHistory,
-      invalidateCaches: () => invalidatePlaybackHistoryQueries(queryClient),
+      // `clear_watch_history` also wipes per-title language picks and source health/affinity that feed stream ranking (Rust `PlaybackStateService::clear`).
+      invalidateCaches: async () => {
+        await Promise.all([
+          invalidatePlaybackHistoryQueries(queryClient),
+          invalidatePlaybackLanguageQueries(queryClient),
+        ]);
+      },
     },
     {
       key: 'library',
@@ -221,14 +250,8 @@ function DataManager() {
       count: stats?.library_count,
       unit: 'items',
       clearFn: api.clearLibrary,
-      // `clear_library` wipes watch statuses too — status is a library
-      // attribute, so both surfaces refetch.
-      invalidateCaches: async () => {
-        await Promise.all([
-          invalidateLibraryQueries(queryClient),
-          invalidateWatchStatusQueries(queryClient),
-        ]);
-      },
+      // `clear_library` also wipes watch statuses — both surfaces refetch.
+      invalidateCaches: () => invalidateLibraryQueries(queryClient),
     },
     {
       key: 'lists',
@@ -246,18 +269,13 @@ function DataManager() {
       count: stats?.watch_statuses_count,
       unit: 'labels',
       clearFn: api.clearAllWatchStatuses,
-      invalidateCaches: async () => {
-        await Promise.all([
-          invalidateWatchStatusQueries(queryClient),
-          queryClient.invalidateQueries({ queryKey: DATA_STATS_QUERY_KEY }),
-        ]);
-      },
+      invalidateCaches: () => invalidateWatchStatusQueries(queryClient),
     },
   ];
 
   return (
     <div className='border-t border-white/[0.06]'>
-      <div className='flex items-baseline justify-between gap-3 px-5 pb-1 pt-4'>
+      <div className='flex flex-wrap items-baseline justify-between gap-x-3 gap-y-1 px-5 pb-1 pt-4'>
         <p className='text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500'>
           Clear local records
         </p>
@@ -296,12 +314,16 @@ function DataManager() {
                 </p>
               </div>
 
-              <div className='flex shrink-0 items-center gap-2'>
+              <div
+                data-clear-row={cat.key}
+                className='flex max-w-full shrink-0 flex-wrap items-center gap-2'
+              >
                 {isConfirming ? (
                   <>
                     <Button
                       size='sm'
                       variant='outline'
+                      data-clear-cancel
                       aria-label={`Cancel clearing ${cat.label.toLowerCase()}`}
                       onClick={() => setConfirmKey(null)}
                       disabled={clearMutation.isPending}
@@ -324,6 +346,7 @@ function DataManager() {
                   <Button
                     size='sm'
                     variant='outline'
+                    data-clear-arm
                     aria-label={`Clear ${cat.label.toLowerCase()}`}
                     onClick={() => setConfirmKey(cat.key)}
                     disabled={cat.count === undefined || isEmpty || clearMutation.isPending}

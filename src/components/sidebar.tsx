@@ -1,22 +1,16 @@
-import {
-  Calendar,
-  Home,
-  Loader2,
-  type LucideIcon,
-  Popcorn,
-  Search,
-  Settings,
-  User,
-} from 'lucide-react';
-import { memo, type ReactNode } from 'react';
+import { useQueryClient } from '@tanstack/react-query';
+import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
+import { memo, type MouseEvent, type ReactNode } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useProfileAvatar } from '@/hooks/use-local-profile';
-import { describePartyStatus, useParty } from '@/lib/party-session';
+import { focusSearchInput } from '@/lib/dom';
 import { routeChunks } from '@/lib/route-chunks';
+import { prefetchSearchCatalog } from '@/lib/search-catalog';
+import { lastSearchFacets, lastSearchPath } from '@/lib/search-page-state';
 import { cn } from '@/lib/utils';
 
 interface SidebarProps {
@@ -34,12 +28,11 @@ interface SidebarNavItem {
 
 const SETTINGS_HREF = '/settings';
 const PROFILE_HREF = '/profile';
-const PARTY_HREF = '/party';
+const SEARCH_HREF = '/search';
 
 const PRIMARY_NAV_ITEMS: SidebarNavItem[] = [
   { icon: Home, label: 'Home', href: '/' },
-  { icon: Search, label: 'Search', href: '/search' },
-  { icon: Popcorn, label: 'Watch Together (Beta)', href: PARTY_HREF },
+  { icon: Search, label: 'Search', href: SEARCH_HREF },
   { icon: Calendar, label: 'Calendar', href: '/calendar' },
 ];
 
@@ -53,13 +46,11 @@ const SECONDARY_NAV_ITEMS: SidebarNavItem[] = [
   },
 ];
 
-// Warm the target page's lazy chunk on hover/focus so the click paints
-// instantly instead of waiting on a Suspense fallback. Loaders are shared
-// with App's lazy() routes via routeChunks so they hit the same chunks.
+// Warm the target's lazy chunk on hover/focus; loaders are shared with App's
+// lazy() routes via routeChunks so they hit the same chunks.
 const ROUTE_CHUNK_WARMERS: Record<string, () => Promise<unknown>> = {
-  '/search': routeChunks.search,
+  [SEARCH_HREF]: routeChunks.search,
   '/calendar': routeChunks.calendar,
-  [PARTY_HREF]: routeChunks.party,
   [SETTINGS_HREF]: routeChunks.settings,
   [PROFILE_HREF]: routeChunks.profile,
 };
@@ -70,42 +61,45 @@ function warmRouteChunk(href: string): void {
 
 export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarProps) {
   const { pathname } = useLocation();
+  const queryClient = useQueryClient();
   const { isUpdateAvailable, pendingUpdate } = useAppUpdater();
   const identity = useProfileAvatar();
-  const { room, busy, unread, panelOpen, setPanelOpen } = useParty();
   const updateTooltip = pendingUpdate?.version
-    ? `Update ${pendingUpdate.version} available`
+    ? `Update v${pendingUpdate.version} available`
     : 'Update available';
-  const partyStatus = room.active
-    ? describePartyStatus(room.members.length, unread)
-    : busy
-      ? 'Connecting to room'
-      : undefined;
 
   const renderItem = (item: SidebarNavItem) => {
     const showUpdate = item.href === SETTINGS_HREF && isUpdateAvailable;
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
-    const status = item.href === PARTY_HREF ? partyStatus : undefined;
-    const opensParty = playerMode && room.active && item.href === PARTY_HREF;
+    const isActive = item.matches?.(pathname) ?? pathname === item.href;
+    const isSearch = item.href === SEARCH_HREF;
     return (
       <SidebarNavButton
         key={item.href}
         item={item}
-        isActive={opensParty ? panelOpen : (item.matches?.(pathname) ?? pathname === item.href)}
-        onOpen={opensParty ? () => setPanelOpen(!panelOpen) : undefined}
+        // Search reopens the last URL; other items keep their static href.
+        to={isSearch ? lastSearchPath() : item.href}
+        isActive={isActive}
         playerMode={playerMode}
         updateAvailable={showUpdate}
-        status={status}
-        badge={
-          item.href === PARTY_HREF && room.active && (!playerMode || unread > 0) ? (
-            <PartyNavBadge unread={unread} />
-          ) : undefined
-        }
         tooltip={showUpdate ? updateTooltip : undefined}
+        onIntent={() => {
+          warmRouteChunk(item.href);
+          if (isSearch && navigator.onLine) {
+            prefetchSearchCatalog(queryClient, lastSearchFacets());
+          }
+        }}
+        onClick={
+          // Already on Search: a click just re-focuses the box, no nav reset.
+          isSearch && isActive
+            ? (event) => {
+                event.preventDefault();
+                focusSearchInput();
+              }
+            : undefined
+        }
         icon={
-          item.href === PARTY_HREF && busy && !room.active ? (
-            <Loader2 aria-hidden='true' className='animate-spin motion-reduce:animate-none' />
-          ) : avatar && identity ? (
+          avatar && identity ? (
             <ProfileAvatar
               name={identity.username}
               avatar={avatar}
@@ -172,58 +166,38 @@ export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarP
   );
 });
 
-const NAV_DOT_CLASS = 'absolute right-2.5 top-2.5 h-2 w-2 rounded-full bg-emerald-400';
-
-// Live room: a quiet dot; unread chat: an accent count the user can act on.
-function PartyNavBadge({ unread }: { unread: number }) {
-  if (unread === 0) return <span aria-hidden='true' className={NAV_DOT_CLASS} />;
-  return (
-    <span
-      aria-hidden='true'
-      className='absolute right-1 top-1 flex h-4 min-w-4 items-center justify-center rounded-full bg-(--accent-act) px-1 text-[10px] font-bold leading-none tabular-nums text-(--on-accent-act) ring-2 ring-zinc-950'
-    >
-      {unread > 9 ? '9+' : unread}
-    </span>
-  );
-}
+const NAV_DOT_CLASS =
+  'absolute right-[9px] top-[9px] h-[7px] w-[7px] rounded-full bg-emerald-400 ring-2 ring-black shadow-[0_0_8px_rgba(52,211,153,0.55)]';
 
 interface SidebarNavButtonProps {
-  badge?: ReactNode;
   icon?: ReactNode;
   isActive: boolean;
   item: SidebarNavItem;
-  onOpen?: () => void;
+  onClick?: (event: MouseEvent) => void;
+  onIntent: () => void;
   playerMode?: boolean;
-  /** Live state appended to the label for the tooltip and accessible name. */
-  status?: string;
+  to: string;
   tooltip?: string;
   updateAvailable?: boolean;
 }
 
 function SidebarNavButton({
-  badge,
   icon,
   isActive,
   item,
-  onOpen,
+  onClick,
+  onIntent,
   playerMode,
-  status,
+  to,
   tooltip,
   updateAvailable,
 }: SidebarNavButtonProps) {
   const content = (
     <>
       {icon ?? <item.icon strokeWidth={1.75} />}
-      {updateAvailable ? <span className={NAV_DOT_CLASS} /> : badge}
+      {updateAvailable && <span className={NAV_DOT_CLASS} />}
     </>
   );
-  // Dialog mode names the action (parity with the player party badge);
-  // nav links keep the destination name.
-  const label = onOpen
-    ? `Open watch party${status ? `, ${status}` : ''}`
-    : status
-      ? `${item.label}, ${status}`
-      : item.label;
   return (
     <div className='relative flex w-full justify-center'>
       <Tooltip>
@@ -232,7 +206,6 @@ function SidebarNavButton({
             asChild
             variant='ghost'
             size='icon'
-            data-party-entry={item.href === PARTY_HREF ? '' : undefined}
             style={
               isActive
                 ? { backgroundColor: 'var(--accent-nav)', color: 'var(--on-accent-nav)' }
@@ -241,41 +214,24 @@ function SidebarNavButton({
             className={cn(
               'relative h-11 w-full overflow-hidden rounded-lg transition-colors duration-150 group [&_svg]:size-[22px]',
               !isActive &&
-                (updateAvailable
-                  ? 'bg-emerald-500/[0.06] text-emerald-200/80 hover:bg-emerald-500/[0.10] hover:text-emerald-200'
-                  : playerMode
-                    ? 'text-white/60 hover:bg-white/[0.08] hover:text-white/90'
-                    : 'text-white/50 hover:bg-white/[0.08] hover:text-white/90'),
+                (playerMode
+                  ? 'text-white/60 hover:bg-white/[0.08] hover:text-white/90'
+                  : 'text-white/50 hover:bg-white/[0.08] hover:text-white/90'),
             )}
           >
-            {onOpen ? (
-              <button
-                type='button'
-                aria-label={label}
-                aria-haspopup='dialog'
-                aria-expanded={isActive}
-                onClick={onOpen}
-              >
-                {content}
-              </button>
-            ) : (
-              <Link
-                to={item.href}
-                aria-label={label}
-                aria-current={isActive ? 'page' : undefined}
-                onPointerEnter={() => warmRouteChunk(item.href)}
-                onFocus={() => warmRouteChunk(item.href)}
-              >
-                {content}
-              </Link>
-            )}
+            <Link
+              to={to}
+              aria-label={item.label}
+              aria-current={isActive ? 'page' : undefined}
+              onPointerEnter={onIntent}
+              onFocus={onIntent}
+              onClick={onClick}
+            >
+              {content}
+            </Link>
           </Button>
         </TooltipTrigger>
-        {!onOpen && (
-          <TooltipContent side='right'>
-            {tooltip ?? (status ? `${item.label} · ${status}` : item.label)}
-          </TooltipContent>
-        )}
+        <TooltipContent side='right'>{tooltip ?? item.label}</TooltipContent>
       </Tooltip>
     </div>
   );

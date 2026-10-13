@@ -7,6 +7,7 @@ import type { NextEpisodeStreamCoordinates } from '@/lib/episode-stream-target';
 import { launchResolvedStream } from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
+import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
 
 const isDev = import.meta.env.DEV;
 
@@ -15,10 +16,9 @@ interface ActiveResolveFeedback {
   title: string;
 }
 
-/** Episode-in-pack pick: the pack row supplies the stream; the pick supplies
-    the episode coordinates + resume point to resolve against. */
+/** Episode-in-pack pick: pack row supplies the stream, the pick supplies episode coords + resume point. */
 interface SelectorEpisodeOverride extends NextEpisodeStreamCoordinates {
-  startTime?: number;
+  getStartTime?: () => number | undefined;
 }
 
 interface SelectorResolveAttempt {
@@ -40,19 +40,20 @@ interface UseSelectorResolutionArgs {
   target: StreamSelectorTarget;
 }
 
+// Short facts only — the release filename is unreadable once truncated.
 function buildResolveFeedback(stream: AddonStream): ActiveResolveFeedback {
-  const normalizedTitle =
-    stream.presentation.streamTitle.trim() ||
-    stream.presentation.sourceName.trim() ||
-    'Selected stream';
-  const subtitle = [stream.sourceName?.trim(), stream.presentation.deliveryLabel]
+  const { presentation } = stream;
+  const title = stream.sourceName?.trim() || presentation.sourceName.trim() || 'Selected stream';
+  const subtitle = [
+    RESOLUTION_LABELS[presentation.resolution],
+    presentation.hdrLabel,
+    presentation.deliveryLabel,
+    presentation.sizeLabel,
+  ]
     .filter(Boolean)
-    .join(' | ');
+    .join(' · ');
 
-  return {
-    subtitle,
-    title: normalizedTitle,
-  };
+  return { subtitle, title };
 }
 
 export function useSelectorResolution({
@@ -79,29 +80,24 @@ export function useSelectorResolution({
     type: streamMediaType,
   } = target;
   const navigate = useNavigate();
-  // Key/session/feedback always move as one unit — a single nullable state
-  // can't tear mid-update the way three sibling states could.
+  // Key/session/feedback move as one unit — a single nullable state can't tear mid-update.
   const [activeResolve, setActiveResolve] = useState<{
     feedback: ActiveResolveFeedback;
     key: string;
     sessionKey: string;
   } | null>(null);
   // Synchronous in-flight guard: `isPending` is render-time state — two
-  // selects in the same tick would both spawn a resolve IPC.
+  // same-tick selects would both spawn a resolve IPC.
   const resolveInFlightRef = useRef(false);
-  // A slow resolve can outlive the close click and the component — `open`/
-  // `mounted` captured in the mutation closure would go stale.
+  // A slow resolve can outlive the close click and the component.
   const openRef = useRef(open);
   const latestSessionKeyRef = useRef(selectorSessionKey);
-  // Resume position reads through the getter at resolve time — the selector
-  // never subscribes to the playback clock.
+  // Read at resolve time so the selector never subscribes to the playback clock.
   const getStartTimeRef = useRef(getStartTime);
-  // Per-attempt identity: a cancelled/superseded resolve can never match
-  // again — its late winner can't navigate or reset newer UI state.
+  // Per-attempt identity: a superseded resolve's late winner can't navigate.
   const resolveAttemptIdRef = useRef(0);
-  // Latest-render binding for the resolve body: `handleSelectStream` is an
-  // event handler (`useEffectEvent` is off-contract) — a per-render ref gives
-  // the same latest-closure semantics.
+  // Latest-render binding for the resolve body — `handleSelectStream` is an
+  // event handler, so a per-render ref gives latest-closure semantics.
   const resolveStreamRef = useRef<((attempt: SelectorResolveAttempt) => Promise<void>) | undefined>(
     undefined,
   );
@@ -125,8 +121,7 @@ export function useSelectorResolution({
     [mountedRef],
   );
 
-  // The selector only exposes the in-flight resolve for its own session — a
-  // resolve started before a session switch stays hidden until invalidated.
+  // Only expose the in-flight resolve for its own session.
   const sessionResolve = activeResolve?.sessionKey === selectorSessionKey ? activeResolve : null;
 
   const resetActiveResolveState = useCallback(() => {
@@ -134,8 +129,7 @@ export function useSelectorResolution({
     setActiveResolve(null);
   }, []);
 
-  // Cancel affordance: invalidate the attempt so its late winner can't
-  // navigate, and release the UI lock.
+  // Invalidate the attempt so its late winner can't navigate; release the UI lock.
   const cancelResolve = useCallback(() => {
     resolveAttemptIdRef.current += 1;
     resetActiveResolveState();
@@ -146,16 +140,14 @@ export function useSelectorResolution({
     onClose();
   }, [cancelResolve, onClose]);
 
-  // Every open/session transition invalidates outstanding attempts — a stale
-  // resolve can never act on the new session.
+  // Open/session transitions invalidate outstanding attempts.
   useEffect(() => {
     cancelResolve();
   }, [cancelResolve, open, selectorSessionKey]);
 
   const resolveStream = async (attempt: SelectorResolveAttempt) => {
     const { stream } = attempt;
-    // A pack-episode pick overrides every coordinate with the chosen
-    // episode's own; a plain row resolves the selector's target.
+    // A pack-episode pick overrides every coordinate with the episode's own.
     const override = attempt.episodeOverride;
     const coords = {
       streamLookupId: override?.streamLookupId ?? lookupId,
@@ -165,9 +157,8 @@ export function useSelectorResolution({
       absoluteEpisode: override?.absoluteEpisode ?? absoluteEpisode,
     };
     try {
-      // Resolve by identity: `preferredStreamKey` keeps the raw stream
-      // payload (proxy secrets included) out of JS. Source/family ride along
-      // so a re-digested key still soft-matches the same stream.
+      // Resolve by identity: `preferredStreamKey` keeps the raw stream payload
+      // (proxy secrets included) out of JS; source/family soft-match on re-digest.
       const data = await resolvePlayerStream({
         mediaType: streamMediaType,
         mediaId: id,
@@ -185,16 +176,14 @@ export function useSelectorResolution({
         },
       });
 
-      // A cancelled or superseded attempt must never navigate — the user may
-      // have closed, switched titles, or unmounted meanwhile.
+      // A cancelled or superseded attempt must never navigate.
       if (!isCurrentResolve(attempt)) {
         return;
       }
       const feedback = attempt.feedback;
 
-      // One request object feeds the prime and the route state: the
-      // canonical-season fold must match or the player's replay misses the
-      // primed entry.
+      // One request object feeds the prime and the route state — the
+      // canonical-season fold must match or the replay misses the primed entry.
       const resolvedRequest = {
         mediaId: id,
         mediaType: streamMediaType,
@@ -214,21 +203,19 @@ export function useSelectorResolution({
         openingStreamName: feedback.title,
         openingStreamSource: feedback.subtitle,
         poster,
-        // An undefined pack resume point means start fresh, not the current
-        // episode's live position. Plain stream swaps retain the live getter.
-        startTime: override ? override.startTime : getStartTimeRef.current?.(),
+        // Fresh pack episodes must not inherit the target's live position.
+        startTime: override ? override.getStartTime?.() : getStartTimeRef.current?.(),
       };
 
       await Promise.resolve()
         .then(() => onBeforePlayerNavigation?.())
         .catch(() => undefined);
-      // The pre-navigation hook can be async — re-check the attempt so a
-      // cancel that landed while awaiting can't navigate.
+      // The pre-navigation hook can be async — re-check so a cancel that landed
+      // while awaiting can't navigate.
       if (!isCurrentResolve(attempt)) {
         return;
       }
-      // The pick supplies the replayed key plus the identity fallback for a
-      // failover winner.
+      // The pick supplies the replayed key plus identity fallback for a failover winner.
       launchResolvedStream(navigate, resolvedRequest, data, routeExtras, stream);
       closeSelector();
     } catch (error) {
@@ -264,8 +251,7 @@ export function useSelectorResolution({
     resolveStreamRef.current = resolveStream;
   });
 
-  // Derived from session UI state: a cancelled resolve may still be settling,
-  // but the user must be able to pick again.
+  // A cancelled resolve may still be settling, but the user must be able to pick again.
   const isAnyResolving = sessionResolve !== null;
 
   const handleSelectStream = useCallback(
@@ -274,8 +260,7 @@ export function useSelectorResolution({
         return;
       }
 
-      // P2P rows are shown for parity, but there's no peer-to-peer engine —
-      // explain instead of paying a doomed resolve.
+      // No peer-to-peer engine — explain instead of paying a doomed resolve.
       if (!stream.presentation.isInstantlyPlayable) {
         toast.info('P2P source — not playable in this build', {
           description:
@@ -285,8 +270,7 @@ export function useSelectorResolution({
         return;
       }
 
-      // Claim the attempt synchronously — a same-tick second click can't slip
-      // past the in-flight guard.
+      // Claim the attempt synchronously so a same-tick second click can't slip past.
       const feedback = buildResolveFeedback(stream);
       const attempt: SelectorResolveAttempt = {
         feedback,

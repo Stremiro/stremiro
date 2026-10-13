@@ -1,7 +1,6 @@
 import { type RefObject, useCallback, useEffect, useState } from 'react';
 
-// Sub-pixel/rounded layouts can report a few px of phantom scroll room —
-// below this the edge counts as reached.
+// Below this px of phantom scroll room (sub-pixel/rounded layouts) the edge counts as reached.
 const SCROLL_BOUNDARY_EPSILON = 4;
 
 interface ScrollEdgeState {
@@ -16,16 +15,8 @@ const INITIAL_SCROLL_EDGE_STATE: ScrollEdgeState = {
   hasOverflow: false,
 };
 
-/**
- * Edge-state tracker for a horizontally scrolling container — owns the
- * rAF-coalesced scroll listener and a ResizeObserver on the container box
- * (a viewport resize that matters resizes the container). Attach via the
- * returned `bind` callback ref so a
- * scroller that mounts late still subscribes. Call `syncScrollState` after
- * content changes — ResizeObserver watches the container's box, not its
- * scrollWidth. `positionRef` mirrors the last scrollLeft so an unmount
- * cleanup can persist it after React detaches the DOM ref.
- */
+/** Horizontal-scroll edge tracker: rAF scroll listener + container ResizeObserver; `bind` subscribes
+    late scrollers, `syncScrollState` re-reads after content changes (RO watches the box, not scrollWidth). */
 export function useScrollEdgeIndicators<T extends HTMLElement>(
   scrollRef: RefObject<T | null>,
   positionRef?: RefObject<number>,
@@ -52,6 +43,7 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
       return;
     }
 
+    // positionRef mirrors scrollLeft so an unmount cleanup can persist it after React detaches the ref.
     if (positionRef) positionRef.current = el.scrollLeft;
     const maxScrollLeft = Math.max(0, el.scrollWidth - el.clientWidth);
     const hasOverflow = maxScrollLeft > SCROLL_BOUNDARY_EPSILON;
@@ -73,7 +65,7 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
     if (!node) return;
 
     const initialSyncFrame = window.requestAnimationFrame(syncScrollState);
-    // Scroll events outpace frames — coalesce to one state read per frame.
+    // Scroll events outpace frames — one state read per frame.
     let scrollFrame: number | null = null;
     const handleScroll = () => {
       if (positionRef) positionRef.current = node.scrollLeft;

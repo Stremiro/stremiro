@@ -1,7 +1,6 @@
 import { useCallback, useState } from 'react';
 
-// Remembers which src failed rather than a boolean: a new or corrected URL
-// un-fails on its own, no remount needed.
+// Tracks which src failed (not a boolean) so a corrected URL un-fails without a remount.
 export function useFailedSrc(src: string | null | undefined) {
   const [failedSrc, setFailedSrc] = useState<string>();
   const onError = useCallback(() => {

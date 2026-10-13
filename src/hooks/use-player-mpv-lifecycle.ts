@@ -23,24 +23,20 @@ import {
   readPlaybackPositionProbe,
   setMpvProperties,
 } from '@/lib/player-mpv';
+import { isNearMediaEnd } from '@/lib/player-skip';
 import { sleep, type TimerHandle } from '@/lib/utils';
 
 const TIME_UPDATE_THROTTLE_MS = 350;
-// Position probe cadence: subscribers get ~3Hz while per-frame property
-// events stay off.
+// Position probe cadence: subscribers get ~3Hz while per-frame property events stay off.
 const POSITION_POLL_MS = 300;
-// Post-pause probe grace covers optimistic-seek settle ticks and a quick
-// resume click.
+// Post-pause probe grace covers optimistic-seek settle ticks and a quick resume click.
 const PAUSED_POLL_GRACE_MS = 1500;
-// Consecutive null probes (~7.5s) mean the mpv IPC channel is dead. Legitimate
-// nulls don't reach this: the probe only runs while playing or loading.
+// Consecutive null probes (~7.5s) = dead mpv IPC; legit nulls never reach this (probe runs only while playing/loading).
 const POSITION_POLL_STRIKE_OUT = 25;
 // The buffered-ahead band only needs to move when it visibly would.
 const BUFFERED_PUBLISH_DELTA_SECS = 0.5;
 const IDLE_GRACE_MS = 4000;
-// Mid-playback `idle-active` means the source dropped out from under a live
-// playhead and nothing reloads it — if the playhead is still dead after this
-// window the failure must reach the user instead of freezing on a last frame.
+// Mid-playback `idle-active` = source dropped under a live playhead; if still dead after this window the failure must reach the user.
 const IDLE_DEAD_VERDICT_MS = 10_000;
 const MPV_TEARDOWN_SETTLE_MS = 150;
 const TRACK_REFRESH_COALESCE_MS = 120;
@@ -83,8 +79,7 @@ interface UsePlayerMpvLifecycleArgs {
   /** Imperative margin re-apply — a reconfig event must not re-render the player tree. */
   requestSurfaceRefresh: () => void;
   isResolvingRef: RefObject<boolean>;
-  // Callbacks read through `useEffectEvent` wrappers below so the stream
-  // effect always invokes the latest render's props.
+  // Callbacks read through `useEffectEvent` wrappers so the stream effect always invokes the latest props.
   clearUiTimers: () => void;
   clearResumeRetryTimer: () => void;
   clearRecoveryTimers: () => void;
@@ -141,7 +136,7 @@ export function usePlayerMpvLifecycle({
   isResolvingRef,
   ...callbacks
 }: UsePlayerMpvLifecycleArgs) {
-  const { activeStreamUrl, activeStreamMpvHttpHeaderFields, lastStreamUrlRef } = stream;
+  const { activeStreamUrl, activeStreamMpvHttpHeaderFields, committedStreamUrlRef } = stream;
   const isDev = import.meta.env.DEV;
   const currentTimeRef = clock.ref;
   // Effect events keep callback changes from restarting the native player.
@@ -200,15 +195,16 @@ export function usePlayerMpvLifecycle({
     let consecutiveProbeFailures = 0;
     let nearCompletionSaved = false;
 
-    // Cosmetic property writes must never fail init — a rejected set here
-    // would surface "Failed to initialize player" on a live mpv.
+    // Cosmetic property writes must never fail init — a reject here would surface "Failed to initialize player" on a live mpv.
     const setMpvPropertiesBestEffort = (properties: Parameters<typeof setMpvProperties>[0]) =>
       setMpvProperties(properties).catch(() => {
         if (isDev) console.warn('[player] mpv property batch apply best-effort failed');
       });
 
-    const isPlayheadNearEnd = () =>
-      durationRef.current > 0 && currentTimeRef.current >= Math.max(0, durationRef.current - 1);
+    const streamGone = () => cancelled || !mountedRef.current || isDestroyedRef.current;
+    const streamCancelled = () => cancelled || isDestroyedRef.current;
+
+    const isPlayheadNearEnd = () => isNearMediaEnd(currentTimeRef.current, durationRef.current);
 
     const clearTransientTimers = () => {
       if (trackRefreshTimer !== null) clearTimeout(trackRefreshTimer);
@@ -219,30 +215,25 @@ export function usePlayerMpvLifecycle({
       }
     };
 
-    // mpv fires file-loaded + playback-restart + reconfig + both track
-    // notifications in a burst on every mount/recovery/advance — coalesce to
-    // one refresh per quiet period.
+    // mpv bursts file-loaded + reconfig + track notifications on every mount/recovery — coalesce to one refresh per quiet period.
     const scheduleTrackRefresh = () => {
       if (trackRefreshTimer !== null) clearTimeout(trackRefreshTimer);
       trackRefreshTimer = setTimeout(() => {
         trackRefreshTimer = null;
-        if (!cancelled && mountedRef.current && !isDestroyedRef.current) {
+        if (!streamGone()) {
           void refreshTracks();
         }
       }, TRACK_REFRESH_COALESCE_MS);
     };
 
-    // Playhead tick — driven by the position poll: optimistic-seek gate,
-    // publish, ready/resume signals.
+    // Playhead tick — driven by the position poll: optimistic-seek gate, publish, ready/resume signals.
     const handleTimePos = (data: number, nearCompletion: boolean) => {
       const now = performance.now();
-      // A pending optimistic seek owns the displayed position — swallow
-      // stale pre-seek ticks.
+      // A pending optimistic seek owns the displayed position — swallow stale pre-seek ticks.
       if (observeTimeUpdate(data, now)) return;
 
       currentTimeRef.current = data;
-      // A hidden window skips the subscriber notify but keeps the ref for
-      // persistence and seek rollback.
+      // A hidden window skips the subscriber notify but keeps the ref for persistence and seek rollback.
       if (!document.hidden) {
         clock.publish(data);
       }
@@ -250,8 +241,7 @@ export function usePlayerMpvLifecycle({
         if (isLoadingNow()) markPlaybackReady();
         markPlaybackVerified();
       }
-      // Rust owns the completion threshold; save only accepted native ticks,
-      // never a stale pre-seek position or an optimistic display-clock value.
+      // Rust owns the completion threshold; save only accepted native ticks, never a stale pre-seek or optimistic value.
       if (nearCompletion && isPlayingRef.current && !nearCompletionSaved) {
         nearCompletionSaved = true;
         void saveProgressRef.current?.();
@@ -260,8 +250,7 @@ export function usePlayerMpvLifecycle({
       void applyResumeIfReady();
     };
 
-    // Seconds buffered ahead; the seekbar adds the live position and clamps
-    // on duration. Ticks skip publishing when the band hasn't visibly moved.
+    // Seconds buffered ahead (seekbar adds live position, clamps on duration); skip publishing when the band hasn't visibly moved.
     const handleBufferedAhead = (data: number) => {
       const next = Math.max(0, data);
       const now = performance.now();
@@ -281,11 +270,9 @@ export function usePlayerMpvLifecycle({
 
     const pollPlaybackPosition = async () => {
       if (positionPollInFlight) return;
-      if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
+      if (streamGone()) return;
       if (!mpvInitializedRef.current) return;
-      // Idle gate: a paused/EOF stream can't move on its own, so the probe
-      // stops spending reads on a static frame. The grace window covers settle
-      // ticks after a pause and a pending optimistic seek.
+      // Idle gate: a paused/EOF stream can't move on its own; grace covers settle ticks and a pending optimistic seek.
       if (
         !isPlayingRef.current &&
         !isLoadingNow() &&
@@ -299,11 +286,10 @@ export function usePlayerMpvLifecycle({
         const { timePos, bufferedAhead, nearCompletion } = await readPlaybackPositionProbe(
           durationRef.current,
         );
-        if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
+        if (streamGone()) return;
         if (typeof timePos === 'number') handleTimePos(timePos, nearCompletion);
         if (typeof bufferedAhead === 'number') handleBufferedAhead(bufferedAhead);
-        // Both fields null while NOT loading means the IPC channel is gone —
-        // a live-but-opening mpv legitimately reports null time-pos.
+        // Both fields null while NOT loading = dead IPC — a live-but-opening mpv legitimately reports null time-pos.
         consecutiveProbeFailures =
           !isLoadingNow() && timePos === null && bufferedAhead === null
             ? consecutiveProbeFailures + 1
@@ -312,11 +298,8 @@ export function usePlayerMpvLifecycle({
           clearInterval(positionPollTimer);
           positionPollTimer = null;
           if (isDev) console.warn('[player] position probe stopped: mpv IPC unreachable');
-          // mpv itself is unreachable — every control silently no-ops from
-          // here and the frame is frozen. A dead IPC is a player fault, not
-          // a stream fault: surface the dead end (retry re-inits mpv via a
-          // fresh resolve) without benching an innocent source. The
-          // error/resolving gates match the idle-dead verdict's.
+          // Dead IPC is a player fault, not a stream fault: surface the dead end (retry re-inits via a fresh
+          // resolve) without benching an innocent source. Gates match the idle-dead verdict's.
           if (!errorRef.current && !isResolvingRef.current) {
             setError('The player stopped responding. Try again.');
           }
@@ -337,6 +320,7 @@ export function usePlayerMpvLifecycle({
       setIsLoading(true);
       setError(null);
       clock.publish(0);
+      durationRef.current = 0;
       bufferedClock.publish(0);
       setDuration(0);
       setIsBuffering(false);
@@ -357,13 +341,11 @@ export function usePlayerMpvLifecycle({
         });
         if (cancelled) return;
 
-        // One parallel batch before loadfile: display props, stream headers,
-        // and listener registration are independent. One listenEvents covers
-        // property-changes and named events. allSettled so a listener
-        // rejection can't strand still-pending property writes past setup.
+        // One parallel batch before loadfile — props, headers, listener registration are independent;
+        // allSettled so a listener rejection can't strand still-pending property writes.
         const startupResults = await Promise.allSettled([
           listenEvents((event) => {
-            if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
+            if (streamGone()) return;
 
             if (event.event !== 'property-change') {
               if (
@@ -374,7 +356,7 @@ export function usePlayerMpvLifecycle({
               ) {
                 scheduleTrackRefresh();
                 window.requestAnimationFrame(() => {
-                  if (!cancelled && mountedRef.current && !isDestroyedRef.current) {
+                  if (!streamGone()) {
                     requestSurfaceRefresh();
                   }
                 });
@@ -386,8 +368,7 @@ export function usePlayerMpvLifecycle({
             if (!name) return;
 
             if (isPlayerTrackRefreshProperty(name)) {
-              // Observed selection ids double as the switch-confirm channel:
-              // a pending `aid`/`sid` write resolves on this event.
+              // Observed selection ids double as the switch-confirm channel — a pending `aid`/`sid` write resolves on this event.
               if (name === 'current-tracks/audio/id') {
                 onObservedTrackSelection('audio', typeof data === 'number' ? data : null);
               } else if (name === 'current-tracks/sub/id') {
@@ -413,8 +394,7 @@ export function usePlayerMpvLifecycle({
                   isPlayingRef.current = !data;
                   setIsPlaying(!data);
                   if (data) {
-                    // Keep the probe ticking briefly past the pause so settle
-                    // ticks and a quick resume still land.
+                    // Keep the probe ticking briefly past the pause so settle ticks and a quick resume still land.
                     pausedPollGraceUntil = performance.now() + PAUSED_POLL_GRACE_MS;
                   }
                 }
@@ -442,8 +422,7 @@ export function usePlayerMpvLifecycle({
                   onEndedChange(false);
                   break;
                 }
-                // mpv emits transient EOF at seek boundaries and live edges;
-                // terminal only once loaded and the playhead is at the end.
+                // mpv emits transient EOF at seek boundaries and live edges; terminal only once loaded at end.
                 if (data !== true || isLoadingNow()) break;
                 if (durationRef.current > 0 && currentTimeRef.current < durationRef.current - 2) {
                   break;
@@ -463,14 +442,13 @@ export function usePlayerMpvLifecycle({
 
                   if (isPlayheadNearEnd()) break;
 
-                  const currentUrl = lastStreamUrlRef.current || activeStreamUrl;
+                  const currentUrl = committedStreamUrlRef.current;
                   if (!currentUrl) break;
 
                   const duringInitialLoad = isLoadingNow();
                   const outcome = duringInitialLoad ? 'load-failed' : 'disconnected';
 
-                  // Report only where recovery never runs —
-                  // `recover_playback_stream` records the outcome itself.
+                  // Report only where recovery never runs — `recover_playback_stream` records the outcome itself.
                   if (isHistoryResumeNow() && duringInitialLoad) {
                     reportStreamFailure(outcome, currentUrl);
                     stopLoading();
@@ -480,15 +458,12 @@ export function usePlayerMpvLifecycle({
 
                   if (hasProgressedMeaningfully) {
                     reportStreamFailure(outcome, currentUrl);
-                    // Nothing reloads a source that idles mid-playback, so arm
-                    // a verdict: a still-dead playhead surfaces the failure —
-                    // recovery (isResolvingRef) or a stream swap (cancelled)
-                    // cancels it, and position movement means mpv self-healed.
+                    // Nothing reloads a mid-playback idle — arm a verdict; recovery, a swap, or position movement cancels it.
                     if (idleDeadTimer === null) {
                       const deadPosition = currentTimeRef.current;
                       idleDeadTimer = setTimeout(() => {
                         idleDeadTimer = null;
-                        if (cancelled || !mountedRef.current || isDestroyedRef.current) return;
+                        if (streamGone()) return;
                         if (errorRef.current || isResolvingRef.current || isLoadingNow()) {
                           return;
                         }
@@ -499,12 +474,10 @@ export function usePlayerMpvLifecycle({
                     break;
                   }
 
-                  // idle-active can fire mid-playback: re-check near-end/verified
-                  // before failing the stream after recovery.
+                  // idle-active can fire mid-playback: re-check near-end/verified before failing after recovery.
                   void recoverFromSlowStartup(currentUrl, outcome).then((didRecover) => {
-                    // A swap/unmount during the up-to-45s recovery must not
-                    // fail the stream that replaced it.
-                    if (cancelled || isDestroyedRef.current) return;
+                    // A swap/unmount during the up-to-45s recovery must not fail the stream that replaced it.
+                    if (streamCancelled()) return;
                     if (didRecover || !mountedRef.current || errorRef.current) return;
 
                     if (isPlayheadNearEnd()) return;
@@ -522,8 +495,7 @@ export function usePlayerMpvLifecycle({
                 break;
               case 'core-idle':
                 if (data === false) {
-                  // duration>0 only: `loadfileSent` marked ready the instant
-                  // mpv started opening — before a single frame existed.
+                  // duration>0 only: `loadfileSent` marked ready before a single frame existed.
                   if (isLoadingNow() && durationRef.current > 0) {
                     markPlaybackReady();
                   }
@@ -532,8 +504,7 @@ export function usePlayerMpvLifecycle({
                 break;
             }
           }).then((registeredUnlisten) => {
-            // Attach the moment registration resolves: a batch rejection or a
-            // cleanup that already ran must not strand the webview subscription.
+            // Attach the moment registration resolves: a batch rejection or already-ran cleanup must not strand the subscription.
             if (cancelled) {
               registeredUnlisten();
             } else {
@@ -546,8 +517,7 @@ export function usePlayerMpvLifecycle({
             ...(subtitleSettingsRef.current.scale !== 1.0
               ? [['sub-scale', subtitleSettingsRef.current.scale] as const]
               : []),
-            // Headers apply before loadfile; empty clears so secrets never
-            // leak. Never log header values; dev signal is a static code only.
+            // Headers apply before loadfile; empty clears so secrets never leak — never log header values.
             ['http-header-fields', activeStreamMpvHttpHeaderFields ?? ''],
           ]),
         ]);
@@ -559,9 +529,7 @@ export function usePlayerMpvLifecycle({
         mpvInitializedRef.current = true;
         setMpvSurfaceReady(true);
 
-        // Live refs after the init awaits: the prefs/volume effects'
-        // mpvInitializedRef gate skips mid-init changes, so these writes must
-        // carry the newest values.
+        // Live refs after the init awaits — the `mpvInitializedRef` gate skips mid-init changes, so write the newest values.
         const liveProperties: [string, number | boolean][] = [];
         if (playbackSpeedRef.current !== 1.0)
           liveProperties.push(['speed', playbackSpeedRef.current]);
@@ -584,22 +552,20 @@ export function usePlayerMpvLifecycle({
 
         clearUiTimers();
         forceShowTimeoutRef.current = setTimeout(() => {
-          // Mid-recovery the old stream's timers must not flash an error for
-          // a swap already in flight.
+          // Mid-recovery the old stream's timers must not flash an error for a swap already in flight.
           if (isResolvingRef.current) return;
-          if (!cancelled && mountedRef.current && isLoadingNow() && !errorRef.current) {
+          if (!streamGone() && isLoadingNow() && !errorRef.current) {
             if (isDev) console.warn('[player] load timed out; revealing controls');
             stopLoading(true);
-            // A stuck load must never strand the user on a black frame —
-            // surface the chrome while the verdict is pending.
+            // A stuck load must never strand the user on a black frame — surface chrome while the verdict is pending.
             revealControls();
             forceShowTimeoutRef.current = setTimeout(() => {
-              if (cancelled || !mountedRef.current || errorRef.current) return;
+              if (streamGone() || errorRef.current) return;
               if (isResolvingRef.current) return;
               if (playbackVerifiedAtRef.current > 0) return;
               if (durationRef.current > 0 && currentTimeRef.current > 0.1) return;
 
-              const currentUrl = lastStreamUrlRef.current || activeStreamUrl;
+              const currentUrl = committedStreamUrlRef.current;
               if (!currentUrl) {
                 reportStreamFailure('load-failed');
                 setError('Stream failed to load. Try another stream.');
@@ -607,11 +573,9 @@ export function usePlayerMpvLifecycle({
                 return;
               }
 
-              // Fires before the startup watchdog — a hung connect gets one
-              // re-rank first. Recovery records its own outcome; a report here
-              // would double-count.
+              // Fires before the startup watchdog — a hung connect gets one re-rank first; recovery records its own outcome.
               void recoverFromSlowStartup(currentUrl, 'load-failed').then((didRecover) => {
-                if (cancelled || isDestroyedRef.current) return;
+                if (streamCancelled()) return;
                 if (didRecover || !mountedRef.current || errorRef.current) return;
                 // A newer recovery attempt took over — don't clobber it.
                 if (isResolvingRef.current) return;
@@ -629,15 +593,12 @@ export function usePlayerMpvLifecycle({
           }
         }, FORCE_SHOW_AFTER_MS);
       } catch (error) {
-        // A cancelled run returns to the already-enqueued cleanup, which owns
-        // teardown — no independent late destroy.
+        // A cancelled run returns to the already-enqueued cleanup, which owns teardown — no late destroy.
         if (cancelled) return;
         if (isDev) console.error('[player] mpv init failed:', error);
-        // A failure before `loadfile` is player setup, not a stream fault —
-        // reporting would bench a source that was never attempted.
+        // A failure before `loadfile` is player setup, not a stream fault — reporting would bench a source never attempted.
         if (loadfileSent) reportStreamFailure('load-failed');
-        // Still serialized on the lifecycle queue: tear the half-built
-        // instance down here so a remount's init can't race it.
+        // Still serialized on the lifecycle queue — tear the half-built instance down so a remount's init can't race it.
         clearTransientTimers();
         unlisten?.();
         unlisten = undefined;
@@ -668,9 +629,7 @@ export function usePlayerMpvLifecycle({
       clearUiTimers();
       clearResumeRetryTimer();
       clearRecoveryTimers();
-      // Teardown serializes through the window-scoped lifecycle queue — a
-      // remount's init waits out this destroy + settle instead of racing the
-      // native instance it could destroy.
+      // Teardown serializes through the lifecycle queue — a remount's init waits out this destroy + settle.
       void enqueuePlayerLifecycle(async () => {
         await mpvDestroy();
         await sleep(MPV_TEARDOWN_SETTLE_MS);
@@ -682,8 +641,7 @@ export function usePlayerMpvLifecycle({
       // eslint-disable-next-line react-hooks/exhaustive-deps
       void saveProgressRef.current?.();
     };
-    // Keyed on the URL only: header changes always come with a URL change, and
-    // callbacks go through effect events so late renders can't re-init mpv.
+    // Keyed on URL only: header changes always come with a URL change; callbacks go through effect events so late renders can't re-init.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeStreamUrl]);
 
