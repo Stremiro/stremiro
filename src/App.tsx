@@ -295,6 +295,7 @@ function AppUpdateManager() {
 // Close barrier: every awaited step is bounded — a wedged native op or viewport
 // transition must not trap the window open (the OS reclaims mpv at exit).
 const CLOSE_BARRIER_STEP_TIMEOUT_MS = 8_000;
+const CLOSE_MPV_TEARDOWN_TIMEOUT_MS = 2_000;
 
 function AppCloseManager() {
   const isDesktopRuntime = isTauriDesktopRuntime();
@@ -367,9 +368,13 @@ function AppCloseManager() {
           await withTimeout(flushPendingAppWrites(), CLOSE_BARRIER_STEP_TIMEOUT_MS, () => {
             throw new Error('Pending writes did not settle.');
           });
-          // A failed native teardown still closes — vetoing would wedge the
-          // window behind an unkillable mpv call; exit reclaims it.
-          await mpvDestroy().catch(() => undefined);
+          // A failed or slow native teardown still closes — vetoing would wedge
+          // the window behind an unkillable mpv call; exit reclaims it.
+          await withTimeout(
+            mpvDestroy().catch(() => undefined),
+            CLOSE_MPV_TEARDOWN_TIMEOUT_MS,
+            () => undefined,
+          );
         } catch {
           // Veto once so the save retries; the next close quits anyway.
           if (!saveFailureVetoed) {

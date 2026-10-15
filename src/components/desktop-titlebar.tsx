@@ -115,13 +115,13 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
     <div className={cn('fixed inset-x-0 top-0 z-80 flex h-8 items-stretch', className)}>
       {historyControls && <TitlebarHistoryControls />}
 
-      {/* Drag region fills remaining space */}
+      {/* Drag region fills remaining space. Tauri's drag script already maximizes
+          on double-click; a React handler here would toggle a second time. */}
       <button
         type='button'
         data-tauri-drag-region
         aria-label='Toggle maximize window'
         className='flex min-w-0 flex-1 items-center select-none focus:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/20'
-        onDoubleClick={handleToggleMaximize}
         onKeyDown={(event) => {
           if (event.key !== 'Enter' && event.key !== ' ') {
             return;
