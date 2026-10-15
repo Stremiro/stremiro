@@ -1,26 +1,53 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowLeft, Maximize2, Minimize2, Minus, X } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Maximize2, Minimize2, Minus, X } from 'lucide-react';
 import { memo, useEffect, useMemo, useState } from 'react';
-import { useLocation, useNavigate } from 'react-router';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
-import { navigateAppBack, pathBelowTop } from '@/lib/navigation';
-import { resolveSafeInternalReturnPath } from '@/lib/player-navigation';
+import { navigateBack, navigateForward, useNavigationHistoryState } from '@/lib/navigation';
 import { cn } from '@/lib/utils';
-
-/** Routes where a back button should appear in the titlebar. */
-function canGoBack(pathname: string): boolean {
-  return pathname.startsWith('/details/');
-}
 
 interface DesktopTitlebarProps {
   className?: string;
+  /** Browse pages only — the player owns its own Back control. */
+  historyControls?: boolean;
+}
+
+const HISTORY_BUTTON_CLASS =
+  'flex h-7 w-7 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30 disabled:pointer-events-none disabled:opacity-25';
+
+function TitlebarHistoryControls() {
+  const { canGoBack, canGoForward } = useNavigationHistoryState();
+  return (
+    <div data-tauri-drag-region='false' className='flex items-center gap-0.5 px-2'>
+      <button
+        type='button'
+        onClick={() => navigateBack()}
+        disabled={!canGoBack}
+        className={HISTORY_BUTTON_CLASS}
+        aria-label='Go back'
+        title='Back (Alt+Left)'
+        aria-keyshortcuts='Alt+ArrowLeft'
+      >
+        <ChevronLeft aria-hidden='true' className='h-4 w-4' strokeWidth={2} />
+      </button>
+      <button
+        type='button'
+        onClick={() => void navigateForward()}
+        disabled={!canGoForward}
+        className={HISTORY_BUTTON_CLASS}
+        aria-label='Go forward'
+        title='Forward (Alt+Right)'
+        aria-keyshortcuts='Alt+ArrowRight'
+      >
+        <ChevronRight aria-hidden='true' className='h-4 w-4' strokeWidth={2} />
+      </button>
+    </div>
+  );
 }
 
 export const DesktopTitlebar = memo(function DesktopTitlebar({
   className,
+  historyControls = false,
 }: DesktopTitlebarProps = {}) {
-  const location = useLocation();
-  const navigate = useNavigate();
   const isDesktopRuntime = isTauriDesktopRuntime();
   const appWindow = useMemo(
     () => (isDesktopRuntime ? getCurrentWindow() : null),
@@ -79,19 +106,6 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
     };
   }, [appWindow]);
 
-  const showBack = canGoBack(location.pathname);
-
-  const handleBack = () => {
-    // A `from` equal to the current route dead-ends — fall through to home.
-    const currentPath = `${location.pathname}${location.search}`;
-    const from = resolveSafeInternalReturnPath(
-      (location.state as { from?: unknown } | undefined)?.from,
-    );
-    const target = from && from !== currentPath ? from : '/';
-    if (pathBelowTop() === target && navigateAppBack()) return;
-    navigate(target, { replace: true });
-  };
-
   const handleToggleMaximize = () => {
     if (!appWindow) return;
     void appWindow.toggleMaximize().catch(() => undefined);
@@ -99,19 +113,7 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
 
   return (
     <div className={cn('fixed inset-x-0 top-0 z-80 flex h-8 items-stretch', className)}>
-      {/* Back button — only on detail-type routes */}
-      {showBack && (
-        <button
-          type='button'
-          onClick={handleBack}
-          className='flex h-full w-12 items-center justify-center text-white transition-colors duration-150 hover:bg-white/[0.06] focus:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30'
-          aria-label='Go back'
-          title='Back (Alt+←)'
-          aria-keyshortcuts='Alt+ArrowLeft'
-        >
-          <ArrowLeft className='h-4 w-4' strokeWidth={2} />
-        </button>
-      )}
+      {historyControls && <TitlebarHistoryControls />}
 
       {/* Drag region fills remaining space */}
       <button

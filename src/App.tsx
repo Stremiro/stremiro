@@ -1,22 +1,42 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { Loader2 } from 'lucide-react';
-import { lazy, type ReactNode, Suspense, useEffect, useLayoutEffect, useRef } from 'react';
+import {
+  lazy,
+  type ReactNode,
+  Suspense,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useLayoutEffect,
+  useRef,
+} from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router';
 import { toast } from 'sonner';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
 import { Layout } from '@/components/layout';
 import { Toaster } from '@/components/ui/sonner';
 import { useAppUpdater } from '@/hooks/use-app-updater';
+import {
+  registerAppUiPreferenceFlusher,
+  useAppUiPreferences,
+} from '@/hooks/use-app-ui-preferences';
+import { api, type AppUiPreferences, getErrorMessage } from '@/lib/api';
 import { isTauriDesktopRuntime, runScheduledAppUpdateCheck } from '@/lib/app-updater';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
-import { PlayerHost, PlayerRouteRegistrar, PlayerSessionProvider } from '@/lib/player-session';
+import {
+  PlayerHost,
+  PlayerRouteRegistrar,
+  PlayerSessionProvider,
+  usePlayerSession,
+} from '@/lib/player-session';
+import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { routeChunks, warmRouteChunks } from '@/lib/route-chunks';
-import { mpvDestroy } from '@/lib/player-mpv';
+import { mpvDestroy, setMpvProperty } from '@/lib/player-mpv';
 import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
-import { boundedMapSet, withTimeout } from '@/lib/utils';
+import { boundedMapSet, clearTimer, withTimeout } from '@/lib/utils';
 import { Home } from '@/pages/home';
 
 const Search = lazy(() => routeChunks.search().then((module) => ({ default: module.Search })));
@@ -59,6 +79,55 @@ const MAX_SAVED_SCROLL_POSITIONS = 40;
 
 function rememberScrollPosition(map: Map<string, number>, key: string, position: number) {
   boundedMapSet(map, key, position, MAX_SAVED_SCROLL_POSITIONS);
+}
+
+function LastLocationRecorder() {
+  const location = useLocation();
+  const queryClient = useQueryClient();
+  const { preferences: startupPage, updatePreferences } = useAppUiPreferences(
+    (preferences) => preferences.startupPage,
+  );
+  const pendingLocationRef = useRef<string | null>(null);
+  const locationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushLocation = useCallback(() => {
+    clearTimer(locationTimerRef);
+    const path = pendingLocationRef.current;
+    pendingLocationRef.current = null;
+    const current = queryClient.getQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY);
+    if (path && current?.startupPage === 'lastVisited' && current.lastLocation !== path) {
+      updatePreferences({ lastLocation: path });
+    }
+  }, [queryClient, updatePreferences]);
+
+  useEffect(() => {
+    const unregister = registerAppUiPreferenceFlusher(flushLocation);
+    return () => {
+      unregister();
+      flushLocation();
+    };
+  }, [flushLocation]);
+
+  useEffect(() => {
+    if (startupPage !== 'lastVisited') {
+      pendingLocationRef.current = null;
+      return;
+    }
+    if (location.pathname.startsWith('/player')) {
+      flushLocation();
+      return;
+    }
+    const nextLocation = `${location.pathname}${location.search}`;
+    const current = queryClient.getQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY);
+    if (current?.lastLocation === nextLocation) {
+      pendingLocationRef.current = null;
+      return;
+    }
+    pendingLocationRef.current = nextLocation;
+    locationTimerRef.current = setTimeout(flushLocation, 1_500);
+    return () => clearTimer(locationTimerRef);
+  }, [location.pathname, location.search, startupPage, flushLocation, queryClient]);
+
+  return null;
 }
 
 // Shared window scroller: PUSH lands at top, POP restores the entry's saved
@@ -147,37 +216,34 @@ function RouteScrollManager() {
 // First check waits for startup to settle; then a 6h interval keeps sessions aware.
 const UPDATE_STARTUP_DELAY_MS = 8_000;
 const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-// During playback, announce polls on this cadence — the card overlays video
-// and its install path exits the process.
-const UPDATE_PLAYBACK_RETRY_MS = 60_000;
 
 function AppUpdateManager() {
   const queryClient = useQueryClient();
   const { isSupported, markUpdateNotified } = useAppUpdater();
+  const { pathname } = useLocation();
+  const resumeDeferredCheckRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     if (import.meta.env.DEV || !isSupported) return;
 
     let disposed = false;
-    let playbackRetryTimer: number | null = null;
+    let deferred = false;
 
-    // Defer while the expanded player is up — the card would sit on the video.
-    const deferDuringPlayback = () => {
-      if (!window.location.pathname.startsWith('/player')) return false;
-      playbackRetryTimer ??= window.setTimeout(() => {
-        playbackRetryTimer = null;
-        void announceAvailableUpdate();
-      }, UPDATE_PLAYBACK_RETRY_MS);
+    // Defer while hidden or in the expanded player — the card would sit on the video.
+    const deferCheck = () => {
+      if (!document.hidden && !window.location.pathname.startsWith('/player')) return false;
+      deferred = true;
       return true;
     };
 
     const announceAvailableUpdate = async () => {
-      if (disposed || deferDuringPlayback()) return;
+      if (disposed || deferCheck()) return;
+      deferred = false;
 
       try {
         const update = await runScheduledAppUpdateCheck(queryClient);
-        // Navigation may change while the check is in flight.
-        if (!update || disposed || deferDuringPlayback()) return;
+        // Visibility and navigation may change while the check is in flight.
+        if (!update || disposed || deferCheck()) return;
 
         // Persistent card morphs announce → progress → error under one toast id.
         toast.custom(
@@ -195,6 +261,12 @@ function AppUpdateManager() {
       }
     };
 
+    const resumeDeferredCheck = () => {
+      if (deferred && !document.hidden) void announceAvailableUpdate();
+    };
+    resumeDeferredCheckRef.current = resumeDeferredCheck;
+    document.addEventListener('visibilitychange', resumeDeferredCheck);
+
     const startupTimer = window.setTimeout(
       () => void announceAvailableUpdate(),
       UPDATE_STARTUP_DELAY_MS,
@@ -208,11 +280,14 @@ function AppUpdateManager() {
       disposed = true;
       window.clearTimeout(startupTimer);
       window.clearInterval(interval);
-      if (playbackRetryTimer !== null) {
-        window.clearTimeout(playbackRetryTimer);
-      }
+      resumeDeferredCheckRef.current = null;
+      document.removeEventListener('visibilitychange', resumeDeferredCheck);
     };
   }, [isSupported, markUpdateNotified, queryClient]);
+
+  useEffect(() => {
+    resumeDeferredCheckRef.current?.();
+  }, [pathname]);
 
   return null;
 }
@@ -223,6 +298,8 @@ const CLOSE_BARRIER_STEP_TIMEOUT_MS = 8_000;
 
 function AppCloseManager() {
   const isDesktopRuntime = isTauriDesktopRuntime();
+  const { session } = usePlayerSession();
+  const hasSession = useEffectEvent(() => !!session);
 
   useEffect(() => {
     if (!isDesktopRuntime) return;
@@ -230,7 +307,9 @@ function AppCloseManager() {
     let isActive = true;
     let closing = false;
     let saveFailureVetoed = false;
+    let quitRequested = false;
     let unlisten: (() => void) | undefined;
+    let unlistenQuit: (() => void) | undefined;
 
     const settleCloseStep = <T,>(step: Promise<T>) =>
       withTimeout(
@@ -252,9 +331,38 @@ function AppCloseManager() {
         try {
           const transitionSettled = await settleCloseStep(waitForViewportTransition());
           if (transitionSettled && isPlayerPip()) {
-            event.preventDefault();
+            if (!quitRequested) {
+              event.preventDefault();
+              await settleCloseStep(returnFromPlayerPip());
+              return;
+            }
             await settleCloseStep(returnFromPlayerPip());
-            return;
+          }
+          if (!quitRequested) {
+            try {
+              const hidden = await withTimeout(
+                api.closeMainWindowToTray(),
+                CLOSE_BARRIER_STEP_TIMEOUT_MS,
+                () => {
+                  throw new Error('Hiding the window timed out.');
+                },
+              );
+              if (hidden) {
+                event.preventDefault();
+                if (hasSession()) await settleCloseStep(setMpvProperty('pause', true));
+                await settleCloseStep(flushPendingAppWrites());
+                return;
+              }
+            } catch {
+              // Without a working tray the window must stay closable.
+              event.preventDefault();
+              quitRequested = true;
+              toast.error('Could not minimize to the system tray.', {
+                description: 'Close again to quit.',
+              });
+              void settleCloseStep(flushPendingAppWrites());
+              return;
+            }
           }
           await withTimeout(flushPendingAppWrites(), CLOSE_BARRIER_STEP_TIMEOUT_MS, () => {
             throw new Error('Pending writes did not settle.');
@@ -282,6 +390,24 @@ function AppCloseManager() {
         }
 
         unlisten = dispose;
+        void getCurrentWindow()
+          .listen('app://quit-requested', () => {
+            quitRequested = true;
+            void getCurrentWindow()
+              .close()
+              .catch((error) => {
+                toast.error('Could not quit Stremiro.', { description: getErrorMessage(error) });
+              });
+          })
+          .then((disposeQuit) => {
+            if (!isActive) disposeQuit();
+            else unlistenQuit = disposeQuit;
+          })
+          .catch(() => {
+            if (import.meta.env.DEV) {
+              console.warn('[app] quit-requested listener failed to register');
+            }
+          });
       })
       .catch(() => {
         if (import.meta.env.DEV) {
@@ -292,6 +418,7 @@ function AppCloseManager() {
     return () => {
       isActive = false;
       unlisten?.();
+      unlistenQuit?.();
     };
   }, [isDesktopRuntime]);
 
@@ -393,6 +520,7 @@ function App() {
       <PlayerHost />
       <AppNavigationBinder />
       <RouteScrollManager />
+      <LastLocationRecorder />
       <AppCloseManager />
       <AppUpdateManager />
       <Toaster />

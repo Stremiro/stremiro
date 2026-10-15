@@ -3,11 +3,12 @@ import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { api } from '@/lib/api';
+import { isTauriDesktopRuntime } from '@/lib/app-updater';
 import {
   APP_UI_PREFERENCES_QUERY_KEY,
   PROFILE_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { sleep } from '@/lib/utils';
+import { sleep, withTimeout } from '@/lib/utils';
 import App from './App';
 import './index.css';
 
@@ -68,6 +69,7 @@ const queryClient = new QueryClient({
 // stored accent/profile instead of flipping from defaults; the cap keeps a
 // slow store from holding launch.
 const PREFERENCES_PRIME_TIMEOUT_MS = 300;
+const STARTUP_ROUTE_TIMEOUT_MS = 2_000;
 const primePreferences = Promise.all([
   queryClient.prefetchQuery({
     queryKey: PROFILE_PREFERENCES_QUERY_KEY,
@@ -83,7 +85,22 @@ const primePreferences = Promise.all([
   }),
 ]);
 
-void Promise.race([primePreferences, sleep(PREFERENCES_PRIME_TIMEOUT_MS)]).then(() => {
+const startupRoute =
+  isTauriDesktopRuntime() && window.location.pathname === '/'
+    ? withTimeout(
+        api.getStartupRoute().catch(() => null),
+        STARTUP_ROUTE_TIMEOUT_MS,
+        () => null,
+      )
+    : Promise.resolve(null);
+
+void Promise.all([
+  Promise.race([primePreferences, sleep(PREFERENCES_PRIME_TIMEOUT_MS)]),
+  startupRoute,
+]).then(([, route]) => {
+  if (route && window.location.pathname === '/') {
+    window.history.replaceState(window.history.state, '', route);
+  }
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>
       <QueryClientProvider client={queryClient}>
