@@ -72,13 +72,22 @@ export function useSelectorPreferencesState({
   }, [showBatchFilter]);
 
   const [filters, setFiltersState] = useState<StreamSelectorPreferences>(defaultFilters);
-  // Marks user edits so hydration never clobbers a change made mid-flight.
+  const latestFiltersRef = useRef(filters);
+  // Only explicitly edited fields may override preferences that arrive mid-flight.
+  const userEditedFilterFieldsRef = useRef(new Set<keyof StreamSelectorPreferences>());
   const userEditedFiltersRef = useRef(false);
   const setFilters = useCallback((next: SetStateAction<StreamSelectorPreferences>) => {
+    const current = latestFiltersRef.current;
+    const nextFilters = typeof next === 'function' ? next(current) : next;
+    for (const field of STREAM_SELECTOR_PREFERENCE_FIELDS) {
+      if (nextFilters[field] !== current[field]) {
+        userEditedFilterFieldsRef.current.add(field);
+      }
+    }
     userEditedFiltersRef.current = true;
-    setFiltersState(next);
+    latestFiltersRef.current = nextFilters;
+    setFiltersState(nextFilters);
   }, []);
-  const latestFiltersRef = useRef(filters);
   // Raw save op — the queue only stores the recovered tail, so lifecycle flushes observe failures here.
   const lastPersistOperationRef = useRef<Promise<void> | null>(null);
   const debouncedFilters = useDebounce(filters, STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS);
@@ -116,7 +125,7 @@ export function useSelectorPreferencesState({
         const freshest = queryClient.getQueryData<StreamSelectorPreferencesState>(
           STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
         )?.preferences;
-        // A pre-hydration edit has no baseline — the freshest shared snapshot is the only correct merge base.
+        // Hydration and lifecycle flushes adopt the stored baseline before composing a write.
         const baseline = persistedBaselineRef.current ?? freshest;
         const changedFields: Partial<StreamSelectorPreferences> = {};
         if (freshest && baseline) {
@@ -163,12 +172,23 @@ export function useSelectorPreferencesState({
   // Hydration-safe flusher shared by selector close and app-write barriers.
   const flushPendingSelectorPreferences = useEffectEvent(async (): Promise<void> => {
     if (userEditedFiltersRef.current) {
+      const needsHydration = !hasHydratedFiltersRef.current;
+      // Closing resets the session refs while this read is pending.
+      const editedFields = new Set(userEditedFilterFieldsRef.current);
       // Hydrate before composing the write — never persist over unread stored state.
       const stored = await queryClient.ensureQueryData({
         queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
         queryFn: api.getStreamSelectorPreferences,
       });
       let nextFilters = latestFiltersRef.current;
+      if (needsHydration) {
+        const storedFilters = stored.initialized ? stored.preferences : defaultFilters;
+        nextFilters = { ...storedFilters };
+        for (const field of editedFields) {
+          nextFilters[field] = latestFiltersRef.current[field] as never;
+        }
+        persistedBaselineRef.current = storedFilters;
+      }
       if (!showBatchFilter && stored.initialized) {
         // Batch control hidden for movies — carry the stored batch, same as reset/hydration.
         nextFilters = {
@@ -190,6 +210,7 @@ export function useSelectorPreferencesState({
 
   const syncFiltersFromPersistedState = useEffectEvent((nextFilters: StreamSelectorPreferences) => {
     // Raw setter: a hydration sync is not a user edit.
+    latestFiltersRef.current = nextFilters;
     setFiltersState((currentFilters) =>
       areStreamSelectorPreferencesEqual(currentFilters, nextFilters) ? currentFilters : nextFilters,
     );
@@ -214,10 +235,11 @@ export function useSelectorPreferencesState({
       normalizedPersistedFilters,
     );
     persistedBaselineRef.current = normalizedPersistedFilters;
-    // An in-flight edit is user intent — the debounced save persists it; syncing would clobber it.
-    if (!userEditedFiltersRef.current) {
-      syncFiltersFromPersistedState(normalizedPersistedFilters);
+    const nextFilters = { ...normalizedPersistedFilters };
+    for (const field of userEditedFilterFieldsRef.current) {
+      nextFilters[field] = latestFiltersRef.current[field] as never;
     }
+    syncFiltersFromPersistedState(nextFilters);
   }, [
     normalizedPersistedFilters,
     open,
@@ -238,6 +260,7 @@ export function useSelectorPreferencesState({
     openSessionKeyRef.current = null;
     hasHydratedFiltersRef.current = false;
     userEditedFiltersRef.current = false;
+    userEditedFilterFieldsRef.current.clear();
   });
 
   useEffect(() => {
@@ -273,6 +296,10 @@ export function useSelectorPreferencesState({
   ]);
 
   const resetFilters = useCallback(() => {
+    // Reset explicitly edits every visible field, even one still showing its default.
+    for (const field of STREAM_SELECTOR_PREFERENCE_FIELDS) {
+      if (field !== 'batch' || showBatchFilter) userEditedFilterFieldsRef.current.add(field);
+    }
     setFilters((current) => {
       const next = showBatchFilter ? defaultFilters : { ...defaultFilters, batch: current.batch };
       return areStreamSelectorPreferencesEqual(current, next) ? current : next;

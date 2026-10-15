@@ -1,26 +1,34 @@
 import * as SliderPrimitive from '@radix-ui/react-slider';
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { Check } from 'lucide-react';
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { Input } from '@/components/ui/input';
-import { cn, clamp, HEX_COLOR_PATTERN } from '@/lib/utils';
+import { registerPendingAppWriteFlusher } from '@/lib/pending-app-writes';
+import { cn, clamp, clearTimer, getAccentTextColor, HEX_COLOR_PATTERN } from '@/lib/utils';
 
-// Soft pastel palette: same hue families as classic accent sets but one
-// shade lighter and less saturated, so the color reads as a premium tint
-// across tabs/sidebar/progress instead of a neon highlight.
 const ACCENT_PRESETS = [
-  { color: '#ffffff', label: 'White' },
-  { color: '#7dd3fc', label: 'Sky' },
-  { color: '#93c5fd', label: 'Blue' },
-  { color: '#a5b4fc', label: 'Indigo' },
-  { color: '#c4b5fd', label: 'Lavender' },
-  { color: '#f9a8d4', label: 'Pink' },
-  { color: '#fda4af', label: 'Rose' },
-  { color: '#fca5a5', label: 'Red' },
-  { color: '#fdba74', label: 'Peach' },
-  { color: '#fcd34d', label: 'Amber' },
-  { color: '#bef264', label: 'Lime' },
-  { color: '#6ee7b7', label: 'Mint' },
+  { label: 'White', soft: '#ffffff', vivid: '#ffffff' },
+  { label: 'Red', soft: '#fca5a5', vivid: '#f87171' },
+  { label: 'Peach', soft: '#fdba74', vivid: '#fb923c' },
+  { label: 'Amber', soft: '#fcd34d', vivid: '#fbbf24' },
+  { label: 'Lime', soft: '#bef264', vivid: '#a3e635' },
+  { label: 'Green', soft: '#86efac', vivid: '#4ade80' },
+  { label: 'Mint', soft: '#6ee7b7', vivid: '#34d399' },
+  { label: 'Teal', soft: '#5eead4', vivid: '#2dd4bf' },
+  { label: 'Cyan', soft: '#67e8f9', vivid: '#22d3ee' },
+  { label: 'Sky', soft: '#7dd3fc', vivid: '#38bdf8' },
+  { label: 'Blue', soft: '#93c5fd', vivid: '#60a5fa' },
+  { label: 'Indigo', soft: '#a5b4fc', vivid: '#818cf8' },
+  { label: 'Lavender', soft: '#c4b5fd', vivid: '#a78bfa' },
+  { label: 'Fuchsia', soft: '#f0abfc', vivid: '#e879f9' },
+  { label: 'Pink', soft: '#f9a8d4', vivid: '#f472b6' },
+  { label: 'Rose', soft: '#fda4af', vivid: '#fb7185' },
 ] as const;
+export const ACCENT_PRESET_LABELS = ACCENT_PRESETS.map((preset) => preset.label);
+type AccentTone = 'soft' | 'vivid';
 const DEFAULT_ACCENT_COLOR = '#ffffff';
+const VIVID_ACCENTS = new Set<string>(
+  ACCENT_PRESETS.map((preset) => preset.vivid).filter((color) => color !== DEFAULT_ACCENT_COLOR),
+);
 // Partial hex the draft field can hold mid-typing; HEX_COLOR_PATTERN gates apply.
 const ACCENT_HEX_DRAFT_PATTERN = /^#[0-9a-fA-F]{0,6}$/;
 
@@ -47,6 +55,8 @@ interface AccentControlsProps {
       undoes the live drag preview. */
   committedIntensity: number;
   onAccentColorChange: (color: string) => void;
+  /** Optional autosave; draft-only surfaces keep their explicit Save flow. */
+  onAccentColorCommit?: (color: string) => void | Promise<void>;
   /** Per-tick draft update while the slider moves. */
   onIntensityChange: (value: number) => void;
   /** One-shot persist at gesture end — surfaces that save on commit (settings)
@@ -62,11 +72,41 @@ export function AccentControls({
   intensity,
   committedIntensity,
   onAccentColorChange,
+  onAccentColorCommit,
   onIntensityChange,
   onIntensityCommit,
 }: AccentControlsProps) {
   const active = resolveAccentPreviewColor(accentColor, committedColor);
-  const isAccentHexInvalid = accentColor.length > 0 && !HEX_COLOR_PATTERN.test(accentColor);
+  // Derived until the user picks a tone, so a profile that hydrates after mount
+  // (or is restored from a backup) still opens on the tone holding its color.
+  const [toneOverride, setTone] = useState<AccentTone | null>(null);
+  const tone = toneOverride ?? (VIVID_ACCENTS.has(active.toLowerCase()) ? 'vivid' : 'soft');
+  const isAccentHexInvalid = !HEX_COLOR_PATTERN.test(accentColor);
+  const validationId = useId();
+  const colorCommitRef = useRef(onAccentColorCommit);
+  colorCommitRef.current = onAccentColorCommit;
+  const pendingColorRef = useRef<string | null>(null);
+  const colorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const flushColor = useCallback(async () => {
+    clearTimer(colorTimerRef);
+    const color = pendingColorRef.current;
+    pendingColorRef.current = null;
+    if (color !== null) await colorCommitRef.current?.(color);
+  }, []);
+  const changeColor = (color: string) => {
+    onAccentColorChange(color);
+    if (!colorCommitRef.current || !HEX_COLOR_PATTERN.test(color)) return;
+    pendingColorRef.current = color;
+    if (colorTimerRef.current !== null) clearTimeout(colorTimerRef.current);
+    colorTimerRef.current = setTimeout(() => void flushColor().catch(() => undefined), 300);
+  };
+  useEffect(() => {
+    const unregister = registerPendingAppWriteFlusher(flushColor);
+    return () => {
+      unregister();
+      void flushColor().catch(() => undefined);
+    };
+  }, [flushColor]);
   // Clamp locally so the preview never lies; Rust clamps again at the boundary.
   const previewIntensity = clamp(Math.round(intensity), 0, 100);
 
@@ -79,91 +119,121 @@ export function AccentControls({
 
   return (
     <>
-      <div className='space-y-2'>
-        <div className='flex items-center justify-between'>
-          <div className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>
+      <div className='space-y-3' onBlurCapture={() => void flushColor().catch(() => undefined)}>
+        <div className='flex items-center justify-between gap-2'>
+          <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
             Accent
           </div>
-          <button
-            type='button'
-            aria-disabled={accentColor === DEFAULT_ACCENT_COLOR}
-            onClick={() => {
-              if (accentColor !== DEFAULT_ACCENT_COLOR) onAccentColorChange(DEFAULT_ACCENT_COLOR);
-            }}
-            className='rounded-sm text-[11px] font-medium text-zinc-600 transition-colors hover:text-zinc-300 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:text-zinc-600'
-          >
-            Reset
-          </button>
+          <div className='flex items-center gap-3'>
+            <div
+              role='group'
+              aria-label='Accent tone'
+              className='flex rounded-md border border-white/[0.08] bg-white/[0.03] p-0.5'
+            >
+              {(['soft', 'vivid'] as const).map((option) => (
+                <button
+                  key={option}
+                  type='button'
+                  aria-pressed={tone === option}
+                  onClick={() => setTone(option)}
+                  className={cn(
+                    'h-6 rounded-sm px-2 text-[11px] font-medium capitalize transition-colors motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40',
+                    tone === option
+                      ? 'bg-white/[0.1] text-white shadow-sm'
+                      : 'text-zinc-400 hover:text-zinc-200',
+                  )}
+                >
+                  {option}
+                </button>
+              ))}
+            </div>
+            <button
+              type='button'
+              aria-disabled={accentColor === DEFAULT_ACCENT_COLOR}
+              onClick={() => {
+                if (accentColor !== DEFAULT_ACCENT_COLOR) changeColor(DEFAULT_ACCENT_COLOR);
+              }}
+              className='rounded-sm text-[11px] font-medium text-zinc-400 transition-colors motion-reduce:transition-none hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:text-zinc-400'
+            >
+              Reset
+            </button>
+          </div>
         </div>
-        <div className='grid grid-cols-6 gap-1.5'>
-          {ACCENT_PRESETS.map((p) => {
-            const isActive = active === p.color;
+        <div
+          className='grid grid-cols-8 gap-x-2 gap-y-3 py-1'
+          role='group'
+          aria-label='Accent presets'
+        >
+          {ACCENT_PRESETS.map((preset) => {
+            const color = preset[tone];
+            const isActive = active.toLowerCase() === color;
             return (
               <button
-                key={p.color}
+                key={preset.label}
                 type='button'
-                title={p.label}
-                aria-label={`${p.label} accent`}
+                title={`${preset.label} · ${tone}`}
+                aria-label={`${preset.label} accent`}
                 aria-pressed={isActive}
-                onClick={() => onAccentColorChange(p.color)}
-                className={cn(
-                  'h-7 rounded-md transition-all duration-150 hover:scale-[1.06] focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/40 border',
-                  isActive
-                    ? 'scale-[1.06] border-transparent'
-                    : 'border-white/10 opacity-60 hover:opacity-100',
-                )}
+                onClick={() => changeColor(color)}
+                className='flex h-6 w-6 items-center justify-center justify-self-center rounded-full border border-white/10 transition-transform duration-150 hover:-translate-y-0.5 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-white/60 motion-reduce:transition-none motion-reduce:transform-none'
                 // Selected ring uses the swatch's own color with a dark gap —
                 // quiet on every hue where a white ring + glow shouted.
                 style={{
-                  backgroundColor: p.color,
-                  boxShadow: isActive
-                    ? `0 0 0 1.5px #0a0a0b, 0 0 0 3px ${p.color}b3, 0 4px 14px -6px ${p.color}80`
-                    : undefined,
+                  backgroundColor: color,
+                  color: getAccentTextColor(color),
+                  boxShadow: isActive ? `0 0 0 2px #0a0a0b, 0 0 0 3.5px ${color}99` : undefined,
                 }}
-              />
+              >
+                {isActive && <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />}
+              </button>
             );
           })}
         </div>
-        <div className='flex items-center gap-2'>
-          <div
-            className='h-7 w-7 rounded-md border border-white/10 shrink-0 transition-colors'
-            style={{ backgroundColor: active }}
-          />
+        <div className='relative'>
           <Input
             value={accentColor}
             onChange={(e) => {
               const val = e.target.value;
               // Empty must pass too — otherwise the field can never be
               // cleared and retyped from scratch.
-              if (val === '' || ACCENT_HEX_DRAFT_PATTERN.test(val)) onAccentColorChange(val);
+              if (val === '' || ACCENT_HEX_DRAFT_PATTERN.test(val)) changeColor(val);
             }}
             maxLength={7}
             placeholder='#ffffff'
             aria-label='Custom accent color hex'
+            aria-invalid={isAccentHexInvalid}
+            aria-describedby={isAccentHexInvalid ? validationId : undefined}
             spellCheck={false}
-            className='h-8 bg-zinc-900/80 border-white/8 text-xs font-mono text-white uppercase placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
+            className='h-9 rounded-lg border-white/[0.08] bg-white/[0.03] pl-11 text-xs font-mono text-zinc-100 uppercase placeholder:text-zinc-500 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0'
           />
-          <input
-            type='color'
-            value={active}
-            onChange={(e) => onAccentColorChange(e.target.value)}
-            aria-label='Pick a custom accent color'
-            title='Pick a custom color'
-            className='h-8 w-9 shrink-0 cursor-pointer rounded-md border border-white/10 bg-zinc-900/80 p-1'
-          />
+          <div
+            className='absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 overflow-hidden rounded-md border border-white/10 focus-within:ring-2 focus-within:ring-white/50 focus-within:ring-offset-2 focus-within:ring-offset-zinc-950'
+            style={{ backgroundColor: active }}
+          >
+            <input
+              type='color'
+              value={active}
+              onChange={(e) => changeColor(e.target.value)}
+              aria-label='Pick a custom accent color'
+              title='Pick a custom color'
+              className='absolute inset-0 h-full w-full cursor-pointer opacity-0'
+            />
+          </div>
         </div>
         {isAccentHexInvalid && (
-          <p className='text-[11px] text-zinc-600'>
+          <p id={validationId} className='text-xs leading-relaxed text-zinc-400'>
             Enter a 6-digit hex like #22d3ee — preview shows the last saved color.
           </p>
         )}
       </div>
 
-      <div className='space-y-2'>
+      <div className='space-y-3'>
         <div className='flex items-center justify-between'>
-          <div className='text-[10px] font-bold uppercase tracking-widest text-zinc-600'>Glow</div>
+          <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
+            Glow
+          </div>
           <span
-            className='text-[11px] font-semibold tabular-nums transition-colors'
+            className='text-xs font-medium tabular-nums text-zinc-400 transition-colors motion-reduce:transition-none'
             style={{ color: previewIntensity > 0 ? active : undefined }}
           >
             {previewIntensity}%
@@ -196,7 +266,7 @@ export function AccentControls({
             style={{ backgroundColor: active }}
           />
         </SliderPrimitive.Root>
-        <p className='text-[11px] text-zinc-600'>
+        <p className='text-xs leading-relaxed text-zinc-400'>
           {previewIntensity === 0
             ? 'Off — pure black background.'
             : 'Subtle background tint derived from your accent — previews live.'}

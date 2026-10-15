@@ -306,6 +306,7 @@ fn sanitize_app_ui_preferences_clamps_runtime_values() {
         subtitle_pos: 140.0,
         subtitle_scale: 12.0,
         trailer_previews: false,
+        ..Default::default()
     });
 
     assert_eq!(preferences.player_volume, 100);
@@ -334,6 +335,10 @@ fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     assert!(parsed.trailer_previews);
     // Opt-in: stores written before auto-skip shipped keep it off.
     assert!(!parsed.auto_skip_intro);
+    assert!(!parsed.close_to_tray);
+    assert!(!parsed.start_minimized);
+    assert_eq!(parsed.startup_page, super::StartupPage::Home);
+    assert_eq!(parsed.last_location, None);
 }
 
 #[test]
@@ -350,4 +355,239 @@ fn app_ui_preferences_patch_quantizes_subtitle_tuning() {
     // Same quanta as the renderer's apply-time clamp: 0.1s delay, 0.05 scale.
     assert_eq!(patched.subtitle_delay, 0.3);
     assert_eq!(patched.subtitle_scale, 1.35);
+}
+
+#[test]
+fn player_timing_preferences_normalize_and_round_trip() {
+    let legacy = super::parse_app_ui_preferences(serde_json::json!({
+        "playerVolume": 42,
+        "autoPlayNext": true,
+    }))
+    .unwrap();
+    assert_eq!(legacy.next_episode_countdown_secs, 8);
+    assert_eq!(legacy.controls_hide_delay_ms, 3000);
+    assert_eq!(AppUiPreferences::default().next_episode_countdown_secs, 8);
+    assert_eq!(AppUiPreferences::default().controls_hide_delay_ms, 3000);
+
+    for (seconds, delay_ms) in [(5, 2000), (8, 3000), (10, 5000), (15, 8000), (30, 3000)] {
+        let patch = serde_json::from_value(serde_json::json!({
+            "nextEpisodeCountdownSecs": seconds,
+            "controlsHideDelayMs": delay_ms,
+        }))
+        .unwrap();
+        let patched = super::apply_app_ui_preferences_patch(legacy.clone(), patch);
+        assert_eq!(patched.next_episode_countdown_secs, seconds);
+        assert_eq!(patched.controls_hide_delay_ms, delay_ms);
+        assert_eq!(patched.player_volume, 42);
+        assert!(patched.auto_play_next);
+        assert_eq!(
+            super::parse_app_ui_preferences(serde_json::to_value(&patched).unwrap()).unwrap(),
+            patched,
+        );
+        assert_eq!(
+            super::apply_app_ui_preferences_patch(patched.clone(), Default::default()),
+            patched,
+        );
+    }
+
+    let patched = super::apply_app_ui_preferences_patch(
+        legacy.clone(),
+        super::AppUiPreferencesPatch {
+            next_episode_countdown_secs: Some(7),
+            controls_hide_delay_ms: Some(4000),
+            ..Default::default()
+        },
+    );
+    assert_eq!(patched, legacy);
+
+    for (seconds, delay_ms) in [
+        (serde_json::json!(0), serde_json::json!(u32::MAX)),
+        (serde_json::json!(7), serde_json::json!(4000)),
+        (serde_json::json!(-1), serde_json::json!(3.5)),
+        (serde_json::json!("15"), serde_json::json!(null)),
+    ] {
+        let parsed = super::parse_app_ui_preferences(serde_json::json!({
+            "playerVolume": 42,
+            "autoPlayNext": true,
+            "nextEpisodeCountdownSecs": seconds,
+            "controlsHideDelayMs": delay_ms,
+        }))
+        .unwrap();
+        assert_eq!(parsed, legacy);
+    }
+}
+
+#[test]
+fn shell_preferences_parse_and_patch_without_resetting_siblings() {
+    let parsed = super::parse_app_ui_preferences(serde_json::json!({
+        "playerVolume": 42,
+        "closeToTray": true,
+        "startMinimized": "yes",
+        "startupPage": "unknown",
+        "lastLocation": "/search?q=space"
+    }))
+    .unwrap();
+    assert_eq!(parsed.player_volume, 42);
+    assert!(parsed.close_to_tray);
+    assert!(!parsed.start_minimized);
+    assert_eq!(parsed.startup_page, super::StartupPage::Home);
+    assert_eq!(parsed.last_location.as_deref(), Some("/search?q=space"));
+
+    let patch = serde_json::from_value(serde_json::json!({
+        "startMinimized": true,
+        "startupPage": "lastVisited"
+    }))
+    .unwrap();
+    let patched = super::apply_app_ui_preferences_patch(parsed, patch);
+    assert!(patched.close_to_tray);
+    assert!(patched.start_minimized);
+    assert_eq!(patched.startup_page, super::StartupPage::LastVisited);
+    assert_eq!(patched.last_location.as_deref(), Some("/search?q=space"));
+    let clear = serde_json::from_value(serde_json::json!({ "lastLocation": null })).unwrap();
+    assert_eq!(
+        super::apply_app_ui_preferences_patch(patched, clear).last_location,
+        None
+    );
+}
+
+#[test]
+fn player_keybindings_keep_known_actions_and_first_claim_per_key() {
+    let parsed = super::parse_app_ui_preferences(serde_json::json!({
+        "closeToTray": true,
+        "playerKeybindings": {
+            "togglePlay": [" ", "K", "p"],
+            "toggleMute": ["k", "Escape", "5", "M"],
+            "seekForward": ["ArrowRight", "   ", "\u{7}"],
+            "dock": [],
+            "deleteEverything": ["d"]
+        }
+    }))
+    .unwrap();
+    assert!(parsed.close_to_tray);
+    let bindings = &parsed.player_keybindings;
+    // Space survives as-is; extra keys past the per-action cap are dropped.
+    assert_eq!(bindings["togglePlay"], vec![" ", "k"]);
+    // `k` belongs to togglePlay (earlier action); Escape and digits stay fixed.
+    assert_eq!(bindings["toggleMute"], vec!["m"]);
+    assert_eq!(bindings["seekForward"], vec!["arrowright"]);
+    // An explicit empty list is an intentional unbind, not a missing override.
+    assert_eq!(bindings["dock"], Vec::<String>::new());
+    assert!(!bindings.contains_key("deleteEverything"));
+
+    let reset = serde_json::from_value(serde_json::json!({ "playerKeybindings": {} })).unwrap();
+    let patched = super::apply_app_ui_preferences_patch(parsed, reset);
+    assert!(patched.player_keybindings.is_empty());
+    assert!(patched.close_to_tray);
+
+    let malformed = super::parse_app_ui_preferences(serde_json::json!({
+        "playerKeybindings": { "togglePlay": [1, 2] },
+        "closeToTray": true
+    }))
+    .unwrap();
+    assert!(malformed.player_keybindings.is_empty());
+    assert!(malformed.close_to_tray);
+}
+
+#[test]
+fn last_location_allows_only_bounded_app_routes() {
+    for valid in [
+        "/",
+        "/search?q=space",
+        "/details/series/tt123",
+        "/profile?tab=library",
+        "/library",
+        "/calendar",
+        "/settings?section=general",
+    ] {
+        assert_eq!(
+            super::normalize_last_location(Some(valid.to_string())).as_deref(),
+            Some(valid)
+        );
+    }
+    for invalid in [
+        "",
+        "https://example.com",
+        "//example.com",
+        "/player/movie/tt123",
+        "/library/../player",
+        "/search?q=..",
+        "/settings//general",
+        "/library\n",
+        "/\\example.com",
+        "/unknown",
+        &format!("/search?q={}", "a".repeat(503)),
+    ] {
+        let value = serde_json::json!({ "lastLocation": invalid, "closeToTray": true });
+        let parsed = super::parse_app_ui_preferences(value).unwrap();
+        assert_eq!(parsed.last_location, None, "{invalid:?}");
+        assert!(parsed.close_to_tray);
+        let patched = super::apply_app_ui_preferences_patch(
+            AppUiPreferences::default(),
+            super::AppUiPreferencesPatch {
+                last_location: Some(Some(invalid.to_string())),
+                ..Default::default()
+            },
+        );
+        assert_eq!(patched.last_location, None);
+    }
+}
+
+#[test]
+fn startup_route_uses_only_valid_browse_locations() {
+    for (page, route) in [
+        (super::StartupPage::Home, None),
+        (super::StartupPage::Library, Some("/library")),
+        (super::StartupPage::Calendar, Some("/calendar")),
+        (
+            super::StartupPage::LastVisited,
+            Some("/settings?section=general"),
+        ),
+    ] {
+        let preferences = AppUiPreferences {
+            startup_page: page,
+            last_location: Some("/settings?section=general".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(super::startup_route(preferences).as_deref(), route);
+    }
+    for location in [
+        None,
+        Some("/player/movie/tt123"),
+        Some("//example.com"),
+        Some("/library/%2e%2E/player/movie/tt123"),
+        Some("/library/.%2e/player/movie/tt123"),
+        Some("/library/%2e./player/movie/tt123"),
+    ] {
+        assert_eq!(
+            super::startup_route(AppUiPreferences {
+                startup_page: super::StartupPage::LastVisited,
+                last_location: location.map(str::to_string),
+                ..Default::default()
+            }),
+            None
+        );
+    }
+}
+
+#[test]
+fn start_minimized_requires_login_or_a_tray_preference() {
+    for launch_at_login in [false, true] {
+        for close_to_tray in [false, true] {
+            for minimize_to_tray in [false, true] {
+                for start_minimized in [false, true] {
+                    let mut preferences = AppUiPreferences {
+                        start_minimized,
+                        close_to_tray,
+                        minimize_to_tray,
+                        ..Default::default()
+                    };
+                    super::normalize_start_minimized(&mut preferences, launch_at_login);
+                    assert_eq!(
+                        preferences.start_minimized,
+                        start_minimized && (launch_at_login || close_to_tray || minimize_to_tray)
+                    );
+                }
+            }
+        }
+    }
 }

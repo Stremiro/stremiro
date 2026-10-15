@@ -78,6 +78,7 @@ export function usePlaybackLanguagePreferences({
       await saveQueue;
       return api.getPlaybackLanguagePreferences();
     },
+    enabled: !mediaId,
     staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 

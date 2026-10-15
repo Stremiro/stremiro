@@ -1,5 +1,30 @@
 import type { ReactNode } from 'react';
+import { RetryBanner } from '@/components/retry-banner';
 import { cn } from '@/lib/utils';
+
+export function SettingsQueryError({
+  query,
+  message,
+  className,
+}: {
+  query: { isError: boolean; isFetching: boolean; refetch: () => Promise<unknown> };
+  message: string;
+  className?: string;
+}) {
+  if (!query.isError) return null;
+  return (
+    <RetryBanner
+      className={className}
+      message={message}
+      isRetrying={query.isFetching}
+      onRetry={() => void query.refetch()}
+    />
+  );
+}
+
+/** Plain status text for a group header's action slot — no chip chrome. */
+export const SETTINGS_HEADER_STATUS_CLASS =
+  'block pt-0.5 text-[12.5px] font-medium tabular-nums text-zinc-500';
 
 /** Glass chrome for outline `Button`s across sections; callers own size. */
 export const SETTINGS_OUTLINE_BUTTON_CLASS =
@@ -34,7 +59,7 @@ export function SettingsGroupHeader({
   title: string;
 }) {
   return (
-    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] bg-white/[0.02] px-5 py-4'>
+    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4'>
       <div className='min-w-0 flex-1 basis-48'>
         <h2 className='text-[15px] font-medium tracking-tight text-white'>{title}</h2>
         {description ? (
@@ -48,8 +73,20 @@ export function SettingsGroupHeader({
   );
 }
 
-export function SettingsBody({ children, className }: { children: ReactNode; className?: string }) {
-  return <div className={cn('px-5 py-4', className)}>{children}</div>;
+export function SettingsBody({
+  children,
+  className,
+  rows = false,
+}: {
+  children: ReactNode;
+  className?: string;
+  rows?: boolean;
+}) {
+  return (
+    <div className={cn('px-5 py-5', rows && 'divide-y divide-white/[0.06]', className)}>
+      {children}
+    </div>
+  );
 }
 
 export function SettingsRow({
@@ -64,11 +101,16 @@ export function SettingsRow({
   label: string;
 }) {
   return (
-    <label className={cn('flex items-center justify-between gap-4 cursor-pointer', className)}>
+    <label
+      className={cn(
+        'flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0 cursor-pointer',
+        className,
+      )}
+    >
       <div className='min-w-0'>
         <span className='block text-[14px] font-medium text-zinc-100'>{label}</span>
         {description ? (
-          <span className='mt-1 block text-[12.5px] leading-relaxed text-zinc-400'>
+          <span className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
             {description}
           </span>
         ) : null}

@@ -1,12 +1,16 @@
-import { parseReleaseNotes } from '@/lib/release-notes';
+import type { ReleaseNoteBlock } from '@/lib/app-updater';
 import { cn } from '@/lib/utils';
 
 /** Structured render of a GitHub release body: heading eyebrows, dotted
     bullets, and plain paragraphs — replaces raw whitespace-pre-wrap dumps. */
-export function ReleaseNotes({ body, className }: { body?: string | null; className?: string }) {
-  const blocks = parseReleaseNotes(body);
-
-  if (blocks.length === 0) {
+export function ReleaseNotes({
+  notes,
+  className,
+}: {
+  notes?: readonly ReleaseNoteBlock[] | null;
+  className?: string;
+}) {
+  if (!notes?.length) {
     return (
       <p className='text-[13px] leading-relaxed text-zinc-500'>
         This release has no published notes.
@@ -16,7 +20,7 @@ export function ReleaseNotes({ body, className }: { body?: string | null; classN
 
   return (
     <div className={cn('space-y-2', className)}>
-      {blocks.map((block) =>
+      {notes.map((block) =>
         block.kind === 'heading' ? (
           <p
             key={block.key}

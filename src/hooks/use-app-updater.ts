@@ -2,19 +2,35 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
 import {
+  APP_RELEASE_NOTES_QUERY_KEY,
   APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY,
   APP_UPDATE_STATE_QUERY_KEY,
   APP_VERSION_QUERY_KEY,
   type AppUpdateHandle,
+  getAppReleaseNotes,
   getCurrentAppVersion,
   getInitialAppUpdateState,
   getStoredLastNotifiedAppUpdateVersion,
+  isTauriDesktopRuntime,
   isUpdateReady,
   runAppUpdateCheck,
   runAppUpdateInstall,
   saveLastNotifiedAppUpdateVersion,
 } from '@/lib/app-updater';
 import { runOptimisticQueryMutation } from '@/lib/optimistic-query';
+
+export function useAppReleaseNotes(version: string | null) {
+  return useQuery({
+    queryKey: [...APP_RELEASE_NOTES_QUERY_KEY, version],
+    queryFn: () => getAppReleaseNotes(version!),
+    enabled: isTauriDesktopRuntime() && !!version,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+    retry: false,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+  });
+}
 
 export function useAppUpdater() {
   const queryClient = useQueryClient();

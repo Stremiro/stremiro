@@ -353,6 +353,7 @@ fn import_settings(
         .unwrap_or(0);
     if restored || addons_imported > 0 {
         store.save()?;
+        let _ = super::app_shell_commands::sync_preferences(app, &load_app_ui_preferences(&store));
     }
 
     let titles_imported =
@@ -387,34 +388,7 @@ pub(crate) async fn export_app_data(
             let library: Vec<MediaItem> = load_library_map(&lib_store)?.into_values().collect();
 
             let lists_store = super::open_store(&app, LISTS_STORE_FILE)?;
-            let order = load_lists_order(&lists_store)?;
-            let mut lists: Vec<UserListWithItems> = Vec::with_capacity(order.len());
-            for list_id in &order {
-                let Some(list) = lists_store.get_typed::<UserList>(list_meta_key(list_id)) else {
-                    continue;
-                };
-                let mut items: Vec<MediaItem> = Vec::with_capacity(list.item_ids.len());
-                for item_id in &list.item_ids {
-                    // Re-run store normalization: a tampered store can't leak hostile fields into a backup.
-                    if let Some(item) = lists_store
-                        .get_typed::<MediaItem>(list_item_store_key(list_id, item_id))
-                        .and_then(normalize_library_item)
-                    {
-                        items.push(item);
-                    }
-                }
-                lists.push(UserListWithItems {
-                    id: list.id,
-                    name: list.name,
-                    icon: list.icon,
-                    item_ids: list
-                        .item_ids
-                        .iter()
-                        .filter_map(|id| normalize_media_id(id))
-                        .collect(),
-                    items,
-                });
-            }
+            let lists = super::list_commands::read_lists(&lists_store)?;
 
             let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
             let watch_statuses = load_watch_statuses_map(&status_store)?;

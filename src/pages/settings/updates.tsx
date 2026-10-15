@@ -1,31 +1,183 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { format, formatDistanceToNow } from 'date-fns';
 import { ArrowUpRight, Download, Loader2, RefreshCw } from 'lucide-react';
+import { useState } from 'react';
 import { toast } from 'sonner';
 import { ReleaseNotes } from '@/components/release-notes';
 import { Button } from '@/components/ui/button';
-import { useAppUpdater } from '@/hooks/use-app-updater';
+import { useAppReleaseNotes, useAppUpdater } from '@/hooks/use-app-updater';
 import { getErrorMessage } from '@/lib/api';
 import {
   appReleaseTagUrl,
   appUpdateProgressPercent,
+  type AppUpdateHandle,
   formatAppUpdateProgress,
+  isTauriDesktopRuntime,
 } from '@/lib/app-updater';
 import { cn, parseLocalScheduleDate } from '@/lib/utils';
 import {
+  SETTINGS_HEADER_STATUS_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
 } from './chrome';
 
-const UPDATE_STATUS_CHIP_CLASS =
-  'inline-flex items-center gap-1.5 rounded-md border border-white/[0.09] bg-white/[0.04] px-2 py-1 text-[11px] font-semibold text-zinc-300';
-
 function formatReleaseDate(date: string | null | undefined): string | null {
   if (!date) return null;
   const parsed = parseLocalScheduleDate(date);
   return parsed ? format(parsed, 'MMM d, yyyy') : date;
+}
+
+function AppChangelog({
+  currentVersion,
+  pendingUpdate,
+}: {
+  currentVersion: string | null;
+  pendingUpdate: AppUpdateHandle | null;
+}) {
+  const [selectedRelease, setSelectedRelease] = useState<'new' | 'installed'>('new');
+  const showNewRelease = pendingUpdate !== null && selectedRelease === 'new';
+  const installedRelease = useAppReleaseNotes(showNewRelease ? null : currentVersion);
+  const release = showNewRelease ? pendingUpdate : installedRelease.data;
+  const version = showNewRelease ? pendingUpdate.version : currentVersion;
+  const releaseDate = formatReleaseDate(release?.date);
+  const isLoading = !showNewRelease && installedRelease.isLoading;
+
+  const handleOpenRelease = () => {
+    if (!version) return;
+    void openUrl(appReleaseTagUrl(version)).catch((error) => toast.error(getErrorMessage(error)));
+  };
+
+  return (
+    <section
+      aria-label='Changelog'
+      className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'
+    >
+      <div className='flex flex-wrap items-center justify-between gap-3 px-4 pt-3'>
+        <p className='text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500'>
+          Changelog
+        </p>
+        {pendingUpdate && currentVersion ? (
+          <div
+            className='relative isolate grid grid-cols-2 rounded-md border border-white/[0.07] bg-white/[0.03] p-0.5'
+            role='group'
+            aria-label='Release version'
+          >
+            <span
+              aria-hidden='true'
+              className='pointer-events-none absolute bottom-0.5 left-0.5 top-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
+              style={{
+                width: 'calc((100% - 4px) / 2)',
+                transform: `translateX(${showNewRelease ? 0 : 100}%)`,
+              }}
+            />
+            {(['new', 'installed'] as const).map((option) => (
+              <button
+                key={option}
+                type='button'
+                aria-pressed={selectedRelease === option}
+                onClick={() => setSelectedRelease(option)}
+                className={cn(
+                  'nav-switch-item relative z-10 h-7 rounded-sm px-2.5 text-[11px] font-medium tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                  selectedRelease === option
+                    ? 'text-(--on-accent-nav)'
+                    : option === 'new'
+                      ? 'text-emerald-300 hover:bg-white/[0.06] hover:text-emerald-200'
+                      : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
+                )}
+              >
+                v{option === 'new' ? pendingUpdate.version : currentVersion} ·{' '}
+                {option === 'new' ? 'New' : 'Installed'}
+              </button>
+            ))}
+          </div>
+        ) : null}
+      </div>
+      <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>
+        <p className='text-[13px] font-semibold text-white'>
+          What's new{version ? ' in' : ''}
+          {version ? (
+            <span
+              className={cn(
+                'ml-1 font-medium tabular-nums',
+                showNewRelease ? 'text-emerald-200' : 'text-zinc-300',
+              )}
+            >
+              v{version}
+            </span>
+          ) : null}
+        </p>
+        {releaseDate ? (
+          <p className='text-[12px] tabular-nums text-zinc-500'>{releaseDate}</p>
+        ) : null}
+        {version ? (
+          <button
+            type='button'
+            onClick={handleOpenRelease}
+            className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+          >
+            View on GitHub
+            <ArrowUpRight className='h-3.5 w-3.5' />
+          </button>
+        ) : null}
+      </div>
+      <div
+        data-selectable='true'
+        aria-busy={isLoading}
+        className='max-h-64 overflow-y-auto overscroll-contain px-4 py-3.5'
+      >
+        {!version ? (
+          <p className='text-[13px] leading-relaxed text-zinc-400'>
+            {isTauriDesktopRuntime()
+              ? 'Release notes will appear when the installed version is available.'
+              : 'Release notes are available in the desktop app.'}
+          </p>
+        ) : isLoading ? (
+          <div role='status' className='space-y-3'>
+            <span className='sr-only'>Loading release notes…</span>
+            <div
+              aria-hidden='true'
+              className='h-2 w-20 animate-pulse rounded bg-white/[0.06] motion-reduce:animate-none'
+            />
+            {['w-full', 'w-5/6', 'w-2/3'].map((width) => (
+              <div key={width} aria-hidden='true' className='flex items-center gap-2.5'>
+                <span className='h-1 w-1 shrink-0 rounded-full bg-zinc-700' />
+                <span
+                  className={cn(
+                    'h-2.5 animate-pulse rounded bg-white/[0.05] motion-reduce:animate-none',
+                    width,
+                  )}
+                />
+              </div>
+            ))}
+          </div>
+        ) : !showNewRelease && !release ? (
+          <div className='space-y-3'>
+            <p className='text-[13px] leading-relaxed text-zinc-400'>
+              {installedRelease.isError || installedRelease.fetchStatus === 'paused'
+                ? 'Release notes are unavailable right now.'
+                : 'No GitHub release was found for this version.'}
+            </p>
+            {installedRelease.isError || installedRelease.fetchStatus === 'paused' ? (
+              <Button
+                size='sm'
+                variant='outline'
+                disabled={installedRelease.isFetching}
+                onClick={() => void installedRelease.refetch()}
+                className={SETTINGS_OUTLINE_BUTTON_CLASS}
+              >
+                {installedRelease.isFetching && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
+                Retry
+              </Button>
+            ) : null}
+          </div>
+        ) : (
+          <ReleaseNotes notes={release?.notes} />
+        )}
+      </div>
+    </section>
+  );
 }
 
 export function UpdatesSection() {
@@ -43,7 +195,6 @@ export function UpdatesSection() {
   } = useAppUpdater();
 
   const installPercent = appUpdateProgressPercent(updateState.installProgress);
-  const releaseDate = formatReleaseDate(pendingUpdate?.date);
 
   const lastCheckedLabel = updateState.lastCheckedAt
     ? formatDistanceToNow(updateState.lastCheckedAt, { addSuffix: true })
@@ -59,20 +210,14 @@ export function UpdatesSection() {
           ? 'The installed build matches the latest signed GitHub release.'
           : 'Updates download a signed installer from GitHub Releases and apply it in place.';
 
-  const statusChip = isInstalling ? null : updateState.status === 'up-to-date' ? (
-    <span className={UPDATE_STATUS_CHIP_CLASS}>
-      <span className='h-1.5 w-1.5 rounded-full bg-emerald-300/80' />
-      Up to date
-    </span>
+  const headerStatus = isInstalling ? null : updateState.status === 'up-to-date' ? (
+    <span className={SETTINGS_HEADER_STATUS_CLASS}>Up to date</span>
   ) : isUpdateAvailable ? (
-    <span className={UPDATE_STATUS_CHIP_CLASS}>
-      <span className='h-1.5 w-1.5 rounded-full bg-emerald-300' />
-      <span className='tabular-nums text-emerald-200'>v{pendingUpdate?.version}</span> ready
+    <span className={cn(SETTINGS_HEADER_STATUS_CLASS, 'text-emerald-300')}>
+      v{pendingUpdate?.version} ready
     </span>
   ) : isChecking ? (
-    <span className='rounded-md border border-white/[0.08] bg-white/[0.04] px-2 py-1 text-[11px] font-medium text-zinc-400'>
-      Checking…
-    </span>
+    <span className={SETTINGS_HEADER_STATUS_CLASS}>Checking…</span>
   ) : null;
 
   const handleCheck = () => {
@@ -97,13 +242,6 @@ export function UpdatesSection() {
     });
   };
 
-  const handleOpenRelease = () => {
-    if (!pendingUpdate) return;
-    void openUrl(appReleaseTagUrl(pendingUpdate.version)).catch((error) =>
-      toast.error(getErrorMessage(error)),
-    );
-  };
-
   return (
     <SettingsGroup className={isUpdateAvailable ? 'relative' : undefined}>
       {/* Same accent vocabulary as the announce card: a hairline, not a tint. */}
@@ -116,11 +254,11 @@ export function UpdatesSection() {
       <SettingsGroupHeader
         title='Updates'
         description='Signed desktop releases from GitHub, applied in place — your data carries over.'
-        action={statusChip}
+        action={headerStatus}
       />
 
       <SettingsBody className='space-y-4'>
-        <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-500'>
+        <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-400'>
           <span>
             Installed{' '}
             <span className='font-semibold tabular-nums text-zinc-100'>
@@ -140,7 +278,7 @@ export function UpdatesSection() {
               </span>
             </>
           ) : null}
-          <span className='text-zinc-600'>· checked {lastCheckedLabel}</span>
+          <span className='text-zinc-400'>· checked {lastCheckedLabel}</span>
         </div>
 
         {isInstalling ? (
@@ -170,7 +308,9 @@ export function UpdatesSection() {
         {updateState.errorMessage ? (
           <div className='rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3'>
             <p className='text-[12px] font-medium text-red-300'>
-              {isUpdateAvailable ? 'Update install failed' : 'Update check failed'}
+              {updateState.errorOperation === 'install'
+                ? 'Update install failed'
+                : 'Update check failed'}
             </p>
             <p className='mt-1 text-[12px] leading-relaxed text-red-200/80'>
               {updateState.errorMessage}
@@ -178,35 +318,11 @@ export function UpdatesSection() {
           </div>
         ) : null}
 
-        {pendingUpdate ? (
-          <div className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'>
-            <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>
-              <p className='text-[13px] font-semibold text-white'>
-                What's new
-                <span className='ml-2 font-medium tabular-nums text-emerald-200'>
-                  v{pendingUpdate.version}
-                </span>
-              </p>
-              {releaseDate ? (
-                <p className='text-[12px] tabular-nums text-zinc-500'>{releaseDate}</p>
-              ) : null}
-              <button
-                type='button'
-                onClick={handleOpenRelease}
-                className='ml-auto inline-flex items-center gap-1 rounded-sm text-[12px] font-medium text-zinc-500 transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
-              >
-                View on GitHub
-                <ArrowUpRight className='h-3.5 w-3.5' />
-              </button>
-            </div>
-            <div
-              data-selectable='true'
-              className='max-h-64 overflow-y-auto overscroll-contain px-4 py-3.5'
-            >
-              <ReleaseNotes body={pendingUpdate.body} />
-            </div>
-          </div>
-        ) : null}
+        <AppChangelog
+          key={pendingUpdate?.version ?? 'installed'}
+          currentVersion={currentVersion}
+          pendingUpdate={pendingUpdate}
+        />
 
         <div className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'>
           {pendingUpdate ? (
@@ -240,7 +356,7 @@ export function UpdatesSection() {
           </Button>
         </div>
 
-        <p className='text-[12.5px] leading-relaxed text-zinc-500'>{statusNote}</p>
+        <p className='text-[13px] leading-relaxed text-zinc-400'>{statusNote}</p>
       </SettingsBody>
     </SettingsGroup>
   );

@@ -1,8 +1,15 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 
-import { type AppUiPreferences, type AppUiPreferencesPatch, api, getErrorMessage } from '@/lib/api';
+import {
+  type AppUiPreferences,
+  type AppUiPreferencesPatch,
+  api,
+  DEFAULT_APP_UI_PREFERENCES,
+  getErrorMessage,
+} from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
+import { type PlayerKeymap, resolvePlayerKeymap } from '@/lib/player-keybindings';
 import {
   claimOptimisticQueryWrite,
   runOptimisticQueryMutation,
@@ -42,18 +49,6 @@ async function flushAppUiPreferenceWrites(): Promise<void> {
 }
 registerPendingAppWriteFlusher(flushAppUiPreferenceWrites);
 
-const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
-  playerVolume: 75,
-  playerSpeed: 1,
-  spoilerProtection: false,
-  subtitleDelay: 0,
-  subtitlePos: 100,
-  subtitleScale: 1.0,
-  autoPlayNext: false,
-  trailerPreviews: true,
-  autoSkipIntro: false,
-};
-
 // Shared query wrapper so `select` observers only re-render on their slice.
 function useAppUiPreferencesQuery<T = AppUiPreferences>(
   select?: (preferences: AppUiPreferences) => T,
@@ -80,11 +75,22 @@ export function useTrailerPreviews(): boolean {
   return preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES.trailerPreviews;
 }
 
-export function useAppUiPreferences() {
-  const queryClient = useQueryClient();
-  const preferencesQuery = useAppUiPreferencesQuery();
+/// Resolved player keymap — re-renders only when the overrides change.
+export function usePlayerKeymap(): PlayerKeymap {
+  const preferencesQuery = useAppUiPreferencesQuery((preferences) => preferences.playerKeybindings);
+  const overrides = preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES.playerKeybindings;
+  return useMemo(() => resolvePlayerKeymap(overrides), [overrides]);
+}
 
-  const currentPreferences = preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES;
+export function useAppUiPreferences<T = AppUiPreferences>(
+  select?: (preferences: AppUiPreferences) => T,
+) {
+  const queryClient = useQueryClient();
+  const preferencesQuery = useAppUiPreferencesQuery(select);
+
+  const currentPreferences =
+    preferencesQuery.data ??
+    (select ? select(DEFAULT_APP_UI_PREFERENCES) : (DEFAULT_APP_UI_PREFERENCES as T));
 
   const flushPreferences = useCallback(async () => {
     if (flushTimer !== null) {
@@ -138,8 +144,8 @@ export function useAppUiPreferences() {
 
   return {
     preferences: currentPreferences,
-    // Controls writing whole fields should hold off while placeholder defaults stand in, so an early gesture can't flap.
-    isHydrating: preferencesQuery.isPlaceholderData,
+    isHydrating: !preferencesQuery.isSuccess || preferencesQuery.isPlaceholderData,
+    preferencesQuery,
     updatePreferences,
   };
 }

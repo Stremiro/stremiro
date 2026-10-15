@@ -14,6 +14,7 @@ import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { type AddonConfig, api, getErrorMessage } from '@/lib/api';
+import { copyText } from '@/lib/notify';
 import {
   ADDON_CONFIGS_QUERY_KEY,
   addonUrlInspectionQueryKey,
@@ -24,13 +25,17 @@ import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn } from '@/lib/utils';
-import { SettingsBody, SettingsGroup, SettingsGroupHeader, SettingsSwitch } from './chrome';
+import {
+  SETTINGS_HEADER_STATUS_CLASS,
+  SettingsBody,
+  SettingsGroup,
+  SettingsGroupHeader,
+  SettingsSwitch,
+} from './chrome';
 
 // Long enough to skip per-keystroke IPC, short enough to read as live.
 const ADDON_URL_INSPECT_DEBOUNCE_MS = 150;
 const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremio:// addon URL.';
-const ADDON_URL_CONFIGURE_MESSAGE =
-  'This is a configure page — open it, finish setup, then paste the generated manifest URL.';
 
 interface AddonRowProps {
   addon: AddonConfig;
@@ -60,12 +65,8 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
   }, [copied]);
 
   const handleCopyLink = async () => {
-    try {
-      await navigator.clipboard.writeText(addon.url);
+    if (await copyText(addon.url, 'Addon link copied', 'Could not copy addon link')) {
       setCopied(true);
-      toast.success('Addon link copied');
-    } catch {
-      toast.error('Could not copy addon link');
     }
   };
 
@@ -89,11 +90,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
             <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
               {addon.name}
             </span>
-            {pinned ? (
-              <span className='shrink-0 rounded-[5px] bg-white/[0.05] px-1.5 py-px text-[10.5px] font-medium text-zinc-400 ring-1 ring-inset ring-white/[0.07]'>
-                Default
-              </span>
-            ) : null}
+            {pinned ? <span className='shrink-0 text-[11.5px] text-zinc-500'>Default</span> : null}
           </div>
           <p
             data-selectable='true'
@@ -212,6 +209,7 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
 export function StreamingSources() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
+  const [isDragging, setIsDragging] = useState(false);
   const newUrlInputRef = useRef<HTMLInputElement | null>(null);
 
   const {
@@ -254,8 +252,7 @@ export function StreamingSources() {
   const isConfigureCandidate = !!inspection?.configurePage;
   const duplicateAddonName = inspection?.duplicateOf;
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
-  const canSubmitNewAddon =
-    !!normalizedNewUrl && !isConfigureCandidate && !duplicateAddonName && !isWorking;
+  const canSubmitNewAddon = !!normalizedNewUrl && !duplicateAddonName && !isWorking;
 
   const handleToggle = (id: string) => {
     if (isWorking) return;
@@ -265,6 +262,7 @@ export function StreamingSources() {
 
   const handleDragEnd = useCallback(
     (event: DragEndEvent) => {
+      setIsDragging(false);
       const { active, over } = event;
       if (!over || active.id === over.id || isWorking) return;
 
@@ -319,15 +317,14 @@ export function StreamingSources() {
         description='Cinemeta (metadata) and OpenSubtitles (subtitles) are pinned defaults. Drag other addons to set stream priority.'
         action={
           addons.length > 0 ? (
-            <span className='inline-flex items-center gap-1.5 rounded-full bg-white/[0.04] px-2.5 py-1 text-[11.5px] font-medium tabular-nums text-zinc-300 ring-1 ring-inset ring-white/[0.07]'>
-              <span aria-hidden='true' className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
+            <span className={SETTINGS_HEADER_STATUS_CLASS}>
               {activeCount} of {addons.length} active
             </span>
           ) : undefined
         }
       />
 
-      <div className='border-b border-white/[0.06] px-5 py-4'>
+      <SettingsBody className='border-b border-white/[0.06]'>
         <div className='flex flex-col gap-2 sm:flex-row'>
           <div className='relative flex-1'>
             <Link2
@@ -373,10 +370,10 @@ export function StreamingSources() {
                 ? inspectionCurrent && inspectionQuery.isError
                   ? 'text-red-400'
                   : 'text-zinc-500'
-                : !normalizedNewUrl
-                  ? 'text-red-400'
-                  : isConfigureCandidate || duplicateAddonName
-                    ? 'text-amber-400'
+                : isConfigureCandidate || duplicateAddonName
+                  ? 'text-amber-400'
+                  : !normalizedNewUrl
+                    ? 'text-red-400'
                     : 'text-emerald-400',
             )}
           >
@@ -386,11 +383,9 @@ export function StreamingSources() {
                 : 'Checking…'
               : !normalizedNewUrl
                 ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
-                : isConfigureCandidate
-                  ? ADDON_URL_CONFIGURE_MESSAGE
-                  : duplicateAddonName
-                    ? `Already configured as ${duplicateAddonName}.`
-                    : `Ready: ${normalizedNewUrl}`}
+                : duplicateAddonName
+                  ? `Already configured as ${duplicateAddonName}.`
+                  : `Ready: ${normalizedNewUrl}`}
           </p>
         ) : (
           <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
@@ -405,7 +400,7 @@ export function StreamingSources() {
             URL to add streams, catalogs, and subtitles.
           </p>
         )}
-      </div>
+      </SettingsBody>
 
       {isLoading && !isFetched ? (
         <SettingsBody className='flex items-center gap-3 text-[13px] text-zinc-500'>
@@ -422,7 +417,10 @@ export function StreamingSources() {
         </SettingsBody>
       ) : (
         // No empty state: the backend always pins default addons.
-        <div className='divide-y divide-white/[0.05]'>
+        <div
+          className='divide-y divide-white/[0.05]'
+          data-escape-capture={isDragging ? '' : undefined}
+        >
           {pinnedAddons.map((addon) => (
             <PinnedAddonRow
               key={addon.id}
@@ -435,7 +433,9 @@ export function StreamingSources() {
             <DndContext
               sensors={sensors}
               collisionDetection={closestCenter}
+              onDragStart={() => setIsDragging(true)}
               onDragEnd={handleDragEnd}
+              onDragCancel={() => setIsDragging(false)}
             >
               <SortableContext
                 items={userAddons.map((a) => a.id)}

@@ -6,6 +6,7 @@ import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
 export const APP_VERSION_QUERY_KEY = ['appVersion'] as const;
+export const APP_RELEASE_NOTES_QUERY_KEY = ['app-release-notes'] as const;
 export const APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY = [
   'app-update-last-notified-version',
 ] as const;
@@ -18,9 +19,15 @@ export function appReleaseTagUrl(version: string): string {
   return `${APP_RELEASES_URL}/tag/v${encodeURIComponent(version)}`;
 }
 
+export interface ReleaseNoteBlock {
+  kind: 'heading' | 'bullet' | 'text';
+  text: string;
+  key: string;
+}
+
 export interface AppUpdateHandle {
   version: string;
-  body?: string | null;
+  notes?: ReleaseNoteBlock[];
   date?: string | null;
 }
 
@@ -45,6 +52,7 @@ interface AppUpdateState {
   lastCheckedAt: number | null;
   installProgress: AppUpdateProgress | null;
   errorMessage: string | null;
+  errorOperation: 'check' | 'install' | null;
 }
 
 let activeInstallPromise: Promise<void> | null = null;
@@ -60,6 +68,7 @@ export function getInitialAppUpdateState(): AppUpdateState {
     lastCheckedAt: null,
     installProgress: null,
     errorMessage: null,
+    errorOperation: null,
   };
 }
 
@@ -139,6 +148,10 @@ export async function getCurrentAppVersion(): Promise<string | null> {
   }
 }
 
+export async function getAppReleaseNotes(version: string): Promise<AppUpdateHandle | null> {
+  return invoke<AppUpdateHandle | null>('get_app_release_notes', { version });
+}
+
 export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUpdateHandle | null> {
   if (!isTauriDesktopRuntime()) {
     writeAppUpdateState(queryClient, () => getInitialAppUpdateState());
@@ -161,6 +174,7 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
     status: 'checking',
     installProgress: null,
     errorMessage: null,
+    errorOperation: null,
   }));
 
   activeCheckPromise = (async () => {
@@ -184,6 +198,7 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
               lastCheckedAt: checkedAt,
               installProgress: null,
               errorMessage: null,
+              errorOperation: null,
             },
       );
 
@@ -201,6 +216,7 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
               lastCheckedAt: Date.now(),
               installProgress: null,
               errorMessage: message,
+              errorOperation: 'check',
             },
       );
 
@@ -273,6 +289,7 @@ export async function runAppUpdateInstall(
       update: targetUpdate,
       installProgress: null,
       errorMessage: null,
+      errorOperation: null,
     }));
 
     try {
@@ -297,6 +314,7 @@ export async function runAppUpdateInstall(
           update: targetUpdate,
           installProgress: progress,
           errorMessage: null,
+          errorOperation: null,
         }));
       });
     } catch (error) {
@@ -325,6 +343,7 @@ export async function runAppUpdateInstall(
           lastCheckedAt: Date.now(),
           installProgress: null,
           errorMessage: message,
+          errorOperation: 'install',
         }));
       } else if (recoveredCheckSucceeded) {
         writeAppUpdateState(queryClient, (current) => ({
@@ -335,6 +354,7 @@ export async function runAppUpdateInstall(
           lastCheckedAt: Date.now(),
           installProgress: null,
           errorMessage: null,
+          errorOperation: null,
         }));
       } else {
         // Rust failures already carry the "run another check" hint — don't append it twice.
@@ -346,6 +366,7 @@ export async function runAppUpdateInstall(
           lastCheckedAt: current.lastCheckedAt,
           installProgress: null,
           errorMessage: message,
+          errorOperation: 'install',
         }));
       }
 

@@ -4,6 +4,7 @@ use crate::providers::addons::sanitize_addon_log;
 use crate::providers::{strip_manifest_suffix, trim_to_max};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
@@ -33,6 +34,52 @@ const PLAYER_VOLUME_DEFAULT: u32 = 75;
 const PLAYER_SPEED_DEFAULT: f64 = 1.0;
 const PLAYER_SPEED_MIN: f64 = 0.25;
 const PLAYER_SPEED_MAX: f64 = 4.0;
+const NEXT_EPISODE_COUNTDOWN_SECS_DEFAULT: u32 = 8;
+const CONTROLS_HIDE_DELAY_MS_DEFAULT: u32 = 3000;
+/// Rebindable player actions, in conflict-priority order. Mirrors `PLAYER_ACTIONS` in
+/// `src/lib/player-keybindings.ts`, which owns labels and default keys.
+const PLAYER_KEYBINDING_ACTIONS: [&str; 22] = [
+    "togglePlay",
+    "seekBackward",
+    "seekForward",
+    "volumeUp",
+    "volumeDown",
+    "toggleMute",
+    "toggleFullscreen",
+    "frameBackward",
+    "frameForward",
+    "speedDown",
+    "speedUp",
+    "speedReset",
+    "cycleSubtitles",
+    "cycleAudio",
+    "subtitleEarlier",
+    "subtitleLater",
+    "skipSegment",
+    "nextEpisode",
+    "episodes",
+    "streamSelector",
+    "dock",
+    "shortcuts",
+];
+const PLAYER_KEYBINDING_MAX_KEYS: usize = 2;
+const PLAYER_KEYBINDING_KEY_MAX_CHARS: usize = 16;
+/// Reserve navigation, modifier/lock and IME keys; digits retain percent seek.
+const PLAYER_KEYBINDING_RESERVED_KEYS: [&str; 13] = [
+    "escape",
+    "tab",
+    "shift",
+    "control",
+    "alt",
+    "altgraph",
+    "meta",
+    "os",
+    "capslock",
+    "numlock",
+    "dead",
+    "process",
+    "unidentified",
+];
 // Subtitle tuning bounds mirror the player's apply-time quantizers (`use-subtitle-adjustments.ts`).
 const SUBTITLE_DELAY_DEFAULT: f64 = 0.0;
 const SUBTITLE_DELAY_MAX_ABS: f64 = 5.0;
@@ -127,6 +174,17 @@ impl AddonConfigView {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum StartupPage {
+    Library,
+    Calendar,
+    LastVisited,
+    #[default]
+    #[serde(other)]
+    Home,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppUiPreferences {
@@ -139,10 +197,19 @@ pub struct AppUiPreferences {
     pub subtitle_scale: f64,
     /// Opt-in EOF auto-advance (Up Next countdown). Off by default — auto-advance is a surprise the user must choose.
     pub auto_play_next: bool,
+    pub next_episode_countdown_secs: u32,
+    pub controls_hide_delay_ms: u32,
     /// Opt-OUT muted trailer embed on hover cards. On by default — disabling must never change existing users' behavior.
     pub trailer_previews: bool,
     /// Opt-in auto-skip of SkipDB intro/recap segments. Off by default — jumping content uninvited is a surprise.
     pub auto_skip_intro: bool,
+    pub close_to_tray: bool,
+    pub minimize_to_tray: bool,
+    pub start_minimized: bool,
+    pub startup_page: StartupPage,
+    pub last_location: Option<String>,
+    /// Per-action overrides only (`[]` = unbound); actions absent here use the frontend defaults.
+    pub player_keybindings: BTreeMap<String, Vec<String>>,
 }
 
 impl Default for AppUiPreferences {
@@ -155,8 +222,16 @@ impl Default for AppUiPreferences {
             subtitle_pos: SUBTITLE_POS_DEFAULT,
             subtitle_scale: SUBTITLE_SCALE_DEFAULT,
             auto_play_next: false,
+            next_episode_countdown_secs: NEXT_EPISODE_COUNTDOWN_SECS_DEFAULT,
+            controls_hide_delay_ms: CONTROLS_HIDE_DELAY_MS_DEFAULT,
             trailer_previews: true,
             auto_skip_intro: false,
+            close_to_tray: false,
+            minimize_to_tray: false,
+            start_minimized: false,
+            startup_page: StartupPage::Home,
+            last_location: None,
+            player_keybindings: BTreeMap::new(),
         }
     }
 }
@@ -171,8 +246,25 @@ pub struct AppUiPreferencesPatch {
     pub subtitle_pos: Option<f64>,
     pub subtitle_scale: Option<f64>,
     pub auto_play_next: Option<bool>,
+    pub next_episode_countdown_secs: Option<u32>,
+    pub controls_hide_delay_ms: Option<u32>,
     pub trailer_previews: Option<bool>,
     pub auto_skip_intro: Option<bool>,
+    pub close_to_tray: Option<bool>,
+    pub minimize_to_tray: Option<bool>,
+    pub start_minimized: Option<bool>,
+    pub startup_page: Option<StartupPage>,
+    #[serde(default, deserialize_with = "deserialize_nullable_patch")]
+    pub last_location: Option<Option<String>>,
+    /// Replaces the whole override map; `{}` restores every default.
+    pub player_keybindings: Option<BTreeMap<String, Vec<String>>>,
+}
+
+fn deserialize_nullable_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 /// Which surfaces follow the profile accent — flags default on so pre-flag stores keep their look.
@@ -254,7 +346,7 @@ pub struct ProfilePreferencesPatch {
     accent_intensity: Option<u8>,
     accent_targets: Option<AccentTargetsPatch>,
     // Missing preserves the avatar; explicit null removes it.
-    #[serde(default, deserialize_with = "deserialize_avatar_patch")]
+    #[serde(default, deserialize_with = "deserialize_nullable_patch")]
     avatar: Option<Option<String>>,
     view_mode: Option<ProfileViewMode>,
 }
@@ -265,13 +357,6 @@ struct AccentTargetsPatch {
     actions: Option<bool>,
     progress: Option<bool>,
     artwork: Option<bool>,
-}
-
-fn deserialize_avatar_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<String>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default)]
@@ -392,9 +477,25 @@ struct StoredAppUiPreferences {
     #[serde(default, deserialize_with = "lenient_option")]
     auto_play_next: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
+    next_episode_countdown_secs: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    controls_hide_delay_ms: Option<u32>,
+    #[serde(default, deserialize_with = "lenient_option")]
     trailer_previews: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     auto_skip_intro: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    close_to_tray: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    minimize_to_tray: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    start_minimized: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    startup_page: Option<StartupPage>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    last_location: Option<String>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    player_keybindings: Option<BTreeMap<String, Vec<String>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -423,6 +524,18 @@ fn normalize_player_speed(value: Option<f64>) -> f64 {
         .filter(|speed| speed.is_finite() && *speed > 0.0)
         .map(|speed| speed.clamp(PLAYER_SPEED_MIN, PLAYER_SPEED_MAX))
         .unwrap_or(PLAYER_SPEED_DEFAULT)
+}
+
+fn normalize_next_episode_countdown_secs(value: Option<u32>) -> u32 {
+    value
+        .filter(|secs| matches!(*secs, 5 | 8 | 10 | 15 | 30))
+        .unwrap_or(NEXT_EPISODE_COUNTDOWN_SECS_DEFAULT)
+}
+
+fn normalize_controls_hide_delay_ms(value: Option<u32>) -> u32 {
+    value
+        .filter(|delay| matches!(*delay, 2000 | 3000 | 5000 | 8000))
+        .unwrap_or(CONTROLS_HIDE_DELAY_MS_DEFAULT)
 }
 
 fn normalize_subtitle_delay(value: Option<f64>) -> f64 {
@@ -577,6 +690,93 @@ pub(crate) fn apply_profile_preferences_patch(
     sanitize_profile_preferences(current)
 }
 
+fn normalize_last_location(location: Option<String>) -> Option<String> {
+    location.filter(|value| {
+        if !value.starts_with('/')
+            || value.chars().count() > 512
+            || value.chars().any(char::is_control)
+            || value.contains("//")
+            || value.contains("..")
+            || value.contains('\\')
+        {
+            return false;
+        }
+        let path = value.split(['?', '#']).next().unwrap_or_default();
+        let segment = path.strip_prefix('/').unwrap_or_default().split('/').next();
+        matches!(
+            segment,
+            Some("" | "search" | "details" | "profile" | "library" | "calendar" | "settings")
+        )
+    })
+}
+
+pub(crate) fn startup_route(preferences: AppUiPreferences) -> Option<String> {
+    match preferences.startup_page {
+        StartupPage::Home => None,
+        StartupPage::Library => Some("/library".to_string()),
+        StartupPage::Calendar => Some("/calendar".to_string()),
+        StartupPage::LastVisited => {
+            normalize_last_location(preferences.last_location).filter(|location| {
+                // History replacement resolves encoded parent segments before routing.
+                !location
+                    .split(['?', '#'])
+                    .next()
+                    .unwrap_or_default()
+                    .split('/')
+                    .any(|segment| {
+                        segment.eq_ignore_ascii_case("%2e%2e")
+                            || segment.eq_ignore_ascii_case(".%2e")
+                            || segment.eq_ignore_ascii_case("%2e.")
+                    })
+            })
+        }
+    }
+}
+
+pub(crate) fn normalize_start_minimized(preferences: &mut AppUiPreferences, launch_at_login: bool) {
+    preferences.start_minimized &=
+        launch_at_login || preferences.close_to_tray || preferences.minimize_to_tray;
+}
+
+/// Keys are lowercased `KeyboardEvent.key` values; `" "` is Space.
+fn normalize_player_binding_key(key: &str) -> Option<String> {
+    if key == " " {
+        return Some(key.to_string());
+    }
+    let key = key.to_lowercase();
+    let length = key.chars().count();
+    if length == 0
+        || length > PLAYER_KEYBINDING_KEY_MAX_CHARS
+        || key.chars().any(|ch| ch.is_whitespace() || ch.is_control())
+        || (length == 1 && key.chars().all(|ch| ch.is_ascii_digit()))
+        || PLAYER_KEYBINDING_RESERVED_KEYS.contains(&key.as_str())
+    {
+        return None;
+    }
+    Some(key)
+}
+
+/// Unknown actions drop; a key claimed by an earlier action loses in later ones.
+fn normalize_player_keybindings(
+    mut bindings: BTreeMap<String, Vec<String>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut claimed = HashSet::new();
+    let mut normalized = BTreeMap::new();
+    for action in PLAYER_KEYBINDING_ACTIONS {
+        let Some(keys) = bindings.remove(action) else {
+            continue;
+        };
+        let keys: Vec<String> = keys
+            .iter()
+            .filter_map(|key| normalize_player_binding_key(key))
+            .filter(|key| claimed.insert(key.clone()))
+            .take(PLAYER_KEYBINDING_MAX_KEYS)
+            .collect();
+        normalized.insert(action.to_string(), keys);
+    }
+    normalized
+}
+
 pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppUiPreferences {
     AppUiPreferences {
         player_volume: normalize_player_volume(Some(preferences.player_volume)),
@@ -586,8 +786,20 @@ pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppU
         subtitle_pos: normalize_subtitle_pos(Some(preferences.subtitle_pos)),
         subtitle_scale: normalize_subtitle_scale(Some(preferences.subtitle_scale)),
         auto_play_next: preferences.auto_play_next,
+        next_episode_countdown_secs: normalize_next_episode_countdown_secs(Some(
+            preferences.next_episode_countdown_secs,
+        )),
+        controls_hide_delay_ms: normalize_controls_hide_delay_ms(Some(
+            preferences.controls_hide_delay_ms,
+        )),
         trailer_previews: preferences.trailer_previews,
         auto_skip_intro: preferences.auto_skip_intro,
+        close_to_tray: preferences.close_to_tray,
+        minimize_to_tray: preferences.minimize_to_tray,
+        start_minimized: preferences.start_minimized,
+        startup_page: preferences.startup_page,
+        last_location: normalize_last_location(preferences.last_location),
+        player_keybindings: normalize_player_keybindings(preferences.player_keybindings),
     }
 }
 
@@ -605,8 +817,22 @@ pub(crate) fn apply_app_ui_preferences_patch(
         subtitle_pos: patch.subtitle_pos.unwrap_or(current.subtitle_pos),
         subtitle_scale: patch.subtitle_scale.unwrap_or(current.subtitle_scale),
         auto_play_next: patch.auto_play_next.unwrap_or(current.auto_play_next),
+        next_episode_countdown_secs: patch
+            .next_episode_countdown_secs
+            .unwrap_or(current.next_episode_countdown_secs),
+        controls_hide_delay_ms: patch
+            .controls_hide_delay_ms
+            .unwrap_or(current.controls_hide_delay_ms),
         trailer_previews: patch.trailer_previews.unwrap_or(current.trailer_previews),
         auto_skip_intro: patch.auto_skip_intro.unwrap_or(current.auto_skip_intro),
+        close_to_tray: patch.close_to_tray.unwrap_or(current.close_to_tray),
+        minimize_to_tray: patch.minimize_to_tray.unwrap_or(current.minimize_to_tray),
+        start_minimized: patch.start_minimized.unwrap_or(current.start_minimized),
+        startup_page: patch.startup_page.unwrap_or(current.startup_page),
+        last_location: patch.last_location.unwrap_or(current.last_location),
+        player_keybindings: patch
+            .player_keybindings
+            .unwrap_or(current.player_keybindings),
     })
 }
 
@@ -628,10 +854,24 @@ fn normalize_stored_app_ui_preferences(preferences: StoredAppUiPreferences) -> A
         subtitle_pos: normalize_subtitle_pos(preferences.subtitle_pos),
         subtitle_scale: normalize_subtitle_scale(preferences.subtitle_scale),
         auto_play_next: preferences.auto_play_next.unwrap_or(false),
+        next_episode_countdown_secs: normalize_next_episode_countdown_secs(
+            preferences.next_episode_countdown_secs,
+        ),
+        controls_hide_delay_ms: normalize_controls_hide_delay_ms(
+            preferences.controls_hide_delay_ms,
+        ),
         // Missing key = pre-toggle store — keep previews on, matching its behavior.
         trailer_previews: preferences.trailer_previews.unwrap_or(true),
         // Opt-in: missing keys on old stores keep auto-skip off.
         auto_skip_intro: preferences.auto_skip_intro.unwrap_or(false),
+        close_to_tray: preferences.close_to_tray.unwrap_or(false),
+        minimize_to_tray: preferences.minimize_to_tray.unwrap_or(false),
+        start_minimized: preferences.start_minimized.unwrap_or(false),
+        startup_page: preferences.startup_page.unwrap_or_default(),
+        last_location: normalize_last_location(preferences.last_location),
+        player_keybindings: normalize_player_keybindings(
+            preferences.player_keybindings.unwrap_or_default(),
+        ),
     }
 }
 

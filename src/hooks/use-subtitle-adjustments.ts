@@ -76,6 +76,7 @@ export function useSubtitleAdjustments({
   const applySubtitleDelay = useCallback(
     (value: number): number => {
       const next = Math.round(clamp(value, -5, 5) * 10) / 10;
+      if (next === settingsRef.current.delay) return next;
       settingsRef.current = { ...settingsRef.current, delay: next };
       setSubtitleDelay(next);
       scheduleMpvSet('sub-delay', next);
@@ -88,6 +89,7 @@ export function useSubtitleAdjustments({
   const applySubtitlePos = useCallback(
     (value: number) => {
       const next = clamp(value, 0, 100);
+      if (next === settingsRef.current.pos) return;
       settingsRef.current = { ...settingsRef.current, pos: next };
       setSubtitlePos(next);
       scheduleMpvSet('sub-pos', next);
@@ -99,6 +101,7 @@ export function useSubtitleAdjustments({
   const applySubtitleScale = useCallback(
     (value: number) => {
       const next = Math.round(clamp(value, 0.25, 3.0) * 20) / 20; // round to 0.05
+      if (next === settingsRef.current.scale) return;
       settingsRef.current = { ...settingsRef.current, scale: next };
       setSubtitleScale(next);
       scheduleMpvSet('sub-scale', next);

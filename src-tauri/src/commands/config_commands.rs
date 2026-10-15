@@ -1,12 +1,14 @@
+pub(crate) use super::addon_registry::schedule_capability_classification;
 use super::config_store::{
     apply_app_ui_preferences_patch, apply_profile_preferences_patch, is_pinned_default_addon_url,
     load_addon_configs, load_app_ui_preferences, load_last_notified_app_update_version,
     load_profile_preferences, load_stream_selector_preferences_state, normalize_addon_url,
-    resolve_addon_configs, sanitize_stream_selector_preferences, save_addon_configs_to_store,
-    save_app_ui_preferences_to_store, save_last_notified_app_update_version_to_store,
-    save_profile_preferences_to_store, save_stream_selector_preferences_to_store, AddonConfig,
-    AddonConfigView, AppUiPreferences, AppUiPreferencesPatch, ProfilePreferences,
-    ProfilePreferencesPatch, StreamSelectorPreferences,
+    normalize_start_minimized, resolve_addon_configs, sanitize_stream_selector_preferences,
+    save_addon_configs_to_store, save_app_ui_preferences_to_store,
+    save_last_notified_app_update_version_to_store, save_profile_preferences_to_store,
+    save_stream_selector_preferences_to_store, startup_route, AddonConfig, AddonConfigView,
+    AppUiPreferences, AppUiPreferencesPatch, ProfilePreferences, ProfilePreferencesPatch,
+    StreamSelectorPreferences,
 };
 use super::DurableStore;
 use crate::providers::addon_manifest::{
@@ -20,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
 use tauri::{command, AppHandle, State};
+use tauri_plugin_autostart::ManagerExt;
 
 const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
 /// Shared classify pool — reuses keep-alive/TLS sessions across settings opens
@@ -46,7 +49,8 @@ pub(crate) fn merge_imported_addon_configs(
         if configs.len() >= MAX_ADDON_CONFIGS {
             break;
         }
-        let Ok(Some(url)) = normalize_addon_url(&config.url) else {
+        let verdict = validate_installable_addon_reference(&config.url);
+        let Some(url) = verdict.normalized_url else {
             continue;
         };
         if configs.iter().any(|existing| existing.url == url) {
@@ -86,16 +90,43 @@ pub async fn get_app_ui_preferences(app: AppHandle) -> Result<AppUiPreferences, 
 }
 
 #[command]
+pub async fn get_startup_route(app: AppHandle) -> Result<Option<String>, String> {
+    super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+        Ok(startup_route(load_app_ui_preferences(&store)))
+    })
+    .await
+}
+
+#[command]
 pub async fn save_app_ui_preferences(
     app: AppHandle,
     patch: AppUiPreferencesPatch,
 ) -> Result<AppUiPreferences, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let preferences = apply_app_ui_preferences_patch(load_app_ui_preferences(&store), patch);
+        let sync_tray = patch.close_to_tray.is_some() || patch.minimize_to_tray.is_some();
+        let check_start_minimized = sync_tray || patch.start_minimized.is_some();
+        let mut preferences =
+            apply_app_ui_preferences_patch(load_app_ui_preferences(&store), patch);
+        if check_start_minimized
+            && preferences.start_minimized
+            && !preferences.close_to_tray
+            && !preferences.minimize_to_tray
+        {
+            // An unreadable OS autostart state must not block saving the other preferences.
+            normalize_start_minimized(
+                &mut preferences,
+                app.autolaunch().is_enabled().unwrap_or(true),
+            );
+        }
 
         save_app_ui_preferences_to_store(&store, &preferences);
         store.save()?;
+        if sync_tray {
+            // The preference is already saved; closing still verifies the tray before hiding.
+            let _ = super::app_shell_commands::sync_preferences(&app, &preferences);
+        }
 
         Ok(preferences)
     })
@@ -361,7 +392,7 @@ pub struct AddonUrlInspection {
     pub duplicate_of: Option<String>,
 }
 
-fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlInspection {
+fn validate_installable_addon_reference(url: &str) -> AddonUrlInspection {
     if url.chars().count() > MAX_ADDON_URL_INPUT_CHARS {
         return AddonUrlInspection {
             error: Some("Addon URL is too long.".to_string()),
@@ -385,16 +416,23 @@ fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlIn
             .to_ascii_lowercase()
             .ends_with("/configure")
     });
-    let duplicate_of = installed
-        .iter()
-        .find(|addon| addon.url == normalized_url)
-        .map(|addon| addon.name.clone());
     AddonUrlInspection {
-        normalized_url: Some(normalized_url),
-        error: None,
+        normalized_url: (!configure_page).then_some(normalized_url),
+        error: configure_page.then(|| "This is a configure page — open it, finish setup, then paste the generated manifest URL.".to_string()),
         configure_page,
-        duplicate_of,
+        duplicate_of: None,
     }
+}
+
+fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlInspection {
+    let mut verdict = validate_installable_addon_reference(url);
+    verdict.duplicate_of = verdict.normalized_url.as_ref().and_then(|url| {
+        installed
+            .iter()
+            .find(|addon| &addon.url == url)
+            .map(|addon| addon.name.clone())
+    });
+    verdict
 }
 
 #[command]
@@ -429,9 +467,6 @@ fn apply_addon_configs_op(
             let url = verdict
                 .normalized_url
                 .ok_or_else(|| "Enter a valid http(s) or stremio:// addon URL.".to_string())?;
-            if verdict.configure_page {
-                return Err("This is a configure page — open it, finish setup, then paste the generated manifest URL.".to_string());
-            }
             if let Some(name) = verdict.duplicate_of {
                 return Err(format!("This addon URL is already configured as {name}."));
             }

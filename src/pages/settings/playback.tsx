@@ -13,12 +13,7 @@ import {
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
-import {
-  api,
-  type AppUiPreferencesPatch,
-  getErrorMessage,
-  type SupportedLanguage,
-} from '@/lib/api';
+import { api, type AppUiPreferences, getErrorMessage, type SupportedLanguage } from '@/lib/api';
 import { normalizeLanguageToken } from '@/lib/player-track-utils';
 import { SUPPORTED_LANGUAGES_QUERY_KEY } from '@/lib/query-invalidation';
 import { clearTimer, cn } from '@/lib/utils';
@@ -27,16 +22,83 @@ import {
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
+  SettingsQueryError,
   SettingsRow,
   SettingsSwitch,
 } from './chrome';
 
-const LANGUAGE_MENU_ITEM_CLASS =
+const PLAYBACK_MENU_ITEM_CLASS =
   'gap-2.5 py-2 px-3 text-sm rounded-lg cursor-pointer hover:bg-white/10 text-zinc-200 hover:text-white transition-colors';
+
+type PlaybackUiPreferences = Pick<
+  AppUiPreferences,
+  | 'autoPlayNext'
+  | 'nextEpisodeCountdownSecs'
+  | 'controlsHideDelayMs'
+  | 'autoSkipIntro'
+  | 'spoilerProtection'
+  | 'trailerPreviews'
+>;
 
 // Fixed-width slot keeps option labels aligned whether or not a check shows.
 function MenuCheck({ active }: { active: boolean }) {
   return active ? <Check className='h-4 w-4 text-white' /> : <div className='w-4' />;
+}
+
+interface SecondsSelectProps {
+  label: string;
+  description: string;
+  seconds: number;
+  options: readonly number[];
+  disabled: boolean;
+  onChange: (seconds: number) => void;
+}
+
+function SecondsSelect({
+  label,
+  description,
+  seconds,
+  options,
+  disabled,
+  onChange,
+}: SecondsSelectProps) {
+  return (
+    <SettingsRow label={label} description={description}>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant='outline'
+            aria-label={`${label}: ${seconds} seconds`}
+            disabled={disabled}
+            className={cn(
+              'h-9 min-w-36 justify-between px-3 text-[13px] shadow-none',
+              SETTINGS_OUTLINE_BUTTON_CLASS,
+            )}
+          >
+            {seconds} seconds
+            <ChevronDown className='ml-3 h-4 w-4 text-zinc-500 opacity-70' />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent
+          align='end'
+          className='min-w-40 border-white/10 bg-zinc-950 backdrop-blur-none'
+        >
+          {options.map((option) => (
+            <DropdownMenuItem
+              key={option}
+              role='menuitemradio'
+              aria-checked={seconds === option}
+              onClick={() => onChange(option)}
+              className={PLAYBACK_MENU_ITEM_CLASS}
+            >
+              <MenuCheck active={seconds === option} />
+              {option} seconds
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </SettingsRow>
+  );
 }
 
 function formatLanguageLabel(
@@ -69,41 +131,36 @@ function LanguageSelector({
   onChange,
 }: LanguageSelectorProps) {
   const normalized = normalizeLanguageToken(value);
-  const selectorLabelId = `${kind}-language-selector-label`;
-  const selectorValueId = `${kind}-language-selector-value`;
   const valueLabel = formatLanguageLabel(value, kind, options);
 
   return (
-    <div className='space-y-2'>
-      <div id={selectorLabelId} className='text-[12px] font-medium text-zinc-400'>
-        {label}
-      </div>
+    <SettingsRow label={label}>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             variant='outline'
-            aria-labelledby={`${selectorLabelId} ${selectorValueId}`}
+            aria-label={`${label}: ${valueLabel}`}
             disabled={disabled}
             className={cn(
-              'h-10 w-full justify-between px-3.5 text-[13px] shadow-none',
+              'h-9 min-w-36 justify-between px-3 text-[13px] shadow-none',
               SETTINGS_OUTLINE_BUTTON_CLASS,
             )}
           >
-            <span id={selectorValueId} title={valueLabel} className='truncate text-zinc-100'>
+            <span title={valueLabel} className='truncate text-zinc-100'>
               {valueLabel}
             </span>
-            <ChevronDown className='ml-2 h-4 w-4 shrink-0 text-zinc-500 opacity-70' />
+            <ChevronDown className='ml-3 h-4 w-4 shrink-0 text-zinc-500 opacity-70' />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent
-          align='start'
-          className='w-(--radix-dropdown-menu-trigger-width) bg-zinc-950 border-white/10 backdrop-blur-none'
+          align='end'
+          className='min-w-40 bg-zinc-950 border-white/10 backdrop-blur-none'
         >
           <DropdownMenuItem
             role='menuitemradio'
             aria-checked={!normalized}
             onClick={() => onChange('')}
-            className={LANGUAGE_MENU_ITEM_CLASS}
+            className={PLAYBACK_MENU_ITEM_CLASS}
           >
             <MenuCheck active={!normalized} />
             Auto
@@ -113,7 +170,7 @@ function LanguageSelector({
               role='menuitemradio'
               aria-checked={normalized === 'off'}
               onClick={() => onChange('off')}
-              className={LANGUAGE_MENU_ITEM_CLASS}
+              className={PLAYBACK_MENU_ITEM_CLASS}
             >
               <MenuCheck active={normalized === 'off'} />
               Off
@@ -125,7 +182,7 @@ function LanguageSelector({
               role='menuitemradio'
               aria-checked={normalized === option.code}
               onClick={() => onChange(option.code)}
-              className={LANGUAGE_MENU_ITEM_CLASS}
+              className={PLAYBACK_MENU_ITEM_CLASS}
             >
               <MenuCheck active={normalized === option.code} />
               {option.label} ({option.code})
@@ -133,7 +190,7 @@ function LanguageSelector({
           ))}
         </DropdownMenuContent>
       </DropdownMenu>
-    </div>
+    </SettingsRow>
   );
 }
 
@@ -210,7 +267,7 @@ function PlaybackLanguageConfig() {
 
   return (
     <div className='space-y-3'>
-      <div className='grid grid-cols-1 gap-4 sm:grid-cols-2'>
+      <div className='divide-y divide-white/[0.06]'>
         <LanguageSelector
           label='Audio'
           value={globalPlaybackLanguagePreferences?.preferredAudioLanguage ?? ''}
@@ -252,7 +309,7 @@ function AppUiPreferenceToggle({
   label,
   description,
 }: {
-  appUiPreferences: ReturnType<typeof useAppUiPreferences>;
+  appUiPreferences: ReturnType<typeof useAppUiPreferences<PlaybackUiPreferences>>;
   field: 'autoPlayNext' | 'autoSkipIntro' | 'spoilerProtection' | 'trailerPreviews';
   label: string;
   description: string;
@@ -261,23 +318,36 @@ function AppUiPreferenceToggle({
   const checked = preferences[field];
 
   return (
-    <SettingsRow label={label} description={description} className='py-3.5 first:pt-0 last:pb-0'>
+    <SettingsRow label={label} description={description}>
       <SettingsSwitch
         ariaLabel={label}
         checked={checked}
         disabled={isHydrating}
-        onChange={() => {
-          const patch: AppUiPreferencesPatch = {};
-          patch[field] = !checked;
-          updatePreferences(patch);
-        }}
+        onChange={() => updatePreferences({ [field]: !checked })}
       />
     </SettingsRow>
   );
 }
 
 export function PlaybackSettings() {
-  const appUiPreferences = useAppUiPreferences();
+  const appUiPreferences = useAppUiPreferences(
+    ({
+      spoilerProtection,
+      trailerPreviews,
+      autoPlayNext,
+      nextEpisodeCountdownSecs,
+      controlsHideDelayMs,
+      autoSkipIntro,
+    }) => ({
+      spoilerProtection,
+      trailerPreviews,
+      autoPlayNext,
+      nextEpisodeCountdownSecs,
+      controlsHideDelayMs,
+      autoSkipIntro,
+    }),
+  );
+  const { preferences, isHydrating, updatePreferences } = appUiPreferences;
 
   return (
     <SettingsGroup>
@@ -289,7 +359,12 @@ export function PlaybackSettings() {
         <PlaybackLanguageConfig />
       </SettingsBody>
       <div className='border-t border-white/[0.06]'>
-        <SettingsBody className='divide-y divide-white/[0.06]'>
+        <SettingsQueryError
+          className='mx-5 mt-4'
+          query={appUiPreferences.preferencesQuery}
+          message="Couldn't load your preferences."
+        />
+        <SettingsBody rows>
           <AppUiPreferenceToggle
             appUiPreferences={appUiPreferences}
             field='spoilerProtection'
@@ -307,6 +382,22 @@ export function PlaybackSettings() {
             field='autoPlayNext'
             label='Auto-play next episode'
             description='When an episode ends, count down and start the next one automatically.'
+          />
+          <SecondsSelect
+            label='Next episode countdown'
+            description='Seconds before the next episode starts automatically.'
+            seconds={preferences.nextEpisodeCountdownSecs}
+            options={[5, 8, 10, 15, 30]}
+            disabled={isHydrating || !preferences.autoPlayNext}
+            onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
+          />
+          <SecondsSelect
+            label='Hide player controls after'
+            description='How long controls stay visible while playing.'
+            seconds={preferences.controlsHideDelayMs / 1000}
+            options={[2, 3, 5, 8]}
+            disabled={isHydrating}
+            onChange={(seconds) => updatePreferences({ controlsHideDelayMs: seconds * 1000 })}
           />
           <AppUiPreferenceToggle
             appUiPreferences={appUiPreferences}

@@ -5,6 +5,14 @@ import { useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { api, getErrorMessage, type ImportResult } from '@/lib/api';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import {
@@ -22,7 +30,12 @@ import {
   STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
-import { SETTINGS_OUTLINE_BUTTON_CLASS, SettingsGroup, SettingsGroupHeader } from './chrome';
+import {
+  SETTINGS_OUTLINE_BUTTON_CLASS,
+  SettingsBody,
+  SettingsGroup,
+  SettingsGroupHeader,
+} from './chrome';
 
 const CLEAR_CONFIRM_TIMEOUT_MS = 8_000;
 
@@ -31,6 +44,7 @@ interface DataCategory {
   label: string;
   description: string;
   count: number | undefined;
+  isEmpty?: boolean;
   unit: string;
   clearFn: () => Promise<void>;
   invalidateCaches: () => Promise<void>;
@@ -40,6 +54,8 @@ function BackupRestore() {
   const queryClient = useQueryClient();
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [importPath, setImportPath] = useState<string | null>(null);
+  const cancelImportRef = useRef<HTMLButtonElement>(null);
 
   const handleExport = async () => {
     setExporting(true);
@@ -62,7 +78,7 @@ function BackupRestore() {
     }
   };
 
-  const handleImport = async () => {
+  const chooseImport = async () => {
     setImporting(true);
     try {
       const selected = await openDialog({
@@ -71,12 +87,22 @@ function BackupRestore() {
         directory: false,
         filters: [{ name: 'JSON', extensions: ['json'] }],
       });
-      if (!selected) return;
+      if (selected) setImportPath(selected);
+    } catch (err) {
+      toast.error(`Import failed: ${getErrorMessage(err)}`);
+    } finally {
+      setImporting(false);
+    }
+  };
 
+  const handleImport = async (path: string) => {
+    setImporting(true);
+    setImportPath(null);
+    try {
       await flushPendingAppWrites();
       let result: ImportResult | undefined;
       try {
-        result = await api.importAppDataFromFile(selected);
+        result = await api.importAppDataFromFile(path);
       } finally {
         // Whole-snapshot writers (profile, selector prefs, addon list) compose
         // writes from cached state — reset, not just invalidate, so a settings
@@ -116,10 +142,10 @@ function BackupRestore() {
   };
 
   return (
-    <div className='flex flex-col items-start justify-between gap-4 px-5 py-4 sm:flex-row sm:items-center'>
+    <SettingsBody className='flex flex-col items-start justify-between gap-4 sm:flex-row sm:items-center'>
       <div className='min-w-0'>
-        <p className='text-[13.5px] font-medium text-white'>Backup & restore</p>
-        <p className='mt-0.5 text-[12.5px] leading-relaxed text-zinc-500'>
+        <p className='text-[14px] font-medium text-zinc-100'>Backup & restore</p>
+        <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>
           Export history, library, lists, addons, and settings to a JSON file. Importing merges
           records and restores settings. Addon URLs can hold account keys — keep backups private.
         </p>
@@ -128,7 +154,7 @@ function BackupRestore() {
         <BackupButton
           icon={Download}
           busy={exporting}
-          disabled={exporting || importing}
+          disabled={exporting || importing || importPath !== null}
           onClick={handleExport}
         >
           Export
@@ -136,13 +162,43 @@ function BackupRestore() {
         <BackupButton
           icon={Upload}
           busy={importing}
-          disabled={exporting || importing}
-          onClick={handleImport}
+          disabled={exporting || importing || importPath !== null}
+          onClick={chooseImport}
         >
           Import
         </BackupButton>
       </div>
-    </div>
+      <Dialog
+        open={importPath !== null}
+        onOpenChange={(open) => {
+          if (!open) setImportPath(null);
+        }}
+      >
+        <DialogContent
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            cancelImportRef.current?.focus();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Import backup?</DialogTitle>
+            <DialogDescription>
+              History, library, lists, and watch statuses merge with your existing records.
+              Preferences, profile, and appearance are replaced by the backup's settings. Addons and
+              per-title language picks merge. This cannot be undone.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button ref={cancelImportRef} variant='outline' onClick={() => setImportPath(null)}>
+              Cancel
+            </Button>
+            <Button onClick={() => importPath && void handleImport(importPath)}>
+              Import backup
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+    </SettingsBody>
   );
 }
 
@@ -194,14 +250,17 @@ function DataManager() {
       await cat.clearFn();
       return cat;
     },
-    onSuccess: async (cat) => {
-      setConfirmKey(null);
-      await cat.invalidateCaches();
+    onSuccess: (cat) => {
       toast.success(`${cat.label} cleared`);
     },
     onError: (err: unknown, cat) => {
+      toast.error(`Failed to clear ${cat.label}: ${getErrorMessage(err)}`, {
+        description: 'Some data may have been partially cleared.',
+      });
+    },
+    onSettled: (_data, _error, cat) => {
       setConfirmKey(null);
-      toast.error(`Failed to clear ${cat.label}: ${getErrorMessage(err)}`);
+      return cat.invalidateCaches();
     },
   });
 
@@ -233,6 +292,7 @@ function DataManager() {
       description:
         'Watched episodes and movies, resume progress, and per-title audio, subtitle and source picks.',
       count: stats?.history_count,
+      isEmpty: stats?.history_count === 0 && stats.has_learned_playback_data === false,
       unit: 'entries',
       clearFn: api.clearWatchHistory,
       // `clear_watch_history` also wipes per-title language picks and source health/affinity that feed stream ranking (Rust `PlaybackStateService::clear`).
@@ -279,7 +339,7 @@ function DataManager() {
         <p className='text-[11px] font-medium uppercase tracking-[0.12em] text-zinc-500'>
           Clear local records
         </p>
-        <p className='text-[11.5px] text-zinc-600'>Permanent — no undo</p>
+        <p className='text-xs text-zinc-400'>Permanent — no undo</p>
       </div>
 
       {isLoadingError && (
@@ -291,27 +351,25 @@ function DataManager() {
         />
       )}
 
-      <div className='divide-y divide-white/[0.05]'>
+      <SettingsBody rows>
         {categories.map((cat) => {
           const isPending = clearMutation.isPending && clearMutation.variables?.key === cat.key;
           const isConfirming = confirmKey === cat.key;
-          const isEmpty = cat.count === 0;
+          const isEmpty = cat.isEmpty ?? cat.count === 0;
 
           return (
             <div
               key={cat.key}
-              className='flex flex-col items-start justify-between gap-3 px-5 py-3.5 sm:flex-row sm:items-center'
+              className='flex flex-col items-start justify-between gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center'
             >
               <div className='min-w-0'>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <span className='text-[13.5px] font-medium text-white'>{cat.label}</span>
+                  <span className='text-[14px] font-medium text-zinc-100'>{cat.label}</span>
                   <span className='text-[12px] tabular-nums text-zinc-500'>
                     {cat.count ?? '—'} {cat.unit}
                   </span>
                 </div>
-                <p className='mt-0.5 text-[12.5px] leading-relaxed text-zinc-400'>
-                  {cat.description}
-                </p>
+                <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>{cat.description}</p>
               </div>
 
               <div
@@ -364,7 +422,7 @@ function DataManager() {
             </div>
           );
         })}
-      </div>
+      </SettingsBody>
     </div>
   );
 }
