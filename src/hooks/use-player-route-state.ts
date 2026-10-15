@@ -8,16 +8,11 @@ import {
 } from '@/lib/player-navigation';
 import { usePlayerSession } from '@/lib/player-session';
 
-function parseNonNegativeInt(value: string | number | undefined): number | undefined {
-  if (typeof value === 'string') {
-    if (!value) return undefined;
-    const parsed = Number.parseInt(value, 10);
-    // Season/episode 0 are valid coordinates (specials).
-    return normalizeRouteNumber(parsed);
-  }
-  return typeof value === 'number' && Number.isFinite(value) && value >= 0
-    ? normalizeRouteNumber(value)
-    : undefined;
+function parseNonNegativeInt(value: string | undefined): number | undefined {
+  if (!value) return undefined;
+  const parsed = Number.parseInt(value, 10);
+  // Season/episode 0 are valid coordinates (specials).
+  return normalizeRouteNumber(parsed);
 }
 
 export function usePlayerRouteState() {
@@ -51,7 +46,6 @@ export function usePlayerRouteState() {
       routeStreamSeason,
       routeStreamEpisode,
       routeStreamLookupId: state.streamLookupId,
-      routeFormat: state.format,
       routeSourceId: state.streamSourceId,
       routeSourceName: state.streamSourceName,
       routeStreamFamily: state.streamFamily,

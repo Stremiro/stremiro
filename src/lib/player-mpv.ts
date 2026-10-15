@@ -7,20 +7,20 @@ export function mpvCommand(
   name: string,
   args: readonly (string | number | boolean)[] = [],
 ): Promise<void> {
-  return invoke('player_mpv_command', { name, args: [...args] });
+  return invoke('player_mpv_command', { name, args });
 }
 
 /** Rust appends `alang`/`slang`/selection options from the canonical language table. */
-interface MpvInitOptions {
+type MpvInitOptions = {
   initialVolume: number;
   initialMuted: boolean;
   startPaused: boolean;
   preferredAudioLanguage?: string;
   preferredSubtitleLanguage?: string;
-}
+};
 
 export function mpvInit(options: MpvInitOptions): Promise<string> {
-  return invoke('player_mpv_init', { ...options });
+  return invoke('player_mpv_init', options);
 }
 
 export function mpvDestroy(): Promise<void> {
@@ -38,10 +38,6 @@ function mpvGetProperty<T>(
   return invoke<T | null>('player_mpv_get_property', { name, format });
 }
 
-export function isPlayerTrackRefreshProperty(name: string): boolean {
-  return name === 'current-tracks/audio/id' || name === 'current-tracks/sub/id';
-}
-
 export function setMpvProperty(name: string, value: string | number | boolean): Promise<void> {
   return invoke('player_mpv_set_property', { name, value });
 }
@@ -53,8 +49,8 @@ export function setMpvProperties(
 }
 
 /** `cycle` steps aid/sid — resolves after mpv applies, so a follow-up read reports the landed id. */
-export async function cycleMpvTrack(type: 'audio' | 'sub'): Promise<void> {
-  await mpvCommand('cycle', [type === 'audio' ? 'aid' : 'sub']);
+export function cycleMpvTrack(type: 'audio' | 'sub'): Promise<void> {
+  return mpvCommand('cycle', [type === 'audio' ? 'aid' : 'sub']);
 }
 
 /** mpv `sub-add <url> [flags [title [lang]]]` — resolves at command accept; the track lands in `track-list` only after mpv fetches it. */
@@ -83,7 +79,7 @@ export async function readPlaybackPositionProbe(durationSecs: number): Promise<{
 }
 
 // Single-id poll (1 IPC vs full list); throws on IPC failure so callers retry — genuine "off" is null.
-export async function readSelectedTrackId(type: 'audio' | 'sub'): Promise<number | null> {
+export function readSelectedTrackId(type: 'audio' | 'sub'): Promise<number | null> {
   return mpvGetProperty<number | null>(`current-tracks/${type}/id`, 'int64');
 }
 

@@ -271,6 +271,7 @@ pub(crate) struct StreamSignalCache {
     /// Slot for key-less streams so `for_stream` always returns a borrow —
     /// unprepared rows (tests) carry no identity and a "" key would collapse them.
     uncached: Option<CachedStreamSignals>,
+    sort_scratch: Vec<(StreamRecommendationKey, AddonStream)>,
 }
 
 impl StreamSignalCache {
@@ -772,23 +773,22 @@ pub(crate) fn sort_streams_by_recommendation(
         inputs.preferred_audio_language,
         inputs.preferred_subtitle_language,
     );
-    let mut keyed: Vec<(StreamRecommendationKey, AddonStream)> = streams
-        .drain(..)
-        .map(|stream| {
-            let key = stream_recommendation_key(
-                &stream,
-                &inputs,
-                reference.as_ref(),
-                language_prefs,
-                signals,
-            );
-            (key, stream)
-        })
-        .collect();
+    let mut keyed = std::mem::take(&mut signals.sort_scratch);
+    keyed.clear();
+    keyed.extend(streams.drain(..).map(|stream| {
+        let key = stream_recommendation_key(
+            &stream,
+            &inputs,
+            reference.as_ref(),
+            language_prefs,
+            signals,
+        );
+        (key, stream)
+    }));
     // Stable sort keeps input order for tied keys.
     keyed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
-    for (key, mut stream) in keyed {
+    for (key, mut stream) in keyed.drain(..) {
         stream.match_summary = stream_match_summary(&key);
         stream.selection_priority = Some(SelectionPriority {
             episode_match: key.episode_match,
@@ -800,6 +800,7 @@ pub(crate) fn sort_streams_by_recommendation(
         recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
         streams.push(stream);
     }
+    signals.sort_scratch = keyed;
 }
 
 #[cfg(test)]

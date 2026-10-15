@@ -11,10 +11,12 @@ import {
 } from 'lucide-react';
 import { memo, useState } from 'react';
 import { CHROME_ICON_BUTTON_CLASS } from '@/components/player-chrome-styles';
-import { PlayerProgressBar } from '@/components/player-progress-bar';
+import { PlayerProgressBar, PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { SkipSegment } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
+import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { snapPlayerPip } from '@/lib/player-window';
 import { cn } from '@/lib/utils';
 
@@ -28,6 +30,7 @@ interface PlayerPipChromeProps {
   clock: PlaybackClock;
   bufferedClock: PlaybackClock;
   duration: number;
+  playbackSpeed?: number;
   skipSegments: SkipSegment[];
   resetKey?: string;
   status?: string;
@@ -39,7 +42,7 @@ interface PlayerPipChromeProps {
   onReturn: () => Promise<void>;
   onTogglePlay: () => Promise<void>;
   onToggleMute: () => Promise<void>;
-  onVolumeStep: (delta: number) => void;
+  onVolumeWheel: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
   onSeek: (seconds: number) => void;
   onNext: () => void;
   onReplay: () => void;
@@ -50,6 +53,7 @@ interface PlayerPipChromeProps {
 
 export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChromeProps) {
   const { title, episodeLabel, visible, status, error, ended, onReturn } = props;
+  const keymap = usePlayerKeymap();
   const [snapping, setSnapping] = useState(false);
   const [focused, setFocused] = useState(false);
   const chromeVisible = visible || !props.isPlaying || !!status || !!error || ended || focused;
@@ -98,13 +102,16 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             setFocused(false);
         }}
         className={cn(
-          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-200 motion-reduce:transition-none',
+          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-150 motion-reduce:transition-none',
           chromeVisible ? 'opacity-100' : 'opacity-0',
         )}
       >
         <div
           data-player-interactive
-          className='pointer-events-auto flex min-w-0 items-center gap-1 bg-linear-to-b from-black/80 to-transparent px-2 pt-1'
+          className={cn(
+            'flex min-w-0 items-center gap-1 bg-linear-to-b from-black/80 to-transparent px-2 pt-1',
+            chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
+          )}
           onPointerEnter={() => props.onControlsHover(true)}
           onPointerLeave={() => props.onControlsHover(false)}
         >
@@ -145,10 +152,22 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         </div>
         <div
           data-player-interactive
-          className='pointer-events-auto shrink-0 bg-linear-to-t from-black/90 via-black/60 to-transparent px-3 pb-2 pt-3'
+          className={cn(
+            'shrink-0 bg-linear-to-t from-black/90 via-black/60 to-transparent px-3 pb-2 pt-3',
+            chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
+          )}
           onPointerEnter={() => props.onControlsHover(true)}
           onPointerLeave={() => props.onControlsHover(false)}
         >
+          <div className='flex justify-end pb-1'>
+            <PlayerTimeDisplay
+              active={chromeVisible}
+              clock={props.clock}
+              duration={props.duration}
+              playbackSpeed={props.playbackSpeed}
+              className='h-6 px-1 text-xs'
+            />
+          </div>
           <PlayerProgressBar
             active={chromeVisible}
             duration={props.duration}
@@ -173,11 +192,9 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                   ? 'Try again'
                   : ended
                     ? 'Watch again'
-                    : props.isPlaying
-                      ? 'Pause (Space)'
-                      : 'Play (Space)'
+                    : withShortcutHint(props.isPlaying ? 'Pause' : 'Play', keymap, 'togglePlay')
               }
-              aria-keyshortcuts='Space k'
+              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
               onClick={() =>
                 error
                   ? props.onRetry()
@@ -198,17 +215,17 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
               type='button'
               className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
               aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
-              aria-keyshortcuts='m'
+              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
               title={
                 volumeIsSilent
-                  ? 'Unmute (M)'
+                  ? withShortcutHint('Unmute', keymap, 'toggleMute')
                   : `Volume ${Math.round(props.volume)}% · scroll to adjust`
               }
               onClick={() => void props.onToggleMute().catch(() => undefined)}
               onWheel={(event) => {
                 if (event.deltaY === 0) return;
                 event.stopPropagation();
-                props.onVolumeStep(event.deltaY < 0 ? 5 : -5);
+                void props.onVolumeWheel(event).catch(() => undefined);
               }}
             >
               <PlayerVolumeIcon muted={volumeIsSilent} volume={props.volume} className='h-4 w-4' />
@@ -218,8 +235,8 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                 type='button'
                 className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
                 aria-label='Next episode'
-                title='Next episode (N)'
-                aria-keyshortcuts='n'
+                title={withShortcutHint('Next episode', keymap, 'nextEpisode')}
+                aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
                 onClick={props.onNext}
               >
                 <SkipForward className='h-4 w-4' />

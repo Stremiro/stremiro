@@ -39,8 +39,6 @@ struct HistoryPlaybackRouteState {
     #[serde(skip_serializing_if = "Option::is_none")]
     backdrop: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     stream_source_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_source_name: Option<String>,
@@ -282,7 +280,6 @@ fn build_player_plan(
         title: normalize_saved_value(Some(item.title.as_str())),
         poster: item.poster.clone(),
         backdrop: item.backdrop.clone(),
-        format: normalize_saved_value(item.last_stream_format.as_deref()),
         stream_source_id: normalize_saved_value(item.source_id.as_deref()),
         stream_source_name: normalize_saved_value(item.source_name.as_deref()),
         stream_family: normalize_saved_value(item.stream_family.as_deref()),
@@ -499,6 +496,18 @@ mod tests {
     }
 
     #[test]
+    fn watch_progress_accepts_legacy_format_and_defaults_missing_format() {
+        let mut payload = serde_json::to_value(progress_item("tt99", "movie")).unwrap();
+        assert!(payload.get("last_stream_format").is_none());
+        let progress: WatchProgress = serde_json::from_value(payload.clone()).unwrap();
+        assert_eq!(progress.last_stream_format, None);
+
+        payload["last_stream_format"] = serde_json::json!("video/mp4");
+        let progress: WatchProgress = serde_json::from_value(payload).unwrap();
+        assert_eq!(progress.last_stream_format.as_deref(), Some("video/mp4"));
+    }
+
+    #[test]
     fn player_plan_runs_without_saved_stream_identity() {
         let mut movie = progress_item("tt99", "movie");
         movie.position = 120.0;
@@ -549,6 +558,7 @@ mod tests {
         item.absolute_episode = Some(5);
         item.stream_season = Some(1);
         item.stream_episode = Some(5);
+        item.last_stream_format = Some("video/mp4".to_string());
         item.last_stream_key = Some("s:saved".to_string());
         item.last_stream_lookup_id = Some("tt7654321".to_string());
         item.source_id = Some("addon-a".to_string());
@@ -562,6 +572,9 @@ mod tests {
         assert_eq!(plan.state.stream_source_name.as_deref(), Some("CDN A"));
         assert_eq!(plan.state.stream_family.as_deref(), Some("cdn|release:x"));
         assert_eq!(plan.state.stream_lookup_id.as_deref(), Some("tt7654321"));
+        assert!(serde_json::to_value(&plan).unwrap()["state"]
+            .get("format")
+            .is_none());
         assert_eq!(
             serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
             serde_json::json!({

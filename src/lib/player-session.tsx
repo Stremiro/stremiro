@@ -15,6 +15,7 @@ import {
 import { useLocation, useMatch, useParams } from 'react-router';
 import { DesktopTitlebar } from '@/components/desktop-titlebar';
 import { RemoteImage } from '@/components/remote-image';
+import { Sidebar } from '@/components/sidebar';
 import { type PlayerRouteState, sanitizePlayerRouteState } from '@/lib/player-navigation';
 import { routeChunks } from '@/lib/route-chunks';
 import { isHttpUrl } from '@/lib/utils';
@@ -149,6 +150,8 @@ function PlayerRouteLoader({ state }: { state: unknown }) {
       <div className='absolute inset-0 flex items-center justify-center animate-in fade-in duration-200 fill-mode-backwards [animation-delay:350ms] motion-reduce:[animation-delay:0ms]'>
         <Loader2 className='h-8 w-8 animate-spin text-white/50' />
       </div>
+      {/* Same rail the player mounts, so the sidebar never blinks out while the chunk loads. */}
+      <Sidebar className='fixed left-0 top-0 z-70 flex' />
       <DesktopTitlebar className='bg-linear-to-b from-black/70 via-black/35 to-transparent' />
     </div>
   );

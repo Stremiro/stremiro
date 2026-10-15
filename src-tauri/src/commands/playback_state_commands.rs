@@ -17,6 +17,8 @@ pub async fn report_playback_stream_outcome(
     stream_family: Option<String>,
     outcome: String,
 ) -> Result<(), String> {
+    let expected_generation = playback_state.history_generation();
+    let timestamp_ms = now_unix_millis();
     let normalized_id = normalize_media_id(&id)
         .ok_or_else(|| "Media ID is required for stream outcome reporting.".to_string())?;
     let normalized_type = normalize_watch_progress_type(&type_)
@@ -37,8 +39,9 @@ pub async fn report_playback_stream_outcome(
                 source_id,
                 stream_family,
                 outcome: normalized_outcome,
-                timestamp_ms: now_unix_millis(),
+                timestamp_ms,
             },
+            expected_generation,
         )
     })
     .await

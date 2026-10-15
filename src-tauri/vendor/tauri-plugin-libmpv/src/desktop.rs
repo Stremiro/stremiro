@@ -6,7 +6,7 @@ use serde::de::DeserializeOwned;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{mpsc, Arc, Mutex};
 use tauri::Emitter;
 use tauri::{plugin::PluginApi, AppHandle, Manager, Runtime};
 
@@ -95,13 +95,10 @@ pub unsafe extern "C" fn event_callback<R: Runtime>(event: *const c_char, userda
     }
 
     let EventUserData {
-        app,
         free_fn,
-        window_label,
+        event_sender,
+        ..
     } = unsafe { &*(userdata as *const EventUserData<R>) };
-    // Teardown frees userdata before queued frontend events necessarily run.
-    let app = app.clone();
-    let window_label = window_label.clone();
 
     let event_string = unsafe { CStr::from_ptr(event).to_string_lossy().to_string() };
 
@@ -109,19 +106,30 @@ pub unsafe extern "C" fn event_callback<R: Runtime>(event: *const c_char, userda
         free_fn(event as *mut c_char);
     }
 
-    tauri::async_runtime::spawn(async move {
+    // The native event-listener thread must not wait for frontend delivery.
+    let _ = event_sender.send(event_string);
+}
+
+fn forward_events(
+    receiver: mpsc::Receiver<String>,
+    alive: &Mutex<bool>,
+    mut emit: impl FnMut(&serde_json::Value),
+) {
+    for event_string in receiver {
+        // Serialize emission with teardown, not just an alive check before emit.
+        let alive = alive
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*alive {
+            continue;
+        }
         match serde_json::from_str::<serde_json::Value>(&event_string) {
-            Ok(event) => {
-                let event_name = format!("mpv-event-{}", window_label);
-                if let Err(e) = app.emit_to(&window_label, &event_name, &event) {
-                    error!("Failed to emit mpv event to frontend: {}", e);
-                }
-            }
+            Ok(event) => emit(&event),
             Err(e) => {
                 error!("Failed to deserialize mpv FFI event: {}", e);
             }
         }
-    });
+    }
 }
 
 impl<R: Runtime> Mpv<R> {
@@ -178,10 +186,13 @@ impl<R: Runtime> Mpv<R> {
         let c_initial_options = CString::new(initial_options_string)?;
         let c_observed_properties = CString::new(observed_properties_string)?;
 
+        let (event_sender, event_receiver) = mpsc::channel();
+        let event_alive = Arc::new(Mutex::new(true));
         let event_callback_data = Box::new(EventUserData {
-            app,
+            app: app.clone(),
             free_fn,
-            window_label: window_label.to_string(),
+            event_sender,
+            event_alive: Arc::clone(&event_alive),
         });
         let event_userdata = Box::into_raw(event_callback_data) as *mut c_void;
 
@@ -198,6 +209,16 @@ impl<R: Runtime> Mpv<R> {
             let _ = unsafe { Box::from_raw(event_userdata as *mut EventUserData<R>) };
             return Err(crate::Error::CreateInstance);
         }
+
+        let window_label_owned = window_label.to_string();
+        tauri::async_runtime::spawn_blocking(move || {
+            let event_name = format!("mpv-event-{}", window_label_owned);
+            forward_events(event_receiver, &event_alive, |event| {
+                if let Err(e) = app.emit_to(&window_label_owned, &event_name, event) {
+                    error!("Failed to emit mpv event to frontend: {}", e);
+                }
+            });
+        });
 
         info!("mpv instance initialized for window '{}'.", window_label);
 
@@ -240,11 +261,18 @@ impl<R: Runtime> Mpv<R> {
     ) -> Result<()> {
         if let Some(instance) = instances_lock.remove(window_label) {
             let wrapper = self.get_wrapper()?;
+            let event_data = unsafe { &*(instance.event_userdata as *const EventUserData<R>) };
+            *event_data
+                .event_alive
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
 
             unsafe {
                 wrapper.mpv_wrapper_destroy(instance.handle);
             }
 
+            // Native destroy waits for the event client to detach. Dropping its
+            // sole sender now lets the forwarder drain without emitting and exit.
             let _ = unsafe { Box::from_raw(instance.event_userdata as *mut EventUserData<R>) };
 
             info!(

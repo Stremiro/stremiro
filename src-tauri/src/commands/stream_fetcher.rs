@@ -348,6 +348,7 @@ async fn fetch_prepared_streams_for_addon(
 ) -> Result<Vec<AddonStream>, String> {
     let source_name = addon.name.as_str();
     let mut last_error: Option<String> = None;
+    let mut any_succeeded = false;
 
     for (index, query_id) in query_ids.iter().enumerate() {
         let timeout_secs = if index == 0 {
@@ -366,6 +367,7 @@ async fn fetch_prepared_streams_for_addon(
 
         match attempt {
             Ok(Ok(streams)) => {
+                any_succeeded = true;
                 let prepared = prepare_addon_streams(streams, source_name, &addon.id);
                 if prepared.is_empty() {
                     continue;
@@ -418,11 +420,67 @@ async fn fetch_prepared_streams_for_addon(
         }
     }
 
-    if let Some(error) = last_error {
-        return Err(error);
+    if !any_succeeded {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
     }
 
     Ok(Vec::new())
+}
+
+pub(crate) async fn fetch_stream_for_link(
+    app: &AppHandle,
+    provider: &AddonTransport,
+    query: &StreamQueryRequest<'_>,
+    stream_key: &str,
+    source_id: Option<&str>,
+) -> Result<Option<AddonStream>, String> {
+    let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
+    let query_ids = build_stream_query_ids(
+        query.media_type,
+        query.id,
+        query.season,
+        query.episode,
+        query.absolute_episode,
+    );
+    let addons = super::addon_registry::load_enabled_addons_snapshot(app).await?;
+    let mut stream_addons: Vec<&AddonConfig> = addons
+        .iter()
+        .filter(|addon| addon_declares_stream(addon, effective_type, query.id))
+        .collect();
+    // The hint can only select an enabled, stream-capable addon from this snapshot.
+    if let Some(index) =
+        source_id.and_then(|id| stream_addons.iter().position(|addon| addon.id == id))
+    {
+        let addon = stream_addons.remove(index);
+        if let Ok(streams) =
+            fetch_prepared_streams_for_addon(provider, effective_type, &query_ids, addon).await
+        {
+            if let Some(stream) = streams
+                .into_iter()
+                .find(|stream| stream.stream_key == stream_key)
+            {
+                return Ok(Some(stream));
+            }
+        }
+    }
+    let mut pending = stream::iter((0..stream_addons.len()).map(|index| {
+        fetch_prepared_streams_for_addon(provider, effective_type, &query_ids, stream_addons[index])
+    }))
+    .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
+
+    while let Some(result) = pending.next().await {
+        if let Ok(streams) = result {
+            if let Some(stream) = streams
+                .into_iter()
+                .find(|stream| stream.stream_key == stream_key)
+            {
+                return Ok(Some(stream));
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// Batched single-store read, off the async worker: health, title affinities, language
@@ -874,18 +932,19 @@ async fn run_progressive_fetch(
                 );
             }
 
-            merge_unique_streams(
-                &mut preview_merged,
-                &mut preview_seen,
-                outcome.streams.iter().cloned(),
-            );
+            if !outcome.streams.is_empty() {
+                merge_unique_streams(
+                    &mut preview_merged,
+                    &mut preview_seen,
+                    outcome.streams.iter().cloned(),
+                );
+                sort_streams_by_recommendation(
+                    &mut preview_merged,
+                    ctx.recommendation_inputs(&stream_family_priorities),
+                    &mut signal_cache,
+                );
+            }
             preview_summaries.insert(index, summarize_addon_outcome(&outcome));
-
-            sort_streams_by_recommendation(
-                &mut preview_merged,
-                ctx.recommendation_inputs(&stream_family_priorities),
-                &mut signal_cache,
-            );
 
             send_selector_snapshot(
                 channel,
@@ -929,13 +988,15 @@ async fn merge_selector_outcomes(
         }
 
         let Some(outcome) = outcomes.remove(index) else {
+            let error_message = format!("{} did not respond in time.", addon.name);
+            push_bounded_error(&mut fatal_errors, error_message.as_str());
             source_summaries.push(StreamSourceSummary {
                 id: addon.id.clone(),
                 name: addon.name.clone(),
                 status: StreamSourceStatus::Offline,
                 stream_count: 0,
                 latency_ms: None,
-                error_message: Some("Source did not return a selector outcome.".to_string()),
+                error_message: Some(error_message),
             });
             continue;
         };

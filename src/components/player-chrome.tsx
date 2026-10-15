@@ -2,27 +2,39 @@ import {
   ArrowLeft,
   Check,
   Cloud,
-  FastForward,
+  Gauge,
   Maximize,
   Minimize,
   Pause,
   PictureInPicture2,
   Play,
-  Rewind,
+  RotateCcw,
+  RotateCw,
+  SkipBack,
   SkipForward,
 } from 'lucide-react';
 import { memo, type Ref, useState } from 'react';
-import { CHROME_ICON_BUTTON_CLASS, CHROME_POPOVER_CLASS } from '@/components/player-chrome-styles';
+import {
+  CHROME_ICON_BUTTON_CLASS,
+  CHROME_ICON_CLASS,
+  CHROME_ICON_STROKE,
+  CHROME_PILL_CLASS,
+  CHROME_POPOVER_CLASS,
+} from '@/components/player-chrome-styles';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
+import { PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { PlayerSlider } from '@/components/player-slider';
 import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { AddonSubtitle } from '@/lib/api';
+import type { PlaybackClock } from '@/lib/player-clock';
+import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
 import type { Track } from '@/lib/player-track-utils';
 import { cn, formatSeasonEpisode } from '@/lib/utils';
 
-// Preset ladder shared by the popover and the `[`/`]` hotkeys — one owner keeps them from drifting.
+// Preset ladder shared by the popover and the speed hotkeys — one owner keeps them from drifting.
 export const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
 
 interface PlayerTopChromeProps {
@@ -35,8 +47,8 @@ interface PlayerTopChromeProps {
   episodeTitle?: string;
   /** Live source label — reflects failover swaps, not just the launch pick. */
   streamSourceName?: string;
-  isFullscreen: boolean;
   onBack: () => Promise<void>;
+  isFullscreen: boolean;
   onToggleFullscreen: () => Promise<void>;
 }
 
@@ -49,64 +61,92 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   episodeCountInSeason,
   episodeTitle,
   streamSourceName,
-  isFullscreen,
   onBack,
+  isFullscreen,
   onToggleFullscreen,
 }: PlayerTopChromeProps) {
-  const secondaryParts: string[] = [];
+  const keymap = usePlayerKeymap();
   const seasonEpisode = formatSeasonEpisode(season, episode);
-  if (seasonEpisode) {
-    secondaryParts.push(
-      `${seasonEpisode}${episodeCountInSeason ? ` / ${episodeCountInSeason}` : ''}`,
-    );
-  }
-  if (episodeTitle) secondaryParts.push(episodeTitle);
-  if (streamSourceName) secondaryParts.push(`via ${streamSourceName}`);
+  const separator = (
+    <span aria-hidden='true' className='h-1 w-1 shrink-0 rounded-full bg-white/35' />
+  );
 
   return (
     <div
       ref={chromeRef}
       data-player-interactive
-      className='pointer-events-auto cursor-auto relative flex items-center justify-between'
+      className='cursor-auto relative flex items-center justify-between'
     >
-      <button
-        type='button'
-        aria-label='Back'
-        aria-keyshortcuts='Escape'
-        title='Back (Esc)'
-        onClick={() => void onBack().catch(() => undefined)}
-        className={CHROME_ICON_BUTTON_CLASS}
-      >
-        <ArrowLeft className='w-5 h-5' strokeWidth={2.5} />
-      </button>
-      <div className='text-center min-w-0 flex-1 mx-4'>
-        <h1 className='text-[15px] font-semibold line-clamp-1 leading-snug'>{title}</h1>
-        {secondaryParts.length > 0 && (
-          <p className='text-xs text-white/50 mt-0.5 truncate'>{secondaryParts.join(' · ')}</p>
+      <div className={CHROME_PILL_CLASS}>
+        <button
+          type='button'
+          aria-label='Back'
+          aria-keyshortcuts='Escape'
+          title='Back (Esc)'
+          onClick={() => void onBack().catch(() => undefined)}
+          className={CHROME_ICON_BUTTON_CLASS}
+        >
+          <ArrowLeft className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+        </button>
+      </div>
+      <div className='mx-6 min-w-0 flex-1 text-center [text-shadow:0_1px_2px_rgba(0,0,0,0.55),0_2px_12px_rgba(0,0,0,0.45)]'>
+        <h1 className='truncate text-[17px] leading-6 font-semibold tracking-tight text-white'>
+          {title}
+        </h1>
+        {(seasonEpisode || episodeTitle || streamSourceName) && (
+          <p className='mt-0.5 flex min-w-0 items-center justify-center gap-2 text-[13px] leading-5'>
+            {seasonEpisode && (
+              <span className='shrink-0 font-semibold tabular-nums text-white/90'>
+                {seasonEpisode}
+                {episodeCountInSeason ? (
+                  <span className='font-medium text-white/45'> / {episodeCountInSeason}</span>
+                ) : null}
+              </span>
+            )}
+            {seasonEpisode && episodeTitle && separator}
+            {episodeTitle && (
+              <span className='min-w-0 truncate font-medium text-white/80'>{episodeTitle}</span>
+            )}
+            {(seasonEpisode || episodeTitle) && streamSourceName && separator}
+            {streamSourceName && (
+              <span className='max-w-[40%] shrink-0 truncate text-white/50'>
+                via {streamSourceName}
+              </span>
+            )}
+          </p>
         )}
       </div>
-      <button
-        type='button'
-        onClick={(e) => {
-          e.stopPropagation();
-          void onToggleFullscreen().catch(() => undefined);
-        }}
-        className={CHROME_ICON_BUTTON_CLASS}
-        aria-label={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
-        aria-keyshortcuts='f'
-        title={isFullscreen ? 'Exit Fullscreen (F)' : 'Fullscreen (F)'}
-      >
-        {isFullscreen ? (
-          <Minimize className='w-5 h-5' strokeWidth={2.5} />
-        ) : (
-          <Maximize className='w-5 h-5' strokeWidth={2.5} />
-        )}
-      </button>
+      <div className={CHROME_PILL_CLASS}>
+        <button
+          type='button'
+          onClick={(e) => {
+            e.stopPropagation();
+            void onToggleFullscreen().catch(() => undefined);
+          }}
+          className={CHROME_ICON_BUTTON_CLASS}
+          aria-label={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
+          title={withShortcutHint(
+            isFullscreen ? 'Exit Fullscreen' : 'Fullscreen',
+            keymap,
+            'toggleFullscreen',
+          )}
+        >
+          {isFullscreen ? (
+            <Minimize className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+          ) : (
+            <Maximize className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+          )}
+        </button>
+      </div>
     </div>
   );
 });
 
 interface PlayerControlsRowProps {
+  clock: PlaybackClock;
+  duration: number;
+  active: boolean;
   onTogglePip?: () => Promise<void>;
   isPlaying: boolean;
   onTogglePlay: () => Promise<void>;
@@ -115,8 +155,8 @@ interface PlayerControlsRowProps {
   isMuted: boolean;
   onToggleMute: () => Promise<void>;
   onVolumeChange: (volume: number) => Promise<void>;
-  /** Wheel/key nudges — the parent owns the live volume ref. */
-  onVolumeStep: (delta: number) => void;
+  /** Shared wheel accumulator — trackpad gestures use the live volume ref. */
+  onVolumeWheel: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
   playbackSpeed: number;
   onSpeedChange: (speed: number) => void;
   hasEpisodes: boolean;
@@ -125,8 +165,14 @@ interface PlayerControlsRowProps {
   canChooseStream: boolean;
   streamSelectorOpen: boolean;
   onOpenStreamSelector: () => void;
+  canGoPrevious: boolean;
+  onPreviousEpisode: () => void;
+  /** e.g. `Previous: S1E2 · Title` — no new keybinding action. */
+  previousEpisodeLabel?: string;
   canGoNext: boolean;
   onNextEpisode: () => void;
+  /** e.g. `Next: S1E3 · Title` — the button tooltip names where it goes. */
+  nextEpisodeLabel?: string;
   audioTracks: Track[];
   trackSwitching: { audio: boolean; sub: boolean };
   onSelectAudioTrack: (
@@ -157,8 +203,23 @@ interface PlayerControlsRowProps {
   ) => void;
 }
 
+function SeekTenIcon({ forward = false }: { forward?: boolean }) {
+  const Icon = forward ? RotateCw : RotateCcw;
+  return (
+    <span aria-hidden='true' className='relative h-6 w-6'>
+      <Icon className='h-6 w-6' strokeWidth={CHROME_ICON_STROKE} />
+      <span className='absolute inset-0 flex items-center justify-center pt-0.5 text-[8.5px] font-bold leading-none tabular-nums'>
+        10
+      </span>
+    </span>
+  );
+}
+
 // Memoized like the sibling selectors/panel — primitive/stable props let the controls row skip playback ticks.
 export const PlayerControlsRow = memo(function PlayerControlsRow({
+  clock,
+  duration,
+  active,
   onTogglePip,
   isPlaying,
   onTogglePlay,
@@ -167,7 +228,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   isMuted,
   onToggleMute,
   onVolumeChange,
-  onVolumeStep,
+  onVolumeWheel,
   playbackSpeed,
   onSpeedChange,
   hasEpisodes,
@@ -176,8 +237,12 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   canChooseStream,
   streamSelectorOpen,
   onOpenStreamSelector,
+  canGoPrevious,
+  onPreviousEpisode,
+  previousEpisodeLabel,
   canGoNext,
   onNextEpisode,
+  nextEpisodeLabel,
   audioTracks,
   trackSwitching,
   onSelectAudioTrack,
@@ -199,95 +264,90 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   onApplySubtitleScale,
   onSelectSubTrack,
 }: PlayerControlsRowProps) {
+  const keymap = usePlayerKeymap();
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const volumeIsSilent = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
+  const speedKeys = [keymap.keys.speedDown[0], keymap.keys.speedUp[0]]
+    .filter((key) => key !== undefined)
+    .map(formatBindingKey);
   return (
-    <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-1 pt-1'>
-      <div className='flex min-w-0 max-w-full flex-wrap items-center gap-1'>
-        <button
-          type='button'
-          aria-label='Rewind 10 seconds'
-          aria-keyshortcuts='ArrowLeft'
-          onClick={() => {
-            void onSeekRelative(-10).catch(() => undefined);
-          }}
-          className={CHROME_ICON_BUTTON_CLASS}
-          title='Rewind 10s (←)'
-        >
-          <Rewind className='w-[18px] h-[18px]' strokeWidth={2.5} />
-        </button>
-
-        <button
-          type='button'
-          aria-label={isPlaying ? 'Pause' : 'Play'}
-          aria-keyshortcuts='Space k'
-          title={isPlaying ? 'Pause (Space)' : 'Play (Space)'}
-          onClick={() => {
-            void onTogglePlay().catch(() => undefined);
-          }}
-          className='flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-white transition-colors hover:bg-white/10 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-        >
-          {isPlaying ? (
-            <Pause className='w-[26px] h-[26px] fill-white' />
-          ) : (
-            <Play className='w-[26px] h-[26px] fill-white' />
+    <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-2'>
+      <div className='flex min-w-0 max-w-full flex-wrap items-center gap-2'>
+        <div className={CHROME_PILL_CLASS}>
+          {hasEpisodes && (
+            <button
+              type='button'
+              aria-label={previousEpisodeLabel ?? 'Previous episode'}
+              title={previousEpisodeLabel ?? 'Previous episode'}
+              disabled={!canGoPrevious}
+              onClick={(e) => {
+                e.stopPropagation();
+                onPreviousEpisode();
+              }}
+              className={CHROME_ICON_BUTTON_CLASS}
+            >
+              <SkipBack className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+            </button>
           )}
-        </button>
-
-        <button
-          type='button'
-          aria-label='Forward 10 seconds'
-          aria-keyshortcuts='ArrowRight'
-          onClick={() => {
-            void onSeekRelative(10).catch(() => undefined);
-          }}
-          className={CHROME_ICON_BUTTON_CLASS}
-          title='Forward 10s (→)'
-        >
-          <FastForward className='w-[18px] h-[18px]' strokeWidth={2.5} />
-        </button>
-
-        {canGoNext && (
           <button
             type='button'
-            aria-label='Next episode'
-            aria-keyshortcuts='n'
-            title='Next Episode (N)'
-            onClick={(e) => {
-              e.stopPropagation();
-              onNextEpisode();
+            aria-label={isPlaying ? 'Pause' : 'Play'}
+            aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
+            title={withShortcutHint(isPlaying ? 'Pause' : 'Play', keymap, 'togglePlay')}
+            onClick={() => {
+              void onTogglePlay().catch(() => undefined);
             }}
             className={CHROME_ICON_BUTTON_CLASS}
           >
-            <SkipForward className='w-[18px] h-[18px]' strokeWidth={2.5} />
+            {isPlaying ? (
+              <Pause className='h-6 w-6 fill-current' strokeWidth={CHROME_ICON_STROKE} />
+            ) : (
+              <Play className='h-6 w-6 fill-current' strokeWidth={CHROME_ICON_STROKE} />
+            )}
           </button>
-        )}
+          {hasEpisodes && (
+            <button
+              type='button'
+              aria-label={nextEpisodeLabel ?? 'Next episode'}
+              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
+              title={withShortcutHint(nextEpisodeLabel ?? 'Next episode', keymap, 'nextEpisode')}
+              disabled={!canGoNext}
+              onClick={(e) => {
+                e.stopPropagation();
+                onNextEpisode();
+              }}
+              className={CHROME_ICON_BUTTON_CLASS}
+            >
+              <SkipForward className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+            </button>
+          )}
+        </div>
 
         {/* Always-visible volume rail reserves its space — hover/focus and pointer capture can't push adjacent controls. */}
         <div
           data-player-interactive
-          className='flex shrink-0 items-center gap-1.5 pr-1'
+          className={cn(CHROME_PILL_CLASS, 'gap-1.5 pr-3')}
           // Interactive regions swallow the ambient wheel handler — scrolling here still adjusts volume.
           onWheel={(e) => {
             if (e.deltaY === 0) return;
             e.stopPropagation();
-            onVolumeStep(e.deltaY < 0 ? 5 : -5);
+            void onVolumeWheel(e).catch(() => undefined);
           }}
         >
           <button
             type='button'
             aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
-            aria-keyshortcuts='m'
-            title={volumeIsSilent ? 'Unmute (M)' : 'Mute (M)'}
+            aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
+            title={withShortcutHint(volumeIsSilent ? 'Unmute' : 'Mute', keymap, 'toggleMute')}
             onClick={() => void onToggleMute().catch(() => undefined)}
             className={CHROME_ICON_BUTTON_CLASS}
           >
             <PlayerVolumeIcon
               muted={volumeIsSilent}
               volume={volume}
-              className='h-[18px] w-[18px]'
-              strokeWidth={2.5}
+              className={CHROME_ICON_CLASS}
+              strokeWidth={CHROME_ICON_STROKE}
             />
           </button>
 
@@ -307,28 +367,95 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             }}
             className='w-20 shrink-0'
           />
-          <span aria-hidden='true' className='w-9 text-right text-xs tabular-nums text-white/65'>
-            {displayedVolume}%
-          </span>
         </div>
+
+        <div className={CHROME_PILL_CLASS}>
+          <PlayerTimeDisplay
+            clock={clock}
+            duration={duration}
+            playbackSpeed={playbackSpeed}
+            active={active}
+          />
+        </div>
+      </div>
+
+      <div className={cn(CHROME_PILL_CLASS, 'ml-auto')}>
+        <button
+          type='button'
+          aria-label='Rewind 10 seconds'
+          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'seekBackward')}
+          onClick={() => {
+            void onSeekRelative(-10).catch(() => undefined);
+          }}
+          className={CHROME_ICON_BUTTON_CLASS}
+          title={withShortcutHint('Rewind 10s', keymap, 'seekBackward')}
+        >
+          <SeekTenIcon />
+        </button>
+        <button
+          type='button'
+          aria-label='Forward 10 seconds'
+          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'seekForward')}
+          onClick={() => {
+            void onSeekRelative(10).catch(() => undefined);
+          }}
+          className={CHROME_ICON_BUTTON_CLASS}
+          title={withShortcutHint('Forward 10s', keymap, 'seekForward')}
+        >
+          <SeekTenIcon forward />
+        </button>
+
+        <SubtitleTrackSelector
+          subTracks={subTracks}
+          trackSwitching={trackSwitching}
+          subtitleDelay={subtitleDelay}
+          subtitlePos={subtitlePos}
+          subtitleScale={subtitleScale}
+          addonSubtitles={addonSubtitles}
+          addonSubtitlesLoading={addonSubtitlesLoading}
+          addonSubtitlesError={addonSubtitlesError}
+          addonSubtitlesQueried={addonSubtitlesQueried}
+          activeAddonSubtitleId={activeAddonSubtitleId}
+          addonSubtitleLoadingId={addonSubtitleLoadingId}
+          onOpenChange={onSubtitleMenuOpenChange}
+          onSelectAddonSubtitle={onSelectAddonSubtitle}
+          onResetSubtitleSettings={onResetSubtitleSettings}
+          onApplySubtitleDelay={onApplySubtitleDelay}
+          onApplySubtitlePos={onApplySubtitlePos}
+          onApplySubtitleScale={onApplySubtitleScale}
+          onSelectTrack={onSelectSubTrack}
+        />
+        <AudioTrackSelector
+          audioTracks={audioTracks}
+          trackSwitching={trackSwitching}
+          onSelectTrack={onSelectAudioTrack}
+        />
 
         <Popover open={speedMenuOpen} onOpenChange={setSpeedMenuOpen}>
           <PopoverTrigger asChild>
             <button
               type='button'
               aria-label={`Playback speed: ${playbackSpeed}x`}
-              title='Playback speed ([/])'
+              title={
+                speedKeys.length > 0
+                  ? `Playback speed (${speedKeys.join(' / ')})`
+                  : 'Playback speed'
+              }
               className={cn(
-                'flex h-9 min-w-12 items-center justify-center rounded-lg px-2 text-xs font-semibold tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
-                playbackSpeed === 1
-                  ? 'text-white/50 hover:text-white hover:bg-white/10'
-                  : 'text-[var(--accent-nav)] hover:bg-white/10',
+                CHROME_ICON_BUTTON_CLASS,
+                'data-[state=open]:bg-white/15 data-[state=open]:text-white',
+                playbackSpeed !== 1 && 'w-auto gap-1.5 px-2.5',
               )}
               onClick={(event) => {
                 event.stopPropagation();
               }}
             >
-              {playbackSpeed}x
+              <Gauge className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+              {playbackSpeed !== 1 && (
+                <span className='text-[11px] font-semibold tabular-nums text-[var(--accent-nav)]'>
+                  {playbackSpeed}x
+                </span>
+              )}
             </button>
           </PopoverTrigger>
           <PopoverContent
@@ -366,56 +493,27 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             </div>
           </PopoverContent>
         </Popover>
-      </div>
-
-      <div className='ml-auto flex shrink-0 items-center gap-1'>
-        {hasEpisodes && (
-          <PlayerEpisodesToggleButton open={episodesOpen} onToggle={onToggleEpisodes} />
-        )}
 
         {canChooseStream && (
           <button
             type='button'
             aria-label='Choose stream or quality'
-            aria-keyshortcuts='q'
+            aria-keyshortcuts={ariaKeyShortcuts(keymap, 'streamSelector')}
             aria-expanded={streamSelectorOpen}
             className={cn(CHROME_ICON_BUTTON_CLASS, streamSelectorOpen && 'bg-white/15 text-white')}
-            title='Choose Stream / Quality (Q)'
+            title={withShortcutHint('Choose Stream / Quality', keymap, 'streamSelector')}
             onClick={(e) => {
               e.stopPropagation();
               onOpenStreamSelector();
             }}
           >
-            <Cloud className='w-[18px] h-[18px]' strokeWidth={2.5} />
+            <Cloud className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
           </button>
         )}
 
-        <AudioTrackSelector
-          audioTracks={audioTracks}
-          trackSwitching={trackSwitching}
-          onSelectTrack={onSelectAudioTrack}
-        />
-
-        <SubtitleTrackSelector
-          subTracks={subTracks}
-          trackSwitching={trackSwitching}
-          subtitleDelay={subtitleDelay}
-          subtitlePos={subtitlePos}
-          subtitleScale={subtitleScale}
-          addonSubtitles={addonSubtitles}
-          addonSubtitlesLoading={addonSubtitlesLoading}
-          addonSubtitlesError={addonSubtitlesError}
-          addonSubtitlesQueried={addonSubtitlesQueried}
-          activeAddonSubtitleId={activeAddonSubtitleId}
-          addonSubtitleLoadingId={addonSubtitleLoadingId}
-          onOpenChange={onSubtitleMenuOpenChange}
-          onSelectAddonSubtitle={onSelectAddonSubtitle}
-          onResetSubtitleSettings={onResetSubtitleSettings}
-          onApplySubtitleDelay={onApplySubtitleDelay}
-          onApplySubtitlePos={onApplySubtitlePos}
-          onApplySubtitleScale={onApplySubtitleScale}
-          onSelectTrack={onSelectSubTrack}
-        />
+        {hasEpisodes && (
+          <PlayerEpisodesToggleButton open={episodesOpen} onToggle={onToggleEpisodes} />
+        )}
         {onTogglePip && (
           <button
             type='button'
@@ -424,7 +522,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             title='Picture in picture'
             onClick={() => void onTogglePip().catch(() => undefined)}
           >
-            <PictureInPicture2 className='h-[18px] w-[18px]' />
+            <PictureInPicture2 className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
           </button>
         )}
       </div>

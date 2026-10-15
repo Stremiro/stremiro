@@ -45,6 +45,7 @@ interface UsePlayerResumeControllerArgs {
   absoluteSeason?: number;
   absoluteEpisode?: number;
   isHistoryResume: boolean;
+  suspended: boolean;
   mountedRef: RefObject<boolean>;
   isDestroyedRef: RefObject<boolean>;
   currentTimeRef: RefObject<number>;
@@ -61,6 +62,7 @@ export function usePlayerResumeController({
   absoluteSeason,
   absoluteEpisode,
   isHistoryResume,
+  suspended,
   mountedRef,
   isDestroyedRef,
   currentTimeRef,
@@ -81,8 +83,17 @@ export function usePlayerResumeController({
   const resumeSessionEpochRef = useRef(0);
   const activeStreamUrlRef = useRef(activeStreamUrl);
   const applyResumeIfReadyRef = useRef<() => Promise<void>>(async () => undefined);
+  const suspendedRef = useRef(suspended);
 
   const clearResumeRetryTimer = useCallback(() => clearTimer(resumeSeekRetryTimerRef), []);
+
+  const isResumePending = useCallback(
+    () =>
+      !suspendedRef.current &&
+      (resumePausePendingRef.current ||
+        (!resumeAppliedRef.current && resumeTimeRef.current >= MIN_RESUME_POSITION_SECS)),
+    [],
+  );
 
   const releaseResumePause = useCallback(async () => {
     if (!resumePausePendingRef.current || !mountedRef.current || isDestroyedRef.current) {
@@ -117,18 +128,29 @@ export function usePlayerResumeController({
     [clearResumeRetryTimer, onResumeMessage, releaseResumePause],
   );
 
-  const scheduleResumeRetry = useCallback((delayMs = RESUME_SEEK_RETRY_DELAY_MS) => {
-    if (resumeAppliedRef.current || resumeSeekRetryTimerRef.current !== null) {
-      return;
-    }
+  const scheduleResumeRetry = useCallback(
+    (delayMs = RESUME_SEEK_RETRY_DELAY_MS) => {
+      if (suspendedRef.current) {
+        clearResumeRetryTimer();
+        return;
+      }
+      if (resumeAppliedRef.current || resumeSeekRetryTimerRef.current !== null) {
+        return;
+      }
 
-    resumeSeekRetryTimerRef.current = window.setTimeout(() => {
-      resumeSeekRetryTimerRef.current = null;
-      void applyResumeIfReadyRef.current();
-    }, delayMs);
-  }, []);
+      resumeSeekRetryTimerRef.current = window.setTimeout(() => {
+        resumeSeekRetryTimerRef.current = null;
+        void applyResumeIfReadyRef.current();
+      }, delayMs);
+    },
+    [clearResumeRetryTimer],
+  );
 
   const applyResumeIfReady = useCallback(async () => {
+    if (suspendedRef.current) {
+      clearResumeRetryTimer();
+      return;
+    }
     const resumeTime = resumeTimeRef.current;
     const currentTime = currentTimeRef.current;
     const durationValue = durationRef.current;
@@ -188,6 +210,7 @@ export function usePlayerResumeController({
     // A session change mid-seek invalidates the whole tail — the old resumeTime must not finalize or retry for the new session.
     if (
       resumeSessionEpochRef.current !== seekEpoch ||
+      suspendedRef.current ||
       !mountedRef.current ||
       isDestroyedRef.current
     ) {
@@ -379,11 +402,21 @@ export function usePlayerResumeController({
     startTime,
   ]);
 
+  useEffect(() => {
+    suspendedRef.current = suspended;
+    if (suspended) {
+      clearResumeRetryTimer();
+    } else if (activeStreamUrlRef.current && isResumePending()) {
+      void applyResumeIfReadyRef.current();
+    }
+  }, [clearResumeRetryTimer, isResumePending, suspended]);
+
   useEffect(() => () => clearResumeRetryTimer(), [clearResumeRetryTimer]);
 
   return {
     applyResumeIfReady,
     clearResumeRetryTimer,
+    isResumePending,
     prepareForStreamLoad,
   };
 }

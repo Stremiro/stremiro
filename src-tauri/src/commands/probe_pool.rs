@@ -17,7 +17,7 @@ use crate::providers::addons::{
 };
 use futures_util::stream::FuturesOrdered;
 use futures_util::StreamExt;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 use tauri::AppHandle;
 
@@ -189,7 +189,6 @@ fn candidate_resolved_stream(
 ) -> BestResolvedStream {
     BestResolvedStream {
         url: resolved.url,
-        format: resolved.format,
         source_id: candidate.source_id,
         source_name: candidate.source_name,
         stream_family: candidate.stream_family,
@@ -250,22 +249,30 @@ pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded
     if excluded_keys.is_empty() {
         return;
     }
+    let excluded_keys: HashSet<&str> = excluded_keys
+        .iter()
+        .map(|key| key.trim())
+        .filter(|key| !key.is_empty())
+        .collect();
+    if excluded_keys.is_empty() {
+        return;
+    }
     // A legacy `h:`/`uh:` exclusion binds by recomputing the dedup key once per
     // stream — skipped entirely when no legacy key is present.
-    let legacy_keys: Vec<&str> = excluded_keys
+    let legacy_keys: HashSet<&str> = excluded_keys
         .iter()
+        .copied()
         .filter(|key| is_legacy_content_key(key))
-        .map(String::as_str)
         .collect();
     streams.retain(|stream| {
-        if excluded_keys.contains(&stream.stream_key) {
+        if excluded_keys.contains(stream.stream_key.as_str()) {
             return false;
         }
         if legacy_keys.is_empty() {
             return true;
         }
         match stream_dedup_key(stream) {
-            Some(dedup) => !legacy_keys.iter().any(|key| *key == dedup),
+            Some(dedup) => !legacy_keys.contains(dedup.as_str()),
             None => true,
         }
     });

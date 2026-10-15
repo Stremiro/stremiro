@@ -753,6 +753,8 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
     // must preserve that buffer instead of discarding its spare capacity.
     streams.reserve(126);
     let capacity = streams.capacity();
+    let mut scratch_capacity = 0;
+    let mut scratch_pointer = std::ptr::null();
 
     for (pass, expected_source) in ["alpha", "beta", "beta"].into_iter().enumerate() {
         if pass == 1 {
@@ -778,6 +780,15 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
         );
         assert_eq!(streams[0].source_name.as_deref(), Some(expected_source));
         assert_eq!(streams.capacity(), capacity);
+        assert!(signals.sort_scratch.is_empty());
+        if pass == 0 {
+            scratch_capacity = signals.sort_scratch.capacity();
+            scratch_pointer = signals.sort_scratch.as_ptr();
+            assert!(scratch_capacity >= streams.len());
+        } else {
+            assert_eq!(signals.sort_scratch.capacity(), scratch_capacity);
+            assert_eq!(signals.sort_scratch.as_ptr(), scratch_pointer);
+        }
     }
 }
 

@@ -6,7 +6,8 @@ use super::{
         PreferredStreamHint, StreamPoolQuery,
     },
     stream_fetcher::{
-        fetch_stream_selector_data, ResolveFetch, StreamRankingOverrides, StreamSelectorData,
+        fetch_stream_for_link, fetch_stream_selector_data, ResolveFetch, StreamRankingOverrides,
+        StreamSelectorData,
     },
     stream_resolver::{
         BestResolvedStream, ResolveStreamError, ResolveStreamErrorKind, MISSING_DIRECT_URL_MESSAGE,
@@ -14,13 +15,147 @@ use super::{
     streaming_helpers::normalize_http_url,
 };
 use crate::operational_log::{field, log_warn};
-use crate::providers::addons::AddonTransport;
+use crate::providers::addon_resource::{is_fetchable_http_url, is_magnet_url};
+use crate::providers::addons::{AddonStream, AddonTransport};
+use serde::Serialize;
 use tauri::ipc::Channel;
 use tauri::{command, AppHandle, State};
 
 /// A recovery chain fails over a handful of times at most; anything larger
 /// is malformed input.
 const RECOVERY_EXCLUDED_STREAM_KEYS_MAX: usize = 16;
+const STREAM_LINK_CHANGED_MESSAGE: &str =
+    "This stream changed — reopen the stream list and try again.";
+
+#[derive(Serialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum StreamLinkKind {
+    Http,
+    Magnet,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StreamLink {
+    url: String,
+    kind: StreamLinkKind,
+}
+
+fn validated_info_hash(hash: &str) -> Option<String> {
+    if hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Some(hash.to_ascii_lowercase());
+    }
+    if hash.len() == 32
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || (b'2'..=b'7').contains(&byte))
+    {
+        return Some(hash.to_ascii_uppercase());
+    }
+    None
+}
+
+fn stream_link(stream: &AddonStream) -> Result<StreamLink, String> {
+    if let Some(url) = stream.url.as_ref() {
+        let kind = if is_fetchable_http_url(url) {
+            Some(StreamLinkKind::Http)
+        } else if is_magnet_url(url) {
+            Some(StreamLinkKind::Magnet)
+        } else {
+            None
+        };
+        if let Some(kind) = kind {
+            return Ok(StreamLink {
+                url: url.clone(),
+                kind,
+            });
+        }
+    }
+    let hash = stream
+        .info_hash
+        .as_deref()
+        .and_then(validated_info_hash)
+        .ok_or_else(|| "This stream has no shareable link.".to_string())?;
+    let mut url = format!("magnet:?xt=urn:btih:{hash}");
+    let name = stream
+        .behavior_hints
+        .as_ref()
+        .and_then(|hints| hints.filename.as_deref())
+        .filter(|name| !name.trim().is_empty())
+        .or_else(|| {
+            stream
+                .title
+                .as_deref()
+                .and_then(|title| title.lines().next())
+        })
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    if let Some(name) = name {
+        url.push_str("&dn=");
+        url.push_str(&urlencoding::encode(name));
+    }
+    for tracker in stream
+        .sources
+        .iter()
+        .filter_map(|source| source.strip_prefix("tracker:"))
+    {
+        url.push_str("&tr=");
+        url.push_str(&urlencoding::encode(tracker));
+    }
+    Ok(StreamLink {
+        url,
+        kind: StreamLinkKind::Magnet,
+    })
+}
+
+#[command]
+#[allow(clippy::too_many_arguments)]
+pub async fn get_stream_link(
+    app: AppHandle,
+    provider: State<'_, AddonTransport>,
+    media_type: String,
+    id: String,
+    season: Option<u32>,
+    episode: Option<u32>,
+    absolute_episode: Option<u32>,
+    stream_key: String,
+    source_id: Option<String>,
+    ranking_media_id: Option<String>,
+    ranking_media_type: Option<String>,
+    ranking_title: Option<String>,
+    ranking_season: Option<u32>,
+    ranking_episode: Option<u32>,
+) -> Result<StreamLink, String> {
+    let query = StreamPoolQuery::new(
+        &media_type,
+        &id,
+        season,
+        episode,
+        absolute_episode,
+        StreamRankingOverrides {
+            media_type: ranking_media_type,
+            media_id: ranking_media_id,
+            title: ranking_title,
+            season: ranking_season,
+            episode: ranking_episode,
+        },
+        "stream lookup",
+    )?;
+    if !super::streaming_helpers::is_prepared_stream_key(&stream_key) {
+        return Err(STREAM_LINK_CHANGED_MESSAGE.to_string());
+    }
+    let stream = fetch_stream_for_link(
+        &app,
+        &provider,
+        &query.request(&query.id),
+        &stream_key,
+        source_id.as_deref(),
+    )
+    .await
+    .map_err(|_| "Could not retrieve this stream link. Try again.".to_string())?
+    .ok_or_else(|| STREAM_LINK_CHANGED_MESSAGE.to_string())?;
+    stream_link(&stream)
+}
 
 fn normalize_recovery_text(value: Option<String>) -> Option<String> {
     value.as_deref().and_then(normalize_opaque_field)
@@ -196,6 +331,8 @@ pub async fn recover_playback_stream(
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
 ) -> Result<Option<BestResolvedStream>, String> {
+    let expected_generation = playback_state.history_generation();
+    let timestamp_ms = now_unix_millis();
     let query = StreamPoolQuery::new(
         &media_type,
         &id,
@@ -234,7 +371,7 @@ pub async fn recover_playback_stream(
     let fetch_id = stream_lookup_id.unwrap_or_else(|| normalized_id.clone());
 
     // Blocking store/file IO on the blocking pool, matching `report_playback_stream_outcome`.
-    // Best-effort telemetry — awaited inline, a wedged store would delay the re-resolve.
+    // Best-effort telemetry — detached so a wedged store cannot delay the re-resolve.
     {
         let outcome_app = app.clone();
         let outcome_service = playback_state.inner().clone();
@@ -251,8 +388,9 @@ pub async fn recover_playback_stream(
                         source_id: failed_source_id,
                         stream_family: failed_stream_family,
                         outcome: normalized_outcome,
-                        timestamp_ms: now_unix_millis(),
+                        timestamp_ms,
                     },
+                    expected_generation,
                 )
             })
             .await;

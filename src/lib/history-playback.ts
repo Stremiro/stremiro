@@ -210,6 +210,7 @@ export async function openHistoryPlaybackPlan(
     const plan = await api.buildHistoryPlaybackPlan(item, from);
     await applyHistoryPlaybackPlan(navigate, plan, options);
   } catch (error) {
+    if (options?.isCancelled?.()) return;
     toast.error(errorTitle, {
       description: error instanceof Error ? error.message : 'Please try again.',
     });

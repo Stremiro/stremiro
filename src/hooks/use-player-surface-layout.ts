@@ -26,25 +26,44 @@ function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
   ].join('|');
 }
 
-/** Fingerprint-deduped margin send: records intent up front so chase frames
- * coalesce, clears on failure. Resolves true only on a verified fresh send. */
+const pendingMarginRequests = new WeakMap<
+  RefObject<string | null>,
+  { fingerprint: string; promise: Promise<boolean> }
+>();
+
+/** Fingerprint-deduped margin send: joins in-flight duplicates, skips settled ones,
+ * and clears owned intent on failure. True means a verified fresh send. */
 function sendMarginRatio(
   fingerprintRef: RefObject<string | null>,
   ratio: VideoMarginRatio,
   fingerprint = serializeVideoMarginRatio(ratio),
 ): Promise<boolean> {
-  if (fingerprintRef.current === fingerprint) return Promise.resolve(false);
+  const pending = pendingMarginRequests.get(fingerprintRef);
+  if (fingerprintRef.current === fingerprint) {
+    return pending?.fingerprint === fingerprint ? pending.promise : Promise.resolve(false);
+  }
   fingerprintRef.current = fingerprint;
-  return setVideoMarginRatio(ratio).then(
-    () => true,
-    () => {
-      // A late reject clears the fingerprint only while it still owns the slot.
-      if (fingerprintRef.current === fingerprint) {
-        fingerprintRef.current = null;
+  const promise = setVideoMarginRatio(ratio)
+    .then(
+      () => true,
+      () => {
+        // A late reject clears the fingerprint only while it still owns the slot.
+        if (
+          pendingMarginRequests.get(fingerprintRef)?.promise === promise &&
+          fingerprintRef.current === fingerprint
+        ) {
+          fingerprintRef.current = null;
+        }
+        return false;
+      },
+    )
+    .finally(() => {
+      if (pendingMarginRequests.get(fingerprintRef)?.promise === promise) {
+        pendingMarginRequests.delete(fingerprintRef);
       }
-      return false;
-    },
-  );
+    });
+  pendingMarginRequests.set(fingerprintRef, { fingerprint, promise });
+  return promise;
 }
 
 function buildVideoMarginRatio(
@@ -116,6 +135,7 @@ export function usePlayerSurfaceLayout({
   // Stale async applies must never overwrite a newer computation.
   const marginGenerationRef = useRef(0);
   const isMini = presentation === 'mini';
+  const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
   useEffect(() => {
     if (!mpvSurfaceReady || !activeStreamUrl) return;
     // Margins shrink video, not subtitle text; keep the track and saved tuning intact.
@@ -148,16 +168,11 @@ export function usePlayerSurfaceLayout({
         return false;
       }
 
-      const shouldReserveOverlayChrome = !isPip && (isLoading || isResolving);
-      // The stream selector deliberately keeps the frame painted; only the
-      // error overlay collapses the surface.
-      const shouldCollapseVideoSurface = showErrorOverlay;
-      const topChromeRect = topChromeRef.current?.getBoundingClientRect();
-      const bottomChromeRect = bottomChromeRef.current?.getBoundingClientRect();
-
       if (generation !== marginGenerationRef.current) return false;
 
-      if (shouldCollapseVideoSurface) {
+      // The stream selector deliberately keeps the frame painted; only the
+      // error overlay collapses the surface.
+      if (showErrorOverlay) {
         return applyMarginRatio(
           buildVideoMarginRatio(containerRect.width, containerRect.height, {
             leftPx: 0,
@@ -169,15 +184,19 @@ export function usePlayerSurfaceLayout({
         );
       }
 
+      const topChromeRect = shouldReserveOverlayChrome
+        ? topChromeRef.current?.getBoundingClientRect()
+        : undefined;
+      const bottomChromeRect = shouldReserveOverlayChrome
+        ? bottomChromeRef.current?.getBoundingClientRect()
+        : undefined;
       const baseTopInsetPx = !isFullscreen && !isPip ? PLAYER_TITLEBAR_HEIGHT_PX : 0;
-      const topInsetPx =
-        shouldReserveOverlayChrome && topChromeRect
-          ? Math.max(baseTopInsetPx, topChromeRect.bottom - containerRect.top)
-          : baseTopInsetPx;
-      const bottomInsetPx =
-        shouldReserveOverlayChrome && bottomChromeRect
-          ? Math.max(0, containerRect.bottom - bottomChromeRect.top)
-          : 0;
+      const topInsetPx = topChromeRect
+        ? Math.max(baseTopInsetPx, topChromeRect.bottom - containerRect.top)
+        : baseTopInsetPx;
+      const bottomInsetPx = bottomChromeRect
+        ? Math.max(0, containerRect.bottom - bottomChromeRect.top)
+        : 0;
       const leftInsetPx = !isFullscreen && !isPip ? PLAYER_SIDEBAR_WIDTH_PX : 0;
 
       const nextMargins = buildVideoMarginRatio(containerRect.width, containerRect.height, {
@@ -194,10 +213,9 @@ export function usePlayerSurfaceLayout({
       bottomChromeRef,
       isFullscreen,
       isPip,
-      isLoading,
-      isResolving,
       playerContainerRef,
       showErrorOverlay,
+      shouldReserveOverlayChrome,
       topChromeRef,
     ],
   );
@@ -224,13 +242,11 @@ export function usePlayerSurfaceLayout({
     if (isMini) return;
     if (typeof ResizeObserver === 'undefined') return;
 
-    const observedElements = [
-      playerContainerRef.current,
-      topChromeRef.current,
-      bottomChromeRef.current,
-    ].filter(Boolean) as HTMLDivElement[];
+    const container = playerContainerRef.current;
+    const topChrome = shouldReserveOverlayChrome ? topChromeRef.current : null;
+    const bottomChrome = shouldReserveOverlayChrome ? bottomChromeRef.current : null;
 
-    if (observedElements.length === 0) return;
+    if (!container && !topChrome && !bottomChrome) return;
 
     let animationFrameId: number | null = null;
     const observer = new ResizeObserver(() => {
@@ -245,9 +261,9 @@ export function usePlayerSurfaceLayout({
       });
     });
 
-    observedElements.forEach((element) => {
-      observer.observe(element);
-    });
+    if (container) observer.observe(container);
+    if (topChrome) observer.observe(topChrome);
+    if (bottomChrome) observer.observe(bottomChrome);
 
     return () => {
       observer.disconnect();
@@ -256,7 +272,14 @@ export function usePlayerSurfaceLayout({
       }
     };
     // PiP unmounts the chrome; returning mounts new nodes behind the same refs.
-  }, [bottomChromeRef, isMini, isPip, playerContainerRef, topChromeRef]);
+  }, [
+    bottomChromeRef,
+    isMini,
+    isPip,
+    playerContainerRef,
+    shouldReserveOverlayChrome,
+    topChromeRef,
+  ]);
 
   useEffect(() => {
     marginRequestRef.current();

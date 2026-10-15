@@ -30,6 +30,7 @@ interface UsePlayerSessionBoundaryArgs {
   onResumeMessage: (text: string) => void;
   playbackLanguageMediaType?: 'movie' | 'series' | 'anime';
   poster?: string;
+  resumeSuspended: boolean;
   startTime?: number;
   stream: PlayerStreamSession;
   streamEpisode?: number;
@@ -58,6 +59,7 @@ export function usePlayerSessionBoundary({
   onResumeMessage,
   playbackLanguageMediaType,
   poster,
+  resumeSuspended,
   startTime,
   streamEpisode,
   streamSeason,
@@ -113,7 +115,7 @@ export function usePlayerSessionBoundary({
       stream,
     });
 
-  const { applyResumeIfReady, clearResumeRetryTimer, prepareForStreamLoad } =
+  const { applyResumeIfReady, clearResumeRetryTimer, isResumePending, prepareForStreamLoad } =
     usePlayerResumeController({
       mediaId,
       mediaType,
@@ -122,6 +124,7 @@ export function usePlayerSessionBoundary({
       absoluteSeason,
       absoluteEpisode,
       isHistoryResume,
+      suspended: resumeSuspended,
       mountedRef,
       isDestroyedRef,
       currentTimeRef: clock.ref,
@@ -170,6 +173,7 @@ export function usePlayerSessionBoundary({
     clearResumeRetryTimer,
     cycleTrack,
     flushPlaybackBeforeNavigation,
+    isResumePending,
     notifyObservedTrackSelection,
     playbackLanguagePreferencesRef,
     prepareForStreamLoad,

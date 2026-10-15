@@ -3,7 +3,7 @@
 //! still apply, so per-field stays.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use tauri::{command, AppHandle, Window};
 use tauri_plugin_libmpv::MpvExt;
 
@@ -59,11 +59,11 @@ pub(crate) struct ObservedTrackIds {
 fn mpv_property(
     app: &AppHandle,
     window_label: &str,
-    name: &str,
+    name: String,
     format: &str,
 ) -> Option<serde_json::Value> {
     app.mpv()
-        .get_property(name.to_string(), format.to_string(), window_label)
+        .get_property(name, format.to_string(), window_label)
         .ok()
 }
 
@@ -81,12 +81,17 @@ fn property_flag(value: Option<serde_json::Value>) -> bool {
 }
 
 fn property_non_blank(value: Option<serde_json::Value>) -> Option<String> {
-    value
-        .as_ref()
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|trimmed| !trimmed.is_empty())
-        .map(str::to_string)
+    let serde_json::Value::String(value) = value? else {
+        return None;
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else if trimmed.len() == value.len() {
+        Some(value)
+    } else {
+        Some(trimmed.to_string())
+    }
 }
 
 /// Duplicate `type:id` rows merge — later non-empty strings win, flags OR
@@ -129,13 +134,13 @@ fn read_track_list(
         audio: property_i64(mpv_property(
             app,
             window_label,
-            "current-tracks/audio/id",
+            "current-tracks/audio/id".to_string(),
             "int64",
         )),
         sub: property_i64(mpv_property(
             app,
             window_label,
-            "current-tracks/sub/id",
+            "current-tracks/sub/id".to_string(),
             "int64",
         )),
     });
@@ -148,18 +153,16 @@ fn read_track_list(
         let Some(id) = property_i64(mpv_property(
             app,
             window_label,
-            &format!("{prefix}/id"),
+            format!("{prefix}/id"),
             "int64",
         )) else {
             continue;
         };
-        let track_type = match property_non_blank(mpv_property(
-            app,
-            window_label,
-            &format!("{prefix}/type"),
-            "string",
-        ))
-        .as_deref()
+        let track_type_value = mpv_property(app, window_label, format!("{prefix}/type"), "string");
+        let track_type = match track_type_value
+            .as_ref()
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
         {
             Some("audio") => PlayerTrackType::Audio,
             Some("sub") => PlayerTrackType::Sub,
@@ -169,7 +172,7 @@ fn read_track_list(
         let external = property_flag(mpv_property(
             app,
             window_label,
-            &format!("{prefix}/external"),
+            format!("{prefix}/external"),
             "flag",
         ));
 
@@ -201,32 +204,32 @@ fn read_track_list(
                 lang: property_non_blank(mpv_property(
                     app,
                     window_label,
-                    &format!("{prefix}/lang"),
+                    format!("{prefix}/lang"),
                     "string",
                 )),
                 title: property_non_blank(mpv_property(
                     app,
                     window_label,
-                    &format!("{prefix}/title"),
+                    format!("{prefix}/title"),
                     "string",
                 )),
                 selected: selected_id == Some(id),
                 default_track: property_flag(mpv_property(
                     app,
                     window_label,
-                    &format!("{prefix}/default"),
+                    format!("{prefix}/default"),
                     "flag",
                 )),
                 forced: property_flag(mpv_property(
                     app,
                     window_label,
-                    &format!("{prefix}/forced"),
+                    format!("{prefix}/forced"),
                     "flag",
                 )),
                 hearing_impaired: property_flag(mpv_property(
                     app,
                     window_label,
-                    &format!("{prefix}/hearing-impaired"),
+                    format!("{prefix}/hearing-impaired"),
                     "flag",
                 )),
                 external,
@@ -236,7 +239,7 @@ fn read_track_list(
                     property_non_blank(mpv_property(
                         app,
                         window_label,
-                        &format!("{prefix}/external-filename"),
+                        format!("{prefix}/external-filename"),
                         "string",
                     ))
                 } else {
@@ -245,18 +248,16 @@ fn read_track_list(
             }
         };
 
-        match index_by_key.get(&(track_type.sort_order(), id)) {
-            Some(&existing_index) => merge_track_variants(&mut tracks[existing_index], track),
-            None => {
-                index_by_key.insert((track_type.sort_order(), id), tracks.len());
+        match index_by_key.entry((track_type.sort_order(), id)) {
+            Entry::Occupied(existing) => merge_track_variants(&mut tracks[*existing.get()], track),
+            Entry::Vacant(entry) => {
+                entry.insert(tracks.len());
                 tracks.push(track);
             }
         }
     }
 
-    tracks.sort_by(|left, right| {
-        (left.r#type.sort_order(), left.id).cmp(&(right.r#type.sort_order(), right.id))
-    });
+    tracks.sort_unstable_by_key(|track| (track.r#type.sort_order(), track.id));
     Ok(tracks)
 }
 

@@ -29,7 +29,6 @@ export interface PreferredStreamIdentity {
 
 /** Identity refs + URL setter a resolved winner writes through — one shared apply for auto-resolve and recovery. */
 export interface ResolvedStreamSession {
-  activeStreamFormatRef: RefObject<string | undefined>;
   activeStreamSourceIdRef: RefObject<string | undefined>;
   activeStreamSourceNameRef: RefObject<string | undefined>;
   activeStreamFamilyRef: RefObject<string | undefined>;
@@ -46,7 +45,6 @@ export function applyResolvedStreamToSession(
   session: ResolvedStreamSession,
   resolved: BestResolvedStream,
 ): void {
-  session.activeStreamFormatRef.current = resolved.format;
   session.activeStreamSourceIdRef.current = nonBlank(resolved.sourceId);
   session.activeStreamSourceNameRef.current = nonBlank(resolved.sourceName);
   session.activeStreamFamilyRef.current = nonBlank(resolved.streamFamily);

@@ -110,6 +110,92 @@ fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
 }
 
 #[test]
+fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
+    let path = TempDbPath::new("recent-titles");
+    assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
+    assert!(ResumeStore::load_watched_title_ids(&path, "movie")
+        .unwrap()
+        .is_empty());
+    assert!(!path.exists());
+    let mut store = ResumeStore::open(&path).unwrap();
+    assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
+    for (key, type_, id, last_watched) in [
+        ("a", "movie", "newer", 200),
+        ("b", "series", "tie", 200),
+        ("c", "series", "tie", 199),
+        ("zz", "movie", "newer", 100),
+        ("z", "movie", "older", 100),
+        ("x", "movie", "oldest", 50),
+    ] {
+        store
+            .upsert_progress(
+                key,
+                &WatchProgress {
+                    id: id.to_string(),
+                    type_: type_.to_string(),
+                    ..sample_progress(last_watched, 120.0)
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        ResumeStore::load_recent_titles(&path).unwrap(),
+        [
+            ("series".to_string(), "tie".to_string()),
+            ("movie".to_string(), "newer".to_string()),
+            ("movie".to_string(), "older".to_string()),
+        ]
+    );
+    assert_eq!(
+        ResumeStore::load_watched_title_ids(&path, "movie").unwrap(),
+        ["newer", "older", "oldest"]
+            .map(str::to_string)
+            .into_iter()
+            .collect()
+    );
+    assert_eq!(
+        ResumeStore::load_watched_title_ids(&path, "series").unwrap(),
+        ["tie"].map(str::to_string).into_iter().collect()
+    );
+    assert!(ResumeStore::load_watched_title_ids(&path, "anime")
+        .unwrap()
+        .is_empty());
+    let reader = ResumeStore::open_read_only(&path).unwrap().unwrap();
+    assert!(reader.execute("DELETE FROM watch_progress", []).is_err());
+    assert_eq!(store.count_entries().unwrap(), 6);
+    drop(reader);
+    store
+        .connection
+        .execute_batch("PRAGMA user_version = 999")
+        .unwrap();
+    assert!(ResumeStore::load_recent_titles(&path).is_err());
+    assert!(ResumeStore::load_watched_title_ids(&path, "movie").is_err());
+    assert_eq!(user_version(&path), 999);
+}
+
+#[test]
+fn watched_title_query_bounds_oversized_history_to_newest_titles() {
+    let path = TempDbPath::new("watched-limit");
+    let mut store = ResumeStore::open(&path).unwrap();
+    let transaction = store.connection.transaction().unwrap();
+    for index in 0..=super::MAX_RESUME_TOTAL_ENTRIES {
+        transaction
+            .execute(
+                "INSERT INTO watch_progress (
+                    history_key, media_id, media_type, position, duration, last_watched, title
+                 ) VALUES (?1, ?1, 'movie', 120, 3600, ?2, 'Title')",
+                rusqlite::params![index.to_string(), index],
+            )
+            .unwrap();
+    }
+    transaction.commit().unwrap();
+    let watched = ResumeStore::load_watched_title_ids(&path, "movie").unwrap();
+    assert_eq!(watched.len(), super::MAX_RESUME_TOTAL_ENTRIES as usize);
+    assert!(!watched.contains("0"));
+    assert!(watched.contains(&super::MAX_RESUME_TOTAL_ENTRIES.to_string()));
+}
+
+#[test]
 fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
     let path = TempDbPath::new("title-count");
     let mut store = ResumeStore::open(&path).expect("open db");
@@ -204,7 +290,10 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
     store
         .upsert_progress(key, &prior)
         .expect("seed remapped episode");
-    let item = crate::test_helpers::test_media_item("tt1234567", "series");
+    let mut item = crate::test_helpers::test_media_item("tt1234567", "series");
+    item.title = "Updated title".into();
+    item.poster = Some("https://img.example/poster.jpg".into());
+    item.backdrop = Some("https://img.example/backdrop.jpg".into());
     let episodes = [
         WatchedEpisode {
             season: 1,
@@ -230,6 +319,11 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
     assert_eq!(writes[0].1.duration, 3600.0);
     assert_eq!(writes[0].1.position, 3600.0);
     assert_eq!(writes[1].1.duration, 1.0);
+    for (_, row) in &writes {
+        assert_eq!(row.title, item.title);
+        assert_eq!(row.poster, item.poster);
+        assert_eq!(row.backdrop, item.backdrop);
+    }
     assert!(writes[0].1.last_watched < writes[1].1.last_watched);
     store.merge_entries(writes).expect("mark watched");
     assert_eq!(store.count_entries().expect("count rows"), 2);

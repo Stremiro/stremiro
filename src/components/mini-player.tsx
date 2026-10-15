@@ -31,8 +31,16 @@ import {
   PLAYER_TITLEBAR_HEIGHT_PX,
   type MiniVideoRect,
 } from '@/hooks/use-player-surface-layout';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { isEditableTarget } from '@/lib/dom';
 import type { PlaybackClock } from '@/lib/player-clock';
+import {
+  ariaKeyShortcuts,
+  formatBindingKey,
+  isRepeatablePlayerAction,
+  type PlayerKeymap,
+  withShortcutHint,
+} from '@/lib/player-keybindings';
 import { createSubscribableStore, type SubscribableStore } from '@/lib/subscribable-store';
 import type { MiniPlayerPosition } from '@/lib/player-session';
 import { clamp, clearTimer, cn, formatTime, prefersReducedMotion } from '@/lib/utils';
@@ -56,9 +64,6 @@ const DOCK_FLIP_MS = 260;
 const DOCK_FLIP_EASING = 'cubic-bezier(0.33, 1, 0.68, 1)';
 // The margin IPC lands a frame or two after the last rect report; the cover stays up so the surface is never seen chasing.
 const SURFACE_SETTLE_MS = 180;
-
-// Discrete actions ignore auto-repeat; arrows keep repeating.
-const MINI_NON_REPEAT_KEYS = new Set([' ', 'enter', 'escape', 'f', 'm', 'n', 'i', 's', 'k']);
 
 interface MiniPlayerMetrics {
   frameWidth: number;
@@ -124,13 +129,13 @@ const MINI_ICON_BUTTON_CLASS =
   'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60';
 
 // Expand/close render twice (hover chrome + error/empty overlay), so the buttons live here once.
-function MiniExpandButton({ onClick }: { onClick: () => void }) {
+function MiniExpandButton({ keymap, onClick }: { keymap: PlayerKeymap; onClick: () => void }) {
   return (
     <button
       type='button'
       aria-label='Back to player'
-      aria-keyshortcuts='f'
-      title='Back to player (F)'
+      aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
+      title={withShortcutHint('Back to player', keymap, 'toggleFullscreen')}
       onClick={onClick}
       className={MINI_ICON_BUTTON_CLASS}
     >
@@ -189,14 +194,20 @@ function useMiniDisplayTime(
   duration: number,
   seekPreviewStore: SeekPreviewStore,
   active = true,
+  wholeSeconds = false,
 ): number {
   const seekPreview = useSyncExternalStore(
     seekPreviewStore.subscribe,
-    seekPreviewStore.getSnapshot,
+    wholeSeconds
+      ? () => {
+          const preview = seekPreviewStore.getSnapshot();
+          return preview === null ? null : Math.floor(preview);
+        }
+      : seekPreviewStore.getSnapshot,
   );
   const currentTime = useSyncExternalStore(
     active || seekPreview !== null ? clock.subscribe : subscribeWhileHidden,
-    clock.getSnapshot,
+    wholeSeconds ? () => Math.floor(clock.getSnapshot()) : clock.getSnapshot,
   );
   return Math.min(seekPreview ?? currentTime, duration > 0 ? duration : currentTime);
 }
@@ -231,7 +242,7 @@ const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
   duration,
   seekPreviewStore,
 }: MiniPlayerTickProps) {
-  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
+  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active, true);
   return (
     <span className='shrink-0 text-[11px] tabular-nums text-white/80'>
       {formatTime(displayTime)}
@@ -308,7 +319,8 @@ interface MiniPlayerProps {
   onTogglePlay: () => void;
   onToggleMute: () => void;
   onVolumeChange: (volume: number) => void;
-  /** Relative wheel/key nudges — the parent owns the live volume ref. */
+  onVolumeWheel: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
+  /** Relative key nudges — the parent owns the live volume ref. */
   onVolumeStep: (delta: number) => void;
   onSeek: (seconds: number) => void;
   onSeekRelative: (deltaSeconds: number) => void;
@@ -345,6 +357,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   onTogglePlay,
   onToggleMute,
   onVolumeChange,
+  onVolumeWheel,
   onVolumeStep,
   onSeek,
   onSeekRelative,
@@ -354,6 +367,10 @@ export const MiniPlayer = memo(function MiniPlayer({
   onReplay,
   onBackToTitle,
 }: MiniPlayerProps) {
+  const keymap = usePlayerKeymap();
+  const playKey = keymap.keys.togglePlay[0];
+  const expandKey = keymap.keys.toggleFullscreen[0];
+  const mountedRef = useRef(true);
   const frameRef = useRef<HTMLDivElement | null>(null);
   const videoSurfaceRef = useRef<HTMLDivElement | null>(null);
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
@@ -581,6 +598,7 @@ export const MiniPlayer = memo(function MiniPlayer({
         onPositionChange(target);
         setIsDocking(false);
         void Promise.resolve(rectOpsRef.current.reportVideoRect()).then((holeReady) => {
+          if (!mountedRef.current) return;
           if (holeReady === true) {
             clearTimer(settleTimerRef);
             setIsSettling(false);
@@ -638,7 +656,9 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   // Unmount-only teardown — a rebuilt `onVideoRectChange` mid-life would kill an in-flight snap.
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (reportFrameRef.current !== null) {
         window.cancelAnimationFrame(reportFrameRef.current);
         reportFrameRef.current = null;
@@ -825,11 +845,11 @@ export const MiniPlayer = memo(function MiniPlayer({
         onSeekRelative(event.deltaY < 0 ? 5 : -5);
         return;
       }
-      onVolumeStep(event.deltaY < 0 ? 5 : -5);
+      void onVolumeWheel(event).catch(() => undefined);
     };
     surface.addEventListener('wheel', handleWheel, { passive: false });
     return () => surface.removeEventListener('wheel', handleWheel);
-  }, [onVolumeStep, onSeekRelative]);
+  }, [onVolumeWheel, onSeekRelative]);
 
   const handleVideoSurfaceKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
@@ -854,45 +874,43 @@ export const MiniPlayer = memo(function MiniPlayer({
           return;
         }
       }
-      if (event.repeat && MINI_NON_REPEAT_KEYS.has(key)) {
+      // Enter/Esc always expand the docked frame; everything else follows the player keymap.
+      const action = key === 'enter' || key === 'escape' ? 'expand' : keymap.byKey.get(key);
+      if (!action) return;
+      if (event.repeat && (action === 'expand' || !isRepeatablePlayerAction(action))) {
         event.preventDefault();
         event.stopPropagation();
         return;
       }
       const handled = (() => {
-        switch (key) {
-          case ' ':
-          case 'k':
+        switch (action) {
+          case 'togglePlay':
             onTogglePlay();
             return true;
-          case 'enter':
-          case 'escape':
-          case 'f':
-          case 'i':
+          case 'expand':
+          case 'toggleFullscreen':
+          case 'dock':
             onExpand();
             return true;
-          case 'arrowleft':
-          case 'j':
+          case 'seekBackward':
             onSeekRelative(event.shiftKey ? -5 : -10);
             return true;
-          case 'arrowright':
-          case 'l':
+          case 'seekForward':
             onSeekRelative(event.shiftKey ? 5 : 10);
             return true;
-          case 'arrowup':
+          case 'volumeUp':
             onVolumeStep(5);
             return true;
-          case 'arrowdown':
+          case 'volumeDown':
             onVolumeStep(-5);
             return true;
-          case 'm':
+          case 'toggleMute':
             onToggleMute();
             return true;
-          case 'n':
+          case 'nextEpisode':
             if (canGoNext) onNextEpisode();
             return canGoNext;
-          case 's':
-            // Skip the active segment — same key as the expanded player.
+          case 'skipSegment':
             if (skipAction) skipAction.onSkip();
             return !!skipAction;
           default:
@@ -906,6 +924,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     },
     [
       canGoNext,
+      keymap,
       onExpand,
       onNextEpisode,
       onSeekRelative,
@@ -986,7 +1005,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           ref={videoSurfaceRef}
           role='application'
           tabIndex={0}
-          aria-label={`Mini player: ${title}. Space to play or pause, F to expand.`}
+          aria-label={`Mini player: ${title}.${playKey !== undefined ? ` ${formatBindingKey(playKey)} to play or pause.` : ''}${expandKey !== undefined ? ` ${formatBindingKey(expandKey)} to expand.` : ''}`}
           onKeyDown={handleVideoSurfaceKeyDown}
           className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
           style={{ height: metrics.videoHeight }}
@@ -1051,7 +1070,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                 e.stopPropagation();
                 skipAction.onSkip();
               }}
-              aria-keyshortcuts='s'
+              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
               className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
             >
               <FastForward className='h-3 w-3 shrink-0 text-white/90' strokeWidth={2.5} />
@@ -1104,7 +1123,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                   controlsActive && 'pointer-events-auto',
                 )}
               >
-                <MiniExpandButton onClick={onExpand} />
+                <MiniExpandButton keymap={keymap} onClick={onExpand} />
                 <MiniSnapButton onClick={snapToNextAnchor} />
                 <p
                   className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'
@@ -1129,7 +1148,11 @@ export const MiniPlayer = memo(function MiniPlayer({
                         type='button'
                         onClick={onNextEpisode}
                         aria-label={`Next episode: ${upNext.label}`}
-                        title={`Next episode: ${upNext.label} (N)`}
+                        title={withShortcutHint(
+                          `Next episode: ${upNext.label}`,
+                          keymap,
+                          'nextEpisode',
+                        )}
                         className='min-w-0 truncate rounded px-1 py-1 text-left text-xs font-medium text-white hover:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
                       >
                         Up next · {upNext.label}
@@ -1157,14 +1180,12 @@ export const MiniPlayer = memo(function MiniPlayer({
                     <button
                       type='button'
                       aria-label={upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play'}
-                      aria-keyshortcuts='Space k'
-                      title={
-                        upNext
-                          ? 'Watch again (Space)'
-                          : isPlaying
-                            ? 'Pause (Space)'
-                            : 'Play (Space)'
-                      }
+                      aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
+                      title={withShortcutHint(
+                        upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play',
+                        keymap,
+                        'togglePlay',
+                      )}
                       onClick={upNext ? onReplay : onTogglePlay}
                       className={cn(MINI_ICON_BUTTON_CLASS, 'bg-white/10 text-white')}
                     >
@@ -1181,8 +1202,8 @@ export const MiniPlayer = memo(function MiniPlayer({
                       <button
                         type='button'
                         aria-label='Next episode'
-                        aria-keyshortcuts='n'
-                        title='Next episode (N)'
+                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
+                        title={withShortcutHint('Next episode', keymap, 'nextEpisode')}
                         onClick={onNextEpisode}
                         className={MINI_ICON_BUTTON_CLASS}
                       >
@@ -1195,8 +1216,8 @@ export const MiniPlayer = memo(function MiniPlayer({
                       <button
                         type='button'
                         aria-label={skipAction.label}
-                        title={skipAction.label}
-                        aria-keyshortcuts='s'
+                        title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
+                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
                         onClick={skipAction.onSkip}
                         className={MINI_ICON_BUTTON_CLASS}
                       >
@@ -1208,8 +1229,12 @@ export const MiniPlayer = memo(function MiniPlayer({
                       <button
                         type='button'
                         aria-label={effectivelyMuted ? 'Unmute' : 'Mute'}
-                        aria-keyshortcuts='m'
-                        title={effectivelyMuted ? 'Unmute (M)' : 'Mute (M)'}
+                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
+                        title={withShortcutHint(
+                          effectivelyMuted ? 'Unmute' : 'Mute',
+                          keymap,
+                          'toggleMute',
+                        )}
                         onClick={onToggleMute}
                         className={MINI_ICON_BUTTON_CLASS}
                       >
@@ -1272,7 +1297,7 @@ export const MiniPlayer = memo(function MiniPlayer({
               <div className='pointer-events-none absolute inset-0 bg-linear-to-t from-black/70 via-black/30 to-black/50' />
               <div className='absolute inset-x-0 top-0 z-10 flex items-center justify-between p-1.5'>
                 <div className='flex items-center gap-1'>
-                  <MiniExpandButton onClick={onExpand} />
+                  <MiniExpandButton keymap={keymap} onClick={onExpand} />
                   <MiniSnapButton onClick={snapToNextAnchor} />
                 </div>
                 <MiniCloseButton onClick={onClose} />

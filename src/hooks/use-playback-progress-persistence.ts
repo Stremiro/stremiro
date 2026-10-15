@@ -38,7 +38,6 @@ export function usePlaybackProgressPersistence({
   stream,
 }: UsePlaybackProgressPersistenceArgs) {
   const {
-    activeStreamFormatRef,
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,
     activeStreamFamilyRef,
@@ -48,6 +47,7 @@ export function usePlaybackProgressPersistence({
   const lastPlayingStateRef = useRef(isPlaying);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveRef = useRef<{ fingerprint: string; operation: Promise<void> } | null>(null);
+  const lastSavedFingerprintRef = useRef<string | null>(null);
   const currentTimeRef = clock.ref;
 
   useEffect(() => {
@@ -73,7 +73,6 @@ export function usePlaybackProgressPersistence({
       poster,
       backdrop,
       // URLs never persist; resume uses lookup/key/source identities.
-      last_stream_format: activeStreamFormatRef.current,
       last_stream_lookup_id: streamLookupIdRef.current,
       last_stream_key: selectedStreamKeyRef.current,
       source_name: activeStreamSourceNameRef.current,
@@ -92,7 +91,6 @@ export function usePlaybackProgressPersistence({
     title,
     poster,
     backdrop,
-    activeStreamFormatRef,
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,
     activeStreamFamilyRef,
@@ -102,38 +100,45 @@ export function usePlaybackProgressPersistence({
 
   // Returns the raw op so lifecycle callers (native close, updater, backup) observe a failed
   // final save; the queue swallows so saves serialize. Rust owns the stub gate/coalescing (should_skip_watch_progress_save).
-  const persistProgress = useCallback((): Promise<void> => {
-    const payload = buildWatchProgressPayload();
-    // Nothing to write — return the tail so a close still waits on queued saves.
-    if (!payload) return saveQueueRef.current;
+  const persistProgress = useCallback(
+    (skipUnchanged = false): Promise<void> => {
+      const payload = buildWatchProgressPayload();
+      // Nothing to write — return the tail so a close still waits on queued saves.
+      if (!payload) return saveQueueRef.current;
 
-    // Epoch snapshot fences deletes: a remove/clear queued after this write must not
-    // resurrect the row (the backend generation guard only covers in-flight saves).
-    const enqueuedEpoch = getWatchProgressEpoch();
-    // Excludes last_watched so overlapping exit saves share one op; a changed snapshot must still save.
-    const fingerprint = JSON.stringify([
-      stream.activeStreamUrl,
-      enqueuedEpoch,
-      { ...payload, last_watched: undefined },
-    ]);
-    if (pendingSaveRef.current?.fingerprint === fingerprint) {
-      return pendingSaveRef.current.operation;
-    }
-    const operation = saveQueueRef.current.then(async () => {
-      if (getWatchProgressEpoch() !== enqueuedEpoch) return;
-      await api.saveWatchProgress(payload);
-    });
-    pendingSaveRef.current = { fingerprint, operation };
-    const clearPendingSave = () => {
-      if (pendingSaveRef.current?.operation === operation) pendingSaveRef.current = null;
-    };
-    void operation.then(clearPendingSave, clearPendingSave);
-    saveQueueRef.current = operation.catch(() => {
-      if (import.meta.env.DEV) console.warn('[player] watch progress persist failed');
-    });
-    // Global tracking covers the op after player unmount — the hook flusher only runs while registered.
-    return trackPendingAppWrite(operation);
-  }, [buildWatchProgressPayload, stream.activeStreamUrl]);
+      // Epoch snapshot fences deletes: a remove/clear queued after this write must not
+      // resurrect the row (the backend generation guard only covers in-flight saves).
+      const enqueuedEpoch = getWatchProgressEpoch();
+      // Excludes last_watched so overlapping exit saves share one op; a changed snapshot must still save.
+      const fingerprint = JSON.stringify([
+        stream.activeStreamUrl,
+        enqueuedEpoch,
+        { ...payload, last_watched: undefined },
+      ]);
+      if (skipUnchanged && lastSavedFingerprintRef.current === fingerprint) {
+        return saveQueueRef.current;
+      }
+      if (pendingSaveRef.current?.fingerprint === fingerprint) {
+        return pendingSaveRef.current.operation;
+      }
+      const operation = saveQueueRef.current.then(async () => {
+        if (getWatchProgressEpoch() !== enqueuedEpoch) return;
+        await api.saveWatchProgress(payload);
+        lastSavedFingerprintRef.current = fingerprint;
+      });
+      pendingSaveRef.current = { fingerprint, operation };
+      const clearPendingSave = () => {
+        if (pendingSaveRef.current?.operation === operation) pendingSaveRef.current = null;
+      };
+      void operation.then(clearPendingSave, clearPendingSave);
+      saveQueueRef.current = operation.catch(() => {
+        if (import.meta.env.DEV) console.warn('[player] watch progress persist failed');
+      });
+      // Global tracking covers the op after player unmount — the hook flusher only runs while registered.
+      return trackPendingAppWrite(operation);
+    },
+    [buildWatchProgressPayload, stream.activeStreamUrl],
+  );
 
   // Never rejects, so every fire-and-forget trigger keeps its old contract.
   const saveProgress = useCallback(
@@ -146,15 +151,15 @@ export function usePlaybackProgressPersistence({
 
   useEffect(() => {
     if (!isPlaying) return;
-    // Playing ticks move past Rust's coalescing delta so every interval save lands; stalled ticks coalesce in Rust.
+    // Stalled ticks must not bump recency; lifecycle saves still refresh last_watched.
     const interval = window.setInterval(() => {
-      void saveProgress();
+      void persistProgress(true).catch(() => undefined);
     }, 15_000);
 
     return () => {
       window.clearInterval(interval);
     };
-  }, [isPlaying, saveProgress]);
+  }, [isPlaying, persistProgress]);
 
   useEffect(() => {
     const handleVisibilityChange = () => {

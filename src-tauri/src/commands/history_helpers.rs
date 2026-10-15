@@ -4,6 +4,7 @@ use super::{
     WatchProgress, MEDIA_TITLE_MAX_CHARS,
 };
 use crate::providers::{bound_optional, non_blank, trim_to_max};
+use std::borrow::Cow;
 use std::collections::HashMap;
 
 const WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS: f64 = 4.0;
@@ -685,7 +686,7 @@ fn choose_latest_entry(
         .clone();
     Some(merge_watch_progress_donors(
         chosen,
-        items,
+        items.into_iter().map(Cow::Owned),
         source_health_priorities,
     ))
 }
@@ -693,9 +694,10 @@ fn choose_latest_entry(
 /// The donor-merge half of `choose_latest_entry`, shared with the per-episode claimant
 /// map: hydrate the seed, then fold co-claimants (quality-sorted, `last_watched` ties)
 /// through `merge_watch_progress_from_donor`. Non-series seeds never take donors.
-pub(crate) fn merge_watch_progress_donors(
+/// Borrowed donors are already hydrated; owned donors must be scored before hydration.
+pub(crate) fn merge_watch_progress_donors<'a>(
     mut chosen: WatchProgress,
-    mut donors: Vec<WatchProgress>,
+    donors: impl IntoIterator<Item = Cow<'a, WatchProgress>>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> WatchProgress {
     hydrate_watch_progress_lookup_id(&mut chosen);
@@ -705,6 +707,7 @@ pub(crate) fn merge_watch_progress_donors(
     }
 
     // Donor scan always runs for series rows — sanitization strips the persisted stream URL, so no early-exit.
+    let mut donors: Vec<_> = donors.into_iter().collect();
     donors.sort_by_cached_key(|donor| {
         std::cmp::Reverse((
             watch_progress_quality_score(&chosen, donor, source_health_priorities),
@@ -713,8 +716,10 @@ pub(crate) fn merge_watch_progress_donors(
     });
 
     for mut donor in donors {
-        hydrate_watch_progress_lookup_id(&mut donor);
-        merge_watch_progress_from_donor(&mut chosen, &donor, source_health_priorities);
+        if let Cow::Owned(donor) = &mut donor {
+            hydrate_watch_progress_lookup_id(donor);
+        }
+        merge_watch_progress_from_donor(&mut chosen, donor.as_ref(), source_health_priorities);
     }
 
     hydrate_watch_progress_lookup_id(&mut chosen);

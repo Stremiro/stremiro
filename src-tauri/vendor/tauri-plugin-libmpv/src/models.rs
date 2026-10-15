@@ -1,6 +1,7 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_void};
+use std::sync::{mpsc::Sender, Arc, Mutex};
 use tauri::{AppHandle, Runtime};
 
 use crate::wrapper::MpvHandle;
@@ -35,7 +36,8 @@ pub struct VideoMarginRatio {
 pub struct EventUserData<R: Runtime> {
     pub app: AppHandle<R>,
     pub free_fn: unsafe extern "C" fn(*mut c_char),
-    pub window_label: String,
+    pub event_sender: Sender<String>,
+    pub event_alive: Arc<Mutex<bool>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

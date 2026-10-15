@@ -14,7 +14,6 @@ export interface PlayerStreamSession extends ResolvedStreamSession {
 }
 
 interface UsePlayerStreamSessionArgs {
-  routeFormat?: string;
   routeSourceId?: string;
   routeSourceName?: string;
   routeStreamFamily?: string;
@@ -39,7 +38,6 @@ interface SessionStreamOverride {
 }
 
 export function usePlayerStreamSession({
-  routeFormat,
   routeSourceId,
   routeSourceName,
   routeStreamFamily,
@@ -51,7 +49,6 @@ export function usePlayerStreamSession({
 }: UsePlayerStreamSessionArgs): PlayerStreamSession {
   // Routes carry identities only (URLs stripped); seed includes episode coordinates so advancing drops prior secrets.
   const routeSeed = JSON.stringify([
-    routeFormat ?? '',
     routeSourceId?.trim() ?? '',
     routeSourceName?.trim() ?? '',
     routeStreamFamily?.trim() ?? '',
@@ -81,7 +78,6 @@ export function usePlayerStreamSession({
   const activeStreamSourceName =
     activeStreamUrl === undefined ? nonBlank(routeSourceName) : activeOverride?.sourceName;
   const committedStreamUrlRef = useRef(activeStreamUrl);
-  const activeStreamFormatRef = useRef<string | undefined>(routeFormat);
   const activeStreamSourceIdRef = useRef<string | undefined>(routeSourceId);
   const activeStreamSourceNameRef = useRef<string | undefined>(routeSourceName);
   const activeStreamFamilyRef = useRef<string | undefined>(routeStreamFamily);
@@ -126,11 +122,10 @@ export function usePlayerStreamSession({
   useEffect(() => {
     // Route identity seeds the refs only until a stream activates; after resolve, `applyResolvedStreamToSession` owns them.
     if (activeStreamUrl !== undefined) return;
-    activeStreamFormatRef.current = routeFormat;
     activeStreamSourceIdRef.current = nonBlank(routeSourceId);
     activeStreamSourceNameRef.current = nonBlank(routeSourceName);
     activeStreamFamilyRef.current = nonBlank(routeStreamFamily);
-  }, [activeStreamUrl, routeFormat, routeSourceId, routeSourceName, routeStreamFamily]);
+  }, [activeStreamUrl, routeSourceId, routeSourceName, routeStreamFamily]);
 
   useEffect(() => {
     if (!routeSelectedStreamKey) {
@@ -150,7 +145,6 @@ export function usePlayerStreamSession({
       activeStreamKey,
       activeStreamSourceName,
       setActiveStreamUrl,
-      activeStreamFormatRef,
       activeStreamSourceIdRef,
       activeStreamSourceNameRef,
       activeStreamFamilyRef,
@@ -164,7 +158,6 @@ export function usePlayerStreamSession({
       activeStreamKey,
       activeStreamSourceName,
       setActiveStreamUrl,
-      activeStreamFormatRef,
       activeStreamSourceIdRef,
       activeStreamSourceNameRef,
       activeStreamFamilyRef,

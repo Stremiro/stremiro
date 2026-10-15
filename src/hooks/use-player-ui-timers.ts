@@ -3,6 +3,7 @@ import {
   type RefObject,
   type SetStateAction,
   useCallback,
+  useEffect,
   useEffectEvent,
   useRef,
 } from 'react';
@@ -10,10 +11,10 @@ import {
 import type { PlayerOsdAction, PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
 import { clearTimer, type TimerHandle } from '@/lib/utils';
 
-const CONTROLS_AUTO_HIDE_DELAY_MS = 3000;
 const OSD_CLEAR_DELAY_MS = 120;
 
 interface UsePlayerUiTimersArgs {
+  controlsHideDelayMs: number;
   isPlayingRef: RefObject<boolean>;
   mountedRef: RefObject<boolean>;
   /** OSD overlay only mounts in the expanded player — docked gestures must not churn its state. */
@@ -26,6 +27,7 @@ interface UsePlayerUiTimersArgs {
 }
 
 export function usePlayerUiTimers({
+  controlsHideDelayMs,
   isPlayingRef,
   mountedRef,
   osdEnabled,
@@ -36,6 +38,7 @@ export function usePlayerUiTimers({
 }: UsePlayerUiTimersArgs) {
   const controlsTimeoutRef = useRef<TimerHandle | null>(null);
   const shouldHoldControlsNow = useEffectEvent(() => shouldHoldControls?.());
+  const canShowOsdNow = useEffectEvent(() => osdEnabled && mountedRef.current);
   const osdTimerRef = useRef<TimerHandle | null>(null);
   const osdClearTimerRef = useRef<TimerHandle | null>(null);
   const osdAnimationFrameRef = useRef<number | null>(null);
@@ -54,8 +57,19 @@ export function usePlayerUiTimers({
     }
   }, []);
 
+  const clearOsd = useCallback(() => {
+    clearOsdTimers();
+    setOsdVisible(false);
+    setOsdAction(null);
+  }, [clearOsdTimers, setOsdAction, setOsdVisible]);
+
+  useEffect(() => {
+    if (!osdEnabled) clearOsd();
+    return clearOsdTimers;
+  }, [clearOsd, clearOsdTimers, osdEnabled]);
+
   const showControlsWithAutoHide = useCallback(
-    (delayMs = CONTROLS_AUTO_HIDE_DELAY_MS) => {
+    (delayMs = controlsHideDelayMs) => {
       setShowControls(true);
       clearControlsAutoHide();
 
@@ -76,12 +90,13 @@ export function usePlayerUiTimers({
       };
       arm();
     },
-    [clearControlsAutoHide, isPlayingRef, mountedRef, setShowControls],
+    [clearControlsAutoHide, controlsHideDelayMs, isPlayingRef, mountedRef, setShowControls],
   );
 
   const triggerOsd = useCallback(
     (action: PlayerOsdAction) => {
-      if (!osdEnabled) {
+      // A seek/track acknowledgement can arrive after docking or opening a panel.
+      if (!canShowOsdNow()) {
         return;
       }
 
@@ -111,7 +126,7 @@ export function usePlayerUiTimers({
         }, OSD_CLEAR_DELAY_MS);
       }, visibleMs);
     },
-    [clearOsdTimers, osdEnabled, setOsdAction, setOsdVisible],
+    [clearOsdTimers, setOsdAction, setOsdVisible],
   );
 
   // Every announcement is the same { kind: 'message', text, icon } literal.
@@ -124,8 +139,8 @@ export function usePlayerUiTimers({
 
   const clearUiTimers = useCallback(() => {
     clearControlsAutoHide();
-    clearOsdTimers();
-  }, [clearControlsAutoHide, clearOsdTimers]);
+    clearOsd();
+  }, [clearControlsAutoHide, clearOsd]);
 
   return {
     announce,

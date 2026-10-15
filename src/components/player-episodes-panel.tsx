@@ -1,5 +1,5 @@
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, ListVideo, Play, X } from 'lucide-react';
+import { Check, ChevronDown, PanelRight, X } from 'lucide-react';
 import { memo, type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import {
@@ -7,8 +7,6 @@ import {
   CHROME_ICON_BUTTON_CLASS,
 } from '@/components/player-chrome-styles';
 import { RemoteImage } from '@/components/remote-image';
-import { WatchProgressStrip } from '@/components/watch-progress-strip';
-import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,8 +16,10 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { SearchInput } from '@/components/ui/search-input';
 import { useEffectiveEpisodeSearch } from '@/hooks/use-episode-search';
-import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
-import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
+import { useDebounce } from '@/hooks/use-debounce';
+import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
+import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
+import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { EPISODE_SEARCH_MIN_COUNT, filterEpisodesBySearchQuery } from '@/lib/episode-search';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
@@ -31,20 +31,26 @@ interface PlayerEpisodesToggleButtonProps {
 }
 
 export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesToggleButtonProps) {
+  const keymap = usePlayerKeymap();
   return (
     <button
       type='button'
       aria-label={open ? 'Close episodes panel' : 'Open episodes panel'}
-      aria-keyshortcuts='e'
+      aria-keyshortcuts={ariaKeyShortcuts(keymap, 'episodes')}
       aria-expanded={open}
-      className={cn(CHROME_ICON_BUTTON_CLASS, 'duration-150', open && 'bg-white/15 text-white')}
-      title='Episodes (E)'
+      aria-controls={open ? 'player-episodes-panel' : undefined}
+      className={cn(
+        CHROME_ICON_BUTTON_CLASS,
+        'rounded-md text-zinc-300 duration-150 hover:bg-white/[0.06] hover:text-white active:scale-100 motion-reduce:transition-none',
+        open && 'bg-white/[0.08] text-white',
+      )}
+      title={withShortcutHint('Episodes', keymap, 'episodes')}
       onClick={(e) => {
         e.stopPropagation();
         onToggle();
       }}
     >
-      <ListVideo className='w-5 h-5' strokeWidth={2.5} />
+      <PanelRight className='h-5 w-5' strokeWidth={2} />
     </button>
   );
 }
@@ -54,7 +60,7 @@ interface PlayerEpisodesPanelProps {
   open: boolean;
   /** Windowed mode must clear the 32px custom titlebar. */
   isFullscreen: boolean;
-  seasons: number[];
+  seasons: NonNullable<MediaDetails['seasons']>;
   selectedSeason: number;
   onSeasonChange: (season: number) => void;
   episodes: Episode[];
@@ -70,10 +76,9 @@ interface PlayerEpisodesPanelProps {
   onClose: () => void;
 }
 
-// Rows are ~100px (p-3 + 68px thumb) plus the 8px gap folded into each measured wrapper. Virtualization only
-// matters for single-season outliers (long-running daily shows/anime); typical seasons render directly.
-const EPISODE_ROW_ESTIMATE_PX = 100;
-const EPISODE_ROW_GAP_PX = 8;
+// Fixed row heights keep long seasons cheap to scroll; virtual wrappers include the gap.
+const EPISODE_ROW_ESTIMATE_PX = 112;
+const EPISODE_ROW_GAP_PX = 4;
 const EPISODE_LIST_VIRTUALIZE_THRESHOLD = 40;
 
 // Memoized so playback ticks never re-render the episode list while the panel sits closed off-screen.
@@ -111,12 +116,14 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   );
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
   const shouldVirtualize = visibleEpisodes.length >= EPISODE_LIST_VIRTUALIZE_THRESHOLD;
+  // Keep rows through the exit fade, then stop observing the hidden viewport.
+  const listExiting = useDebounce(open, 180);
   const episodeVirtualizer = useVirtualizer({
     count: visibleEpisodes.length,
     getScrollElement: () => scrollViewportRef.current,
-    estimateSize: () => EPISODE_ROW_ESTIMATE_PX,
+    estimateSize: () => EPISODE_ROW_ESTIMATE_PX + EPISODE_ROW_GAP_PX,
     overscan: 6,
-    enabled: shouldVirtualize,
+    enabled: shouldVirtualize && (open || listExiting),
   });
 
   // A new filter result starts at the top — a stale offset could leave a short list scrolled past its end.
@@ -126,11 +133,23 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     if (shouldVirtualize) episodeVirtualizer.scrollToOffset(0);
   }, [effectiveEpisodeSearch, selectedSeason, shouldVirtualize, episodeVirtualizer]);
 
-  // Opening mid-season centers the playing row once per open, then scroll ownership returns to the user.
+  // Follow playback only on opening, so browsing another season never fights the user's selection.
+  const wasOpenRef = useRef(false);
   const didScrollToCurrentRef = useRef(false);
   useEffect(() => {
+    const isOpening = open && !wasOpenRef.current;
+    wasOpenRef.current = open;
     if (!open) {
       didScrollToCurrentRef.current = false;
+      return;
+    }
+    if (
+      isOpening &&
+      currentSeason !== undefined &&
+      seasons.some((season) => season.number === currentSeason) &&
+      selectedSeason !== currentSeason
+    ) {
+      onSeasonChange(currentSeason);
       return;
     }
     // An empty list is still loading — consuming the once-per-open flag here would skip centering on arrival.
@@ -147,17 +166,30 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       return;
     }
 
-    scrollViewportRef.current
-      ?.querySelector<HTMLElement>('[data-current-episode]')
-      ?.scrollIntoView({ block: 'center' });
-  }, [open, visibleEpisodes, shouldVirtualize, episodeVirtualizer, currentSeason, currentEpisode]);
+    const viewport = scrollViewportRef.current;
+    const row = viewport?.querySelector<HTMLElement>('[data-current-episode]');
+    if (!viewport || !row) return;
+
+    // Only this viewport may scroll: scrolling ancestors also moves the native-video overlay.
+    const rowTop = row.getBoundingClientRect().top - viewport.getBoundingClientRect().top;
+    viewport.scrollTop += rowTop - (viewport.clientHeight - row.offsetHeight) / 2;
+  }, [
+    open,
+    visibleEpisodes,
+    shouldVirtualize,
+    episodeVirtualizer,
+    currentSeason,
+    currentEpisode,
+    seasons,
+    selectedSeason,
+    onSeasonChange,
+  ]);
 
   const renderEpisode = useCallback(
     (ep: Episode) => {
       const isCurrent = episodeMatchesCoordinates(ep, currentSeason, currentEpisode);
       const airDate = formatAirDate(ep.releaseDate);
-      // Same bar/badge vocabulary as the details episode cards — the Resume pill marks the Continue target,
-      // never the already-marked Now Playing row.
+      // The Continue target gets Resume, never the already-marked Now playing row.
       const watchEntry = episodeProgressFor?.(ep);
       const isSpoiler = isEpisodeSpoiler(
         ep,
@@ -172,6 +204,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       const isResume =
         !isCurrent && resumeTarget?.season === ep.season && resumeTarget?.episode === ep.episode;
       const thumbnail = ep.thumbnail || backdrop;
+      const episodeTitle = getEpisodeTitle(isSpoiler ? undefined : ep.title, ep.episode);
 
       return (
         <button
@@ -180,76 +213,68 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
           data-current-episode={isCurrent ? '' : undefined}
           aria-current={isCurrent ? 'true' : undefined}
           className={cn(
-            'w-full text-left group relative flex items-start gap-3 p-3 rounded-xl border cursor-pointer transition-colors duration-200 outline-hidden focus-visible:ring-2 focus-visible:ring-white/25',
-            isCurrent
-              ? 'bg-[rgb(var(--accent-act-rgb)/0.07)] border-[rgb(var(--accent-act-rgb)/0.25)]'
-              : 'border-transparent hover:bg-white/[0.04] focus-visible:bg-white/[0.04]',
+            'relative flex h-28 w-full cursor-pointer items-center gap-3 rounded-md p-2 text-left outline-hidden transition-colors duration-120 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-white/40 motion-reduce:transition-none',
+            isCurrent ? 'bg-white/[0.04]' : 'hover:bg-white/[0.025] focus-visible:bg-white/[0.025]',
           )}
           onClick={() => onEpisodeSelect(ep)}
         >
-          <div className='relative w-28 h-[68px] bg-zinc-900 rounded-md overflow-hidden shrink-0'>
+          {isCurrent && (
+            <span
+              aria-hidden='true'
+              className='absolute left-0 top-4 bottom-4 w-0.5 rounded-r-full bg-(--accent-act)'
+            />
+          )}
+          <div className='relative aspect-video w-[clamp(7rem,38%,10rem)] shrink-0 overflow-hidden rounded-md bg-zinc-900 ring-1 ring-white/[0.06]'>
             {/* Placeholder sits under the thumb — hiding the broken image reveals it without sibling-DOM poking. */}
-            <div className='absolute inset-0 flex items-center justify-center text-white/10 font-bold text-base tracking-wide bg-zinc-800/50'>
-              EP {ep.episode}
+            <div className='absolute inset-0 flex items-center justify-center text-sm font-semibold tracking-wide text-zinc-700'>
+              E{ep.episode}
             </div>
             {thumbnail && (
               <RemoteImage
                 src={thumbnail}
                 loading='lazy'
                 className={cn(
-                  'relative w-full h-full object-cover transition-opacity duration-300',
+                  'relative h-full w-full object-cover',
                   isSpoiler && 'scale-110 blur-md',
-                  isCurrent
-                    ? 'opacity-100'
-                    : 'opacity-55 group-hover:opacity-80 group-focus-visible:opacity-80',
                 )}
                 alt=''
               />
             )}
-            {isResume && (
-              <span className='accent-lattice absolute left-1 top-1 flex h-5 items-center rounded-md px-1.5 text-[11px] font-medium leading-none'>
-                Resume
-              </span>
-            )}
-            <div className='absolute bottom-1 right-1 flex h-4 items-center rounded bg-black/60 px-1 text-[10px] font-semibold leading-none tabular-nums text-white/70'>
-              {ep.episode}
-            </div>
-            <WatchProgressStrip percent={progressPercent} />
-          </div>
-
-          <div className='flex flex-col min-w-0 flex-1'>
-            <h3
-              className={cn(
-                'text-sm font-medium truncate transition-colors mb-0.5',
-                isCurrent
-                  ? 'text-white'
-                  : 'text-zinc-300 group-hover:text-white group-focus-visible:text-white',
-              )}
-            >
-              {getEpisodeTitle(isSpoiler ? undefined : ep.title, ep.episode)}
-            </h3>
-            {(isCurrent || airDate) && (
-              <div className='flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mb-1'>
-                {isCurrent && (
-                  <span className='flex items-center gap-1 text-[11px] font-medium text-[var(--accent-act)]'>
-                    <Play className='h-2.5 w-2.5 fill-current' />
-                    Now playing
-                  </span>
-                )}
-                {/* Air date — same muted meta vocabulary as the details cards. */}
-                {airDate && (
-                  <span className='text-[11px] tabular-nums text-zinc-400'>{airDate}</span>
-                )}
+            {progressPercent > 0 && (
+              <div className='absolute inset-x-0 bottom-0 h-0.5 bg-black/40'>
+                <div
+                  className='h-full w-full origin-left bg-(--accent-act)'
+                  style={{ transform: `scaleX(${progressPercent / 100})` }}
+                />
               </div>
             )}
+          </div>
+
+          <div className='flex h-full min-w-0 flex-1 flex-col py-0.5'>
+            <h3
+              className='truncate text-sm font-medium leading-5 tracking-tight text-zinc-100'
+              title={episodeTitle}
+            >
+              <span className='tabular-nums text-zinc-500'>{ep.episode}</span>
+              <span className='mx-1.5 text-zinc-700'>·</span>
+              {episodeTitle}
+            </h3>
             <p
-              className='text-[11px] text-zinc-400 line-clamp-2 leading-relaxed'
+              className='mt-1 line-clamp-2 text-[13px] leading-[19px] text-zinc-400'
               title={isSpoiler ? undefined : ep.overview || undefined}
             >
               {isSpoiler
                 ? 'Description hidden to prevent spoilers.'
                 : ep.overview || 'No description available.'}
             </p>
+            <div className='mt-auto flex min-w-0 items-center gap-2 text-[11px] leading-4'>
+              {(isCurrent || isResume) && (
+                <span className='shrink-0 font-medium text-(--accent-act)'>
+                  {isCurrent ? 'Playing' : 'Resume'}
+                </span>
+              )}
+              {airDate && <span className='truncate tabular-nums text-zinc-500'>{airDate}</span>}
+            </div>
           </div>
         </button>
       );
@@ -268,95 +293,110 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
 
   return (
     <aside
+      id='player-episodes-panel'
       ref={panelRef}
       data-player-interactive
-      // Off-screen but mounted for the slide transition — keep it out of the tab order and a11y tree while closed.
+      // Keep the mounted exit transition out of the tab order and accessibility tree.
       inert={!open}
       aria-hidden={!open}
       aria-label='Episodes'
       className={cn(
-        'absolute right-3 bottom-3 w-[380px] max-w-[calc(100vw-1.5rem)] z-60 flex flex-col overflow-hidden',
-        'rounded-2xl border border-white/[0.08] bg-zinc-950/95',
-        'shadow-2xl shadow-black/70',
-        'transition-[translate,opacity] duration-380 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        'absolute right-3 bottom-3 z-60 flex w-[460px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden',
+        // Opaque: any translucency lets the native video bleed through and muddies the rows.
+        'rounded-lg border border-white/[0.07] bg-zinc-950',
+        'shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_16px_48px_-16px_rgba(0,0,0,0.7)]',
+        'transition-[translate,opacity] duration-160 ease-out starting:translate-x-2 starting:opacity-0 motion-reduce:transition-none',
         // Below the custom titlebar in windowed mode so window controls never overlap the panel header.
         isFullscreen ? 'top-3' : 'top-12',
-        open ? 'translate-x-0 opacity-100' : 'translate-x-[calc(100%+24px)] opacity-0',
+        open ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-2 opacity-0',
       )}
     >
-      <div className='flex items-center justify-between gap-3 px-4 pb-3 pt-4 border-b border-white/[0.07] shrink-0'>
-        <div className='flex flex-col gap-1.5 min-w-0'>
-          <h2 className='font-semibold text-[15px] text-white tracking-tight leading-none'>
+      <div className='shrink-0 border-b border-white/[0.06]'>
+        <div className='flex items-center gap-2.5 px-4 pt-4 pb-3'>
+          <h2 className='text-[15px] leading-5 font-semibold tracking-tight text-white'>
             Episodes
           </h2>
-
-          {seasons.length > 1 ? (
-            <DropdownMenu modal={false}>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant='outline'
-                  size='sm'
-                  className='h-7 text-[11px] font-medium border-white/10 bg-white/[0.04] hover:bg-white/10 text-zinc-300 transition-colors'
-                  onClick={(e) => e.stopPropagation()}
-                  onPointerDown={(e) => e.stopPropagation()}
-                >
-                  Season {selectedSeason} <ChevronDown className='w-3 h-3 ml-1.5 opacity-60' />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align='start'
-                side='bottom'
-                className='z-80 max-h-[300px] overflow-y-auto bg-zinc-950/95 border-white/10'
-                onClick={(e) => e.stopPropagation()}
-              >
-                {seasons.map((seasonNumber) => (
-                  <DropdownMenuItem
-                    key={seasonNumber}
-                    role='menuitemradio'
-                    aria-checked={selectedSeason === seasonNumber}
-                    onSelect={() => onSeasonChange(seasonNumber)}
-                    className={cn(
-                      'cursor-pointer py-2 px-3 text-sm transition-colors',
-                      selectedSeason === seasonNumber
-                        ? 'bg-white/10 text-white font-medium'
-                        : 'hover:bg-white/10',
-                    )}
-                  >
-                    Season {seasonNumber}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : (
-            <p className='text-xs text-zinc-500 font-medium'>Season {selectedSeason}</p>
-          )}
+          <p className='min-w-0 flex-1 truncate text-xs tabular-nums text-zinc-400'>
+            {seasonEpisodes.length} {seasonEpisodes.length === 1 ? 'episode' : 'episodes'}
+          </p>
+          <button
+            type='button'
+            onClick={onClose}
+            aria-label='Close episodes panel'
+            title='Close (Esc)'
+            className={cn(
+              CHROME_CLOSE_BUTTON_CLASS,
+              'rounded-md duration-120 hover:bg-white/[0.05] motion-reduce:transition-none',
+            )}
+          >
+            <X className='w-4 h-4' strokeWidth={2.25} />
+          </button>
         </div>
-        <button
-          type='button'
-          onClick={onClose}
-          aria-label='Close episodes panel'
-          title='Close (E)'
-          className={CHROME_CLOSE_BUTTON_CLASS}
-        >
-          <X className='w-4 h-4' strokeWidth={2.25} />
-        </button>
+
+        {(seasons.length > 1 || searchVisible) && (
+          <div className='flex items-center gap-2 px-4 pb-3'>
+            {seasons.length > 1 && (
+              <DropdownMenu modal={false}>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type='button'
+                    aria-label={`Season ${selectedSeason}, change season`}
+                    className='flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.03] pr-2.5 pl-3 text-xs font-medium text-zinc-200 outline-hidden transition-colors duration-120 hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-white/30 data-[state=open]:bg-white/[0.05] motion-reduce:transition-none'
+                    onClick={(e) => e.stopPropagation()}
+                    onPointerDown={(e) => e.stopPropagation()}
+                  >
+                    Season {selectedSeason}
+                    <ChevronDown className='h-3.5 w-3.5 text-zinc-500' strokeWidth={2} />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align='start'
+                  side='bottom'
+                  className='z-80 max-h-[min(320px,var(--radix-dropdown-menu-content-available-height))] min-w-44 overflow-y-auto rounded-lg border-white/10 bg-zinc-950 backdrop-blur-none'
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  {seasons.map(({ number: season, episodeCount: count }) => {
+                    const isSelected = selectedSeason === season;
+                    return (
+                      <DropdownMenuItem
+                        key={season}
+                        role='menuitemradio'
+                        aria-checked={isSelected}
+                        onSelect={() => onSeasonChange(season)}
+                        className={cn(
+                          'cursor-pointer gap-2 rounded-md py-2 pr-3 pl-2 text-[13px]',
+                          isSelected ? 'font-medium text-white' : 'text-zinc-300',
+                        )}
+                      >
+                        <Check
+                          className={cn('h-4 w-4 shrink-0', !isSelected && 'invisible')}
+                          strokeWidth={2.25}
+                        />
+                        <span className='flex-1'>Season {season}</span>
+                        <span className='text-xs tabular-nums text-zinc-500'>{count}</span>
+                      </DropdownMenuItem>
+                    );
+                  })}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+            {searchVisible && (
+              <SearchInput
+                placeholder='Search episodes…'
+                value={episodeSearch}
+                onValueChange={setEpisodeSearch}
+                clearLabel='Clear episode search'
+                wrapperClassName='min-w-0 flex-1'
+                className='h-9 rounded-md border-white/[0.06] bg-white/[0.03] text-xs text-white placeholder:text-zinc-500 focus-visible:border-white/20 focus-visible:ring-white/20'
+              />
+            )}
+          </div>
+        )}
       </div>
 
-      {searchVisible && (
-        <div className='px-4 pb-3 pt-3 border-b border-white/[0.07] shrink-0'>
-          <SearchInput
-            placeholder='Search episodes…'
-            value={episodeSearch}
-            onValueChange={setEpisodeSearch}
-            clearLabel='Clear episode search'
-            className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-600 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
-          />
-        </div>
-      )}
-
-      <ScrollArea viewportRef={scrollViewportRef} className='flex-1'>
+      <ScrollArea viewportRef={scrollViewportRef} className='min-h-0 flex-1'>
         {visibleEpisodes.length === 0 ? (
-          <p className='px-6 py-10 text-center text-xs text-zinc-500'>
+          <p className='px-6 py-12 text-center text-xs text-zinc-400'>
             {effectiveEpisodeSearch ? (
               <>
                 No episodes match <span className='text-zinc-400'>{effectiveEpisodeSearch}</span>
@@ -368,7 +408,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         ) : shouldVirtualize ? (
           <div
             className='relative w-full'
-            style={{ height: `${episodeVirtualizer.getTotalSize() + 24}px` }}
+            style={{ height: `${episodeVirtualizer.getTotalSize() + 16}px` }}
           >
             {episodeVirtualizer.getVirtualItems().map((virtualRow) => {
               const ep = visibleEpisodes[virtualRow.index];
@@ -378,7 +418,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                   key={`${ep.season}-${ep.episode}`}
                   data-index={virtualRow.index}
                   ref={episodeVirtualizer.measureElement}
-                  className='absolute left-3 right-3 top-3'
+                  className='absolute left-2 right-2 top-2'
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,
                     paddingBottom: `${EPISODE_ROW_GAP_PX}px`,
@@ -390,7 +430,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             })}
           </div>
         ) : (
-          <div className='p-3 space-y-2'>{visibleEpisodes.map((ep) => renderEpisode(ep))}</div>
+          <div className='space-y-1 p-2'>{visibleEpisodes.map(renderEpisode)}</div>
         )}
       </ScrollArea>
     </aside>

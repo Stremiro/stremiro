@@ -252,13 +252,18 @@ impl PlaybackStateService {
         if cached.len() <= MAX_CACHED_HISTORY {
             return;
         }
-        let mut ordered: Vec<(u64, String)> = cached
+        let mut ordered: Vec<(u64, &String)> = cached
             .iter()
-            .map(|(key, item)| (item.last_watched, key.clone()))
+            .map(|(key, item)| (item.last_watched, key))
             .collect();
         ordered.sort();
         let overflow = cached.len() - MAX_CACHED_HISTORY;
-        for (_, key) in ordered.into_iter().take(overflow) {
+        let victims: Vec<String> = ordered
+            .into_iter()
+            .take(overflow)
+            .map(|(_, key)| key.clone())
+            .collect();
+        for key in victims {
             cached.remove(&key);
         }
     }
@@ -276,6 +281,18 @@ impl PlaybackStateService {
 
     pub(crate) fn count_resume_titles(&self, app: &AppHandle) -> Result<usize, String> {
         self.with_resume_store(app, |resume_store| resume_store.count_titles())
+    }
+
+    pub(crate) fn has_learned_playback_data(&self, app: &AppHandle) -> Result<bool, String> {
+        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        Ok([
+            PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+            PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+            PLAYBACK_EPISODE_MAPPING_INDEX_KEY,
+            PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
+        ]
+        .iter()
+        .any(|key| !load_advisory_index(&store, key).is_empty()))
     }
 
     pub(crate) fn total_watch_time_secs(&self, app: &AppHandle) -> Result<u64, String> {

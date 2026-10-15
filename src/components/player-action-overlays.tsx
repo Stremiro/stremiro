@@ -1,7 +1,9 @@
 import { FastForward } from 'lucide-react';
 import { memo, useSyncExternalStore } from 'react';
 import { Button } from '@/components/ui/button';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { PlaybackClock } from '@/lib/player-clock';
+import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { clamp, cn } from '@/lib/utils';
 
 interface PlayerSkipAction {
@@ -50,6 +52,7 @@ export const PlayerActionOverlays = memo(function PlayerActionOverlays({
   segmentStart,
   segmentEnd,
 }: PlayerActionOverlaysProps) {
+  const keymap = usePlayerKeymap();
   if (!skipAction) {
     return null;
   }
@@ -60,15 +63,15 @@ export const PlayerActionOverlays = memo(function PlayerActionOverlays({
         onClick={skipAction.onSkip}
         variant='outline'
         aria-label={skipAction.label}
-        aria-keyshortcuts='s'
-        title={`${skipAction.label} (S)`}
+        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
+        title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
         className={cn(
           'relative min-h-11 max-w-full overflow-hidden px-4 py-2.5 text-sm font-semibold rounded-xl',
           'bg-zinc-950/80 hover:bg-zinc-900/90 text-white',
           'border border-white/20 hover:border-white/40',
           'shadow-2xl shadow-black/60',
           'flex items-center gap-2 transition-colors duration-150',
-          'animate-in fade-in duration-200 motion-reduce:animate-none',
+          'animate-in fade-in duration-150 motion-reduce:animate-none',
         )}
       >
         <FastForward className='h-4 w-4 shrink-0' strokeWidth={2.5} />

@@ -600,23 +600,6 @@ pub(crate) fn merge_unique_streams(
     }
 }
 
-pub(crate) fn infer_stream_mime(url: &str) -> &'static str {
-    let lower = url.to_ascii_lowercase();
-    if lower.contains(".m3u8") {
-        "application/x-mpegURL"
-    } else if lower.contains(".mpd") {
-        "application/dash+xml"
-    } else if lower.contains(".webm") {
-        "video/webm"
-    } else if lower.contains(".ogg") || lower.contains(".ogv") {
-        "video/ogg"
-    } else if lower.contains(".mkv") {
-        "video/x-matroska"
-    } else {
-        "video/mp4"
-    }
-}
-
 pub(crate) fn stream_absolute_episode_targets(
     media_type: &str,
     id: &str,
@@ -679,13 +662,13 @@ pub(crate) fn build_stream_query_ids(
 }
 
 pub(crate) fn build_addon_source_priority_map<'a>(
-    addons: impl IntoIterator<Item = &'a AddonConfig>,
+    addons: impl IntoIterator<Item = &'a AddonConfig, IntoIter: ExactSizeIterator>,
 ) -> HashMap<String, u32> {
-    let addons: Vec<&AddonConfig> = addons.into_iter().collect();
+    let addons = addons.into_iter();
     let total = u32::try_from(addons.len()).unwrap_or(u32::MAX);
     let mut priorities = HashMap::new();
 
-    for (idx, addon) in addons.iter().enumerate() {
+    for (idx, addon) in addons.enumerate() {
         // Instance ids are the ordering key — addons sharing a display name keep independent ranks.
         let Some(normalized) = normalize_source_id(&addon.id) else {
             continue;

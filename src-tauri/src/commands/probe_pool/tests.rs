@@ -552,7 +552,6 @@ fn candidate_input(source_name: &str, stream_key: &str) -> StreamResolveCandidat
 fn resolved(url: &str) -> ResolvedStream {
     ResolvedStream {
         url: url.to_string(),
-        format: "mkv".to_string(),
         mpv_http_header_fields: String::new(),
     }
 }

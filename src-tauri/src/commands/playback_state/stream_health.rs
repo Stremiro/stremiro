@@ -430,7 +430,8 @@ fn prune_by_recency(
     item_key: impl Fn(&str) -> String,
 ) {
     let now_ms = now_unix_millis();
-    let mut survivors: Vec<(String, u64)> = Vec::with_capacity(index.len());
+    let mut survivors =
+        (index.len() > max_entries).then(|| Vec::<(String, u64)>::with_capacity(index.len()));
     index.retain(|key| {
         let Some(activity) = load_activity(store, key) else {
             return false;
@@ -448,7 +449,7 @@ fn prune_by_recency(
 
         if !keep {
             store.delete(item_key(key));
-        } else {
+        } else if let Some(survivors) = survivors.as_mut() {
             let last_activity = [
                 activity.last_success_at,
                 activity.last_failure_at,
@@ -465,7 +466,7 @@ fn prune_by_recency(
     });
 
     // Index order is key-sorted, so truncation would evict arbitrarily — evict least recently active instead.
-    if survivors.len() > max_entries {
+    if let Some(survivors) = survivors.filter(|survivors| survivors.len() > max_entries) {
         let overflow = survivors.len() - max_entries;
         evict_least_active(store, index, survivors, overflow, item_key);
     }
@@ -533,17 +534,17 @@ fn scored_priorities<'a>(
 
 impl PlaybackStateService {
     /// Records an outcome against the source-health and stream-family reputations.
-    /// Generation-guarded like `track_progress_guarded`: a racing clear/remove must
-    /// not let a stale outcome repopulate wiped indexes.
+    /// The caller captures the generation at IPC entry so a racing clear/remove
+    /// cannot let a stale outcome repopulate wiped indexes.
     pub(crate) fn record_stream_outcome(
         &self,
         app: &AppHandle,
         mut report: StreamOutcomeReport,
+        expected_generation: u64,
     ) -> Result<(), String> {
         // IPC-supplied coordinates go straight into the family snapshot — apply the shared ingress bound first.
         report.season = normalize_episode_coordinate(report.season);
         report.episode = normalize_episode_coordinate(report.episode);
-        let start_generation = self.history_generation();
         let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
         // Health attribution uses the resolved stream's `source_id`; a name-only
         // report (legacy route state) skips the health write rather than guessing.
@@ -552,7 +553,7 @@ impl PlaybackStateService {
         // before the first mutation, not only before `save`. The lock serializes the
         // whole section so a `clear`/`remove_keys` bump+delete can't interleave.
         let _state_file_guard = self.lock_state_file_write();
-        if self.history_generation() != start_generation {
+        if self.history_generation() != expected_generation {
             return Ok(());
         }
 

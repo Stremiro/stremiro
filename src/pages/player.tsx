@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
+import { Copy, Loader2 } from 'lucide-react';
 import {
   type MouseEvent,
   useCallback,
@@ -18,7 +18,7 @@ import { PlayerActionOverlays } from '@/components/player-action-overlays';
 import { PlayerControlsRow, PlayerTopChrome, SPEED_OPTIONS } from '@/components/player-chrome';
 import { PlayerEpisodesPanel } from '@/components/player-episodes-panel';
 import { type PlayerOsdAction, PlayerOsdOverlay } from '@/components/player-osd-overlay';
-import { PlayerProgressBar } from '@/components/player-progress-bar';
+import { PlayerEdgeProgress, PlayerProgressBar } from '@/components/player-progress-bar';
 import { PlayerPipChrome } from '@/components/player-pip-chrome';
 import { PlayerShortcutsOverlay } from '@/components/player-shortcuts-overlay';
 import { PlayerStreamSelector } from '@/components/player-stream-selector';
@@ -32,7 +32,13 @@ import {
 } from '@/components/player-state-overlays';
 import { RemoteImage } from '@/components/remote-image';
 import { Sidebar } from '@/components/sidebar';
-import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
+import { useAppUiPreferences, usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
@@ -60,7 +66,14 @@ import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
 import { usePlayerVolumeControls } from '@/hooks/use-player-volume-controls';
 import { useStreamRecovery } from '@/hooks/use-stream-recovery';
 import { useSubtitleAdjustments } from '@/hooks/use-subtitle-adjustments';
-import { api, type Episode, type SkipSegment, type SkipTimesResult } from '@/lib/api';
+import {
+  api,
+  type AppUiPreferences,
+  type Episode,
+  type MediaDetails,
+  type SkipSegment,
+  type SkipTimesResult,
+} from '@/lib/api';
 import { RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import {
   buildEpisodeStreamTarget,
@@ -75,7 +88,8 @@ import {
   watchProgressCoordinates,
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
-import { launchResolvedStream } from '@/lib/player-navigation';
+import { copyText } from '@/lib/notify';
+import { buildDetailsRoute, launchResolvedStream } from '@/lib/player-navigation';
 import { createPlaybackClock } from '@/lib/player-clock';
 import {
   blurActivePlayerControl,
@@ -123,8 +137,6 @@ interface PlayerLoadingCopy {
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
 // A cold addon resolve can take ~14s — past this the picker beats a blank loader.
 const NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS = 12_000;
-// EOF card countdown — short enough that a binge doesn't stall between episodes.
-const AUTO_PLAY_NEXT_SECONDS = 8;
 // Mini chrome lingers so the undock dissolve plays under the fading-in player.
 const MINI_EXIT_MS = 180;
 type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: number };
@@ -143,7 +155,30 @@ const CLOSED_STREAM_SELECTOR_STATE: StreamSelectorState = {
 };
 
 const EMPTY_EPISODES: Episode[] = [];
+const EMPTY_SEASONS: NonNullable<MediaDetails['seasons']> = [];
 const EMPTY_SKIP_SEGMENTS: SkipSegment[] = [];
+
+const selectPlayerPreferences = ({
+  playerVolume,
+  playerSpeed,
+  subtitleDelay,
+  subtitlePos,
+  subtitleScale,
+  autoPlayNext,
+  nextEpisodeCountdownSecs,
+  controlsHideDelayMs,
+  autoSkipIntro,
+}: AppUiPreferences) => ({
+  playerVolume,
+  playerSpeed,
+  subtitleDelay,
+  subtitlePos,
+  subtitleScale,
+  autoPlayNext,
+  nextEpisodeCountdownSecs,
+  controlsHideDelayMs,
+  autoSkipIntro,
+});
 
 export function Player() {
   const { session } = usePlayerSession();
@@ -177,7 +212,6 @@ function InnerPlayer() {
     routeAbsoluteEpisode,
     routeAbsoluteSeason,
     routeEpisode,
-    routeFormat,
     routeSeason,
     routeRequestedStreamKey,
     routeSelectedStreamKey,
@@ -196,7 +230,6 @@ function InnerPlayer() {
 
   // -- State --
   const stream = usePlayerStreamSession({
-    routeFormat,
     routeSourceId,
     routeSourceName,
     routeStreamFamily,
@@ -215,15 +248,21 @@ function InnerPlayer() {
     activeStreamSourceNameRef,
     activeStreamFamilyRef,
     streamLookupIdRef,
+    committedStreamUrlRef,
   } = stream;
+  const handleCopyStreamLink = useCallback(() => {
+    const url = committedStreamUrlRef.current;
+    if (url) void copyText(url, 'Stream link copied');
+  }, [committedStreamUrlRef]);
   const { preferences: appUiPreferences, updatePreferences: updateAppUiPreferences } =
-    useAppUiPreferences();
+    useAppUiPreferences(selectPlayerPreferences);
 
   const [isPlaying, setIsPlaying] = useState(false);
   const [duration, setDuration] = useState(0);
   const [showControls, setShowControls] = useState(false);
   const [isLoading, setIsLoading] = useState(true);
   const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
+  const [hasPlaybackAdvanced, setHasPlaybackAdvanced] = useState(false);
   /** Reactive mirror of playbackEndedRef so the EOF "Up Next" card can render. */
   const [hasEnded, setHasEnded] = useState(false);
   const [isResolving, setIsResolving] = useState(false);
@@ -231,7 +270,8 @@ function InnerPlayer() {
   const [error, setError] = useState<string | null>(null);
   const [playbackSpeed, setPlaybackSpeed] = useState(() => appUiPreferences.playerSpeed);
   const [showEpisodes, setShowEpisodes] = useState(false);
-  // `?` overlay — topmost layer like the episodes panel; Esc closes it first.
+  const keymap = usePlayerKeymap();
+  // Shortcuts overlay — topmost layer like the episodes panel; Esc closes it first.
   const [showShortcuts, setShowShortcuts] = useState(false);
   const toggleShortcuts = useCallback(() => setShowShortcuts((open) => !open), []);
   const closeShortcuts = useCallback(() => setShowShortcuts(false), []);
@@ -276,10 +316,10 @@ function InnerPlayer() {
   }, [restoreCursorVisibility]);
 
   const handleBeforeEnterFullscreen = useCallback(() => {
-    setShowEpisodes(false);
+    closeEpisodesPanel();
     setShowShortcuts(false);
     restoreCursorVisibility();
-  }, [restoreCursorVisibility]);
+  }, [closeEpisodesPanel, restoreCursorVisibility]);
 
   const {
     isFullscreen,
@@ -320,7 +360,7 @@ function InnerPlayer() {
   const errorRef = useRef<string | null>(error);
   const isResolvingRef = useRef(false);
   const selectorOpenRequestIdRef = useRef(0);
-  // Re-entry latch for `playNextEpisode` — `isResolving` isn't set fast enough to stop a double-click.
+  // Shared adjacent-episode latch — `isResolving` isn't set fast enough to stop a double-click.
   const nextEpisodeRequestRef = useRef<number | null>(null);
   /** Always-current playing state — used in closures to avoid stale captures. */
   const isPlayingRef = useRef(false);
@@ -332,6 +372,7 @@ function InnerPlayer() {
   const failoverResumePositionRef = useRef(0);
   const resetStreamScopedState = useEffectEvent(() => {
     setHasPlaybackStarted(false);
+    setHasPlaybackAdvanced(false);
     clock.publish(0);
     durationRef.current = 0;
     playbackVerifiedAtRef.current = 0;
@@ -353,9 +394,17 @@ function InnerPlayer() {
     showControlsWithAutoHide,
     triggerOsd,
   } = usePlayerUiTimers({
+    controlsHideDelayMs: appUiPreferences.controlsHideDelayMs,
     isPlayingRef,
     mountedRef,
-    osdEnabled: isExpanded,
+    osdEnabled:
+      isExpanded &&
+      !isResolving &&
+      !error &&
+      !hasEnded &&
+      !showStreamSelector &&
+      !showEpisodes &&
+      !showShortcuts,
     setOsdAction,
     setOsdVisible,
     setShowControls,
@@ -366,22 +415,6 @@ function InnerPlayer() {
     durationRef,
     resetKey: activeStreamUrl,
     triggerOsd,
-  });
-  // Idle card: a zero-input stretch while paused dims the frame; any input dismisses.
-  const { idle: idleOverlayVisible, wake: wakePlayerIdle } = usePlayerIdleOverlay({
-    enabled:
-      isExpanded &&
-      !isPip &&
-      hasPlaybackStarted &&
-      !isPlaying &&
-      !hasEnded &&
-      !isLoading &&
-      !isResolving &&
-      !error &&
-      !showStreamSelector &&
-      !showEpisodes &&
-      !showShortcuts,
-    mountedRef,
   });
   const clearUiTimers = useCallback(() => {
     clearManagedUiTimers();
@@ -410,6 +443,18 @@ function InnerPlayer() {
     (requestId: number) => requestId !== selectorOpenRequestIdRef.current || !mountedRef.current,
     [mountedRef],
   );
+
+  const clearNextEpisodeRequest = useCallback((requestId?: number) => {
+    // A late continuation must not clear a newer episode's resolving state.
+    if (
+      nextEpisodeRequestRef.current === null ||
+      (requestId !== undefined && nextEpisodeRequestRef.current !== requestId)
+    )
+      return;
+    nextEpisodeRequestRef.current = null;
+    setIsResolving(false);
+    setResolveStatus('');
+  }, []);
 
   useEffect(() => {
     resetStreamScopedState();
@@ -450,7 +495,9 @@ function InnerPlayer() {
   // SkipDB keys on IMDb id; anime-history `kitsu:` ids carry no anchor and return no segments.
   const isSeriesLike = isSeriesLikeMediaType(effectiveResolveMediaType);
   // Same query as details, so arriving from there is a cache hit.
-  const { data: titleWatchProgress } = useTitleWatchProgress(id, { enabled: isSeriesLike });
+  const { data: titleWatchProgress } = useTitleWatchProgress(id, {
+    enabled: isSeriesLike && isExpanded && showEpisodes,
+  });
   const episodeProgress = titleWatchProgress?.episodeProgress;
   const episodeProgressFor = useCallback(
     (ep: Episode) =>
@@ -520,15 +567,16 @@ function InnerPlayer() {
 
   // -- Derived State --
   // Details payload carries seasons already sorted.
-  const seasons = useMemo(() => details?.seasons?.map((s) => s.number) ?? [], [details?.seasons]);
+  const seasons = details?.seasons ?? EMPTY_SEASONS;
 
   // Render-phase correction: adopt a valid season before paint.
-  if (seasons.length > 0 && !seasons.includes(selectedSeason)) {
+  if (seasons.length > 0 && !seasons.some((s) => s.number === selectedSeason)) {
     const fallbackSeason =
       currentEpisode?.season ??
-      (resolvedAbsoluteSeason !== undefined && seasons.includes(resolvedAbsoluteSeason)
+      (resolvedAbsoluteSeason !== undefined &&
+      seasons.some((s) => s.number === resolvedAbsoluteSeason)
         ? resolvedAbsoluteSeason
-        : seasons[0]);
+        : seasons[0]?.number);
     if (fallbackSeason !== undefined && fallbackSeason !== selectedSeason) {
       setSelectedSeason(fallbackSeason);
     }
@@ -627,6 +675,10 @@ function InnerPlayer() {
     const time = clock.getSnapshot();
     return skipSegments.find((seg) => time >= seg.start_time - 1 && time < seg.end_time) ?? null;
   });
+  const hasActiveSkipSegmentStarted = useSyncExternalStore(
+    clock.subscribe,
+    () => activeSkipSegment !== null && clock.getSnapshot() >= activeSkipSegment.start_time,
+  );
 
   // The frameless window hides document.title; it still feeds the OS taskbar tooltip.
   const currentEpisodeLabel = formatSeasonEpisode(resolvedAbsoluteSeason, resolvedAbsoluteEpisode);
@@ -654,6 +706,7 @@ function InnerPlayer() {
     clearResumeRetryTimer,
     cycleTrack,
     flushPlaybackBeforeNavigation,
+    isResumePending,
     notifyObservedTrackSelection,
     playbackLanguagePreferencesRef,
     prepareForStreamLoad,
@@ -685,6 +738,7 @@ function InnerPlayer() {
     onResumeMessage: handleResumeMessage,
     playbackLanguageMediaType: effectiveResolveMediaType,
     poster,
+    resumeSuspended: error !== null,
     startTime,
     streamEpisode: resolvedStreamEpisode,
     streamSeason: resolvedStreamSeason,
@@ -708,6 +762,7 @@ function InnerPlayer() {
     announce,
     effectiveResolveMediaType,
     id,
+    menuAvailable: isExpanded && !isPip,
     mountedRef,
     resolvedStreamEpisode,
     resolvedStreamSeason,
@@ -793,19 +848,22 @@ function InnerPlayer() {
 
   const openPreparedStreamSelector = useCallback(
     (nextTarget: SelectedEpisodeStreamTarget | null) => {
+      selectorOpenRequestIdRef.current += 1;
+      clearNextEpisodeRequest();
       setError(null);
       setStreamSelectorState({
         open: true,
         target: nextTarget,
         mounted: true,
       });
-      setShowEpisodes(false);
+      closeEpisodesPanel();
     },
-    [],
+    [clearNextEpisodeRequest, closeEpisodesPanel],
   );
 
   const closeStreamSelector = useCallback(() => {
     selectorOpenRequestIdRef.current += 1;
+    clearNextEpisodeRequest();
     // Dismiss without a pick hands back the pause the selector took on the way in.
     if (resumeAfterSelectorDismissRef.current) {
       resumeAfterSelectorDismissRef.current = false;
@@ -814,7 +872,7 @@ function InnerPlayer() {
     }
     // Keep target/mounted so the exit animation can play; `open` alone drives behavior.
     setStreamSelectorState((state) => (state.mounted ? { ...state, open: false } : state));
-  }, []);
+  }, [clearNextEpisodeRequest]);
 
   const reopenSelectorForSavedStreamFailure = useCallback(() => {
     setIsResolving(false);
@@ -858,6 +916,8 @@ function InnerPlayer() {
 
   // Only an advancing playhead proves the stream: duration alone can precede a stall, and must neither cancel recovery nor credit the source.
   const markPlaybackVerified = useCallback(() => {
+    // Metadata and the paused resume seek can arrive before playback actually runs.
+    if (isPlayingRef.current) setHasPlaybackAdvanced(true);
     if (playbackVerifiedAtRef.current > 0) return;
     markPlaybackStarted();
     playbackVerifiedAtRef.current = performance.now();
@@ -886,23 +946,26 @@ function InnerPlayer() {
     }
   }, [activeStreamUrl, session?.state]);
 
-  const prepareForPlayerNavigation = useCallback(() => {
-    selectorCommittedPauseRef.current =
-      resumeAfterSelectorDismissRef.current && activeStreamUrl
-        ? { state: session?.state, url: activeStreamUrl }
-        : null;
-    resumeAfterSelectorDismissRef.current = false;
-    prepareForInternalPlayerNavigation();
-    setShowControls(true);
-    setShowEpisodes(false);
-    // Synchronous progress snapshot; also covers same-session stream picks that skip the exit guard.
-    void flushPlaybackBeforeNavigation();
-  }, [
-    activeStreamUrl,
-    flushPlaybackBeforeNavigation,
-    prepareForInternalPlayerNavigation,
-    session?.state,
-  ]);
+  const prepareForPlayerNavigation = useCallback(
+    (flushProgress = true) => {
+      selectorCommittedPauseRef.current =
+        resumeAfterSelectorDismissRef.current && activeStreamUrl
+          ? { state: session?.state, url: activeStreamUrl }
+          : null;
+      resumeAfterSelectorDismissRef.current = false;
+      prepareForInternalPlayerNavigation();
+      setShowControls(true);
+      setShowEpisodes(false);
+      // Synchronous progress snapshot; also covers same-session stream picks that skip the exit guard.
+      if (flushProgress) void flushPlaybackBeforeNavigation();
+    },
+    [
+      activeStreamUrl,
+      flushPlaybackBeforeNavigation,
+      prepareForInternalPlayerNavigation,
+      session?.state,
+    ],
+  );
 
   const expandPlayer = useCallback(() => {
     if (!session) return;
@@ -936,13 +999,11 @@ function InnerPlayer() {
       // Back abandons a pending next-episode resolve — its completion would navigate back into the expanded player.
       if (nextEpisodeRequestRef.current !== null) {
         selectorOpenRequestIdRef.current += 1;
-        nextEpisodeRequestRef.current = null;
-        setIsResolving(false);
-        setResolveStatus('');
+        clearNextEpisodeRequest();
       }
       void flushPlaybackBeforeNavigation();
     }
-  }, [flushPlaybackBeforeNavigation, isExpanded]);
+  }, [clearNextEpisodeRequest, flushPlaybackBeforeNavigation, isExpanded]);
 
   const handleEndedChange = useCallback(
     (ended: boolean) => {
@@ -983,6 +1044,7 @@ function InnerPlayer() {
     isMutedRef,
     volumeRef,
     handleVolumeChange,
+    handleVolumeWheel,
     stepVolume,
     toggleMute,
   } = usePlayerVolumeControls({
@@ -1033,6 +1095,7 @@ function InnerPlayer() {
     onEndedChange: handleEndedChange,
     observeTimeUpdate,
     isSeekPending,
+    isResumePending,
     onObservedTrackSelection: notifyObservedTrackSelection,
     refreshTracks,
     reportStreamFailure,
@@ -1044,6 +1107,24 @@ function InnerPlayer() {
     restorePlayerSurface,
     // Stuck loads keep controls pinned — auto-hide would bury the escape hatch.
     revealControls: () => setShowControls(true),
+  });
+
+  // Idle card: a zero-input stretch while paused dims the frame; any input dismisses.
+  const { idle: idleOverlayVisible, wake: wakePlayerIdle } = usePlayerIdleOverlay({
+    enabled:
+      isExpanded &&
+      !isPip &&
+      hasPlaybackAdvanced &&
+      !isPlaying &&
+      !hasEnded &&
+      !isLoading &&
+      !isResolving &&
+      !isBuffering &&
+      !error &&
+      !showStreamSelector &&
+      !showEpisodes &&
+      !showShortcuts,
+    mountedRef,
   });
 
   const playbackControlEpochRef = useRef(0);
@@ -1103,8 +1184,6 @@ function InnerPlayer() {
         setIsPlaying(false);
       }
 
-      const requestId = ++selectorOpenRequestIdRef.current;
-
       const target = buildEpisodeStreamTarget(streamLookupId || id, nextEpisode);
 
       // The resume lookup is advisory for a different episode only — a same-episode pick reads the live clock.
@@ -1117,6 +1196,7 @@ function InnerPlayer() {
 
       // Open immediately — the advisory lookup fills startTime behind the dialog before any pick.
       openPreparedStreamSelector({ ...target });
+      const requestId = selectorOpenRequestIdRef.current;
 
       if (!targetsCurrentEpisode) {
         const resumeStartTimePromise =
@@ -1161,6 +1241,16 @@ function InnerPlayer() {
   );
 
   const localDayMs = useLocalDay().getTime();
+  const previousEpisode = useMemo(() => {
+    const current = currentEpisode;
+    if (!episodes || !current) return undefined;
+    return episodes.findLast(
+      (ep) =>
+        ep.season < current.season ||
+        (ep.season === current.season && ep.episode < current.episode),
+    );
+  }, [episodes, currentEpisode]);
+
   const nextEpisode = useMemo(() => {
     const current = currentEpisode;
     if (!episodes || !current) return undefined;
@@ -1172,6 +1262,14 @@ function InnerPlayer() {
     );
     return next && isAiredByLocalDay(next.releaseDate, localDayMs) ? next : undefined;
   }, [episodes, currentEpisode, localDayMs]);
+
+  const previousEpisodeLabel = previousEpisode
+    ? `Previous: ${formatSeasonEpisode(previousEpisode.season, previousEpisode.episode)}${previousEpisode.title ? ` · ${previousEpisode.title}` : ''}`
+    : undefined;
+
+  const nextEpisodeLabel = nextEpisode
+    ? `Next: ${formatSeasonEpisode(nextEpisode.season, nextEpisode.episode)}${nextEpisode.title ? ` · ${nextEpisode.title}` : ''}`
+    : undefined;
 
   // Shared silent resolve so the EOF/tail prefetch warms the same cache key the click uses.
   const resolveEpisodeStream = useCallback(
@@ -1212,74 +1310,90 @@ function InnerPlayer() {
   );
 
   // Silent ranked resolve first — the just-played source usually wins; timeout/failure falls back to the selector.
-  const playNextEpisode = useCallback(() => {
-    if (!nextEpisode || !id || nextEpisodeRequestRef.current !== null) {
-      // Dead-end feedback (`N` on a finale or movie); `nextEpisode`-gated callers never reach here.
-      if (!nextEpisode && !nextEpisodeRequestRef.current) {
-        announce('No next episode');
-      }
-      return;
-    }
-    const ep = nextEpisode;
-
-    const requestId = ++selectorOpenRequestIdRef.current;
-    nextEpisodeRequestRef.current = requestId;
-    const { target, request, resolve } = resolveEpisodeStream(ep, id);
-    setIsResolving(true);
-    setResolveStatus('Loading next episode');
-
-    const resumeStartTimePromise = getLatestEpisodeResumeStartTime(
-      id,
-      effectiveResolveMediaType,
-      target.absoluteSeason,
-      target.absoluteEpisode,
-    );
-    const resolveWork = Promise.all([resolve, resumeStartTimePromise]);
-    void withTimeout(resolveWork, NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS, () => {
-      throw new Error('Next-episode resolve timed out');
-    })
-      .then(([resolved, resumeStartTime]) => {
-        if (isSelectorRequestStale(requestId)) return;
-        if (!resolved?.url) throw new Error('No streams found for the next episode.');
-
-        prepareForPlayerNavigation();
-        launchResolvedStream(navigate, request, resolved, {
-          backdrop,
-          from,
-          logo,
-          poster,
-          startTime: resumeStartTime,
-        });
-      })
-      .catch(() => {
-        if (isSelectorRequestStale(requestId)) return;
-        setIsResolving(false);
-        setResolveStatus('');
-        openStreamSelectorForEpisode(ep, {
-          pauseCurrentPlayback: true,
-          resumeStartTimePromise,
-        });
-      })
-      .finally(() => {
-        if (nextEpisodeRequestRef.current === requestId) {
-          nextEpisodeRequestRef.current = null;
+  const playAdjacentEpisode = useCallback(
+    (ep: Episode | undefined, direction: 'next' | 'previous') => {
+      if (!ep || !id || nextEpisodeRequestRef.current !== null) {
+        if (!ep && nextEpisodeRequestRef.current === null) {
+          announce(`No ${direction} episode`);
         }
-      });
-  }, [
-    announce,
-    backdrop,
-    effectiveResolveMediaType,
-    from,
-    id,
-    isSelectorRequestStale,
-    logo,
-    navigate,
-    nextEpisode,
-    openStreamSelectorForEpisode,
-    poster,
-    prepareForPlayerNavigation,
-    resolveEpisodeStream,
-  ]);
+        return;
+      }
+
+      const requestId = ++selectorOpenRequestIdRef.current;
+      nextEpisodeRequestRef.current = requestId;
+      const { target, request, resolve } = resolveEpisodeStream(ep, id);
+      setIsResolving(true);
+      setResolveStatus(`Loading ${direction} episode`);
+
+      const resumeStartTimePromise = getLatestEpisodeResumeStartTime(
+        id,
+        effectiveResolveMediaType,
+        target.absoluteSeason,
+        target.absoluteEpisode,
+      );
+      const resolveWork = Promise.all([resolve, resumeStartTimePromise]);
+      void withTimeout(resolveWork, NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS, () => {
+        throw new Error('adjacent-episode resolve timed out');
+      })
+        .then(([resolved, resumeStartTime]) => {
+          if (isSelectorRequestStale(requestId)) {
+            clearNextEpisodeRequest(requestId);
+            return;
+          }
+          if (!resolved?.url) throw new Error('No streams found for the adjacent episode.');
+
+          prepareForPlayerNavigation();
+          launchResolvedStream(navigate, request, resolved, {
+            backdrop,
+            from,
+            logo,
+            poster,
+            startTime: resumeStartTime,
+          });
+        })
+        .catch(() => {
+          if (isSelectorRequestStale(requestId)) {
+            clearNextEpisodeRequest(requestId);
+            return;
+          }
+          clearNextEpisodeRequest(requestId);
+          openStreamSelectorForEpisode(ep, {
+            pauseCurrentPlayback: true,
+            resumeStartTimePromise,
+          });
+        })
+        .finally(() => {
+          if (nextEpisodeRequestRef.current === requestId) {
+            nextEpisodeRequestRef.current = null;
+          }
+        });
+    },
+    [
+      announce,
+      backdrop,
+      clearNextEpisodeRequest,
+      effectiveResolveMediaType,
+      from,
+      id,
+      isSelectorRequestStale,
+      logo,
+      navigate,
+      openStreamSelectorForEpisode,
+      poster,
+      prepareForPlayerNavigation,
+      resolveEpisodeStream,
+    ],
+  );
+
+  const playNextEpisode = useCallback(
+    () => playAdjacentEpisode(nextEpisode, 'next'),
+    [nextEpisode, playAdjacentEpisode],
+  );
+
+  const playPreviousEpisode = useCallback(
+    () => playAdjacentEpisode(previousEpisode, 'previous'),
+    [previousEpisode, playAdjacentEpisode],
+  );
 
   // One EOF gate for both cards; the variant depends on whether an episode follows.
   // Auto-play counts down to the same silent resolve `N` runs — a gate flip disarms the timer.
@@ -1289,20 +1403,37 @@ function InnerPlayer() {
   const showUpNextCard = eofCardOpen && !!nextEpisode;
   const showEndCard = eofCardOpen && !nextEpisode;
   const [autoPlayNextIn, setAutoPlayNextIn] = useState<number | null>(null);
+  const [eofAutoPlayCancelled, setEofAutoPlayCancelled] = useState(false);
+
+  useEffect(() => {
+    setEofAutoPlayCancelled(false);
+  }, [
+    id,
+    resolvedAbsoluteSeason,
+    resolvedAbsoluteEpisode,
+    nextEpisode?.season,
+    nextEpisode?.episode,
+  ]);
 
   // Docked EOF never counts down — the advance would yank the user into the expanded player with no visible cancel.
   const autoPlayNext = appUiPreferences.autoPlayNext;
   useEffect(() => {
-    if (!autoPlayNext || !showUpNextCard || !isExpanded) {
+    if (!autoPlayNext || !showUpNextCard || !isExpanded || eofAutoPlayCancelled) {
       setAutoPlayNextIn(null);
       return;
     }
-    setAutoPlayNextIn(AUTO_PLAY_NEXT_SECONDS);
+    setAutoPlayNextIn(appUiPreferences.nextEpisodeCountdownSecs);
     const timer = window.setInterval(() => {
       setAutoPlayNextIn((current) => (current === null ? current : current - 1));
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [autoPlayNext, isExpanded, showUpNextCard]);
+  }, [
+    appUiPreferences.nextEpisodeCountdownSecs,
+    autoPlayNext,
+    eofAutoPlayCancelled,
+    isExpanded,
+    showUpNextCard,
+  ]);
 
   useEffect(() => {
     if (autoPlayNextIn !== 0) return;
@@ -1310,7 +1441,10 @@ function InnerPlayer() {
     playNextEpisode();
   }, [autoPlayNextIn, playNextEpisode]);
 
-  const cancelAutoPlayNext = useCallback(() => setAutoPlayNextIn(null), []);
+  const cancelAutoPlayNext = useCallback(() => {
+    setEofAutoPlayCancelled(true);
+    setAutoPlayNextIn(null);
+  }, []);
 
   // Every EOF play affordance uses the same rewind-and-resume path.
   const replayFromStart = useCallback(() => {
@@ -1318,8 +1452,30 @@ function InnerPlayer() {
   }, [restartPlayback]);
 
   const backToTitle = useCallback(() => {
-    void navigateBack().catch(() => undefined);
-  }, [navigateBack]);
+    if (!id) {
+      void navigateBack().catch(() => undefined);
+      return;
+    }
+    // Expanded navigation retains the session; the docking effect owns its progress flush.
+    prepareForPlayerNavigation(!isExpanded);
+    navigate(buildDetailsRoute(type, id), {
+      replace: true,
+      state:
+        resolvedAbsoluteSeason !== undefined
+          ? { from, season: resolvedAbsoluteSeason, episode: resolvedAbsoluteEpisode }
+          : { from },
+    });
+  }, [
+    from,
+    id,
+    isExpanded,
+    navigate,
+    navigateBack,
+    prepareForPlayerNavigation,
+    resolvedAbsoluteEpisode,
+    resolvedAbsoluteSeason,
+    type,
+  ]);
 
   // OS media keys; stays mounted when docked so they keep driving playback.
   // `previoustrack` restarts the title — no playlist-back concept.
@@ -1401,7 +1557,14 @@ function InnerPlayer() {
   const autoSkipIntro = appUiPreferences.autoSkipIntro;
   const lastAutoSkipSegmentRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!autoSkipIntro || !activeSkipAction || !activeSkipSegment || tailSegmentActive) return;
+    if (
+      !autoSkipIntro ||
+      !activeSkipAction ||
+      !activeSkipSegment ||
+      !hasActiveSkipSegmentStarted ||
+      tailSegmentActive
+    )
+      return;
     const { type: segmentType, start_time: start, end_time: end } = activeSkipSegment;
     if (segmentType !== 'intro' && segmentType !== 'recap') return;
     const segmentKey = `${id}:${resolvedAbsoluteSeason}:${resolvedAbsoluteEpisode}:${segmentType}:${start}:${end}`;
@@ -1412,6 +1575,7 @@ function InnerPlayer() {
     activeSkipAction,
     activeSkipSegment,
     autoSkipIntro,
+    hasActiveSkipSegmentStarted,
     id,
     resolvedAbsoluteEpisode,
     resolvedAbsoluteSeason,
@@ -1498,19 +1662,13 @@ function InnerPlayer() {
   );
 
   const toggleEpisodesPanel = useCallback(() => {
-    // Mount-once: opening is the only transition that can mount the panel.
-    setEpisodesPanelMounted(true);
-    setShowEpisodes((prev) => !prev);
-  }, []);
-
-  // `e` toggles both ways — closing goes through closeEpisodesPanel so trapped focus returns to the surface.
-  const toggleEpisodesFromHotkey = useCallback(() => {
     if (showEpisodes) {
       closeEpisodesPanel();
     } else {
-      toggleEpisodesPanel();
+      setEpisodesPanelMounted(true);
+      setShowEpisodes(true);
     }
-  }, [closeEpisodesPanel, showEpisodes, toggleEpisodesPanel]);
+  }, [closeEpisodesPanel, showEpisodes]);
 
   // -- Hotkeys --
   const hasEpisodes = (episodes?.length ?? 0) > 0;
@@ -1526,6 +1684,7 @@ function InnerPlayer() {
     hasEpisodes,
     isExpanded,
     isFullscreen,
+    keymap,
     mountedRef,
     navigateBack: isPip ? returnFromPip : navigateBack,
     nudgeSubtitleDelay,
@@ -1540,7 +1699,7 @@ function InnerPlayer() {
     stepSpeed,
     resetSpeed: () => handleSpeedSelect(1),
     closeShortcuts,
-    toggleEpisodes: toggleEpisodesFromHotkey,
+    toggleEpisodes: toggleEpisodesPanel,
     toggleShortcuts,
     toggleFullscreen,
     toggleMute,
@@ -1600,10 +1759,10 @@ function InnerPlayer() {
       if (event.shiftKey) {
         void seekRelative(event.deltaY < 0 ? 5 : -5).catch(() => undefined);
       } else {
-        void stepVolume(event.deltaY < 0 ? 5 : -5).catch(() => undefined);
+        void handleVolumeWheel(event).catch(() => undefined);
       }
     },
-    [seekRelative, showEpisodes, showShortcuts, showStreamSelector, stepVolume],
+    [handleVolumeWheel, seekRelative, showEpisodes, showShortcuts, showStreamSelector],
   );
 
   // Paused pins the chrome — once the idle card owns the frame both dissolve; any input brings them back.
@@ -1691,7 +1850,6 @@ function InnerPlayer() {
     },
     [handleVolumeChange],
   );
-  // One adapter for both volume-step surfaces (mini dock + expanded chrome wheel).
   const handleVolumeStep = useCallback(
     (delta: number) => {
       void stepVolume(delta).catch(() => undefined);
@@ -1743,7 +1901,7 @@ function InnerPlayer() {
   );
   const showPauseResume =
     !isPlaying &&
-    hasPlaybackStarted &&
+    hasPlaybackAdvanced &&
     !hasEnded &&
     !atEndOfStream &&
     !activeSkipAction &&
@@ -1756,13 +1914,14 @@ function InnerPlayer() {
     [details?.episodes, selectorAbsoluteSeason, selectorAbsoluteEpisode],
   );
   // Held a beat past the flag so the loading card dissolves out.
-  const loadingOverlay = useDelayedUnmount((isLoading || isResolving) && !error, 220);
+  const loadingOverlay = useDelayedUnmount((isLoading || isResolving) && !error, 180);
   const loadingBackdrop = useDelayedUnmount(isLoading, 500);
   // Same dissolve for the stall spinner.
   const bufferingOverlay = useDelayedUnmount(
-    isBuffering && !isLoading && !isResolving && !showErrorOverlay,
-    200,
+    isBuffering && playbackIntact && !hasEnded && !panelsOwnSurface && !loadingOverlay.mounted,
+    150,
   );
+  const centerStatusVisible = loadingOverlay.mounted || bufferingOverlay.mounted || !!error;
   // `PlayerStreamSelector` is memoized — the target must hold a stable identity.
   const selectorTarget = useMemo<StreamSelectorTarget>(
     () => ({
@@ -1872,6 +2031,7 @@ function InnerPlayer() {
       onTogglePlay={handleMiniTogglePlay}
       onToggleMute={handleMiniToggleMute}
       onVolumeChange={handleMiniVolumeChange}
+      onVolumeWheel={handleVolumeWheel}
       onVolumeStep={handleVolumeStep}
       onSeek={handleMiniSeek}
       onSeekRelative={handleMiniSeekRelative}
@@ -1908,8 +2068,10 @@ function InnerPlayer() {
       role='application'
       aria-label='Player viewport'
       className={cn(
-        // Mount fade covers navigation, episode swaps, and the mini→expand hop.
-        'relative w-full h-screen overflow-hidden bg-transparent text-white group page-enter',
+        // clip, not hidden: a hidden box is still programmatically scrollable, so focus or
+        // scrollIntoView inside the off-canvas episodes panel would shift the whole player sideways.
+        // No bare `group` here: it would satisfy every descendant `group-hover:` while the pointer is anywhere on the player.
+        'relative w-full h-screen overflow-clip bg-transparent text-white',
         !isFullscreen && !isPip && 'pl-[60px]',
       )}
       onMouseMove={handleMouseMove}
@@ -1917,15 +2079,32 @@ function InnerPlayer() {
       onWheel={handlePlayerWheel}
       id='mpv-container'
     >
-      <div
-        aria-hidden='true'
-        className={cn(
-          'absolute inset-0 z-10',
-          (!showControls && isPlaying) || idleOverlayVisible ? 'cursor-none' : 'cursor-auto',
-        )}
-        onClick={handlePlayerClick}
-        onDoubleClick={handlePlayerDoubleClick}
-      />
+      <ContextMenu
+        onOpenChange={(open) => {
+          if (!open) return;
+          wakePlayerIdle();
+          restoreCursorVisibility();
+          showControlsWithAutoHide();
+        }}
+      >
+        <ContextMenuTrigger asChild>
+          <div
+            aria-hidden='true'
+            className={cn(
+              'absolute inset-0 z-10',
+              (!showControls && isPlaying) || idleOverlayVisible ? 'cursor-none' : 'cursor-auto',
+            )}
+            onClick={handlePlayerClick}
+            onDoubleClick={handlePlayerDoubleClick}
+          />
+        </ContextMenuTrigger>
+        <ContextMenuContent onKeyDown={(event) => event.stopPropagation()}>
+          <ContextMenuItem disabled={!activeStreamUrl} onSelect={handleCopyStreamLink}>
+            <Copy className='h-4 w-4' />
+            Copy stream link
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {!isFullscreen && !isPip && (
         <DesktopTitlebar className='z-85 bg-linear-to-b from-black/70 via-black/35 to-transparent' />
       )}
@@ -1934,7 +2113,7 @@ function InnerPlayer() {
           data-player-interactive
           className='fixed left-0 top-0 z-70 h-screen pointer-events-auto'
         >
-          <Sidebar className='flex' playerMode />
+          <Sidebar className='flex' />
         </div>
       )}
       {loadingBackdrop.mounted && (
@@ -1961,7 +2140,7 @@ function InnerPlayer() {
         </div>
       )}
 
-      {!isPip && showErrorOverlay && (
+      {!isPip && showErrorOverlay && !panelsOwnSurface && (
         <PlayerErrorOverlay
           message={error ?? ''}
           onRetry={handleRetryFailedStream}
@@ -1971,7 +2150,7 @@ function InnerPlayer() {
       )}
 
       {/* Loading — held mounted a beat past the flag so the card dissolves. */}
-      {!isPip && loadingOverlay.mounted && !error && (
+      {!isPip && loadingOverlay.mounted && !error && !panelsOwnSurface && (
         <PlayerLoadingOverlay
           headline={playerLoadingCopy.headline}
           detail={playerLoadingCopy.detail}
@@ -1985,19 +2164,24 @@ function InnerPlayer() {
       )}
 
       {/* Buffering: a bare spinner mid-playback, not the full loading card. */}
-      {!isPip && bufferingOverlay.mounted && (
-        // The entrance fade debounces one-frame stalls; the parent holds the mount a beat so recovery dissolves out.
-        <div
-          className={cn(
-            'pointer-events-none absolute inset-0 z-40 flex items-center justify-center',
-            bufferingOverlay.exiting
-              ? 'animate-out fade-out duration-200 fill-mode-forwards'
-              : 'animate-in fade-in duration-200',
-          )}
-        >
-          <Loader2 className='h-9 w-9 animate-spin text-white/55 drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)]' />
-        </div>
-      )}
+      {!isPip &&
+        bufferingOverlay.mounted &&
+        !loadingOverlay.mounted &&
+        !error &&
+        !hasEnded &&
+        !panelsOwnSurface && (
+          // The entrance fade debounces one-frame stalls; the parent holds the mount a beat so recovery dissolves out.
+          <div
+            className={cn(
+              'pointer-events-none absolute inset-0 z-40 flex items-center justify-center',
+              bufferingOverlay.exiting
+                ? 'opacity-0 animate-out fade-out duration-150 fill-mode-forwards motion-reduce:animate-none'
+                : 'animate-in fade-in duration-150 motion-reduce:animate-none',
+            )}
+          >
+            <Loader2 className='h-9 w-9 animate-spin text-white/55 drop-shadow-[0_2px_8px_rgba(0,0,0,0.8)]' />
+          </div>
+        )}
 
       {/* Idle card — sits under the chrome (z-40) so woken controls draw above. */}
       {!isPip && hasPlaybackStarted && (
@@ -2012,11 +2196,28 @@ function InnerPlayer() {
         />
       )}
 
+      {!isFullscreen && !isPip && (
+        <PlayerEdgeProgress
+          clock={clock}
+          duration={duration}
+          visible={
+            !chromeVisible &&
+            hasPlaybackStarted &&
+            duration > 0 &&
+            playbackIntact &&
+            !hasEnded &&
+            !idleOverlayVisible
+          }
+        />
+      )}
+
       {/* Controls overlay — edge scrims only; the frame itself stays clear. */}
       {!isPip && (
         <div
           className={cn(
-            'absolute inset-0 z-40 pointer-events-none flex flex-col',
+            // Mount fade lives here, not on the root — the root also holds the
+            // sidebar and titlebar, which must not fade or shift on open.
+            'page-enter absolute inset-0 z-40 pointer-events-none flex flex-col',
             'justify-between pb-6',
             !isFullscreen && 'pt-12',
             isFullscreen && 'pt-6',
@@ -2029,20 +2230,21 @@ function InnerPlayer() {
           <div
             aria-hidden='true'
             className={cn(
-              'absolute inset-x-0 top-0 h-24 bg-linear-to-b from-black/55 via-black/20 to-transparent transition-opacity duration-300',
+              'absolute inset-x-0 top-0 h-32 bg-linear-to-b from-black/65 via-black/25 to-transparent transition-opacity duration-150 motion-reduce:transition-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
           />
           <div
             aria-hidden='true'
             className={cn(
-              'absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent transition-opacity duration-300',
+              'absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent transition-opacity duration-150 motion-reduce:transition-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
           />
           <div
             className={cn(
-              'transition-opacity duration-300 has-[:focus-visible]:opacity-100',
+              'transition-opacity duration-150 motion-reduce:transition-none has-[:focus-visible]:opacity-100',
+              chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
           >
@@ -2054,8 +2256,8 @@ function InnerPlayer() {
               episodeCountInSeason={episodeCountInSeason}
               episodeTitle={currentEpisode?.title}
               streamSourceName={activeStreamSourceName}
-              isFullscreen={isFullscreen}
               onBack={navigateBack}
+              isFullscreen={isFullscreen}
               onToggleFullscreen={toggleFullscreen}
             />
           </div>
@@ -2071,8 +2273,9 @@ function InnerPlayer() {
               pointerOverControlsRef.current = false;
             }}
           >
-            <div className='pointer-events-none absolute bottom-full right-0 flex max-w-full items-end justify-end pb-4'>
-              {activeSkipAction && (
+            {/* Seek previews include a segment badge; keep the action lane above their full height. */}
+            <div className='pointer-events-none absolute bottom-full right-0 flex max-w-full items-end justify-end pb-12'>
+              {activeSkipAction && !idleOverlayVisible && (
                 <PlayerActionOverlays
                   clock={clock}
                   skipAction={activeSkipAction}
@@ -2085,7 +2288,7 @@ function InnerPlayer() {
                   episode={nextEpisode}
                   thumbnail={nextEpisodeThumbnail}
                   autoPlaySecondsLeft={autoPlayNextIn}
-                  autoPlayDurationSeconds={AUTO_PLAY_NEXT_SECONDS}
+                  autoPlayDurationSeconds={appUiPreferences.nextEpisodeCountdownSecs}
                   onCancelAutoPlay={cancelAutoPlayNext}
                   onPlayNext={playNextEpisode}
                 />
@@ -2101,7 +2304,8 @@ function InnerPlayer() {
             </div>
             <div
               className={cn(
-                'pointer-events-auto transition-opacity duration-300 has-[:focus-visible]:opacity-100',
+                'transition-opacity duration-150 motion-reduce:transition-none has-[:focus-visible]:opacity-100',
+                chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
                 chromeVisible ? 'opacity-100' : 'opacity-0',
               )}
             >
@@ -2116,6 +2320,9 @@ function InnerPlayer() {
               />
 
               <PlayerControlsRow
+                clock={clock}
+                duration={duration}
+                active={chromeVisible}
                 onTogglePip={canPip ? togglePip : undefined}
                 isPlaying={isPlaying}
                 onTogglePlay={togglePlay}
@@ -2124,7 +2331,7 @@ function InnerPlayer() {
                 isMuted={isMuted}
                 onToggleMute={toggleMute}
                 onVolumeChange={handleVolumeChange}
-                onVolumeStep={handleVolumeStep}
+                onVolumeWheel={handleVolumeWheel}
                 playbackSpeed={playbackSpeed}
                 onSpeedChange={handleSpeedSelect}
                 hasEpisodes={hasEpisodes}
@@ -2133,8 +2340,12 @@ function InnerPlayer() {
                 canChooseStream={!!id}
                 streamSelectorOpen={showStreamSelector}
                 onOpenStreamSelector={openManualStreamFallback}
+                canGoPrevious={!!previousEpisode}
+                onPreviousEpisode={playPreviousEpisode}
+                previousEpisodeLabel={previousEpisodeLabel}
                 canGoNext={!!nextEpisode}
                 onNextEpisode={playNextEpisode}
+                nextEpisodeLabel={nextEpisodeLabel}
                 audioTracks={audioTracks}
                 trackSwitching={trackSwitching}
                 onSelectAudioTrack={handleAudioTrackSelect}
@@ -2160,16 +2371,23 @@ function InnerPlayer() {
           </div>
         </div>
       )}
-      <PlayerPauseResumeButton
-        visible={!isPip && showPauseResume && !bufferingOverlay.mounted}
-        onResume={togglePlay}
-      />
+      {!isPip && !centerStatusVisible && !panelsOwnSurface && (
+        <PlayerPauseResumeButton visible={showPauseResume} onResume={togglePlay} />
+      )}
 
       <PlayerOsdOverlay
         action={osdAction}
-        visible={osdVisible}
-        isLoading={isLoading}
-        isResolving={isResolving}
+        visible={
+          osdVisible &&
+          playbackIntact &&
+          !loadingOverlay.mounted &&
+          !panelsOwnSurface &&
+          !idleOverlayVisible &&
+          !hasEnded &&
+          (!isPip || !bufferingOverlay.mounted)
+        }
+        isFullscreen={isFullscreen}
+        compact={isPip}
       />
 
       {episodesPanelMounted && (
@@ -2192,7 +2410,7 @@ function InnerPlayer() {
         />
       )}
 
-      {showShortcuts && <PlayerShortcutsOverlay onClose={closeShortcuts} />}
+      {showShortcuts && <PlayerShortcutsOverlay keymap={keymap} onClose={closeShortcuts} />}
 
       {streamSelectorNode}
 
@@ -2207,6 +2425,7 @@ function InnerPlayer() {
           clock={clock}
           bufferedClock={bufferedClock}
           duration={duration}
+          playbackSpeed={playbackSpeed}
           skipSegments={skipSegments}
           resetKey={activeStreamUrl}
           status={
@@ -2226,7 +2445,7 @@ function InnerPlayer() {
           onReturn={returnFromPip}
           onTogglePlay={togglePlay}
           onToggleMute={toggleMute}
-          onVolumeStep={handleVolumeStep}
+          onVolumeWheel={handleVolumeWheel}
           onSeek={seek}
           onNext={playNextEpisode}
           onReplay={replayFromStart}

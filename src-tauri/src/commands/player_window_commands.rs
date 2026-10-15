@@ -115,6 +115,13 @@ pub(crate) async fn get_player_pip(state: State<'_, PlayerPipState>) -> Result<b
     Ok(state.0.lock().await.is_some())
 }
 
+fn window_monitor(window: &Window) -> tauri::Result<Option<Monitor>> {
+    match window.current_monitor()? {
+        Some(monitor) => Ok(Some(monitor)),
+        None => window.primary_monitor(),
+    }
+}
+
 fn restore_window(window: &Window, saved: &WindowPlacement) -> tauri::Result<()> {
     // Remove the PiP ceiling before restoring the app's configured constraints.
     let configured = window
@@ -153,7 +160,7 @@ fn restore_window(window: &Window, saved: &WindowPlacement) -> tauri::Result<()>
         .find(|monitor| area_contains(monitor.work_area(), center))
     {
         Some(monitor) => Some(monitor),
-        None => window.current_monitor()?.or(window.primary_monitor()?),
+        None => window_monitor(window)?,
     };
     if let Some(monitor) = monitor {
         let area = monitor.work_area();
@@ -199,12 +206,8 @@ pub(crate) async fn set_player_pip(
         if window.is_fullscreen().map_err(|error| error.to_string())? {
             return Err("Exit fullscreen before opening picture in picture.".to_string());
         }
-        let monitor = window
-            .current_monitor()
+        let monitor = window_monitor(&window)
             .map_err(|error| error.to_string())?
-            .or(window
-                .primary_monitor()
-                .map_err(|error| error.to_string())?)
             .ok_or("No monitor is available for picture in picture.")?;
         let mut saved = WindowPlacement {
             position: window.outer_position().map_err(|error| error.to_string())?,
@@ -254,12 +257,8 @@ pub(crate) async fn snap_player_pip(
     if placement.is_none() {
         return Ok(());
     }
-    let monitor = window
-        .current_monitor()
+    let monitor = window_monitor(&window)
         .map_err(|error| error.to_string())?
-        .or(window
-            .primary_monitor()
-            .map_err(|error| error.to_string())?)
         .ok_or("No monitor is available for picture in picture.")?;
     let size = window.inner_size().map_err(|error| error.to_string())?;
     place_pip(&window, &monitor, size).map_err(|error| error.to_string())

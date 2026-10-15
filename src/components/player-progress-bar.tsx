@@ -24,10 +24,108 @@ const FALLBACK_SKIP_SEGMENT_STYLE = {
 };
 
 const subscribeWhileHidden = () => () => {};
+const ENDS_AT_FORMATTER = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' });
 
 function getSegmentStyle(type: string): { color: string; badge: string } {
   return SKIP_SEGMENT_STYLES[type] ?? FALLBACK_SKIP_SEGMENT_STYLE;
 }
+
+interface PlayerTimeDisplayProps {
+  clock: PlaybackClock;
+  duration: number;
+  playbackSpeed?: number;
+  active?: boolean;
+  className?: string;
+}
+
+export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
+  clock,
+  duration,
+  playbackSpeed = 1,
+  active = true,
+  className,
+}: PlayerTimeDisplayProps) {
+  const [showRemainingTime, setShowRemainingTime] = useState(false);
+  const displayTime = useSyncExternalStore(active ? clock.subscribe : subscribeWhileHidden, () =>
+    Math.floor(
+      showRemainingTime && duration > 0
+        ? Math.max(0, duration - clock.getSnapshot())
+        : clock.getSnapshot(),
+    ),
+  );
+  const [endsAtText, setEndsAtText] = useState<string | null>(null);
+  const endsAtMinuteRef = useRef<number | null>(null);
+  useEffect(() => {
+    const remainingWallClockSecs = (duration - clock.getSnapshot()) / (playbackSpeed || 1);
+    const endsAtMinute =
+      duration > 0 && remainingWallClockSecs >= 60
+        ? Math.floor((Date.now() + remainingWallClockSecs * 1000) / 60_000)
+        : null;
+    if (endsAtMinute === endsAtMinuteRef.current) return;
+    endsAtMinuteRef.current = endsAtMinute;
+    setEndsAtText(endsAtMinute === null ? null : ENDS_AT_FORMATTER.format(endsAtMinute * 60_000));
+  }, [clock, displayTime, duration, playbackSpeed]);
+
+  const toggleLabel = showRemainingTime ? 'Show elapsed time' : 'Show remaining time';
+  return (
+    <button
+      type='button'
+      onClick={(e) => {
+        e.stopPropagation();
+        setShowRemainingTime((value) => !value);
+      }}
+      aria-pressed={showRemainingTime}
+      aria-label={toggleLabel}
+      className={cn(
+        // Cap-height trimming centers the digits optically; line-box centering leaves them sitting low.
+        'flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[13px] font-semibold leading-none tabular-nums tracking-tight text-white transition-colors hover:bg-white/12 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 [&>span]:[text-box:trim-both_cap_alphabetic]',
+        className,
+      )}
+      title={endsAtText ? `${toggleLabel} · Ends at ${endsAtText}` : toggleLabel}
+    >
+      <span>
+        {showRemainingTime && duration > 0
+          ? `−${formatTime(displayTime)}`
+          : formatTime(displayTime)}
+      </span>
+      <span className='font-medium text-white/40'>/</span>
+      <span className='font-medium text-white/60'>{formatTime(duration)}</span>
+    </button>
+  );
+});
+
+interface PlayerEdgeProgressProps {
+  clock: PlaybackClock;
+  duration: number;
+  visible: boolean;
+}
+
+export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
+  clock,
+  duration,
+  visible,
+}: PlayerEdgeProgressProps) {
+  const currentTime = useSyncExternalStore(
+    visible ? clock.subscribe : subscribeWhileHidden,
+    clock.getSnapshot,
+  );
+  const progress = duration > 0 ? clamp(currentTime / duration, 0, 1) : 0;
+
+  return (
+    <div
+      aria-hidden='true'
+      className={cn(
+        'pointer-events-none absolute bottom-0 left-[60px] right-0 z-40 h-0.5 bg-white/15 transition-opacity duration-150 motion-reduce:transition-none',
+        visible ? 'opacity-100' : 'opacity-0',
+      )}
+    >
+      <div
+        className='absolute inset-0 origin-left bg-white'
+        style={{ transform: `scaleX(${progress})` }}
+      />
+    </div>
+  );
+});
 
 interface SkipNotchesProps {
   duration: number;
@@ -127,7 +225,6 @@ export function PlayerProgressBar({
     subscribeToTicks ? bufferedClock.subscribe : subscribeWhileHidden,
     bufferedClock.getSnapshot,
   );
-  const [showRemainingTime, setShowRemainingTime] = useState(false);
   const [hoverPct, setHoverPct] = useState<number | null>(null);
   const hoverTime = hoverPct === null ? null : (hoverPct / 100) * duration;
   const hoverSegment =
@@ -147,14 +244,6 @@ export function PlayerProgressBar({
     [duration],
   );
 
-  const updateHoverAtClientX = useCallback(
-    (clientX: number, rectOverride?: DOMRect | null) => {
-      const fraction = getSeekFraction(clientX, rectOverride);
-      if (fraction !== null) setHoverPct(fraction * 100);
-    },
-    [getSeekFraction],
-  );
-
   const scheduleHoverUpdate = useCallback(
     (clientX: number) => {
       pendingHoverXRef.current = clientX;
@@ -163,11 +252,15 @@ export function PlayerProgressBar({
       hoverRafRef.current = window.requestAnimationFrame(() => {
         hoverRafRef.current = null;
         const pendingClientX = pendingHoverXRef.current;
+        pendingHoverXRef.current = null;
         if (pendingClientX === null) return;
-        updateHoverAtClientX(pendingClientX);
+        const fraction = getSeekFraction(pendingClientX, dragRectRef.current);
+        if (fraction === null) return;
+        setHoverPct(fraction * 100);
+        if (dragPointerIdRef.current !== null) setSeekPreviewTime(fraction * duration);
       });
     },
-    [updateHoverAtClientX],
+    [duration, getSeekFraction],
   );
 
   const clearHoverState = useCallback(() => {
@@ -234,22 +327,17 @@ export function PlayerProgressBar({
       dragRectRef.current = rect;
 
       setSeekPreviewTime(frac * duration);
-      updateHoverAtClientX(e.clientX, rect);
+      setHoverPct(frac * 100);
     },
-    [clearHoverState, duration, getSeekFraction, updateHoverAtClientX],
+    [clearHoverState, duration, getSeekFraction],
   );
 
   const handlePointerMove = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.pointerId !== dragPointerIdRef.current) return;
-
-      const frac = getSeekFraction(e.clientX, dragRectRef.current);
-      if (frac === null) return;
-
-      setSeekPreviewTime(frac * duration);
-      updateHoverAtClientX(e.clientX, dragRectRef.current);
+      scheduleHoverUpdate(e.clientX);
     },
-    [duration, getSeekFraction, updateHoverAtClientX],
+    [scheduleHoverUpdate],
   );
 
   const handlePointerUp = useCallback(
@@ -260,6 +348,7 @@ export function PlayerProgressBar({
       // Clear the pointer id before releasing capture so `lostpointercapture` can't cancel the seek committing here.
       const pointerId = e.pointerId;
       dragPointerIdRef.current = null;
+      clearHoverState();
 
       const frac = getSeekFraction(e.clientX, dragRectRef.current);
       if (frac !== null) {
@@ -271,7 +360,6 @@ export function PlayerProgressBar({
       }
       dragRectRef.current = null;
       setSeekPreviewTime(null);
-      clearHoverState();
     },
     [clearHoverState, duration, getSeekFraction, onSeek],
   );
@@ -348,114 +436,81 @@ export function PlayerProgressBar({
     canSeek && bufferedAheadSecs > 0 ? Math.min(currentTime + bufferedAheadSecs, duration) : null;
 
   return (
-    <>
-      <div className='flex items-center justify-end px-0.5 pb-2'>
-        <div className='shrink-0'>
-          <button
-            type='button'
-            onClick={(e) => {
-              e.stopPropagation();
-              setShowRemainingTime((v) => !v);
-            }}
-            aria-pressed={showRemainingTime}
-            aria-label={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
-            className='rounded-sm text-[13px] font-medium text-white/75 tabular-nums leading-none hover:text-white transition-colors duration-150 cursor-pointer select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-            title={showRemainingTime ? 'Show elapsed time' : 'Show remaining time'}
-          >
-            {showRemainingTime && duration > 0 ? (
-              <>
-                <span className='text-white/40'>-</span>
-                {formatTime(Math.max(0, duration - displayTime))}
-              </>
-            ) : (
-              formatTime(displayTime)
-            )}
-            <span className='text-white/30'> / </span>
-            {formatTime(duration)}
-          </button>
+    <div
+      ref={progressBarRef}
+      data-player-interactive
+      role='slider'
+      tabIndex={canSeek ? 0 : -1}
+      aria-label='Playback progress'
+      aria-orientation='horizontal'
+      aria-disabled={canSeek ? undefined : true}
+      aria-valuemin={0}
+      aria-valuemax={canSeek ? duration : 0}
+      aria-valuenow={canSeek ? clamp(displayTime, 0, duration) : 0}
+      aria-valuetext={formatTime(displayTime)}
+      className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center rounded-md touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default'
+      onMouseMove={handleMouseMove}
+      onMouseLeave={handleMouseLeave}
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
+      onKeyDown={handleKeyDown}
+    >
+      {hoverPct !== null && duration > 0 && (
+        <div
+          className='absolute bottom-full mb-2 -translate-x-1/2 pointer-events-none z-10 flex flex-col items-center gap-1'
+          style={{ left: `${clamp(hoverPct, 5, 95)}%` }}
+        >
+          {hoverSegment && (
+            <span
+              className={cn(
+                'whitespace-nowrap text-[9px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
+                getSegmentStyle(hoverSegment.type).badge,
+              )}
+            >
+              {`${getSkipLabel(hoverSegment.type).replace(/^Skip\s+/, '')} · ${formatTime(hoverSegment.start_time)}–${formatTime(hoverSegment.end_time)}`}
+            </span>
+          )}
+          <div className='whitespace-nowrap rounded-md bg-black/85 px-2 py-1 text-[12px] font-semibold leading-none tracking-tight tabular-nums text-white shadow-lg ring-1 ring-white/10'>
+            {formatTime((hoverPct / 100) * duration)}
+          </div>
         </div>
-      </div>
+      )}
 
-      <div
-        ref={progressBarRef}
-        data-player-interactive
-        role='slider'
-        tabIndex={canSeek ? 0 : -1}
-        aria-label='Playback progress'
-        aria-orientation='horizontal'
-        aria-disabled={canSeek ? undefined : true}
-        aria-valuemin={0}
-        aria-valuemax={canSeek ? duration : 0}
-        aria-valuenow={canSeek ? clamp(displayTime, 0, duration) : 0}
-        aria-valuetext={formatTime(displayTime)}
-        className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center rounded-md touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default'
-        onMouseMove={handleMouseMove}
-        onMouseLeave={handleMouseLeave}
-        onPointerDown={handlePointerDown}
-        onPointerMove={handlePointerMove}
-        onPointerUp={handlePointerUp}
-        onPointerCancel={handlePointerCancel}
-        onLostPointerCapture={handlePointerCancel}
-        onKeyDown={handleKeyDown}
-      >
+      <div className='relative w-full h-2 group-hover/bar:h-[10px] group-focus-visible/bar:h-[10px] transition-[height] duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
         {hoverPct !== null && duration > 0 && (
           <div
-            className='absolute bottom-full mb-2 -translate-x-1/2 pointer-events-none z-10 flex flex-col items-center gap-1'
-            style={{ left: `${clamp(hoverPct, 5, 95)}%` }}
-          >
-            {hoverSegment && (
-              <span
-                className={cn(
-                  'text-[9px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
-                  getSegmentStyle(hoverSegment.type).badge,
-                )}
-              >
-                {getSkipLabel(hoverSegment.type)}
-              </span>
-            )}
-            <div className='whitespace-nowrap rounded-md bg-black/85 px-2 py-1 text-[12px] font-semibold leading-none tracking-tight tabular-nums text-white shadow-lg ring-1 ring-white/10'>
-              {formatTime((hoverPct / 100) * duration)}
-            </div>
-          </div>
+            className='absolute inset-0 origin-left bg-white/25 pointer-events-none'
+            style={{ transform: `scaleX(${hoverPct / 100})` }}
+          />
         )}
 
-        <div className='relative w-full h-2 group-hover/bar:h-[10px] group-focus-visible/bar:h-[10px] transition-[height] duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
-          {hoverPct !== null && duration > 0 && (
-            <div
-              className='absolute inset-0 origin-left bg-white/25 pointer-events-none'
-              style={{ transform: `scaleX(${hoverPct / 100})` }}
-            />
-          )}
-
-          {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
-            <div
-              className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
-              style={{
-                transform: `translateX(${Math.min(100, (currentTime / duration) * 100)}%) scaleX(${(bufferedEndSecs - currentTime) / duration})`,
-              }}
-            />
-          )}
-
+        {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
-            className='absolute inset-0 origin-left bg-white pointer-events-none z-0'
-            style={{ transform: `scaleX(${progressPct / 100})` }}
+            className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
+            style={{
+              transform: `translateX(${Math.min(100, (currentTime / duration) * 100)}%) scaleX(${(bufferedEndSecs - currentTime) / duration})`,
+            }}
           />
+        )}
 
-          <SkipNotches
-            duration={duration}
-            skipSegments={skipSegments}
-            hoverSegment={hoverSegment}
+        <div
+          className='absolute inset-0 origin-left bg-white pointer-events-none z-0'
+          style={{ transform: `scaleX(${progressPct / 100})` }}
+        />
+
+        <SkipNotches duration={duration} skipSegments={skipSegments} hoverSegment={hoverSegment} />
+
+        {/* Playhead nub sits above slices so position stays readable inside a segment band. */}
+        {duration > 0 && displayTime > 0 && (
+          <div
+            className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'
+            style={{ left: `${progressPct}%` }}
           />
-
-          {/* Playhead nub sits above slices so position stays readable inside a segment band. */}
-          {duration > 0 && displayTime > 0 && (
-            <div
-              className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'
-              style={{ left: `${progressPct}%` }}
-            />
-          )}
-        </div>
+        )}
       </div>
-    </>
+    </div>
   );
 }

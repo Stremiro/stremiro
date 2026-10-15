@@ -4,6 +4,7 @@ use crate::commands::WatchProgress;
 use rusqlite::{
     params, Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement, Transaction,
 };
+use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
 
@@ -239,6 +240,68 @@ impl ResumeStore {
             [],
             "",
         )
+    }
+
+    fn open_read_only(path: &Path) -> Result<Option<Connection>, String> {
+        if !path
+            .try_exists()
+            .map_err(|error| format!("Failed to inspect playback resume database: {}", error))?
+        {
+            return Ok(None);
+        }
+        // A WAL reader needs neither the shared writer lock nor store initialization.
+        let connection = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|error| format!("Failed to open playback resume database: {}", error))?;
+        connection
+            .busy_timeout(Duration::from_secs(5))
+            .map_err(|error| format!("Failed to open playback resume database: {}", error))?;
+        Self::schema_version(&connection)?;
+        Ok(Some(connection))
+    }
+
+    pub(crate) fn load_recent_titles(path: &Path) -> Result<Vec<(String, String)>, String> {
+        let Some(connection) = Self::open_read_only(path)? else {
+            return Ok(Vec::new());
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT media_type, media_id FROM (
+                    SELECT media_type, media_id, last_watched, history_key,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY media_type, media_id
+                               ORDER BY last_watched DESC, history_key DESC
+                           ) AS title_rank
+                    FROM watch_progress
+                 ) WHERE title_rank = 1
+                 ORDER BY last_watched DESC, history_key DESC LIMIT 3",
+            )
+            .map_err(|error| format!("Failed to read recent playback resume titles: {error}"))?;
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .and_then(|rows| rows.collect())
+            .map_err(|error| format!("Failed to read recent playback resume titles: {error}"))
+    }
+
+    pub(crate) fn load_watched_title_ids(
+        path: &Path,
+        media_type: &str,
+    ) -> Result<HashSet<String>, String> {
+        let Some(connection) = Self::open_read_only(path)? else {
+            return Ok(HashSet::new());
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT media_id FROM watch_progress WHERE media_type = ?1
+                 GROUP BY media_id ORDER BY MAX(last_watched) DESC, media_id
+                 LIMIT ?2",
+            )
+            .map_err(|error| format!("Failed to read watched playback resume titles: {error}"))?;
+        statement
+            .query_map(params![media_type, MAX_RESUME_TOTAL_ENTRIES], |row| {
+                row.get(0)
+            })
+            .and_then(|rows| rows.collect())
+            .map_err(|error| format!("Failed to read watched playback resume titles: {error}"))
     }
 
     pub(crate) fn count_entries(&mut self) -> Result<usize, String> {

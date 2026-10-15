@@ -26,6 +26,8 @@ export function usePlayerVolumeControls({
   const [volume, setVolume] = useState(() => playerVolume);
   const [isMuted, setIsMutedState] = useState(false);
   const volumeRef = useRef(volume);
+  const wheelDeltaAccumulatorRef = useRef(0);
+  const lastWheelEventAtRef = useRef(0);
   // mpv re-inits (stream swap, recovery) read this so a muted session stays muted.
   const isMutedRef = useRef(false);
   const setIsMuted = useCallback((muted: boolean) => {
@@ -37,7 +39,8 @@ export function usePlayerVolumeControls({
     const nextVolume = playerVolume;
     // Locally persisted volume already matches the live ref; apply only external changes.
     const volumeChanged = volumeRef.current !== nextVolume;
-    setVolume((current) => (current === nextVolume ? current : nextVolume));
+    const displayedVolume = isMutedRef.current ? 0 : nextVolume;
+    setVolume((current) => (current === displayedVolume ? current : displayedVolume));
     volumeRef.current = nextVolume;
 
     if (mpvInitializedRef.current && volumeChanged) {
@@ -51,6 +54,10 @@ export function usePlayerVolumeControls({
   const handleVolumeChange = useCallback(
     async (newVol: number) => {
       newVol = clamp(newVol, 0, 100);
+      if (newVol === volumeRef.current && !(newVol > 0 && isMutedRef.current)) {
+        triggerOsd({ kind: 'volume', level: newVol });
+        return;
+      }
       setVolume(newVol);
       volumeRef.current = newVol;
       scheduleVolumePersist({ playerVolume: newVol });
@@ -75,6 +82,33 @@ export function usePlayerVolumeControls({
       await handleVolumeChange(volumeRef.current + delta);
     },
     [handleVolumeChange, triggerOsd],
+  );
+
+  const handleVolumeWheel = useCallback(
+    async (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => {
+      const normalizedDelta =
+        event.deltaY * (event.deltaMode === 1 ? 20 : event.deltaMode === 2 ? 100 : 1);
+      if (!Number.isFinite(normalizedDelta) || normalizedDelta === 0) return;
+
+      const now = performance.now();
+      if (
+        now - lastWheelEventAtRef.current > 250 ||
+        Math.sign(normalizedDelta) !== Math.sign(wheelDeltaAccumulatorRef.current)
+      ) {
+        wheelDeltaAccumulatorRef.current = 0;
+      }
+      lastWheelEventAtRef.current = now;
+      wheelDeltaAccumulatorRef.current += normalizedDelta;
+
+      // Notched wheels retain 5% steps; fine trackpad input needs 4px for each 1%.
+      const notched = Math.abs(normalizedDelta) >= 20;
+      const threshold = notched ? 20 : 4;
+      const steps = Math.trunc(wheelDeltaAccumulatorRef.current / threshold);
+      if (steps === 0) return;
+      wheelDeltaAccumulatorRef.current -= steps * threshold;
+      await stepVolume(-steps * (notched ? 5 : 1));
+    },
+    [stepVolume],
   );
 
   const toggleMute = useCallback(async () => {
@@ -108,6 +142,7 @@ export function usePlayerVolumeControls({
     isMutedRef,
     volumeRef,
     handleVolumeChange,
+    handleVolumeWheel,
     stepVolume,
     toggleMute,
   };

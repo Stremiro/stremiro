@@ -19,7 +19,6 @@ fn resolved_headers_stay_on_first_hop_origin() {
         )
         .expect("valid urls resolve");
         assert_eq!(resolved.url, final_url);
-        assert_eq!(resolved.format, "video/x-matroska");
         if keep_headers {
             assert_eq!(
                 resolved.mpv_http_header_fields,
@@ -51,6 +50,7 @@ fn mpv_http_header_fields_escape_commas_and_backslashes() {
         r"X-Custom: one\,two\\three\\\,four,Authorization: Bearer fixture"
     );
     let payload = serde_json::to_value(resolved).unwrap();
+    assert!(payload.get("format").is_none());
     assert!(payload.get("mpvHttpHeaderFields").is_some());
     assert!(payload.get("requestHeaders").is_none());
 }

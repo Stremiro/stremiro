@@ -1,39 +1,10 @@
 import { type RefObject, useEffect, useEffectEvent } from 'react';
 
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
+import { isRepeatablePlayerAction, type PlayerKeymap } from '@/lib/player-keybindings';
 
 const PLAYER_SHORTCUT_CONTROL_SELECTOR =
   'button, a, [role="button"], [role="menu"], [role="menuitem"], [data-player-interactive]';
-
-// Discrete actions ignore auto-repeat (arrows/volume/speed etc. keep ramping).
-// Digits are one-shot percent seeks — a held digit would storm identical seeks.
-const NON_REPEAT_KEYS = new Set([
-  ' ',
-  'k',
-  'f',
-  'm',
-  'n',
-  'c',
-  'e',
-  'i',
-  's',
-  'a',
-  'q',
-  '?',
-  '\\',
-  'enter',
-  'escape',
-  '0',
-  '1',
-  '2',
-  '3',
-  '4',
-  '5',
-  '6',
-  '7',
-  '8',
-  '9',
-]);
 
 // A focused control owns only its activation keys; everything else stays a media hotkey. Sliders self-consume theirs.
 function shouldIgnorePlayerHotkeyTarget(target: EventTarget | null, key: string): boolean {
@@ -61,16 +32,17 @@ function shouldIgnorePlayerHotkeyTarget(target: EventTarget | null, key: string)
 interface UsePlayerHotkeysOptions {
   closeEpisodesPanel: () => void;
   closeStreamSelector: () => void;
-  /** `a` — cycle the audio track (mpv's convention); OSD names the landing track. */
+  /** Cycle the audio track (mpv's convention); OSD names the landing track. */
   cycleAudioTrack: () => Promise<void>;
   cycleSubtitles: () => Promise<void>;
   durationRef: RefObject<number>;
   frameStep: (direction: 1 | -1) => Promise<void>;
-  /** Arrow-up/down volume steps — reads the live volume ref internally. */
+  /** Volume steps — reads the live volume ref internally. */
   stepVolume: (delta: number) => Promise<void>;
   hasEpisodes: boolean;
   isExpanded: boolean;
   isFullscreen: boolean;
+  keymap: PlayerKeymap;
   mountedRef: RefObject<boolean>;
   navigateBack: () => Promise<void>;
   nudgeSubtitleDelay: (direction: 1 | -1) => void;
@@ -81,7 +53,7 @@ interface UsePlayerHotkeysOptions {
   showEpisodes: boolean;
   showShortcuts: boolean;
   showStreamSelector: boolean;
-  /** Active skip-segment/intro CTA — `S`/`Enter` trigger its `onSkip`. */
+  /** Active skip-segment/intro CTA — the skip binding triggers its `onSkip`. */
   skipAction: { onSkip: () => void } | null;
   stepSpeed: (direction: 1 | -1) => void;
   resetSpeed: () => void;
@@ -105,6 +77,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     hasEpisodes,
     isExpanded,
     isFullscreen,
+    keymap,
     mountedRef,
     navigateBack,
     nudgeSubtitleDelay,
@@ -147,13 +120,22 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       return;
     }
 
-    if (e.repeat && NON_REPEAT_KEYS.has(normalizedKey)) {
+    const action = keymap.byKey.get(normalizedKey);
+    const isDigit = /^[0-9]$/.test(normalizedKey);
+
+    // Discrete actions ignore auto-repeat (seek/volume/speed etc. keep ramping).
+    // Digits are one-shot percent seeks — a held digit would storm identical seeks.
+    if (
+      e.repeat &&
+      (normalizedKey === 'escape' || isDigit || (action && !isRepeatablePlayerAction(action)))
+    ) {
       e.preventDefault();
       return;
     }
 
     // Escape works even with focus inside panels; Radix popper layers own theirs.
     if (normalizedKey === 'escape') {
+      e.preventDefault();
       // Topmost first: shortcuts overlay, then selector, episodes, fullscreen, then Back.
       if (showShortcuts) {
         closeShortcuts();
@@ -168,25 +150,23 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
         return;
       }
       if (isFullscreen) {
-        e.preventDefault();
         void toggleFullscreen().catch(() => undefined);
         return;
       }
       // Nothing left to close: Esc is player-level Back.
-      e.preventDefault();
       void navigateBack().catch(() => undefined);
       return;
     }
 
-    // `e` must also close the panel from inside, so it intercepts ahead of the open gate.
-    if (normalizedKey === 'e' && hasEpisodes && !showStreamSelector && !showShortcuts) {
+    // The episodes key must also close the panel from inside, so it intercepts ahead of the open gate.
+    if (action === 'episodes' && hasEpisodes && !showStreamSelector && !showShortcuts) {
       e.preventDefault();
       toggleEpisodes();
       return;
     }
 
-    // `?` toggles help — closes from anywhere, never opens over the modal selector.
-    if (normalizedKey === '?' && !showStreamSelector) {
+    // Help closes from anywhere, never opens over the modal selector.
+    if (action === 'shortcuts' && !showStreamSelector) {
       e.preventDefault();
       toggleShortcuts();
       return;
@@ -198,104 +178,68 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     }
 
     // 0–9: percent seeks, matching mpv/YouTube convention.
-    if (/^[0-9]$/.test(normalizedKey) && durationRef.current > 0) {
+    if (isDigit && durationRef.current > 0) {
       e.preventDefault();
       void seek((durationRef.current * Number(normalizedKey)) / 10).catch(() => undefined);
       return;
     }
 
-    switch (normalizedKey) {
-      case ' ':
-      case 'k':
-        e.preventDefault();
-        void togglePlay().catch(() => undefined);
-        break;
-      // Shift halves the step for fine scrubbing, matching Shift+wheel.
-      case 'arrowright':
-      case 'l':
-        e.preventDefault();
-        void seekRelative(e.shiftKey ? 5 : 10).catch(() => undefined);
-        break;
-      case 'arrowleft':
-      case 'j':
-        e.preventDefault();
-        void seekRelative(e.shiftKey ? -5 : -10).catch(() => undefined);
-        break;
-      case 'arrowup':
-        e.preventDefault();
-        void stepVolume(5).catch(() => undefined);
-        break;
-      case 'arrowdown':
-        e.preventDefault();
-        void stepVolume(-5).catch(() => undefined);
-        break;
-      case 'f':
-        e.preventDefault();
-        void toggleFullscreen().catch(() => undefined);
-        break;
-      case 'm':
-        e.preventDefault();
-        void toggleMute().catch(() => undefined);
-        break;
-      case 'n':
-        e.preventDefault();
-        playNextEpisode();
-        break;
-      case 'c':
-        e.preventDefault();
-        void cycleSubtitles().catch(() => undefined);
-        break;
-      case 'a':
-        e.preventDefault();
-        void cycleAudioTrack().catch(() => undefined);
-        break;
-      case 'q':
-        if (openStreamSelector) {
-          e.preventDefault();
-          openStreamSelector();
-        }
-        break;
-      case 'i':
+    if (!action) return;
+    // Shift halves the seek step for fine scrubbing, matching Shift+wheel.
+    const seekStep = e.shiftKey ? 5 : 10;
+    const run = (effect: () => unknown) => {
+      e.preventDefault();
+      effect();
+    };
+
+    switch (action) {
+      case 'togglePlay':
+        return run(() => void togglePlay().catch(() => undefined));
+      case 'seekForward':
+        return run(() => void seekRelative(seekStep).catch(() => undefined));
+      case 'seekBackward':
+        return run(() => void seekRelative(-seekStep).catch(() => undefined));
+      case 'volumeUp':
+        return run(() => void stepVolume(5).catch(() => undefined));
+      case 'volumeDown':
+        return run(() => void stepVolume(-5).catch(() => undefined));
+      case 'toggleFullscreen':
+        return run(() => void toggleFullscreen().catch(() => undefined));
+      case 'toggleMute':
+        return run(() => void toggleMute().catch(() => undefined));
+      case 'nextEpisode':
+        return run(playNextEpisode);
+      case 'cycleSubtitles':
+        return run(() => void cycleSubtitles().catch(() => undefined));
+      case 'cycleAudio':
+        return run(() => void cycleAudioTrack().catch(() => undefined));
+      case 'streamSelector':
+        if (openStreamSelector) run(openStreamSelector);
+        return;
+      case 'dock':
         // Dock to the mini player — same destination as Back on a healthy session.
-        e.preventDefault();
-        void navigateBack().catch(() => undefined);
-        break;
-      case '.':
-        e.preventDefault();
-        void frameStep(1).catch(() => undefined);
-        break;
-      case ',':
-        e.preventDefault();
-        void frameStep(-1).catch(() => undefined);
-        break;
-      case '[':
-        e.preventDefault();
-        stepSpeed(-1);
-        break;
-      case ']':
-        e.preventDefault();
-        stepSpeed(1);
-        break;
-      case '\\':
-        e.preventDefault();
-        resetSpeed();
-        break;
-      case 'z':
-        e.preventDefault();
-        nudgeSubtitleDelay(-1);
-        break;
-      case 'x':
-        e.preventDefault();
-        nudgeSubtitleDelay(1);
-        break;
-      case 's':
-      case 'enter':
-        // Only hijack Enter while a segment is active — otherwise a focused surface keeps native behavior.
-        if (skipAction) {
-          e.preventDefault();
-          skipAction.onSkip();
-        }
-        break;
+        return run(() => void navigateBack().catch(() => undefined));
+      case 'frameForward':
+        return run(() => void frameStep(1).catch(() => undefined));
+      case 'frameBackward':
+        return run(() => void frameStep(-1).catch(() => undefined));
+      case 'speedDown':
+        return run(() => stepSpeed(-1));
+      case 'speedUp':
+        return run(() => stepSpeed(1));
+      case 'speedReset':
+        return run(resetSpeed);
+      case 'subtitleEarlier':
+        return run(() => nudgeSubtitleDelay(-1));
+      case 'subtitleLater':
+        return run(() => nudgeSubtitleDelay(1));
+      case 'skipSegment':
+        // Only hijack the key while a segment is active — otherwise a focused surface keeps native behavior.
+        if (skipAction) run(skipAction.onSkip);
+        return;
+      case 'episodes':
+      case 'shortcuts':
+        return;
     }
   });
 

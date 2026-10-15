@@ -1,4 +1,3 @@
-use super::streaming_helpers::infer_stream_mime;
 use crate::providers::addons::sanitize_addon_log;
 use crate::providers::fetch_policy::MAX_REDIRECT_HOPS;
 use serde::Serialize;
@@ -23,7 +22,6 @@ static REDIRECT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
 #[serde(rename_all = "camelCase")]
 pub struct ResolvedStream {
     pub url: String,
-    pub format: String,
     /// mpv string-list of the final origin's bounded headers. Secrets: never log/persist.
     pub mpv_http_header_fields: String,
 }
@@ -32,7 +30,6 @@ pub struct ResolvedStream {
 #[serde(rename_all = "camelCase")]
 pub struct BestResolvedStream {
     pub url: String,
-    pub format: String,
     /// Stable addon-instance id of the winner: feeds source-health attribution and resume binding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
@@ -321,7 +318,6 @@ fn build_resolved_direct_stream(
             Vec::new()
         };
     Ok(ResolvedStream {
-        format: infer_stream_mime(&final_url).to_string(),
         url: final_url,
         mpv_http_header_fields: format_mpv_http_header_fields(&request_headers),
     })

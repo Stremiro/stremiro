@@ -1,8 +1,10 @@
 import { ArrowLeft, Loader2, Play, RotateCcw, X } from 'lucide-react';
-import { memo } from 'react';
+import { memo, useEffect, useState } from 'react';
 import { RemoteImage } from '@/components/remote-image';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
+import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
 import { clamp, cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
 
 // Presentational player states, memoized like PlayerActionOverlays — unchanged overlays skip the commit.
@@ -11,7 +13,7 @@ const ERROR_SECONDARY_BUTTON_CLASS =
   'rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
 /** The expanded player's action lane owns placement above its measured chrome. */
 const EOF_CARD_SLOT_CLASS =
-  'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in zoom-in-95 duration-200 motion-reduce:animate-none';
+  'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in duration-150 motion-reduce:animate-none';
 const EOF_GLASS_CLASS = 'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60';
 const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
 
@@ -42,7 +44,7 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
   return (
     <div
       role='alert'
-      className='absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/85 px-6 text-center animate-in fade-in zoom-in-95 duration-200'
+      className='absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/85 px-6 text-center animate-in fade-in duration-150 motion-reduce:animate-none'
     >
       <X className='w-12 h-12 text-red-400/90 mb-4' strokeWidth={1.5} />
       <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback Error</h2>
@@ -91,16 +93,30 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   onChooseStream,
   onBack,
 }: PlayerLoadingOverlayProps) {
+  const [revealed, setRevealed] = useState(false);
+  const [wasExiting, setWasExiting] = useState(exiting);
+  if (wasExiting !== exiting) {
+    setWasExiting(exiting);
+    // A load that restarts mid-exit gets the full reveal debounce again.
+    if (!exiting) setRevealed(false);
+  }
+  useEffect(() => {
+    if (exiting || revealed) return;
+    // A CSS exit animation would paint a warm load that never finished its delayed entrance.
+    const timer = window.setTimeout(() => setRevealed(true), 350);
+    return () => window.clearTimeout(timer);
+  }, [exiting, revealed]);
+  if (!revealed) return null;
+
   return (
     <div className='pointer-events-none absolute inset-0 z-50 flex items-center justify-center'>
-      {/* Entrance delay doubles as a debounce: a warm resolve+init lands under ~350ms, so the card unmounts
-          before painting instead of flashing a frame. `fill-mode-backwards` holds opacity-0 through the delay. */}
       <div
+        inert={exiting}
         className={cn(
-          'relative mx-4 w-full max-w-[19rem] overflow-hidden rounded-2xl border border-white/[0.07] bg-zinc-950/75 px-4 pb-3 pt-3.5 shadow-xl shadow-black/50 backdrop-blur-2xl',
+          'relative mx-4 w-full max-w-[19rem] overflow-hidden rounded-2xl border border-white/[0.07] bg-zinc-950/75 px-4 pb-3 pt-3.5 shadow-xl shadow-black/50 backdrop-blur-2xl motion-reduce:animate-none',
           exiting
-            ? 'animate-out fade-out zoom-out-95 duration-200 fill-mode-forwards'
-            : 'animate-in fade-in zoom-in-95 duration-200 fill-mode-backwards [animation-delay:350ms] motion-reduce:[animation-delay:0ms]',
+            ? 'opacity-0 animate-out fade-out duration-180 fill-mode-forwards'
+            : 'animate-in fade-in duration-150',
         )}
       >
         {(isHttpUrl(logo) || title || context) && (
@@ -137,7 +153,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
           </div>
         </div>
 
-        <div className='pointer-events-auto mt-3 flex items-center gap-1.5 pl-[26px]'>
+        <div className='mt-3 flex items-center gap-1.5 pl-[26px] pointer-events-auto'>
           <button
             type='button'
             onClick={onChooseStream}
@@ -189,8 +205,8 @@ export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
     <div
       aria-hidden={!visible}
       className={cn(
-        'pointer-events-none absolute inset-0 z-30 transition-[opacity,visibility] duration-300 ease-out motion-reduce:transition-none',
-        visible ? 'visible opacity-100' : 'invisible opacity-0',
+        'pointer-events-none absolute inset-0 z-30 transition-opacity duration-150 ease-out motion-reduce:transition-none',
+        visible ? 'opacity-100' : 'opacity-0',
       )}
     >
       <div className='absolute inset-0 bg-black/25' />
@@ -253,6 +269,7 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
   visible,
   onResume,
 }: PlayerPauseResumeButtonProps) {
+  const keymap = usePlayerKeymap();
   return (
     <div
       aria-hidden={!visible}
@@ -261,8 +278,8 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
       <button
         type='button'
         aria-label='Resume playback'
-        aria-keyshortcuts='Space k'
-        title='Resume playback (Space or K)'
+        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
+        title={withShortcutHint('Resume playback', keymap, 'togglePlay')}
         tabIndex={visible ? 0 : -1}
         onClick={(e) => {
           e.stopPropagation();
@@ -270,8 +287,10 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
         }}
         className={cn(
           'flex h-20 w-20 items-center justify-center bg-transparent text-white/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60',
-          'transition-[opacity,color] duration-150 ease-out motion-reduce:transition-none',
-          visible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+          'transition-opacity duration-150 ease-out motion-reduce:transition-none motion-reduce:animate-none',
+          visible
+            ? 'pointer-events-auto opacity-100 animate-in fade-in duration-150 fill-mode-backwards [animation-delay:150ms]'
+            : 'pointer-events-none opacity-0',
         )}
       >
         <Play
@@ -296,7 +315,7 @@ interface PlayerUpNextCardProps {
 const UP_NEXT_RING_RADIUS = 13;
 const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 
-// EOF "Up Next": one click (or N) runs the silent auto-resolve. With auto-play on, a countdown ring arms the
+// EOF "Up Next": one click (or the next-episode key) runs the silent auto-resolve. With auto-play on, a countdown ring arms the
 // same action; the cancel chip disarms it.
 export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   episode,
@@ -306,6 +325,8 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   onCancelAutoPlay,
   onPlayNext,
 }: PlayerUpNextCardProps) {
+  const keymap = usePlayerKeymap();
+  const nextEpisodeKey = keymap.keys.nextEpisode[0];
   const countingDown = autoPlaySecondsLeft !== null;
   const ringProgress = countingDown
     ? clamp(autoPlaySecondsLeft / autoPlayDurationSeconds, 0, 1)
@@ -314,7 +335,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
     <div data-player-interactive className={cn(EOF_CARD_SLOT_CLASS, 'gap-2')}>
       <button
         type='button'
-        aria-keyshortcuts='n'
+        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
         onClick={(e) => {
           e.stopPropagation();
           onPlayNext();
@@ -335,7 +356,13 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
             {countingDown ? (
               <>
                 Playing in <span aria-hidden='true'>{autoPlaySecondsLeft}s</span>
-                <span className='sr-only'>— press N or click to play now</span>
+                <span className='sr-only'>
+                  —{' '}
+                  {nextEpisodeKey !== undefined
+                    ? `press ${formatBindingKey(nextEpisodeKey)} or `
+                    : ''}
+                  click to play now
+                </span>
               </>
             ) : (
               'Play next episode'

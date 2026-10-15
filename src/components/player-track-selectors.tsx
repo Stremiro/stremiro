@@ -1,9 +1,16 @@
-import { Check, Headphones, Loader2, Minus, Plus, Subtitles } from 'lucide-react';
+import { AudioLines, Captions, Check, Loader2, Minus, Plus } from 'lucide-react';
 import { memo, useMemo, useState } from 'react';
-import { CHROME_ICON_BUTTON_CLASS, CHROME_POPOVER_CLASS } from '@/components/player-chrome-styles';
+import {
+  CHROME_ICON_BUTTON_CLASS,
+  CHROME_ICON_CLASS,
+  CHROME_ICON_STROKE,
+  CHROME_POPOVER_CLASS,
+} from '@/components/player-chrome-styles';
 import { PlayerSlider } from '@/components/player-slider';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { AddonSubtitle } from '@/lib/api';
+import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { buildTrackLabelMap, type Track } from '@/lib/player-track-utils';
 import { clamp, cn } from '@/lib/utils';
 
@@ -68,6 +75,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
   trackSwitching,
   onSelectTrack,
 }: AudioTrackSelectorProps) {
+  const keymap = usePlayerKeymap();
   const audioTrackLabels = useMemo(() => buildTrackLabelMap(audioTracks), [audioTracks]);
   const selectedAudioTrack = audioTracks.find((track) => track.selected);
   const selectedAudioLabel = selectedAudioTrack
@@ -81,13 +89,16 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
       <PopoverTrigger asChild>
         <button
           type='button'
-          className={cn(CHROME_ICON_BUTTON_CLASS, 'active:scale-100')}
+          className={cn(
+            CHROME_ICON_BUTTON_CLASS,
+            'active:scale-100 data-[state=open]:bg-white/15 data-[state=open]:text-white',
+          )}
           aria-label={selectedAudioLabel ? `Audio: ${selectedAudioLabel}` : 'Audio track'}
-          aria-keyshortcuts='a'
-          title='Audio Track (A)'
+          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'cycleAudio')}
+          title={withShortcutHint('Audio Track', keymap, 'cycleAudio')}
           onClick={(e) => e.stopPropagation()}
         >
-          <Headphones className='h-[18px] w-[18px]' strokeWidth={2.5} />
+          <AudioLines className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -164,6 +175,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   onSelectAddonSubtitle,
   onOpenChange,
 }: SubtitleTrackSelectorProps) {
+  const keymap = usePlayerKeymap();
   const subtitleTrackLabels = useMemo(() => buildTrackLabelMap(subTracks), [subTracks]);
   const selectedSubTrack = subTracks.find((track) => track.selected);
   const selectedSubLabel = selectedSubTrack
@@ -187,17 +199,15 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
         <button
           type='button'
           className={cn(
-            'relative flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
-            subtitlesShownOff
-              ? 'text-white/40 hover:text-white/70 hover:bg-white/10'
-              : 'text-white/80 hover:text-white hover:bg-white/10',
+            CHROME_ICON_BUTTON_CLASS,
+            'relative data-[state=open]:bg-white/15 data-[state=open]:text-white',
           )}
           aria-label={`Subtitles: ${subStateLabel}`}
-          aria-keyshortcuts='c'
-          title='Subtitles (C)'
+          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'cycleSubtitles')}
+          title={withShortcutHint('Subtitles', keymap, 'cycleSubtitles')}
           onClick={(e) => e.stopPropagation()}
         >
-          <Subtitles className='h-[18px] w-[18px]' strokeWidth={2.5} />
+          <Captions className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
           {hasNonDefaultSettings && (
             <span className='absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
           )}

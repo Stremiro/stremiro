@@ -16,6 +16,7 @@ interface UsePlayerAddonSubtitlesOptions {
   announce: (text: string, icon?: PlayerOsdMessageIcon) => void;
   effectiveResolveMediaType: string;
   id?: string;
+  menuAvailable: boolean;
   mountedRef: RefObject<boolean>;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
@@ -34,6 +35,7 @@ export function usePlayerAddonSubtitles({
   announce,
   effectiveResolveMediaType,
   id,
+  menuAvailable,
   mountedRef,
   resolvedStreamEpisode,
   resolvedStreamSeason,
@@ -57,10 +59,15 @@ export function usePlayerAddonSubtitles({
     };
   }, [activeStreamUrl]);
 
+  useEffect(() => {
+    if (!menuAvailable) setSubtitleMenuOpened(false);
+  }, [menuAvailable]);
+
   // Trimmed so the query key matches what the API sends — untrimmed keys would fork the cache entry.
   const lookupMediaType = effectiveResolveMediaType.trim();
   const lookupMediaId = (streamLookupId || id)?.trim();
-  const subtitlesEnabled = subtitleMenuOpened && lookupMediaType !== '' && !!lookupMediaId;
+  const subtitlesEnabled =
+    menuAvailable && subtitleMenuOpened && lookupMediaType !== '' && !!lookupMediaId;
 
   const subtitlesQuery = useQuery({
     queryKey: addonSubtitlesQueryKey(

@@ -8,6 +8,7 @@ use super::history_helpers::{
 use super::playback_state::PlaybackStateService;
 use super::{normalize_media_id, normalize_watch_progress_type, now_unix_millis, WatchProgress};
 use crate::providers::MediaItem;
+use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
@@ -75,14 +76,11 @@ where
 /// Groups rows by title, preserving the loader's first-seen order
 /// (`ORDER BY last_watched DESC, history_key DESC`) so downstream stable sorts
 /// keep recency ties instead of HashMap iteration order.
-fn group_watch_progress_by_title<T: std::borrow::Borrow<WatchProgress>>(
-    items: impl IntoIterator<Item = T>,
-) -> Vec<Vec<T>> {
+fn group_watch_progress_by_title(items: Vec<WatchProgress>) -> Vec<Vec<WatchProgress>> {
     let mut positions: HashMap<(String, String), usize> = HashMap::new();
-    let mut grouped: Vec<Vec<T>> = Vec::new();
+    let mut grouped: Vec<Vec<WatchProgress>> = Vec::new();
     for item in items {
-        let row = item.borrow();
-        let key = (row.type_.clone(), row.id.clone());
+        let key = (item.type_.clone(), item.id.clone());
         match positions.get(&key) {
             Some(&index) => grouped[index].push(item),
             None => {
@@ -126,15 +124,22 @@ pub(crate) fn build_title_watch_history_rows(items: Vec<WatchProgress>) -> Vec<W
 
 /// Borrows the rows and copies only the selected resume entries.
 pub(super) fn build_continue_watching_entries(items: &[WatchProgress]) -> Vec<WatchProgress> {
-    let mut list: Vec<WatchProgress> = group_watch_progress_by_title(items)
-        .into_iter()
-        .filter_map(|rows| {
-            rows.into_iter()
-                .filter(|row| is_continue_watching_candidate(row))
-                .min_by(|left, right| compare_continue_watching(left, right))
-                .cloned()
-        })
-        .collect();
+    let mut positions: HashMap<(&str, &str), usize> = HashMap::new();
+    let mut winners: Vec<Option<&WatchProgress>> = Vec::new();
+    for row in items {
+        let index = *positions
+            .entry((row.type_.as_str(), row.id.as_str()))
+            .or_insert_with(|| {
+                winners.push(None);
+                winners.len() - 1
+            });
+        if is_continue_watching_candidate(row)
+            && winners[index].is_none_or(|winner| compare_continue_watching(row, winner).is_lt())
+        {
+            winners[index] = Some(row);
+        }
+    }
+    let mut list: Vec<WatchProgress> = winners.into_iter().flatten().cloned().collect();
     for item in &mut list {
         hydrate_watch_progress_lookup_id(item);
     }
@@ -313,24 +318,22 @@ pub async fn get_watch_history(
 }
 
 /// Per-title resume snapshot for details pages and card hover: one indexed `media_id`
-/// read instead of full-table scans. `continue_watching` uses the same grouping chooser
-/// as the global query; `history` keeps every per-episode row (recency-sorted, hydrated).
+/// read instead of full-table scans. Resume picks use the global grouping chooser;
+/// episode rows and selected history heads avoid duplicating full lists on the wire.
 #[derive(Debug, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TitleWatchProgress {
-    pub history: Vec<WatchProgress>,
-    pub continue_watching: Vec<WatchProgress>,
     /// Per-episode rows keyed `id:season:episode`, shared by the details/player/selector progress lookups.
     pub episode_progress: HashMap<String, WatchProgress>,
     /// Furthest canonical episode per season for spoiler masking — highest started
     /// episode, seeded by the latest series row's resume-target coordinates.
     pub watched_episode_ceiling: HashMap<u32, u32>,
-    /// Per-kind `continue_watching` picks — the frontend's resume `find` scans, folded once (`is_series_like` = series|anime).
+    /// Per-kind resumable picks, folded once (`is_series_like` = series|anime).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub series_resume_entry: Option<WatchProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub movie_resume_entry: Option<WatchProgress>,
-    /// First-of-kind `history` heads and `history[0]` — list is `last_watched` DESC, so first match is latest.
+    /// Latest per-kind history heads and latest overall (`last_watched` DESC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_series_entry: Option<WatchProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -346,7 +349,7 @@ fn build_title_episode_progress(
     history: &[WatchProgress],
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> HashMap<String, WatchProgress> {
-    let mut claimants: HashMap<String, Vec<WatchProgress>> = HashMap::new();
+    let mut claimants: HashMap<String, Vec<&WatchProgress>> = HashMap::new();
     for canonical in [true, false] {
         for row in history.iter().filter(|row| row.type_ == "series") {
             let canonical_coordinates =
@@ -363,7 +366,7 @@ fn build_title_episode_progress(
                 claimants
                     .entry(format!("{}:{}:{}", row.id, season, episode))
                     .or_default()
-                    .push(row.clone());
+                    .push(row);
             }
         }
     }
@@ -373,7 +376,11 @@ fn build_title_episode_progress(
             // First claimant keeps its slot (canonical beats remapped); co-claimants
             // merge in as donors, then the merged row re-derives annotations.
             let chosen = rows[0].clone();
-            let merged = merge_watch_progress_donors(chosen, rows, source_health_priorities);
+            let merged = merge_watch_progress_donors(
+                chosen,
+                rows.into_iter().map(Cow::Borrowed),
+                source_health_priorities,
+            );
             (key, with_progress_annotations(merged))
         })
         .collect()
@@ -417,7 +424,7 @@ pub(super) fn build_title_watch_progress_with_priorities(
 ) -> TitleWatchProgress {
     let continue_watching = annotate_watch_progress_list(build_continue_watching_entries(&items));
     let history = annotate_watch_progress_list(build_title_watch_history_rows(items));
-    // Per-kind picks cloned before the vecs move into the struct — both lists are per-title and small.
+    // Keep only the per-kind picks; full lists are internal to this fold.
     let series_resume_entry = continue_watching
         .iter()
         .find(|row| is_series_like_watch_progress(row))
@@ -435,8 +442,6 @@ pub(super) fn build_title_watch_progress_with_priorities(
     TitleWatchProgress {
         episode_progress: build_title_episode_progress(&history, source_health_priorities),
         watched_episode_ceiling: build_watched_episode_ceiling(&history),
-        history,
-        continue_watching,
         series_resume_entry,
         movie_resume_entry,
         latest_series_entry,
@@ -514,9 +519,10 @@ pub(super) fn prepare_episode_watch_changes(
                 position: 0.0,
                 duration: 0.0,
                 last_watched: stamp,
-                title: item.title.clone(),
-                poster: item.poster.clone(),
-                backdrop: item.backdrop.clone(),
+                // Filled once in the common path below, before persistence sanitizes the row.
+                title: String::new(),
+                poster: None,
+                backdrop: None,
                 last_stream_format: None,
                 last_stream_lookup_id: None,
                 last_stream_key: None,

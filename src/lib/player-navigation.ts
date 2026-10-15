@@ -17,7 +17,6 @@ export interface PlayerRouteState {
   poster?: string;
   backdrop?: string;
   logo?: string;
-  format?: string;
   streamSourceId?: string;
   streamSourceName?: string;
   streamFamily?: string;
@@ -107,7 +106,6 @@ export function sanitizePlayerRouteState(
     'poster',
     'backdrop',
     'logo',
-    'format',
     'streamSourceId',
     'streamSourceName',
     'streamFamily',
@@ -192,7 +190,6 @@ function buildResolvedStreamRouteState(
   const explicit: PlayerRouteState = {
     absoluteEpisode: request.absoluteEpisode,
     absoluteSeason: request.absoluteSeason,
-    format: resolved.format,
     requestedStreamKey: picked?.streamKey ?? resolved.streamKey,
     selectedStreamKey: resolved.streamKey ?? picked?.streamKey,
     streamEpisode: request.streamEpisode,

@@ -7,7 +7,7 @@ import { RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 const PLAYER_INTERACTIVE_TARGET_SELECTOR = `[data-player-interactive], ${RADIX_POPPER_CONTENT_SELECTOR}`;
 
 export function isPlayerInteractiveTarget(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && !!target.closest(PLAYER_INTERACTIVE_TARGET_SELECTOR);
+  return target instanceof Element && !!target.closest(PLAYER_INTERACTIVE_TARGET_SELECTOR);
 }
 
 export function shouldIgnorePlayerSurfaceInteraction(event: MouseEvent<HTMLElement>): boolean {

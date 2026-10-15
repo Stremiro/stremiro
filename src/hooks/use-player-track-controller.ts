@@ -97,6 +97,10 @@ export function usePlayerTrackController({
     audio: false,
     sub: false,
   });
+  const cycleRefreshPendingRef = useRef<TrackSwitchingState>({
+    audio: false,
+    sub: false,
+  });
   const trackListRef = useRef<Track[]>([]);
   const trackRefreshInFlightRef = useRef<Promise<Track[]> | null>(null);
   const trackRefreshQueuedRef = useRef<Promise<Track[]> | null>(null);
@@ -131,6 +135,7 @@ export function usePlayerTrackController({
 
   const resetTrackSelectionObservations = useCallback(() => {
     observedTrackIdsRef.current = { audio: undefined, sub: undefined };
+    cycleRefreshPendingRef.current = { audio: false, sub: false };
     for (const type of ['audio', 'sub'] as TrackType[]) {
       const waiters = selectionWaitersRef.current[type];
       for (const waiter of waiters) {
@@ -248,13 +253,16 @@ export function usePlayerTrackController({
   const notifyObservedTrackSelection = useCallback((type: TrackType, id: number | null) => {
     observedTrackIdsRef.current[type] = id;
     const waiters = selectionWaitersRef.current[type];
+    let resolvedSelection = false;
     for (const waiter of waiters) {
       if (waiter.target === 'no' ? id === null : id === waiter.target) {
         window.clearTimeout(waiter.timer);
         waiters.delete(waiter);
         waiter.resolve(true);
+        resolvedSelection = true;
       }
     }
+    return resolvedSelection || cycleRefreshPendingRef.current[type];
   }, []);
 
   // Capture generation before the write so resets during IPC remain detectable.
@@ -522,6 +530,7 @@ export function usePlayerTrackController({
 
       const generation = trackRefreshGenerationRef.current;
       setTrackSwitchingFlag(type, true);
+      cycleRefreshPendingRef.current[type] = true;
       try {
         await cycleMpvTrack(type);
         if (generation !== trackRefreshGenerationRef.current) return null;
@@ -529,6 +538,8 @@ export function usePlayerTrackController({
         if (generation !== trackRefreshGenerationRef.current) return null;
         if (selectedId !== undefined) observedTrackIdsRef.current[type] = selectedId;
         // Refresh before persisting the selection's track-list fingerprint.
+        // Only claim events before this snapshot; later changes need their own refresh.
+        cycleRefreshPendingRef.current[type] = false;
         const fresh = await refreshTracks();
         if (generation !== trackRefreshGenerationRef.current) return null;
         const landedId =
@@ -542,9 +553,19 @@ export function usePlayerTrackController({
         );
         return landedId;
       } catch {
+        if (
+          generation === trackRefreshGenerationRef.current &&
+          cycleRefreshPendingRef.current[type]
+        ) {
+          cycleRefreshPendingRef.current[type] = false;
+          await refreshTracks();
+        }
         return null;
       } finally {
-        if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag(type, false);
+        if (generation === trackRefreshGenerationRef.current) {
+          cycleRefreshPendingRef.current[type] = false;
+          setTrackSwitchingFlag(type, false);
+        }
       }
     },
     [persistTrackSelection, refreshTracks, setTrackSwitchingFlag],
