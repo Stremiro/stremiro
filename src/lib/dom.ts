@@ -27,6 +27,15 @@ export function isEditableTarget(target: EventTarget | null, extraSelector?: str
   );
 }
 
+export function isKeyCaptureTarget(target: EventTarget | null, key?: string): boolean {
+  return (
+    [target, document.activeElement].some(
+      (element) => element instanceof Element && !!element.closest('[data-key-capture]'),
+    ) ||
+    (key === 'Escape' && document.querySelector('[data-escape-capture]') !== null)
+  );
+}
+
 /** Run `onMounted` with the first `selector` match, retrying one frame for virtual rows. */
 export function whenRowMounted(
   getContainer: () => ParentNode | null,

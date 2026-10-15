@@ -6,13 +6,16 @@ import type {
   AppUiPreferencesPatch,
   DataStats,
   ImportResult,
+  LibraryFilters,
   MediaItem,
+  ProfileLibrary,
   ProfilePreferences,
   ProfilePreferencesPatch,
   StreamSelectorPreferences,
   StreamSelectorPreferencesState,
   TitleWatchProgress,
   UserList,
+  UserListSummary,
   WatchStatus,
 } from '@/lib/api';
 import {
@@ -75,6 +78,11 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
         })(),
       ),
     getAppUiPreferences: () => safeInvoke<AppUiPreferences>('get_app_ui_preferences'),
+    getStartupRoute: () => safeInvoke<string | null>('get_startup_route'),
+    getLaunchAtLogin: () => safeInvoke<boolean>('get_launch_at_login'),
+    setLaunchAtLogin: (enabled: boolean) => write<boolean>('set_launch_at_login', { enabled }),
+    hideMainWindowToTray: () => safeInvoke<void>('hide_main_window_to_tray'),
+    closeMainWindowToTray: () => safeInvoke<boolean>('close_main_window_to_tray'),
     saveAppUiPreferences: (patch: AppUiPreferencesPatch) =>
       safeInvoke<AppUiPreferences>('save_app_ui_preferences', {
         patch,
@@ -94,21 +102,37 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       }),
     addToLibrary: (item: MediaItem) => write<void>('add_to_library', { item: toMediaItem(item) }),
     removeFromLibrary: (id: string) => write<void>('remove_from_library', { id }),
+    bulkRemoveFromLibrary: async (ids: string[]): Promise<number> => {
+      if (ids.length === 0) return 0;
+      return write<number>('bulk_remove_from_library', { ids });
+    },
     getLibrary: () => safeInvoke<MediaItem[]>('get_library'),
+    getProfileLibrary: (filters: LibraryFilters) =>
+      safeInvoke<ProfileLibrary>('get_profile_library', { filters }),
     createList: (name: string, icon?: string) => write<UserList>('create_list', { name, icon }),
     deleteList: (listId: string) => write<void>('delete_list', { listId }),
     renameList: (listId: string, name: string, icon?: string) =>
       write<void>('rename_list', { listId, name, icon }),
     addToList: (listId: string, item: MediaItem) =>
       write<void>('add_to_list', { listId, item: toMediaItem(item) }),
+    bulkAddToList: async (listId: string, items: MediaItem[]): Promise<number> => {
+      if (items.length === 0) return 0;
+      return write<number>('bulk_add_to_list', { listId, items: items.map(toMediaItem) });
+    },
     removeFromList: (listId: string, itemId: string) =>
       write<void>('remove_from_list', { listId, itemId }),
     getLists: () => safeInvoke<UserList[]>('get_lists'),
+    getListSummaries: (itemId?: string) =>
+      safeInvoke<UserListSummary[]>('get_list_summaries', { itemId: itemId ?? null }),
     reorderListItems: (listId: string, itemIds: string[]) =>
       write<void>('reorder_list_items', { listId, itemIds }),
     reorderLists: (listIds: string[]) => write<void>('reorder_lists', { listIds }),
     setWatchStatus: (item: MediaItem, status: WatchStatus | null) =>
       write<MediaItem | null>('set_watch_status', { item: toMediaItem(item), status }),
+    bulkSetWatchStatus: async (items: MediaItem[], status: WatchStatus | null): Promise<number> => {
+      if (items.length === 0) return 0;
+      return write<number>('bulk_set_watch_status', { items: items.map(toMediaItem), status });
+    },
     setEpisodesWatched: (
       item: MediaItem,
       episodes: readonly { season: number; episode: number }[],

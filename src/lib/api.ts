@@ -7,7 +7,7 @@ import type { PlayerRouteState } from '@/lib/player-navigation';
 import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
 import type { StreamRankingOptions } from '@/lib/stream-ranking';
 
-export { getErrorKind, getErrorMessage } from '@/lib/api-core';
+export { getErrorKind, getErrorMessage, getListErrorMessage } from '@/lib/api-core';
 export { toMediaItem } from '@/lib/api-store';
 
 export interface MediaItem {
@@ -50,9 +50,11 @@ interface MediaSeason {
 export interface MediaDetails extends MediaItem {
   imdbId?: string;
   rating?: string;
+  runtime?: string;
   cast?: string[];
+  directors?: string[];
   /** Backend-validated 11-char YouTube video ids. */
-  trailers?: { id: string }[];
+  trailers?: { id: string; name?: string }[];
   /** Backend-ordered by (season, episode); coordinate ties preserve addon
       order. */
   episodes?: Episode[];
@@ -99,7 +101,27 @@ export interface UserList {
   items?: MediaItem[];
 }
 
+export interface UserListSummary {
+  id: string;
+  name: string;
+  icon: string;
+  item_count: number;
+  contains_item: boolean;
+}
+
 export type WatchStatus = 'watching' | 'watched' | 'plan_to_watch' | 'dropped';
+
+export interface LibraryFilters {
+  query?: string;
+  type?: 'all' | 'movie' | 'series';
+  status?: WatchStatus | 'all' | 'none';
+  sort?: 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
+}
+
+export interface ProfileLibrary {
+  items: MediaItem[];
+  statusCounts: Record<WatchStatus | 'none', number>;
+}
 
 export const WATCH_STATUSES: readonly WatchStatus[] = [
   'watching',
@@ -230,7 +252,6 @@ export interface AddonSubtitle {
 
 export interface BestResolvedStream {
   url: string;
-  format: string;
   /** Rust-encoded mpv headers, in-memory only. Never persisted or routed; empty clears. */
   mpvHttpHeaderFields: string;
   /** Stable addon-instance id (`AddonConfig.id`) of the resolved winner. */
@@ -366,6 +387,8 @@ export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets'>> & 
 
 export type ProfilePreferencesPatch = LocalProfileUpdate & { viewMode?: ProfileViewMode };
 
+export type StartupPage = 'home' | 'library' | 'calendar' | 'lastVisited';
+
 export interface AppUiPreferences {
   playerVolume: number;
   playerSpeed: number;
@@ -376,6 +399,8 @@ export interface AppUiPreferences {
   subtitleScale: number;
   /** Opt-in: the EOF Up Next card auto-plays after a countdown. */
   autoPlayNext: boolean;
+  nextEpisodeCountdownSecs: number;
+  controlsHideDelayMs: number;
   /** Opt-OUT: muted trailer embed on hover-expanded media cards. */
   trailerPreviews: boolean;
   /**
@@ -384,7 +409,34 @@ export interface AppUiPreferences {
    * `autoPlayNext`'s job).
    */
   autoSkipIntro: boolean;
+  closeToTray: boolean;
+  minimizeToTray: boolean;
+  startMinimized: boolean;
+  startupPage: StartupPage;
+  lastLocation: string | null;
+  /** Per-action overrides (`[]` = unbound); see `src/lib/player-keybindings.ts`. */
+  playerKeybindings: Record<string, string[]>;
 }
+
+export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
+  playerVolume: 75,
+  playerSpeed: 1,
+  spoilerProtection: false,
+  subtitleDelay: 0,
+  subtitlePos: 100,
+  subtitleScale: 1.0,
+  autoPlayNext: false,
+  nextEpisodeCountdownSecs: 8,
+  controlsHideDelayMs: 3000,
+  trailerPreviews: true,
+  autoSkipIntro: false,
+  closeToTray: false,
+  minimizeToTray: false,
+  startMinimized: false,
+  startupPage: 'home',
+  lastLocation: null,
+  playerKeybindings: {},
+};
 
 export interface AppUiPreferencesPatch {
   playerVolume?: number;
@@ -394,8 +446,17 @@ export interface AppUiPreferencesPatch {
   subtitlePos?: number;
   subtitleScale?: number;
   autoPlayNext?: boolean;
+  nextEpisodeCountdownSecs?: number;
+  controlsHideDelayMs?: number;
   trailerPreviews?: boolean;
   autoSkipIntro?: boolean;
+  closeToTray?: boolean;
+  minimizeToTray?: boolean;
+  startMinimized?: boolean;
+  startupPage?: StartupPage;
+  lastLocation?: string | null;
+  /** Replaces the whole override map; `{}` restores every default. */
+  playerKeybindings?: Record<string, string[]>;
 }
 
 export type StreamSelectorQuality = 'all' | '4k' | '1080p' | '720p' | 'sd';
@@ -487,6 +548,7 @@ export const api = {
 export interface DataStats {
   history_count: number;
   history_title_count: number;
+  has_learned_playback_data: boolean;
   library_count: number;
   lists_count: number;
   watch_statuses_count: number;
@@ -530,18 +592,16 @@ export interface WatchProgress {
   has_started_watching?: boolean;
 }
 
-/** All hydrated title rows plus its resumable subset. */
+/** Per-episode progress plus selected resume and latest-history rows. */
 export interface TitleWatchProgress {
-  history: WatchProgress[];
-  continueWatching: WatchProgress[];
   /** Per-episode rows keyed `id:season:episode` (canonical coords claim first). */
   episodeProgress: Record<string, WatchProgress>;
   /** Furthest started episode per season — spoiler-mask ceiling. */
   watchedEpisodeCeiling: Record<string, number>;
-  /** Per-kind `continueWatching` picks (series-like vs movie), pre-folded. */
+  /** Per-kind resumable picks (series-like vs movie), pre-folded. */
   seriesResumeEntry?: WatchProgress;
   movieResumeEntry?: WatchProgress;
-  /** First-of-kind `history` heads and `history[0]` (`last_watched` DESC). */
+  /** Latest per-kind history heads and latest overall (`last_watched` DESC). */
   latestSeriesEntry?: WatchProgress;
   latestMovieEntry?: WatchProgress;
   latestEntry?: WatchProgress;

@@ -23,6 +23,15 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
+// Exact Rust list validation messages that are safe to show; anything else stays generic.
+const USER_FACING_LIST_ERROR =
+  /^(?:List name is required\.|List not found|Too many lists\. Maximum is \d+\.|List is full\. Maximum is \d+ items\.|A custom list cannot exceed \d+ items)$/;
+
+export function getListErrorMessage(error: unknown): string | undefined {
+  const message = getErrorMessage(error);
+  return USER_FACING_LIST_ERROR.test(message) ? message : undefined;
+}
+
 /** `kind` tag of a structured Rust command error (carried as the Error's `cause`). */
 export function getErrorKind(error: unknown): string | undefined {
   const cause = error instanceof Error ? error.cause : error;

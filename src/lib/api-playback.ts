@@ -78,6 +78,26 @@ function bestStreamCacheKey(
 
 export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
   return {
+    getStreamLink: (
+      type: string,
+      id: string,
+      streamKey: string,
+      season?: number,
+      episode?: number,
+      absoluteEpisode?: number,
+      options?: StreamRankingOptions,
+      sourceId?: string,
+    ) =>
+      safeInvoke<{ url: string; kind: 'http' | 'magnet' }>('get_stream_link', {
+        mediaType: type.trim(),
+        id: id.trim(),
+        streamKey,
+        sourceId,
+        season,
+        episode,
+        absoluteEpisode,
+        ...options,
+      }),
     getStreamSelectorData: (
       type: string,
       id: string,
@@ -117,19 +137,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     ) => {
       const trimmedType = type.trim();
       const trimmedId = id.trim();
-      const {
-        preferredStreamKey: rawPreferredStreamKey,
-        preferredSourceId: rawPreferredSourceId,
-        preferredSourceName: rawPreferredSourceName,
-        preferredStreamFamily: rawPreferredStreamFamily,
-        ...rankingOptions
-      } = options ?? {};
-      const preferredHints = normalizePreferredStreamHints({
-        preferredStreamKey: rawPreferredStreamKey,
-        preferredSourceId: rawPreferredSourceId,
-        preferredSourceName: rawPreferredSourceName,
-        preferredStreamFamily: rawPreferredStreamFamily,
-      });
+      const preferredHints = normalizePreferredStreamHints(options ?? {});
       const cacheKey = bestStreamCacheKey(
         trimmedType,
         trimmedId,
@@ -145,8 +153,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
           season,
           episode,
           absoluteEpisode,
+          ...options,
           ...preferredHints,
-          ...rankingOptions,
         }),
       );
     },

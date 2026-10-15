@@ -1,16 +1,25 @@
 import type { QueryClient } from '@tanstack/react-query';
-import type { CalendarRange } from '@/lib/api';
+import type { CalendarRange, LibraryFilters } from '@/lib/api';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
+const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
+export function profileLibraryQueryKey(filters: LibraryFilters) {
+  return [...PROFILE_LIBRARY_QUERY_KEY, filters] as const;
+}
 // Rust interleaves continue-watching + Up Next from one snapshot, keyed per local day.
 export const RESUME_RAIL_QUERY_KEY = 'resume-rail';
 export function resumeRailQueryKey(localToday: string | undefined) {
   return [RESUME_RAIL_QUERY_KEY, localToday ?? ''] as const;
 }
 export const WATCH_HISTORY_QUERY_KEY = ['watch-history'] as const;
+export const RECENT_WATCH_SEED_QUERY_KEY = [...WATCH_HISTORY_QUERY_KEY, 'recent-seed'] as const;
 const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
 export const TOTAL_WATCH_TIME_QUERY_KEY = ['total-watch-time'] as const;
 export const LISTS_QUERY_KEY = ['lists'] as const;
+const LIST_SUMMARIES_QUERY_KEY = ['list-summaries'] as const;
+export function listSummariesQueryKey(itemId?: string) {
+  return [...LIST_SUMMARIES_QUERY_KEY, itemId?.trim() || undefined] as const;
+}
 export const WATCH_STATUSES_QUERY_KEY = ['watch-statuses'] as const;
 const CALENDAR_EVENTS_QUERY_KEY = ['calendar-events'] as const;
 export const DATA_STATS_QUERY_KEY = ['dataStats'] as const;
@@ -149,6 +158,7 @@ export async function invalidateLibraryQueries(queryClient: QueryClient) {
   refreshScheduleQueries(queryClient);
   await Promise.all([
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
@@ -190,6 +200,7 @@ export async function invalidateListQueries(queryClient: QueryClient) {
   // lists_count lives inside the stats payload.
   await Promise.all([
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
+    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }
@@ -199,6 +210,7 @@ export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
   refreshScheduleQueries(queryClient);
   await Promise.all([
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
+    invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }
@@ -256,6 +268,7 @@ export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
     invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY),
     invalidateQuery(queryClient, TRENDING_QUERY_KEY),
     invalidateQuery(queryClient, BROWSE_GENRES_QUERY_KEY),
+    invalidateQuery(queryClient, RECENT_WATCH_SEED_QUERY_KEY),
   ]);
 }
 
@@ -286,7 +299,9 @@ export async function invalidateStoredDataQueries(
   await Promise.all([
     invalidateHistoryCollections(queryClient),
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
+    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     restoreSettings && invalidateSettingsQueries(queryClient),
   ]);

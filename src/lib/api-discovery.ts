@@ -45,6 +45,8 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
 
   const getBrowseGenres = () => safeInvoke<BrowseGenres>('get_browse_genres');
 
+  const getRecentWatchSeed = () => safeInvoke<MediaItem | null>('get_recent_watch_seed');
+
   // Rust picks the browse catalog and seed genres from the source's genres.
   const querySimilarTitles = (source: MediaItem) =>
     safeInvoke<MediaItem[]>('query_similar_titles', {
@@ -54,6 +56,7 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
         type: source.type,
         year: source.year,
         genres: source.genres,
+        description: source.description,
       },
     });
 
@@ -64,6 +67,7 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
     getDetailsPrefetchBundle,
     getCalendarEvents,
     getBrowseGenres,
+    getRecentWatchSeed,
     querySimilarTitles,
   };
 }

@@ -3,6 +3,21 @@ import type { ReactNode } from 'react';
 import { toast } from 'sonner';
 import { cn, hideBrokenImage } from '@/lib/utils';
 
+export async function copyText(
+  text: string,
+  successMessage: string,
+  failureMessage = 'Could not copy link',
+): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    toast.success(successMessage);
+    return true;
+  } catch {
+    toast.error(failureMessage);
+    return false;
+  }
+}
+
 // Top-center action channel for deliberate "tracked" confirmations (watch status, library, lists);
 // ambient notices stay on the bottom-center channel.
 //

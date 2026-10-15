@@ -1,6 +1,7 @@
 import { type ClassValue, clsx } from 'clsx';
 import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns';
 import { twMerge } from 'tailwind-merge';
+import type { AccentTargets } from '@/lib/api';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
@@ -17,25 +18,45 @@ export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 /** Content-column insets clearing the fixed sidebar; never `cn()`-merge — `lg:px-*` would override `lg:pl-[92px]` under tailwind-merge. */
 export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
 
-/** `#rrggbb` to `"r g b"` for use inside `rgb()`/`rgba()` with CSS vars. */
-export function hexToRgbTriplet(value: string): `${number} ${number} ${number}` {
+function parseHexRgb(value: string): [number, number, number] | null {
   const match = HEX_COLOR_PATTERN.exec(value.trim());
-  if (!match?.[1]) return '255 255 255';
+  if (!match?.[1]) return null;
   const channels = Number.parseInt(match[1], 16);
-  return `${(channels >> 16) & 255} ${(channels >> 8) & 255} ${channels & 255}`;
+  return [(channels >> 16) & 255, (channels >> 8) & 255, channels & 255];
+}
+
+/** `#rrggbb` to `"r g b"` for use inside `rgb()`/`rgba()` with CSS vars. */
+function hexToRgbTriplet(value: string): `${number} ${number} ${number}` {
+  const [r, g, b] = parseHexRgb(value) ?? [255, 255, 255];
+  return `${r} ${g} ${b}`;
 }
 
 /** Readable text color over a filled accent background. */
 export function getAccentTextColor(value: string): '#000000' | '#ffffff' {
-  const match = HEX_COLOR_PATTERN.exec(value.trim());
-  if (!match?.[1]) return '#000000';
-  const channels = Number.parseInt(match[1], 16);
-  const luminance =
-    (0.299 * ((channels >> 16) & 255) +
-      0.587 * ((channels >> 8) & 255) +
-      0.114 * (channels & 255)) /
-    255;
+  const rgb = parseHexRgb(value);
+  if (!rgb) return '#000000';
+  const [r, g, b] = rgb;
+  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
   return luminance > 0.6 ? '#000000' : '#ffffff';
+}
+
+const NEUTRAL_ACCENT = '#d4d4d8';
+
+export function applyAccentVars(accent: string, targets: AccentTargets) {
+  const root = document.documentElement;
+  const scopes: Array<[string, boolean]> = [
+    ['app-accent', true],
+    ['accent-nav', targets.navigation],
+    ['accent-act', targets.actions],
+    ['accent-prog', targets.progress],
+    ['accent-art', targets.artwork],
+  ];
+  for (const [scope, enabled] of scopes) {
+    const color = enabled ? accent : NEUTRAL_ACCENT;
+    root.style.setProperty(`--${scope}`, color);
+    root.style.setProperty(`--${scope}-rgb`, hexToRgbTriplet(color));
+    root.style.setProperty(`--on-${scope}`, getAccentTextColor(color));
+  }
 }
 
 /** Trimmed string, or `undefined` when blank — mirrors Rust `non_blank`. */
