@@ -1,23 +1,32 @@
 import { Check, ChevronRight, Loader2, Settings2, SlidersHorizontal } from 'lucide-react';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
 import { ProfileAvatar } from '@/components/profile-avatar';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import type { LocalProfile, LocalProfileUpdate } from '@/hooks/use-local-profile';
+import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
 import { clamp, getAccentTextColor, nonBlank } from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
   onUpdate,
   isSaving,
+  isHydrating,
+  isError,
+  isRetrying,
+  onRetry,
 }: {
   profile: LocalProfile;
   onUpdate: (updates: LocalProfileUpdate) => Promise<void>;
   isSaving: boolean;
+  isHydrating: boolean;
+  isError: boolean;
+  isRetrying: boolean;
+  onRetry: () => void;
 }) {
   const navigate = useNavigate();
   const [open, setOpen] = useState(false);
@@ -25,8 +34,13 @@ export function ProfileSettingsPopover({
   const [draftAccentColor, setDraftAccentColor] = useState(profile.accentColor);
   const [draftIntensity, setDraftIntensity] = useState(profile.accentIntensity);
 
+  useEffect(() => {
+    if (isHydrating) setOpen(false);
+  }, [isHydrating]);
+
   const handleOpenChange = (next: boolean) => {
     if (next) {
+      if (isHydrating) return;
       setDraftName(profile.username);
       setDraftAccentColor(profile.accentColor);
       setDraftIntensity(profile.accentIntensity);
@@ -41,7 +55,7 @@ export function ProfileSettingsPopover({
 
   const handleSave = async () => {
     const trimmedName = draftName.trim();
-    if (!trimmedName || isSaving) return;
+    if (!trimmedName || isSaving || isHydrating || isError) return;
 
     try {
       await onUpdate({
@@ -59,13 +73,14 @@ export function ProfileSettingsPopover({
   const active = previewAccentColor;
 
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
+    <Popover open={open && !isHydrating} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button
           type='button'
           title='Customize profile'
           aria-label='Customize profile'
-          className='flex h-8 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2.5 text-zinc-400 transition-colors duration-150 hover:border-white/[0.14] hover:bg-white/[0.07] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+          disabled={isHydrating}
+          className='flex h-8 items-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] px-2.5 text-zinc-400 transition-colors duration-150 enabled:hover:border-white/[0.14] enabled:hover:bg-white/[0.07] enabled:hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25 disabled:cursor-not-allowed disabled:opacity-50'
         >
           <span
             aria-hidden='true'
@@ -86,99 +101,116 @@ export function ProfileSettingsPopover({
           <h2 className='text-[13px] font-semibold text-white'>Customize profile</h2>
         </div>
 
-        <div className='px-3.5 py-3 space-y-4'>
-          <div className='flex items-center gap-2.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2'>
-            <ProfileAvatar
-              name={previewName}
-              avatar={profile.avatar}
-              className='h-8 w-8'
-              fallbackClassName='text-[13px] font-black transition-colors duration-200'
-              fallbackStyle={{ backgroundColor: `${active}1f`, color: active }}
-            />
-            <div className='min-w-0 flex-1'>
-              <p
-                dir='auto'
-                title={previewName}
-                className='truncate text-[12.5px] font-semibold text-white'
-              >
-                {previewName}
-              </p>
-              <p className='text-[10.5px] text-zinc-600'>Preview — save to apply</p>
-            </div>
-            <div
-              className='h-5 w-5 shrink-0 rounded-md border border-white/10 transition-colors duration-200'
-              style={{ backgroundColor: active }}
-            />
-          </div>
-
-          <div className='space-y-1'>
-            <label htmlFor='profile-display-name' className='text-[12px] font-medium text-zinc-400'>
-              Display name
-            </label>
-            <Input
-              id='profile-display-name'
-              value={draftName}
-              // Code-point cap matching Rust's char limit — `maxLength` counts UTF-16 units.
-              onChange={(e) => setDraftName(Array.from(e.target.value).slice(0, 32).join(''))}
-              onKeyDown={(e) => {
-                if (
-                  e.key !== 'Enter' ||
-                  e.defaultPrevented ||
-                  e.nativeEvent.isComposing ||
-                  e.repeat
-                )
-                  return;
-                e.preventDefault();
-                void handleSave();
-              }}
-              placeholder='Enter your name…'
-              className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
-            />
-          </div>
-
-          <AccentControls
-            accentColor={draftAccentColor}
-            committedColor={profile.accentColor}
-            intensity={draftIntensity}
-            committedIntensity={profile.accentIntensity}
-            onAccentColorChange={setDraftAccentColor}
-            onIntensityChange={setDraftIntensity}
-          />
-        </div>
-
-        <div className='px-3.5 pb-3.5 space-y-1.5'>
-          <Button
-            size='sm'
-            onClick={handleSave}
-            disabled={!draftName.trim()}
-            aria-disabled={isSaving || undefined}
-            aria-busy={isSaving || undefined}
-            className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5'
-            style={{
-              backgroundColor: active,
-              color: getAccentTextColor(active),
-            }}
-          >
-            {isSaving ? (
-              <Loader2 aria-hidden='true' className='w-3 h-3 animate-spin' />
-            ) : (
-              <Check aria-hidden='true' className='w-3 h-3' />
-            )}
-            {isSaving ? 'Saving…' : 'Save'}
-          </Button>
-          <button
-            type='button'
-            onClick={() => {
+        {isError ? (
+          <RetryBanner
+            className='m-2 px-2.5 py-2'
+            message="Couldn't load profile preferences."
+            isRetrying={isRetrying}
+            onRetry={() => {
               setOpen(false);
-              navigate('/settings?section=appearance');
+              onRetry();
             }}
-            className='flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
-          >
-            <SlidersHorizontal className='h-3 w-3' />
-            Tint controls
-            <ChevronRight className='h-3 w-3 opacity-60' />
-          </button>
-        </div>
+          />
+        ) : (
+          <>
+            <div className='px-3.5 py-3 space-y-4'>
+              <div className='flex items-center gap-2.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2'>
+                <ProfileAvatar
+                  name={previewName}
+                  avatar={profile.avatar}
+                  className='h-8 w-8'
+                  fallbackClassName='text-[13px] font-black transition-colors duration-200'
+                  fallbackStyle={{ backgroundColor: `${active}1f`, color: active }}
+                />
+                <div className='min-w-0 flex-1'>
+                  <p
+                    dir='auto'
+                    title={previewName}
+                    className='truncate text-[12.5px] font-semibold text-white'
+                  >
+                    {previewName}
+                  </p>
+                  <p className='text-[10.5px] text-zinc-600'>Preview — save to apply</p>
+                </div>
+                <div
+                  className='h-5 w-5 shrink-0 rounded-md border border-white/10 transition-colors duration-200'
+                  style={{ backgroundColor: active }}
+                />
+              </div>
+
+              <div className='space-y-1'>
+                <label
+                  htmlFor='profile-display-name'
+                  className='text-[12px] font-medium text-zinc-400'
+                >
+                  Display name
+                </label>
+                <Input
+                  id='profile-display-name'
+                  value={draftName}
+                  // Code-point cap matching Rust's char limit — `maxLength` counts UTF-16 units.
+                  onChange={(e) => setDraftName(Array.from(e.target.value).slice(0, 32).join(''))}
+                  onKeyDown={(e) => {
+                    if (
+                      e.key !== 'Enter' ||
+                      e.defaultPrevented ||
+                      e.nativeEvent.isComposing ||
+                      e.repeat
+                    )
+                      return;
+                    e.preventDefault();
+                    void handleSave();
+                  }}
+                  placeholder='Enter your name…'
+                  className='h-8 bg-zinc-900/80 border-white/8 text-[13px] text-white placeholder:text-zinc-700 focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:ring-offset-0 rounded-md'
+                />
+              </div>
+
+              <AccentControls
+                accentColor={draftAccentColor}
+                committedColor={profile.accentColor}
+                intensity={draftIntensity}
+                committedIntensity={profile.accentIntensity}
+                onAccentColorChange={setDraftAccentColor}
+                onIntensityChange={setDraftIntensity}
+              />
+            </div>
+
+            <div className='px-3.5 pb-3.5 space-y-1.5'>
+              <Button
+                size='sm'
+                onClick={handleSave}
+                disabled={!draftName.trim() || isHydrating}
+                aria-disabled={isSaving || undefined}
+                aria-busy={isSaving || undefined}
+                className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5'
+                style={{
+                  backgroundColor: active,
+                  color: getAccentTextColor(active),
+                }}
+              >
+                {isSaving ? (
+                  <Loader2 aria-hidden='true' className='w-3 h-3 animate-spin' />
+                ) : (
+                  <Check aria-hidden='true' className='w-3 h-3' />
+                )}
+                {isSaving ? 'Saving…' : 'Save'}
+              </Button>
+              <button
+                type='button'
+                onClick={() => {
+                  setOpen(false);
+                  navigate('/settings?section=appearance');
+                }}
+                className='flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
+              >
+                <SlidersHorizontal className='h-3 w-3' />
+                Tint controls
+                <ChevronRight className='h-3 w-3 opacity-60' />
+              </button>
+            </div>
+          </>
+        )}
       </PopoverContent>
     </Popover>
   );

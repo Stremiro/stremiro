@@ -134,6 +134,11 @@ export function useLocalProfile() {
   return {
     profile: currentPreferences.profile,
     viewMode: currentPreferences.viewMode,
+    isHydrating:
+      !profilePreferencesQuery.isError &&
+      (!profilePreferencesQuery.isSuccess || profilePreferencesQuery.isPlaceholderData),
+    isError: profilePreferencesQuery.isError,
+    profilePreferencesQuery,
     updateProfile,
     updateViewMode,
     isSaving: savePreferencesMutation.isPending,

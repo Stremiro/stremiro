@@ -71,7 +71,7 @@ pub(crate) struct DurableStoreRegistry {
 impl DurableStoreRegistry {
     /// First open reads under the registry lock; a missing file starts empty,
     /// invalid data errors and is never cached so a later open retries disk state.
-    pub(super) fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
+    pub(crate) fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
         let mut stores = lock_or_recover(&self.stores);
         if let Some(store) = stores.get(&path) {
             return Ok(store.clone());
@@ -101,13 +101,15 @@ impl DurableStoreRegistry {
 /// and the dirty flag the exit flush reads.
 #[derive(Clone)]
 pub(crate) struct DurableStore {
-    path: PathBuf,
+    path: Arc<Path>,
     data: Arc<Mutex<StoreData>>,
 }
 
 struct StoreData {
     entries: HashMap<String, Value>,
     dirty: bool,
+    #[cfg(test)]
+    save_count: usize,
 }
 
 /// Store files are flat `{key: value}` objects — empty bytes, invalid JSON, and
@@ -125,10 +127,12 @@ impl DurableStore {
             Err(error) => return Err(error.to_string()),
         };
         Ok(Self {
-            path: path.to_path_buf(),
+            path: Arc::from(path),
             data: Arc::new(Mutex::new(StoreData {
                 entries,
                 dirty: false,
+                #[cfg(test)]
+                save_count: 0,
             })),
         })
     }
@@ -183,6 +187,11 @@ impl DurableStore {
         lock_or_recover(&self.data).dirty
     }
 
+    #[cfg(test)]
+    pub(super) fn save_count(&self) -> usize {
+        lock_or_recover(&self.data).save_count
+    }
+
     /// Atomic commit with the map lock held through serialize+rename; `dirty` stays
     /// set on failure so the exit flush can retry. A clean store no-ops.
     pub(crate) fn save(&self) -> Result<(), String> {
@@ -196,6 +205,10 @@ impl DurableStore {
         }
         write_atomic_file(&self.path, &bytes, true)?;
         data.dirty = false;
+        #[cfg(test)]
+        {
+            data.save_count += 1;
+        }
         Ok(())
     }
 }

@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, State};
 
 mod addon_registry;
+pub(crate) mod app_shell_commands;
 pub(crate) mod app_update_commands;
 pub(crate) mod backup_commands;
 pub(crate) mod browse_genre_commands;
@@ -300,6 +301,7 @@ pub async fn get_skip_times(
 pub struct DataStats {
     pub history_count: usize,
     pub history_title_count: usize,
+    pub has_learned_playback_data: bool,
     pub library_count: usize,
     pub lists_count: usize,
     pub watch_statuses_count: usize,
@@ -317,6 +319,7 @@ pub async fn get_data_stats(
         move || {
             let history_count = service.count_resume_entries(&app)?;
             let history_title_count = service.count_resume_titles(&app)?;
+            let has_learned_playback_data = service.has_learned_playback_data(&app)?;
 
             // Index headers alone answer the count — `load_*_map` parses every record
             // and can repair-write inside a read-only endpoint.
@@ -332,6 +335,7 @@ pub async fn get_data_stats(
             Ok(DataStats {
                 history_count,
                 history_title_count,
+                has_learned_playback_data,
                 library_count,
                 lists_count,
                 watch_statuses_count,

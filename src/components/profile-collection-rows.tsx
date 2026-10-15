@@ -1,11 +1,10 @@
 import { formatDistanceToNow } from 'date-fns';
-import { Loader2, Play, X } from 'lucide-react';
+import { Check, Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
 import { useNavigate } from 'react-router';
-import { RemoteImage } from '@/components/remote-image';
+import { PosterThumb } from '@/components/poster-thumb';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
-import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import { useRemoveFromWatchHistory } from '@/hooks/use-media-library';
@@ -26,47 +25,33 @@ import { navigateToDetails } from '@/lib/player-navigation';
 import { cn, formatSeasonEpisode, mediaTypeLabel } from '@/lib/utils';
 import { mediaCardRailKey } from './media-card';
 
-function PosterThumb({
-  poster,
-  title,
-  progressPct,
-}: {
-  poster?: string;
-  title: string;
-  progressPct?: number;
-}) {
-  return (
-    <div className='relative w-8 h-12 shrink-0 rounded-md overflow-hidden bg-zinc-900/80 ring-1 ring-white/[0.06]'>
-      {poster ? (
-        <RemoteImage
-          src={poster}
-          alt={title}
-          className='w-full h-full object-cover'
-          loading='lazy'
-        />
-      ) : (
-        <div className='w-full h-full flex items-center justify-center text-white/10 text-[8px] font-bold'>
-          N/A
-        </div>
-      )}
-      <WatchProgressStrip percent={progressPct ?? 0} className='h-0.5 bg-black/50' />
-    </div>
-  );
-}
-
 export function LibraryList({
   items,
   watchStatuses,
+  selectionMode,
+  selectedIds,
+  onToggleSelect,
 }: {
   items: MediaItem[];
   watchStatuses?: Record<string, WatchStatus>;
+  selectionMode?: boolean;
+  selectedIds?: ReadonlySet<string>;
+  onToggleSelect?: (item: MediaItem) => void;
 }) {
   return (
     <WindowVirtualizedStack
       items={items}
       getItemKey={mediaCardRailKey}
       estimateSize={() => 76}
-      renderItem={(item) => <LibraryListRow item={item} status={watchStatuses?.[item.id]} />}
+      renderItem={(item) => (
+        <LibraryListRow
+          item={item}
+          status={watchStatuses?.[item.id]}
+          selectionMode={selectionMode}
+          isSelected={selectedIds?.has(item.id) ?? false}
+          onToggleSelect={onToggleSelect}
+        />
+      )}
     />
   );
 }
@@ -74,9 +59,15 @@ export function LibraryList({
 const LibraryListRow = memo(function LibraryListRow({
   item,
   status,
+  selectionMode = false,
+  isSelected = false,
+  onToggleSelect,
 }: {
   item: MediaItem;
   status?: WatchStatus;
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: (item: MediaItem) => void;
 }) {
   const navigate = useNavigate();
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
@@ -84,11 +75,38 @@ const LibraryListRow = memo(function LibraryListRow({
   return (
     <button
       type='button'
-      className='w-full flex items-center gap-3 px-3 py-2.5 rounded-md bg-white/[0.015] border border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] transition-colors text-left group focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:border-white/20'
-      onPointerEnter={prefetchDetails}
-      onFocus={prefetchDetails}
-      onClick={() => navigateToDetails(navigate, item.type, item.id)}
+      aria-pressed={selectionMode ? isSelected : undefined}
+      aria-label={selectionMode ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}` : undefined}
+      className={cn(
+        'w-full flex items-center gap-3 px-3 py-2.5 rounded-md border hover:bg-white/[0.04] hover:border-white/[0.10] transition-colors text-left group focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:border-white/20',
+        selectionMode && isSelected
+          ? 'border-white/[0.18] bg-white/[0.06]'
+          : 'bg-white/[0.015] border-white/[0.05]',
+      )}
+      onPointerEnter={selectionMode ? undefined : prefetchDetails}
+      onFocus={selectionMode ? undefined : prefetchDetails}
+      onClick={(event) => {
+        if (selectionMode) {
+          event.preventDefault();
+          onToggleSelect?.(item);
+          return;
+        }
+        navigateToDetails(navigate, item.type, item.id);
+      }}
     >
+      {selectionMode && (
+        <span
+          aria-hidden='true'
+          className={cn(
+            'flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors',
+            isSelected
+              ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav)'
+              : 'border-white/25 bg-black/30 text-transparent group-hover:border-white/50',
+          )}
+        >
+          <Check className='h-3 w-3' strokeWidth={3} />
+        </span>
+      )}
       <PosterThumb poster={item.poster} title={item.title} />
 
       <div className='flex-1 min-w-0'>
@@ -127,6 +145,8 @@ export function HistoryListView({ items }: { items: WatchProgress[] }) {
 }
 
 const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgress }) {
+  const navigate = useNavigate();
+  const prefetchDetails = usePrefetchDetails(item.id, item.type_);
   const progressPct = getWatchProgressPercent(item.position, item.duration);
   const { season, episode } = watchProgressCoordinates(item);
   const seasonEpisodeLabel = formatSeasonEpisode(season, episode);
@@ -147,24 +167,36 @@ const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgr
 
   return (
     <div className='group/hrow flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] transition-colors'>
-      <PosterThumb poster={item.poster} title={item.title} progressPct={progressPct} />
-
-      <div className='flex-1 min-w-0'>
-        <p dir='auto' title={item.title} className='text-[13px] font-medium text-zinc-100 truncate'>
-          {item.title}
-        </p>
-        <div className='flex flex-wrap items-center gap-x-2 gap-y-1 mt-1'>
-          {seasonEpisodeLabel && (
-            <span className='text-[11px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
-          )}
-          {progressPct > 0 && (
-            <span className='text-[11px] text-zinc-500 tabular-nums'>
-              {Math.round(progressPct)}%
-            </span>
-          )}
-          {watchedAgo && <span className='text-[11px] text-zinc-600'>{watchedAgo}</span>}
+      <button
+        type='button'
+        aria-label={`Open details for ${item.title}`}
+        onClick={() => navigateToDetails(navigate, item.type_, item.id)}
+        onPointerEnter={prefetchDetails}
+        onFocus={prefetchDetails}
+        className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
+      >
+        <PosterThumb poster={item.poster} title={item.title} progressPct={progressPct} />
+        <div className='flex-1 min-w-0'>
+          <p
+            dir='auto'
+            title={item.title}
+            className='text-[13px] font-medium text-zinc-100 truncate'
+          >
+            {item.title}
+          </p>
+          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 mt-1'>
+            {seasonEpisodeLabel && (
+              <span className='text-[11px] text-zinc-400 font-medium'>{seasonEpisodeLabel}</span>
+            )}
+            {progressPct > 0 && (
+              <span className='text-[11px] text-zinc-500 tabular-nums'>
+                {Math.round(progressPct)}%
+              </span>
+            )}
+            {watchedAgo && <span className='text-[11px] text-zinc-600'>{watchedAgo}</span>}
+          </div>
         </div>
-      </div>
+      </button>
 
       <div className='flex items-center gap-0.5 shrink-0'>
         <Button

@@ -1,13 +1,17 @@
 use super::store_helpers::{
     library_item_key, load_library_index, load_library_map, load_watch_status_index,
-    merge_library_item, normalize_library_item, watch_status_item_key,
+    merge_library_item, normalize_library_item, normalize_watch_status, persist_index_map,
+    read_library_snapshot, read_watch_status_snapshot, watch_status_item_key, LIBRARY_LAYOUT,
+    WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
     WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::MediaItem;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashMap;
 use tauri::{command, AppHandle};
 
 /// Bound on the library index: every add rewrites the index key, so an
@@ -28,11 +32,7 @@ pub(super) fn prepare_library_write(
         .get_typed(library_item_key(&item.id))
         .and_then(normalize_library_item)
         .filter(|existing| existing.id == item.id);
-    let item = if let Some(existing) = existing {
-        merge_library_item(existing, item)
-    } else {
-        item
-    };
+    let item = merge_library_item(existing.as_ref(), item);
     if !index.contains(&item.id) {
         if index.len() >= MAX_LIBRARY_ITEMS {
             return Err("Library is full.".to_string());
@@ -96,6 +96,54 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
     .await
 }
 
+fn normalize_bulk_library_ids(ids: &[String]) -> Result<Vec<String>, String> {
+    ids.iter()
+        .map(|id| normalize_media_id(id).ok_or_else(|| "Invalid media id for library.".to_string()))
+        .collect()
+}
+
+fn remove_library_items(
+    store: &DurableStore,
+    status_store: &DurableStore,
+    ids: &[String],
+) -> Result<usize, String> {
+    let mut library = read_library_snapshot(store)?;
+    let mut statuses = read_watch_status_snapshot(status_store)?;
+    let mut removed = 0usize;
+    let mut status_changed = false;
+    for id in ids {
+        removed += usize::from(library.items.remove(id).is_some());
+        status_changed |= statuses.items.remove(id).is_some();
+    }
+    // Same status-before-library durability ordering as single removal.
+    if status_changed {
+        persist_index_map(
+            status_store,
+            WATCH_STATUS_LAYOUT,
+            &statuses.index,
+            &statuses.items,
+        )?;
+    }
+    if removed > 0 {
+        persist_index_map(store, LIBRARY_LAYOUT, &library.index, &library.items)?;
+    }
+    Ok(removed)
+}
+
+#[command]
+pub async fn bulk_remove_from_library(app: AppHandle, ids: Vec<String>) -> Result<usize, String> {
+    run_blocking_store_op(move || {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let ids = normalize_bulk_library_ids(&ids)?;
+        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
+        remove_library_items(&store, &status_store, &ids)
+    })
+    .await
+}
+
 #[command]
 pub async fn get_library(app: AppHandle) -> Result<Vec<MediaItem>, String> {
     run_blocking_store_op(move || {
@@ -109,4 +157,343 @@ pub async fn get_library(app: AppHandle) -> Result<Vec<MediaItem>, String> {
         Ok(items)
     })
     .await
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum LibrarySort {
+    #[default]
+    Default,
+    TitleAsc,
+    TitleDesc,
+    YearAsc,
+    YearDesc,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum LibraryType {
+    #[default]
+    All,
+    Movie,
+    Series,
+}
+
+#[derive(Default, Deserialize)]
+pub(crate) struct LibraryFilters {
+    query: Option<String>,
+    #[serde(default, rename = "type")]
+    type_: LibraryType,
+    status: Option<String>,
+    #[serde(default)]
+    sort: LibrarySort,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ProfileLibrary {
+    items: Vec<MediaItem>,
+    status_counts: HashMap<String, usize>,
+}
+
+fn filter_profile_library(
+    mut items: Vec<MediaItem>,
+    statuses: &HashMap<String, String>,
+    filters: LibraryFilters,
+) -> Result<ProfileLibrary, String> {
+    let status = match filters.status.as_deref().map(str::trim) {
+        None | Some("all") => None,
+        Some("none") => Some("none".to_string()),
+        Some(value) => {
+            Some(normalize_watch_status(value).ok_or_else(|| "Invalid watch status.".to_string())?)
+        }
+    };
+    // Keep literal Unicode/punctuation matching; remote search normalization is ASCII-only.
+    let query = filters.query.as_deref().unwrap_or("").trim().to_lowercase();
+    let mut status_counts = ["watching", "watched", "plan_to_watch", "dropped", "none"]
+        .into_iter()
+        .map(|status| (status.to_string(), 0))
+        .collect::<HashMap<_, _>>();
+    for item in &items {
+        let status = statuses.get(&item.id).map_or("none", String::as_str);
+        if let Some(count) = status_counts.get_mut(status) {
+            *count += 1;
+        }
+    }
+    items.retain(|item| {
+        let type_matches = match filters.type_ {
+            LibraryType::All => true,
+            LibraryType::Movie => item.type_ == "movie",
+            LibraryType::Series => item.type_ == "series",
+        };
+        type_matches
+            && status.as_deref().is_none_or(|status| {
+                statuses.get(&item.id).map_or("none", String::as_str) == status
+            })
+            && (query.is_empty() || item.title.to_lowercase().contains(&query))
+    });
+    items.sort_by_cached_key(|item| {
+        let title = item.title.to_lowercase();
+        let year = item.primary_year;
+        let year_key = match filters.sort {
+            LibrarySort::YearDesc => year.map(|year| u32::MAX - year).unwrap_or(u32::MAX),
+            LibrarySort::YearAsc => year.unwrap_or(u32::MAX),
+            _ => 0,
+        };
+        (year_key, title, item.id.clone())
+    });
+    if matches!(filters.sort, LibrarySort::TitleDesc) {
+        items.reverse();
+    }
+    Ok(ProfileLibrary {
+        items,
+        status_counts,
+    })
+}
+
+#[command]
+pub async fn get_profile_library(
+    app: AppHandle,
+    filters: Option<LibraryFilters>,
+) -> Result<ProfileLibrary, String> {
+    run_blocking_store_op(move || {
+        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
+        read_profile_library(&store, &status_store, filters.unwrap_or_default())
+    })
+    .await
+}
+
+fn read_profile_library(
+    store: &DurableStore,
+    status_store: &DurableStore,
+    filters: LibraryFilters,
+) -> Result<ProfileLibrary, String> {
+    // Both snapshots must succeed before any filtered result can be shown.
+    let items = read_library_snapshot(store)?.items.into_values().collect();
+    let statuses = read_watch_status_snapshot(status_store)?.items;
+    filter_profile_library(items, &statuses, filters)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::{test_media_item, test_store};
+
+    fn profile_items() -> Vec<MediaItem> {
+        [
+            ("z", "Zulu", "movie", Some(2024)),
+            ("b", "beta", "series", Some(2000)),
+            ("a", "Alpha", "movie", Some(2024)),
+            ("u", "Undated", "series", None),
+            ("j", "東京: Dawn", "movie", None),
+        ]
+        .into_iter()
+        .map(|(id, title, type_, year)| {
+            let mut item = test_media_item(id, type_);
+            item.title = title.to_string();
+            item.primary_year = year;
+            item
+        })
+        .collect()
+    }
+
+    fn profile_statuses() -> HashMap<String, String> {
+        [
+            ("a", "watched"),
+            ("b", "watching"),
+            ("z", "dropped"),
+            ("outside", "watched"),
+        ]
+        .into_iter()
+        .map(|(id, status)| (id.to_string(), status.to_string()))
+        .collect()
+    }
+
+    fn profile_ids(filters: serde_json::Value) -> Vec<String> {
+        filter_profile_library(
+            profile_items(),
+            &profile_statuses(),
+            serde_json::from_value(filters).unwrap(),
+        )
+        .unwrap()
+        .items
+        .into_iter()
+        .map(|item| item.id)
+        .collect()
+    }
+
+    #[test]
+    fn profile_search_matches_literal_titles_case_insensitively() {
+        assert_eq!(profile_ids(json!({"query": "  ALP  "})), ["a"]);
+        assert_eq!(profile_ids(json!({"query": " 東京: "})), ["j"]);
+        assert!(profile_ids(json!({"query": "missing"})).is_empty());
+    }
+
+    #[test]
+    fn profile_type_and_status_filters_combine_including_no_status() {
+        assert_eq!(profile_ids(json!({"type": "series"})), ["b", "u"]);
+        assert_eq!(profile_ids(json!({"status": "watched"})), ["a"]);
+        assert_eq!(profile_ids(json!({"status": "none"})), ["u", "j"]);
+        assert_eq!(profile_ids(json!({"status": " Watching "})), ["b"]);
+        assert_eq!(
+            profile_ids(json!({"type": "movie", "status": "none"})),
+            ["j"]
+        );
+        assert!(profile_ids(json!({"type": "movie", "status": "watching"})).is_empty());
+        assert!(profile_ids(json!({"status": "plan_to_watch"})).is_empty());
+    }
+
+    #[test]
+    fn profile_each_sort_is_deterministic_and_undated_titles_sink() {
+        for (sort, expected) in [
+            ("default", vec!["a", "b", "u", "z", "j"]),
+            ("title-asc", vec!["a", "b", "u", "z", "j"]),
+            ("title-desc", vec!["j", "z", "u", "b", "a"]),
+            ("year-asc", vec!["b", "a", "z", "u", "j"]),
+            ("year-desc", vec!["a", "z", "b", "u", "j"]),
+        ] {
+            assert_eq!(profile_ids(json!({"sort": sort})), expected, "{sort}");
+        }
+    }
+
+    #[test]
+    fn profile_status_counts_are_unfiltered_and_exclude_non_library_titles() {
+        let result = filter_profile_library(
+            profile_items(),
+            &profile_statuses(),
+            serde_json::from_value(json!({"query": "Alpha", "status": "watched"})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(result.items.len(), 1);
+        assert_eq!(result.status_counts["watched"], 1);
+        assert_eq!(result.status_counts["watching"], 1);
+        assert_eq!(result.status_counts["dropped"], 1);
+        assert_eq!(result.status_counts["plan_to_watch"], 0);
+        assert_eq!(result.status_counts["none"], 2);
+    }
+
+    #[test]
+    fn profile_rejects_unknown_filters_and_corrupt_status_data() {
+        for filters in [json!({"type": "invalid"}), json!({"sort": "invalid"})] {
+            assert!(serde_json::from_value::<LibraryFilters>(filters).is_err());
+        }
+        assert!(filter_profile_library(
+            profile_items(),
+            &profile_statuses(),
+            serde_json::from_value(json!({"status": "invalid"})).unwrap(),
+        )
+        .is_err());
+        let library = test_store();
+        let statuses = test_store();
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
+        library
+            .store
+            .set(library_item_key("a"), json!(test_media_item("a", "movie")));
+        statuses
+            .store
+            .set(WATCH_STATUS_INDEX_KEY, json!({"corrupt": true}));
+        for status in ["watched", "none", "all"] {
+            assert!(read_profile_library(
+                &library.store,
+                &statuses.store,
+                serde_json::from_value(json!({"status": status})).unwrap(),
+            )
+            .is_err());
+        }
+        assert_eq!(library.store.save_count(), 0);
+        assert_eq!(statuses.store.save_count(), 0);
+    }
+
+    #[test]
+    fn bulk_removal_counts_unique_existing_items_and_saves_each_domain_once() {
+        let library = test_store();
+        let statuses = test_store();
+        for id in ["a", "b", "c"] {
+            library
+                .store
+                .set(library_item_key(id), json!(test_media_item(id, "movie")));
+            statuses
+                .store
+                .set(watch_status_item_key(id), json!("watching"));
+        }
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b", "c"]));
+        statuses
+            .store
+            .set(WATCH_STATUS_INDEX_KEY, json!(["a", "b", "c"]));
+        library.store.save().unwrap();
+        statuses.store.save().unwrap();
+
+        let ids =
+            normalize_bulk_library_ids(&[" a ".into(), "b".into(), "a".into(), "missing".into()])
+                .unwrap();
+        assert_eq!(
+            remove_library_items(&library.store, &statuses.store, &ids).unwrap(),
+            2
+        );
+        assert_eq!(library.store.get(LIBRARY_INDEX_KEY), Some(json!(["c"])));
+        assert_eq!(
+            statuses.store.get(WATCH_STATUS_INDEX_KEY),
+            Some(json!(["c"]))
+        );
+        assert!(library.store.get(library_item_key("a")).is_none());
+        assert!(statuses.store.get(watch_status_item_key("b")).is_none());
+        assert_eq!(library.store.save_count(), 2);
+        assert_eq!(statuses.store.save_count(), 2);
+        let reopened = super::super::DurableStoreRegistry::default()
+            .open_path(library.path.clone())
+            .unwrap();
+        assert_eq!(reopened.get(LIBRARY_INDEX_KEY), Some(json!(["c"])));
+        assert_eq!(
+            remove_library_items(&library.store, &statuses.store, &ids).unwrap(),
+            0
+        );
+        assert_eq!(library.store.save_count(), 2);
+        assert_eq!(statuses.store.save_count(), 2);
+    }
+
+    #[test]
+    fn bulk_removal_rejects_invalid_ids_without_partial_mutations() {
+        let library = test_store();
+        let statuses = test_store();
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
+        library
+            .store
+            .set(library_item_key("a"), json!(test_media_item("a", "movie")));
+        library.store.save().unwrap();
+        let before = std::fs::read(&library.path).unwrap();
+        for invalid in ["".to_string(), "undefined".to_string(), "x".repeat(257)] {
+            let result = normalize_bulk_library_ids(&["a".into(), invalid])
+                .and_then(|ids| remove_library_items(&library.store, &statuses.store, &ids));
+            assert!(result.is_err());
+            library.store.save().unwrap();
+            assert_eq!(std::fs::read(&library.path).unwrap(), before);
+            assert_eq!(library.store.save_count(), 1);
+            assert_eq!(statuses.store.save_count(), 0);
+        }
+    }
+
+    #[test]
+    fn bulk_removal_validates_both_indexes_before_read_repair_or_deletes() {
+        let library = test_store();
+        let statuses = test_store();
+        library
+            .store
+            .set(LIBRARY_INDEX_KEY, json!(["a", "missing"]));
+        library
+            .store
+            .set(library_item_key("a"), json!(test_media_item("a", "movie")));
+        statuses
+            .store
+            .set(WATCH_STATUS_INDEX_KEY, json!({"corrupt": true}));
+        library.store.save().unwrap();
+        assert!(remove_library_items(&library.store, &statuses.store, &["a".into()]).is_err());
+        library.store.save().unwrap();
+        assert_eq!(
+            library.store.get(LIBRARY_INDEX_KEY),
+            Some(json!(["a", "missing"]))
+        );
+        assert!(library.store.get(library_item_key("a")).is_some());
+        assert_eq!(library.store.save_count(), 1);
+    }
 }

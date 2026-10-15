@@ -22,7 +22,7 @@ import {
   GripVertical,
   ListPlus,
   Pencil,
-  Search,
+  Plus,
   Trash2,
   Tv,
   X,
@@ -30,6 +30,7 @@ import {
 import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
+import { PosterThumb } from '@/components/poster-thumb';
 import { ViewToggle } from '@/components/profile-library-controls';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
@@ -52,13 +53,37 @@ import { notifyAction } from '@/lib/notify';
 
 import { invalidateListQueries, LISTS_QUERY_KEY } from '@/lib/query-invalidation';
 import { cn, isHttpUrl } from '@/lib/utils';
-import { ListIcon } from './list-icons';
+import { AddTitlesDialog } from './add-titles-dialog';
+import { ListIconTile } from './list-icons';
 
 const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-1',
   'list-manager-skeleton-2',
   'list-manager-skeleton-3',
 ] as const;
+
+function ListPosterStack({ items }: { items?: MediaItem[] }) {
+  const posters = items?.slice(0, 3) ?? [];
+  return (
+    <span aria-hidden='true' className='hidden h-10 shrink-0 items-center -space-x-3 sm:flex'>
+      {posters.length > 0 ? (
+        posters.map((item) => (
+          <PosterThumb
+            key={item.id}
+            poster={item.poster}
+            mediaType='movie'
+            size='sm'
+            className='bg-zinc-900 shadow-md ring-zinc-800'
+          />
+        ))
+      ) : (
+        <span className='flex h-10 w-7 items-center justify-center rounded-md border border-dashed border-white/10 text-zinc-600'>
+          <Plus className='h-3 w-3' />
+        </span>
+      )}
+    </span>
+  );
+}
 
 interface SortableListCardProps {
   list: UserList;
@@ -112,9 +137,7 @@ function SortableListCard({
           aria-expanded={isExpanded}
           className='flex min-h-8 items-center gap-3 flex-1 min-w-0 rounded-md group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         >
-          <span className='shrink-0 text-zinc-300'>
-            <ListIcon iconId={list.icon} size={16} />
-          </span>
+          <ListIconTile iconId={list.icon} />
           <div className='flex-1 min-w-0 text-left'>
             <div className='flex items-center gap-2'>
               <span
@@ -124,11 +147,12 @@ function SortableListCard({
               >
                 {list.name}
               </span>
-              <span className='text-[12px] tabular-nums text-zinc-500 shrink-0'>
-                {list.item_ids.length}
-              </span>
             </div>
+            <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
+              {list.item_ids.length} title{list.item_ids.length === 1 ? '' : 's'}
+            </p>
           </div>
+          <ListPosterStack items={list.items} />
           <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
             {isExpanded ? (
               <ChevronDown className='w-4 h-4' />
@@ -307,24 +331,12 @@ const SortableItemRow = memo(function SortableItemRow({
         onFocus={prefetchDetails}
         onClick={() => navigateToDetails(navigate, item.type, item.id)}
       >
-        <span className='h-10 w-7 rounded overflow-hidden bg-zinc-800 shrink-0'>
-          {isHttpUrl(item.poster) ? (
-            <RemoteImage
-              src={item.poster}
-              alt=''
-              className='w-full h-full object-cover'
-              loading='lazy'
-            />
-          ) : (
-            <span className='w-full h-full flex items-center justify-center'>
-              {item.type === 'movie' ? (
-                <Film className='w-3 h-3 text-zinc-600' />
-              ) : (
-                <Tv className='w-3 h-3 text-zinc-600' />
-              )}
-            </span>
-          )}
-        </span>
+        <PosterThumb
+          poster={item.poster}
+          mediaType={item.type}
+          size='sm'
+          className='rounded bg-zinc-800 ring-0'
+        />
         <span className='flex-1 min-w-0'>
           <span
             dir='auto'
@@ -360,21 +372,19 @@ const SortableItemRow = memo(function SortableItemRow({
   );
 });
 
-// `orderedIds` resets via `key={list.id}` remount and collapse/expand unmount — no key on the usage itself.
 function ListItemsView({ list }: { list: UserList }) {
   const queryClient = useQueryClient();
 
-  const [orderedIds, setOrderedIds] = useState<string[]>(() => list.item_ids);
+  const [orderedIds, setOrderedIds] = useState<string[] | null>(null);
 
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const [search, setSearch] = useState('');
+  const [addTitlesOpen, setAddTitlesOpen] = useState(false);
 
-  // Derive items from the preferred order — external removals drop out, external adds append.
-  // Structural sharing keeps `list.items` referentially stable, so recomputes are infrequent.
   const orderedItems = useMemo(() => {
-    // `items` is absent on create-list response; views always read through `get_lists` which populates it.
     const sourceItems = list.items ?? [];
+    if (!orderedIds) return sourceItems;
     const itemMap = new Map(sourceItems.map((i) => [i.id, i]));
     const ordered = orderedIds.flatMap((id) => {
       const orderedItem = itemMap.get(id);
@@ -387,29 +397,24 @@ function ListItemsView({ list }: { list: UserList }) {
 
   const sensors = useSortableSensors();
 
-  // Newest issued order owns cache writes and failure reverts — a superseded response must not roll back or stomp a newer drag.
+  // Only the latest drag may release its local order after the persisted items have refetched.
   const latestReorderIdsRef = useRef<string[] | null>(null);
 
   const reorderItems = useMutation({
     mutationFn: (newIds: string[]) => api.reorderListItems(list.id, newIds),
-    onSuccess: (_data, newIds) => {
-      // Collapse unmounts this view and `orderedIds` re-inits from `list.item_ids` — mirror the saved order into cache so re-expand doesn't snap back.
+    onSuccess: async (_data, newIds) => {
+      await queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
       if (latestReorderIdsRef.current === newIds) {
-        queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
-          lists?.map((entry) => (entry.id === list.id ? { ...entry, item_ids: newIds } : entry)),
-        );
+        latestReorderIdsRef.current = null;
+        setOrderedIds(null);
       }
-      void invalidateListQueries(queryClient);
     },
     onError: (_error, newIds) => {
-      // Revert to the freshest persisted order from the cache, not the render-stale `list` prop.
       if (latestReorderIdsRef.current === newIds) {
-        const persisted = queryClient
-          .getQueryData<UserList[]>(LISTS_QUERY_KEY)
-          ?.find((entry) => entry.id === list.id)?.item_ids;
-        setOrderedIds(persisted ?? list.item_ids);
+        latestReorderIdsRef.current = null;
+        setOrderedIds(null);
       }
-      void invalidateListQueries(queryClient);
+      void queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
       notifyAction('Failed to save order', { tone: 'error' });
     },
   });
@@ -461,31 +466,55 @@ function ListItemsView({ list }: { list: UserList }) {
 
   const activeItem = activeId ? orderedItems.find((i) => `${list.id}::${i.id}` === activeId) : null;
 
-  if (orderedItems.length === 0) {
-    return (
-      <div className='flex flex-col items-center justify-center py-8 text-zinc-600 gap-2'>
-        <Search className='w-6 h-6' />
-        <p className='text-sm'>This list is empty</p>
-        <p className='text-xs text-zinc-700'>
-          Open a movie or show's card and choose &ldquo;Add to List&rdquo;.
-        </p>
-      </div>
-    );
-  }
-
   return (
-    <div className='p-3 space-y-3'>
-      <div className='flex items-center gap-2'>
-        <SearchInput
-          value={search}
-          onValueChange={setSearch}
-          placeholder='Search in list…'
-          clearLabel='Clear list search'
-          wrapperClassName='flex-1'
-          className='h-9 pl-8 rounded-lg bg-white/[0.03] border-white/[0.07] text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
-        />
-        <ViewToggle viewMode={viewMode} onChange={setViewMode} />
+    <div className='p-3 space-y-3' data-escape-capture={activeId !== null ? '' : undefined}>
+      <div className='flex flex-wrap items-center gap-2'>
+        {orderedItems.length > 0 ? (
+          <>
+            <SearchInput
+              value={search}
+              onValueChange={setSearch}
+              placeholder='Search in list…'
+              clearLabel='Clear list search'
+              wrapperClassName='min-w-32 flex-1'
+              className='h-9 pl-8 rounded-lg bg-white/[0.03] border-white/[0.07] text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
+            />
+            <ViewToggle viewMode={viewMode} onChange={setViewMode} />
+          </>
+        ) : (
+          <p className='flex-1 pl-1 text-xs font-medium text-zinc-500'>Your titles</p>
+        )}
+        <Button
+          variant='outline'
+          size='sm'
+          onClick={() => setAddTitlesOpen(true)}
+          className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+        >
+          <Plus className='h-3.5 w-3.5' />
+          Add titles
+        </Button>
       </div>
+
+      {orderedItems.length === 0 && (
+        <div className='flex flex-col items-center gap-3 px-4 py-7 text-center'>
+          <ListIconTile iconId={list.icon} size='lg' />
+          <div>
+            <p className='text-sm font-medium text-zinc-300'>Make this collection yours</p>
+            <p className='mt-1 max-w-sm text-xs leading-relaxed text-zinc-500'>
+              Use &ldquo;Add titles&rdquo; to choose from your library, or the save button on a
+              title's details page.
+            </p>
+          </div>
+          <Button
+            size='sm'
+            onClick={() => setAddTitlesOpen(true)}
+            className='bg-white text-black hover:bg-zinc-200'
+          >
+            <Plus className='h-3.5 w-3.5' />
+            Add titles
+          </Button>
+        </div>
+      )}
 
       <DndContext
         sensors={sensors}
@@ -556,6 +585,7 @@ function ListItemsView({ list }: { list: UserList }) {
           No items match &ldquo;{search}&rdquo;
         </p>
       )}
+      {addTitlesOpen && <AddTitlesDialog list={list} onOpenChange={setAddTitlesOpen} />}
     </div>
   );
 }
@@ -564,9 +594,7 @@ function ListGhostCard({ list }: { list: UserList }) {
   return (
     <div className='rounded-xl border border-white/20 bg-zinc-900/90 shadow-2xl shadow-black/60 px-4 py-3 flex items-center gap-3 opacity-90'>
       <GripVertical className='w-4 h-4 text-zinc-500' />
-      <span className='text-zinc-300'>
-        <ListIcon iconId={list.icon} size={16} />
-      </span>
+      <ListIconTile iconId={list.icon} />
       <span className='font-semibold text-sm text-zinc-200'>{list.name}</span>
       <span className='text-[12px] tabular-nums text-zinc-500 ml-1'>{list.item_ids.length}</span>
     </div>
@@ -593,9 +621,8 @@ export function ListsManager() {
 
   const reorderLists = useMutation({
     mutationFn: (ids: string[]) => api.reorderLists(ids),
+    onSettled: () => invalidateListQueries(queryClient),
     onError: () => {
-      // Revert the optimistic cache write to server order.
-      void invalidateListQueries(queryClient);
       notifyAction('Failed to save list order', { tone: 'error' });
     },
   });
@@ -631,7 +658,7 @@ export function ListsManager() {
   };
 
   const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
+    async (event: DragEndEvent) => {
       setActiveListId(null);
       const { active, over } = event;
       if (!over || active.id === over.id) return;
@@ -641,6 +668,7 @@ export function ListsManager() {
       if (oldIdx === -1 || newIdx === -1) return;
 
       const next = arrayMove(lists, oldIdx, newIdx);
+      await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
       queryClient.setQueryData(LISTS_QUERY_KEY, next);
       reorderLists.mutate(next.map((l) => l.id));
     },
@@ -662,7 +690,7 @@ export function ListsManager() {
   };
 
   return (
-    <div className='space-y-6'>
+    <div className='space-y-6' data-escape-capture={activeListId !== null ? '' : undefined}>
       <div className='flex items-center justify-between'>
         <div>
           <h2 className='text-[15px] font-medium tracking-tight text-white'>Lists</h2>
@@ -698,13 +726,12 @@ export function ListsManager() {
         />
       ) : lists.length === 0 ? (
         <div className='flex flex-col items-center justify-center px-6 py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015]'>
-          <div className='w-10 h-10 flex items-center justify-center text-zinc-600'>
-            <ListIcon iconId='Film' size={24} />
-          </div>
+          <ListIconTile iconId='Film' size='lg' />
           <div className='text-center'>
             <p className='text-[15px] font-semibold text-zinc-200'>No lists yet</p>
             <p className='text-[13px] leading-relaxed text-zinc-400 mt-1'>
-              Create a list, then use &ldquo;Add to List&rdquo; on any movie or show's card.
+              Create a list and choose &ldquo;Add titles&rdquo;, or save directly from a title's
+              details page.
             </p>
           </div>
         </div>

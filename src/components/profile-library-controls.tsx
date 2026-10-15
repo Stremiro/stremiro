@@ -4,13 +4,21 @@ import {
   CalendarArrowDown,
   CalendarArrowUp,
   Check,
+  CheckSquare,
   ChevronDown,
   LayoutGrid,
   List,
+  ListPlus,
   type LucideIcon,
+  Plus,
   RotateCcw,
+  Trash2,
+  X,
 } from 'lucide-react';
-import type { RefObject } from 'react';
+import { type RefObject, useState } from 'react';
+import { CreateListDialog } from '@/components/list/list-editor-dialog';
+import { ListIconTile } from '@/components/list/list-icons';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -19,14 +27,20 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/search-input';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Skeleton } from '@/components/ui/skeleton';
+import { useListSummaries } from '@/hooks/use-media-library';
 import {
+  type LibraryFilters,
+  type MediaItem,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
   WATCH_STATUSES,
   type WatchStatus,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
-export type LibrarySort = 'default' | 'title-asc' | 'title-desc' | 'year-desc' | 'year-asc';
+type LibrarySort = NonNullable<LibraryFilters['sort']>;
+type LibraryStatusFilter = WatchStatus | 'all' | 'none';
 
 const LIBRARY_SORT_OPTIONS: Record<LibrarySort, { label: string; icon: LucideIcon | null }> = {
   default: { label: 'Default', icon: null },
@@ -38,36 +52,29 @@ const LIBRARY_SORT_OPTIONS: Record<LibrarySort, { label: string; icon: LucideIco
 
 const LIBRARY_SORT_KEYS = Object.keys(LIBRARY_SORT_OPTIONS) as LibrarySort[];
 
-const FILTER_MENU_BUTTON_CLASS =
-  'h-9 px-3 gap-1.5 text-[12px] font-medium rounded-md bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0 inline-flex items-center';
+export function isLibrarySort(value: string | null): value is LibrarySort {
+  return LIBRARY_SORT_KEYS.some((key) => key === value);
+}
+
+const LIBRARY_FOCUS_RING_CLASS =
+  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
+const FILTER_MENU_BUTTON_CLASS = cn(
+  'h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0',
+  LIBRARY_FOCUS_RING_CLASS,
+);
 
 const VIEW_MODES: { mode: 'grid' | 'list'; label: string; icon: LucideIcon }[] = [
   { mode: 'grid', label: 'Grid view', icon: LayoutGrid },
   { mode: 'list', label: 'List view', icon: List },
 ];
 
-export function LibraryToolbar({
-  typeFilter,
-  onTypeFilterChange,
-  statusFilter,
-  onStatusFilterChange,
-  statusCounts,
-  libraryCount,
-  filteredCount,
-  search,
-  onSearchChange,
-  searchInputRef,
-  sort,
-  onSortChange,
-  viewMode,
-  onViewModeChange,
-  onReset,
-}: {
+interface LibraryToolbarProps {
   typeFilter: 'all' | 'movie' | 'series';
   onTypeFilterChange: (type: 'all' | 'movie' | 'series') => void;
-  statusFilter: WatchStatus | 'all';
-  onStatusFilterChange: (status: WatchStatus | 'all') => void;
-  statusCounts: Record<WatchStatus, number>;
+  statusFilter: LibraryStatusFilter;
+  onStatusFilterChange: (status: LibraryStatusFilter) => void;
+  statusCounts: Record<WatchStatus | 'none', number>;
+  statusesAvailable: boolean;
   libraryCount: number;
   filteredCount: number;
   search: string;
@@ -78,11 +85,40 @@ export function LibraryToolbar({
   viewMode: 'grid' | 'list';
   onViewModeChange: (mode: 'grid' | 'list') => void;
   onReset: () => void;
-}) {
+  selectionMode: boolean;
+  onToggleSelectionMode: () => void;
+}
+
+export function LibraryToolbar({
+  typeFilter,
+  onTypeFilterChange,
+  statusFilter,
+  onStatusFilterChange,
+  statusCounts,
+  statusesAvailable,
+  libraryCount,
+  filteredCount,
+  search,
+  onSearchChange,
+  searchInputRef,
+  sort,
+  onSortChange,
+  viewMode,
+  onViewModeChange,
+  onReset,
+  selectionMode,
+  onToggleSelectionMode,
+}: LibraryToolbarProps) {
   const activeSortOption = LIBRARY_SORT_OPTIONS[sort];
   const ActiveSortIcon = activeSortOption.icon;
   const hasFilters =
     typeFilter !== 'all' || statusFilter !== 'all' || search.length > 0 || sort !== 'default';
+  const statusLabel =
+    statusFilter === 'all'
+      ? 'All statuses'
+      : statusFilter === 'none'
+        ? 'No status'
+        : WATCH_STATUS_LABELS[statusFilter];
 
   return (
     <div className='space-y-3'>
@@ -104,25 +140,33 @@ export function LibraryToolbar({
       </div>
       <div className='flex items-center gap-2 flex-wrap'>
         <div
-          className='flex items-center gap-0.5 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
+          className='relative isolate grid grid-cols-3 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
           role='group'
           aria-label='Library media type'
         >
+          <span
+            aria-hidden='true'
+            className='pointer-events-none absolute top-0.5 bottom-0.5 left-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
+            style={{
+              width: 'calc((100% - 4px) / 3)',
+              transform: `translateX(${typeFilter === 'all' ? 0 : typeFilter === 'movie' ? 100 : 200}%)`,
+            }}
+          />
           {(['all', 'movie', 'series'] as const).map((t) => (
             <button
               key={t}
               type='button'
               aria-pressed={typeFilter === t}
               onClick={() => onTypeFilterChange(t)}
-              style={typeFilter === t ? { backgroundColor: 'var(--accent-nav)' } : undefined}
               className={cn(
-                'h-8 px-3 rounded-sm text-[12px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                'nav-switch-item relative z-10 h-8 px-3 rounded-sm text-[12px] font-medium transition-colors duration-150',
+                LIBRARY_FOCUS_RING_CLASS,
                 typeFilter === t
                   ? 'text-(--on-accent-nav)'
                   : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06]',
               )}
             >
-              {t === 'all' ? 'All' : t === 'movie' ? 'Movies' : 'Shows'}
+              {t === 'all' ? 'All' : t === 'movie' ? 'Movies' : 'Series'}
             </button>
           ))}
         </div>
@@ -133,9 +177,9 @@ export function LibraryToolbar({
               variant='outline'
               size='sm'
               className={FILTER_MENU_BUTTON_CLASS}
-              aria-label={`Library status: ${statusFilter === 'all' ? 'All statuses' : WATCH_STATUS_LABELS[statusFilter]}`}
+              aria-label={`Library status: ${statusLabel}`}
             >
-              {statusFilter !== 'all' && (
+              {statusFilter !== 'all' && statusFilter !== 'none' && (
                 <span
                   aria-hidden='true'
                   className={cn(
@@ -144,9 +188,7 @@ export function LibraryToolbar({
                   )}
                 />
               )}
-              <span>
-                {statusFilter === 'all' ? 'All statuses' : WATCH_STATUS_LABELS[statusFilter]}
-              </span>
+              <span>{statusLabel}</span>
               <ChevronDown className='w-3 h-3 opacity-50' />
             </Button>
           </DropdownMenuTrigger>
@@ -172,11 +214,20 @@ export function LibraryToolbar({
                   />
                   {WATCH_STATUS_LABELS[s]}
                   <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
-                    {statusCounts[s] ?? 0}
+                    {statusesAvailable ? (statusCounts[s] ?? 0) : '—'}
                   </span>
                 </FilterMenuItem>
               );
             })}
+            <FilterMenuItem
+              checked={statusFilter === 'none'}
+              onSelect={() => onStatusFilterChange('none')}
+            >
+              No status
+              <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
+                {statusesAvailable ? (statusCounts.none ?? 0) : '—'}
+              </span>
+            </FilterMenuItem>
           </DropdownMenuContent>
         </DropdownMenu>
 
@@ -187,7 +238,10 @@ export function LibraryToolbar({
           onClick={() => {
             if (hasFilters) onReset();
           }}
-          className='h-9 gap-1.5 px-2 text-[12px] text-zinc-400 hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default'
+          className={cn(
+            'h-9 gap-1.5 px-2 text-[12px] text-zinc-400 hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
         >
           <RotateCcw className='h-3.5 w-3.5' />
           Reset
@@ -224,6 +278,19 @@ export function LibraryToolbar({
           </DropdownMenu>
 
           <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+          <Button
+            variant='outline'
+            size='sm'
+            aria-pressed={selectionMode}
+            onClick={onToggleSelectionMode}
+            className={cn(
+              FILTER_MENU_BUTTON_CLASS,
+              selectionMode && 'border-white/[0.18] bg-white/[0.1] text-white',
+            )}
+          >
+            <CheckSquare className='h-3.5 w-3.5' />
+            Select
+          </Button>
         </div>
       </div>
     </div>
@@ -265,10 +332,18 @@ export function ViewToggle({
 }) {
   return (
     <div
-      className='flex items-center gap-0.5 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
+      className='relative isolate grid grid-cols-2 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
       role='group'
       aria-label='Collection view'
     >
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute top-0.5 bottom-0.5 left-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
+        style={{
+          width: 'calc((100% - 4px) / 2)',
+          transform: `translateX(${viewMode === 'grid' ? 0 : 100}%)`,
+        }}
+      />
       {VIEW_MODES.map(({ mode, label, icon: Icon }) => (
         <button
           key={mode}
@@ -280,13 +355,244 @@ export function ViewToggle({
             if (mode !== viewMode) onChange(mode);
           }}
           className={cn(
-            'flex h-8 w-8 items-center justify-center rounded-sm transition-colors focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/30',
-            viewMode === mode ? 'accent-active' : 'text-zinc-400 hover:text-zinc-200',
+            'nav-switch-item relative z-10 flex h-8 w-8 items-center justify-center rounded-sm transition-colors duration-150',
+            LIBRARY_FOCUS_RING_CLASS,
+            viewMode === mode ? 'text-(--on-accent-nav)' : 'text-zinc-400 hover:text-zinc-200',
           )}
         >
           <Icon className='w-3.5 h-3.5' />
         </button>
       ))}
+    </div>
+  );
+}
+
+interface LibraryBulkActionBarProps {
+  selectedItems: MediaItem[];
+  filteredCount: number;
+  selectAllDisabled?: boolean;
+  allFilteredSelected: boolean;
+  onSelectAllFiltered: () => void;
+  onClearSelection: () => void;
+  onExitSelectionMode: () => void;
+  onBulkSetStatus: (status: WatchStatus | null) => void;
+  onBulkAddToList: (listId: string, listName: string, items: MediaItem[]) => Promise<void>;
+  onBulkRemove: () => void;
+  isBusy?: boolean;
+}
+
+const BULK_BUTTON_CLASS = cn(
+  'h-8 gap-1.5 rounded-lg border-white/[0.1] bg-white/[0.03] px-2.5 text-xs text-zinc-300 hover:bg-white/[0.08] hover:text-white',
+  LIBRARY_FOCUS_RING_CLASS,
+);
+const BULK_MENU_ITEM_CLASS = cn(
+  'flex w-full items-center gap-2 rounded-md px-2.5 py-2 text-left text-xs text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:ring-inset disabled:opacity-50',
+  LIBRARY_FOCUS_RING_CLASS,
+);
+const BULK_STATUS_OPTIONS: { status: WatchStatus | null; label: string }[] = [
+  ...WATCH_STATUSES.map((status) => ({ status, label: WATCH_STATUS_LABELS[status] })),
+  { status: null, label: 'Clear status' },
+];
+
+export function LibraryBulkActionBar({
+  selectedItems,
+  filteredCount,
+  selectAllDisabled = false,
+  allFilteredSelected,
+  onSelectAllFiltered,
+  onClearSelection,
+  onExitSelectionMode,
+  onBulkSetStatus,
+  onBulkAddToList,
+  onBulkRemove,
+  isBusy = false,
+}: LibraryBulkActionBarProps) {
+  const [statusOpen, setStatusOpen] = useState(false);
+  const [listsOpen, setListsOpen] = useState(false);
+  const [createListOpen, setCreateListOpen] = useState(false);
+  const [createListItems, setCreateListItems] = useState<MediaItem[]>([]);
+  const {
+    data: customLists = [],
+    isPending: listsLoading,
+    isError: listsError,
+    isFetching: listsFetching,
+    refetch: refetchLists,
+  } = useListSummaries(undefined);
+  const selectedCount = selectedItems.length;
+  const actionsDisabled = selectedCount === 0 || isBusy;
+
+  return (
+    <div
+      aria-label='Library selection actions'
+      aria-busy={isBusy}
+      className='flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/90 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
+    >
+      <div className='flex items-center gap-3'>
+        <span role='status' className='text-[13px] font-semibold text-white tabular-nums'>
+          {selectedCount} selected
+        </span>
+        <button
+          type='button'
+          disabled={filteredCount === 0 || isBusy || selectAllDisabled}
+          onClick={allFilteredSelected ? onClearSelection : onSelectAllFiltered}
+          className={cn(
+            'rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white disabled:opacity-40',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          {allFilteredSelected ? 'Deselect all' : `Select all (${filteredCount})`}
+        </button>
+      </div>
+      <div className='flex flex-wrap items-center gap-1.5'>
+        <Popover open={statusOpen} onOpenChange={setStatusOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={actionsDisabled}
+              className={BULK_BUTTON_CLASS}
+            >
+              <CheckSquare className='h-3.5 w-3.5' />
+              Set Status
+              <ChevronDown className='h-3 w-3 opacity-60' />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align='end'
+            className='w-44 rounded-xl border-white/10 bg-zinc-950/98 p-1.5 shadow-xl'
+          >
+            <p className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>Set watch status</p>
+            {BULK_STATUS_OPTIONS.map(({ status, label }) => (
+              <button
+                key={status ?? 'clear'}
+                type='button'
+                disabled={actionsDisabled}
+                className={BULK_MENU_ITEM_CLASS}
+                onClick={() => {
+                  setStatusOpen(false);
+                  onBulkSetStatus(status);
+                }}
+              >
+                <span
+                  aria-hidden='true'
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full bg-current',
+                    status === null ? 'text-zinc-500' : WATCH_STATUS_COLORS[status].text,
+                  )}
+                />
+                {label}
+              </button>
+            ))}
+          </PopoverContent>
+        </Popover>
+        <Popover open={listsOpen} onOpenChange={setListsOpen}>
+          <PopoverTrigger asChild>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={actionsDisabled}
+              className={BULK_BUTTON_CLASS}
+            >
+              <ListPlus className='h-3.5 w-3.5' />
+              Add to List
+              <ChevronDown className='h-3 w-3 opacity-60' />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent
+            align='end'
+            className='w-72 rounded-xl border-white/10 bg-zinc-950/95 backdrop-blur-xl p-1.5 shadow-2xl'
+          >
+            <p className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
+              Add selected titles
+            </p>
+            {listsError && (
+              <RetryBanner
+                className='px-2.5 py-2'
+                message="Couldn't load lists."
+                onRetry={() => void refetchLists()}
+                isRetrying={listsFetching}
+              />
+            )}
+            <div className='max-h-64 overflow-y-auto'>
+              {listsLoading && (
+                <div aria-label='Loading lists' role='status' className='space-y-1.5 p-2.5'>
+                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+                </div>
+              )}
+              {!listsLoading && !listsError && customLists.length === 0 && (
+                <p className='px-2.5 py-2 text-xs text-zinc-500'>No lists yet.</p>
+              )}
+              {customLists.map((list) => (
+                <button
+                  key={list.id}
+                  type='button'
+                  disabled={actionsDisabled}
+                  className={BULK_MENU_ITEM_CLASS}
+                  title={list.name}
+                  onClick={() => {
+                    setListsOpen(false);
+                    void onBulkAddToList(list.id, list.name, selectedItems);
+                  }}
+                >
+                  <ListIconTile iconId={list.icon} size='sm' />
+                  <span className='min-w-0 flex-1 truncate' dir='auto'>
+                    {list.name}
+                  </span>
+                  <span className='text-[11px] tabular-nums text-zinc-500'>
+                    {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
+                  </span>
+                </button>
+              ))}
+            </div>
+            <button
+              type='button'
+              disabled={actionsDisabled}
+              className={cn(BULK_MENU_ITEM_CLASS, 'mt-1 border-t border-white/[0.06]')}
+              onClick={() => {
+                setListsOpen(false);
+                setCreateListItems([...selectedItems]);
+                setCreateListOpen(true);
+              }}
+            >
+              <Plus className='h-3.5 w-3.5' />
+              New list…
+            </button>
+          </PopoverContent>
+        </Popover>
+        <CreateListDialog
+          open={createListOpen}
+          onOpenChange={setCreateListOpen}
+          onCreated={(list) => onBulkAddToList(list.id, list.name, createListItems)}
+        />
+        <Button
+          variant='outline'
+          size='sm'
+          disabled={actionsDisabled}
+          onClick={onBulkRemove}
+          className={cn(
+            'h-8 gap-1.5 rounded-lg border-rose-500/25 bg-rose-500/10 px-2.5 text-xs text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          <Trash2 className='h-3.5 w-3.5' />
+          Remove
+        </Button>
+        <Button
+          variant='ghost'
+          size='sm'
+          disabled={isBusy}
+          onClick={onExitSelectionMode}
+          className={cn(
+            'h-8 gap-1.5 rounded-lg px-2.5 text-xs text-zinc-400 hover:text-white',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          <X className='h-3.5 w-3.5' />
+          Done
+        </Button>
+      </div>
     </div>
   );
 }

@@ -20,6 +20,7 @@ pub(crate) fn test_stream() -> AddonStream {
         url: None,
         file_idx: None,
         behavior_hints: None,
+        sources: Vec::new(),
         cached: false,
         seeders: None,
         size_bytes: None,
@@ -89,6 +90,26 @@ pub(crate) fn test_media_item(id: &str, type_: &str) -> MediaItem {
         display_year: None,
         genres: None,
         type_: type_.to_string(),
+    }
+}
+
+/// Isolated durable store fixture; never touches the application's user data.
+pub(crate) struct TestStore {
+    pub store: crate::commands::DurableStore,
+    pub path: std::path::PathBuf,
+}
+
+pub(crate) fn test_store() -> TestStore {
+    let path = std::env::temp_dir().join(format!("stremiro-bulk-{}.json", uuid::Uuid::new_v4()));
+    let store = crate::commands::DurableStoreRegistry::default()
+        .open_path(path.clone())
+        .expect("open isolated store");
+    TestStore { store, path }
+}
+
+impl Drop for TestStore {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 

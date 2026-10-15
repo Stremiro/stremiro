@@ -21,28 +21,35 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     (!item.title.is_empty()).then_some(item)
 }
 
-pub(super) fn merge_library_item(existing: MediaItem, incoming: MediaItem) -> MediaItem {
-    let year = incoming.year.or(existing.year);
+pub(super) fn normalize_library_items(items: Vec<MediaItem>) -> Result<Vec<MediaItem>, String> {
+    items
+        .into_iter()
+        .map(|item| {
+            normalize_library_item(item).ok_or_else(|| {
+                "Invalid media item. Missing required id, title, or type.".to_string()
+            })
+        })
+        .collect()
+}
 
-    MediaItem {
-        id: existing.id,
-        title: incoming.title,
-        poster: incoming.poster.or(existing.poster),
-        backdrop: incoming.backdrop.or(existing.backdrop),
-        logo: incoming.logo.or(existing.logo),
-        description: incoming.description.or(existing.description),
-        year: year.clone(),
-        primary_year: incoming
-            .primary_year
-            .or(existing.primary_year)
-            .or_else(|| extract_primary_year(year.as_deref())),
-        display_year: incoming
-            .display_year
-            .or(existing.display_year)
-            .or_else(|| build_display_year(year.as_deref())),
-        genres: incoming.genres.or(existing.genres),
-        type_: incoming.type_,
+pub(super) fn merge_library_item(existing: Option<&MediaItem>, mut item: MediaItem) -> MediaItem {
+    if let Some(existing) = existing {
+        item.poster = item.poster.or_else(|| existing.poster.clone());
+        item.backdrop = item.backdrop.or_else(|| existing.backdrop.clone());
+        item.logo = item.logo.or_else(|| existing.logo.clone());
+        item.description = item.description.or_else(|| existing.description.clone());
+        item.year = item.year.or_else(|| existing.year.clone());
+        item.primary_year = item.primary_year.or(existing.primary_year);
+        item.display_year = item.display_year.or_else(|| existing.display_year.clone());
+        item.genres = item.genres.or_else(|| existing.genres.clone());
     }
+    item.primary_year = item
+        .primary_year
+        .or_else(|| extract_primary_year(item.year.as_deref()));
+    item.display_year = item
+        .display_year
+        .or_else(|| build_display_year(item.year.as_deref()));
+    item
 }
 
 pub(super) fn library_item_key(item_id: &str) -> String {
@@ -136,18 +143,24 @@ pub(super) fn load_index(store: &DurableStore, index_key: &str) -> Result<Vec<St
     Ok(index)
 }
 
-/// Index-driven map load with read-repair: missing/malformed items and key drift
-/// mark `modified`, then one persist drops stale items and rewrites index + items.
-fn load_index_map<T, N, M>(
+pub(super) struct IndexStoreSnapshot<T> {
+    pub items: HashMap<String, T>,
+    pub index: Vec<String>,
+    modified: bool,
+}
+
+/// Read-only snapshot: bulk commands must finish capacity checks before even
+/// read-repair mutates a live store (dirty data could later flush on exit).
+fn read_index_map<T, N, M>(
     store: &DurableStore,
     layout: IndexStoreLayout,
     normalize: N,
     merge: M,
-) -> Result<HashMap<String, T>, String>
+) -> Result<IndexStoreSnapshot<T>, String>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
     N: Fn(&str, T) -> Option<(String, T)>,
-    M: Fn(T, T) -> T,
+    M: Fn(&T, T) -> T,
 {
     let index = load_index(store, layout.index_key)?;
     let mut map: HashMap<String, T> = HashMap::with_capacity(index.len());
@@ -166,19 +179,34 @@ where
             modified = true;
         }
 
-        if let Some(existing) = map.remove(&key) {
-            modified = true;
-            map.insert(key, merge(existing, normalized));
-        } else {
-            map.insert(key, normalized);
+        match map.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                modified = true;
+                let merged = merge(entry.get(), normalized);
+                entry.insert(merged);
+            }
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(normalized);
+            }
         }
     }
 
-    if modified {
-        persist_index_map(store, layout, &index, &map)?;
-    }
+    Ok(IndexStoreSnapshot {
+        items: map,
+        index,
+        modified,
+    })
+}
 
-    Ok(map)
+fn load_snapshot<T: serde::Serialize>(
+    store: &DurableStore,
+    layout: IndexStoreLayout,
+    snapshot: IndexStoreSnapshot<T>,
+) -> Result<HashMap<String, T>, String> {
+    if snapshot.modified {
+        persist_index_map(store, layout, &snapshot.index, &snapshot.items)?;
+    }
+    Ok(snapshot.items)
 }
 
 pub(super) fn load_library_index(store: &DurableStore) -> Result<Vec<String>, String> {
@@ -186,11 +214,17 @@ pub(super) fn load_library_index(store: &DurableStore) -> Result<Vec<String>, St
 }
 
 pub(super) fn load_library_map(store: &DurableStore) -> Result<HashMap<String, MediaItem>, String> {
-    load_index_map(
+    load_snapshot(store, LIBRARY_LAYOUT, read_library_snapshot(store)?)
+}
+
+pub(super) fn read_library_snapshot(
+    store: &DurableStore,
+) -> Result<IndexStoreSnapshot<MediaItem>, String> {
+    read_index_map(
         store,
         LIBRARY_LAYOUT,
         |_item_id, item| normalize_library_item(item).map(|item| (item.id.clone(), item)),
-        merge_library_item,
+        |existing, incoming| merge_library_item(Some(existing), incoming),
     )
 }
 
@@ -223,7 +257,17 @@ pub(super) fn load_watch_status_index(store: &DurableStore) -> Result<Vec<String
 pub(super) fn load_watch_statuses_map(
     store: &DurableStore,
 ) -> Result<HashMap<String, String>, String> {
-    load_index_map(
+    load_snapshot(
+        store,
+        WATCH_STATUS_LAYOUT,
+        read_watch_status_snapshot(store)?,
+    )
+}
+
+pub(super) fn read_watch_status_snapshot(
+    store: &DurableStore,
+) -> Result<IndexStoreSnapshot<String>, String> {
+    read_index_map(
         store,
         WATCH_STATUS_LAYOUT,
         |item_id, status: String| {
@@ -231,4 +275,50 @@ pub(super) fn load_watch_statuses_map(
         },
         |_existing, incoming| incoming,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::test_media_item;
+
+    #[test]
+    fn borrowed_library_merge_preserves_missing_metadata_without_mutating_existing() {
+        let mut existing = test_media_item("a", "movie");
+        existing.poster = Some("https://img.example/old.jpg".into());
+        existing.backdrop = Some("https://img.example/backdrop.jpg".into());
+        existing.logo = Some("https://img.example/logo.png".into());
+        existing.description = Some("Existing description".into());
+        existing.year = Some("2024".into());
+        existing.primary_year = Some(2024);
+        existing.display_year = Some("2024".into());
+        existing.genres = Some(vec!["Drama".into()]);
+        let before = json!(existing);
+        let mut incoming = test_media_item("a", "movie");
+        incoming.title = "New title".into();
+        incoming.poster = Some("https://img.example/new.jpg".into());
+        let merged = merge_library_item(Some(&existing), incoming);
+        assert_eq!(merged.title, "New title");
+        assert_eq!(
+            merged.poster.as_deref(),
+            Some("https://img.example/new.jpg")
+        );
+        assert_eq!(merged.backdrop, existing.backdrop);
+        assert_eq!(merged.logo, existing.logo);
+        assert_eq!(merged.description, existing.description);
+        assert_eq!(merged.year, existing.year);
+        assert_eq!(merged.primary_year, Some(2024));
+        assert_eq!(merged.display_year, existing.display_year);
+        assert_eq!(merged.genres, existing.genres);
+        assert_eq!(json!(existing), before);
+    }
+
+    #[test]
+    fn new_library_merge_derives_year_fields_without_an_existing_item() {
+        let mut item = test_media_item("a", "movie");
+        item.year = Some("2023-2024".into());
+        let merged = merge_library_item(None, item);
+        assert_eq!(merged.primary_year, Some(2023));
+        assert_eq!(merged.display_year.as_deref(), Some("2023"));
+    }
 }

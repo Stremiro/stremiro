@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bookmark, Check, ChevronLeft, Heart, ListPlus, Loader2, Play, Trash2 } from 'lucide-react';
+import { Bookmark, Check, ChevronLeft, Heart, Loader2, Play, Trash2 } from 'lucide-react';
 import {
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -9,23 +9,21 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import { currentPathWithSearch, navigateOnAnchorClick } from '@/lib/navigation';
 import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
-import { ListIcon } from '@/components/list/list-icons';
+import { SaveToCollectionPanel } from '@/components/list/save-to-collection';
 import { RemoteImage } from '@/components/remote-image';
-import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import {
   useIsItemInLibrary,
   useItemWatchStatus,
   useLatestWatchHistoryEntry,
-  useLists,
+  useListSummaries,
   useMediaCollectionActions,
 } from '@/hooks/use-media-library';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
@@ -59,12 +57,11 @@ import {
   primaryGenrePills,
 } from '@/lib/utils';
 
-// IMDb "8.3" or percentage "83" to a 0-100 score.
 function normalizeRating(raw: string | null | undefined): number | null {
   if (!raw) return null;
   const val = parseFloat(raw);
   if (Number.isNaN(val)) return null;
-  return val <= 10 ? Math.round(val * 10) : Math.round(val);
+  return Math.round(val * 10);
 }
 function getRatingStyle(score: number | null) {
   if (score === null) return null;
@@ -115,6 +112,9 @@ interface MediaCardProps {
   isPlayPending?: boolean;
   onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   subtitle?: string;
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: (item: MediaItem) => void;
 }
 
 function ResumeProgressBar({ progress }: { progress?: number }) {
@@ -132,6 +132,9 @@ interface MediaCardPosterProps {
   onPrefetchDetails?: () => void;
   progress?: number;
   subtitle?: string;
+  selectionMode?: boolean;
+  isSelected?: boolean;
+  onToggleSelect?: (item: MediaItem) => void;
 }
 
 function MediaCardPoster({
@@ -144,15 +147,133 @@ function MediaCardPoster({
   onPrefetchDetails,
   progress,
   subtitle,
+  selectionMode = false,
+  isSelected = false,
+  onToggleSelect,
 }: MediaCardPosterProps) {
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
   const anchorLabel = onPlay
     ? [`Resume ${item.title}`, subtitle, metaLine].filter(Boolean).join(', ')
     : item.title;
 
+  const poster = (
+    <div
+      className={cn(
+        'relative rounded-lg bg-zinc-900',
+        selectionMode &&
+          isSelected &&
+          'ring-2 ring-(--accent-nav) ring-offset-2 ring-offset-zinc-950',
+      )}
+    >
+      <div className='relative aspect-2/3 rounded-lg overflow-hidden bg-zinc-900'>
+        <div
+          aria-hidden='true'
+          className='absolute inset-0 flex items-center justify-center px-4 text-center'
+        >
+          <span
+            dir='auto'
+            className='line-clamp-3 text-sm font-medium leading-relaxed text-zinc-500'
+          >
+            {item.title}
+          </span>
+        </div>
+        {isHttpUrl(item.poster) ? (
+          <RemoteImage
+            src={item.poster}
+            alt={item.title}
+            className='relative object-cover w-full h-full bg-zinc-900'
+            loading='lazy'
+          />
+        ) : null}
+        {selectionMode && (
+          <span
+            aria-hidden='true'
+            className={cn(
+              'absolute top-2.5 left-2.5 z-20 flex h-6 w-6 items-center justify-center rounded-lg border transition-all duration-150',
+              isSelected
+                ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav) shadow-md scale-100'
+                : 'border-white/30 bg-black/55 text-transparent backdrop-blur-md group-hover:border-white/60',
+            )}
+          >
+            <Check className='h-3.5 w-3.5' strokeWidth={3} />
+          </span>
+        )}
+
+        {subtitle && (
+          <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
+            <div className='rounded-[5px] border border-white/10 bg-black/75 px-1.5 py-1 text-[10.5px] font-semibold leading-none tabular-nums text-white/90 backdrop-blur-xs'>
+              {subtitle}
+            </div>
+          </div>
+        )}
+
+        <ResumeProgressBar progress={progress} />
+
+        {!selectionMode && isPlayPending && (
+          <div className='absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150'>
+            <Loader2 className='h-5 w-5 animate-spin text-white/85' />
+            <span className='text-[11.5px] font-medium text-white/80'>Opening…</span>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+  const textBlock = (
+    <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
+      <p
+        dir='auto'
+        title={item.title}
+        className='line-clamp-2 min-h-[2.5em] [overflow-wrap:anywhere] text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100'
+      >
+        {item.title}
+      </p>
+      {metaLine ? (
+        <p
+          title={metaLine}
+          className='truncate text-[11px] font-normal leading-none tabular-nums text-zinc-400'
+        >
+          {metaLine}
+        </p>
+      ) : item.displayYear ? (
+        <p className='text-[11px] font-normal leading-none text-zinc-500'>{item.displayYear}</p>
+      ) : null}
+      {currentStatus && (
+        <p className='flex items-center gap-1.5 text-[11px] font-medium leading-none text-zinc-400'>
+          <span
+            aria-hidden='true'
+            className={cn(
+              'h-1 w-1 rounded-full bg-current',
+              WATCH_STATUS_COLORS[currentStatus].text,
+            )}
+          />
+          {WATCH_STATUS_LABELS[currentStatus]}
+        </p>
+      )}
+    </div>
+  );
+
+  if (selectionMode) {
+    return (
+      <button
+        type='button'
+        aria-label={`${isSelected ? 'Deselect' : 'Select'} ${item.title}`}
+        aria-pressed={isSelected}
+        className='group block w-full rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          onToggleSelect?.(item);
+        }}
+      >
+        {poster}
+        {textBlock}
+      </button>
+    );
+  }
+
   return (
     <>
-      {/* Plain anchor + root-bound navigate — a <Link> subscribes to location, so every card would re-render per URL reflect. */}
+      {/* Plain anchor avoids subscribing every resting card to navigation. */}
       <a
         href={detailsPath}
         aria-label={anchorLabel}
@@ -167,79 +288,9 @@ function MediaCardPoster({
         onFocus={onPrefetchDetails}
         onPointerDown={onPrefetchDetails}
       >
-        <div className='relative rounded-lg bg-zinc-900'>
-          <div className='relative aspect-2/3 rounded-lg overflow-hidden bg-zinc-900'>
-            <div
-              aria-hidden='true'
-              className='absolute inset-0 flex items-center justify-center px-4 text-center'
-            >
-              <span
-                dir='auto'
-                className='line-clamp-3 text-sm font-medium leading-relaxed text-zinc-500'
-              >
-                {item.title}
-              </span>
-            </div>
-            {isHttpUrl(item.poster) ? (
-              <RemoteImage
-                src={item.poster}
-                alt={item.title}
-                className='relative object-cover w-full h-full bg-zinc-900'
-                loading='lazy'
-              />
-            ) : null}
-
-            {subtitle && (
-              <div className='absolute bottom-1.5 left-1.5 z-10 flex max-w-[calc(100%-12px)] flex-col items-start gap-1'>
-                <div className='rounded-[5px] border border-white/10 bg-black/75 px-1.5 py-1 text-[10.5px] font-semibold leading-none tabular-nums text-white/90 backdrop-blur-xs'>
-                  {subtitle}
-                </div>
-              </div>
-            )}
-
-            <ResumeProgressBar progress={progress} />
-
-            {isPlayPending && (
-              <div className='absolute inset-0 z-20 flex flex-col items-center justify-center gap-2 bg-black/55 backdrop-blur-[2px] animate-in fade-in duration-150'>
-                <Loader2 className='h-5 w-5 animate-spin text-white/85' />
-                <span className='text-[11.5px] font-medium text-white/80'>Opening…</span>
-              </div>
-            )}
-          </div>
-        </div>
+        {poster}
       </a>
-
-      <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
-        <p
-          dir='auto'
-          title={item.title}
-          className='line-clamp-2 min-h-[2.5em] [overflow-wrap:anywhere] text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100'
-        >
-          {item.title}
-        </p>
-        {metaLine ? (
-          <p
-            title={metaLine}
-            className='truncate text-[11px] font-normal leading-none tabular-nums text-zinc-400'
-          >
-            {metaLine}
-          </p>
-        ) : item.displayYear ? (
-          <p className='text-[11px] font-normal leading-none text-zinc-500'>{item.displayYear}</p>
-        ) : null}
-        {currentStatus && (
-          <p className='flex items-center gap-1.5 text-[11px] font-medium leading-none text-zinc-400'>
-            <span
-              aria-hidden='true'
-              className={cn(
-                'h-1 w-1 rounded-full bg-current',
-                WATCH_STATUS_COLORS[currentStatus].text,
-              )}
-            />
-            {WATCH_STATUS_LABELS[currentStatus]}
-          </p>
-        )}
-      </div>
+      {textBlock}
     </>
   );
 }
@@ -310,15 +361,7 @@ function MediaCardOverlay({
     gcTime: DETAILS_GC_TIME_MS,
   });
 
-  const listsQuery = useLists();
-  const { data: lists } = listsQuery;
-  const isRetryingLists = listsQuery.isFetched && listsQuery.isLoading;
-
-  // Membership derives from the already-fetched lists (each carries `item_ids`) — no second IPC per expanded card.
-  const itemListIds = useMemo(
-    () => lists?.filter((list) => list.item_ids.includes(item.id)).map((list) => list.id),
-    [lists, item.id],
-  );
+  const { data: lists } = useListSummaries(item.id);
   const { data: historyEntry } = useLatestWatchHistoryEntry(item.id, {
     enabled: !onPlay,
   });
@@ -329,12 +372,11 @@ function MediaCardOverlay({
   });
   const isInLibrary = isInLibraryOverride ?? resolvedIsInLibrary;
 
-  const { addItemToNewList, toggleLibrary, toggleListMembership } = useMediaCollectionActions({
+  const collectionActions = useMediaCollectionActions({
     item,
     isInLibrary,
-    itemListIds,
-    lists,
   });
+  const { addItemToNewList, toggleLibrary } = collectionActions;
   const primaryPlayback = useMediaPrimaryPlayback({
     from,
     historyEntry,
@@ -359,7 +401,7 @@ function MediaCardOverlay({
 
   const backdropSrc = details?.backdrop || item.backdrop || item.poster;
 
-  const isInAnyList = (itemListIds?.length ?? 0) > 0;
+  const isInAnyList = lists?.some((list) => list.contains_item) ?? false;
   const primaryActionLabel = onPlay
     ? subtitle
       ? `Resume ${subtitle}`
@@ -452,73 +494,12 @@ function MediaCardOverlay({
                 <span className='text-[12px] font-semibold text-white'>Add to List</span>
               </div>
 
-              <div className='space-y-0.5 max-h-24 overflow-y-auto'>
-                {listsQuery.isError || isRetryingLists ? (
-                  <RetryBanner
-                    className='gap-2 px-2 py-1.5'
-                    message="Couldn't load lists."
-                    isRetrying={listsQuery.isFetching}
-                    onRetry={() => void listsQuery.refetch()}
-                  />
-                ) : listsQuery.isLoading ? (
-                  <p
-                    role='status'
-                    className='flex items-center gap-2 px-2 py-1 text-[11px] text-zinc-400'
-                  >
-                    <Loader2 className='h-3 w-3 animate-spin' />
-                    Loading lists…
-                  </p>
-                ) : lists && lists.length > 0 ? (
-                  lists.map((list) => {
-                    const isInThisList = itemListIds?.includes(list.id) ?? false;
-                    return (
-                      <button
-                        key={list.id}
-                        type='button'
-                        title={list.name}
-                        aria-pressed={isInThisList}
-                        className='w-full min-h-9 flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors duration-150 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
-                        onClick={(e) => {
-                          e.preventDefault();
-                          e.stopPropagation();
-                          // Same disabled-focus-collapse trap as the library button — guard instead of disabling.
-                          if (toggleListMembership.isPending) return;
-                          toggleListMembership.mutate(list);
-                        }}
-                        aria-disabled={toggleListMembership.isPending || undefined}
-                      >
-                        <span className='text-zinc-400 shrink-0'>
-                          <ListIcon iconId={list.icon} size={13} />
-                        </span>
-                        <span className='flex-1 truncate text-[11px] text-zinc-200'>
-                          {list.name}
-                        </span>
-                        <span className='text-zinc-600 text-[10px] shrink-0'>
-                          {list.item_ids.length}
-                        </span>
-                        {isInThisList && <Check className='w-3 h-3 text-(--accent-act) shrink-0' />}
-                      </button>
-                    );
-                  })
-                ) : (
-                  <p className='text-[11px] text-zinc-600 px-2 py-1'>No lists yet</p>
-                )}
-              </div>
-
-              <div className='pt-1 border-t border-white/[0.06]'>
-                <button
-                  type='button'
-                  className='w-full min-h-9 flex items-center gap-2 px-2 py-1.5 rounded-md hover:bg-white/8 transition-colors duration-150 text-zinc-400 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    onCreateListOpenChange(true);
-                  }}
-                >
-                  <ListPlus className='h-3.5 w-3.5 shrink-0' />
-                  <span className='text-[11px]'>Create New List…</span>
-                </button>
-              </div>
+              <SaveToCollectionPanel
+                item={item}
+                isInLibrary={isInLibrary}
+                actions={collectionActions}
+                onCreateList={() => onCreateListOpenChange(true)}
+              />
             </div>
           ) : (
             <div className='relative z-10 flex flex-1 flex-col gap-2 p-3 pt-2.5'>
@@ -686,6 +667,9 @@ export const MediaCard = memo(function MediaCard({
   onRemoveFromContinue,
   subtitle,
   isPlayPending = false,
+  selectionMode = false,
+  isSelected = false,
+  onToggleSelect,
 }: MediaCardProps) {
   const detailsRouteType = resolvePlayerRouteMediaType(item.type);
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
@@ -741,7 +725,7 @@ export const MediaCard = memo(function MediaCard({
 
   const scheduleExpand = useCallback(() => {
     // Escape restores poster focus without immediately reopening the card.
-    if (expanded || restoringFocusRef.current) return;
+    if (selectionMode || expanded || restoringFocusRef.current) return;
     // Hover focus can inherit an earlier keyboard ring; track its owner here.
     hoverFocusRef.current = !cardRef.current?.contains(document.activeElement);
     clearExpandTimer();
@@ -756,7 +740,7 @@ export const MediaCard = memo(function MediaCard({
       setExpanded(true);
       expandTimer.current = null;
     }, delay);
-  }, [clearExpandTimer, expanded, prefetchDetails, resolvePopoverAlign]);
+  }, [clearExpandTimer, expanded, prefetchDetails, resolvePopoverAlign, selectionMode]);
 
   const handleMouseLeave = useCallback(() => {
     if (
@@ -785,6 +769,10 @@ export const MediaCard = memo(function MediaCard({
       clearExpandTimer();
     };
   }, [clearExpandTimer]);
+
+  useEffect(() => {
+    if (selectionMode) collapseCard();
+  }, [selectionMode, collapseCard]);
 
   const toggleListPicker = useCallback(
     (e: ReactMouseEvent) => {
@@ -859,8 +847,9 @@ export const MediaCard = memo(function MediaCard({
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <article
       ref={cardRef}
-      data-media-card-expanded={expanded || undefined}
-      className={cn('relative', expanded && 'z-30')}
+      data-media-card='true'
+      data-media-card-expanded={(!selectionMode && expanded) || undefined}
+      className={cn('relative', !selectionMode && expanded && 'z-30')}
       aria-label={item.title}
       onMouseEnter={scheduleExpand}
       onMouseLeave={handleMouseLeave}
@@ -868,7 +857,7 @@ export const MediaCard = memo(function MediaCard({
       onBlur={handleBlur}
       onKeyDown={handleKeyDown}
     >
-      <div className={cn(expanded && 'invisible')}>
+      <div className={cn(!selectionMode && expanded && 'invisible')}>
         <MediaCardPoster
           currentStatus={currentStatus}
           detailsRouteType={detailsRouteType}
@@ -879,10 +868,13 @@ export const MediaCard = memo(function MediaCard({
           onPrefetchDetails={prefetchDetails}
           progress={safeProgress}
           subtitle={subtitle}
+          selectionMode={selectionMode}
+          isSelected={isSelected}
+          onToggleSelect={onToggleSelect}
         />
       </div>
 
-      {expanded && (
+      {!selectionMode && expanded && (
         <MediaCardOverlay
           createListOpen={createListOpen}
           currentStatus={currentStatus}

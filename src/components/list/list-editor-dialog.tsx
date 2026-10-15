@@ -1,21 +1,22 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Loader2 } from 'lucide-react';
-import { useEffect, useEffectEvent, useState } from 'react';
+import { Check, Loader2 } from 'lucide-react';
+import { type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
   DialogContent,
+  DialogDescription,
   DialogFooter,
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { api, type UserList } from '@/lib/api';
+import { api, getListErrorMessage, type UserList } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import { invalidateListQueries } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 
-import { DEFAULT_LIST_ICON, LIST_ICONS, ListIcon } from './list-icons';
+import { DEFAULT_LIST_ICON, LIST_ICONS, ListIconTile } from './list-icons';
 
 interface ListEditorDialogProps {
   initialIcon: string;
@@ -24,6 +25,7 @@ interface ListEditorDialogProps {
   onOpenChange: (open: boolean) => void;
   onSubmit: (values: { icon: string; name: string }) => void;
   open: boolean;
+  returnFocusRef?: RefObject<HTMLElement | null>;
   submitLabel: string;
   submitReady: (values: { icon: string; trimmedName: string }) => boolean;
   title: string;
@@ -36,12 +38,14 @@ function ListEditorDialog({
   onOpenChange,
   onSubmit,
   open,
+  returnFocusRef,
   submitLabel,
   submitReady,
   title,
 }: ListEditorDialogProps) {
   const [name, setName] = useState(initialName);
   const [selectedIcon, setSelectedIcon] = useState(initialIcon);
+  const nameInputRef = useRef<HTMLInputElement>(null);
   const nameInputId = `${title.replace(/\s+/g, '-').toLowerCase()}-name`;
 
   const syncInitialState = useEffectEvent((nextInitialIcon: string, nextInitialName: string) => {
@@ -66,21 +70,75 @@ function ListEditorDialog({
   };
 
   const trimmedName = name.trim();
-  const canSubmit = submitReady({ icon: selectedIcon, trimmedName });
+  const nameLength = [...name].length;
+  const canSubmit = nameLength <= 64 && submitReady({ icon: selectedIcon, trimmedName });
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className='sm:max-w-sm bg-zinc-950 border-zinc-800 text-zinc-200'>
+      <DialogContent
+        className='sm:max-w-md max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 border-white/10 text-zinc-200'
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          nameInputRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          const target = returnFocusRef?.current;
+          if (target?.isConnected) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
+        }}
+      >
         <DialogHeader>
-          <DialogTitle className='text-white font-bold'>{title}</DialogTitle>
+          <DialogTitle className='text-white font-semibold'>{title}</DialogTitle>
+          <DialogDescription className='text-zinc-400'>
+            A home for your next obsession, favourites, or movie night.
+          </DialogDescription>
         </DialogHeader>
 
-        <form onSubmit={handleSubmit} className='space-y-5 mt-2'>
-          <div className='space-y-2'>
-            <div className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'>
-              Icon
+        <form onSubmit={handleSubmit} className='space-y-5'>
+          <div className='flex items-center gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4'>
+            <ListIconTile iconId={selectedIcon} size='lg' />
+            <div className='min-w-0'>
+              <p className='text-[10px] font-medium uppercase tracking-widest text-zinc-500'>
+                Your collection
+              </p>
+              <p
+                dir='auto'
+                className={cn(
+                  'mt-1 truncate text-lg font-semibold tracking-tight',
+                  trimmedName ? 'text-white' : 'text-zinc-500',
+                )}
+              >
+                {trimmedName || 'Give it a name'}
+              </p>
             </div>
-            <div role='group' aria-label='Icon' className='grid grid-cols-8 gap-2'>
+          </div>
+
+          <div className='space-y-2'>
+            <div className='flex items-center justify-between'>
+              <label htmlFor={nameInputId} className='text-xs font-medium text-zinc-300'>
+                List name
+              </label>
+              <span id={`${nameInputId}-count`} className='text-[11px] tabular-nums text-zinc-500'>
+                {nameLength}/64
+              </span>
+            </div>
+            <Input
+              ref={nameInputRef}
+              id={nameInputId}
+              aria-describedby={`${nameInputId}-count`}
+              value={name}
+              onChange={(event) => setName([...event.target.value].slice(0, 64).join(''))}
+              placeholder='Weekend cinema'
+              className='h-10 rounded-lg bg-white/[0.03] border-white/10 focus-visible:ring-white/20 text-white placeholder:text-zinc-600'
+              disabled={isPending}
+            />
+          </div>
+
+          <div className='space-y-2'>
+            <div className='text-xs font-medium text-zinc-300'>Choose an icon</div>
+            <div role='group' aria-label='List icon' className='grid grid-cols-6 gap-1.5'>
               {LIST_ICONS.map(({ id, label }) => (
                 <button
                   key={id}
@@ -89,41 +147,22 @@ function ListEditorDialog({
                   aria-label={label}
                   aria-pressed={selectedIcon === id}
                   onClick={() => setSelectedIcon(id)}
+                  disabled={isPending}
                   className={cn(
-                    'aspect-square w-full rounded-md flex items-center justify-center transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
+                    'relative flex items-center justify-center rounded-xl p-2 transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-50',
                     selectedIcon === id
-                      ? 'bg-white/15 ring-1 ring-white/30 text-white'
-                      : 'bg-zinc-900 hover:bg-zinc-800 text-zinc-400 hover:text-zinc-200',
+                      ? 'bg-white/[0.05] ring-2 ring-[var(--accent-nav)]'
+                      : 'hover:bg-white/[0.04]',
                   )}
                 >
-                  <ListIcon iconId={id} size={16} />
+                  <ListIconTile iconId={id} />
+                  {selectedIcon === id && (
+                    <span className='absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent-nav)] text-[var(--on-accent-nav)]'>
+                      <Check className='h-2.5 w-2.5' strokeWidth={3} />
+                    </span>
+                  )}
                 </button>
               ))}
-            </div>
-          </div>
-
-          <div className='space-y-2'>
-            <label
-              htmlFor={nameInputId}
-              className='text-[11px] font-bold text-zinc-500 uppercase tracking-widest'
-            >
-              List Name
-            </label>
-            <div className='flex items-center gap-2'>
-              <div className='h-9 w-9 rounded-lg bg-zinc-900 border border-white/10 flex items-center justify-center text-white shrink-0'>
-                <ListIcon iconId={selectedIcon} size={16} />
-              </div>
-              {/* eslint-disable jsx-a11y/no-autofocus -- focus into the primary field is intended. */}
-              <Input
-                id={nameInputId}
-                value={name}
-                onChange={(event) => setName(event.target.value)}
-                placeholder='My Favourites'
-                className='bg-zinc-900 border-white/10 focus-visible:ring-white/20 text-white placeholder:text-zinc-600'
-                maxLength={40}
-                autoFocus
-              />
-              {/* eslint-enable jsx-a11y/no-autofocus */}
             </div>
           </div>
 
@@ -155,9 +194,15 @@ interface CreateListDialogProps {
   onCreated?: (list: UserList) => Promise<void> | void;
   onOpenChange: (open: boolean) => void;
   open: boolean;
+  returnFocusRef?: RefObject<HTMLElement | null>;
 }
 
-export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDialogProps) {
+export function CreateListDialog({
+  open,
+  onOpenChange,
+  onCreated,
+  returnFocusRef,
+}: CreateListDialogProps) {
   const queryClient = useQueryClient();
 
   const createList = useMutation({
@@ -168,7 +213,8 @@ export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDi
       void Promise.resolve(onCreated?.(newList)).finally(() => invalidateListQueries(queryClient));
       onOpenChange(false);
     },
-    onError: () => notifyAction('Failed to create list', { tone: 'error' }),
+    onError: (error) =>
+      notifyAction(getListErrorMessage(error) ?? 'Failed to create list', { tone: 'error' }),
   });
 
   return (
@@ -179,6 +225,7 @@ export function CreateListDialog({ open, onOpenChange, onCreated }: CreateListDi
       onOpenChange={onOpenChange}
       onSubmit={(values) => createList.mutate(values)}
       open={open}
+      returnFocusRef={returnFocusRef}
       submitLabel='Create List'
       submitReady={({ trimmedName }) => Boolean(trimmedName)}
       title='Create New List'
@@ -203,7 +250,8 @@ export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogP
       notifyAction('List renamed', { detail: variables.name });
       onOpenChange(false);
     },
-    onError: () => notifyAction('Failed to rename list', { tone: 'error' }),
+    onError: (error) =>
+      notifyAction(getListErrorMessage(error) ?? 'Failed to rename list', { tone: 'error' }),
   });
 
   return (

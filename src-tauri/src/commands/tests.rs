@@ -1014,7 +1014,7 @@ fn title_watch_history_rows_hydrate_lookup_id_within_series_gate() {
 }
 
 #[test]
-fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() {
+fn title_watch_progress_keeps_episode_rows_and_selects_stable_resume_rows_per_kind() {
     let mut completed = series_episode_progress(3_000, 1, 8, 2_400.0, 2_400.0);
     let mut movie = mk_watch_progress(&completed.id, "movie", 1_000);
     movie.position = 600.0;
@@ -1029,13 +1029,12 @@ fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() 
     let progress =
         build_title_watch_progress_with_priorities(vec![completed, movie, first, second], None);
 
-    assert_eq!(progress.history.len(), 4);
-    assert_eq!(progress.history[0].episode, Some(8));
-    assert!(progress.history[0].is_watched);
-    assert_eq!(progress.history[0].resume_start_time, None);
-    assert_eq!(progress.continue_watching.len(), 2);
-    // A completed first row still owns its group's ordering on cross-kind ties.
-    let resume = &progress.continue_watching[0];
+    assert_eq!(progress.episode_progress.len(), 3);
+    let completed = progress.latest_series_entry.as_ref().unwrap();
+    assert_eq!(completed.episode, Some(8));
+    assert!(completed.is_watched);
+    assert_eq!(completed.resume_start_time, None);
+    let resume = progress.series_resume_entry.as_ref().unwrap();
     assert_eq!(resume.type_, "series");
     assert_eq!(resume.episode, Some(3));
     assert_eq!(resume.absolute_season, Some(1));
@@ -1045,7 +1044,7 @@ fn title_watch_progress_keeps_history_and_selects_stable_resume_rows_per_kind() 
         Some(resume.id.as_str())
     );
     assert_eq!(resume.resume_start_time, Some(600.0));
-    assert_eq!(progress.continue_watching[1].type_, "movie");
+    assert_eq!(progress.movie_resume_entry.as_ref().unwrap().type_, "movie");
     // Pre-picked heads mirror the frontend's per-kind `find` scans.
     assert_eq!(
         progress.latest_entry.as_ref().map(|row| row.episode),

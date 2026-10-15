@@ -21,6 +21,97 @@ pub struct UserListWithItems {
     pub items: Vec<MediaItem>,
 }
 
+#[derive(Debug, Serialize)]
+pub struct UserListSummary {
+    pub id: String,
+    pub name: String,
+    pub icon: String,
+    pub item_count: usize,
+    pub contains_item: bool,
+}
+
+// Validate the snapshot's wire shape without allocating its artwork, description or genres.
+#[derive(Deserialize)]
+pub(super) struct ListItemIdentity {
+    id: String,
+    title: String,
+    #[serde(rename = "type")]
+    type_: String,
+    #[serde(
+        default,
+        rename = "poster",
+        deserialize_with = "validate_optional_string"
+    )]
+    _poster: (),
+    #[serde(
+        default,
+        rename = "backdrop",
+        deserialize_with = "validate_optional_string"
+    )]
+    _backdrop: (),
+    #[serde(
+        default,
+        rename = "logo",
+        deserialize_with = "validate_optional_string"
+    )]
+    _logo: (),
+    #[serde(
+        default,
+        rename = "description",
+        deserialize_with = "validate_optional_string"
+    )]
+    _description: (),
+    #[serde(
+        default,
+        rename = "year",
+        deserialize_with = "validate_optional_string"
+    )]
+    _year: (),
+    #[serde(
+        default,
+        rename = "displayYear",
+        deserialize_with = "validate_optional_string"
+    )]
+    _display_year: (),
+    #[serde(
+        default,
+        rename = "genres",
+        deserialize_with = "validate_optional_genres"
+    )]
+    _genres: (),
+}
+
+fn validate_optional_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    Option::<&str>::deserialize(deserializer).map(|_| ())
+}
+
+fn validate_optional_genres<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<(), D::Error> {
+    Option::<Vec<&str>>::deserialize(deserializer).map(|_| ())
+}
+
+impl ListItemIdentity {
+    pub(super) fn normalized_id(self) -> Option<String> {
+        super::store_helpers::normalize_library_item(MediaItem {
+            id: self.id,
+            title: self.title,
+            type_: self.type_,
+            poster: None,
+            backdrop: None,
+            logo: None,
+            description: None,
+            year: None,
+            primary_year: None,
+            display_year: None,
+            genres: None,
+        })
+        .map(|item| item.id)
+    }
+}
+
 pub(super) const LISTS_ORDER_KEY: &str = "lists_order";
 /// Store key prefixes — single owner so prefix sweeps (clear/delete) can
 /// never drift from the key builders below.

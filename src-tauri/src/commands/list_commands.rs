@@ -1,13 +1,14 @@
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
-    normalize_list_id, normalize_list_name, reorder_known_ids, UserList, UserListWithItems,
-    LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
+    normalize_list_id, normalize_list_name, reorder_known_ids, ListItemIdentity, UserList,
+    UserListSummary, UserListWithItems, LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, MAX_LISTS,
+    MAX_LIST_ITEMS,
 };
-use super::store_helpers::normalize_library_item;
+use super::store_helpers::{merge_library_item, normalize_library_item, normalize_library_items};
 use super::{normalize_media_id, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle};
 
 #[command]
@@ -130,6 +131,66 @@ pub async fn add_to_list(app: AppHandle, list_id: String, item: MediaItem) -> Re
     .await
 }
 
+fn add_list_items(
+    store: &DurableStore,
+    list_id: &str,
+    items: Vec<MediaItem>,
+) -> Result<usize, String> {
+    let mut list = load_list(store, list_id)?;
+    if items.is_empty() {
+        return Ok(0);
+    }
+    let mut known: HashSet<&str> = list.item_ids.iter().map(String::as_str).collect();
+    let new_ids: Vec<String> = items
+        .iter()
+        .filter(|item| known.insert(&item.id))
+        .map(|item| item.id.clone())
+        .collect();
+    if list.item_ids.len() + new_ids.len() > MAX_LIST_ITEMS {
+        return Err(format!(
+            "A custom list cannot exceed {} items",
+            MAX_LIST_ITEMS
+        ));
+    }
+    drop(known);
+    let added = new_ids.len();
+    list.item_ids.extend(new_ids);
+    // Stage merges before any store mutation. Duplicate ids merge in payload
+    // order and cost only one store read and one final write.
+    let mut prepared = HashMap::<String, MediaItem>::with_capacity(items.len());
+    for item in items {
+        let id = item.id.clone();
+        let existing = prepared.remove(&id).or_else(|| {
+            store
+                .get_typed(list_item_store_key(list_id, &id))
+                .and_then(normalize_library_item)
+                .filter(|existing| existing.id == id)
+        });
+        prepared.insert(id, merge_library_item(existing.as_ref(), item));
+    }
+    for (id, item) in prepared {
+        store.set(list_item_store_key(list_id, &id), json!(item));
+    }
+    store.set(list_meta_key(list_id), json!(list));
+    store.save()?;
+    Ok(added)
+}
+
+#[command]
+pub async fn bulk_add_to_list(
+    app: AppHandle,
+    list_id: String,
+    items: Vec<MediaItem>,
+) -> Result<usize, String> {
+    super::run_blocking_store_op(move || {
+        let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
+        let items = normalize_library_items(items)?;
+        let store = super::open_store(&app, LISTS_STORE_FILE)?;
+        add_list_items(&store, &list_id, items)
+    })
+    .await
+}
+
 #[command]
 pub async fn remove_from_list(
     app: AppHandle,
@@ -163,9 +224,60 @@ pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, String>
     .await
 }
 
+#[command]
+pub async fn get_list_summaries(
+    app: AppHandle,
+    item_id: Option<String>,
+) -> Result<Vec<UserListSummary>, String> {
+    let item_id = item_id.as_deref().and_then(normalize_media_id);
+    super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, LISTS_STORE_FILE)?;
+        read_lists_with(
+            &store,
+            |store, key| {
+                let id = store.get_typed::<ListItemIdentity>(key)?.normalized_id()?;
+                Some((id, ()))
+            },
+            |list, _| UserListSummary {
+                item_count: list.item_ids.len(),
+                contains_item: item_id
+                    .as_ref()
+                    .is_some_and(|id| list.item_ids.contains(id)),
+                id: list.id,
+                name: list.name,
+                icon: list.icon,
+            },
+        )
+    })
+    .await
+}
+
 pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>, String> {
+    read_lists_with(
+        store,
+        |store, key| {
+            let item = store
+                .get_typed::<MediaItem>(key)
+                .and_then(normalize_library_item)?;
+            Some((item.id.clone(), item))
+        },
+        |list, items| UserListWithItems {
+            id: list.id,
+            name: list.name,
+            icon: list.icon,
+            item_ids: list.item_ids,
+            items,
+        },
+    )
+}
+
+fn read_lists_with<T, R>(
+    store: &DurableStore,
+    load_item: impl Fn(&DurableStore, &str) -> Option<(String, T)>,
+    build: impl Fn(UserList, Vec<T>) -> R,
+) -> Result<Vec<R>, String> {
     let order = load_lists_order(store)?;
-    let mut result: Vec<UserListWithItems> = Vec::with_capacity(order.len());
+    let mut result = Vec::with_capacity(order.len());
     let mut surviving_ids: Vec<String> = Vec::with_capacity(order.len());
     let mut modified = false;
 
@@ -177,21 +289,33 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
         let mut seen = HashSet::with_capacity(list.item_ids.len());
         // Read every original row before repairing keys — swapped ids must not
         // overwrite an unread row; collisions keep the first valid item (backup import's dedupe policy).
-        let items: Vec<MediaItem> = list
+        let rows: Vec<_> = list
             .item_ids
             .iter()
-            .filter_map(|id| store.get_typed::<MediaItem>(list_item_store_key(list_id, id)))
-            .filter_map(normalize_library_item)
-            .filter(|item| seen.insert(item.id.clone()))
+            .enumerate()
+            .filter_map(|(index, id)| {
+                let (cleaned_id, item) = load_item(store, &list_item_store_key(list_id, id))?;
+                seen.insert(cleaned_id.clone())
+                    .then_some((index, cleaned_id, item))
+            })
             .collect();
-        let cleaned_item_ids: Vec<String> = items.iter().map(|item| item.id.clone()).collect();
+        let cleaned_item_ids: Vec<String> = rows.iter().map(|(_, id, _)| id.clone()).collect();
         if cleaned_item_ids != list.item_ids {
+            // Only damaged membership needs full snapshots in the summary path.
+            let repaired_items: Vec<MediaItem> = rows
+                .iter()
+                .filter_map(|(index, _, _)| {
+                    store
+                        .get_typed(list_item_store_key(list_id, &list.item_ids[*index]))
+                        .and_then(normalize_library_item)
+                })
+                .collect();
             // Delete all old keys before any insert: a later old-key delete
             // could otherwise erase an earlier repaired row.
             for id in &list.item_ids {
                 store.delete(list_item_store_key(list_id, id));
             }
-            for item in &items {
+            for item in &repaired_items {
                 store.set(list_item_store_key(list_id, &item.id), json!(item));
             }
         }
@@ -204,13 +328,10 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
             store.set(list_meta_key(list_id), json!(list));
         }
 
-        result.push(UserListWithItems {
-            id: list.id,
-            name: list.name,
-            icon: list.icon,
-            item_ids: list.item_ids,
-            items,
-        });
+        result.push(build(
+            list,
+            rows.into_iter().map(|(_, _, item)| item).collect(),
+        ));
     }
 
     // Ghost order entries never surface in the result.
@@ -272,4 +393,139 @@ pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), 
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_helpers::{test_media_item, test_store};
+
+    fn seed_list(store: &DurableStore, ids: Vec<String>) {
+        store.set(
+            list_meta_key("list_a"),
+            json!(UserList {
+                id: "list_a".into(),
+                name: "List".into(),
+                icon: "list".into(),
+                item_ids: ids,
+            }),
+        );
+        store.save().unwrap();
+    }
+
+    #[test]
+    fn bulk_list_add_merges_existing_appends_new_and_saves_once() {
+        let fixture = test_store();
+        let mut existing = test_media_item("a", "movie");
+        existing.poster = Some("https://img.example/a.jpg".into());
+        fixture
+            .store
+            .set(list_item_store_key("list_a", "a"), json!(existing));
+        seed_list(&fixture.store, vec!["a".into()]);
+        let mut first_b = test_media_item("b", "movie");
+        first_b.description = Some("Keep this description".into());
+        let mut last_b = test_media_item(" b ", "movie");
+        last_b.title = "Last title".into();
+        let items = normalize_library_items(vec![
+            test_media_item("a", "movie"),
+            first_b,
+            test_media_item("c", "series"),
+            last_b,
+        ])
+        .unwrap();
+        assert_eq!(add_list_items(&fixture.store, "list_a", items).unwrap(), 2);
+        assert_eq!(
+            load_list(&fixture.store, "list_a").unwrap().item_ids,
+            ["a", "b", "c"]
+        );
+        let a = fixture
+            .store
+            .get_typed::<MediaItem>(list_item_store_key("list_a", "a"))
+            .unwrap();
+        assert_eq!(a.poster.as_deref(), Some("https://img.example/a.jpg"));
+        let b = fixture
+            .store
+            .get_typed::<MediaItem>(list_item_store_key("list_a", "b"))
+            .unwrap();
+        assert_eq!(b.title, "Last title");
+        assert_eq!(b.description.as_deref(), Some("Keep this description"));
+        assert_eq!(fixture.store.save_count(), 2);
+        let reopened = super::super::DurableStoreRegistry::default()
+            .open_path(fixture.path.clone())
+            .unwrap();
+        assert_eq!(
+            load_list(&reopened, "list_a").unwrap().item_ids,
+            ["a", "b", "c"]
+        );
+    }
+
+    #[test]
+    fn bulk_list_capacity_failure_leaves_live_and_persisted_list_unchanged() {
+        let fixture = test_store();
+        seed_list(
+            &fixture.store,
+            (0..MAX_LIST_ITEMS)
+                .map(|index| format!("id{index}"))
+                .collect(),
+        );
+        let before = std::fs::read(&fixture.path).unwrap();
+        let items = normalize_library_items(vec![
+            test_media_item("id0", "movie"),
+            test_media_item("new", "movie"),
+        ])
+        .unwrap();
+        assert!(add_list_items(&fixture.store, "list_a", items).is_err());
+        fixture.store.save().unwrap();
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+        assert!(fixture
+            .store
+            .get(list_item_store_key("list_a", "id0"))
+            .is_none());
+        assert_eq!(fixture.store.save_count(), 1);
+    }
+
+    #[test]
+    fn bulk_list_duplicate_ids_do_not_double_count_capacity() {
+        let fixture = test_store();
+        seed_list(
+            &fixture.store,
+            (0..MAX_LIST_ITEMS - 1)
+                .map(|index| format!("id{index}"))
+                .collect(),
+        );
+        let items = normalize_library_items(vec![
+            test_media_item("new", "movie"),
+            test_media_item(" new ", "movie"),
+        ])
+        .unwrap();
+        assert_eq!(add_list_items(&fixture.store, "list_a", items).unwrap(), 1);
+        assert_eq!(
+            load_list(&fixture.store, "list_a").unwrap().item_ids.len(),
+            MAX_LIST_ITEMS
+        );
+    }
+
+    #[test]
+    fn bulk_list_invalid_item_and_missing_list_fail_without_mutations() {
+        let fixture = test_store();
+        seed_list(&fixture.store, Vec::new());
+        let result = normalize_library_items(vec![
+            test_media_item("a", "movie"),
+            test_media_item("", "movie"),
+        ])
+        .and_then(|items| add_list_items(&fixture.store, "list_a", items));
+        assert!(result.is_err());
+        assert!(normalize_list_id("invalid:list").is_none());
+        assert_eq!(
+            add_list_items(&fixture.store, "list_a", Vec::new()).unwrap(),
+            0
+        );
+        assert!(add_list_items(&fixture.store, "missing", Vec::new()).is_err());
+        fixture.store.save().unwrap();
+        assert_eq!(fixture.store.save_count(), 1);
+        assert!(load_list(&fixture.store, "list_a")
+            .unwrap()
+            .item_ids
+            .is_empty());
+    }
 }

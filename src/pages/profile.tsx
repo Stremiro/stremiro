@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { History, LayoutList, Library, Search } from 'lucide-react';
-import { useCallback, useDeferredValue, useMemo, useRef, useState } from 'react';
+import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { ListsManager } from '@/components/list/lists-manager';
@@ -13,13 +13,22 @@ import {
 import { HistoryItem, HistoryListView, LibraryList } from '@/components/profile-collection-rows';
 import {
   LibraryToolbar,
+  LibraryBulkActionBar,
   ViewToggle,
-  type LibrarySort,
+  isLibrarySort,
 } from '@/components/profile-library-controls';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -32,12 +41,17 @@ import {
 } from '@/hooks/use-local-profile';
 import {
   useLibraryItems,
+  useProfileLibrary,
+  useBulkAddToList,
+  useBulkRemoveFromLibrary,
+  useBulkSetWatchStatus,
   useTotalWatchTime,
   useWatchHistory,
   useWatchStatuses,
 } from '@/hooks/use-media-library';
 import {
   api,
+  getListErrorMessage,
   type MediaItem,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
@@ -46,22 +60,21 @@ import {
 } from '@/lib/api';
 import { DATA_STATS_QUERY_KEY, DATA_STATS_STALE_TIME_MS } from '@/lib/query-invalidation';
 import { watchProgressItemKey } from '@/lib/history-playback';
+import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { cn, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
 const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
   { length: 12 },
   (_, index) => `profile-grid-skeleton-${index}`,
 );
-
-// `primaryYear` is backend-extracted; undated titles sink in both directions.
-function compareReleaseYears(a: MediaItem, b: MediaItem, direction: 1 | -1): number {
-  const left = a.primaryYear;
-  const right = b.primaryYear;
-  if (left === undefined || right === undefined) {
-    return Number(left === undefined) - Number(right === undefined);
-  }
-  return (left - right) * direction;
-}
+const EMPTY_LIBRARY_ITEMS: MediaItem[] = [];
+const EMPTY_STATUS_COUNTS: Record<WatchStatus | 'none', number> = {
+  watching: 0,
+  watched: 0,
+  plan_to_watch: 0,
+  dropped: 0,
+  none: 0,
+};
 
 const PROFILE_TABS = [
   { id: 'library', label: 'Library', icon: Library },
@@ -89,9 +102,12 @@ export function Profile() {
     updateProfile,
     updateViewMode,
     isSaving: isSavingProfilePreferences,
+    isHydrating: isHydratingProfile,
+    isError: profilePreferencesError,
+    profilePreferencesQuery,
   } = useLocalProfile();
 
-  // Preserve the active tab across details navigation.
+  // Preserve collection controls across details navigation.
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const activeTab = isProfileTabId(tabParam) ? tabParam : 'library';
@@ -102,6 +118,20 @@ export function Profile() {
           const next = new URLSearchParams(current);
           if (tab === 'library') next.delete('tab');
           else next.set('tab', tab);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
+  const setLibraryParam = useCallback(
+    (key: 'q' | 'type' | 'status' | 'sort', value: string, defaultValue = '') => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          if (value === defaultValue) next.delete(key);
+          else next.set(key, value);
           return next;
         },
         { replace: true },
@@ -138,7 +168,6 @@ export function Profile() {
   const {
     data: allWatchStatuses,
     isError: watchStatusesError,
-    isFetched: watchStatusesFetched,
     isFetching: watchStatusesFetching,
     refetch: refetchWatchStatuses,
   } = useWatchStatuses();
@@ -146,15 +175,98 @@ export function Profile() {
   // Backend aggregate — the collapsed history rows would undercount.
   const { data: totalWatchTimeSecs } = useTotalWatchTime();
 
-  const [libraryStatusFilter, setLibraryStatusFilter] = useState<WatchStatus | 'all'>('all');
-  const [libraryTypeFilter, setLibraryTypeFilter] = useState<'all' | 'movie' | 'series'>('all');
-  const [librarySort, setLibrarySort] = useState<LibrarySort>('default');
-  const [librarySearch, setLibrarySearch] = useState('');
+  const statusParam = searchParams.get('status');
+  const libraryStatusFilter =
+    WATCH_STATUSES.find((status) => status === statusParam) ??
+    (statusParam === 'none' ? 'none' : 'all');
+  const typeParam = searchParams.get('type');
+  const libraryTypeFilter = typeParam === 'movie' || typeParam === 'series' ? typeParam : 'all';
+  const sortParam = searchParams.get('sort');
+  const librarySort = isLibrarySort(sortParam) ? sortParam : 'default';
+  const librarySearchParam = searchParams.get('q') ?? '';
+  const [librarySearch, setLibrarySearch] = useState(librarySearchParam);
+  const [previousSearchParam, setPreviousSearchParam] = useState(librarySearchParam);
+  if (previousSearchParam !== librarySearchParam) {
+    setPreviousSearchParam(librarySearchParam);
+    setLibrarySearch(librarySearchParam);
+  }
+  const librarySearchTimerRef = useRef<number | undefined>(undefined);
+  const flushLibrarySearch = useCallback(() => {
+    window.clearTimeout(librarySearchTimerRef.current);
+    librarySearchTimerRef.current = undefined;
+    if (librarySearch === librarySearchParam || window.location.pathname !== location.pathname)
+      return;
+    setLibraryParam('q', librarySearch);
+  }, [librarySearch, librarySearchParam, location.pathname, setLibraryParam]);
+  useEffect(() => {
+    if (librarySearch === librarySearchParam) return;
+    librarySearchTimerRef.current = window.setTimeout(flushLibrarySearch, 250);
+    return () => window.clearTimeout(librarySearchTimerRef.current);
+  }, [librarySearch, librarySearchParam, flushLibrarySearch]);
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const [confirmBulkRemoveOpen, setConfirmBulkRemoveOpen] = useState(false);
+  const bulkRemoveFromLibrary = useBulkRemoveFromLibrary();
+  const bulkSetWatchStatus = useBulkSetWatchStatus();
+  const bulkAddToList = useBulkAddToList();
+  const isBulkBusy =
+    bulkRemoveFromLibrary.isPending || bulkSetWatchStatus.isPending || bulkAddToList.isPending;
+  const exitSelectionMode = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+    setConfirmBulkRemoveOpen(false);
+  }, []);
+
+  useEffect(() => {
+    if (!selectionMode) return;
+    if (activeTab !== 'library' || (library?.length === 0 && !bulkRemoveFromLibrary.isPending)) {
+      exitSelectionMode();
+      return;
+    }
+    if (!library || bulkRemoveFromLibrary.isPending) return;
+    const libraryIds = new Set(library.map((item) => item.id));
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => libraryIds.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [selectionMode, activeTab, library, bulkRemoveFromLibrary.isPending, exitSelectionMode]);
+
+  useEffect(() => {
+    if (!selectionMode || confirmBulkRemoveOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      if (
+        isEditableTarget(document.activeElement, RADIX_POPPER_CONTENT_SELECTOR) ||
+        document.querySelector(`${RADIX_POPPER_CONTENT_SELECTOR}, ${OPEN_DIALOG_SELECTOR}`)
+      )
+        return;
+      event.preventDefault();
+      exitSelectionMode();
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [selectionMode, confirmBulkRemoveOpen, exitSelectionMode]);
   const librarySearchRef = useRef<HTMLInputElement>(null);
-  const normalizedLibrarySearch = useNormalizedSearchQuery(librarySearch);
   const libraryReadFailed =
     (libraryError || (libraryFetched && libraryLoading)) && library === undefined;
   const statusFilterPending = libraryStatusFilter !== 'all' && allWatchStatuses === undefined;
+  const profileLibraryQuery = useProfileLibrary({
+    query: librarySearchParam,
+    type: libraryTypeFilter,
+    status: libraryStatusFilter,
+    sort: librarySort,
+  });
+  const filteredLibrary =
+    statusFilterPending || profileLibraryQuery.isError
+      ? EMPTY_LIBRARY_ITEMS
+      : (profileLibraryQuery.data?.items ?? EMPTY_LIBRARY_ITEMS);
+  const statusCounts = profileLibraryQuery.data?.statusCounts ?? EMPTY_STATUS_COUNTS;
+  const selectAllDisabled =
+    statusFilterPending ||
+    profileLibraryQuery.isError ||
+    profileLibraryQuery.isFetching ||
+    profileLibraryQuery.isPlaceholderData ||
+    librarySearch !== librarySearchParam;
 
   const handleViewModeChange = useCallback(
     (mode: 'grid' | 'list') => {
@@ -164,67 +276,91 @@ export function Profile() {
   );
 
   const resetLibraryFilters = useCallback(() => {
-    setLibraryStatusFilter('all');
-    setLibraryTypeFilter('all');
-    setLibrarySort('default');
     setLibrarySearch('');
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        for (const key of ['q', 'type', 'status', 'sort']) next.delete(key);
+        return next;
+      },
+      { replace: true },
+    );
     librarySearchRef.current?.focus({ preventScroll: true });
-  }, []);
+  }, [setSearchParams]);
 
-  // Filter and sort changes do not affect unfiltered status counts.
-  const statusCounts = useMemo(() => {
-    const counts = {} as Record<WatchStatus, number>;
-    for (const item of library ?? []) {
-      const status = allWatchStatuses?.[item.id];
-      if (status) counts[status] = (counts[status] ?? 0) + 1;
-    }
-    return counts;
-  }, [library, allWatchStatuses]);
+  const selectedItems = useMemo(
+    () => (library ?? []).filter((item) => selectedIds.has(item.id)),
+    [library, selectedIds],
+  );
+  const allFilteredSelected =
+    filteredLibrary.length > 0 && filteredLibrary.every((item) => selectedIds.has(item.id));
 
-  // One combined predicate when filters are active; otherwise the source array passes through.
-  const filteredLibrary = useMemo(() => {
-    const source = library ?? [];
-    const hasStatusFilter = libraryStatusFilter !== 'all';
-    const hasTypeFilter = libraryTypeFilter !== 'all';
-    const hasSearch = normalizedLibrarySearch.length > 0;
-    let items = source;
-    if (hasStatusFilter || hasTypeFilter || hasSearch) {
-      items = items.filter(
-        (item) =>
-          (!hasStatusFilter || allWatchStatuses?.[item.id] === libraryStatusFilter) &&
-          (!hasTypeFilter || item.type === libraryTypeFilter) &&
-          (!hasSearch || item.title.toLowerCase().includes(normalizedLibrarySearch)),
+  const handleToggleSelect = useCallback(
+    (item: MediaItem) => {
+      if (isBulkBusy) return;
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        if (next.has(item.id)) next.delete(item.id);
+        else next.add(item.id);
+        return next;
+      });
+    },
+    [isBulkBusy],
+  );
+
+  const handleSelectAllFiltered = useCallback(() => {
+    if (isBulkBusy || selectAllDisabled) return;
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const item of filteredLibrary) next.add(item.id);
+      return next;
+    });
+  }, [filteredLibrary, isBulkBusy, selectAllDisabled]);
+
+  const handleBulkSetStatus = async (status: WatchStatus | null) => {
+    if (selectedItems.length === 0 || isBulkBusy) return;
+    try {
+      const count = await bulkSetWatchStatus.mutateAsync({ items: selectedItems, status });
+      toast.success(
+        status === null
+          ? `Cleared status for ${count} title${count === 1 ? '' : 's'}`
+          : `Set ${count} title${count === 1 ? '' : 's'} to ${WATCH_STATUS_LABELS[status]}`,
       );
+    } catch {
+      toast.error('Failed to update watch statuses');
     }
-    switch (librarySort) {
-      case 'title-asc':
-        items = items.toSorted((a, b) => a.title.localeCompare(b.title));
-        break;
-      case 'title-desc':
-        items = items.toSorted((a, b) => b.title.localeCompare(a.title));
-        break;
-      case 'year-desc':
-        items = items.toSorted((a, b) => compareReleaseYears(a, b, -1));
-        break;
-      case 'year-asc':
-        items = items.toSorted((a, b) => compareReleaseYears(a, b, 1));
-        break;
-      case 'default':
-        break;
-      default: {
-        const unhandled: never = librarySort;
-        return unhandled;
-      }
+  };
+
+  const handleBulkAddToList = async (listId: string, listName: string, items: MediaItem[]) => {
+    if (items.length === 0 || isBulkBusy) return;
+    try {
+      const count = await bulkAddToList.mutateAsync({ listId, items });
+      toast.success(
+        count === 0
+          ? 'Selected titles are already in this list'
+          : `Added ${count} title${count === 1 ? '' : 's'} to "${listName}"`,
+      );
+    } catch (error) {
+      toast.error(getListErrorMessage(error) ?? 'Failed to add titles to list');
     }
-    return items;
-  }, [
-    library,
-    libraryStatusFilter,
-    libraryTypeFilter,
-    librarySort,
-    normalizedLibrarySearch,
-    allWatchStatuses,
-  ]);
+  };
+
+  const handleBulkRemove = () => {
+    if (selectedItems.length > 0 && !isBulkBusy) setConfirmBulkRemoveOpen(true);
+  };
+
+  const confirmBulkRemove = async () => {
+    if (selectedItems.length === 0 || isBulkBusy) return;
+    const ids = selectedItems.map((item) => item.id);
+    try {
+      const count = await bulkRemoveFromLibrary.mutateAsync(ids);
+      toast.success(`Removed ${count} title${count === 1 ? '' : 's'} from Library`);
+      exitSelectionMode();
+    } catch {
+      toast.error('Failed to remove titles from Library');
+      setConfirmBulkRemoveOpen(false);
+    }
+  };
 
   const historyCount =
     activeTab === 'history' && history !== undefined
@@ -250,7 +386,10 @@ export function Profile() {
   };
 
   return (
-    <div className='relative min-h-screen page-enter'>
+    <div
+      className='relative min-h-screen page-enter'
+      data-escape-capture={selectionMode && activeTab === 'library' ? '' : undefined}
+    >
       <div
         className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-6 pb-16 space-y-6 relative z-10`}
       >
@@ -258,6 +397,10 @@ export function Profile() {
           profile={profile}
           onUpdateProfile={updateProfile}
           isSaving={isSavingProfilePreferences}
+          isHydrating={isHydratingProfile}
+          isError={profilePreferencesError}
+          isRetrying={profilePreferencesQuery.isFetching}
+          onRetry={() => void profilePreferencesQuery.refetch()}
           libraryCount={library?.length}
           listsCount={dataStats?.lists_count}
           historyCount={historyCount}
@@ -268,15 +411,23 @@ export function Profile() {
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
           <TabsList
             aria-label='Profile collections'
-            className='max-w-full justify-start overflow-x-auto rounded-lg border border-white/[0.07] bg-white/[0.03] p-1 h-auto gap-0.5 scrollbar-hide'
+            className='relative isolate inline-grid grid-cols-3 max-w-full overflow-x-auto rounded-lg border border-white/[0.07] bg-white/[0.03] p-1 h-auto gap-0 scrollbar-hide'
           >
+            <span
+              aria-hidden='true'
+              className='pointer-events-none absolute top-1 bottom-1 left-1 rounded-md bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
+              style={{
+                width: `calc((100% - 8px) / ${PROFILE_TABS.length})`,
+                transform: `translateX(${PROFILE_TABS.findIndex((tab) => tab.id === activeTab) * 100}%)`,
+              }}
+            />
             {PROFILE_TABS.map((tab) => (
               <TabsTrigger
                 key={tab.id}
                 value={tab.id}
-                style={tab.id === activeTab ? { backgroundColor: 'var(--accent-nav)' } : undefined}
+                style={{ backgroundColor: 'transparent' }}
                 className={cn(
-                  'shrink-0 px-3 py-2 rounded-md text-[13px] font-medium shadow-none transition-colors flex items-center gap-1.5 hover:text-zinc-100',
+                  'nav-switch-item relative z-10 shrink-0 px-3 py-2 rounded-md text-[13px] font-medium shadow-none data-[state=active]:shadow-none data-[state=active]:text-(--on-accent-nav) transition-colors duration-150 flex items-center justify-center gap-1.5 hover:text-zinc-100',
                   tab.id === activeTab
                     ? 'text-(--on-accent-nav) hover:text-(--on-accent-nav)'
                     : 'text-zinc-400',
@@ -296,34 +447,77 @@ export function Profile() {
           {activeTab === 'library' && libraryCount > 0 && (
             <LibraryToolbar
               typeFilter={libraryTypeFilter}
-              onTypeFilterChange={setLibraryTypeFilter}
+              onTypeFilterChange={(type) => setLibraryParam('type', type, 'all')}
               statusFilter={libraryStatusFilter}
-              onStatusFilterChange={setLibraryStatusFilter}
+              onStatusFilterChange={(status) => setLibraryParam('status', status, 'all')}
               statusCounts={statusCounts}
+              statusesAvailable={allWatchStatuses !== undefined}
               libraryCount={libraryCount}
               filteredCount={filteredLibrary.length}
               search={librarySearch}
               onSearchChange={setLibrarySearch}
               searchInputRef={librarySearchRef}
               sort={librarySort}
-              onSortChange={setLibrarySort}
+              onSortChange={(sort) => setLibraryParam('sort', sort, 'default')}
               viewMode={viewMode}
               onViewModeChange={handleViewModeChange}
               onReset={resetLibraryFilters}
+              selectionMode={selectionMode}
+              onToggleSelectionMode={() => {
+                if (isBulkBusy) return;
+                if (selectionMode) exitSelectionMode();
+                else setSelectionMode(true);
+              }}
             />
           )}
 
-          <TabsContent value='library' className='space-y-4'>
+          <TabsContent
+            value='library'
+            className='space-y-4'
+            // Capture replaces the origin URL before a card/row can push details; unmount is too late.
+            onClickCapture={flushLibrarySearch}
+            onKeyDownCapture={(event) => {
+              if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing)
+                flushLibrarySearch();
+            }}
+          >
+            {watchStatusesError && (
+              <RetryBanner
+                message={
+                  allWatchStatuses === undefined
+                    ? "Couldn't load watch statuses. Status filters are unavailable."
+                    : "Couldn't refresh watch statuses."
+                }
+                onRetry={() => void refetchWatchStatuses()}
+                isRetrying={watchStatusesFetching}
+              />
+            )}
+            {selectionMode && (
+              <LibraryBulkActionBar
+                selectedItems={selectedItems}
+                filteredCount={filteredLibrary.length}
+                selectAllDisabled={selectAllDisabled}
+                allFilteredSelected={allFilteredSelected}
+                onSelectAllFiltered={handleSelectAllFiltered}
+                onClearSelection={() => setSelectedIds(new Set())}
+                onExitSelectionMode={exitSelectionMode}
+                onBulkSetStatus={(status) => void handleBulkSetStatus(status)}
+                onBulkAddToList={handleBulkAddToList}
+                onBulkRemove={handleBulkRemove}
+                isBusy={isBulkBusy}
+              />
+            )}
             <CollectionTabContent
-              isError={
-                libraryReadFailed ||
-                (statusFilterPending && (watchStatusesError || watchStatusesFetched))
+              isError={libraryReadFailed || profileLibraryQuery.isError}
+              isLoading={
+                libraryLoading ||
+                profileLibraryQuery.isLoading ||
+                (statusFilterPending && !watchStatusesError)
               }
-              isLoading={libraryLoading || statusFilterPending}
               items={filteredLibrary}
-              errorLabel={libraryReadFailed ? 'your library' : 'your watch statuses'}
-              onRetry={libraryReadFailed ? refetchLibrary : refetchWatchStatuses}
-              isRetrying={libraryReadFailed ? libraryFetching : watchStatusesFetching}
+              errorLabel='your library'
+              onRetry={() => Promise.all([refetchLibrary(), profileLibraryQuery.refetch()])}
+              isRetrying={libraryFetching || profileLibraryQuery.isFetching}
               viewMode={viewMode}
               getItemKey={mediaCardRailKey}
               renderItem={(item) => (
@@ -331,9 +525,20 @@ export function Profile() {
                   item={item}
                   currentStatusOverride={allWatchStatuses?.[item.id] ?? null}
                   isInLibraryOverride
+                  selectionMode={selectionMode}
+                  isSelected={selectedIds.has(item.id)}
+                  onToggleSelect={handleToggleSelect}
                 />
               )}
-              renderList={(items) => <LibraryList items={items} watchStatuses={allWatchStatuses} />}
+              renderList={(items) => (
+                <LibraryList
+                  items={items}
+                  watchStatuses={allWatchStatuses}
+                  selectionMode={selectionMode}
+                  selectedIds={selectedIds}
+                  onToggleSelect={handleToggleSelect}
+                />
+              )}
               empty={
                 library && library.length > 0 ? (
                   <EmptyState
@@ -431,6 +636,46 @@ export function Profile() {
             />
           </TabsContent>
         </Tabs>
+        <Dialog
+          open={confirmBulkRemoveOpen}
+          onOpenChange={(open) => {
+            if (!bulkRemoveFromLibrary.isPending) setConfirmBulkRemoveOpen(open);
+          }}
+        >
+          <DialogContent
+            onEscapeKeyDown={(event) => {
+              if (bulkRemoveFromLibrary.isPending) event.preventDefault();
+            }}
+            onPointerDownOutside={(event) => {
+              if (bulkRemoveFromLibrary.isPending) event.preventDefault();
+            }}
+            className='border-white/10 bg-zinc-950 sm:max-w-md'
+          >
+            <DialogHeader>
+              <DialogTitle>Remove selected titles?</DialogTitle>
+              <DialogDescription>
+                Remove {selectedIds.size} title{selectedIds.size === 1 ? '' : 's'} from your library
+                and clear their watch statuses? Watch history and custom lists will be kept.
+              </DialogDescription>
+            </DialogHeader>
+            <DialogFooter>
+              <Button
+                variant='outline'
+                disabled={bulkRemoveFromLibrary.isPending}
+                onClick={() => setConfirmBulkRemoveOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                disabled={selectedItems.length === 0 || isBulkBusy}
+                onClick={() => void confirmBulkRemove()}
+                className='border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
+              >
+                {bulkRemoveFromLibrary.isPending ? 'Removing…' : 'Remove from Library'}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
@@ -440,6 +685,10 @@ function ProfileHeader({
   profile,
   onUpdateProfile,
   isSaving,
+  isHydrating,
+  isError,
+  isRetrying,
+  onRetry,
   libraryCount,
   listsCount,
   historyCount,
@@ -449,6 +698,10 @@ function ProfileHeader({
   profile: LocalProfile;
   onUpdateProfile: (updates: LocalProfileUpdate) => Promise<void>;
   isSaving: boolean;
+  isHydrating: boolean;
+  isError: boolean;
+  isRetrying: boolean;
+  onRetry: () => void;
   libraryCount: number | undefined;
   listsCount: number | undefined;
   historyCount: number | undefined;
@@ -476,6 +729,10 @@ function ProfileHeader({
                     profile={profile}
                     onUpdate={onUpdateProfile}
                     isSaving={isSaving}
+                    isHydrating={isHydrating}
+                    isError={isError}
+                    isRetrying={isRetrying}
+                    onRetry={onRetry}
                   />
                 </div>
               </div>
