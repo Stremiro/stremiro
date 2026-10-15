@@ -7,12 +7,25 @@ import { buildYouTubeEmbedUrl } from '@/lib/trailer-utils';
 // `DialogContent` only mounts while open, so autoplay can't run hidden.
 export function useDetailsTrailer(item: MediaDetails | undefined) {
   const [trailerOpen, setTrailerOpen] = useState(false);
-  const trailerId = item?.trailers?.[0]?.id;
-  const trailerUrl = trailerId ? buildYouTubeEmbedUrl(trailerId, { autoplay: true }) : null;
+  const [selectedId, selectTrailer] = useState<string | undefined>();
+  const trailers = item?.trailers ?? [];
+  const selectedTrailer = trailers.find((trailer) => trailer.id === selectedId) ?? trailers[0];
+  const selectedTrailerId = selectedTrailer?.id;
+  const trailerUrl = selectedTrailerId
+    ? buildYouTubeEmbedUrl(selectedTrailerId, { autoplay: true })
+    : null;
 
   const openTrailer = useCallback(() => {
     if (trailerUrl) setTrailerOpen(true);
   }, [trailerUrl]);
 
-  return { trailerOpen, trailerUrl, openTrailer, onTrailerOpenChange: setTrailerOpen };
+  return {
+    trailerOpen,
+    trailerUrl,
+    trailers,
+    selectedTrailerId,
+    selectTrailer,
+    openTrailer,
+    onTrailerOpenChange: setTrailerOpen,
+  };
 }

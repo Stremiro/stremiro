@@ -160,12 +160,20 @@ fn cached_empty_titles_are_filtered_only_after_duplicate_selection() {
     let empty = build_item("tt1", "\u{feff}\0", Some("2024"));
     let fallback = build_item("tt1", "Fallback", Some("2024"));
     let visible = build_item("tt2", "Visible", Some("2024"));
-    let merged = crate::commands::addon_registry::merge_catalog_items(
-        vec![Ok(vec![empty]), Ok(vec![fallback, visible])],
+    let merged = crate::commands::addon_registry::merge_catalog_pages(
+        [vec![empty], vec![fallback, visible]].map(|items| {
+            Ok(crate::commands::addon_registry::CatalogFetchPage {
+                items,
+                next_skip: None,
+            })
+        }),
         "empty",
     )
     .unwrap();
-    assert_eq!(ids(&super::retain_titled_catalog_items(merged)), ["tt2"]);
+    assert_eq!(
+        ids(&super::retain_titled_catalog_items(merged.items)),
+        ["tt2"]
+    );
 }
 
 #[test]

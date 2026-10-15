@@ -67,7 +67,8 @@ function calendarEventLinkProps(
   const label = `${event.seriesTitle} — ${detail} — ${format(event.date, 'EEEE, MMMM d, yyyy')}`;
   return {
     to: buildDetailsRoute(event.mediaType, event.mediaId),
-    state: event.type === 'episode' ? { from, season: event.season } : { from },
+    state:
+      event.type === 'episode' ? { from, season: event.season, episode: event.episode } : { from },
     onPointerEnter: () => onPrefetch(event),
     onFocus: () => onPrefetch(event),
     'aria-label': label,

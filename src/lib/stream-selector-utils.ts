@@ -132,6 +132,29 @@ const SELECTOR_RES_RANK: Record<AddonStreamResolution, number> = {
   sd: 1,
 };
 
+const searchTextCache = new WeakMap<AddonStream, string>();
+
+function getStreamSearchText(stream: AddonStream): string {
+  const cached = searchTextCache.get(stream);
+  if (cached !== undefined) return cached;
+  const presentation = stream.presentation;
+  const text = [
+    stream.sourceName,
+    presentation.streamTitle,
+    presentation.sourceName,
+    presentation.codecLabel,
+    presentation.hdrLabel,
+    presentation.audioLabel,
+    presentation.multiAudioLabel,
+    presentation.sizeLabel,
+    presentation.resolution,
+  ]
+    .join(' ')
+    .toLowerCase();
+  searchTextCache.set(stream, text);
+  return text;
+}
+
 export function filterSelectorStreams(
   streams: readonly AddonStream[],
   filters: StreamSelectorPreferences,
@@ -158,20 +181,7 @@ export function filterSelectorStreams(
     if (filterEpisodesOnly && stream.presentation.isBatch) continue;
     if (filterPacksOnly && !stream.presentation.isBatch) continue;
     if (searchTerms.length > 0) {
-      const presentation = stream.presentation;
-      const text = [
-        stream.sourceName,
-        presentation.streamTitle,
-        presentation.sourceName,
-        presentation.codecLabel,
-        presentation.hdrLabel,
-        presentation.audioLabel,
-        presentation.multiAudioLabel,
-        presentation.sizeLabel,
-        presentation.resolution,
-      ]
-        .join(' ')
-        .toLowerCase();
+      const text = getStreamSearchText(stream);
       if (!searchTerms.every((term) => text.includes(term))) continue;
     }
     (stream.presentation.isInstantlyPlayable ? playable : p2p).push(stream);

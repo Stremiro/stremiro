@@ -49,7 +49,7 @@ pub(crate) fn addon_episode_lookup_type(media_type: &str) -> &str {
 /// History-row canonicalization: the stream namespace with an infallible fallback —
 /// unknown persisted types fold to `series`, still honoring kitsu-id promotion.
 pub(crate) fn normalize_history_row_media_type(media_type: &str, media_id: &str) -> &'static str {
-    normalize_stream_media_type(media_type, Some(media_id)).unwrap_or({
+    normalize_stream_media_type(media_type, Some(media_id)).unwrap_or_else(|| {
         if media_id.trim().to_ascii_lowercase().starts_with("kitsu:") {
             "anime"
         } else {

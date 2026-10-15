@@ -128,12 +128,14 @@ fn calendar_requests(
     // source-health reads and the full history wire payload.
     let mut latest_by_id: HashMap<&str, &WatchProgress> = HashMap::new();
     for row in &history {
-        if latest_by_id
-            .get(row.id.as_str())
-            .is_none_or(|existing| row.last_watched > existing.last_watched)
-        {
-            latest_by_id.insert(&row.id, row);
-        }
+        latest_by_id
+            .entry(row.id.as_str())
+            .and_modify(|existing| {
+                if row.last_watched > existing.last_watched {
+                    *existing = row;
+                }
+            })
+            .or_insert(row);
     }
     for (id, status) in statuses {
         if status != "watching" {
@@ -215,7 +217,15 @@ fn calendar_events(
                 id: episode.id,
                 media_id: schedule.id.clone(),
                 media_type: schedule.type_.clone(),
-                title: episode.title,
+                title: Some(
+                    episode
+                        .title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|title| !title.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("Episode {}", episode.episode)),
+                ),
                 series_title: schedule.title.clone(),
                 season: Some(episode.season),
                 episode: Some(episode.episode),
@@ -234,17 +244,20 @@ fn calendar_schedule(
     range: &CalendarRange,
 ) -> CalendarSchedule {
     // `release_date` is a validated `YYYY-MM-DD` local day, so string bounds
-    // and a stable ordinal sort reproduce the client's date-only ordering.
+    // and a stable lexical sort reproduce the client's date-only ordering.
     let mut upcoming: Vec<_> = events
         .iter()
         .filter(|event| {
             event.release_date.as_str() >= range.upcoming_start.as_str()
                 && event.release_date.as_str() <= range.upcoming_end.as_str()
         })
+        .collect();
+    upcoming.sort_by(|left, right| left.release_date.cmp(&right.release_date));
+    let upcoming = upcoming
+        .into_iter()
+        .take(MAX_UPCOMING_EVENTS)
         .cloned()
         .collect();
-    upcoming.sort_by_key(|event| date_ordinal(&event.release_date));
-    upcoming.truncate(MAX_UPCOMING_EVENTS);
     let mut days: BTreeMap<String, Vec<CalendarScheduleEvent>> = BTreeMap::new();
     for event in events {
         days.entry(event.release_date.clone())
@@ -366,6 +379,11 @@ mod tests {
                 ..test_progress()
             },
             WatchProgress {
+                type_: "series".into(),
+                last_watched: 10,
+                ..test_progress()
+            },
+            WatchProgress {
                 id: "ttold".into(),
                 type_: "series".into(),
                 ..test_progress()
@@ -461,6 +479,44 @@ mod tests {
         assert_eq!(upcoming_only[0].id, "today");
     }
 
+    #[test]
+    fn calendar_events_normalize_missing_blank_and_padded_episode_titles() {
+        let episodes = [None, Some(""), Some(" \t\n "), Some("  Finale  ")]
+            .into_iter()
+            .enumerate()
+            .map(|(index, title)| MediaScheduleEpisode {
+                id: format!("episode-{index}"),
+                title: title.map(str::to_string),
+                season: 2,
+                episode: index as u32 + 1,
+                release_date: Some("2026-01-01".into()),
+            })
+            .collect();
+        let events = calendar_events(
+            vec![MediaSchedule {
+                id: "tt123".into(),
+                type_: "series".into(),
+                title: "Series".into(),
+                poster: None,
+                release_date: None,
+                episodes,
+            }],
+            &range(),
+        );
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.title.as_deref())
+                .collect::<Vec<_>>(),
+            [
+                Some("Episode 1"),
+                Some("Episode 2"),
+                Some("Episode 3"),
+                Some("Finale")
+            ]
+        );
+    }
+
     fn event(
         id: &str,
         type_: &'static str,
@@ -544,6 +600,34 @@ mod tests {
                 .map(|event| event.id.as_str())
                 .collect::<Vec<_>>(),
             vec!["first", "e9", "e8", "e7", "e6", "e5", "e4", "e3"]
+        );
+    }
+
+    #[test]
+    fn calendar_schedule_lexical_dates_match_ordinals_across_year_boundary() {
+        let range = CalendarRange {
+            visible_start: "2025-12-28".into(),
+            visible_end: "2026-01-07".into(),
+            upcoming_start: "2025-12-28".into(),
+            upcoming_end: "2026-01-07".into(),
+        };
+        let events = vec![
+            event("later", "movie", "2026-01-07", None, None, "Later"),
+            event("new-year", "movie", "2026-01-01", None, None, "New"),
+            event("early", "movie", "2025-12-28", None, None, "Early"),
+            event("year-end", "movie", "2025-12-31", None, None, "End"),
+            event("same-day", "movie", "2026-01-01", None, None, "Same"),
+        ];
+        let mut expected = events.clone();
+        expected.sort_by_key(|event| date_ordinal(&event.release_date));
+        let schedule = calendar_schedule(0, events, &range);
+        assert_eq!(
+            schedule
+                .upcoming
+                .iter()
+                .map(|event| &event.id)
+                .collect::<Vec<_>>(),
+            expected.iter().map(|event| &event.id).collect::<Vec<_>>()
         );
     }
 }

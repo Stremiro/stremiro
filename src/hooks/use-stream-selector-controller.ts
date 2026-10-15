@@ -1,7 +1,8 @@
 import { Channel } from '@tauri-apps/api/core';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { replaceEqualDeep, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
+import { useDebounce } from '@/hooks/use-debounce';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useTitleWatchProgress } from '@/hooks/use-media-library';
 import { useSelectorPreferencesState } from '@/hooks/use-selector-preferences';
@@ -32,6 +33,26 @@ const EMPTY_STREAM_STATS: StreamSelectorStats = {
   episodeLikeCount: 0,
   sourceHealth: { degraded: 0, offline: 0, pending: 0 },
 };
+
+function shareStreamSelectorData(previousData: unknown, nextData: unknown): StreamSelectorData {
+  const previous = previousData as StreamSelectorData | undefined;
+  const next = nextData as StreamSelectorData;
+  if (!previous) return next;
+
+  const { streams: previousStreams, ...previousFields } = previous;
+  const { streams: nextStreams, ...nextFields } = next;
+  // Ranking inserts/moves rows, so index-based sharing would rebuild unchanged streams.
+  const previousByKey = new Map(previousStreams.map((stream) => [stream.streamKey, stream]));
+  const streams = nextStreams.map((stream) =>
+    replaceEqualDeep(previousByKey.get(stream.streamKey), stream),
+  );
+  const fields = replaceEqualDeep(previousFields, nextFields);
+  const sameStreams =
+    streams.length === previousStreams.length &&
+    streams.every((stream, index) => stream === previousStreams[index]);
+  if (sameStreams && fields === previousFields) return previous;
+  return { ...fields, streams: sameStreams ? previousStreams : streams };
+}
 
 interface UseStreamSelectorControllerArgs {
   open: boolean;
@@ -83,6 +104,9 @@ export function useStreamSelectorController({
     selectorSessionKey,
   });
   const [searchQuery, setSearchQuery] = useState('');
+  const normalizedSearchQuery = searchQuery.trim().replace(/\s+/g, ' ').toLowerCase();
+  const debouncedSearchQuery = useDebounce(normalizedSearchQuery, 180);
+  const effectiveSearchQuery = normalizedSearchQuery ? debouncedSearchQuery : '';
   useEffect(() => {
     setSearchQuery('');
   }, [open, selectorSessionKey]);
@@ -151,6 +175,10 @@ export function useStreamSelectorController({
   );
   // Channels can't be cancelled — an abandoned invoke keeps emitting; a per-fetch generation drops stale snapshots.
   const selectorFetchGenerationRef = useRef(0);
+  const selectorOpenRef = useRef(open);
+  useEffect(() => {
+    selectorOpenRef.current = open;
+  }, [open]);
   const {
     data: streamSelectorData,
     error: streamSelectorDataError,
@@ -165,7 +193,11 @@ export function useStreamSelectorController({
       // Channel is not an EventTarget — onmessage is its only surface.
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       onProgress.onmessage = (snapshot) => {
-        if (!signal.aborted && generation === selectorFetchGenerationRef.current) {
+        if (
+          selectorOpenRef.current &&
+          !signal.aborted &&
+          generation === selectorFetchGenerationRef.current
+        ) {
           queryClient.setQueryData(selectorQueryKey, snapshot);
         }
       };
@@ -179,6 +211,7 @@ export function useStreamSelectorController({
         onProgress,
       );
     },
+    structuralSharing: shareStreamSelectorData,
     enabled: open && !!lookupId?.trim() && isOnline,
     staleTime: 1000 * 60 * 3,
     retry: 0,
@@ -236,8 +269,8 @@ export function useStreamSelectorController({
   const episodeProgress = titleProgress?.episodeProgress;
   // Synchronous filter/sort so clicks feel instant; Rust stays the `smart` ranking authority.
   const sortedStreams = useMemo(
-    () => filterSelectorStreams(streams, effectiveFilters, searchQuery),
-    [streams, effectiveFilters, searchQuery],
+    () => filterSelectorStreams(streams, effectiveFilters, effectiveSearchQuery),
+    [streams, effectiveFilters, effectiveSearchQuery],
   );
 
   // A failed addon-config read must not masquerade as "no addons" — surface it as a retryable error once loading settles.
@@ -278,6 +311,7 @@ export function useStreamSelectorController({
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
+    effectiveSearchQuery,
     hasEnabledAddons,
     episodeProgress,
     watchedEpisodeCeiling: titleProgress?.watchedEpisodeCeiling,
@@ -296,6 +330,7 @@ export function useStreamSelectorController({
     isLoadingAddonConfigs,
     isOnline,
     qualityFilter,
+    rankingOptions,
     refetchStreams,
     resetFilters,
     selectorSessionKey,

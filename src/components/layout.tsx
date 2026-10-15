@@ -4,12 +4,9 @@ import { Button } from '@/components/ui/button';
 import { useBrowseHotkeys } from '@/hooks/use-browse-hotkeys';
 import { useProfileAccent } from '@/hooks/use-local-profile';
 import { navigateApp } from '@/lib/navigation';
-import { clamp, getAccentTextColor, hexToRgbTriplet } from '@/lib/utils';
+import { applyAccentVars, clamp } from '@/lib/utils';
 import { DesktopTitlebar } from './desktop-titlebar';
 import { Sidebar } from './sidebar';
-
-// Soft neutral rendered in place of the accent on surfaces the user opted out.
-const NEUTRAL_ACCENT = '#d4d4d8';
 
 // A route render crash must not unmount PlayerHost and the docked mini player —
 // contain failure to the page; navigation resets the boundary via location key.
@@ -83,28 +80,13 @@ export function Layout() {
   // Accent vars must land on <html> before first paint — a passive effect would
   // flash the white fallback for one frame on launch.
   useLayoutEffect(() => {
-    const root = document.documentElement;
-    root.style.setProperty('--app-accent', accent);
-    root.style.setProperty('--app-accent-rgb', hexToRgbTriplet(accent));
-    root.style.setProperty('--on-app-accent', getAccentTextColor(accent));
-    root.style.setProperty('--app-glow', String(glowScale));
-    const targets: Array<[key: string, enabled: boolean]> = [
-      ['nav', accentTargets.navigation],
-      ['act', accentTargets.actions],
-      ['prog', accentTargets.progress],
-      ['art', accentTargets.artwork],
-    ];
-    for (const [key, enabled] of targets) {
-      const resolved = enabled ? accent : NEUTRAL_ACCENT;
-      root.style.setProperty(`--accent-${key}`, resolved);
-      root.style.setProperty(`--accent-${key}-rgb`, hexToRgbTriplet(resolved));
-      root.style.setProperty(`--on-accent-${key}`, getAccentTextColor(resolved));
-    }
+    applyAccentVars(accent, accentTargets);
+    document.documentElement.style.setProperty('--app-glow', String(glowScale));
   }, [accent, accentTargets, glowScale]);
 
   return (
     <>
-      <DesktopTitlebar />
+      <DesktopTitlebar historyControls />
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
       {/* Ambient accent tint. Radial gradients only — blur on viewport layers
           clips and quantizes into visible rings on WebView2. Alpha rides

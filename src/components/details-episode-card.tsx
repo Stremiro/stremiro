@@ -1,10 +1,17 @@
 import { memo, type Ref } from 'react';
+import { format } from 'date-fns';
 import { Check, Play } from 'lucide-react';
 import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useFailedSrc } from '@/hooks/use-failed-src';
-import { cn, formatAirDate, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
+import {
+  cn,
+  formatAirDate,
+  formatSeasonEpisode,
+  getEpisodeTitle,
+  parseLocalScheduleDate,
+} from '@/lib/utils';
 
 export function isEpisodeSpoiler(
   episode: Episode,
@@ -17,9 +24,8 @@ export function isEpisodeSpoiler(
   return (
     spoilerProtection &&
     !isCurrent &&
-    ceiling !== undefined &&
     !progress?.has_started_watching &&
-    episode.episode > ceiling
+    (ceiling === undefined || episode.episode > ceiling)
   );
 }
 
@@ -28,8 +34,11 @@ interface EpisodeCardProps {
   isResume: boolean;
   isSpoiler: boolean;
   isWatched: boolean;
+  isAired?: boolean;
+  isWatchedDisabled?: boolean;
   isWatchedPending: boolean;
   progressPercent: number;
+  remainingText?: string | null;
   resumeRef?: Ref<HTMLButtonElement>;
   onPlay: (episode: Episode) => void;
   onToggleWatched?: (episode: Episode) => void;
@@ -40,8 +49,11 @@ function EpisodeCardInner({
   isResume,
   isSpoiler,
   isWatched,
+  isAired = true,
+  isWatchedDisabled = false,
   isWatchedPending,
   progressPercent,
+  remainingText,
   resumeRef,
   onPlay,
   onToggleWatched,
@@ -49,6 +61,11 @@ function EpisodeCardInner({
   const [thumbnail, onThumbnailError] = useFailedSrc(episode.thumbnail);
   const title = getEpisodeTitle(isSpoiler ? undefined : episode.title, episode.episode);
   const airDate = formatAirDate(episode.releaseDate);
+  const releaseDate = !isAired ? parseLocalScheduleDate(episode.releaseDate) : null;
+  const unairedLabel = releaseDate
+    ? `Not Yet Aired · ${format(releaseDate, 'MMM d')}`
+    : 'Not Yet Aired';
+  const watchButtonLabel = `${isResume ? 'Resume' : 'Play'} ${formatSeasonEpisode(episode.season, episode.episode)}: ${title}${remainingText && !isWatched ? ` (${remainingText})` : ''}`;
 
   return (
     <div className='relative'>
@@ -56,7 +73,7 @@ function EpisodeCardInner({
         type='button'
         ref={resumeRef}
         onClick={() => onPlay(episode)}
-        aria-label={`${isResume ? 'Resume' : 'Play'} ${formatSeasonEpisode(episode.season, episode.episode)}: ${title}`}
+        aria-label={watchButtonLabel}
         title={title}
         className={cn(
           'group/episode relative block aspect-video w-full overflow-hidden rounded-lg border bg-zinc-900 text-left transition-colors duration-200',
@@ -106,7 +123,20 @@ function EpisodeCardInner({
           <h4 className='line-clamp-2 text-sm font-medium leading-snug text-white drop-shadow-md'>
             {title}
           </h4>
-          {airDate && <p className='mt-0.5 truncate text-[11px] text-white/65'>{airDate}</p>}
+          <div className='mt-1 flex flex-wrap items-center gap-1.5'>
+            {!isAired ? (
+              <span className='inline-flex rounded-md border border-white/10 bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-zinc-300'>
+                {unairedLabel}
+              </span>
+            ) : (
+              airDate && <p className='truncate text-[11px] text-white/65'>{airDate}</p>
+            )}
+            {remainingText && !isWatched && (
+              <span className='inline-flex rounded-md border border-white/10 bg-black/75 px-1.5 py-0.5 text-[11px] font-medium tabular-nums text-zinc-200'>
+                {remainingText}
+              </span>
+            )}
+          </div>
         </div>
 
         <WatchProgressStrip percent={progressPercent} className='z-20' />
@@ -116,12 +146,14 @@ function EpisodeCardInner({
         <button
           type='button'
           aria-pressed={isWatched}
-          aria-disabled={isWatchedPending || undefined}
+          aria-disabled={isWatchedDisabled || isWatchedPending || undefined}
           aria-busy={isWatchedPending || undefined}
           aria-label={`Mark ${formatSeasonEpisode(episode.season, episode.episode) || `episode ${episode.episode}`} as ${isWatched ? 'unwatched' : 'watched'}`}
           title={isWatched ? 'Mark as unwatched' : 'Mark as watched'}
-          onClick={() => onToggleWatched(episode)}
-          className='group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-wait aria-disabled:opacity-60'
+          onClick={() => {
+            if (!isWatchedDisabled && !isWatchedPending) onToggleWatched(episode);
+          }}
+          className='group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default aria-busy:cursor-wait aria-disabled:opacity-60'
         >
           <span
             className={cn(

@@ -1,4 +1,4 @@
-import type { MouseEvent as ReactMouseEvent } from 'react';
+import { type MouseEvent as ReactMouseEvent, useSyncExternalStore } from 'react';
 import type { NavigateFunction, NavigateOptions, NavigationType, To } from 'react-router';
 
 // Root binding avoids per-card router subscriptions during search URL updates.
@@ -35,10 +35,45 @@ export function navigateAppBack(): boolean {
   return navigateTo(-1);
 }
 
+export const navigateBack = navigateAppBack;
+
+export function navigateForward(): boolean {
+  return entryIndex < entryStack.length - 1 && navigateTo(1);
+}
+
 // The root location effect feeds this bounded mirror, including forward entries.
 const entryStack: { key: string; path: string }[] = [];
 const ENTRY_MEMORY_MAX = 128;
 let entryIndex = -1;
+const historyListeners = new Set<() => void>();
+const EMPTY_HISTORY_STATE = { canGoBack: false, canGoForward: false };
+let historyState = EMPTY_HISTORY_STATE;
+
+function notifyHistoryListeners(): void {
+  const canGoBack = entryIndex > 0;
+  const canGoForward = entryIndex >= 0 && entryIndex < entryStack.length - 1;
+  if (historyState.canGoBack === canGoBack && historyState.canGoForward === canGoForward) return;
+  historyState = { canGoBack, canGoForward };
+  for (const listener of historyListeners) listener();
+}
+
+function subscribeToHistory(listener: () => void): () => void {
+  historyListeners.add(listener);
+  return () => {
+    historyListeners.delete(listener);
+  };
+}
+
+function getHistoryState() {
+  return historyState;
+}
+
+export function useNavigationHistoryState(): {
+  canGoBack: boolean;
+  canGoForward: boolean;
+} {
+  return useSyncExternalStore(subscribeToHistory, getHistoryState, () => EMPTY_HISTORY_STATE);
+}
 
 export function recordLocationEntry(key: string, path: string, action: NavigationType): void {
   if (action === 'POP') {
@@ -69,6 +104,7 @@ export function recordLocationEntry(key: string, path: string, action: Navigatio
   if (pendingDetailsReturn && pendingDetailsReturn.path !== path) {
     pendingDetailsReturn = null;
   }
+  notifyHistoryListeners();
 }
 
 // Undefined means the caller needs an explicit fallback.

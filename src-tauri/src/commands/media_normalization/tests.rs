@@ -1,6 +1,7 @@
 use super::{
     build_display_year, build_release_date, extract_primary_year, normalize_episode_metadata_list,
-    normalize_media_details, normalize_media_item, normalize_title,
+    normalize_media_details, normalize_media_item, normalize_rating, normalize_runtime,
+    normalize_title,
 };
 use crate::providers::{Episode, MediaDetails, MediaItem, MediaSeason};
 
@@ -114,9 +115,11 @@ fn normalize_media_details_normalizes_years_and_episodes() {
         release_date: None,
         type_: "series".to_string(),
         description: None,
-        rating: None,
-        cast: None,
-        genres: None,
+        rating: Some(" 8.30 ".into()),
+        runtime: Some("142 min".into()),
+        cast: Some(vec![" Actor ".into(), "actor".into(), "Other".into()]),
+        directors: Some(vec![" Director ".into(), "DIRECTOR".into()]),
+        genres: Some(vec![" Drama ".into(), "drama".into()]),
         trailers: None,
         episodes: Some(vec![
             Episode {
@@ -156,6 +159,11 @@ fn normalize_media_details_normalizes_years_and_episodes() {
 
     assert_eq!(normalized.id, "kitsu:123");
     assert_eq!(normalized.imdb_id.as_deref(), Some("tt123"));
+    assert_eq!(normalized.rating.as_deref(), Some("8.30"));
+    assert_eq!(normalized.runtime.as_deref(), Some("2h 22m"));
+    assert_eq!(normalized.cast.unwrap(), ["Actor", "Other"]);
+    assert_eq!(normalized.directors.unwrap(), ["Director"]);
+    assert_eq!(normalized.genres.unwrap(), ["Drama"]);
     assert_eq!(normalized.display_year.as_deref(), Some("2013"));
     assert_eq!(normalized.release_date.as_deref(), Some("2013-04-07"));
     assert_eq!(
@@ -235,7 +243,9 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
         type_: "movie".to_string(),
         description: None,
         rating: None,
+        runtime: None,
         cast: None,
+        directors: None,
         genres: None,
         trailers: None,
         episodes: None,
@@ -256,6 +266,59 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
             .as_deref(),
         Some("2024-01-01")
     );
+    for (released, expected) in [
+        ("2023-07-18T00:00:00.000Z", Some("2023")),
+        ("2024-02-29", Some("2024")),
+        ("2023-02-29", None),
+        ("2024", None),
+        ("Unknown", None),
+    ] {
+        let mut input = details(Some(released));
+        input.year = None;
+        assert_eq!(
+            normalize_media_details(input, "tt1")
+                .display_year
+                .as_deref(),
+            expected,
+            "{released}"
+        );
+    }
+}
+
+#[test]
+fn runtime_and_rating_reject_invalid_display_values() {
+    for (input, expected) in [
+        ("142 min", "2h 22m"),
+        ("142", "2h 22m"),
+        ("142m", "2h 22m"),
+        ("45 mins", "45m"),
+        ("2h 22min", "2h 22m"),
+        (" 2 h 22 m ", "2h 22m"),
+        ("120", "2h"),
+        ("1", "1m"),
+        ("1440", "24h"),
+    ] {
+        assert_eq!(
+            normalize_runtime(Some(input.into())).as_deref(),
+            Some(expected)
+        );
+        assert_eq!(
+            normalize_runtime(Some(expected.into())).as_deref(),
+            Some(expected)
+        );
+    }
+    for invalid in ["N/A", "0", "1441", "-1", "1.5", "2h 60m", "999999999999h"] {
+        assert_eq!(normalize_runtime(Some(invalid.into())), None, "{invalid}");
+    }
+    for valid in ["0", "10", "8.30"] {
+        assert_eq!(
+            normalize_rating(Some(format!(" {valid} "))).as_deref(),
+            Some(valid)
+        );
+    }
+    for invalid in ["N/A", "83", "-0.1", "10.1", "8.3/10", "NaN", "inf", ""] {
+        assert_eq!(normalize_rating(Some(invalid.into())), None, "{invalid}");
+    }
 }
 
 #[test]
@@ -320,7 +383,13 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         type_: "series".to_string(),
         description: None,
         rating: Some("r".repeat(500)),
+        runtime: None,
         cast: Some((0..200).map(|index| format!("actor-{index}")).collect()),
+        directors: Some(
+            (0..16)
+                .map(|index| format!("{index}{}", "d".repeat(200)))
+                .collect(),
+        ),
         genres: None,
         trailers: None,
         episodes: Some((1..=2).map(episode).collect()),
@@ -333,8 +402,11 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
     let normalized = normalize_media_details(details, "tt123");
 
     assert_eq!(normalized.imdb_id.as_deref().map(str::len), Some(256));
-    assert_eq!(normalized.rating.as_deref().map(str::len), Some(64));
+    assert_eq!(normalized.rating, None);
     assert_eq!(normalized.cast.as_ref().map(Vec::len), Some(64));
+    let directors = normalized.directors.unwrap();
+    assert_eq!(directors.len(), 8);
+    assert!(directors.iter().all(|name| name.chars().count() == 128));
     let episodes = normalized.episodes.expect("episodes");
     assert_eq!(episodes.len(), 2);
     assert_eq!(episodes[0].id.len(), 256);

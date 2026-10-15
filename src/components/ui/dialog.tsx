@@ -6,6 +6,8 @@ import { cn } from '@/lib/utils';
 
 const Dialog = DialogPrimitive.Root;
 
+const DialogClose = DialogPrimitive.Close;
+
 const DialogPortal = DialogPrimitive.Portal;
 
 const DialogOverlay = React.forwardRef<
@@ -28,49 +30,65 @@ interface DialogContentProps extends React.ComponentPropsWithoutRef<
 > {
   /** Per-dialog scrim override (e.g. a lighter overlay over the player). */
   overlayClassName?: string;
+  hideCloseButton?: boolean;
 }
 
 const DialogContent = React.forwardRef<
   React.ElementRef<typeof DialogPrimitive.Content>,
   DialogContentProps
->(({ className, overlayClassName, children, onOpenAutoFocus, onCloseAutoFocus, ...props }, ref) => {
-  // Radix restores focus to the trigger on close — programmatic dialogs have none, so remember the focused element.
-  const openerRef = React.useRef<HTMLElement | null>(null);
+>(
+  (
+    {
+      className,
+      overlayClassName,
+      hideCloseButton = false,
+      children,
+      onOpenAutoFocus,
+      onCloseAutoFocus,
+      ...props
+    },
+    ref,
+  ) => {
+    // Radix restores focus to the trigger on close — programmatic dialogs have none, so remember the focused element.
+    const openerRef = React.useRef<HTMLElement | null>(null);
 
-  return (
-    <DialogPortal>
-      <DialogOverlay className={overlayClassName} />
-      <DialogPrimitive.Content
-        ref={ref}
-        className={cn(
-          'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-2 sm:rounded-lg',
-          className,
-        )}
-        onOpenAutoFocus={(event) => {
-          // Fires before Radix moves focus into the dialog.
-          openerRef.current =
-            document.activeElement instanceof HTMLElement ? document.activeElement : null;
-          onOpenAutoFocus?.(event);
-        }}
-        onCloseAutoFocus={(event) => {
-          onCloseAutoFocus?.(event);
-          const opener = openerRef.current;
-          if (!event.defaultPrevented && opener?.isConnected) {
-            event.preventDefault();
-            opener.focus({ preventScroll: true });
-          }
-        }}
-        {...props}
-      >
-        {children}
-        <DialogPrimitive.Close className='absolute right-2 top-2 flex h-9 w-9 items-center justify-center rounded-md opacity-70 transition-[opacity,background-color] duration-150 hover:bg-white/[0.06] hover:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none'>
-          <X className='h-4 w-4' />
-          <span className='sr-only'>Close</span>
-        </DialogPrimitive.Close>
-      </DialogPrimitive.Content>
-    </DialogPortal>
-  );
-});
+    return (
+      <DialogPortal>
+        <DialogOverlay className={overlayClassName} />
+        <DialogPrimitive.Content
+          ref={ref}
+          className={cn(
+            'fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 border bg-background p-6 shadow-lg duration-200 ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[state=closed]:slide-out-to-bottom-1 data-[state=open]:slide-in-from-bottom-2 sm:rounded-lg',
+            className,
+          )}
+          onOpenAutoFocus={(event) => {
+            // Fires before Radix moves focus into the dialog.
+            openerRef.current =
+              document.activeElement instanceof HTMLElement ? document.activeElement : null;
+            onOpenAutoFocus?.(event);
+          }}
+          onCloseAutoFocus={(event) => {
+            onCloseAutoFocus?.(event);
+            const opener = openerRef.current;
+            if (!event.defaultPrevented && opener?.isConnected) {
+              event.preventDefault();
+              opener.focus({ preventScroll: true });
+            }
+          }}
+          {...props}
+        >
+          {children}
+          {!hideCloseButton && (
+            <DialogPrimitive.Close className='absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none'>
+              <X className='h-4 w-4' />
+              <span className='sr-only'>Close</span>
+            </DialogPrimitive.Close>
+          )}
+        </DialogPrimitive.Content>
+      </DialogPortal>
+    );
+  },
+);
 DialogContent.displayName = DialogPrimitive.Content.displayName;
 
 const DialogHeader = ({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) => (
@@ -110,4 +128,12 @@ const DialogDescription = React.forwardRef<
 ));
 DialogDescription.displayName = DialogPrimitive.Description.displayName;
 
-export { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle };
+export {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+};

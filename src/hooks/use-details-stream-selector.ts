@@ -107,6 +107,7 @@ export function useDetailsStreamSelector({
         'season' | 'episode' | 'title' | 'streamLookupId' | 'streamSeason' | 'streamEpisode'
       >,
       options?: {
+        episodeTitle?: string;
         overview?: string;
         startTime?: number;
       },
@@ -124,7 +125,7 @@ export function useDetailsStreamSelector({
         absoluteEpisode: target.absoluteEpisode,
         // Bare title — the header owns the S/E label and player chrome re-adds it.
         title: itemTitle ?? '',
-        episodeTitle: episodeInput.title,
+        episodeTitle: options?.episodeTitle ?? episodeInput.title,
         overview: options?.overview,
         startTime: options?.startTime,
       });

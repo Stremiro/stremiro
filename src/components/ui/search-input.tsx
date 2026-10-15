@@ -13,6 +13,8 @@ interface SearchInputProps {
   className?: string;
   wrapperClassName?: string;
   inputRef?: RefObject<HTMLInputElement | null>;
+  /** Enter in the field — e.g. jump to the first result. */
+  onSubmit?: () => void;
 }
 
 export function SearchInput({
@@ -24,6 +26,7 @@ export function SearchInput({
   className,
   wrapperClassName,
   inputRef: suppliedInputRef,
+  onSubmit,
 }: SearchInputProps) {
   const localInputRef = useRef<HTMLInputElement>(null);
   const inputRef = suppliedInputRef ?? localInputRef;
@@ -38,6 +41,11 @@ export function SearchInput({
         aria-label={ariaLabel ?? placeholder}
         className={cn('pl-9 pr-8', className)}
         onKeyDown={(e) => {
+          if (e.key === 'Enter' && onSubmit && !e.nativeEvent.isComposing) {
+            e.preventDefault();
+            if (!e.repeat) onSubmit();
+            return;
+          }
           // Progressive dismissal: Esc clears text, then blurs so page-level Esc (back) becomes the next step.
           if (e.key !== 'Escape' || e.defaultPrevented || e.nativeEvent.isComposing) return;
           e.preventDefault();

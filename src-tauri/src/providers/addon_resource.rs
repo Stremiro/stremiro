@@ -25,7 +25,9 @@ const RESOURCE_TIMEOUT_SECS: u64 = 20;
 const MAX_CATALOG_ITEMS: usize = 500;
 const MAX_EPISODES: usize = 2_000;
 const MAX_TRAILERS: usize = 32;
+const MAX_TRAILER_NAME_CHARS: usize = 80;
 const MAX_CAST: usize = 64;
+const MAX_CREDITS: usize = 8;
 const MAX_GENRES: usize = 32;
 const MAX_STRING_CHARS: usize = 2_048;
 const MAX_ID_CHARS: usize = 256;
@@ -157,8 +159,8 @@ pub(crate) struct AddonResourceClient {
     client: Client,
     // Shared parsed metadata; shape-specific clones happen outside the cache lock.
     meta_cache: TtlCache<Arc<MediaDetails>>,
-    catalog_cache: TtlCache<CatalogPage>,
-    subtitle_cache: TtlCache<Vec<AddonSubtitle>>,
+    catalog_cache: TtlCache<Arc<CatalogPage>>,
+    subtitle_cache: TtlCache<Arc<[AddonSubtitle]>>,
     /// Per-addon cooldown keyed by base-URL hash — same contract as the transport's `fetch_failures`.
     fetch_failures: FetchFailureCooldown,
     /// Short-TTL negative cache — a deterministic failure (status, size cap,
@@ -172,7 +174,7 @@ pub(crate) struct AddonResourceClient {
 }
 
 /// Lite shape rebuilt field-by-field so a card hit never copies the discarded
-/// `episodes`/`cast`; a new `MediaDetails` field fails this literal on purpose.
+/// episodes and credits; a new `MediaDetails` field fails this literal on purpose.
 pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetails {
     if include_episodes {
         return details.clone();
@@ -190,7 +192,9 @@ pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> 
         type_: details.type_.clone(),
         description: details.description.clone(),
         rating: details.rating.clone(),
+        runtime: details.runtime.clone(),
         cast: None,
+        directors: None,
         genres: details.genres.clone(),
         trailers: details.trailers.clone(),
         episodes: None,
@@ -267,7 +271,8 @@ impl AddonResourceClient {
         let url = build_resource_url(base_url, "catalog", type_, catalog_id, extras)?;
         let cache_key = resource_cache_key("catalog", &url);
         let addon_key = hash_segment(base_url);
-        self.fetch_contract()
+        let page = self
+            .fetch_contract()
             .run(
                 &self.catalog_cache,
                 &cache_key,
@@ -282,10 +287,11 @@ impl AddonResourceClient {
                             FetchFailure::Fatal("Invalid catalog response format.".to_string())
                         })?;
 
-                    Ok(parse_catalog_page(response, normalize))
+                    Ok(Arc::new(parse_catalog_page(response, normalize)))
                 },
             )
-            .await
+            .await?;
+        Ok(page.as_ref().clone())
     }
 
     pub(crate) async fn fetch_meta(
@@ -333,7 +339,8 @@ impl AddonResourceClient {
         let url = build_resource_url(base_url, "subtitles", type_, id, &[])?;
         let cache_key = resource_cache_key("subtitles", &url);
         let addon_key = hash_segment(base_url);
-        self.fetch_contract()
+        let subtitles = self
+            .fetch_contract()
             .run(
                 &self.subtitle_cache,
                 &cache_key,
@@ -352,10 +359,11 @@ impl AddonResourceClient {
                         .subtitles
                         .into_iter()
                         .filter_map(parse_subtitle_item)
-                        .collect())
+                        .collect::<Arc<[AddonSubtitle]>>())
                 },
             )
-            .await
+            .await?;
+        Ok(subtitles.to_vec())
     }
 }
 
@@ -495,6 +503,22 @@ fn json_u32(value: Option<&Value>) -> Option<u32> {
     }
 }
 
+fn meta_link_names(value: &Value, category: &str, max_items: usize) -> Option<Vec<String>> {
+    let names: Vec<String> = value
+        .get("links")?
+        .as_array()?
+        .iter()
+        .filter(|link| {
+            link.get("category")
+                .and_then(Value::as_str)
+                .is_some_and(|value| value.trim().eq_ignore_ascii_case(category))
+        })
+        .filter_map(|link| json_string_field(link, "name"))
+        .take(max_items)
+        .collect();
+    (!names.is_empty()).then_some(names)
+}
+
 fn parse_catalog_page(
     response: CatalogResponse,
     normalize: fn(MediaItem) -> MediaItem,
@@ -514,11 +538,14 @@ fn parse_catalog_page(
 
 fn parse_catalog_item(value: CatalogItemJson) -> Option<MediaItem> {
     let id = value.id.as_ref().and_then(json_string)?;
+    if id.chars().count() > MAX_ID_CHARS {
+        return None;
+    }
     let title = value.name.as_ref().and_then(json_string)?;
     let type_ = value.type_.as_ref().and_then(json_string)?;
 
     Some(MediaItem {
-        id: id.chars().take(MAX_ID_CHARS).collect(),
+        id,
         title,
         poster: sanitize_image_url(value.poster.as_ref()),
         backdrop: sanitize_image_url(value.background.as_ref()),
@@ -572,10 +599,15 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
         description: json_string_field(&value, "description"),
         rating: json_string_field(&value, "imdbRating")
             .or_else(|| json_string_field(&value, "rating")),
-        cast: json_string_list(value.get("cast"), MAX_CAST),
+        runtime: json_string_field(&value, "runtime"),
+        cast: json_string_list(value.get("cast"), MAX_CAST)
+            .or_else(|| meta_link_names(&value, "Cast", MAX_CAST)),
+        directors: json_string_list(value.get("director"), MAX_CREDITS)
+            .or_else(|| meta_link_names(&value, "Directors", MAX_CREDITS)),
         genres: json_string_list(value.get("genre"), MAX_GENRES)
-            .or_else(|| json_string_list(value.get("genres"), MAX_GENRES)),
-        trailers: parse_trailers(value.get("trailers")),
+            .or_else(|| json_string_list(value.get("genres"), MAX_GENRES))
+            .or_else(|| meta_link_names(&value, "Genres", MAX_GENRES)),
+        trailers: parse_trailers(value.get("trailers"), value.get("trailerStreams")),
         // Lite-shape trimming happens post-cache in `meta_for_shape`.
         episodes,
         seasons,
@@ -616,29 +648,66 @@ fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
     sanitize_image_url_opt(value.and_then(json_string))
 }
 
-fn parse_trailers(value: Option<&Value>) -> Option<Vec<Trailer>> {
-    let Value::Array(items) = value? else {
-        return None;
-    };
+fn normalize_trailer_name(title: &str) -> Option<String> {
+    let mut name = String::with_capacity(title.len().min(MAX_TRAILER_NAME_CHARS));
+    let mut remaining = MAX_TRAILER_NAME_CHARS;
+    for word in title.split_whitespace() {
+        if remaining == 0 {
+            break;
+        }
+        if !name.is_empty() {
+            name.push(' ');
+            remaining -= 1;
+        }
+        for character in word.chars().take(remaining) {
+            name.push(character);
+            remaining -= 1;
+        }
+    }
+    // The bound may land on the separator before the next word.
+    if name.ends_with(' ') {
+        name.pop();
+    }
+    (!name.is_empty()).then_some(name)
+}
 
-    let trailers: Vec<Trailer> = items
-        .iter()
-        .filter_map(|item| {
-            // Video tokens reach the browser `<iframe>` src: strict 11-char YouTube token only.
-            let source = json_string_field(item, "source")?;
-            if !is_youtube_video_token(&source) {
-                return None;
+fn parse_trailers(value: Option<&Value>, streams: Option<&Value>) -> Option<Vec<Trailer>> {
+    let mut trailers: Vec<Trailer> = Vec::new();
+    for item in value.and_then(Value::as_array).into_iter().flatten() {
+        let Some(source) =
+            json_string_field(item, "source").filter(|source| is_youtube_video_token(source))
+        else {
+            continue;
+        };
+        if !json_string_field(item, "type")
+            .is_some_and(|type_| type_.eq_ignore_ascii_case("trailer"))
+            || trailers.iter().any(|trailer| trailer.id == source)
+        {
+            continue;
+        }
+        trailers.push(Trailer {
+            id: source,
+            name: None,
+        });
+        if trailers.len() == MAX_TRAILERS {
+            break;
+        }
+    }
+    for item in streams.and_then(Value::as_array).into_iter().flatten() {
+        let Some(id) = json_string_field(item, "ytId").filter(|id| is_youtube_video_token(id))
+        else {
+            continue;
+        };
+        let name =
+            json_string_field(item, "title").and_then(|title| normalize_trailer_name(&title));
+        if let Some(trailer) = trailers.iter_mut().find(|trailer| trailer.id == id) {
+            if trailer.name.is_none() {
+                trailer.name = name;
             }
-            let type_ = json_string_field(item, "type")?;
-            if !type_.eq_ignore_ascii_case("trailer") {
-                return None;
-            }
-
-            Some(Trailer { id: source })
-        })
-        .take(MAX_TRAILERS)
-        .collect();
-
+        } else if trailers.len() < MAX_TRAILERS {
+            trailers.push(Trailer { id, name });
+        }
+    }
     (!trailers.is_empty()).then_some(trailers)
 }
 
@@ -828,3 +897,35 @@ async fn fetch_bounded_json(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod trailer_name_tests {
+    use super::*;
+
+    #[test]
+    fn trailer_names_collapse_whitespace_without_intermediate_word_storage() {
+        assert_eq!(normalize_trailer_name(" \t\n "), None);
+        assert_eq!(
+            normalize_trailer_name("  Official\t \n Trailer\u{2003}HD  ").as_deref(),
+            Some("Official Trailer HD")
+        );
+        assert_eq!(
+            normalize_trailer_name("Already normalized").as_deref(),
+            Some("Already normalized")
+        );
+    }
+
+    #[test]
+    fn trailer_names_bound_unicode_characters_and_trim_cut_separators() {
+        let unicode = "語".repeat(MAX_TRAILER_NAME_CHARS + 1);
+        assert_eq!(
+            normalize_trailer_name(&unicode).unwrap(),
+            "語".repeat(MAX_TRAILER_NAME_CHARS)
+        );
+        let prefix = "a".repeat(MAX_TRAILER_NAME_CHARS - 1);
+        assert_eq!(
+            normalize_trailer_name(&format!("{prefix} tail")).unwrap(),
+            prefix
+        );
+    }
+}

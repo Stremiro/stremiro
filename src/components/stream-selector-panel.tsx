@@ -46,9 +46,16 @@ import {
 } from '@/lib/api';
 import { whenRowMounted } from '@/lib/dom';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
-import { getWatchProgressPercent } from '@/lib/history-playback';
+import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
-import { cn, formatAirDate, formatSeasonEpisode, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
+import {
+  cn,
+  formatAirDate,
+  formatSeasonEpisode,
+  formatTime,
+  getEpisodeTitle,
+  isHttpUrl,
+} from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
   'h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
@@ -145,6 +152,7 @@ interface StreamSelectorHeaderProps {
   onRequestClose: () => void;
   poster?: string;
   season?: number;
+  startTime?: number;
   title: string;
 }
 
@@ -161,10 +169,17 @@ export function StreamSelectorHeader({
   onRequestClose,
   poster,
   season,
+  startTime,
   title,
 }: StreamSelectorHeaderProps) {
   const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
   const kicker = formatSeasonEpisode(season, episode) || mediaLabel;
+  const playbackLabel =
+    startTime !== undefined && Number.isFinite(startTime) && startTime >= 0
+      ? startTime < MIN_RESUME_POSITION_SECS
+        ? 'Start from the beginning'
+        : `Resume from ${formatTime(startTime)}`
+      : 'Choose a stream to play';
   return (
     <div className='relative h-56 shrink-0 overflow-hidden'>
       {backdrop ? (
@@ -182,6 +197,17 @@ export function StreamSelectorHeader({
         <div className='absolute inset-0 bg-zinc-900/60 z-0' />
       )}
 
+      <button
+        type='button'
+        onClick={onRequestClose}
+        aria-label='Close stream selector'
+        aria-keyshortcuts='Escape'
+        title='Close (Esc)'
+        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-400 transition-colors hover:border-red-500/45 hover:bg-red-500/25 hover:text-red-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400/50'
+      >
+        <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
+      </button>
+
       <DialogHeader className='relative z-10 p-6 h-full flex flex-col justify-end text-left'>
         <div className='flex items-end gap-4'>
           {poster && (
@@ -192,31 +218,34 @@ export function StreamSelectorHeader({
               alt=''
             />
           )}
-          <div className='flex flex-col gap-1.5 min-w-0'>
+          <div className='flex min-w-0 flex-1 flex-col gap-1.5 pr-8'>
             <p className={HEADER_KICKER_CLASS}>{kicker}</p>
-            {logoSrc ? (
-              <>
-                <RemoteImage
-                  src={logoSrc}
-                  className='max-h-12 w-auto max-w-72 object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)]'
-                  alt=''
-                  onError={onLogoError}
-                />
-                <DialogTitle className='sr-only'>{title}</DialogTitle>
-              </>
-            ) : (
-              <DialogTitle className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white'>
-                {title}
-              </DialogTitle>
-            )}
-            <DialogDescription className='sr-only'>
-              Choose a stream source to start playback.
-            </DialogDescription>
+            <div className='min-w-0'>
+              {logoSrc ? (
+                <>
+                  <RemoteImage
+                    src={logoSrc}
+                    className='max-h-12 w-auto max-w-full object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)] sm:max-w-72'
+                    alt=''
+                    onError={onLogoError}
+                  />
+                  <DialogTitle className='sr-only'>{title}</DialogTitle>
+                </>
+              ) : (
+                <DialogTitle className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white'>
+                  {title}
+                </DialogTitle>
+              )}
+            </div>
             {episodeTitle && (
               <p className='truncate text-[15px] font-medium leading-snug text-white/75'>
                 {episodeTitle}
               </p>
             )}
+            <DialogDescription className='text-xs font-medium leading-snug text-zinc-300'>
+              <span className='sr-only'>Choose a stream source. {kicker}. </span>
+              {playbackLabel}
+            </DialogDescription>
             {compactOverview && (
               <p className='line-clamp-2 max-w-2xl text-xs leading-relaxed text-zinc-400 hidden sm:block'>
                 {compactOverview}
@@ -225,15 +254,6 @@ export function StreamSelectorHeader({
           </div>
         </div>
       </DialogHeader>
-
-      <button
-        type='button'
-        onClick={onRequestClose}
-        className='absolute top-4 right-4 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-white/10 bg-black/40 text-white/70 backdrop-blur-md transition-colors hover:bg-black/60 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-        aria-label='Close'
-      >
-        <X className='w-4 h-4' strokeWidth={2.25} />
-      </button>
     </div>
   );
 }

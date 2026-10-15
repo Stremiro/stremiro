@@ -3,16 +3,18 @@ import { useEffect, useEffectEvent } from 'react';
 import {
   focusSearchInput,
   isEditableTarget,
+  isKeyCaptureTarget,
   OPEN_DIALOG_SELECTOR,
   RADIX_POPPER_CONTENT_SELECTOR,
 } from '@/lib/dom';
-import { navigateApp, navigateAppBack } from '@/lib/navigation';
+import { navigateApp, navigateBack, navigateForward } from '@/lib/navigation';
 import { lastSearchPath } from '@/lib/search-page-state';
 
 // A focused floating layer owns its keys — includes the docked mini player's [role="dialog"], whose keys belong to the player keymap.
 const OWNED_LAYER_SELECTOR = `[role="dialog"], ${RADIX_POPPER_CONTENT_SELECTOR}, [data-media-card-expanded]`;
 // Document-level yield: an open dialog/popper is a top layer regardless of focus — never navigate out from under it.
 const OPEN_LAYER_SELECTOR = `${OPEN_DIALOG_SELECTOR}, ${RADIX_POPPER_CONTENT_SELECTOR}`;
+const QUICK_SECTION_PATHS = ['/', '/search', '/calendar', '/library', '/settings'] as const;
 
 function isInsideOwnedLayer(target: EventTarget | null): boolean {
   return target instanceof HTMLElement && !!target.closest(OWNED_LAYER_SELECTOR);
@@ -22,10 +24,17 @@ function hasOpenLayer(): boolean {
   return document.querySelector(OPEN_LAYER_SELECTOR) !== null;
 }
 
-/** Browse-page hotkeys: `/`/`Ctrl+K` opens search, `Esc`/`Backspace`/`Alt+←` goes back. Capture phase precedes Radix listeners so open layers still yield. */
+/** Browse shortcuts yield to editable targets and open layers; player routes own their controls. */
 export function useBrowseHotkeys() {
   const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    if (event.defaultPrevented || event.isComposing) return;
+    if (
+      event.defaultPrevented ||
+      event.isComposing ||
+      isKeyCaptureTarget(event.target, event.key) ||
+      window.location.pathname.startsWith('/player')
+    ) {
+      return;
+    }
 
     const key = event.key.toLowerCase();
     const openSearch = () => {
@@ -44,6 +53,21 @@ export function useBrowseHotkeys() {
       if (!event.repeat) openSearch();
       return;
     }
+    if (
+      event.altKey &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      /^[1-5]$/.test(key)
+    ) {
+      if (isEditableTarget(event.target) || isInsideOwnedLayer(event.target) || hasOpenLayer()) {
+        return;
+      }
+      event.preventDefault();
+      const path = QUICK_SECTION_PATHS[Number(key) - 1];
+      if (!event.repeat && window.location.pathname !== path) navigateApp(path);
+      return;
+    }
     if ((key === 'arrowleft' || key === 'arrowright') && event.altKey) {
       if (
         event.ctrlKey ||
@@ -57,8 +81,8 @@ export function useBrowseHotkeys() {
       }
       event.preventDefault();
       if (!event.repeat) {
-        if (key === 'arrowleft') navigateAppBack();
-        else navigateApp(1);
+        if (key === 'arrowleft') navigateBack();
+        else void navigateForward();
       }
       return;
     }
@@ -75,14 +99,33 @@ export function useBrowseHotkeys() {
       case 'escape':
         if (hasOpenLayer()) return;
         event.preventDefault();
-        navigateAppBack();
+        navigateBack();
         break;
     }
   });
 
+  const handleMouseNavigation = useEffectEvent((event: MouseEvent) => {
+    if (
+      window.location.pathname.startsWith('/player') ||
+      (event.button !== 3 && event.button !== 4)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    if (event.type !== 'mouseup' || hasOpenLayer()) return;
+    if (event.button === 3) navigateBack();
+    else void navigateForward();
+  });
+
   useEffect(() => {
     window.addEventListener('keydown', handleKeyDown, true);
-    return () => window.removeEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('mouseup', handleMouseNavigation, true);
+    window.addEventListener('auxclick', handleMouseNavigation, true);
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('mouseup', handleMouseNavigation, true);
+      window.removeEventListener('auxclick', handleMouseNavigation, true);
+    };
     // Effect event binds once and always reads fresh state.
   }, []);
 }

@@ -11,7 +11,7 @@ import type { SearchFacets } from '@/lib/search-page-state';
 
 interface CatalogPageSummary {
   items: MediaItem[];
-  lastPageAddsItems: boolean;
+  lastPageAddedTypes: Set<MediaItem['type']>;
 }
 
 // Key the whole immutable pages array so middle-page refetches invalidate the summary.
@@ -33,7 +33,7 @@ function getCatalogPageSummary(pages: readonly SearchCatalogPage[]): CatalogPage
 
   const seen = new Set<string>();
   const items: MediaItem[] = [];
-  let lastPageAddsItems = false;
+  const lastPageAddedTypes = new Set<MediaItem['type']>();
   const lastIndex = pages.length - 1;
   pages.forEach((page, index) => {
     for (const item of page.items) {
@@ -41,11 +41,11 @@ function getCatalogPageSummary(pages: readonly SearchCatalogPage[]): CatalogPage
       if (seen.has(key)) continue;
       seen.add(key);
       items.push(item);
-      if (index === lastIndex) lastPageAddsItems = true;
+      if (index === lastIndex) lastPageAddedTypes.add(item.type);
     }
   });
 
-  const summary = { items, lastPageAddsItems };
+  const summary = { items, lastPageAddedTypes };
   pageSummaries.set(pages, summary);
   return summary;
 }
@@ -63,8 +63,7 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
   const allBrowse = facets.type === 'all' && !normalizedQuery;
 
   return infiniteQueryOptions({
-    // Only browse paginates; one infinite query covers both modes. The shared
-    // key head is what the invalidation sweep matches on.
+    // Browse and text search share paging; the key head matches the invalidation sweep.
     queryKey: [
       ...SEARCH_CATALOG_QUERY_KEY,
       normalizedQuery ?? null,
@@ -92,10 +91,12 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
       if (!allBrowse) {
         return nextCatalogSkip(lastPage, allPages, lastPageParam as number);
       }
-      const cursors = lastPage.allCursors;
-      return cursors && (cursors.movie !== undefined || cursors.series !== undefined)
-        ? cursors
-        : undefined;
+      const previousCursors = lastPageParam as AllBrowseCursors;
+      const cursors = {
+        movie: nextCatalogSkip(lastPage, allPages, previousCursors.movie, 'movie'),
+        series: nextCatalogSkip(lastPage, allPages, previousCursors.series, 'series'),
+      };
+      return cursors.movie !== undefined || cursors.series !== undefined ? cursors : undefined;
     },
     staleTime: SEARCH_CATALOG_STALE_TIME_MS,
     gcTime: SEARCH_CATALOG_GC_TIME_MS,
@@ -116,17 +117,20 @@ export function flattenCatalogPages(pages: readonly SearchCatalogPage[]): MediaI
 function nextCatalogSkip(
   lastPage: SearchCatalogPage,
   allPages: SearchCatalogPage[],
-  lastPageParam: number,
+  lastPageParam: number | undefined,
+  mediaType?: MediaItem['type'],
 ): number | undefined {
-  const nextSkip = lastPage.nextSkip;
+  if (lastPageParam === undefined) return undefined;
+  const nextSkip = mediaType ? lastPage.allCursors?.[mediaType] : lastPage.nextSkip;
+  // All browse retains the same cursor only when a branch failed and needs a retry.
+  if (mediaType && nextSkip === lastPageParam) return nextSkip;
   // Rust emits `Option<u32>`; only a non-advancing (saturated) cursor needs a guard.
   if (nextSkip == null || nextSkip <= lastPageParam) {
     return undefined;
   }
 
   // A page with no unseen titles ends pagination despite an advancing source cursor.
-  if (allPages.length <= 1) {
-    return lastPage.items.length > 0 ? nextSkip : undefined;
-  }
-  return getCatalogPageSummary(allPages).lastPageAddsItems ? nextSkip : undefined;
+  const { lastPageAddedTypes } = getCatalogPageSummary(allPages);
+  const addsItems = mediaType ? lastPageAddedTypes.has(mediaType) : lastPageAddedTypes.size > 0;
+  return addsItems ? nextSkip : undefined;
 }

@@ -8,8 +8,6 @@ fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress()
     let bundle = DetailsPrefetchBundle {
         details: None,
         progress: TitleWatchProgress {
-            history: Vec::new(),
-            continue_watching: Vec::new(),
             episode_progress: std::collections::HashMap::new(),
             watched_episode_ceiling: std::collections::HashMap::new(),
             series_resume_entry: None,
@@ -24,7 +22,9 @@ fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress()
     // `details` always serializes (null on a degraded prefetch); the
     // progress shape must stay identical to `get_title_watch_progress`.
     assert_eq!(value["details"], serde_json::Value::Null);
-    assert_eq!(value["progress"]["continueWatching"], serde_json::json!([]));
+    assert!(value["progress"].get("history").is_none());
+    assert!(value["progress"].get("continueWatching").is_none());
+    assert_eq!(value["progress"]["episodeProgress"], serde_json::json!({}));
     assert_eq!(
         value["progress"]["watchedEpisodeCeiling"],
         serde_json::json!({})
@@ -88,7 +88,9 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
         type_: "series".into(),
         description: Some(format!("{} tail", "d".repeat(4095))),
         rating: Some(format!("{} tail", "r".repeat(63))),
+        runtime: None,
         cast: Some(vec![format!("{} tail", "c".repeat(127))]),
+        directors: None,
         genres: Some(vec![format!("{} tail", "g".repeat(63))]),
         trailers: None,
         episodes: Some(vec![Episode {
@@ -147,7 +149,9 @@ fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
         type_: "series".to_string(),
         description: None,
         rating: None,
+        runtime: None,
         cast: None,
+        directors: None,
         genres: None,
         trailers: None,
         episodes: Some(vec![
@@ -210,7 +214,9 @@ fn build_media_schedule_keeps_movie_release_date_without_episode_payload() {
         type_: "movie".to_string(),
         description: None,
         rating: None,
+        runtime: None,
         cast: None,
+        directors: None,
         genres: None,
         trailers: None,
         episodes: Some(vec![episode("unexpected", 1, 1, Some("2024-01-01"))]),

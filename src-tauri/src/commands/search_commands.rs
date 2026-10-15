@@ -226,10 +226,20 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
 }
 
 fn normalize_search_text(value: &str) -> String {
-    super::normalize_token_text(value)
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut normalized = String::with_capacity(value.len());
+    let mut separator_pending = false;
+    for ch in value.chars() {
+        if ch.is_ascii_alphanumeric() {
+            if separator_pending && !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push(ch.to_ascii_lowercase());
+            separator_pending = false;
+        } else {
+            separator_pending = true;
+        }
+    }
+    normalized
 }
 
 fn score_search_item(
@@ -255,14 +265,14 @@ fn score_search_item(
         score += 400;
     }
 
-    let title_tokens = normalized_title.split_whitespace().collect::<Vec<_>>();
+    let title_tokens = normalized_title.split_whitespace();
     let mut matched_tokens = 0i32;
     let mut prefix_token_matches = 0i32;
 
     for token in query_tokens.iter().copied() {
         if title_tokens
-            .iter()
-            .any(|segment| segment == &token || segment.starts_with(token))
+            .clone()
+            .any(|segment| segment.starts_with(token))
         {
             matched_tokens += 1;
             prefix_token_matches += 1;
@@ -395,7 +405,8 @@ async fn fetch_query_results(
     query: &str,
     media_type: Option<SearchMediaType>,
     genres: &[String],
-) -> Result<Vec<MediaItem>, String> {
+    skip: u32,
+) -> Result<super::addon_registry::CatalogFetchPage, String> {
     let media_types: &[&str] = match media_type {
         Some(SearchMediaType::Movie) => &["movie"],
         Some(SearchMediaType::Series) => &["series"],
@@ -421,20 +432,23 @@ async fn fetch_query_results(
 
     // One shared pool for the (genre × source) fan-out: per-genre outcomes stay
     // isolated while total concurrency stays at `ADDON_RESOURCE_CONCURRENCY`.
-    let outcomes = super::addon_registry::search_catalog_items_for_genres(
+    let outcomes = super::addon_registry::search_catalog_pages_for_genres(
         app,
         client,
         query,
         media_types,
         &genre_extras,
+        skip,
     )
     .await?;
-    let items = super::addon_registry::merge_catalog_items(outcomes, "Failed to search catalog.")?;
+    let mut page =
+        super::addon_registry::merge_catalog_pages(outcomes, "Failed to search catalog.")?;
 
-    Ok(retain_search_items_matching_genres(
-        retain_titled_catalog_items(items),
+    page.items = retain_search_items_matching_genres(
+        retain_titled_catalog_items(page.items),
         &required_genres,
-    ))
+    );
+    Ok(page)
 }
 
 fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
@@ -740,13 +754,20 @@ pub(crate) async fn query_search_catalog_for_request(
     if let Some(query) = criteria.query.as_deref() {
         // Items arrive normalized, so the scorer reads `primary_year` instead
         // of re-parsing year strings per item.
-        let items =
-            fetch_query_results(app, client, query, criteria.media_type, &criteria.genres).await?;
-        let items = rank_search_results(query, items, criteria.year_range);
+        let page = fetch_query_results(
+            app,
+            client,
+            query,
+            criteria.media_type,
+            &criteria.genres,
+            criteria.skip,
+        )
+        .await?;
+        let items = rank_search_results(query, page.items, criteria.year_range);
 
         return Ok(SearchCatalogPage {
             items,
-            next_skip: None,
+            next_skip: page.next_skip,
             all_cursors: None,
         });
     }

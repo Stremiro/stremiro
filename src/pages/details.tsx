@@ -16,10 +16,13 @@ import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card
 import { SeasonSwitcher } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
 import { DetailsTrailerDialog } from '@/components/details-trailer-dialog';
+import { CreateListDialog } from '@/components/list/list-editor-dialog';
+import { SaveToCollectionPanel } from '@/components/list/save-to-collection';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
 import { StreamSelector } from '@/components/stream-selector';
 import { Button } from '@/components/ui/button';
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
@@ -32,9 +35,10 @@ import { useDetailsTrailer } from '@/hooks/use-details-trailer';
 import { useDetailsWatchStatus } from '@/hooks/use-details-watch-status';
 import {
   useMarkSeasonWatched,
+  useListSummaries,
+  useMediaCollectionActions,
   useTitleWatchProgress,
   useToggleEpisodeWatched,
-  useToggleLibraryItem,
 } from '@/hooks/use-media-library';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import {
@@ -63,6 +67,7 @@ import {
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
+  getEpisodeTitle,
   isSeriesLikeMediaType,
   isAiredByLocalDay,
   mediaTypeLabel,
@@ -86,6 +91,82 @@ const EPISODE_PAGE_BUTTON_CLASS =
 const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-6xl ${SIDEBAR_PAGE_COLUMN_INSETS}`;
 
 const WATCH_STATUS_ORDER: WatchStatus[] = ['plan_to_watch', 'watching', 'watched', 'dropped'];
+
+const EMPTY_CREDIT_NAMES: string[] = [];
+
+function DetailsCredits({
+  cast = EMPTY_CREDIT_NAMES,
+  directors = EMPTY_CREDIT_NAMES,
+}: Pick<MediaDetails, 'cast' | 'directors'>) {
+  if (!cast.length && !directors.length) return null;
+
+  return (
+    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5 text-[13px] leading-5'>
+      {cast.length > 0 && (
+        <>
+          <dt className='text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'>
+            Starring
+          </dt>
+          <dd className='flex min-w-0 items-baseline gap-2 text-white/80'>
+            <span className='min-w-0 truncate' title={cast.join(' · ')}>
+              {cast.slice(0, 4).join(' · ')}
+            </span>
+            {cast.length > 4 && (
+              <Popover>
+                <PopoverTrigger asChild>
+                  <button
+                    type='button'
+                    aria-label='Full cast'
+                    className='inline-flex min-h-6 shrink-0 items-center rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[11px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+                  >
+                    +{cast.length - 4}
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  align='start'
+                  sideOffset={8}
+                  tabIndex={0}
+                  aria-labelledby='details-full-cast-heading'
+                  className='max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
+                >
+                  <h2
+                    id='details-full-cast-heading'
+                    className='mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'
+                  >
+                    Full cast
+                  </h2>
+                  <ul
+                    aria-labelledby='details-full-cast-heading'
+                    className='grid grid-cols-2 gap-x-4 gap-y-2'
+                  >
+                    {cast.map((name) => (
+                      <li
+                        key={name}
+                        className='min-w-0 wrap-break-word text-[13px] leading-5 text-white/80'
+                      >
+                        {name}
+                      </li>
+                    ))}
+                  </ul>
+                </PopoverContent>
+              </Popover>
+            )}
+          </dd>
+        </>
+      )}
+      {directors.length > 0 && (
+        <>
+          <dt className='text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'>
+            {directors.length === 1 ? 'Director' : 'Directors'}
+          </dt>
+          <dd className='min-w-0 truncate text-white/80' title={directors.join(' · ')}>
+            {directors.join(' · ')}
+          </dd>
+        </>
+      )}
+    </dl>
+  );
+}
 
 export function Details() {
   const { type, id } = useParams<{ type: string; id: string }>();
@@ -135,6 +216,7 @@ function DetailsContent() {
     isError: watchHistoryError,
     refetch: retryWatchHistory,
   } = useTitleWatchProgress(baseRouteId, { staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS });
+  const hasWatchProgress = Boolean(titleProgress);
   const episodeProgress = titleProgress?.episodeProgress;
   // `latestSeriesEntry` is the backend's first series-like row of the
   // `last_watched` DESC history list.
@@ -167,7 +249,13 @@ function DetailsContent() {
     watchStatusMutation,
     isInLibrary,
   } = useDetailsWatchStatus(item);
-  const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
+  const collectionActions = useMediaCollectionActions({ item, isInLibrary });
+  const { toggleLibrary, addItemToNewList } = collectionActions;
+  const { data: listSummaries } = useListSummaries(item?.id, { enabled: Boolean(item?.id) });
+  const isSaved = isInLibrary || (listSummaries?.some((list) => list.contains_item) ?? false);
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [createListOpen, setCreateListOpen] = useState(false);
+  const saveTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Season 0 (specials) is valid; only accept real numbers — `Number(null)`
   // would read a missing season as Specials.
@@ -176,8 +264,21 @@ function DetailsContent() {
     typeof rawLocationSeason === 'number' && Number.isFinite(rawLocationSeason)
       ? Math.trunc(rawLocationSeason)
       : null;
+  const rawLocationEpisode = (location.state as { episode?: unknown } | null)?.episode;
+  const locationEpisode =
+    typeof rawLocationEpisode === 'number' && Number.isFinite(rawLocationEpisode)
+      ? Math.trunc(rawLocationEpisode)
+      : null;
 
-  const { trailerOpen, trailerUrl, openTrailer, onTrailerOpenChange } = useDetailsTrailer(item);
+  const {
+    trailerOpen,
+    trailerUrl,
+    trailers,
+    selectedTrailerId,
+    selectTrailer,
+    openTrailer,
+    onTrailerOpenChange,
+  } = useDetailsTrailer(item);
   // A corrected artwork URL from a refetch must retry without a route remount.
   const backdropUrl = item?.backdrop || item?.poster;
   const logoUrl = item?.logo;
@@ -187,7 +288,6 @@ function DetailsContent() {
   const [loadedLogo, setLoadedLogo] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
-  const [castExpanded, setCastExpanded] = useState(false);
   const localDayMs = useLocalDay().getTime();
   const descriptionRef = useRef<HTMLParagraphElement | null>(null);
 
@@ -200,11 +300,13 @@ function DetailsContent() {
     episodeSearch,
     setEpisodeSearch,
     selectSeason,
+    jumpToEpisode,
     shouldShowEpisodeSearch,
     episodeRangeLabel,
     totalEpisodeCount,
     totalEpisodePages,
     activeEpisodePageIndex,
+    resumeEpisodePageIndex,
     visibleEpisodeStart,
     hasPreviousEpisodes,
     hasMoreEpisodes,
@@ -215,6 +317,7 @@ function DetailsContent() {
     effectiveRouteId: baseRouteId,
     locationKey: location.key,
     locationSeason,
+    locationEpisode,
     resumeSeason: resumeEpisodeCoords?.season ?? latestSeriesProgressCoords.season,
     resumeEpisode: resumeEpisodeCoords?.episode ?? latestSeriesProgressCoords.episode,
     isLoadingWatchHistory: isLoadingWatchHistoryForItem,
@@ -296,22 +399,35 @@ function DetailsContent() {
     (ep: Episode) => {
       if (!item) return;
 
-      const startTime =
-        episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)]
-          ?.resume_start_time;
+      const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
+      const hideSpoiler = isEpisodeSpoiler(
+        ep,
+        spoilerProtection,
+        titleProgress?.watchedEpisodeCeiling,
+        epProgress,
+      );
       openEpisodeStreamSelector(ep, {
-        overview: ep.overview || item.description,
-        startTime,
+        episodeTitle: getEpisodeTitle(hideSpoiler ? undefined : ep.title, ep.episode),
+        overview: hideSpoiler ? item.description : ep.overview || item.description,
+        startTime: epProgress?.resume_start_time,
       });
     },
-    [episodeProgress, item, baseRouteId, openEpisodeStreamSelector],
+    [
+      episodeProgress,
+      item,
+      baseRouteId,
+      openEpisodeStreamSelector,
+      spoilerProtection,
+      titleProgress?.watchedEpisodeCeiling,
+    ],
   );
 
   // Destructured `mutate` keeps this stable — the mutation object is
   // re-allocated per render and would defeat `EpisodeCard`'s memo.
   const handleToggleEpisodeWatched = useCallback(
     (ep: Episode) => {
-      if (!item || episodeWatchedPending || markSeasonWatched.isPending) return;
+      if (!item || !hasWatchProgress || episodeWatchedPending || markSeasonWatched.isPending)
+        return;
       const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
       mutateEpisodeWatched({
         episodes: [ep],
@@ -320,6 +436,7 @@ function DetailsContent() {
     },
     [
       episodeProgress,
+      hasWatchProgress,
       item,
       baseRouteId,
       mutateEpisodeWatched,
@@ -547,6 +664,15 @@ function DetailsContent() {
                       : mediaTypeLabel(item.type)}
                   </span>
 
+                  {item.runtime && (
+                    <>
+                      <span aria-hidden='true' className='text-white/25'>
+                        ·
+                      </span>
+                      <span className='tabular-nums'>{item.runtime}</span>
+                    </>
+                  )}
+
                   {item.genres && item.genres.length > 0 && (
                     <>
                       <span aria-hidden='true' className='text-white/25'>
@@ -606,6 +732,7 @@ function DetailsContent() {
                     {descriptionExpanded ? 'Show less' : 'Read more'}
                   </button>
                 )}
+                <DetailsCredits cast={item.cast} directors={item.directors} />
               </div>
 
               <div className='flex flex-wrap items-center gap-2.5 pt-2'>
@@ -641,30 +768,56 @@ function DetailsContent() {
                 </button>
 
                 <div className='flex gap-2.5'>
-                  <button
-                    type='button'
-                    aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
-                    aria-pressed={isInLibrary}
-                    aria-busy={toggleLibrary.isPending || undefined}
-                    title={isInLibrary ? 'In library' : 'Add to library'}
-                    className={cn(
-                      ICON_ACTION_CLASS,
-                      isInLibrary &&
-                        'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
-                    )}
-                    aria-disabled={toggleLibrary.isPending || undefined}
-                    onClick={() => {
-                      if (!toggleLibrary.isPending) toggleLibrary.mutate();
-                    }}
-                  >
-                    {toggleLibrary.isPending ? (
-                      <Loader2 className='w-5 h-5 animate-spin' />
-                    ) : isInLibrary ? (
-                      <Check className='w-5 h-5' />
-                    ) : (
-                      <Plus className='w-5 h-5' />
-                    )}
-                  </button>
+                  <Popover open={saveOpen} onOpenChange={setSaveOpen}>
+                    <PopoverTrigger asChild>
+                      <button
+                        ref={saveTriggerRef}
+                        type='button'
+                        aria-label='Save to library or list'
+                        aria-busy={toggleLibrary.isPending || undefined}
+                        title={isSaved ? 'Saved' : 'Save'}
+                        className={cn(
+                          ICON_ACTION_CLASS,
+                          isSaved &&
+                            'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
+                        )}
+                      >
+                        {toggleLibrary.isPending ? (
+                          <Loader2 className='w-5 h-5 animate-spin' />
+                        ) : isSaved ? (
+                          <Check className='w-5 h-5' />
+                        ) : (
+                          <Plus className='w-5 h-5' />
+                        )}
+                      </button>
+                    </PopoverTrigger>
+                    <PopoverContent
+                      align='start'
+                      sideOffset={8}
+                      aria-label='Save to'
+                      className='w-72 rounded-xl border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl backdrop-blur-xl'
+                    >
+                      <h2 className='px-2.5 pb-1.5 pt-2 text-sm font-semibold text-white'>
+                        Save to
+                      </h2>
+                      <SaveToCollectionPanel
+                        item={item}
+                        isInLibrary={isInLibrary}
+                        showLibrary
+                        actions={collectionActions}
+                        onCreateList={() => {
+                          setSaveOpen(false);
+                          setCreateListOpen(true);
+                        }}
+                      />
+                    </PopoverContent>
+                  </Popover>
+                  <CreateListDialog
+                    open={createListOpen}
+                    onOpenChange={setCreateListOpen}
+                    onCreated={addItemToNewList}
+                    returnFocusRef={saveTriggerRef}
+                  />
 
                   {item.trailers && item.trailers.length > 0 && (
                     <button
@@ -760,30 +913,6 @@ function DetailsContent() {
                   })}
                 </div>
               </div>
-
-              {item.cast && item.cast.length > 0 && (
-                <div className='pt-6 max-w-3xl'>
-                  <div className='flex flex-wrap items-center gap-x-2 gap-y-2 text-[13px] md:text-[14px]'>
-                    <span className='font-semibold text-white/65 mr-1'>Starring:</span>
-                    {(castExpanded ? item.cast : item.cast.slice(0, 5)).map((actor, i, cast) => (
-                      <span key={actor} className='flex items-center'>
-                        <span className='text-zinc-300'>{actor}</span>
-                        {i < cast.length - 1 && <span className='text-white/20 mx-2'>,</span>}
-                      </span>
-                    ))}
-                    {item.cast.length > 5 && (
-                      <button
-                        type='button'
-                        onClick={() => setCastExpanded((v) => !v)}
-                        aria-expanded={castExpanded}
-                        className='ml-1 inline-flex min-h-8 items-center rounded-md px-1 text-white/65 transition-colors duration-150 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-                      >
-                        {castExpanded ? 'Show less' : `+${item.cast.length - 5} more`}
-                      </button>
-                    )}
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         </div>
@@ -819,6 +948,14 @@ function DetailsContent() {
                   : undefined
               }
             >
+              {watchHistoryError && !hasWatchProgress && (
+                <RetryBanner
+                  className='px-3 py-2'
+                  message="Couldn't load watch history. Retry to change episode completion."
+                  onRetry={() => void retryWatchHistory()}
+                  isRetrying={isFetchingWatchHistory}
+                />
+              )}
               {shouldShowEpisodeSearch && (
                 <SearchInput
                   placeholder='Search episodes…'
@@ -843,22 +980,45 @@ function DetailsContent() {
                       <span className='text-zinc-500'>{` · ${seasonWatchedCount} watched`}</span>
                     )}
                   </p>
+                  {resumeEpisodeCoords &&
+                    (selectedSeason !== resumeEpisodeCoords.season ||
+                      (resumeEpisodePageIndex !== null &&
+                        activeEpisodePageIndex !== resumeEpisodePageIndex) ||
+                      episodeSearch.trim().length > 0) && (
+                      <button
+                        type='button'
+                        onClick={() =>
+                          jumpToEpisode(resumeEpisodeCoords.season, resumeEpisodeCoords.episode)
+                        }
+                        className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+                      >
+                        <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+                        Jump to S{resumeEpisodeCoords.season}E{resumeEpisodeCoords.episode}
+                      </button>
+                    )}
                   {!shouldShowEpisodeProgressSkeleton &&
                     (seasonWatchTargets.length > 1 || markSeasonWatched.isPending) && (
                       <button
                         type='button'
                         aria-disabled={
-                          markSeasonWatched.isPending || episodeWatchedPending || undefined
+                          !hasWatchProgress ||
+                          markSeasonWatched.isPending ||
+                          episodeWatchedPending ||
+                          undefined
                         }
                         onClick={() => {
-                          if (!markSeasonWatched.isPending && !episodeWatchedPending) {
+                          if (
+                            hasWatchProgress &&
+                            !markSeasonWatched.isPending &&
+                            !episodeWatchedPending
+                          ) {
                             markSeasonWatched.mutate({
                               episodes: seasonWatchTargets,
                               watched: true,
                             });
                           }
                         }}
-                        className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-wait'
+                        className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
                       >
                         {markSeasonWatched.isPending ? (
                           <Loader2 className='h-3.5 w-3.5 animate-spin' />
@@ -940,6 +1100,11 @@ function DetailsContent() {
                     const isResumeEp =
                       seriesCanResume &&
                       episodeMatchesCoordinates(ep, seriesResumeSeason, seriesResumeEpisode);
+                    const isWatched = optimisticWatched ?? !!epProgress?.is_watched;
+                    const remainingText =
+                      epProgress && !isWatched && epProgress.has_started_watching
+                        ? formatWatchRemaining(epProgress.position, epProgress.duration)
+                        : null;
 
                     return (
                       <EpisodeCard
@@ -952,9 +1117,12 @@ function DetailsContent() {
                           titleProgress?.watchedEpisodeCeiling,
                           epProgress,
                         )}
-                        isWatched={optimisticWatched ?? !!epProgress?.is_watched}
+                        isWatched={isWatched}
+                        isAired={isAiredByLocalDay(ep.releaseDate, localDayMs)}
+                        isWatchedDisabled={!hasWatchProgress}
                         isWatchedPending={episodeWatchedPending || markSeasonWatched.isPending}
                         progressPercent={progressPercent}
+                        remainingText={remainingText}
                         resumeRef={isResumeEp ? resumeEpisodeRef : undefined}
                         onPlay={handleWatchEpisode}
                         onToggleWatched={handleToggleEpisodeWatched}
@@ -993,6 +1161,9 @@ function DetailsContent() {
         open={trailerOpen}
         onOpenChange={onTrailerOpenChange}
         trailerUrl={trailerUrl}
+        trailers={trailers}
+        selectedTrailerId={selectedTrailerId}
+        onSelectTrailer={selectTrailer}
         title={item.title}
       />
     </div>

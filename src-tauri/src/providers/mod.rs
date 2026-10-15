@@ -186,7 +186,11 @@ pub(crate) struct MediaDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cast: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub directors: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genres: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,6 +213,8 @@ pub(crate) struct MediaSeason {
 pub(crate) struct Trailer {
     /// Strict 11-char YouTube video id; the frontend builds the embed URL.
     pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]

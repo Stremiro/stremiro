@@ -3,6 +3,7 @@ import {
   ArrowUp,
   Check,
   CloudCheck,
+  Copy,
   Layers,
   Link2,
   Package,
@@ -10,6 +11,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import {
   focusedRowRange,
   StreamAddonHealthChips,
@@ -27,9 +29,16 @@ import {
   StreamSelectorHeader,
 } from '@/components/stream-selector-panel';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
 import { warmPlayerChunk } from '@/lib/player-session';
 import {
+  api,
   getErrorMessage,
   type AddonStream,
   type Episode,
@@ -38,6 +47,7 @@ import {
 import { isEditableTarget, whenRowMounted } from '@/lib/dom';
 import { buildEpisodeStreamTarget, episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { episodeProgressKey } from '@/lib/history-playback';
+import { copyText } from '@/lib/notify';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import {
   buildStreamMatchBadges,
@@ -93,6 +103,7 @@ interface StreamItemProps {
   isResolving: boolean;
   onRowFocus: (streamKey: string) => void;
   onSelect: (stream: AddonStream) => void;
+  onCopyLink: (stream: AddonStream) => Promise<void>;
   /** Active sort — the row emphasizes whichever fact ordered it, so the ranking reads on the row. */
   sortMode: StreamSelectorSort;
   stream: AddonStream;
@@ -156,6 +167,7 @@ const StreamItem = memo(function StreamItem({
   stream,
   onSelect,
   onRowFocus,
+  onCopyLink,
   isActive,
   isLastUsed,
   isSameFamily,
@@ -164,6 +176,7 @@ const StreamItem = memo(function StreamItem({
   sortMode,
   tabIndex,
 }: StreamItemProps) {
+  const rowRef = useRef<HTMLButtonElement | null>(null);
   const {
     isPlayable,
     sourceName,
@@ -180,178 +193,223 @@ const StreamItem = memo(function StreamItem({
   const DeliveryIcon = deliveryTile.Icon;
 
   return (
-    <div
-      role='listitem'
-      className={cn(
-        'group relative px-3 py-2.5 rounded-xl',
-        'bg-white/[0.02] border border-white/[0.05]',
-        'hover:bg-white/[0.045] hover:border-white/[0.1]',
-        'transition-[background-color,border-color,opacity] duration-150 cursor-pointer w-full overflow-hidden',
-        !isPlayable && 'opacity-55 saturate-[0.65]',
-        isActive &&
-          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
-        disabled && !isResolving && 'opacity-50',
-        isResolving && 'pointer-events-none border-white/[0.16] bg-white/[0.05]',
-      )}
+    <ContextMenu
+      onOpenChange={(open) => {
+        if (open) rowRef.current?.focus({ preventScroll: true });
+      }}
     >
-      {matchTier && (
-        <span
-          aria-hidden='true'
-          className='pointer-events-none absolute right-0 top-0 h-20 w-52'
-          style={{
-            backgroundImage: `radial-gradient(${MATCH_DOT_COLORS[matchTier]} 0.85px, transparent 1.35px)`,
-            backgroundSize: '5.5px 5.5px',
-            backgroundPosition: 'top right',
-            maskImage:
-              'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
-            WebkitMaskImage:
-              'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
-          }}
-        />
-      )}
-
-      <button
-        type='button'
-        onClick={() => onSelect(stream)}
-        onFocus={() => onRowFocus(stream.streamKey)}
-        aria-disabled={disabled || undefined}
-        aria-current={isActive ? 'true' : undefined}
-        aria-busy={isResolving || undefined}
-        data-stream-key={stream.streamKey}
-        tabIndex={tabIndex}
-        aria-label={`Select ${sourceName} stream${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
-        className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
-      />
-
-      {isResolving && (
-        <div className='absolute bottom-0 left-0 right-0 h-[2px] bg-white/5 overflow-hidden rounded-b-xl'>
-          <div className='h-full w-1/3 bg-white/50 animate-[progress-slide_1.6s_linear_infinite]' />
-        </div>
-      )}
-
-      <div className='relative z-10 flex items-center gap-3 pointer-events-none'>
-        <div
-          aria-hidden='true'
-          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
-        >
-          <DeliveryIcon
-            className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
-            strokeWidth={1.75}
+      <div
+        role='listitem'
+        className={cn(
+          'group relative px-3 py-2.5 rounded-xl',
+          'bg-white/[0.02] border border-white/[0.05]',
+          'hover:bg-white/[0.045] hover:border-white/[0.1]',
+          'transition-[background-color,border-color,opacity] duration-150 cursor-pointer w-full overflow-hidden',
+          !isPlayable && 'opacity-55 saturate-[0.65]',
+          isActive &&
+            'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
+          disabled && !isResolving && 'opacity-50',
+          isResolving && 'pointer-events-none border-white/[0.16] bg-white/[0.05]',
+        )}
+      >
+        {matchTier && (
+          <span
+            aria-hidden='true'
+            className='pointer-events-none absolute right-0 top-0 h-20 w-52'
+            style={{
+              backgroundImage: `radial-gradient(${MATCH_DOT_COLORS[matchTier]} 0.85px, transparent 1.35px)`,
+              backgroundSize: '5.5px 5.5px',
+              backgroundPosition: 'top right',
+              maskImage:
+                'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
+              WebkitMaskImage:
+                'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
+            }}
           />
-        </div>
+        )}
 
-        <div className='flex-1 min-w-0'>
-          <div className='flex items-center gap-1.5 min-w-0'>
-            <p className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'>
-              {sourceName}
-            </p>
-            <div className='flex items-center gap-1 shrink-0'>
-              {techBadges.map((badge, badgeIndex) => (
-                <span
-                  key={`${badge.label}:${badge.cls}`}
-                  className={cn(
-                    'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
-                    badge.cls,
-                    badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
-                  )}
-                >
-                  {badge.label}
-                </span>
-              ))}
-              {isActive && (
-                <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
-                  <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act) motion-safe:animate-pulse' />
-                  Current
-                </span>
-              )}
-              {!isActive && isLastUsed && (
-                <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
-                  <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
-                  Last used
-                </span>
-              )}
-              {!isActive && !isLastUsed && isSameFamily && (
-                <span className='text-[11px] font-medium leading-none text-zinc-400'>
-                  Same release
-                </span>
-              )}
-            </div>
+        <ContextMenuTrigger asChild>
+          <button
+            ref={rowRef}
+            type='button'
+            onClick={() => onSelect(stream)}
+            onFocus={() => onRowFocus(stream.streamKey)}
+            aria-disabled={disabled || undefined}
+            aria-current={isActive ? 'true' : undefined}
+            aria-busy={isResolving || undefined}
+            data-stream-key={stream.streamKey}
+            tabIndex={tabIndex}
+            title={streamTitle}
+            aria-label={`Select ${sourceName} stream${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
+            className='absolute inset-0 z-0 rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
+          />
+        </ContextMenuTrigger>
+
+        {isResolving && (
+          <div className='absolute bottom-0 left-0 right-0 h-[2px] bg-white/5 overflow-hidden rounded-b-xl'>
+            <div className='h-full w-1/3 bg-white/50 animate-[progress-slide_1.6s_linear_infinite]' />
+          </div>
+        )}
+
+        <div className='relative z-10 flex items-center gap-3 pointer-events-none'>
+          <div
+            aria-hidden='true'
+            className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
+          >
+            <DeliveryIcon
+              className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
+              strokeWidth={1.75}
+            />
           </div>
 
-          <p className='text-[11px] text-zinc-400 truncate mt-0.5 leading-snug'>{streamTitle}</p>
-
-          <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
-            {metaParts.map((part, index) => (
-              <Fragment key={part.key}>
-                {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
-                <span
-                  className={cn(
-                    'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
-                    part.className,
-                  )}
-                >
-                  {part.text}
-                </span>
-              </Fragment>
-            ))}
-            {typeof stream.seeders === 'number' && stream.seeders > 0 && (
-              <>
-                <span className='text-zinc-700 text-[10px]'>·</span>
-                <span
-                  className={cn(
-                    'text-[10.5px] inline-flex items-center gap-0.5 shrink-0',
-                    sortMode === 'seeds' ? 'text-white font-semibold' : 'text-zinc-300 font-medium',
-                  )}
-                >
-                  <ArrowUp className='w-[9px] h-[9px]' strokeWidth={2.5} />
-                  {stream.seeders}
-                </span>
-              </>
-            )}
-          </div>
-
-          {(matchBadges.length > 0 || recommendationReasons.length > 0) && (
-            <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
-              {matchBadges.map((badge) => {
-                const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
-                return (
+          <div className='flex-1 min-w-0'>
+            <div className='flex items-center gap-1.5 min-w-0'>
+              <p className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'>
+                {sourceName}
+              </p>
+              <div className='flex items-center gap-1 shrink-0'>
+                {techBadges.map((badge, badgeIndex) => (
                   <span
-                    key={badge.kind}
+                    key={`${badge.label}:${badge.cls}`}
                     className={cn(
-                      'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
+                      'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
                       badge.cls,
+                      badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
                     )}
                   >
-                    {BadgeIcon && (
-                      <BadgeIcon className='-ml-px h-[11px] w-[11px]' strokeWidth={2.5} />
-                    )}
                     {badge.label}
                   </span>
-                );
-              })}
-              {recommendationReasons.map((reason, index) => (
-                <Fragment key={reason.kind}>
-                  {index > 0 && (
-                    <span aria-hidden='true' className='text-[11px] text-zinc-700'>
-                      ·
-                    </span>
-                  )}
+                ))}
+                {isActive && (
+                  <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
+                    <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act) motion-safe:animate-pulse' />
+                    Current
+                  </span>
+                )}
+                {!isActive && isLastUsed && (
+                  <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
+                    <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
+                    Last played
+                  </span>
+                )}
+                {!isActive && !isLastUsed && isSameFamily && (
+                  <span className='text-[11px] font-medium leading-none text-zinc-400'>
+                    Same release
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <p
+              title={streamTitle}
+              className='text-[11px] text-zinc-400 truncate mt-0.5 leading-snug'
+            >
+              {streamTitle}
+            </p>
+
+            <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
+              {metaParts.map((part, index) => (
+                <Fragment key={part.key}>
+                  {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
                   <span
                     className={cn(
-                      'text-[11px] leading-none',
-                      index === 0 && matchBadges.length > 0 && 'ml-1.5',
-                      REASON_TONE_CLASS[reason.tone],
+                      'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
+                      part.className,
                     )}
                   >
-                    {reason.label}
+                    {part.text}
                   </span>
                 </Fragment>
               ))}
+              {typeof stream.seeders === 'number' && stream.seeders > 0 && (
+                <>
+                  <span className='text-zinc-700 text-[10px]'>·</span>
+                  <span
+                    className={cn(
+                      'text-[10.5px] inline-flex items-center gap-0.5 shrink-0',
+                      sortMode === 'seeds'
+                        ? 'text-white font-semibold'
+                        : 'text-zinc-300 font-medium',
+                    )}
+                  >
+                    <ArrowUp className='w-[9px] h-[9px]' strokeWidth={2.5} />
+                    {stream.seeders}
+                  </span>
+                </>
+              )}
             </div>
+
+            {(matchBadges.length > 0 || recommendationReasons.length > 0) && (
+              <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
+                {matchBadges.map((badge) => {
+                  const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
+                  return (
+                    <span
+                      key={badge.kind}
+                      className={cn(
+                        'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
+                        badge.cls,
+                      )}
+                    >
+                      {BadgeIcon && (
+                        <BadgeIcon className='-ml-px h-[11px] w-[11px]' strokeWidth={2.5} />
+                      )}
+                      {badge.label}
+                    </span>
+                  );
+                })}
+                {recommendationReasons.map((reason, index) => (
+                  <Fragment key={reason.kind}>
+                    {index > 0 && (
+                      <span aria-hidden='true' className='text-[11px] text-zinc-700'>
+                        ·
+                      </span>
+                    )}
+                    <span
+                      className={cn(
+                        'text-[11px] leading-none',
+                        index === 0 && matchBadges.length > 0 && 'ml-1.5',
+                        REASON_TONE_CLASS[reason.tone],
+                      )}
+                    >
+                      {reason.label}
+                    </span>
+                  </Fragment>
+                ))}
+              </div>
+            )}
+          </div>
+          {isPlayable && stream.presentation.deliveryKind !== 'p2p' && (
+            <button
+              type='button'
+              aria-label='Copy stream URL'
+              title='Copy stream URL'
+              tabIndex={tabIndex}
+              onFocus={() => onRowFocus(stream.streamKey)}
+              onClick={(event) => {
+                event.stopPropagation();
+                void onCopyLink(stream);
+              }}
+              className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+            >
+              <Copy aria-hidden='true' className='h-3.5 w-3.5' />
+            </button>
           )}
         </div>
       </div>
-    </div>
+      <ContextMenuContent
+        onKeyDown={(event) => event.stopPropagation()}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          rowRef.current?.focus({ preventScroll: true });
+        }}
+      >
+        <ContextMenuItem onSelect={() => void onCopyLink(stream)}>
+          <Copy className='h-4 w-4' />
+          {stream.presentation.deliveryKind === 'p2p' ? 'Copy magnet link' : 'Copy stream link'}
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 });
 
@@ -367,6 +425,7 @@ interface StreamVirtualListProps {
   /** Release family of the last-used pick — fallback badge when the exact key can't exist (sibling episode) or rotted. */
   lastStreamFamily?: string;
   handleSelectStream: (stream: AddonStream) => void;
+  handleCopyLink: (stream: AddonStream) => Promise<void>;
   isAnyResolving: boolean;
   /** True once per dialog open: focus + scroll the remembered row into view. */
   initialFocusPending: boolean;
@@ -384,6 +443,7 @@ function StreamVirtualList({
   lastStreamKey,
   lastStreamFamily,
   handleSelectStream,
+  handleCopyLink,
   isAnyResolving,
   initialFocusPending,
   onInitialFocusDone,
@@ -449,7 +509,12 @@ function StreamVirtualList({
       () => scrollRef.current,
       `[data-stream-key="${CSS.escape(streamKey)}"]`,
       (row) => {
-        if (initial && isEditableTarget(document.activeElement)) return;
+        if (initial) {
+          const active = document.activeElement;
+          const dialog = scrollRef.current?.closest('[role="dialog"]');
+          // Progressive results must not steal focus after the user starts interacting with the chrome.
+          if (active && active !== document.body && active !== dialog && active !== row) return;
+        }
         row.focus({ preventScroll: initial });
         if (initial) row.scrollIntoView({ block: 'nearest' });
       },
@@ -550,6 +615,7 @@ function StreamVirtualList({
           key={streamKey}
           stream={stream}
           onSelect={handleSelectStream}
+          onCopyLink={handleCopyLink}
           onRowFocus={setFocusedStreamKey}
           isActive={currentStreamKey === streamKey}
           isLastUsed={lastStreamKey === streamKey}
@@ -566,6 +632,7 @@ function StreamVirtualList({
       currentStreamKey,
       focusedIndex,
       handleSelectStream,
+      handleCopyLink,
       isAnyResolving,
       lastStreamKey,
       familyFallbackKey,
@@ -628,6 +695,7 @@ export function StreamSelector({
   currentStreamKey,
   getStartTime,
 }: StreamSelectorProps) {
+  const dialogContentRef = useRef<HTMLDivElement | null>(null);
   const {
     absoluteEpisode,
     absoluteSeason,
@@ -649,6 +717,7 @@ export function StreamSelector({
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
+    effectiveSearchQuery,
     hasEnabledAddons,
     episodeProgress,
     watchedEpisodeCeiling,
@@ -666,6 +735,7 @@ export function StreamSelector({
     lastStreamFamily,
     lookupId,
     qualityFilter,
+    rankingOptions,
     refetchStreams,
     resetFilters,
     selectorSessionKey,
@@ -688,9 +758,34 @@ export function StreamSelector({
     target,
   });
 
+  const handleCopyLink = useCallback(
+    async (stream: AddonStream) => {
+      try {
+        const link = await api.getStreamLink(
+          type,
+          lookupId,
+          stream.streamKey,
+          season,
+          episode,
+          absoluteEpisode,
+          rankingOptions,
+          stream.sourceId,
+        );
+        await copyText(
+          link.url,
+          link.kind === 'magnet' ? 'Magnet link copied' : 'Stream link copied',
+        );
+      } catch (error) {
+        toast.error(getErrorMessage(error));
+      }
+    },
+    [absoluteEpisode, episode, lookupId, rankingOptions, season, type],
+  );
+
   // Canonical display coordinates — the header shows the browsed (absolute) numbering, not the addon's stream-space remap.
   const displaySeason = absoluteSeason ?? season;
   const displayEpisode = absoluteEpisode ?? episode;
+  const headerStartTime = open ? getStartTime?.() : undefined;
 
   // Pack browsing: a playable batch row opens the in-pack episode picker instead of resolving blind.
   const [packStream, setPackStream] = useState<AddonStream | null>(null);
@@ -768,7 +863,7 @@ export function StreamSelector({
   const handleInitialFocusDone = useCallback(() => setListFocusPending(false), []);
 
   // Filter/sort changes drop the list to the top — remounting resets scroll offset and row measurements in one step.
-  const listResetKey = `${qualityFilter}:${sourceFilter}:${batchFilter}:${sortMode}:${effectiveAddonFilter}:${searchQuery}`;
+  const listResetKey = `${qualityFilter}:${sourceFilter}:${batchFilter}:${sortMode}:${effectiveAddonFilter}:${effectiveSearchQuery}`;
 
   // Per-source chips ride the loading state too — the roster lands before any stream, so "searching" shows real names.
   const healthChips =
@@ -794,6 +889,7 @@ export function StreamSelector({
         onRequestClose={handleRequestClose}
         poster={poster}
         season={displaySeason}
+        startTime={headerStartTime}
         title={title || 'Unknown Title'}
       />
 
@@ -858,6 +954,7 @@ export function StreamSelector({
                       lastStreamKey={lastStreamKey}
                       lastStreamFamily={lastStreamFamily}
                       handleSelectStream={handleStreamPress}
+                      handleCopyLink={handleCopyLink}
                       isAnyResolving={isAnyResolving}
                       initialFocusPending={listFocusPending}
                       onInitialFocusDone={handleInitialFocusDone}
@@ -915,10 +1012,17 @@ export function StreamSelector({
   return (
     <Dialog open={open} onOpenChange={handleDialogOpenChange}>
       <DialogContent
+        ref={dialogContentRef}
+        hideCloseButton
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          dialogContentRef.current?.focus({ preventScroll: true });
+        }}
         onKeyDown={(event) => {
           if (
             packStream &&
             event.key === 'Backspace' &&
+            !isEditableTarget(event.target) &&
             !event.defaultPrevented &&
             !event.nativeEvent.isComposing &&
             !event.ctrlKey &&
@@ -942,7 +1046,7 @@ export function StreamSelector({
           }
         }}
         overlayClassName='bg-black/55 backdrop-blur-[2px]'
-        className='sm:max-w-4xl h-[82vh] flex flex-col p-0 bg-transparent border-none shadow-none rounded-md [&>button]:hidden'
+        className='sm:max-w-4xl h-[82vh] flex flex-col p-0 bg-transparent border-none shadow-none rounded-md outline-hidden'
       >
         {streamPanel}
       </DialogContent>

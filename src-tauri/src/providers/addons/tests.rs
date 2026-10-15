@@ -740,6 +740,48 @@ fn decode_stream_items_decodes_typed_protocol_fields() {
 }
 
 #[test]
+fn stream_sources_decode_leniently_and_only_keep_bounded_trackers() {
+    for sources in [Value::Null, serde_json::json!(42), serde_json::json!({})] {
+        let stream: AddonStream = serde_json::from_value(serde_json::json!({
+            "url": "https://cdn.example/video.mkv",
+            "sources": sources
+        }))
+        .expect("malformed sources preserve the stream");
+        assert!(stream.sources.is_empty());
+    }
+    let mut sources = vec![
+        serde_json::json!(null),
+        serde_json::json!(12),
+        serde_json::json!("dht:node"),
+        serde_json::json!("tracker:file:///private"),
+        serde_json::json!(format!(
+            "tracker:https://tracker.example/{}",
+            "x".repeat(512)
+        )),
+    ];
+    for scheme in ["udp", "http", "https", "wss"] {
+        sources.push(serde_json::json!(format!(
+            "tracker:{scheme}://tracker.example/announce"
+        )));
+    }
+    sources.extend(
+        (0..30).map(|index| serde_json::json!(format!("tracker:https://tracker.example/{index}"))),
+    );
+    let stream: AddonStream = serde_json::from_value(serde_json::json!({
+        "infoHash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
+        "sources": sources
+    }))
+    .expect("decodes mixed sources");
+    assert_eq!(stream.sources.len(), 24);
+    assert_eq!(stream.sources[0], "tracker:udp://tracker.example/announce");
+    assert_eq!(stream.sources[3], "tracker:wss://tracker.example/announce");
+    assert!(serde_json::to_value(&stream)
+        .expect("serializes")
+        .get("sources")
+        .is_none());
+}
+
+#[test]
 fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
     // `seeders`/`sizeBytes`/`cached` are `skip_deserializing`: hydration is
     // the only writer, so a malicious addon cannot float to the top of

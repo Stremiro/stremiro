@@ -1,8 +1,8 @@
 use super::{
     add_subtitle_if_unique, addon_allows_catalog, addon_allows_subtitles,
-    catalog_fetch_page_from_source, catalog_page_next_skip, collect_catalog_outcomes,
-    collect_with_deadline, extra_skip_value, merge_catalog_pages, searchable_catalog_ids,
-    CatalogFetchPage, SourcedAddonSubtitle,
+    catalog_fetch_page_from_source, catalog_page_next_skip, catalog_search_extras,
+    collect_catalog_outcomes, collect_with_deadline, extra_skip_value, merge_catalog_pages,
+    merge_search_catalog_pages, searchable_catalog_ids, CatalogFetchPage, SourcedAddonSubtitle,
 };
 use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
@@ -54,8 +54,11 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
 #[test]
 fn classified_search_uses_only_declared_search_catalogs() {
     let addon = classified_cinemeta_addon();
-    assert_eq!(searchable_catalog_ids(&addon, "movie"), vec!["top"]);
-    assert!(searchable_catalog_ids(&addon, "series").is_empty());
+    assert_eq!(
+        searchable_catalog_ids(&addon, "movie", 0),
+        vec![("top".to_string(), true)]
+    );
+    assert!(searchable_catalog_ids(&addon, "series", 0).is_empty());
 
     let search = [CatalogExtra {
         name: "search".to_string(),
@@ -93,7 +96,90 @@ fn unclassified_addon_is_not_skipped() {
         value: "dune".to_string(),
     }];
     assert!(addon_allows_catalog(&addon, "movie", "top", &extras));
-    assert_eq!(searchable_catalog_ids(&addon, "movie"), vec!["top"]);
+    assert_eq!(
+        searchable_catalog_ids(&addon, "movie", 0),
+        vec![("top".to_string(), false)]
+    );
+    assert!(searchable_catalog_ids(&addon, "movie", 50).is_empty());
+}
+
+#[test]
+fn query_extras_include_skip_only_on_later_pages() {
+    let first = catalog_search_extras("dune", Some(" Drama "), 0);
+    assert_eq!(
+        first
+            .iter()
+            .map(|extra| (extra.name.as_str(), extra.value.as_str()))
+            .collect::<Vec<_>>(),
+        [("search", "dune"), ("genre", "Drama")]
+    );
+    let next = catalog_search_extras("dune", None, 50);
+    assert_eq!(next[0].name, "search");
+    assert_eq!(next[0].value, "dune");
+    assert_eq!(next[1].name, "skip");
+    assert_eq!(extra_skip_value(&next), 50);
+}
+
+#[test]
+fn later_search_pages_exclude_nonpaging_catalogs() {
+    let mut addon = classified_cinemeta_addon();
+    addon.capabilities = Some(
+        parse_addon_manifest(
+            br#"{
+                "name": "Search catalogs",
+                "resources": ["catalog"], "types": ["movie"],
+                "catalogs": [
+                    {"id": "single", "type": "movie", "extraSupported": ["search"]},
+                    {"id": "paged", "type": "movie", "extra": [{"name": "search"}, {"name": "skip"}]}
+                ]
+            }"#,
+        )
+        .unwrap(),
+    );
+    assert_eq!(
+        searchable_catalog_ids(&addon, "movie", 0),
+        [("single".to_string(), false), ("paged".to_string(), true)]
+    );
+    assert_eq!(
+        searchable_catalog_ids(&addon, "movie", 50),
+        [("paged".to_string(), true)]
+    );
+}
+
+#[test]
+fn search_pages_end_without_paging_targets_or_provider_items() {
+    let page = merge_search_catalog_pages(Vec::new(), 50).unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(page.next_skip, None);
+    assert!(merge_search_catalog_pages(Vec::new(), 0).is_err());
+    let page = merge_search_catalog_pages(
+        vec![Ok(catalog_fetch_page_from_source(
+            CatalogPage::default(),
+            50,
+        ))],
+        50,
+    )
+    .unwrap();
+    assert_eq!(page.next_skip, None);
+    let page = merge_search_catalog_pages(
+        vec![
+            Ok(CatalogFetchPage {
+                items: vec![test_media_item("single", "movie")],
+                next_skip: None,
+            }),
+            Ok(catalog_fetch_page_from_source(
+                CatalogPage {
+                    items: vec![],
+                    source_item_count: 3,
+                },
+                50,
+            )),
+        ],
+        50,
+    )
+    .unwrap();
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.next_skip, Some(53));
 }
 
 #[test]

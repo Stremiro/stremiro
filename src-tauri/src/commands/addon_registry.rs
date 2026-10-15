@@ -47,6 +47,42 @@ static ENABLED_ADDONS_MEMO: Mutex<Option<(u64, Arc<Vec<AddonConfig>>)>> = Mutex:
 static CLASSIFY_RETRY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static CLASSIFY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
+struct CapabilityClassificationGuard<'a>(&'a AtomicBool);
+
+impl<'a> CapabilityClassificationGuard<'a> {
+    fn try_acquire(in_flight: &'a AtomicBool) -> Option<Self> {
+        if in_flight.swap(true, Ordering::SeqCst) {
+            None
+        } else {
+            Some(Self(in_flight))
+        }
+    }
+}
+
+impl Drop for CapabilityClassificationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+pub(crate) fn schedule_capability_classification(
+    app: &AppHandle,
+    on_error: impl FnOnce(String) + Send + 'static,
+) {
+    let Some(guard) = CapabilityClassificationGuard::try_acquire(&CLASSIFY_IN_FLIGHT) else {
+        return;
+    };
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Captured before spawning so cancellation before the first poll also releases it.
+        let _guard = guard;
+        if let Err(error) = super::config_commands::classify_installed_addon_capabilities(app).await
+        {
+            on_error(error);
+        }
+    });
+}
+
 /// Self-heal for addons whose manifest fetch failed at install time: an
 /// unclassified (`capabilities: None`) addon is queried for every resource
 /// under fail-open routing, so a subtitles-only addon would eat stream
@@ -72,15 +108,7 @@ fn maybe_schedule_capability_classification(app: &AppHandle, addons: &[AddonConf
         }
         *retry_at = Some(Instant::now());
     }
-    if CLASSIFY_IN_FLIGHT.swap(true, Ordering::SeqCst) {
-        return;
-    }
-
-    let app = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let _ = super::config_commands::classify_installed_addon_capabilities(app).await;
-        CLASSIFY_IN_FLIGHT.store(false, Ordering::SeqCst);
-    });
+    schedule_capability_classification(app, |_| {});
 }
 
 pub(crate) fn load_enabled_addons(app: &AppHandle) -> Result<Arc<Vec<AddonConfig>>, String> {
@@ -164,17 +192,19 @@ fn addon_allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
         .is_none_or(|snapshot| snapshot_supports_subtitles(snapshot, type_, id))
 }
 
-fn searchable_catalog_ids(addon: &AddonConfig, type_: &str) -> Vec<String> {
+fn searchable_catalog_ids(addon: &AddonConfig, type_: &str, skip: u32) -> Vec<(String, bool)> {
     match addon.capabilities.as_ref() {
-        None => vec!["top".to_string()],
+        None if skip == 0 => vec![("top".to_string(), false)],
+        None => Vec::new(),
         Some(snapshot) => snapshot
             .catalogs
             .iter()
             .filter(|catalog| {
                 catalog.type_.eq_ignore_ascii_case(type_)
                     && catalog_declares_extra(catalog, "search")
+                    && (skip == 0 || catalog_declares_extra(catalog, "skip"))
             })
-            .map(|catalog| catalog.id.clone())
+            .map(|catalog| (catalog.id.clone(), catalog_declares_extra(catalog, "skip")))
             .collect(),
     }
 }
@@ -263,22 +293,6 @@ pub(crate) fn merge_catalog_pages(
     }
 
     Ok(CatalogFetchPage { items, next_skip })
-}
-
-pub(crate) fn merge_catalog_items(
-    results: impl IntoIterator<Item = Result<Vec<MediaItem>, String>>,
-    empty_error: &str,
-) -> Result<Vec<MediaItem>, String> {
-    merge_catalog_pages(
-        results.into_iter().map(|result| {
-            result.map(|items| CatalogFetchPage {
-                items,
-                next_skip: None,
-            })
-        }),
-        empty_error,
-    )
-    .map(|page| page.items)
 }
 
 pub async fn fetch_catalog_page(
@@ -415,7 +429,7 @@ async fn run_catalog_work_pool(
     client: &AddonResourceClient,
     mut work: Vec<CatalogWorkItem>,
     group_count: usize,
-) -> Vec<Vec<Result<CatalogPage, String>>> {
+) -> Vec<Vec<(usize, Result<CatalogPage, String>)>> {
     let mut remaining = vec![0; group_count];
     for item in &work {
         remaining[item.group] += 1;
@@ -447,13 +461,10 @@ async fn run_catalog_work_pool(
     for (group, order, result) in outcomes {
         grouped[group].push((order, result));
     }
+    for bucket in &mut grouped {
+        bucket.sort_by_key(|(order, _)| *order);
+    }
     grouped
-        .into_iter()
-        .map(|mut bucket| {
-            bucket.sort_by_key(|(order, _)| *order);
-            bucket.into_iter().map(|(_, result)| result).collect()
-        })
-        .collect()
 }
 
 /// Multi-group catalog fetch: one bounded pool
@@ -500,9 +511,9 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
         .map(|((bucket, error), skip)| match error {
             Some(error) => Err(error),
             None => merge_catalog_pages(
-                bucket
-                    .into_iter()
-                    .map(|result| result.map(|page| catalog_fetch_page_from_source(page, skip))),
+                bucket.into_iter().map(|(_, result)| {
+                    result.map(|page| catalog_fetch_page_from_source(page, skip))
+                }),
                 "Failed to load catalog.",
             ),
         })
@@ -513,34 +524,29 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
 /// through one `ADDON_RESOURCE_CONCURRENCY` pool, then merges per genre so
 /// one failed or unsupported genre never discards another's results.
 /// Returns one outcome per input genre, in order.
-pub async fn search_catalog_items_for_genres(
+pub async fn search_catalog_pages_for_genres(
     app: &AppHandle,
     client: &AddonResourceClient,
     query: &str,
     media_types: &[&str],
     genres: &[Option<String>],
-) -> Result<Vec<Result<Vec<MediaItem>, String>>, String> {
+    skip: u32,
+) -> Result<Vec<Result<CatalogFetchPage, String>>, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
     let mut work = Vec::new();
     let mut group_errors: Vec<Option<String>> = Vec::with_capacity(genres.len());
+    let mut group_paging = Vec::with_capacity(genres.len());
 
     for (group, genre) in genres.iter().enumerate() {
-        let mut extras = vec![CatalogExtra {
-            name: "search".to_string(),
-            value: query.to_string(),
-        }];
-        if let Some(genre) = genre.as_deref().and_then(super::normalize_non_empty) {
-            extras.push(CatalogExtra {
-                name: "genre".to_string(),
-                value: genre,
-            });
-        }
+        let extras = catalog_search_extras(query, genre.as_deref(), skip);
 
         let mut order = 0;
+        let mut paging = Vec::new();
         'addons: for addon in snapshot.iter() {
             for media_type in media_types {
-                for catalog_id in searchable_catalog_ids(addon, media_type) {
+                for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type, skip) {
                     if addon_allows_catalog(addon, media_type, &catalog_id, &extras) {
+                        paging.push(supports_skip);
                         work.push(CatalogWorkItem {
                             group,
                             order,
@@ -557,7 +563,8 @@ pub async fn search_catalog_items_for_genres(
                 }
             }
         }
-        group_errors.push((order == 0).then(|| {
+        group_paging.push(paging);
+        group_errors.push((order == 0 && skip == 0).then(|| {
             format!("No enabled addon declares a searchable catalog for the requested type. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another catalog addon is enabled in Settings → Streaming.")
         }));
     }
@@ -566,16 +573,62 @@ pub async fn search_catalog_items_for_genres(
         .await
         .into_iter()
         .zip(group_errors)
-        .map(|(bucket, error)| match error {
+        .zip(group_paging)
+        .map(|((bucket, error), paging)| match error {
             Some(error) => Err(error),
-            None => merge_catalog_items(
+            None => merge_search_catalog_pages(
                 bucket
                     .into_iter()
-                    .map(|result| result.map(|page| page.items)),
-                "Failed to search catalog.",
+                    .map(|(order, result)| {
+                        result.map(|page| {
+                            if paging[order] {
+                                catalog_fetch_page_from_source(page, skip)
+                            } else {
+                                CatalogFetchPage {
+                                    items: page.items,
+                                    next_skip: None,
+                                }
+                            }
+                        })
+                    })
+                    .collect(),
+                skip,
             ),
         })
         .collect())
+}
+
+fn catalog_search_extras(query: &str, genre: Option<&str>, skip: u32) -> Vec<CatalogExtra> {
+    let mut extras = vec![CatalogExtra {
+        name: "search".to_string(),
+        value: query.to_string(),
+    }];
+    if let Some(genre) = genre.and_then(super::normalize_non_empty) {
+        extras.push(CatalogExtra {
+            name: "genre".to_string(),
+            value: genre,
+        });
+    }
+    if skip > 0 {
+        extras.push(CatalogExtra {
+            name: "skip".to_string(),
+            value: skip.to_string(),
+        });
+    }
+    extras
+}
+
+fn merge_search_catalog_pages(
+    pages: Vec<Result<CatalogFetchPage, String>>,
+    skip: u32,
+) -> Result<CatalogFetchPage, String> {
+    if pages.is_empty() && skip > 0 {
+        return Ok(CatalogFetchPage {
+            items: Vec::new(),
+            next_skip: None,
+        });
+    }
+    merge_catalog_pages(pages, "Failed to search catalog.")
 }
 
 pub async fn fetch_meta_details(

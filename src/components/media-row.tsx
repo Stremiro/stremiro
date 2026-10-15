@@ -28,6 +28,7 @@ interface MediaRowProps {
   /** Freshness for this row's catalog entry — a parent sharing the query key (home hero) must pass its own so the pair can't drift. */
   staleTime?: number;
   enabled?: boolean;
+  minItems?: number;
   genreFilter?: GenreFilterConfig;
 }
 
@@ -38,6 +39,7 @@ export function MediaRow({
   queryFn,
   staleTime = MEDIA_ROW_STALE_TIME_MS,
   enabled = true,
+  minItems = 1,
   genreFilter,
 }: MediaRowProps) {
   const {
@@ -135,6 +137,8 @@ export function MediaRow({
       </p>,
     );
   }
+
+  if (!isLoading && data.length < minItems) return null;
 
   return (
     <HorizontalMediaRail

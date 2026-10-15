@@ -167,14 +167,15 @@
     }
   }
 
-  /* Shared route entrance: opacity only so it never fights scroll restore
-     or layout, and cheap enough to run on every mount. */
-  @keyframes page-fade-in {
+  /* Shared route entrance: a subtle rise and fade, entirely compositor-side. */
+  @keyframes page-enter-rise {
     from {
       opacity: 0;
+      transform: translate3d(0, 6px, 0);
     }
     to {
       opacity: 1;
+      transform: translate3d(0, 0, 0);
     }
   }
 
@@ -251,6 +252,42 @@
 }
 
 @layer utilities {
+  /* Selection moves on its own layer; labels keep their normal text rendering. */
+  .nav-switch-item,
+  .nav-switch-item.accent-lattice-soft {
+    transition:
+      color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
+      transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .nav-switch-item:active:not(:disabled):not([aria-disabled='true']) {
+    transform: scale(0.985);
+  }
+
+  .nav-sliding-pill,
+  .nav-sliding-bar {
+    transition:
+      transform 190ms cubic-bezier(0.22, 1, 0.36, 1),
+      width 190ms cubic-bezier(0.22, 1, 0.36, 1),
+      height 190ms cubic-bezier(0.22, 1, 0.36, 1),
+      opacity 140ms ease;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .nav-switch-item,
+    .nav-sliding-pill,
+    .nav-sliding-bar {
+      transition: none !important;
+    }
+
+    /* Sliding transforms still position the indicators, but snap instantly. */
+    .nav-switch-item:active:not(:disabled):not([aria-disabled='true']) {
+      transform: none !important;
+    }
+  }
+
   .scrollbar-hide {
     -ms-overflow-style: none;
     scrollbar-width: none;
@@ -260,14 +297,19 @@
     display: none;
   }
 
-  /* One calm fade for every routed page — replaces the per-page
+  /* One calm entrance for every routed page — replaces the per-page
      animate-in durations (150/300/500ms) so navigation feels uniform. */
   .page-enter {
-    animation: page-fade-in 300ms ease-out;
+    animation: page-enter-rise 200ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
+  .search-results-enter {
+    animation: page-enter-rise 180ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   @media (prefers-reduced-motion: reduce) {
-    .page-enter {
+    .page-enter,
+    .search-results-enter {
       animation: none;
     }
   }

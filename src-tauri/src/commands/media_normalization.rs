@@ -1,6 +1,7 @@
 use super::{normalize_media_image_url, MEDIA_ID_MAX_CHARS, MEDIA_TITLE_MAX_CHARS};
 use crate::providers::{extract_primary_year, Episode, MediaDetails, MediaItem};
 use regex::Regex;
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 /// Untrusted addon/backup field bounds shared by the catalog, details, and
@@ -13,6 +14,7 @@ pub(crate) const MEDIA_GENRE_MAX_CHARS: usize = 64;
 /// keep them unreachable for honest addons, so they bound hostile input only.
 const MEDIA_DETAILS_RATING_MAX_CHARS: usize = 64;
 const MEDIA_DETAILS_CAST_MAX: usize = 64;
+const MEDIA_DETAILS_CREDITS_MAX: usize = 8;
 const MEDIA_DETAILS_CAST_NAME_MAX_CHARS: usize = 128;
 const EPISODE_ID_MAX_CHARS: usize = 256;
 const EPISODE_TITLE_MAX_CHARS: usize = 512;
@@ -25,6 +27,52 @@ const EPISODE_THUMBNAIL_MAX_CHARS: usize = 2_048;
 static RELEASE_DATE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})(?:[^\d]|$)").expect("valid release date regex")
 });
+
+static RUNTIME_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(?:([0-9]+)\s*h(?:ours?|rs?)?(?:\s*([0-9]+)\s*m(?:in(?:ute)?s?)?)?|([0-9]+)\s*(?:m(?:in(?:ute)?s?)?)?)$")
+        .expect("valid runtime regex")
+});
+
+fn normalize_runtime(value: Option<String>) -> Option<String> {
+    let value = value?;
+    let value = value.trim();
+    if value.len() > 64 {
+        return None;
+    }
+    let captures = RUNTIME_REGEX.captures(value)?;
+    let minutes = if let Some(hours) = captures.get(1) {
+        let hours = hours.as_str().parse::<u32>().ok()?;
+        let minutes = captures
+            .get(2)
+            .map(|minutes| minutes.as_str().parse::<u32>())
+            .transpose()
+            .ok()?
+            .unwrap_or(0);
+        if minutes >= 60 {
+            return None;
+        }
+        hours.checked_mul(60)?.checked_add(minutes)?
+    } else {
+        captures.get(3)?.as_str().parse::<u32>().ok()?
+    };
+    if !(1..=1440).contains(&minutes) {
+        return None;
+    }
+    Some(match (minutes / 60, minutes % 60) {
+        (0, minutes) => format!("{minutes}m"),
+        (hours, 0) => format!("{hours}h"),
+        (hours, minutes) => format!("{hours}h {minutes}m"),
+    })
+}
+
+fn normalize_rating(value: Option<String>) -> Option<String> {
+    let value = value?.trim().to_string();
+    (value.chars().count() <= MEDIA_DETAILS_RATING_MAX_CHARS
+        && value
+            .parse::<f64>()
+            .is_ok_and(|rating| (0.0..=10.0).contains(&rating)))
+    .then_some(value)
+}
 
 pub(crate) fn build_display_year(value: Option<&str>) -> Option<String> {
     extract_primary_year(value).map(|year| year.to_string())
@@ -81,10 +129,12 @@ fn bound_string_list(
     max_items: usize,
     max_chars: usize,
 ) -> Option<Vec<String>> {
+    let mut seen = HashSet::new();
     let bounded: Vec<String> = values
         .unwrap_or_default()
         .into_iter()
         .filter_map(|value| bound_optional(Some(value), max_chars))
+        .filter(|value| seen.insert(value.to_lowercase()))
         .take(max_items)
         .collect();
     (!bounded.is_empty()).then_some(bounded)
@@ -183,21 +233,34 @@ pub(crate) fn normalize_media_details(details: MediaDetails, requested_id: &str)
     details.backdrop = details.backdrop.and_then(|s| normalize_media_image_url(&s));
     details.logo = details.logo.and_then(|s| normalize_media_image_url(&s));
     details.description = bound_optional(details.description, MEDIA_DESCRIPTION_MAX_CHARS);
-    details.rating = bound_optional(details.rating, MEDIA_DETAILS_RATING_MAX_CHARS);
+    details.rating = normalize_rating(details.rating);
+    details.runtime = normalize_runtime(details.runtime);
     details.year = bound_optional(details.year, MEDIA_YEAR_MAX_CHARS);
     details.cast = bound_string_list(
         details.cast,
         MEDIA_DETAILS_CAST_MAX,
         MEDIA_DETAILS_CAST_NAME_MAX_CHARS,
     );
+    details.directors = bound_string_list(
+        details.directors,
+        MEDIA_DETAILS_CREDITS_MAX,
+        MEDIA_DETAILS_CAST_NAME_MAX_CHARS,
+    );
     details.genres = bound_string_list(details.genres, MEDIA_GENRES_MAX, MEDIA_GENRE_MAX_CHARS);
     // Trailers need no bounding here: `parse_trailers` is the only producer
     // and already caps the list and admits strict 11-char YouTube ids only.
-    details.display_year = build_display_year(details.year.as_deref());
+    let release_date = build_release_date(details.release_date.as_deref());
+    details.display_year = build_display_year(details.year.as_deref()).or_else(|| {
+        let released = details.release_date.as_deref()?.trim();
+        let stamp = RELEASE_DATE_REGEX.find(released)?;
+        if stamp.start() != 0 {
+            return None;
+        }
+        release_date.as_ref().map(|date| date[..4].to_string())
+    });
     // A parsed meta `released` (full ISO date) wins over the year-only
     // fallback so calendar movie events land on the real day, not Jan 1.
-    details.release_date = build_release_date(details.release_date.as_deref())
-        .or_else(|| build_release_date(details.year.as_deref()));
+    details.release_date = release_date.or_else(|| build_release_date(details.year.as_deref()));
     details.episodes = details.episodes.take().map(normalize_episode_metadata_list);
     details
 }

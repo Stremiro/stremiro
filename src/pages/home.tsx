@@ -8,7 +8,12 @@ import { ResumeSection } from '@/components/resume-section';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
-import { MEDIA_ROW_STALE_TIME_MS, trendingRowQueryKey } from '@/lib/query-invalidation';
+import {
+  MEDIA_ROW_STALE_TIME_MS,
+  RECENT_WATCH_SEED_QUERY_KEY,
+  WATCH_HISTORY_STALE_TIME_MS,
+  trendingRowQueryKey,
+} from '@/lib/query-invalidation';
 import { sameSearchGenre, searchGenrePath, type SearchMediaType } from '@/lib/search-page-state';
 import { cn } from '@/lib/utils';
 
@@ -51,6 +56,14 @@ export function Home() {
     queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
     staleTime: MEDIA_ROW_STALE_TIME_MS,
     enabled: isOnline,
+  });
+
+  const { data: recentWatchSeed, isSuccess: isRecentSeedReady } = useQuery({
+    queryKey: RECENT_WATCH_SEED_QUERY_KEY,
+    queryFn: api.getRecentWatchSeed,
+    staleTime: WATCH_HISTORY_STALE_TIME_MS,
+    enabled: isOnline,
+    retry: false,
   });
 
   // Stable slice so Hero's memo holds across unrelated home re-renders.
@@ -115,6 +128,23 @@ export function Home() {
           queryFn={() => fetchCatalogItems({ mediaType: 'series' })}
           enabled={isOnline}
         />
+
+        {isRecentSeedReady && recentWatchSeed && (
+          <MediaRow
+            key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
+            title={`Because you watched ${recentWatchSeed.title}`}
+            queryKey={trendingRowQueryKey(
+              'similar',
+              recentWatchSeed.type,
+              recentWatchSeed.id,
+              recentWatchSeed.year ?? '',
+              ...(recentWatchSeed.genres ?? []),
+            )}
+            queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+            enabled={isOnline}
+            minItems={4}
+          />
+        )}
 
         {/* Provider "Animation" series also carries western cartoons — hence the title. */}
         <MediaRow

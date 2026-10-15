@@ -12,7 +12,16 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -33,6 +42,7 @@ import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
+import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
 import { navigateAppBack } from '@/lib/navigation';
 import { prefetchSearchCatalog, searchCatalogKey } from '@/lib/search-catalog';
@@ -98,7 +108,7 @@ const estimateSearchItemHeight = (itemWidth: number) =>
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
-  'group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'nav-switch-item group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
 const SEARCH_FACET_IDLE_CLASS =
   'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
 
@@ -120,21 +130,17 @@ function SearchPanel({
   return (
     <div
       role={role}
-      className='mx-auto mt-10 flex max-w-sm flex-col items-center rounded-xl border border-white/[0.07] bg-white/[0.02] px-6 py-10 text-center'
+      className='mx-auto mt-10 flex max-w-sm flex-col items-center justify-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.015] px-6 py-12 text-center'
     >
-      {icon ? (
-        <span className='flex h-10 w-10 items-center justify-center rounded-lg bg-white/[0.05]'>
-          {icon}
-        </span>
-      ) : null}
+      {icon ? <span className='flex h-10 w-10 items-center justify-center'>{icon}</span> : null}
       <p
         role={titleRole}
-        className='mt-4 max-w-full [overflow-wrap:anywhere] text-[15px] font-medium text-white'
+        className='max-w-full [overflow-wrap:anywhere] text-[15px] font-semibold text-zinc-200'
       >
         {title}
       </p>
       {description ? (
-        <p className='mt-1 max-w-full [overflow-wrap:anywhere] text-[13px] leading-relaxed text-zinc-500'>
+        <p className='w-full max-w-xs [overflow-wrap:anywhere] text-[13px] leading-relaxed text-zinc-500'>
           {description}
         </p>
       ) : null}
@@ -248,12 +254,12 @@ const SearchResults = memo(function SearchResults({
             onClick={() => {
               if (!isFetching) void refetch();
             }}
-            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4 inline-flex items-center gap-2')}
+            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
           >
             {isRetryingInitialLoad && (
               <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
             )}
-            {isRetryingInitialLoad ? 'Trying again…' : 'Try again'}
+            Retry
           </button>
         }
       />
@@ -284,7 +290,7 @@ const SearchResults = memo(function SearchResults({
             <button
               type='button'
               onClick={onResetFilters}
-              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4')}
+              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1')}
             >
               Reset filters
             </button>
@@ -292,7 +298,7 @@ const SearchResults = memo(function SearchResults({
             <button
               type='button'
               onClick={onClearSearch}
-              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-4')}
+              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1')}
             >
               Clear search
             </button>
@@ -351,13 +357,7 @@ const SearchResults = memo(function SearchResults({
               <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
             )}
             <span aria-live='polite'>
-              {isFetchingNextPage
-                ? 'Loading more titles'
-                : isError
-                  ? isFetchNextPageError
-                    ? 'Retry loading more'
-                    : 'Try again'
-                  : 'Load more'}
+              {isFetchingNextPage ? 'Loading more titles' : isError ? 'Retry' : 'Load more'}
             </span>
           </button>
         </div>
@@ -392,6 +392,9 @@ export function Search() {
     setQuery,
     trimmedDebouncedQuery,
   } = useSearchPageState();
+  const typeGroupRef = useRef<HTMLDivElement>(null);
+  const typeButtons = useRef(new Map<SearchMediaType, HTMLButtonElement>());
+  const typeIndicator = useSlidingIndicator(activeType, typeGroupRef, typeButtons);
   const {
     errorObj,
     fetchNextPage,
@@ -470,11 +473,37 @@ export function Search() {
 
   const isRetryingInitialLoad = isFetched && isLoading;
   const showSkeleton =
-    !isRetryingInitialLoad && !isError && (isLoading || (isFetching && results.length === 0));
+    !isRetryingInitialLoad &&
+    !isError &&
+    (isLoading || ((isFetching || isPlaceholderData) && results.length === 0));
   const isBrowsing = query.trim().length === 0;
   const isUpdating = isOnline && (query.trim() !== trimmedDebouncedQuery || isPlaceholderData);
   const activeFeedLabel =
     SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed)?.label ?? 'Trending';
+
+  const resultsRef = useRef<HTMLDivElement>(null);
+  const resultsMode = JSON.stringify([
+    activeType,
+    !!trimmedDebouncedQuery,
+    activeGenre ?? null,
+    trimmedDebouncedQuery ? null : activeFeed,
+  ]);
+  const previousResultsMode = useRef(resultsMode);
+  const pendingResultsEntrance = useRef(false);
+  const resultsReady = !isPlaceholderData && !showSkeleton;
+  useLayoutEffect(() => {
+    if (previousResultsMode.current !== resultsMode) {
+      previousResultsMode.current = resultsMode;
+      pendingResultsEntrance.current = true;
+    }
+    if (!pendingResultsEntrance.current || !resultsReady) return;
+    const container = resultsRef.current;
+    if (!container) return;
+    pendingResultsEntrance.current = false;
+    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+    // Rapid switches share an in-flight entrance instead of flashing or remounting the grid.
+    container.classList.add('search-results-enter');
+  }, [resultsMode, resultsReady]);
 
   // Ambient "working" cue: any catalog fetch drifts the accent dot fields.
   useAmbientActivity(isFetching);
@@ -637,27 +666,40 @@ export function Search() {
             </div>
 
             <div
+              ref={typeGroupRef}
               role='group'
               aria-label='Content type'
-              className='inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/[0.08] bg-white/[0.03] p-1 scrollbar-hide justify-self-center'
+              className='relative isolate inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/[0.08] bg-white/[0.03] p-1 scrollbar-hide justify-self-center'
             >
+              {typeIndicator && (
+                <span
+                  aria-hidden='true'
+                  className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md bg-(--accent-nav)'
+                  style={{
+                    width: typeIndicator.width,
+                    height: typeIndicator.height,
+                    transform: `translate3d(${typeIndicator.left}px, ${typeIndicator.top}px, 0)`,
+                  }}
+                />
+              )}
               {SEARCH_TYPE_OPTIONS.map((option) => (
                 <button
                   key={option.id}
+                  ref={(node) => {
+                    if (node) typeButtons.current.set(option.id, node);
+                    else typeButtons.current.delete(option.id);
+                  }}
                   type='button'
                   aria-pressed={activeType === option.id}
                   onClick={() => selectType(option.id)}
                   onPointerEnter={() => prefetchType(option.id)}
                   onFocus={() => prefetchType(option.id)}
                   className={cn(
-                    'inline-flex h-7 shrink-0 items-center justify-center rounded-md px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
+                    'nav-switch-item relative inline-flex h-7 shrink-0 items-center justify-center rounded-md px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
                     activeType === option.id
                       ? 'text-(--on-accent-nav)'
                       : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
                   )}
-                  style={
-                    activeType === option.id ? { backgroundColor: 'var(--accent-nav)' } : undefined
-                  }
                 >
                   {option.label}
                 </button>
@@ -745,7 +787,16 @@ export function Search() {
           </div>
         </div>
 
-        <div className='pt-5'>
+        <div
+          ref={resultsRef}
+          aria-busy={(isOnline && (showSkeleton || isUpdating || isFetching)) || undefined}
+          className='pt-5'
+          onAnimationEnd={(event) => {
+            if (event.target === event.currentTarget) {
+              event.currentTarget.classList.remove('search-results-enter');
+            }
+          }}
+        >
           <SearchResults
             activeGenre={activeGenre}
             errorObj={errorObj}

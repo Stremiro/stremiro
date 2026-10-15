@@ -556,9 +556,9 @@ pub(crate) fn normalize_separators(text: &str) -> std::borrow::Cow<'_, str> {
 
 /// Batch text = strict batch regex, or a pack keyword beside a season marker
 /// ("Show S01 Complete") — the keyword alone appears in movie titles too.
-fn is_batch_text(text: &str) -> bool {
+fn is_batch_text(text: &str, has_episode_range: bool) -> bool {
     BATCH_REGEX.is_match(text)
-        || has_episode_range(text)
+        || has_episode_range
         || (PACK_KEYWORD_REGEX.is_match(text) && SEASON_MARKER_REGEX.is_match(text))
 }
 
@@ -722,6 +722,7 @@ pub(crate) struct StreamMatchText {
     name_title: String,
     /// Per-field batch memo filled in `lower` — SeasonPack re-asks per coordinate without re-running regexes.
     batch: BatchTextFlags,
+    episode_range: BatchTextFlags,
     /// Release-tag memo over `name_title`, filled once in `lower`.
     pub(crate) flags: StreamFlags,
 }
@@ -750,10 +751,21 @@ impl StreamMatchText {
             name.as_deref().unwrap_or(""),
             title.as_deref().unwrap_or("")
         );
+        let episode_range = BatchTextFlags {
+            name: name.as_deref().is_some_and(has_episode_range),
+            title: title.as_deref().is_some_and(has_episode_range),
+            filename: filename.as_deref().is_some_and(has_episode_range),
+        };
         let batch = BatchTextFlags {
-            name: name.as_deref().is_some_and(is_batch_text),
-            title: title.as_deref().is_some_and(is_batch_text),
-            filename: filename.as_deref().is_some_and(is_batch_text),
+            name: name
+                .as_deref()
+                .is_some_and(|text| is_batch_text(text, episode_range.name)),
+            title: title
+                .as_deref()
+                .is_some_and(|text| is_batch_text(text, episode_range.title)),
+            filename: filename
+                .as_deref()
+                .is_some_and(|text| is_batch_text(text, episode_range.filename)),
         };
         let flags = detect_stream_flags(&name_title);
         Self {
@@ -762,6 +774,7 @@ impl StreamMatchText {
             filename,
             name_title,
             batch,
+            episode_range,
             flags,
         }
     }
@@ -771,7 +784,7 @@ impl StreamMatchText {
         &self.name_title
     }
 
-    /// (field text, season context, batch memo) per field — the season regexes
+    /// (field text, season context, batch-without-range memo) per field — the season regexes
     /// run once per field, not per probe. Absent fields stay `None`.
     pub(super) fn fields_with_season_context(
         &self,
@@ -779,9 +792,18 @@ impl StreamMatchText {
         final_season: bool,
     ) -> [Option<(&String, Option<bool>, bool)>; 3] {
         [
-            (self.name.as_ref(), self.batch.name),
-            (self.title.as_ref(), self.batch.title),
-            (self.filename.as_ref(), self.batch.filename),
+            (
+                self.name.as_ref(),
+                self.batch.name && !self.episode_range.name,
+            ),
+            (
+                self.title.as_ref(),
+                self.batch.title && !self.episode_range.title,
+            ),
+            (
+                self.filename.as_ref(),
+                self.batch.filename && !self.episode_range.filename,
+            ),
         ]
         .map(|(text, is_batch)| {
             let text = text?;
@@ -859,11 +881,11 @@ pub(crate) fn stream_episode_match_texts(
     let mut batch_with_matching_season = false;
     let mut batch_without_season = false;
     let mut conflicting_season = false;
-    for (text, season_context, is_batch) in fields.iter().flatten() {
+    for (_, season_context, is_batch) in fields.iter().flatten() {
         if matches!(season_context, Some(false)) {
             conflicting_season = true;
         }
-        if *is_batch && !has_episode_range(text) {
+        if *is_batch {
             match season_context {
                 Some(true) => batch_with_matching_season = true,
                 Some(false) => {}

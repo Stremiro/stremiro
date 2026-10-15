@@ -287,13 +287,6 @@ fn normalize_lower(value: Option<&str>) -> Option<String> {
     }
 }
 
-pub(crate) fn tokenize_language_meta(value: &str) -> Vec<String> {
-    super::normalize_token_text(value)
-        .split_whitespace()
-        .map(str::to_string)
-        .collect()
-}
-
 /// How a token reached a canonical code: `Exact` = the whole value canonicalized
 /// (incl. the `off` sentinel); `Inferred` = a per-token scan of a longer string —
 /// advisory for consumers that persist or auto-apply on the result.
@@ -338,9 +331,10 @@ pub(crate) fn classify_language_token(
         };
     }
 
-    let inferred = tokenize_language_meta(&normalized)
-        .into_iter()
-        .find_map(|token| canonicalize_language_token(&token).map(str::to_string));
+    let token_text = super::normalize_token_text(&normalized);
+    let inferred = token_text
+        .split_whitespace()
+        .find_map(|token| canonicalize_language_token(token).map(str::to_string));
     let confidence = inferred
         .is_some()
         .then_some(LanguageMatchConfidence::Inferred);
@@ -428,8 +422,9 @@ pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
         push_unique(&mut candidates, alias);
     }
 
-    for token in tokenize_language_meta(&normalized) {
-        if let Some(token_canonical) = canonicalize_language_token(&token) {
+    let token_text = super::normalize_token_text(&normalized);
+    for token in token_text.split_whitespace() {
+        if let Some(token_canonical) = canonicalize_language_token(token) {
             push_unique(&mut candidates, token_canonical);
 
             for alias in language_aliases(token_canonical) {
@@ -441,40 +436,30 @@ pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
     candidates
 }
 
-fn contains_token(tokens: &[String], needle: &str) -> bool {
-    tokens.iter().any(|token| token == needle)
+fn contains_token(tokens: &[&str], needle: &str) -> bool {
+    tokens.contains(&needle)
 }
 
-fn contains_any_token(tokens: &[String], needles: &[&str]) -> bool {
+fn contains_any_token(tokens: &[&str], needles: &[&str]) -> bool {
     needles.iter().any(|needle| contains_token(tokens, needle))
 }
 
-fn contains_phrase(tokens: &[String], phrase: &[&str]) -> bool {
+fn contains_phrase(tokens: &[&str], phrase: &[&str]) -> bool {
     if phrase.is_empty() || tokens.len() < phrase.len() {
         return false;
     }
 
-    tokens
-        .windows(phrase.len())
-        .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+    tokens.windows(phrase.len()).any(|window| window == phrase)
 }
 
 fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -> i32 {
     let lang = normalize_lower(track.lang.as_deref()).unwrap_or_default();
-    let lang_tokens = track
-        .lang
-        .as_deref()
-        .map(tokenize_language_meta)
-        .unwrap_or_default();
-    let title_tokens = track
-        .title
-        .as_deref()
-        .map(tokenize_language_meta)
-        .unwrap_or_default();
-    let combined_tokens = lang_tokens
-        .iter()
-        .chain(title_tokens.iter())
-        .cloned()
+    let lang_text = super::normalize_token_text(track.lang.as_deref().unwrap_or_default());
+    let title_text = super::normalize_token_text(track.title.as_deref().unwrap_or_default());
+    let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
+    let combined_tokens = lang_text
+        .split_whitespace()
+        .chain(title_tokens.iter().copied())
         .collect::<Vec<_>>();
 
     let tagged_language = normalize_language_token(track.lang.as_deref(), false);
@@ -498,13 +483,14 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
     for candidate in candidates {
         if lang == *candidate {
             score = score.max(120);
-        } else if lang.starts_with(&format!("{}-", candidate)) {
+        } else if lang
+            .strip_prefix(candidate.as_str())
+            .is_some_and(|rest| rest.starts_with('-'))
+        {
             score = score.max(100);
         }
 
-        if !is_exact_only_language_alias(candidate)
-            && title_tokens.iter().any(|token| token == candidate)
-        {
+        if !is_exact_only_language_alias(candidate) && title_tokens.contains(&candidate.as_str()) {
             score = score.max(80);
         }
     }
@@ -553,8 +539,9 @@ pub(crate) fn infer_track_preferred_language(
     title: Option<&str>,
 ) -> Option<String> {
     normalize_language_token(lang, false).or_else(|| {
-        tokenize_language_meta(title?)
-            .iter()
+        let title_text = super::normalize_token_text(title?);
+        title_text
+            .split_whitespace()
             .find_map(|token| canonicalize_language_token(token).map(str::to_string))
     })
 }
@@ -574,13 +561,16 @@ pub(crate) fn track_matches_preferred_language(
     }
 
     let lang = normalize_lower(lang).unwrap_or_default();
-    let title_tokens = title.map(tokenize_language_meta).unwrap_or_default();
+    let title_text = title.map(super::normalize_token_text).unwrap_or_default();
+    let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
 
     candidates.iter().any(|candidate| {
         lang == *candidate
-            || lang.starts_with(&format!("{}-", candidate))
+            || lang
+                .strip_prefix(candidate.as_str())
+                .is_some_and(|rest| rest.starts_with('-'))
             || (!is_exact_only_language_alias(candidate)
-                && title_tokens.iter().any(|token| token == candidate))
+                && title_tokens.contains(&candidate.as_str()))
     })
 }
 

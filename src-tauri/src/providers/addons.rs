@@ -117,6 +117,8 @@ pub(crate) struct AddonStream {
     pub file_idx: Option<u32>,
     #[serde(rename = "behaviorHints", alias = "behavior_hints", skip_serializing)]
     pub behavior_hints: Option<BehaviorHints>,
+    #[serde(default, deserialize_with = "deserialize_sources", skip_serializing)]
+    pub sources: Vec<String>,
 
     // Stremio carries no `seeders`/`size`/`cached` keys — wire values could only spoof ranking.
     /// Hydration-derived availability hint; the wire exposes only `presentation.deliveryKind`.
@@ -156,6 +158,34 @@ pub(crate) struct AddonStream {
     /// smuggling rank text; `Arc` keeps cache clones to a refcount bump.
     #[serde(skip)]
     pub(crate) match_text: std::sync::OnceLock<std::sync::Arc<StreamMatchText>>,
+}
+
+fn deserialize_sources<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    let Value::Array(items) = value else {
+        return Ok(Vec::new());
+    };
+    Ok(items
+        .into_iter()
+        .filter_map(|item| {
+            let Value::String(source) = item else {
+                return None;
+            };
+            let tracker = source.strip_prefix("tracker:")?;
+            if source.chars().take(513).count() > 512
+                || !["udp://", "http://", "https://", "wss://"]
+                    .iter()
+                    .any(|scheme| tracker.starts_with(scheme))
+            {
+                return None;
+            }
+            Some(source)
+        })
+        .take(24)
+        .collect())
 }
 
 impl AddonStream {

@@ -370,15 +370,12 @@ pub(crate) async fn fetch_media_schedules(
     let mut errors = Vec::new();
 
     // Sequential bursts keep instantaneous fan-out bounded — constants above own the rationale.
-    for chunk in normalized_requests.chunks(MEDIA_SCHEDULE_MAX_ITEMS) {
-        let mut pending = stream::iter(chunk.iter().cloned().enumerate().map(
-            |(index, (request_types, media_type, id))| {
-                let app = app.clone();
-                async move {
-                    let outcome = fetch_media_schedule_inner(&app, client, &media_type, &id).await;
+    for chunk in normalized_requests.chunks_mut(MEDIA_SCHEDULE_MAX_ITEMS) {
+        let mut pending = stream::iter(chunk.iter_mut().map(std::mem::take).enumerate().map(
+            |(index, (request_types, media_type, id))| async move {
+                let outcome = fetch_media_schedule_inner(app, client, &media_type, &id).await;
 
-                    (index, request_types, outcome)
-                }
+                (index, request_types, outcome)
             },
         ))
         .buffer_unordered(MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT);

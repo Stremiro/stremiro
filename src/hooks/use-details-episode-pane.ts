@@ -28,6 +28,7 @@ interface UseDetailsEpisodePaneArgs {
   /// `location.key` — identifies this navigation, so a season pick can't leak onto a fresh navigation to the same title.
   locationKey: string;
   locationSeason: number | null;
+  locationEpisode?: number | null;
   resumeSeason?: number;
   resumeEpisode?: number;
   isLoadingWatchHistory: boolean;
@@ -43,11 +44,13 @@ interface UseDetailsEpisodePaneResult {
   episodeSearch: string;
   setEpisodeSearch: React.Dispatch<React.SetStateAction<string>>;
   selectSeason: (seasonNumber: number) => void;
+  jumpToEpisode: (seasonNumber: number, episodeNumber: number) => void;
   shouldShowEpisodeSearch: boolean;
   episodeRangeLabel: string;
   totalEpisodeCount: number;
   totalEpisodePages: number;
   activeEpisodePageIndex: number;
+  resumeEpisodePageIndex: number | null;
   visibleEpisodeStart: number;
   hasPreviousEpisodes: boolean;
   hasMoreEpisodes: boolean;
@@ -60,6 +63,7 @@ export function useDetailsEpisodePane({
   effectiveRouteId,
   locationKey,
   locationSeason,
+  locationEpisode,
   resumeSeason,
   resumeEpisode,
   isLoadingWatchHistory,
@@ -134,13 +138,23 @@ export function useDetailsEpisodePane({
     (selectedSeason === null || resumeSeason === selectedSeason)
       ? resumeEpisode
       : null;
+  const shouldUseLocationEpisode =
+    userSelectedSeason === null &&
+    locationSeason !== null &&
+    selectedSeason === locationSeason &&
+    typeof locationEpisode === 'number';
+  const defaultEpisode = shouldUseLocationEpisode
+    ? locationEpisode
+    : resumeEpisodeForSelectedSeason;
 
   // Key on the route id, not `item.id`: stable from mount (no flip when metadata
   // lands) and matches the identity progress reads/writes use.
   const currentEpisodeSeasonKey = `${effectiveRouteId || 'unknown'}:${selectedSeason ?? 'none'}`;
-  const episodePageKey = hasEpisodeSearch
-    ? JSON.stringify([currentEpisodeSeasonKey, effectiveEpisodeSearch])
-    : currentEpisodeSeasonKey;
+  const episodePageKey = JSON.stringify([
+    locationKey,
+    currentEpisodeSeasonKey,
+    effectiveEpisodeSearch,
+  ]);
   const seasonEpisodes = useMemo(
     () =>
       selectedSeason === null
@@ -148,20 +162,35 @@ export function useDetailsEpisodePane({
         : (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === selectedSeason),
     [item?.episodes, selectedSeason],
   );
-  const resumeEpisodeIndex = useMemo(
+  const defaultEpisodeIndex = useMemo(
     () =>
-      resumeEpisodeForSelectedSeason === null
+      defaultEpisode == null
         ? -1
-        : seasonEpisodes.findIndex((episode) => episode.episode === resumeEpisodeForSelectedSeason),
-    [resumeEpisodeForSelectedSeason, seasonEpisodes],
+        : seasonEpisodes.findIndex((episode) => episode.episode === defaultEpisode),
+    [defaultEpisode, seasonEpisodes],
   );
+  const resumeEpisodePageIndex = useMemo(() => {
+    if (item?.type !== 'series' || resumeSeason === undefined || resumeEpisode === undefined) {
+      return null;
+    }
+    const episodes =
+      resumeSeason === selectedSeason
+        ? seasonEpisodes
+        : (item.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === resumeSeason);
+    const index = episodes.findIndex((episode) => episode.episode === resumeEpisode);
+    return index >= 0 ? Math.floor(index / EPISODE_DISPLAY_PAGE_SIZE) : null;
+  }, [item?.type, item?.episodes, resumeSeason, resumeEpisode, selectedSeason, seasonEpisodes]);
   const defaultEpisodePageIndex =
-    resumeEpisodeIndex >= 0 ? Math.floor(resumeEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : 0;
+    defaultEpisodeIndex >= 0 ? Math.floor(defaultEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : 0;
+  // Explicit navigation coordinates beat old page memory until the user picks a
+  // season or page. Returning to a remembered title must still open the linked episode.
+  const initialEpisodePageIndex =
+    shouldUseLocationEpisode && defaultEpisodeIndex >= 0
+      ? defaultEpisodePageIndex
+      : (episodePageMemory.get(currentEpisodeSeasonKey) ?? defaultEpisodePageIndex);
   const requestedEpisodePageIndex =
     (episodePageOverride?.key === episodePageKey ? episodePageOverride.page : undefined) ??
-    (hasEpisodeSearch
-      ? 0
-      : (episodePageMemory.get(currentEpisodeSeasonKey) ?? defaultEpisodePageIndex));
+    (hasEpisodeSearch ? 0 : initialEpisodePageIndex);
 
   const searchFilteredEpisodes = useMemo(
     () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
@@ -220,6 +249,22 @@ export function useDetailsEpisodePane({
     [locationKey, setEpisodeSearch],
   );
 
+  const jumpToEpisode = useCallback(
+    (seasonNumber: number, episodeNumber: number) => {
+      const episodes = (item?.episodes ?? EMPTY_EPISODES).filter(
+        (episode) => episode.season === seasonNumber,
+      );
+      const index = episodes.findIndex((episode) => episode.episode === episodeNumber);
+      if (index < 0) return;
+      const page = Math.floor(index / EPISODE_DISPLAY_PAGE_SIZE);
+      const seasonKey = `${effectiveRouteId || 'unknown'}:${seasonNumber}`;
+      selectSeason(seasonNumber);
+      rememberEpisodePage(seasonKey, page);
+      setEpisodePageOverride({ key: JSON.stringify([locationKey, seasonKey, '']), page });
+    },
+    [item?.episodes, effectiveRouteId, locationKey, selectSeason],
+  );
+
   return {
     seasonCount: seasons.length,
     selectedSeason,
@@ -229,11 +274,13 @@ export function useDetailsEpisodePane({
     episodeSearch,
     setEpisodeSearch,
     selectSeason,
+    jumpToEpisode,
     shouldShowEpisodeSearch,
     episodeRangeLabel,
     totalEpisodeCount,
     totalEpisodePages,
     activeEpisodePageIndex,
+    resumeEpisodePageIndex,
     visibleEpisodeStart,
     hasPreviousEpisodes,
     hasMoreEpisodes,

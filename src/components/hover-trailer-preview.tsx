@@ -23,7 +23,8 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
   const hasPlayedRef = useRef(false);
   const connectedRef = useRef(false);
   // Prevent PAUSED events from undoing a visibility pause.
-  const hiddenPausedRef = useRef(false);
+  const visibilityPausedRef = useRef(true);
+  const offscreenRef = useRef(true);
   const [revealed, setRevealed] = useState(false);
 
   const embedUrl = buildYouTubeEmbedUrl(videoId, {
@@ -45,14 +46,15 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     postYouTubeListening(iframe);
     postYouTubeCommand(iframe, 'addEventListener', ['onStateChange']);
     postYouTubeCommand(iframe, 'mute');
-    hiddenPausedRef.current = document.hidden;
-    postYouTubeCommand(iframe, document.hidden ? 'pauseVideo' : 'playVideo');
+    visibilityPausedRef.current = document.hidden || offscreenRef.current;
+    postYouTubeCommand(iframe, visibilityPausedRef.current ? 'pauseVideo' : 'playVideo');
   }, []);
 
   useEffect(() => {
     hasPlayedRef.current = false;
     connectedRef.current = false;
-    hiddenPausedRef.current = false;
+    visibilityPausedRef.current = true;
+    offscreenRef.current = true;
     setRevealed(false);
   }, [videoId]);
 
@@ -82,8 +84,8 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       connectedRef.current = true;
 
       // Autoplay can start after the visibility event already ran.
-      if (document.hidden) {
-        hiddenPausedRef.current = true;
+      if (document.hidden || offscreenRef.current) {
+        visibilityPausedRef.current = true;
         setRevealed(false);
         if (
           playerState === YOUTUBE_PLAYER_STATE.PLAYING ||
@@ -116,7 +118,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       if (
         playerState === YOUTUBE_PLAYER_STATE.PAUSED &&
         hasPlayedRef.current &&
-        !hiddenPausedRef.current
+        !visibilityPausedRef.current
       ) {
         postYouTubeCommand(iframe, 'playVideo');
       }
@@ -128,22 +130,30 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     };
   }, [handshake, videoId]);
 
-  // Pause on hide; hidden autoplay completions are handled above.
+  // Pause on hide or scroll out of view; late autoplay completions are handled above.
   useEffect(() => {
-    const handleVisibility = () => {
-      const iframe = iframeRef.current;
-      if (!iframe || !connectedRef.current) return;
-      if (document.hidden) {
-        hiddenPausedRef.current = true;
-        postYouTubeCommand(iframe, 'pauseVideo');
-      } else if (hiddenPausedRef.current) {
-        hiddenPausedRef.current = false;
-        postYouTubeCommand(iframe, 'playVideo');
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+    const syncVisibility = () => {
+      const shouldPause = document.hidden || offscreenRef.current;
+      const wasPaused = visibilityPausedRef.current;
+      visibilityPausedRef.current = shouldPause;
+      if (shouldPause) setRevealed(false);
+      if (connectedRef.current && (shouldPause || wasPaused)) {
+        postYouTubeCommand(iframe, shouldPause ? 'pauseVideo' : 'playVideo');
       }
     };
-    document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, []);
+    const observer = new IntersectionObserver(([entry]) => {
+      offscreenRef.current = !entry.isIntersecting;
+      syncVisibility();
+    });
+    observer.observe(iframe);
+    document.addEventListener('visibilitychange', syncVisibility);
+    return () => {
+      observer.disconnect();
+      document.removeEventListener('visibilitychange', syncVisibility);
+    };
+  }, [videoId]);
 
   useEffect(() => {
     const startedAt = Date.now();

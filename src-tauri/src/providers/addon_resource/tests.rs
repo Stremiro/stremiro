@@ -18,6 +18,25 @@ fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
 }
 
 #[test]
+fn catalog_ids_reject_oversized_values_without_aliasing() {
+    let prefix = "x".repeat(MAX_ID_CHARS);
+    for suffix in ["a", "b"] {
+        assert!(catalog_item(serde_json::json!({
+            "id": format!("{prefix}{suffix}"), "name": "Title", "type": "movie"
+        }))
+        .is_none());
+    }
+    assert_eq!(
+        catalog_item(serde_json::json!({
+            "id": prefix, "name": "Title", "type": "movie"
+        }))
+        .unwrap()
+        .id,
+        prefix
+    );
+}
+
+#[test]
 fn cached_catalog_page_applies_normalizer_without_changing_source_count_or_bounds() {
     let mut metas = vec![serde_json::json!(null)];
     metas.extend((0..=MAX_CATALOG_ITEMS).map(|index| {
@@ -56,7 +75,7 @@ async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic()
     );
     client.catalog_cache.put(
         &resource_cache_key("catalog", &catalog_url),
-        page,
+        Arc::new(page),
         false,
         || true,
     );
@@ -299,6 +318,28 @@ fn parse_meta_skips_malformed_episode_siblings() {
 }
 
 #[test]
+fn meta_credits_prefer_direct_fields_and_fall_back_to_link_names() {
+    let mut value = serde_json::json!({
+        "id": "tt1", "name": "Title", "type": "movie", "runtime": 142,
+        "director": "Primary Director",
+        "links": [
+            {"name": "Actor", "category": "cAsT", "url": "https://example.test"},
+            {"name": "Drama", "category": "Genres"},
+            {"name": "Link Director", "category": "DIRECTORS"},
+            {"name": "Ignored", "category": "imdb"}
+        ]
+    });
+    let direct = parse_meta_item(value.clone()).unwrap();
+    assert_eq!(direct.runtime.as_deref(), Some("142"));
+    assert_eq!(direct.cast.unwrap(), ["Actor"]);
+    assert_eq!(direct.genres.unwrap(), ["Drama"]);
+    assert_eq!(direct.directors.unwrap(), ["Primary Director"]);
+    value.as_object_mut().unwrap().remove("director");
+    let fallback = parse_meta_item(value).unwrap();
+    assert_eq!(fallback.directors.unwrap(), ["Link Director"]);
+}
+
+#[test]
 fn parse_meta_prefers_episode_over_number() {
     let details = parse_meta_item(serde_json::json!({
         "id": "tt1",
@@ -365,6 +406,9 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
         "name": "Show",
         "type": "series",
         "description": "A show",
+        "runtime": "45 min",
+        "cast": ["Actor"],
+        "director": ["Director"],
         "videos": [
             {"id": "tt1:1:1", "season": 1, "episode": 1},
             {"id": "tt1:1:2", "season": 1, "episode": 2}
@@ -386,6 +430,11 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
     let full = meta_for_shape(hit.as_ref(), true);
     assert!(lite.episodes.is_none());
     assert!(lite.seasons.is_none());
+    assert!(lite.cast.is_none());
+    assert!(lite.directors.is_none());
+    assert_eq!(lite.runtime.as_deref(), Some("45 min"));
+    assert_eq!(full.cast.as_deref().unwrap(), ["Actor"]);
+    assert_eq!(full.directors.as_deref().unwrap(), ["Director"]);
     assert_eq!(full.episodes.as_ref().map(Vec::len), Some(2));
     // The parse-derived season summary rides the full shape only.
     assert_eq!(
@@ -398,13 +447,14 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
     assert!(Arc::ptr_eq(&hit, &still_cached));
     assert!(still_cached.episodes.is_some());
 
-    // Lite and full disagree only on `episodes`/`seasons` — every other
-    // serialized field is identical.
+    // Card shaping drops episodes and credits, keeping all other fields.
     let lite_json = serde_json::to_value(&lite).expect("serialize lite");
     let mut full_json = serde_json::to_value(&full).expect("serialize full");
     let full_object = full_json.as_object_mut().unwrap();
     full_object.remove("episodes");
     full_object.remove("seasons");
+    full_object.remove("cast");
+    full_object.remove("directors");
     assert_eq!(lite_json, full_json);
 }
 
@@ -484,9 +534,12 @@ fn meta_images_and_thumbnails_are_fetch_gated() {
 
 #[test]
 fn trailer_source_rejects_non_youtube_tokens() {
-    let valid = parse_trailers(Some(&serde_json::json!([
-        {"source": "dQw4w9WgXcQ", "type": "Trailer"}
-    ])))
+    let valid = parse_trailers(
+        Some(&serde_json::json!([
+            {"source": "dQw4w9WgXcQ", "type": "Trailer"}
+        ])),
+        None,
+    )
     .expect("valid trailer list");
     assert_eq!(valid.len(), 1);
     assert_eq!(valid[0].id, "dQw4w9WgXcQ");
@@ -500,13 +553,47 @@ fn trailer_source_rejects_non_youtube_tokens() {
         "",
     ] {
         assert!(
-            parse_trailers(Some(&serde_json::json!([
-                {"source": source, "type": "Trailer"}
-            ])))
+            parse_trailers(
+                Some(&serde_json::json!([
+                    {"source": source, "type": "Trailer"}
+                ])),
+                Some(&serde_json::json!([{"ytId": source, "title": "Trailer"}])),
+            )
             .is_none(),
             "{source} must be rejected"
         );
     }
+}
+
+#[test]
+fn trailers_merge_names_in_source_order_and_keep_unique_bounded_ids() {
+    let trailers = parse_trailers(
+        Some(&serde_json::json!([
+            {"source": "dQw4w9WgXcQ", "type": "Trailer"},
+            {"source": "dQw4w9WgXcQ", "type": "Trailer"},
+            {"source": "abcdefghijk", "type": "Trailer"},
+            {"source": "xxxxxxxxxxx", "type": "Clip"}
+        ])),
+        Some(&serde_json::json!([
+            {"ytId": "abcdefghijk", "title": " \t Official  trailer \n"},
+            {"ytId": "dQw4w9WgXcQ", "title": "   "},
+            {"ytId": "dQw4w9WgXcQ", "title": "Teaser"},
+            {"ytId": "12345678901", "title": "n".repeat(200)},
+            {"ytId": "12345678901", "title": "Duplicate"}
+        ])),
+    )
+    .unwrap();
+    assert_eq!(trailers.len(), 3);
+    assert_eq!(trailers[0].id, "dQw4w9WgXcQ");
+    assert_eq!(trailers[0].name.as_deref(), Some("Teaser"));
+    assert_eq!(trailers[1].name.as_deref(), Some("Official trailer"));
+    assert_eq!(trailers[2].name.as_ref().unwrap().chars().count(), 80);
+    let streams = serde_json::json!((0..40)
+        .map(|index| serde_json::json!({"ytId": format!("{index:011}"), "title": "Trailer"}))
+        .collect::<Vec<_>>());
+    let bounded = parse_trailers(None, Some(&streams)).unwrap();
+    assert_eq!(bounded.len(), MAX_TRAILERS);
+    assert_eq!(bounded.last().unwrap().id, "00000000031");
 }
 
 #[test]

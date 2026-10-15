@@ -1,12 +1,13 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
-import { memo, type MouseEvent, type ReactNode } from 'react';
+import { memo, type MouseEvent, type ReactNode, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useProfileAvatar } from '@/hooks/use-local-profile';
+import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { focusSearchInput } from '@/lib/dom';
 import { routeChunks } from '@/lib/route-chunks';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
@@ -15,7 +16,6 @@ import { cn } from '@/lib/utils';
 
 interface SidebarProps {
   className?: string;
-  playerMode?: boolean;
 }
 
 interface SidebarNavItem {
@@ -59,7 +59,45 @@ function warmRouteChunk(href: string): void {
   void ROUTE_CHUNK_WARMERS[href]?.().catch(() => undefined);
 }
 
-export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarProps) {
+function useNavIndicator(items: SidebarNavItem[], pathname: string) {
+  const navRef = useRef<HTMLElement>(null);
+  const itemRefs = useRef(new Map<string, HTMLDivElement>());
+  const activeHref = items.find((item) => item.matches?.(pathname) ?? pathname === item.href)?.href;
+  const indicator = useSlidingIndicator(activeHref, navRef, itemRefs);
+
+  return { navRef, itemRefs, activeHref, indicator };
+}
+
+function SidebarNavIndicator({ indicator, activeHref }: ReturnType<typeof useNavIndicator>) {
+  if (!indicator) return null;
+  return (
+    <>
+      <span
+        aria-hidden='true'
+        className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-xl border border-white/[0.12] bg-white/[0.09] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]'
+        style={{
+          width: indicator.width,
+          height: indicator.height,
+          transform: `translate3d(${indicator.left}px, ${indicator.top}px, 0)`,
+          opacity: activeHref ? 1 : 0,
+        }}
+      />
+      <span
+        aria-hidden='true'
+        className='nav-sliding-bar pointer-events-none absolute left-0 top-0 w-[3px] rounded-r-full bg-(--accent-nav)'
+        style={{
+          height: indicator.height - 20,
+          transform: `translate3d(0, ${indicator.top + 10}px, 0)`,
+          opacity: activeHref ? 1 : 0,
+        }}
+      />
+    </>
+  );
+}
+
+// One rendering for browse and player — the player mounts its own copy, so any
+// visual difference reads as the rail jumping when playback opens.
+export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
   const { pathname } = useLocation();
   const queryClient = useQueryClient();
   const { isUpdateAvailable, pendingUpdate } = useAppUpdater();
@@ -67,8 +105,10 @@ export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarP
   const updateTooltip = pendingUpdate?.version
     ? `Update v${pendingUpdate.version} available`
     : 'Update available';
+  const primaryNav = useNavIndicator(PRIMARY_NAV_ITEMS, pathname);
+  const secondaryNav = useNavIndicator(SECONDARY_NAV_ITEMS, pathname);
 
-  const renderItem = (item: SidebarNavItem) => {
+  const renderItem = (item: SidebarNavItem, group: ReturnType<typeof useNavIndicator>) => {
     const showUpdate = item.href === SETTINGS_HREF && isUpdateAvailable;
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
     const isActive = item.matches?.(pathname) ?? pathname === item.href;
@@ -80,7 +120,11 @@ export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarP
         // Search reopens the last URL; other items keep their static href.
         to={isSearch ? lastSearchPath() : item.href}
         isActive={isActive}
-        playerMode={playerMode}
+        sharedIndicator={group.indicator !== null}
+        itemRef={(node) => {
+          if (node) group.itemRefs.current.set(item.href, node);
+          else group.itemRefs.current.delete(item.href);
+        }}
         updateAvailable={showUpdate}
         tooltip={showUpdate ? updateTooltip : undefined}
         onIntent={() => {
@@ -112,55 +156,53 @@ export const Sidebar = memo(function Sidebar({ className, playerMode }: SidebarP
     );
   };
 
-  const logo = (
-    <img
-      src='/stremiro.ico'
-      alt=''
-      aria-hidden='true'
-      loading='eager'
-      decoding='async'
-      className={playerMode ? 'h-6 w-6 opacity-50' : 'h-7 w-7'}
-    />
-  );
-
   return (
     <TooltipProvider delayDuration={0}>
       <div
         className={cn(
-          'w-[60px] h-screen shrink-0 cursor-auto flex flex-col items-center pt-8 pb-4 z-50 pointer-events-none transition-colors duration-300',
-          playerMode && 'backdrop-blur-[2px]',
+          'w-[60px] h-screen shrink-0 cursor-auto flex flex-col items-center pt-8 pb-4 z-50 pointer-events-none',
           className,
         )}
       >
         <div className='w-full px-2 pb-5 pointer-events-auto'>
-          {playerMode ? (
-            <div className='flex h-10 w-full items-center justify-center'>{logo}</div>
-          ) : (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Link
-                  to='/'
-                  aria-label='Open Stremiro home'
-                  className='group flex h-11 w-full items-center justify-center transition-all duration-200 hover:scale-105 rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
-                >
-                  {logo}
-                </Link>
-              </TooltipTrigger>
-              <TooltipContent side='right'>Stremiro</TooltipContent>
-            </Tooltip>
-          )}
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Link
+                to='/'
+                aria-label='Open Stremiro home'
+                className='group flex h-11 w-full items-center justify-center rounded-lg transition-transform duration-200 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transform-none'
+              >
+                <img
+                  src='/stremiro.ico'
+                  alt=''
+                  aria-hidden='true'
+                  loading='eager'
+                  decoding='async'
+                  className='h-7 w-7'
+                />
+              </Link>
+            </TooltipTrigger>
+            <TooltipContent side='right'>Stremiro</TooltipContent>
+          </Tooltip>
         </div>
 
         <nav
+          ref={primaryNav.navRef}
           aria-label='Primary'
-          className='flex-1 flex flex-col gap-2.5 w-full px-2 pointer-events-auto'
+          className='relative isolate flex-1 flex flex-col gap-2.5 w-full px-2 pointer-events-auto'
         >
-          {PRIMARY_NAV_ITEMS.map(renderItem)}
+          <SidebarNavIndicator {...primaryNav} />
+          {PRIMARY_NAV_ITEMS.map((item) => renderItem(item, primaryNav))}
         </nav>
 
-        <div className='flex flex-col gap-2.5 mt-auto w-full px-2 pb-4 pointer-events-auto'>
-          {SECONDARY_NAV_ITEMS.map(renderItem)}
-        </div>
+        <nav
+          ref={secondaryNav.navRef}
+          aria-label='Secondary'
+          className='relative isolate flex flex-col gap-2.5 mt-auto w-full px-2 pb-4 pointer-events-auto'
+        >
+          <SidebarNavIndicator {...secondaryNav} />
+          {SECONDARY_NAV_ITEMS.map((item) => renderItem(item, secondaryNav))}
+        </nav>
       </div>
     </TooltipProvider>
   );
@@ -173,9 +215,10 @@ interface SidebarNavButtonProps {
   icon?: ReactNode;
   isActive: boolean;
   item: SidebarNavItem;
+  itemRef?: (node: HTMLDivElement | null) => void;
   onClick?: (event: MouseEvent) => void;
   onIntent: () => void;
-  playerMode?: boolean;
+  sharedIndicator?: boolean;
   to: string;
   tooltip?: string;
   updateAvailable?: boolean;
@@ -185,38 +228,42 @@ function SidebarNavButton({
   icon,
   isActive,
   item,
+  itemRef,
   onClick,
   onIntent,
-  playerMode,
+  sharedIndicator,
   to,
   tooltip,
   updateAvailable,
 }: SidebarNavButtonProps) {
   const content = (
     <>
-      {icon ?? <item.icon strokeWidth={1.75} />}
+      <span className='flex items-center justify-center transition-transform duration-150 ease-out group-hover:scale-[1.04] motion-reduce:transform-none'>
+        {icon ?? <item.icon aria-hidden='true' strokeWidth={1.75} />}
+      </span>
       {updateAvailable && <span className={NAV_DOT_CLASS} />}
     </>
   );
   return (
-    <div className='relative flex w-full justify-center'>
+    <div ref={itemRef} className='relative flex w-full justify-center'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute -left-2 top-[10px] h-6 w-[3px] rounded-r-full bg-(--accent-nav) transition-opacity duration-150'
+        style={{ opacity: isActive && !sharedIndicator ? 1 : 0 }}
+      />
       <Tooltip>
         <TooltipTrigger asChild>
           <Button
             asChild
             variant='ghost'
             size='icon'
-            style={
-              isActive
-                ? { backgroundColor: 'var(--accent-nav)', color: 'var(--on-accent-nav)' }
-                : undefined
-            }
             className={cn(
-              'relative h-11 w-full overflow-hidden rounded-lg transition-colors duration-150 group [&_svg]:size-[22px]',
-              !isActive &&
-                (playerMode
-                  ? 'text-white/60 hover:bg-white/[0.08] hover:text-white/90'
-                  : 'text-white/50 hover:bg-white/[0.08] hover:text-white/90'),
+              'nav-switch-item relative h-11 w-full overflow-hidden rounded-xl group [&_svg]:size-[22px]',
+              isActive && 'text-(--accent-nav) hover:bg-transparent hover:text-(--accent-nav)',
+              isActive &&
+                !sharedIndicator &&
+                'bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] hover:bg-white/[0.07]',
+              !isActive && 'text-white/50 hover:bg-white/[0.08] hover:text-white/90',
             )}
           >
             <Link
