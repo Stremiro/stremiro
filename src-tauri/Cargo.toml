@@ -19,7 +19,7 @@ crate-type = ["rlib"]
 tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
-tauri = { version = "2.11.5", features = [] }
+tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-updater = "2.11.0"
 serde = { version = "1", features = ["derive"] }
@@ -38,6 +38,7 @@ tauri-plugin-dialog = "2.7.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
 tauri-plugin-single-instance = "2"
+tauri-plugin-autostart = "2.7.0"
 
 [patch.crates-io]
 tauri-plugin-libmpv = { path = "vendor/tauri-plugin-libmpv" }
