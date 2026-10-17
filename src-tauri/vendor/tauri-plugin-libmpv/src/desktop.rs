@@ -3,6 +3,7 @@ use once_cell::sync::OnceCell;
 use raw_window_handle::HasWindowHandle;
 use scopeguard::defer;
 use serde::de::DeserializeOwned;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::ffi::{c_char, c_void, CStr, CString};
 use std::path::PathBuf;
@@ -86,10 +87,10 @@ pub fn init<R: Runtime, C: DeserializeOwned>(
 pub struct Mpv<R: Runtime> {
     app: AppHandle<R>,
     pub instances: Mutex<HashMap<String, MpvInstance>>,
-    pub wrapper: OnceCell<LibmpvWrapper>,
+    pub wrapper: OnceCell<Arc<LibmpvWrapper>>,
 }
 
-pub unsafe extern "C" fn event_callback<R: Runtime>(event: *const c_char, userdata: *mut c_void) {
+pub unsafe extern "C" fn event_callback(event: *const c_char, userdata: *mut c_void) {
     if event.is_null() || userdata.is_null() {
         return;
     }
@@ -98,9 +99,9 @@ pub unsafe extern "C" fn event_callback<R: Runtime>(event: *const c_char, userda
         free_fn,
         event_sender,
         ..
-    } = unsafe { &*(userdata as *const EventUserData<R>) };
+    } = unsafe { &*(userdata as *const EventUserData) };
 
-    let event_string = unsafe { CStr::from_ptr(event).to_string_lossy().to_string() };
+    let event_string = unsafe { CStr::from_ptr(event).to_string_lossy().into_owned() };
 
     unsafe {
         free_fn(event as *mut c_char);
@@ -110,10 +111,25 @@ pub unsafe extern "C" fn event_callback<R: Runtime>(event: *const c_char, userda
     let _ = event_sender.send(event_string);
 }
 
+const FRONTEND_EVENTS: &[&str] = &[
+    "seek",
+    "playback-restart",
+    "file-loaded",
+    "audio-reconfig",
+    "video-reconfig",
+    "property-change",
+];
+
+#[derive(serde::Deserialize)]
+struct EventHeader<'a> {
+    #[serde(borrow)]
+    event: Cow<'a, str>,
+}
+
 fn forward_events(
     receiver: mpsc::Receiver<String>,
     alive: &Mutex<bool>,
-    mut emit: impl FnMut(&serde_json::Value),
+    mut emit: impl FnMut(String),
 ) {
     for event_string in receiver {
         // Serialize emission with teardown, not just an alive check before emit.
@@ -121,21 +137,24 @@ fn forward_events(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if !*alive {
-            continue;
+            break;
         }
-        match serde_json::from_str::<serde_json::Value>(&event_string) {
-            Ok(event) => emit(&event),
+        let should_emit = match serde_json::from_str::<EventHeader<'_>>(&event_string) {
+            Ok(event) => FRONTEND_EVENTS.contains(&event.event.as_ref()),
             Err(e) => {
                 error!("Failed to deserialize mpv FFI event: {}", e);
+                false
             }
+        };
+        if should_emit {
+            emit(event_string);
         }
     }
 }
 
 impl<R: Runtime> Mpv<R> {
     pub fn init(&self, mpv_config: MpvConfig, window_label: &str) -> Result<String> {
-        self.init_wid_mode(mpv_config, window_label)?;
-        Ok(window_label.to_string())
+        self.init_wid_mode(mpv_config, window_label)
     }
 
     fn init_wid_mode(&self, mpv_config: MpvConfig, window_label: &str) -> Result<String> {
@@ -189,7 +208,6 @@ impl<R: Runtime> Mpv<R> {
         let (event_sender, event_receiver) = mpsc::channel();
         let event_alive = Arc::new(Mutex::new(true));
         let event_callback_data = Box::new(EventUserData {
-            app: app.clone(),
             free_fn,
             event_sender,
             event_alive: Arc::clone(&event_alive),
@@ -200,13 +218,13 @@ impl<R: Runtime> Mpv<R> {
             wrapper.mpv_wrapper_create(
                 c_initial_options.as_ptr(),
                 c_observed_properties.as_ptr(),
-                Some(event_callback::<R>),
+                Some(event_callback),
                 event_userdata,
             )
         };
 
         if mpv_handle.is_null() {
-            let _ = unsafe { Box::from_raw(event_userdata as *mut EventUserData<R>) };
+            let _ = unsafe { Box::from_raw(event_userdata as *mut EventUserData) };
             return Err(crate::Error::CreateInstance);
         }
 
@@ -214,7 +232,7 @@ impl<R: Runtime> Mpv<R> {
         tauri::async_runtime::spawn_blocking(move || {
             let event_name = format!("mpv-event-{}", window_label_owned);
             forward_events(event_receiver, &event_alive, |event| {
-                if let Err(e) = app.emit_to(&window_label_owned, &event_name, event) {
+                if let Err(e) = app.emit_str_to(&window_label_owned, &event_name, event) {
                     error!("Failed to emit mpv event to frontend: {}", e);
                 }
             });
@@ -225,6 +243,7 @@ impl<R: Runtime> Mpv<R> {
         let instance = MpvInstance {
             handle: mpv_handle,
             event_userdata: event_userdata,
+            last_video_margins: [None; 4],
         };
 
         instances_lock.insert(window_label.to_string(), instance);
@@ -236,49 +255,8 @@ impl<R: Runtime> Mpv<R> {
 
     pub fn destroy(&self, window_label: &str) -> Result<()> {
         let mut instances_lock = self.lock_instances();
-        self.destroy_locked(&mut instances_lock, window_label)
-    }
-
-    /// `destroy` for event-loop callers (window destruction, app exit). A
-    /// wedged native init holds the instance lock forever; bounded waits keep
-    /// it from freezing the event loop or blocking quit. Skipped teardown is
-    /// reclaimed when the process exits.
-    pub fn destroy_bounded(&self, window_label: &str, budget: std::time::Duration) -> Result<()> {
-        let Some(mut instances_lock) = self.lock_instances_bounded(budget) else {
-            warn!(
-                "Skipped mpv destroy for '{}': the instance lock is held by a wedged call.",
-                window_label
-            );
-            return Ok(());
-        };
-        self.destroy_locked(&mut instances_lock, window_label)
-    }
-
-    fn destroy_locked(
-        &self,
-        instances_lock: &mut HashMap<String, MpvInstance>,
-        window_label: &str,
-    ) -> Result<()> {
         if let Some(instance) = instances_lock.remove(window_label) {
-            let wrapper = self.get_wrapper()?;
-            let event_data = unsafe { &*(instance.event_userdata as *const EventUserData<R>) };
-            *event_data
-                .event_alive
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
-
-            unsafe {
-                wrapper.mpv_wrapper_destroy(instance.handle);
-            }
-
-            // Native destroy waits for the event client to detach. Dropping its
-            // sole sender now lets the forwarder drain without emitting and exit.
-            let _ = unsafe { Box::from_raw(instance.event_userdata as *mut EventUserData<R>) };
-
-            info!(
-                "mpv instance for window '{}' has been destroyed.",
-                window_label,
-            );
+            Self::destroy_instance(instance, self.get_wrapper()?, window_label);
         } else {
             trace!(
                 "No running mpv instance found for window '{}' to destroy.",
@@ -286,6 +264,71 @@ impl<R: Runtime> Mpv<R> {
             );
         }
         Ok(())
+    }
+
+    /// Bound the total event-loop wait, including instance locking and native teardown.
+    pub fn destroy_bounded(&self, window_label: &str, budget: std::time::Duration) -> Result<()> {
+        let started = std::time::Instant::now();
+        let Some(mut instances_lock) = self.lock_instances_bounded(budget) else {
+            warn!(
+                "Skipped mpv destroy for '{}': the instance lock is held by a wedged call.",
+                window_label
+            );
+            return Ok(());
+        };
+        let Some(instance) = instances_lock.remove(window_label) else {
+            trace!(
+                "No running mpv instance found for window '{}' to destroy.",
+                window_label
+            );
+            return Ok(());
+        };
+        let wrapper = Arc::clone(self.get_wrapper()?);
+        let label = window_label.to_string();
+        let (completed, completion) = mpsc::channel();
+        if let Err(error) = std::thread::Builder::new()
+            .name("mpv-destroy".into())
+            .spawn(move || {
+                Self::destroy_instance(instance, &wrapper, &label);
+                let _ = completed.send(());
+            })
+        {
+            instances_lock.insert(window_label.to_string(), instance);
+            return Err(error.into());
+        }
+        drop(instances_lock);
+
+        match completion.recv_timeout(budget.saturating_sub(started.elapsed())) {
+            Ok(()) => {}
+            Err(mpsc::RecvTimeoutError::Timeout) => warn!(
+                "Timed out waiting for mpv destroy for '{}'; native teardown continues.",
+                window_label
+            ),
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                return Err(Error::Destroy("Native teardown thread stopped.".into()));
+            }
+        }
+        Ok(())
+    }
+
+    fn destroy_instance(instance: MpvInstance, wrapper: &LibmpvWrapper, window_label: &str) {
+        let event_data = unsafe { &*(instance.event_userdata as *const EventUserData) };
+        *event_data
+            .event_alive
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+
+        unsafe {
+            wrapper.mpv_wrapper_destroy(instance.handle);
+        }
+
+        // Callback userdata must outlive native destroy, even if its caller times out.
+        let _ = unsafe { Box::from_raw(instance.event_userdata as *mut EventUserData) };
+
+        info!(
+            "mpv instance for window '{}' has been destroyed.",
+            window_label,
+        );
     }
 
     pub fn command(
@@ -336,40 +379,50 @@ impl<R: Runtime> Mpv<R> {
         value: &serde_json::Value,
         window_label: &str,
     ) -> crate::Result<()> {
+        self.with_instance(window_label, |instance| {
+            self.set_property_locked(instance, name, value, window_label)
+        })
+    }
+
+    fn set_property_locked(
+        &self,
+        instance: &MpvInstance,
+        name: &str,
+        value: &serde_json::Value,
+        window_label: &str,
+    ) -> crate::Result<()> {
         trace!("SET PROPERTY '{}'", name);
 
-        self.with_instance(window_label, |instance| {
-            let wrapper = self.get_wrapper()?;
+        let wrapper = self.get_wrapper()?;
 
-            let value_string = serde_json::to_string(value)?;
+        let value_string = serde_json::to_string(value)?;
 
-            let c_name = CString::new(name)?;
-            let c_value = CString::new(value_string)?;
+        let c_name = CString::new(name)?;
+        let c_value = CString::new(value_string)?;
 
-            let result_ptr = unsafe {
-                wrapper.mpv_wrapper_set_property(instance.handle, c_name.as_ptr(), c_value.as_ptr())
-            };
+        let result_ptr = unsafe {
+            wrapper.mpv_wrapper_set_property(instance.handle, c_name.as_ptr(), c_value.as_ptr())
+        };
 
-            if result_ptr.is_null() {
-                return Err(crate::Error::FFI("Call returned null pointer".into()));
-            }
+        if result_ptr.is_null() {
+            return Err(crate::Error::FFI("Call returned null pointer".into()));
+        }
 
-            defer! {
-                unsafe { wrapper.mpv_wrapper_free(result_ptr) };
-            }
+        defer! {
+            unsafe { wrapper.mpv_wrapper_free(result_ptr) };
+        }
 
-            let response_str = unsafe { CStr::from_ptr(result_ptr).to_string_lossy() };
-            let response: FfiResponse = serde_json::from_str(&response_str)?;
+        let response_str = unsafe { CStr::from_ptr(result_ptr).to_string_lossy() };
+        let response: FfiResponse = serde_json::from_str(&response_str)?;
 
-            if let Some(err) = response.error {
-                Err(crate::Error::SetProperty {
-                    window_label: window_label.to_string(),
-                    message: err,
-                })
-            } else {
-                Ok(())
-            }
-        })
+        if let Some(err) = response.error {
+            Err(crate::Error::SetProperty {
+                window_label: window_label.to_string(),
+                message: err,
+            })
+        } else {
+            Ok(())
+        }
     }
 
     pub fn get_property(
@@ -381,8 +434,9 @@ impl<R: Runtime> Mpv<R> {
         self.with_instance(window_label, |instance| {
             let wrapper = self.get_wrapper()?;
 
-            let c_name = CString::new(name.as_str())?;
-            let c_format = CString::new(format.as_str())?;
+            trace!("GET PROPERTY '{}'", name);
+            let c_name = CString::new(name)?;
+            let c_format = CString::new(format)?;
 
             let result_ptr = unsafe {
                 wrapper.mpv_wrapper_get_property(
@@ -419,7 +473,6 @@ impl<R: Runtime> Mpv<R> {
                 message: "FFI response contained no data".to_string(),
             })?;
 
-            trace!("GET PROPERTY '{}'", name);
             Ok(value)
         })
     }
@@ -438,12 +491,27 @@ impl<R: Runtime> Mpv<R> {
             ("video-margin-ratio-bottom", ratio.bottom),
         ];
 
-        for (property, value_option) in margins {
-            if let Some(value) = value_option {
-                self.set_property(property, &serde_json::json!(value), window_label)?;
-            }
+        if margins.iter().all(|(_, value)| value.is_none()) {
+            return Ok(());
         }
-        Ok(())
+
+        self.with_instance(window_label, |instance| {
+            for (index, (property, value)) in margins.into_iter().enumerate() {
+                if let Some(value) = value {
+                    if instance.last_video_margins[index] == Some(value) {
+                        continue;
+                    }
+                    self.set_property_locked(
+                        instance,
+                        property,
+                        &serde_json::json!(value),
+                        window_label,
+                    )?;
+                    instance.last_video_margins[index] = Some(value);
+                }
+            }
+            Ok(())
+        })
     }
 
     fn lock_and_check_existence<'a>(
@@ -465,11 +533,11 @@ impl<R: Runtime> Mpv<R> {
 
     fn with_instance<F, T>(&self, window_label: &str, operation: F) -> Result<T>
     where
-        F: FnOnce(&MpvInstance) -> Result<T>,
+        F: FnOnce(&mut MpvInstance) -> Result<T>,
     {
-        let instances_lock = self.lock_instances();
+        let mut instances_lock = self.lock_instances();
 
-        let instance = instances_lock.get(window_label).ok_or_else(|| {
+        let instance = instances_lock.get_mut(window_label).ok_or_else(|| {
             crate::Error::InstanceNotFound(format!(
                 "mpv instance for window label '{}' not found",
                 window_label
@@ -515,7 +583,7 @@ impl<R: Runtime> Mpv<R> {
         }
     }
 
-    fn get_wrapper(&self) -> Result<&LibmpvWrapper> {
+    fn get_wrapper(&self) -> Result<&Arc<LibmpvWrapper>> {
         self.wrapper.get_or_try_init(|| {
             info!("libmpv-wrapper not initialized. Trying to load libmpv-wrapper now...");
 
@@ -539,7 +607,11 @@ impl<R: Runtime> Mpv<R> {
                 .map(|dir| dir.join(lib_name))
                 .find(|path| path.exists())
                 .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| lib_name.to_string());
+                .ok_or_else(|| {
+                    Error::FFI(format!(
+                        "Bundled {lib_name} not found beside the executable or in its lib directory"
+                    ))
+                })?;
 
             info!("Attempting to load libmpv-wrapper from: {}", valid_lib_path);
             let result = unsafe { LibmpvWrapper::new(&valid_lib_path) };
@@ -547,7 +619,7 @@ impl<R: Runtime> Mpv<R> {
             match result {
                 Ok(wrapper) => {
                     info!("Successfully loaded libmpv-wrapper.");
-                    Ok(wrapper)
+                    Ok(Arc::new(wrapper))
                 }
                 Err(e) => Err(Error::FFI(format!(
                     "Failed to load libmpv-wrapper from '{}'. Error: {:?}",

@@ -23,7 +23,7 @@ tauri = { version = "2.11.5", features = ["tray-icon"] }
 tauri-plugin-opener = "2.5.5"
 tauri-plugin-updater = "2.11.0"
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["raw_value"] }
 # `system-proxy` honors Windows/macOS proxy settings; declared here so it
 # does not depend on another crate enabling it through feature unification.
 reqwest = { version = "0.13", features = ["rustls-no-provider", "stream", "gzip", "deflate", "brotli", "system-proxy"], default-features = false }
@@ -37,8 +37,14 @@ futures-util = "0.3.34"
 tauri-plugin-dialog = "2.7.3"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 sha2 = "0.10"
+image = { version = "0.25.4", default-features = false, features = ["png", "jpeg", "webp", "gif", "bmp"] }
+base64 = "0.22"
 tauri-plugin-single-instance = "2"
 tauri-plugin-autostart = "2.7.0"
+
+[target.'cfg(windows)'.dependencies]
+webview2-com = "=0.39.1"
+windows-core = "=0.62.2"
 
 [patch.crates-io]
 tauri-plugin-libmpv = { path = "vendor/tauri-plugin-libmpv" }

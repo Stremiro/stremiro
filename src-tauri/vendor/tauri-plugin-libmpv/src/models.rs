@@ -2,7 +2,6 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::ffi::{c_char, c_void};
 use std::sync::{mpsc::Sender, Arc, Mutex};
-use tauri::{AppHandle, Runtime};
 
 use crate::wrapper::MpvHandle;
 
@@ -10,6 +9,7 @@ use crate::wrapper::MpvHandle;
 pub struct MpvInstance {
     pub handle: *mut MpvHandle,
     pub event_userdata: *mut c_void,
+    pub(crate) last_video_margins: [Option<f64>; 4],
 }
 
 unsafe impl Send for MpvInstance {}
@@ -33,8 +33,7 @@ pub struct VideoMarginRatio {
 }
 
 #[derive(Debug, Clone)]
-pub struct EventUserData<R: Runtime> {
-    pub app: AppHandle<R>,
+pub struct EventUserData {
     pub free_fn: unsafe extern "C" fn(*mut c_char),
     pub event_sender: Sender<String>,
     pub event_alive: Arc<Mutex<bool>>,

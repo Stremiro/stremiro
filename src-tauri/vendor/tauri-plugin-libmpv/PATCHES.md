@@ -8,11 +8,17 @@ are retained; upstream JavaScript tooling and lockfiles are not needed here.
 
 Local changes:
 
-- Free failed initialization userdata as its actual `EventUserData<R>` type.
+- Load only the bundled wrapper beside the executable or in its `lib` directory.
+- Stop event forwarding after teardown instead of draining discarded events.
+- Consume owned property names and formats directly when building C strings.
+- Return the initialized window label without allocating it again.
+- Free failed initialization userdata as its actual `EventUserData` type.
 - Clone event ownership before spawning work, so queued events cannot borrow
   userdata freed by teardown.
-- Hold the instance mutex through native destruction, preventing overlapping
-  destruction and replacement initialization; share poison recovery.
+- Filter unused event kinds through a borrowed header and emit retained JSON
+  verbatim with `emit_str_to`, preserving teardown serialization.
+- Hold the instance mutex through synchronous native destruction, preventing
+  overlapping destruction and replacement initialization; share poison recovery.
 - Leave close requests to the app's save-and-teardown barrier; clean up on
   actual window destruction or application exit instead of racing a veto.
 - Reject null property responses before registering their free operation,
@@ -29,9 +35,14 @@ Local changes:
 - Bound `RunEvent::Exit` teardown: a wedged native call holds the instance
   lock forever, and the event-loop exit handler must not block on it; skip
   after a short budget — process teardown reclaims native handles.
+- Detach event-loop destruction onto an `mpv-destroy` thread with one total
+  wait budget; retain the native handle, userdata and DLL until destroy returns.
 - Return the real message in `get_wid`'s fallback `UnsupportedPlatform` error
   instead of an empty string.
 - Drop the unused `base64` dependency.
+- Remove the unused app handle and runtime generic from callback userdata.
+- Apply video margins under one instance lock; skip unchanged sides, cache each
+  successful write per instance and retry failures through the shared native setter.
 - Keep command arguments and property values out of trace logs, since they
   can contain signed URLs or authorization headers.
 - Remove raw plugin IPC and permissions: the app owns every native operation
