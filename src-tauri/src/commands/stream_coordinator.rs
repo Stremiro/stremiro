@@ -1,4 +1,6 @@
-use super::language::{canonicalize_language_token, canonicalize_language_value};
+use super::language::{
+    bracketed_language_tags, canonicalize_language_token, canonicalize_language_value,
+};
 use super::normalize_token_text;
 use super::streaming_helpers::{
     normalize_source_id, normalize_source_key, stream_language_haystack,
@@ -6,8 +8,8 @@ use super::streaming_helpers::{
 };
 use crate::providers::addons::{
     language_mention_is_audio, stream_episode_match_texts, AddonStream, SelectionPriority,
-    StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary,
-    StreamRecommendationReason, StreamTitleMatch,
+    StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchBadgeKind,
+    StreamMatchSummary, StreamMatchTier, StreamRecommendationReason, StreamTitleMatch,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -144,10 +146,8 @@ const TITLE_BOUNDARY_TOKENS: &[&str] = &[
 pub(crate) struct StreamMatchContext<'a> {
     pub media_type: &'a str,
     pub title: Option<&'a str>,
-    pub query_season: Option<u32>,
-    pub query_episode: Option<u32>,
+    pub episode_targets: &'a [(u32, u32)],
     pub canonical_season: Option<u32>,
-    pub canonical_episode: Option<u32>,
     /// True when the requested season is the show's final season — lets the episode
     /// battery resolve numberless "final season" naming claims (`text_matches_requested_season`).
     pub is_final_season: bool,
@@ -268,6 +268,9 @@ struct CachedStreamSignals {
 #[derive(Default)]
 pub(crate) struct StreamSignalCache {
     by_stream_key: HashMap<String, CachedStreamSignals>,
+    reference: Option<ReferenceTitle>,
+    /// Also marks the fetch context initialized when the reference title is absent.
+    language_prefs: Option<CanonicalLanguagePrefs>,
     /// Slot for key-less streams so `for_stream` always returns a borrow —
     /// unprepared rows (tests) carry no identity and a "" key would collapse them.
     uncached: Option<CachedStreamSignals>,
@@ -279,9 +282,16 @@ impl StreamSignalCache {
         &mut self,
         stream: &AddonStream,
         inputs: &StreamRecommendationInputs<'_>,
-        reference: Option<&ReferenceTitle>,
-        language_prefs: CanonicalLanguagePrefs,
     ) -> &CachedStreamSignals {
+        if self.language_prefs.is_none() {
+            self.reference = build_reference_title(inputs.match_context.title);
+            self.language_prefs = Some(canonicalize_language_prefs(
+                inputs.preferred_audio_language,
+                inputs.preferred_subtitle_language,
+            ));
+        }
+        let reference = self.reference.as_ref();
+        let language_prefs = self.language_prefs.expect("fetch context just initialized");
         if stream.stream_key.is_empty() {
             return self.uncached.insert(compute_cached_signals(
                 stream,
@@ -359,11 +369,9 @@ fn compute_cached_signals(
 fn stream_recommendation_key(
     stream: &AddonStream,
     inputs: &StreamRecommendationInputs<'_>,
-    reference: Option<&ReferenceTitle>,
-    language_prefs: CanonicalLanguagePrefs,
     signals: &mut StreamSignalCache,
 ) -> StreamRecommendationKey {
-    let cached = signals.for_stream(stream, inputs, reference, language_prefs);
+    let cached = signals.for_stream(stream, inputs);
     // Family priority is the one ranking input still growing between progressive passes — stays per-pass.
     let family = stream_family_priority(
         cached.normalized_family.as_deref(),
@@ -390,32 +398,63 @@ fn stream_language_preference_priority(
     let mut subtitle_matches = false;
     let mut has_dub = false;
     let mut has_subtitle_hint = false;
-    let mut tokens = haystack
-        .split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .peekable();
-    while let Some(token) = tokens.next() {
-        match token {
-            "dub" | "dubbed" => has_dub = true,
-            "sub" | "subs" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
-            _ => {}
+    for segment in haystack.split(['/', '|', '\n', '\r', ';', ',']) {
+        let mut tags = bracketed_language_tags(segment).peekable();
+        let mut previous = None;
+        let mut tokens = segment
+            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .filter(|token| !token.is_empty())
+            .peekable();
+        while let Some(token) = tokens.next() {
+            let preceding = previous.replace(token);
+            match token {
+                "dub" | "dubbed" => has_dub = true,
+                "sub" | "subs" | "subbed" | "subtitle" | "subtitles" => has_subtitle_hint = true,
+                _ => {}
+            }
+            let start = token.as_ptr() as usize - segment.as_ptr() as usize;
+            while tags.peek().is_some_and(|(range, _)| range.end <= start) {
+                tags.next();
+            }
+            let bracketed = tags
+                .peek()
+                .filter(|(range, _)| range.contains(&start))
+                .map(|(_, language)| *language);
+            if bracketed.is_none()
+                && reference.is_some_and(|reference| reference.tokens.contains(token))
+            {
+                continue;
+            }
+            // Exact-only codes are evidence inside brackets, never ordinary prose.
+            let Some(canonical) = bracketed.or_else(|| canonicalize_language_token(token)) else {
+                continue;
+            };
+            let role = tokens
+                .peek()
+                .copied()
+                .filter(|next| {
+                    matches!(
+                        *next,
+                        "audio"
+                            | "dub"
+                            | "dubbed"
+                            | "sub"
+                            | "subs"
+                            | "subbed"
+                            | "subtitle"
+                            | "subtitles"
+                    )
+                })
+                .or(preceding);
+            let audio_only = matches!(role, Some("audio" | "dub" | "dubbed"));
+            audio_matches |= language_mention_is_audio(role.unwrap_or(""))
+                && preferred_audio_language == Some(canonical);
+            subtitle_matches |= !audio_only
+                && matches!(
+                    preferred_subtitle_language,
+                    Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
+                );
         }
-        if reference.is_some_and(|reference| reference.tokens.contains(token)) {
-            continue;
-        }
-        // Token scans skip exact-only codes (`no`, `hi`, …) that double as ordinary words.
-        let Some(canonical) = canonicalize_language_token(token) else {
-            continue;
-        };
-        let next = tokens.peek().copied();
-        let audio_only = matches!(next, Some("audio" | "dub" | "dubbed"));
-        audio_matches |= language_mention_is_audio(next.unwrap_or(""))
-            && preferred_audio_language == Some(canonical);
-        subtitle_matches |= !audio_only
-            && matches!(
-                preferred_subtitle_language,
-                Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
-            );
     }
     // Flags come from the shared `StreamFlags` memo so ranking and the badge score the same vocabulary.
     let has_dual_audio = flags.dual_audio;
@@ -536,40 +575,28 @@ fn stream_episode_relevance_priority(
         kind: StreamEpisodeMatchKind::None,
         season_claim_verified: false,
     };
-    // One lowered match-text set serves both coordinate pairs.
+    // Ranking and filtering share the query's canonical/absolute target set.
     let texts = stream.match_texts();
-    // Remapped titles carry a canonical pair distinct from the query pair;
-    // when identical (common case) the second battery run is skipped.
-    let query_pair = (context.query_season, context.query_episode);
-    let canonical_pair = (context.canonical_season, context.canonical_episode);
-    let pairs = [
-        Some(query_pair),
-        (canonical_pair != query_pair).then_some(canonical_pair),
-    ];
-
-    for pair in pairs.into_iter().flatten() {
-        if let (Some(season), Some(episode)) = pair {
-            // `is_final_season` was computed for the canonical season — a divergent
-            // query season must not inherit it, or a numberless "final season" claim
-            // verifies against a season it cannot refer to.
-            let final_season = context.is_final_season && Some(season) == context.canonical_season;
-            best_match = best_match.max(stream_episode_match_texts(
-                texts,
-                season,
-                episode,
-                final_season,
-            ));
-        }
+    for &(season, episode) in context.episode_targets {
+        // Only the canonical season can inherit a numberless "final season" claim.
+        let final_season = context.is_final_season && Some(season) == context.canonical_season;
+        best_match = best_match.max(stream_episode_match_texts(
+            texts,
+            season,
+            episode,
+            final_season,
+        ));
     }
 
     best_match
 }
 
-/// Reference title tokens computed once per ranking pass.
+/// Reference title tokens computed once per fetch.
 struct ReferenceTitle {
     tokens: HashSet<String>,
     initialism: Option<String>,
     len: usize,
+    normalized: String,
 }
 
 fn build_reference_title(title: Option<&str>) -> Option<ReferenceTitle> {
@@ -589,6 +616,7 @@ fn build_reference_title(title: Option<&str>) -> Option<ReferenceTitle> {
         tokens,
         initialism,
         len,
+        normalized,
     })
 }
 
@@ -631,7 +659,8 @@ fn stream_title_relevance_score(
     .into_iter()
     .flatten()
     {
-        let normalized = normalize_token_text(strip_leading_group_tag(candidate));
+        let candidate = strip_leading_group_tag(candidate);
+        let normalized = normalize_token_text(candidate);
         let candidate_tokens: HashSet<&str> = tokenize_title_words(&normalized, true)
             .filter(|word| !is_title_stop_word(word))
             .collect();
@@ -679,6 +708,61 @@ fn stream_title_relevance_score(
             score -= 1;
         }
 
+        // Bare numbers can be episode labels on series; only movie sequels are unambiguous.
+        if media_type == "movie" && overlap_count >= reference.len {
+            let mut words = candidate
+                .split(|ch: char| !ch.is_ascii_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .zip(normalized.split_whitespace())
+                .take_while(|(_, token)| !is_title_boundary_token(token))
+                .peekable();
+            let mut numbered_sequel = false;
+            while let Some((_, token)) = words.next() {
+                if !reference_tokens.contains(token) {
+                    continue;
+                }
+                numbered_sequel = words.peek().is_some_and(|(raw, token)| {
+                    if reference
+                        .normalized
+                        .split_whitespace()
+                        .any(|word| word == *token)
+                    {
+                        return false;
+                    }
+                    let small_number = token
+                        .parse::<u8>()
+                        .is_ok_and(|number| (1..=20).contains(&number));
+                    let roman = matches!(
+                        *token,
+                        "ii" | "iii" | "iv" | "v" | "vi" | "vii" | "viii" | "ix" | "x"
+                    );
+                    if !small_number && !roman {
+                        return false;
+                    }
+                    let end = raw.as_ptr() as usize - candidate.as_ptr() as usize + raw.len();
+                    let suffix = &candidate[end..];
+                    let next = suffix
+                        .split(|ch: char| !ch.is_ascii_alphanumeric())
+                        .find(|word| !word.is_empty());
+                    let decimal = small_number
+                        && suffix.starts_with('.')
+                        && next.is_some_and(|next| {
+                            next.parse::<u16>()
+                                .is_ok_and(|number| !(1900..=2100).contains(&number))
+                        });
+                    let size_or_quality = next.is_some_and(|next| {
+                        ["b", "kb", "kib", "mb", "mib", "gb", "gib", "tb", "tib", "k"]
+                            .iter()
+                            .any(|unit| next.eq_ignore_ascii_case(unit))
+                    });
+                    !decimal && !size_or_quality
+                });
+            }
+            if numbered_sequel {
+                score = score.min(2);
+            }
+        }
+
         best_score = best_score.max(score);
         if best_score == 4 {
             break;
@@ -690,7 +774,10 @@ fn stream_title_relevance_score(
 
 /// Structured episode/title match tiers for the selector badges — same thresholds
 /// as the free-text reasons, carried as data so the UI never parses strings.
-fn stream_match_summary(key: &StreamRecommendationKey) -> Option<StreamMatchSummary> {
+fn stream_match_summary(
+    key: &StreamRecommendationKey,
+    stream: &AddonStream,
+) -> Option<StreamMatchSummary> {
     let episode = (key.episode_match != StreamEpisodeMatchKind::None).then_some(key.episode_match);
     let title = if key.title_match >= 4 {
         Some(StreamTitleMatch::Close)
@@ -700,7 +787,55 @@ fn stream_match_summary(key: &StreamRecommendationKey) -> Option<StreamMatchSumm
         None
     };
 
-    (episode.is_some() || title.is_some()).then_some(StreamMatchSummary { episode, title })
+    let pack_coverage = stream.match_texts().pack_coverage.clone();
+    (episode.is_some() || title.is_some() || pack_coverage.is_some()).then_some(
+        StreamMatchSummary {
+            episode,
+            title,
+            pack_coverage,
+        },
+    )
+}
+
+fn set_stream_match_badges(stream: &mut AddonStream) {
+    use StreamMatchBadgeKind as Badge;
+    use StreamMatchTier as Tier;
+
+    let summary = stream.match_summary.as_ref();
+    let episode = summary.and_then(|summary| summary.episode);
+    let (episode_badge, mut tier) = match episode {
+        Some(StreamEpisodeMatchKind::Exact) => (Some(Badge::Episode), Some(Tier::Exact)),
+        Some(StreamEpisodeMatchKind::EpisodeRange) => {
+            (Some(Badge::Range), Some(Tier::EpisodeRange))
+        }
+        Some(StreamEpisodeMatchKind::SeasonPack) => {
+            let multi_season = summary
+                .and_then(|summary| summary.pack_coverage.as_ref())
+                .is_some_and(|coverage| coverage.seasons.len() > 1);
+            (
+                Some(if multi_season {
+                    Badge::MultiSeason
+                } else {
+                    Badge::Season
+                }),
+                Some(Tier::SeasonPack),
+            )
+        }
+        _ => (None, None),
+    };
+    stream.match_badge_kinds.clear();
+    stream.match_badge_kinds.extend(episode_badge);
+    match summary.and_then(|summary| summary.title) {
+        Some(StreamTitleMatch::Close) => {
+            stream.match_badge_kinds.push(Badge::Title);
+            tier = tier.or(Some(Tier::Title));
+        }
+        Some(StreamTitleMatch::Partial) => stream.match_badge_kinds.push(Badge::TitlePartial),
+        None => {}
+    }
+    stream.match_tier = tier;
+    stream.show_pack_badge = stream.presentation.is_batch
+        && matches!(episode, None | Some(StreamEpisodeMatchKind::Exact));
 }
 
 /// The selector row renders at most this many reason chips.
@@ -767,36 +902,30 @@ pub(crate) fn sort_streams_by_recommendation(
 ) {
     // Draining moves streams without cloning and keeps the output buffer for the
     // repeated ranking passes of progressive fetches.
-    let reference = build_reference_title(inputs.match_context.title);
-    // Canonicalize the preference strings once per ranking pass.
-    let language_prefs = canonicalize_language_prefs(
-        inputs.preferred_audio_language,
-        inputs.preferred_subtitle_language,
-    );
     let mut keyed = std::mem::take(&mut signals.sort_scratch);
     keyed.clear();
     keyed.extend(streams.drain(..).map(|stream| {
-        let key = stream_recommendation_key(
-            &stream,
-            &inputs,
-            reference.as_ref(),
-            language_prefs,
-            signals,
-        );
+        let key = stream_recommendation_key(&stream, &inputs, signals);
         (key, stream)
     }));
     // Stable sort keeps input order for tied keys.
     keyed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
     for (key, mut stream) in keyed.drain(..) {
-        stream.match_summary = stream_match_summary(&key);
-        stream.selection_priority = Some(SelectionPriority {
+        let selection_priority = Some(SelectionPriority {
             episode_match: key.episode_match,
             season_claim_verified: key.season_claim_verified,
             title_match: key.title_match,
             viability: key.viability,
             language: key.language,
         });
+        // These facts are fetch-constant. Preserve the row's owned pack coverage on
+        // progressive re-sorts; fresh rows in the final merge still initialize it.
+        if stream.selection_priority != selection_priority {
+            stream.match_summary = stream_match_summary(&key, &stream);
+            set_stream_match_badges(&mut stream);
+            stream.selection_priority = selection_priority;
+        }
         recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
         streams.push(stream);
     }

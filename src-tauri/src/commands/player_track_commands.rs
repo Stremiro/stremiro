@@ -33,6 +33,7 @@ impl PlayerTrackType {
 pub(crate) struct PlayerTrack {
     id: i64,
     r#type: PlayerTrackType,
+    display_label: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,14 +85,7 @@ fn property_non_blank(value: Option<serde_json::Value>) -> Option<String> {
     let serde_json::Value::String(value) = value? else {
         return None;
     };
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else if trimmed.len() == value.len() {
-        Some(value)
-    } else {
-        Some(trimmed.to_string())
-    }
+    crate::providers::bound_optional(Some(value), usize::MAX)
 }
 
 /// Duplicate `type:id` rows merge — later non-empty strings win, flags OR
@@ -182,6 +176,7 @@ fn read_track_list(
             PlayerTrack {
                 id,
                 r#type: track_type,
+                display_label: String::new(),
                 lang: None,
                 title: None,
                 selected: false,
@@ -201,6 +196,7 @@ fn read_track_list(
             PlayerTrack {
                 id,
                 r#type: track_type,
+                display_label: String::new(),
                 lang: property_non_blank(mpv_property(
                     app,
                     window_label,
@@ -258,6 +254,38 @@ fn read_track_list(
     }
 
     tracks.sort_unstable_by_key(|track| (track.r#type.sort_order(), track.id));
+    let mut label_counts = [HashMap::new(), HashMap::new(), HashMap::new()];
+    for track in &mut tracks {
+        let lang = track
+            .lang
+            .as_deref()
+            .map(str::to_uppercase)
+            .filter(|lang| !lang.is_empty());
+        let title = track.title.as_deref().filter(|title| !title.is_empty());
+        let mut label = match (title, lang.as_deref()) {
+            (Some(title), Some(lang)) if !title.to_lowercase().contains(&lang.to_lowercase()) => {
+                format!("{lang} · {title}")
+            }
+            (Some(title), _) => title.to_string(),
+            (None, Some(lang)) => lang.to_string(),
+            (None, None) => format!("Track {}", track.id),
+        };
+        if track.forced {
+            label.push_str(" · Forced");
+        }
+        if track.hearing_impaired {
+            label.push_str(" · SDH");
+        }
+        *label_counts[track.r#type.sort_order() as usize]
+            .entry(label.clone())
+            .or_insert(0) += 1;
+        track.display_label = label;
+    }
+    for track in &mut tracks {
+        if label_counts[track.r#type.sort_order() as usize][&track.display_label] > 1 {
+            track.display_label.push_str(&format!(" #{}", track.id));
+        }
+    }
     Ok(tracks)
 }
 

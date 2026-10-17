@@ -5,7 +5,9 @@ use super::{
     StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES, SAME_HOST_PROBE_SPACING,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
-use crate::providers::addons::{AddonStream, SelectionPriority, StreamEpisodeMatchKind};
+use crate::providers::addons::{
+    stream_conflicts_with_episode_targets, AddonStream, SelectionPriority, StreamEpisodeMatchKind,
+};
 use crate::test_helpers::test_stream;
 use futures_util::stream::FuturesOrdered;
 use std::future::Future;
@@ -55,7 +57,10 @@ fn candidate_input_moves_identity_and_preserves_probe_fields() {
         ],
         identity
     );
-    assert_eq!(candidate.direct_url, "https://cdn.example/file.mkv");
+    assert_eq!(
+        candidate.direct_url.as_str(),
+        "https://cdn.example/file.mkv"
+    );
     assert_eq!(
         candidate.request_headers,
         vec![("Referer".to_string(), "https://site.example/".to_string())]
@@ -116,12 +121,12 @@ fn probe_plan_deduplicates_requests_without_collapsing_auth_or_spending_slots_on
     let plan = build_probe_candidates(
         vec![
             probeable_stream("s:duplicate", None),
-            probeable_stream("s:excluded-key", None),
+            probeable_stream("s:excluded-key", Some("ABC123")),
             excluded_url,
             authenticated,
             preferred,
         ],
-        Some("s:excluded-key"),
+        Some("h:abc123:0"),
         Some("https://cdn.example/excluded.mkv"),
         hint("s:preferred"),
     );
@@ -130,6 +135,195 @@ fn probe_plan_deduplicates_requests_without_collapsing_auth_or_spending_slots_on
     assert_eq!(plan[1].0.stream_key, "s:auth");
     assert!(plan[0].0.request_headers.is_empty());
     assert_eq!(plan[1].0.request_headers.len(), 1);
+}
+
+#[test]
+fn probe_plan_ignores_fragment_aliases_without_losing_player_hints_or_request_variants() {
+    let mut streams: Vec<_> = (0..BEST_STREAM_MAX_CANDIDATES)
+        .map(|index| {
+            let mut stream = probeable_stream(&format!("s:{index}"), None);
+            stream.url = Some(format!("https://cdn.example/dead.mkv#hint{index}.mkv"));
+            stream
+        })
+        .collect();
+    let mut healthy = probeable_stream("s:healthy", None);
+    healthy.url = Some("https://cdn.example/healthy.mkv#container.mkv".to_string());
+    streams.push(healthy);
+    let mut authenticated = streams[0].clone();
+    authenticated.stream_key = "s:auth".to_string();
+    authenticated.behavior_hints = Some(
+        serde_json::from_value(serde_json::json!({
+            "proxyHeaders": {"request": {"Authorization": "Bearer fixture"}}
+        }))
+        .unwrap(),
+    );
+    streams.push(authenticated);
+    let mut query_variant = streams[0].clone();
+    query_variant.stream_key = "s:query".to_string();
+    query_variant.url = Some("https://cdn.example/dead.mkv?token=other#hint.mkv".to_string());
+    streams.push(query_variant);
+
+    let plan = build_probe_candidates(streams.clone(), None, None, PreferredStreamHint::default());
+    assert_eq!(
+        plan.iter()
+            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .collect::<Vec<_>>(),
+        ["s:0", "s:healthy", "s:auth", "s:query"]
+    );
+    assert_eq!(plan[0].0.direct_url.fragment(), Some("hint0.mkv"));
+    assert_eq!(plan[1].0.direct_url.fragment(), Some("container.mkv"));
+
+    let recovery =
+        build_probe_candidates(streams, Some("s:0"), None, PreferredStreamHint::default());
+    assert_eq!(
+        recovery
+            .iter()
+            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .collect::<Vec<_>>(),
+        ["s:healthy", "s:auth", "s:query"]
+    );
+}
+
+#[test]
+fn probe_plan_deduplicates_header_names_without_changing_values_or_duplicates() {
+    let streams = [
+        (
+            "s:first",
+            serde_json::json!({
+                "Authorization": "Bearer fixture", "X-Tag": "first", "x-tag": "second"
+            }),
+        ),
+        (
+            "s:case-duplicate",
+            serde_json::json!({
+                "authorization": "Bearer fixture", "X-TAG": "second", "x-tag": "first"
+            }),
+        ),
+        (
+            "s:different-value",
+            serde_json::json!({
+                "Authorization": "Bearer Fixture", "X-Tag": "first", "x-tag": "second"
+            }),
+        ),
+        (
+            "s:missing-duplicate",
+            serde_json::json!({"authorization": "Bearer fixture", "X-Tag": "first"}),
+        ),
+        (
+            "s:different-duplicate",
+            serde_json::json!({
+                "authorization": "Bearer fixture", "X-Tag": "first", "x-tag": "first"
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(key, headers)| {
+        let mut stream = probeable_stream(key, None);
+        stream.behavior_hints = Some(
+            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
+                .unwrap(),
+        );
+        stream
+    })
+    .collect::<Vec<_>>();
+    let original_headers = streams[0].request_headers();
+
+    let plan = build_probe_candidates(streams, None, None, PreferredStreamHint::default());
+
+    assert_eq!(
+        plan.iter()
+            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .collect::<Vec<_>>(),
+        [
+            "s:first",
+            "s:different-value",
+            "s:missing-duplicate",
+            "s:different-duplicate"
+        ]
+    );
+    assert_eq!(plan[0].0.request_headers, original_headers);
+    assert_eq!(
+        plan.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
+        [0, 1, 2, 3].map(|slot| SAME_HOST_PROBE_SPACING * slot)
+    );
+}
+
+#[test]
+fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants() {
+    let streams: Vec<_> = [
+        (
+            "s:failed",
+            serde_json::json!({
+                "Authorization": "Bearer first", "Referer": "https://site.example/first"
+            }),
+        ),
+        (
+            "s:alias",
+            serde_json::json!({
+                "authorization": "Bearer first", "referer": "https://site.example/first"
+            }),
+        ),
+        (
+            "s:different-auth",
+            serde_json::json!({
+                "Authorization": "Bearer second", "Referer": "https://site.example/first"
+            }),
+        ),
+        (
+            "s:different-referer",
+            serde_json::json!({
+                "Authorization": "Bearer first", "Referer": "https://site.example/second"
+            }),
+        ),
+    ]
+    .into_iter()
+    .map(|(key, headers)| {
+        let mut stream = probeable_stream(key, None);
+        stream.behavior_hints = Some(
+            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
+                .unwrap(),
+        );
+        stream
+    })
+    .collect();
+
+    for (failed_key, expected) in [
+        (
+            Some("s:failed"),
+            vec!["s:different-auth", "s:different-referer"],
+        ),
+        (
+            Some(" s:failed "),
+            vec!["s:different-auth", "s:different-referer"],
+        ),
+        (
+            Some("s:expired"),
+            vec!["s:failed", "s:different-auth", "s:different-referer"],
+        ),
+        (None, vec![]),
+        (Some("h:legacy:0"), vec![]),
+    ] {
+        let plan = build_probe_candidates(
+            streams.clone(),
+            failed_key,
+            Some("https://cdn.example/file.mkv"),
+            PreferredStreamHint::default(),
+        );
+        assert_eq!(
+            plan.iter()
+                .map(|(candidate, _)| candidate.stream_key.as_str())
+                .collect::<Vec<_>>(),
+            expected,
+            "{failed_key:?}"
+        );
+        for (candidate, _) in plan {
+            let original = streams
+                .iter()
+                .find(|stream| stream.stream_key == candidate.stream_key)
+                .unwrap();
+            assert_eq!(candidate.request_headers, original.request_headers());
+        }
+    }
 }
 
 fn hint(stream_key: &'static str) -> PreferredStreamHint<'static> {
@@ -148,253 +342,210 @@ fn pair() -> Vec<AddonStream> {
     ]
 }
 
-#[test]
-fn preferred_position_matches_prepared_stream_key() {
-    let streams = pair();
-
-    assert_eq!(
-        find_preferred_position(&streams, hint("s:bbbb"), None),
-        Some(1)
-    );
+fn priority(
+    episode_match: StreamEpisodeMatchKind,
+    season_claim_verified: bool,
+    title_match: i8,
+    language: u8,
+) -> Option<SelectionPriority> {
+    Some(SelectionPriority {
+        episode_match,
+        season_claim_verified,
+        title_match,
+        viability: 1,
+        language,
+    })
 }
 
-#[test]
-fn preferred_position_matches_legacy_dedup_key() {
-    // Rows persisted before prepared keys carry the `h:` content key while
-    // the pool row's `stream_key` is the prepared `s:` form — the tier must
-    // bind them via the row's dedup identity, not string equality.
-    let streams = vec![
-        probeable_stream("s:prepared-1", None),
-        probeable_stream("s:prepared-2", Some("ABC123")),
-    ];
-
-    assert_eq!(
-        find_preferred_position(&streams, hint("h:abc123:0"), None),
-        Some(1)
-    );
-}
-
-#[test]
-fn preferred_position_skips_excluded_key() {
-    let streams = pair();
-
-    // The excluded failed stream must not re-bind through the key tier.
-    assert_eq!(
-        find_preferred_position(&streams, hint("s:aaaa"), Some("s:aaaa")),
-        None
-    );
-}
-
-#[test]
-fn preferred_position_ignores_key_hits_without_direct_url() {
-    // A saved `h:` torrent key on a pool row with no direct URL: the key
-    // tier must pass it by so softer tiers (or no match) decide.
-    let torrent = AddonStream {
-        url: None,
-        info_hash: Some("abc123".to_string()),
-        stream_key: "s:prepared".to_string(),
-        ..test_stream()
+macro_rules! preferred_position_tests {
+    ($($name:ident: ($streams:expr, $preferred:expr, $excluded:expr) => $expected:expr;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let streams = $streams;
+                assert_eq!(find_preferred_position(&streams, $preferred, $excluded), $expected);
+            }
+        )*
     };
+}
 
-    assert_eq!(
-        find_preferred_position(&[torrent], hint("h:abc123:0"), None),
-        None
-    );
+preferred_position_tests! {
+    preferred_position_matches_prepared_stream_key:
+        (pair(), hint("s:bbbb"), None) => Some(1);
+    // Legacy `h:` keys bind through dedup identity, not prepared-key equality.
+    preferred_position_matches_legacy_dedup_key:
+        (vec![
+            probeable_stream("s:prepared-1", None),
+            probeable_stream("s:prepared-2", Some("ABC123")),
+        ], hint("h:abc123:0"), None) => Some(1);
+    preferred_position_skips_excluded_key:
+        (pair(), hint("s:aaaa"), Some("s:aaaa")) => None;
+    preferred_position_ignores_key_hits_without_direct_url:
+        ([AddonStream {
+            url: None,
+            info_hash: Some("abc123".to_string()),
+            stream_key: "s:prepared".to_string(),
+            ..test_stream()
+        }], hint("h:abc123:0"), None) => None;
+    preferred_position_falls_through_key_miss_to_family:
+        ({
+            let mut streams = pair();
+            streams[1].stream_family = Some("alpha|release:test".to_string());
+            streams
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:test"),
+            ..hint("s:rotted")
+        }, None) => Some(1);
+    preferred_position_excluded_stream_does_not_rebind_by_family:
+        ({
+            let mut streams = pair();
+            streams[0].stream_family = Some("alpha|release:x".to_string());
+            streams
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:x"),
+            ..hint("s:rotted")
+        }, Some("s:aaaa")) => None;
+    preferred_position_excluded_stream_does_not_rebind_by_source:
+        ({
+            let mut streams = pair();
+            streams[0].source_name = Some("alpha".to_string());
+            streams
+        }, PreferredStreamHint {
+            source_name: Some("alpha"),
+            ..hint("s:rotted")
+        }, Some("s:aaaa")) => None;
+    preferred_position_excluded_stream_does_not_rebind_by_legacy_hash:
+        ({
+            let mut excluded = probeable_stream("s:prepared", Some("ABC123"));
+            excluded.stream_family = Some("alpha|release:x".to_string());
+            vec![excluded, probeable_stream("s:bbbb", None)]
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:x"),
+            ..hint("s:rotted")
+        }, Some("h:abc123:0")) => None;
+    preferred_position_falls_back_to_source_name:
+        ({
+            let mut streams = pair();
+            streams[1].source_name = Some("alpha".to_string());
+            streams
+        }, PreferredStreamHint {
+            source_name: Some("alpha"),
+            ..hint("s:rotted")
+        }, None) => Some(1);
+    preferred_position_source_id_miss_does_not_fall_through_to_name:
+        ([AddonStream {
+            source_id: Some("addon-a".to_string()),
+            source_name: Some("shared".to_string()),
+            ..probeable_stream("s:aaaa", None)
+        }], PreferredStreamHint {
+            source_id: Some("addon-b"),
+            source_name: Some("shared"),
+            ..PreferredStreamHint::default()
+        }, None) => None;
 }
 
 #[test]
-fn preferred_position_falls_through_key_miss_to_family() {
-    let mut streams = pair();
-    streams[1].stream_family = Some("alpha|release:test".to_string());
+fn preferred_position_legacy_resume_family_falls_back_to_source_id() {
+    use crate::commands::resume_store::ResumeStore;
+    use crate::commands::streaming_helpers::prepare_addon_streams;
+    use crate::test_helpers::{test_progress, test_store};
 
-    let mut preferred = hint("s:rotted");
-    preferred.stream_family = Some("alpha|release:test");
-
-    assert_eq!(find_preferred_position(&streams, preferred, None), Some(1));
-}
-
-#[test]
-fn preferred_position_excluded_stream_does_not_rebind_by_family() {
-    let mut excluded = probeable_stream("s:aaaa", None);
-    excluded.stream_family = Some("alpha|release:x".to_string());
-    let streams = vec![excluded, probeable_stream("s:bbbb", None)];
-
-    let mut preferred = hint("s:rotted");
-    preferred.stream_family = Some("alpha|release:x");
-
-    assert_eq!(
-        find_preferred_position(&streams, preferred, Some("s:aaaa")),
-        None
-    );
-}
-
-#[test]
-fn preferred_position_excluded_stream_does_not_rebind_by_source() {
-    let mut excluded = probeable_stream("s:aaaa", None);
-    excluded.source_name = Some("alpha".to_string());
-    let streams = vec![excluded, probeable_stream("s:bbbb", None)];
-
-    let mut preferred = hint("s:rotted");
-    preferred.source_name = Some("alpha");
-
-    assert_eq!(
-        find_preferred_position(&streams, preferred, Some("s:aaaa")),
-        None
-    );
-}
-
-#[test]
-fn preferred_position_excluded_stream_does_not_rebind_by_legacy_hash() {
-    let mut excluded = probeable_stream("s:prepared", Some("ABC123"));
-    excluded.stream_family = Some("alpha|release:x".to_string());
-    let streams = vec![excluded, probeable_stream("s:bbbb", None)];
-
-    let mut preferred = hint("s:rotted");
-    preferred.stream_family = Some("alpha|release:x");
-
-    assert_eq!(
-        find_preferred_position(&streams, preferred, Some("h:abc123:0")),
-        None
-    );
-}
-
-#[test]
-fn preferred_position_falls_back_to_source_name() {
-    let mut streams = pair();
-    streams[1].source_name = Some("alpha".to_string());
-
-    let mut preferred = hint("s:rotted");
-    preferred.source_name = Some("alpha");
-
-    assert_eq!(find_preferred_position(&streams, preferred, None), Some(1));
-}
-
-#[test]
-fn preferred_position_source_id_miss_does_not_fall_through_to_name() {
-    let mut stream = probeable_stream("s:aaaa", None);
-    stream.source_id = Some("addon-a".to_string());
-    stream.source_name = Some("shared".to_string());
-
+    let fixture = test_store();
+    let mut resume_store = ResumeStore::open(&fixture.path).unwrap();
+    let progress = crate::commands::WatchProgress {
+        last_stream_key: Some("s:expired".to_string()),
+        source_id: Some("addon-b".to_string()),
+        source_name: Some("Shared".to_string()),
+        stream_family: Some("shared|release:show".to_string()),
+        ..test_progress()
+    };
+    resume_store
+        .upsert_progress("movie:tt123", &progress)
+        .unwrap();
+    let row = resume_store.get_entry("movie:tt123").unwrap().unwrap();
+    let mut streams = Vec::new();
+    for source_id in ["addon-a", "addon-b"] {
+        streams.extend(prepare_addon_streams(
+            vec![probeable_stream("s:unprepared", None)],
+            "Shared",
+            source_id,
+        ));
+    }
+    assert!(streams
+        .iter()
+        .all(|stream| stream.stream_family != row.stream_family));
     let preferred = PreferredStreamHint {
-        source_id: Some("addon-b"),
-        source_name: Some("shared"),
-        ..PreferredStreamHint::default()
+        stream_key: row.last_stream_key.as_deref(),
+        source_id: row.source_id.as_deref(),
+        source_name: row.source_name.as_deref(),
+        stream_family: row.stream_family.as_deref(),
     };
-
-    assert_eq!(find_preferred_position(&[stream], preferred, None), None);
-}
-
-#[test]
-fn preferred_position_family_tier_requires_same_source_id() {
-    let mut wrong_instance = probeable_stream("s:aaaa", None);
-    wrong_instance.stream_family = Some("alpha|release:x".to_string());
-    wrong_instance.source_id = Some("addon-a".to_string());
-    let mut right_instance = probeable_stream("s:bbbb", None);
-    right_instance.stream_family = Some("alpha|release:x".to_string());
-    right_instance.source_id = Some("addon-b".to_string());
-    let streams = vec![wrong_instance, right_instance];
-
-    let preferred = PreferredStreamHint {
-        stream_family: Some("alpha|release:x"),
-        source_id: Some("addon-b"),
-        ..PreferredStreamHint::default()
-    };
-
     assert_eq!(find_preferred_position(&streams, preferred, None), Some(1));
-}
-
-#[test]
-fn preferred_position_family_hint_cannot_drop_below_best_episode_match() {
-    let mut streams = pair();
-    streams[0].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::Exact,
-        season_claim_verified: true,
-        title_match: 4,
-        viability: 1,
-        language: 0,
-    });
-    streams[1].stream_family = Some("alpha|release:x".to_string());
-    streams[1].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::None,
-        season_claim_verified: false,
-        title_match: 4,
-        viability: 1,
-        language: 0,
-    });
-
-    let mut preferred = hint("s:rotted");
-    preferred.stream_family = Some("alpha|release:x");
-
-    assert_eq!(find_preferred_position(&streams, preferred, None), None);
-}
-
-#[test]
-fn preferred_position_source_hint_cannot_drop_below_best_language_match() {
-    let mut streams = pair();
-    streams[0].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::Exact,
-        season_claim_verified: true,
-        title_match: 4,
-        viability: 1,
-        language: 6,
-    });
-    streams[1].source_id = Some("addon-a".to_string());
-    streams[1].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::Exact,
-        season_claim_verified: true,
-        title_match: 4,
-        viability: 1,
-        language: 0,
-    });
-
-    let mut preferred = hint("s:rotted");
-    preferred.source_id = Some("addon-a");
-
-    assert_eq!(find_preferred_position(&streams, preferred, None), None);
-}
-
-#[test]
-fn preferred_position_family_hint_allowed_at_equal_priority() {
-    let mut streams = pair();
-    let priority = SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::Exact,
-        season_claim_verified: true,
-        title_match: 4,
-        viability: 1,
-        language: 6,
-    };
-    streams[0].selection_priority = Some(priority);
-    streams[1].stream_family = Some("alpha|release:x".to_string());
-    streams[1].selection_priority = Some(priority);
-
-    let mut preferred = hint("s:rotted");
-    preferred.stream_family = Some("alpha|release:x");
-
-    assert_eq!(find_preferred_position(&streams, preferred, None), Some(1));
-}
-
-#[test]
-fn preferred_position_exact_key_honored_below_best_priority() {
-    let mut streams = pair();
-    streams[0].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::Exact,
-        season_claim_verified: true,
-        title_match: 4,
-        viability: 1,
-        language: 6,
-    });
-    streams[1].selection_priority = Some(SelectionPriority {
-        episode_match: StreamEpisodeMatchKind::None,
-        season_claim_verified: false,
-        title_match: 0,
-        viability: 1,
-        language: 0,
-    });
-
     assert_eq!(
-        find_preferred_position(&streams, hint("s:bbbb"), None),
-        Some(1)
+        resume_store
+            .get_entry("movie:tt123")
+            .unwrap()
+            .unwrap()
+            .stream_family
+            .as_deref(),
+        Some("shared|release:show")
     );
+}
+
+preferred_position_tests! {
+    preferred_position_family_tier_requires_same_source_id:
+        ({
+            let mut streams = pair();
+            for (stream, source_id) in streams.iter_mut().zip(["addon-a", "addon-b"]) {
+                stream.stream_family = Some("alpha|release:x".to_string());
+                stream.source_id = Some(source_id.to_string());
+            }
+            streams
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:x"),
+            source_id: Some("addon-b"),
+            ..PreferredStreamHint::default()
+        }, None) => Some(1);
+    preferred_position_family_hint_cannot_drop_below_best_episode_match:
+        ({
+            let mut streams = pair();
+            streams[0].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 0);
+            streams[1].stream_family = Some("alpha|release:x".to_string());
+            streams[1].selection_priority = priority(StreamEpisodeMatchKind::None, false, 4, 0);
+            streams
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:x"),
+            ..hint("s:rotted")
+        }, None) => None;
+    preferred_position_source_hint_cannot_drop_below_best_language_match:
+        ({
+            let mut streams = pair();
+            streams[0].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 6);
+            streams[1].source_id = Some("addon-a".to_string());
+            streams[1].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 0);
+            streams
+        }, PreferredStreamHint {
+            source_id: Some("addon-a"),
+            ..hint("s:rotted")
+        }, None) => None;
+    preferred_position_family_hint_allowed_at_equal_priority:
+        ({
+            let mut streams = pair();
+            streams[0].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 6);
+            streams[1].stream_family = Some("alpha|release:x".to_string());
+            streams[1].selection_priority = streams[0].selection_priority;
+            streams
+        }, PreferredStreamHint {
+            stream_family: Some("alpha|release:x"),
+            ..hint("s:rotted")
+        }, None) => Some(1);
+    preferred_position_exact_key_honored_below_best_priority:
+        ({
+            let mut streams = pair();
+            streams[0].selection_priority = priority(StreamEpisodeMatchKind::Exact, true, 4, 6);
+            streams[1].selection_priority = priority(StreamEpisodeMatchKind::None, false, 0, 0);
+            streams
+        }, hint("s:bbbb"), None) => Some(1);
 }
 
 fn pool_query(media_type: &str, season: Option<u32>, episode: Option<u32>) -> StreamPoolQuery {
@@ -417,48 +568,94 @@ fn pool_query(media_type: &str, season: Option<u32>, episode: Option<u32>) -> St
 }
 
 #[test]
-fn retain_episode_candidates_drops_conflicting_claims_keeps_order() {
-    let query = pool_query("series", Some(1), Some(5));
-    let mut correct = probeable_stream("s:good", None);
-    correct.name = Some("Show.S01E05.1080p".to_string());
-    let mut unknown = probeable_stream("s:unknown", None);
-    unknown.name = Some("Show.1080p.Release".to_string());
-    let mut wrong = probeable_stream("s:bad", None);
-    wrong.name = Some("Show.S02E05.1080p".to_string());
+fn stream_pool_query_preserves_composed_ipc_trimming() {
+    let query = |media_type: &str, id: &str| {
+        StreamPoolQuery::new(
+            media_type,
+            id,
+            None,
+            None,
+            None,
+            StreamRankingOverrides {
+                media_type: None,
+                media_id: None,
+                title: None,
+                season: None,
+                episode: None,
+            },
+            "stream lookup",
+        )
+        .map(|query| (query.media_type, query.id))
+    };
+    for (prefix, suffix, valid) in [
+        (" \t\u{feff}\u{a0}", "\u{2028}\u{feff}\r\n ", true),
+        ("\u{feff}\u{85}", "\u{85}\u{feff}", true),
+        ("\u{85}\u{feff}", "\u{feff}\u{85}", false),
+    ] {
+        let media_type = format!("{prefix}MoViE{suffix}");
+        let id = format!("{prefix}tt123{suffix}");
+        let actual = query(&media_type, &id);
+        assert_eq!(
+            actual,
+            query(
+                crate::commands::js_trim(&media_type),
+                crate::commands::js_trim(&id)
+            )
+        );
+        assert_eq!(actual.is_ok(), valid);
+        if valid {
+            assert_eq!(actual.unwrap(), ("movie".to_string(), "tt123".to_string()));
+        }
+    }
+}
 
-    let mut streams = vec![correct, unknown, wrong];
-    query.retain_episode_candidates(&mut streams, &query.id, false);
+/// Keys that survive the fetch-time episode gate for `query.request(fetch_id)`.
+fn eligible_keys(query: &StreamPoolQuery, streams: &[AddonStream], fetch_id: &str) -> Vec<String> {
+    let targets = query.request(fetch_id).episode_targets(&query.ranking);
+    streams
+        .iter()
+        .filter(|stream| {
+            !stream_conflicts_with_episode_targets(stream.match_texts(), &targets, None)
+        })
+        .map(|stream| stream.stream_key.clone())
+        .collect()
+}
+
+fn named_stream(key: &str, name: &str) -> AddonStream {
+    let mut stream = probeable_stream(key, None);
+    stream.name = Some(name.to_string());
+    stream
+}
+
+#[test]
+fn episode_targets_drop_conflicting_claims_and_keep_order() {
+    let query = pool_query("series", Some(1), Some(5));
+    let streams = [
+        named_stream("s:good", "Show.S01E05.1080p"),
+        named_stream("s:unknown", "Show.1080p.Release"),
+        named_stream("s:bad", "Show.S02E05.1080p"),
+    ];
 
     assert_eq!(
-        streams
-            .iter()
-            .map(|stream| stream.stream_key.as_str())
-            .collect::<Vec<_>>(),
-        vec!["s:good", "s:unknown"]
+        eligible_keys(&query, &streams, &query.id),
+        ["s:good", "s:unknown"]
     );
 }
 
 #[test]
-fn retain_episode_candidates_keeps_queried_absolute_episode_fallbacks() {
+fn episode_targets_keep_queried_absolute_episode_fallbacks() {
     for media_type in ["series", "anime"] {
         let mut query = pool_query(media_type, Some(2), Some(3));
         query.absolute_episode = Some(27);
-        let mut streams = [(2, 3), (2, 27), (1, 27), (1, 28)]
-            .into_iter()
-            .map(|(season, episode)| {
-                let mut stream = probeable_stream(&format!("s:{season}:{episode}"), None);
-                stream.name = Some(format!("Show.S{season:02}E{episode:02}.1080p"));
-                stream
-            })
-            .collect::<Vec<_>>();
-
-        query.retain_episode_candidates(&mut streams, &query.id, false);
+        let streams = [(2, 3), (2, 27), (1, 27), (1, 28)].map(|(season, episode)| {
+            named_stream(
+                &format!("s:{season}:{episode}"),
+                &format!("Show.S{season:02}E{episode:02}.1080p"),
+            )
+        });
 
         assert_eq!(
-            streams
-                .iter()
-                .map(|stream| stream.stream_key.as_str())
-                .collect::<Vec<_>>(),
+            eligible_keys(&query, &streams, &query.id),
             ["s:2:3", "s:2:27", "s:1:27"],
             "{media_type}"
         );
@@ -466,7 +663,7 @@ fn retain_episode_candidates_keeps_queried_absolute_episode_fallbacks() {
 }
 
 #[test]
-fn retain_episode_candidates_limits_absolute_targets_to_the_fetch_id() {
+fn episode_targets_limit_absolute_fallbacks_to_the_fetch_id() {
     for (media_type, id, fetch_id, absolute_episode, retained) in [
         ("series", "tt123", "tt123", Some(27), 1),
         ("series", "tt123", "tt123", None, 0),
@@ -478,43 +675,14 @@ fn retain_episode_candidates_limits_absolute_targets_to_the_fetch_id() {
         let mut query = pool_query(media_type, Some(2), Some(3));
         query.id = id.to_string();
         query.absolute_episode = absolute_episode;
-        let mut stream = probeable_stream("s:absolute", None);
-        stream.name = Some("Show.S01E27.1080p".to_string());
-        let mut streams = vec![stream];
-
-        query.retain_episode_candidates(&mut streams, fetch_id, false);
+        let streams = [named_stream("s:absolute", "Show.S01E27.1080p")];
 
         assert_eq!(
-            streams.len(),
+            eligible_keys(&query, &streams, fetch_id).len(),
             retained,
             "{media_type} {id} {fetch_id} {absolute_episode:?}"
         );
     }
-}
-
-#[test]
-fn retain_episode_candidates_wrong_only_pool_leaves_no_preferred_match() {
-    let query = pool_query("series", Some(1), Some(5));
-    let mut wrong = probeable_stream("s:bad", None);
-    wrong.name = Some("Show.S02E05.1080p".to_string());
-    let mut streams = vec![wrong];
-
-    query.retain_episode_candidates(&mut streams, &query.id, false);
-
-    assert!(streams.is_empty());
-    assert_eq!(find_preferred_position(&streams, hint("s:bad"), None), None);
-}
-
-#[test]
-fn retain_episode_candidates_bypasses_movies() {
-    let query = pool_query("movie", None, None);
-    let mut stream = probeable_stream("s:bad", None);
-    stream.name = Some("Show.S02E05.1080p".to_string());
-    let mut streams = vec![stream];
-
-    query.retain_episode_candidates(&mut streams, &query.id, false);
-
-    assert_eq!(streams.len(), 1);
 }
 
 #[tokio::test]
@@ -527,6 +695,8 @@ async fn excluded_legacy_key_filters_matching_pool_candidate() {
         Some("h:abc123:0"),
         None,
         PreferredStreamHint::default(),
+        tokio::time::Instant::now()
+            + Duration::from_secs(super::BEST_STREAM_CANDIDATE_TIMEOUT_SECS),
     )
     .await
     .expect_err("the excluded stream must be filtered before probing");
@@ -540,11 +710,12 @@ async fn excluded_legacy_key_filters_matching_pool_candidate() {
 
 fn candidate_input(source_name: &str, stream_key: &str) -> StreamResolveCandidateInput {
     StreamResolveCandidateInput {
+        pool_fetched_at: None,
         source_id: None,
         source_name: Some(source_name.to_string()),
         stream_family: None,
         stream_key: stream_key.to_string(),
-        direct_url: format!("https://cdn.example/{stream_key}.mkv"),
+        direct_url: reqwest::Url::parse(&format!("https://cdn.example/{stream_key}.mkv")).unwrap(),
         request_headers: Vec::new(),
     }
 }
@@ -601,7 +772,7 @@ async fn candidate_results_consume_in_rank_order() {
         Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
     ));
 
-    let winner = resolve_candidate_results(candidates, None)
+    let winner = resolve_candidate_results(candidates, None, None)
         .await
         .expect("first-ranked probe wins");
 
@@ -643,11 +814,54 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
             Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
         ));
 
-        let winner = resolve_candidate_results(candidates, excluded_url)
+        let winner = resolve_candidate_results(candidates, None, excluded_url)
             .await
             .expect("next-ranked probe wins");
 
         assert_eq!(winner.stream_key.as_deref(), Some("s:b"));
+    }
+}
+
+#[tokio::test]
+async fn recovery_candidate_results_accept_same_url_for_a_different_prepared_request() {
+    for (failed_key, expected) in [
+        (Some("s:failed"), "s:alternate"),
+        (Some(" s:failed "), "s:alternate"),
+        (None, "s:fallback"),
+        (Some("h:legacy:0"), "s:fallback"),
+    ] {
+        let mut candidates = FuturesOrdered::new();
+        candidates.push_back(fake_probe(
+            candidate_input("alternate", "s:alternate"),
+            Duration::from_secs(1),
+            Box::pin(async {
+                Ok(ResolvedStream {
+                    url: "https://cdn.example/failed.mkv".to_string(),
+                    mpv_http_header_fields: "Authorization: Bearer second".to_string(),
+                })
+            }),
+        ));
+        candidates.push_back(fake_probe(
+            candidate_input("fallback", "s:fallback"),
+            Duration::from_secs(1),
+            Box::pin(async { Ok(resolved("https://cdn.example/fallback.mkv")) }),
+        ));
+
+        let winner = resolve_candidate_results(
+            candidates,
+            failed_key,
+            Some("https://cdn.example/failed.mkv"),
+        )
+        .await
+        .expect("a distinct request resolves");
+        assert_eq!(winner.stream_key.as_deref(), Some(expected));
+        if expected == "s:alternate" {
+            assert_eq!(winner.url, "https://cdn.example/failed.mkv");
+            assert_eq!(
+                winner.mpv_http_header_fields,
+                "Authorization: Bearer second"
+            );
+        }
     }
 }
 
@@ -665,7 +879,7 @@ async fn candidate_results_all_failures_error() {
         Box::pin(async { Err("gone".to_string().into()) }),
     ));
 
-    let error = resolve_candidate_results(candidates, None)
+    let error = resolve_candidate_results(candidates, None, None)
         .await
         .expect_err("all probes failed");
 
@@ -688,7 +902,7 @@ async fn candidate_results_rate_limited_probe_marks_error_kind() {
         }),
     ));
 
-    let error = resolve_candidate_results(candidates, None)
+    let error = resolve_candidate_results(candidates, None, None)
         .await
         .expect_err("the only probe failed");
 
@@ -721,7 +935,7 @@ async fn candidate_results_drops_queued_probe_futures_after_winner() {
         }),
     ));
 
-    let winner = resolve_candidate_results(candidates, None)
+    let winner = resolve_candidate_results(candidates, None, None)
         .await
         .expect("first-ranked probe wins");
 

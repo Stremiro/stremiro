@@ -14,6 +14,7 @@ pub(crate) fn hash_segment(value: &str) -> String {
 
 struct TtlEntry<V> {
     value: V,
+    inserted_at: Instant,
     expires_at: Instant,
 }
 
@@ -37,10 +38,18 @@ impl<V: Clone> TtlCache<V> {
     }
 
     pub(crate) fn get(&self, key: &str) -> Option<V> {
+        self.get_fresh(key, None)
+    }
+
+    pub(crate) fn get_fresh(&self, key: &str, not_before: Option<Instant>) -> Option<V> {
         let mut entries = lock_or_recover(&self.entries);
         let entry = entries.get(key)?;
         if entry.expires_at > Instant::now() {
-            Some(entry.value.clone())
+            if not_before.is_some_and(|not_before| entry.inserted_at < not_before) {
+                None
+            } else {
+                Some(entry.value.clone())
+            }
         } else {
             entries.remove(key);
             None
@@ -57,15 +66,18 @@ impl<V: Clone> TtlCache<V> {
         }
         // A cache below its capacity can still retain large, expired payloads.
         let now = Instant::now();
-        entries.retain(|_, entry| entry.expires_at > now);
+        Self::retain_fresh(&mut entries, now);
         let ttl = if is_empty { self.empty_ttl } else { self.ttl };
-        entries.insert(
-            key.to_string(),
-            TtlEntry {
-                value,
-                expires_at: Instant::now() + ttl,
-            },
-        );
+        let entry = TtlEntry {
+            value,
+            inserted_at: now,
+            expires_at: now + ttl,
+        };
+        if let Some(existing) = entries.get_mut(key) {
+            *existing = entry;
+        } else {
+            entries.insert(key.to_string(), entry);
+        }
         // Enforce the bound without evicting the entry just stored.
         while entries.len() > self.max_entries {
             let Some(victim) = entries
@@ -78,6 +90,14 @@ impl<V: Clone> TtlCache<V> {
             };
             entries.remove(&victim);
         }
+    }
+
+    pub(crate) fn purge_expired(&self) {
+        Self::retain_fresh(&mut lock_or_recover(&self.entries), Instant::now());
+    }
+
+    fn retain_fresh(entries: &mut HashMap<String, TtlEntry<V>>, now: Instant) {
+        entries.retain(|_, entry| entry.expires_at > now);
     }
 
     pub(crate) fn clear(&self) {
@@ -134,6 +154,7 @@ impl InFlight {
 /// Min gap between liveness probes on a marked host — bounds an outage to
 /// ~one transport attempt per gap, not one per caller.
 const COOLDOWN_PROBE_GAP: Duration = Duration::from_secs(10);
+const COOLDOWN_CAPACITY: usize = 64;
 
 struct CooldownMark {
     /// Fast-fail deadline for the mark.
@@ -187,7 +208,7 @@ pub(crate) struct FetchFailureCooldown {
 }
 
 impl FetchFailureCooldown {
-    /// `sweep_at` bounds map growth: expired entries drop on read; a sweep runs on insert past it.
+    /// `sweep_at` triggers expired-mark cleanup; live marks also have a hard capacity.
     pub(crate) fn new(ttl: Duration, sweep_at: usize) -> Self {
         Self {
             table: Mutex::new(CooldownTable::default()),
@@ -243,7 +264,7 @@ impl FetchFailureCooldown {
     }
 
     /// Record a retry-exhausted or timed-out fetch failure for `key` —
-    /// status/size/parse errors are content-scoped and belong to the per-key
+    /// deterministic status/size/parse errors belong to the per-key
     /// negative cache. The first probe may ride through immediately.
     pub(crate) fn note(&self, key: &str, generation: &AtomicU64, expected: u64) {
         let mut table = lock_or_recover(&self.table);
@@ -266,8 +287,21 @@ impl FetchFailureCooldown {
                 probing: false,
                 probe_id: 0,
             });
-        if table.marks.len() > self.sweep_at {
-            table.marks.retain(|_, mark| mark.until > now);
+        if table.marks.len() > self.sweep_at.min(COOLDOWN_CAPACITY) {
+            table
+                .marks
+                .retain(|_, mark| mark.probing || mark.until > now);
+        }
+        if table.marks.len() > COOLDOWN_CAPACITY {
+            let victim = table
+                .marks
+                .iter()
+                .filter(|(_, mark)| !mark.probing)
+                .min_by_key(|(_, mark)| mark.until)
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim {
+                table.marks.remove(&victim);
+            }
         }
     }
 
@@ -325,14 +359,31 @@ impl FetchFailureCooldown {
     }
 }
 
-/// `Retryable` is a transient transport error (send/connect/timeout/read)
+/// `Retryable` is a transient transport or HTTP server error
 /// earning the back-off retry and, on exhaustion, the per-addon cooldown;
-/// `Fatal` is deterministic per request (status, size cap, decode, absent
+/// `Fatal` is deterministic per request (other statuses, size cap, decode, absent
 /// meta) and lands in the short-TTL negative cache — a content-level failure
 /// must not mark the whole addon dead.
 pub(crate) enum FetchFailure {
     Retryable(String),
     Fatal(String),
+}
+
+impl FetchFailure {
+    pub(crate) fn from_send_error(error: &reqwest::Error, message: String) -> Self {
+        if error.is_redirect() || error.is_builder() {
+            Self::Fatal(message)
+        } else {
+            Self::Retryable(message)
+        }
+    }
+
+    pub(crate) fn from_http_status(status: reqwest::StatusCode, message: String) -> Self {
+        match status.as_u16() {
+            408 | 500 | 502 | 503 | 504 => Self::Retryable(message),
+            _ => Self::Fatal(message),
+        }
+    }
 }
 
 /// Shared fetch contract: cache hit → negative-cache hit → cooldown gate →
@@ -374,7 +425,25 @@ impl FetchContract<'_> {
         Fetch: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, FetchFailure>>,
     {
-        if let Some(cached) = cache.get(key) {
+        self.run_fresh(cache, key, addon_key, None, is_empty, fetch)
+            .await
+    }
+
+    pub(crate) async fn run_fresh<T, Fetch, Fut>(
+        &self,
+        cache: &TtlCache<T>,
+        key: &str,
+        addon_key: &str,
+        not_before: Option<Instant>,
+        is_empty: impl Fn(&T) -> bool,
+        fetch: Fetch,
+    ) -> Result<T, String>
+    where
+        T: Clone,
+        Fetch: Fn() -> Fut,
+        Fut: std::future::Future<Output = Result<T, FetchFailure>>,
+    {
+        if let Some(cached) = cache.get_fresh(key, not_before) {
             return Ok(cached);
         }
         if let Some(error) = self.failure_cache.get(key) {
@@ -392,7 +461,7 @@ impl FetchContract<'_> {
         let result = {
             let _fetch_permit = key_lock.lock().await;
             // Re-read the leader's result (or its recorded failure) instead of re-running the fetch.
-            let early = if let Some(cached) = cache.get(key) {
+            let early = if let Some(cached) = cache.get_fresh(key, not_before) {
                 Some(Ok(cached))
             } else if let Some(error) = self.failure_cache.get(key) {
                 Some(Err(error))
@@ -484,6 +553,60 @@ impl FetchContract<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transient_http_statuses_retry_without_changing_rate_limit_policy() {
+        for status in [408, 500, 502, 503, 504] {
+            let failure = FetchFailure::from_http_status(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                status.to_string(),
+            );
+            assert!(
+                matches!(failure, FetchFailure::Retryable(message) if message == status.to_string())
+            );
+        }
+        for status in [400, 401, 403, 404, 409, 422, 429, 501, 505] {
+            let failure = FetchFailure::from_http_status(
+                reqwest::StatusCode::from_u16(status).unwrap(),
+                status.to_string(),
+            );
+            assert!(
+                matches!(failure, FetchFailure::Fatal(message) if message == status.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn freshness_reads_skip_older_values_without_changing_ordinary_reads() {
+        let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
+        cache.put("populated", vec![1], false, || true);
+        cache.put("empty", Vec::new(), true, || true);
+        let not_before = lock_or_recover(&cache.entries)
+            .values()
+            .map(|entry| entry.inserted_at)
+            .max()
+            .unwrap()
+            + Duration::from_nanos(1);
+
+        assert_eq!(cache.get_fresh("populated", Some(not_before)), None);
+        assert_eq!(cache.get_fresh("empty", Some(not_before)), None);
+        assert_eq!(cache.get("populated"), Some(vec![1]));
+        assert_eq!(cache.get("empty"), Some(Vec::new()));
+
+        let not_before = Instant::now();
+        cache.put("populated", vec![2], false, || true);
+        cache.put("empty", Vec::new(), true, || true);
+        assert_eq!(
+            cache.get_fresh("populated", Some(not_before)),
+            Some(vec![2])
+        );
+        assert_eq!(cache.get_fresh("empty", Some(not_before)), Some(Vec::new()));
+        let inserted_at = lock_or_recover(&cache.entries)["populated"].inserted_at;
+        assert_eq!(
+            cache.get_fresh("populated", Some(inserted_at)),
+            Some(vec![2])
+        );
+    }
 
     #[test]
     fn expired_reads_and_inserts_release_payloads_below_capacity() {
@@ -692,18 +815,24 @@ mod tests {
                 |_| false,
                 || {
                     attempts.fetch_add(1, Ordering::SeqCst);
-                    async { Err(FetchFailure::Retryable("down".into())) }
+                    async {
+                        Err(FetchFailure::from_http_status(
+                            reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                            "down".into(),
+                        ))
+                    }
                 },
             )
             .await;
         assert!(outcome.is_err());
         assert_eq!(attempts.load(Ordering::SeqCst), FETCH_ATTEMPTS as u64);
+        assert_eq!(failures.get("k"), None);
         assert!(cooldown.cooling_down("addon"));
 
         // The first retryable failure marked the addon; the next call rides
         // through as the liveness probe — and its success lifts the mark.
         let recovered: Result<u32, String> = contract
-            .run(&cache, "k2", "addon", |_| false, || async { Ok(7u32) })
+            .run(&cache, "k", "addon", |_| false, || async { Ok(7u32) })
             .await;
         assert_eq!(recovered, Ok(7));
         assert!(!cooldown.cooling_down("addon"));

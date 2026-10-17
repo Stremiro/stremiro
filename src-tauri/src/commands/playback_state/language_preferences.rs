@@ -1,6 +1,6 @@
 use super::{
     insert_sorted_unique, load_advisory_index, merge_sorted_unique, playback_title_scope_key,
-    prune_index_to_cap, PlaybackStateService, PLAYBACK_STATE_STORE_FILE,
+    prune_index_to_cap, PlaybackStateService,
 };
 use crate::commands::playback_preferences_commands::sanitize_language_pref;
 use crate::commands::{DurableStore, PlaybackLanguagePreferences};
@@ -92,7 +92,7 @@ impl PlaybackStateService {
             return Ok(defaults);
         };
 
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         let snapshot = load_playback_language_preferences_snapshot(&store, &scope_key);
 
         Ok(merge_playback_language_preferences(
@@ -101,6 +101,7 @@ impl PlaybackStateService {
         ))
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_playback_language_preference_outcome(
         &self,
         app: &AppHandle,
@@ -109,13 +110,13 @@ impl PlaybackStateService {
         preferred_audio_language: Option<String>,
         preferred_subtitle_language: Option<String>,
         timestamp_ms: u64,
+        expected_generation: u64,
     ) -> Result<(), String> {
         let Some(scope_key) = playback_title_scope_key(Some(media_type), Some(media_id)) else {
             return Ok(());
         };
 
-        let start_generation = self.history_generation();
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         // `off` is only a subtitle value; the audio sanitize must match the
         // global-preferences path or a stray "off" would persist as a pref.
         let preferred_audio_language = sanitize_language_pref(preferred_audio_language, false);
@@ -123,8 +124,8 @@ impl PlaybackStateService {
 
         let _state_file_guard = self.lock_state_file_write();
         // Same resurrection hazard as `record_stream_outcome`: a history clear
-        // racing this write must not leave a stale language preference.
-        if self.history_generation() != start_generation {
+        // racing this write, even before the worker starts, must not leave a stale preference.
+        if self.history_generation() != expected_generation {
             return Ok(());
         }
         // The index load must live inside the critical section like every sibling
@@ -182,7 +183,7 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
     ) -> Result<BTreeMap<String, PlaybackLanguagePreferencesSnapshot>, String> {
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         Ok(
             load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY)
                 .into_iter()
@@ -205,7 +206,7 @@ impl PlaybackStateService {
         if entries.is_empty() {
             return Ok(0);
         }
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         let _state_file_guard = self.lock_state_file_write();
         let mut preferences_index =
             load_advisory_index(&store, PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY);

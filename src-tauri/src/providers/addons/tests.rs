@@ -4,6 +4,19 @@ use super::*;
 use crate::test_helpers::test_stream;
 use std::sync::atomic::Ordering;
 
+impl AddonTransport {
+    pub(crate) fn seed_stream_cache(
+        &self,
+        media_type: &str,
+        id: &str,
+        addon_url: &str,
+        streams: Vec<AddonStream>,
+    ) {
+        let key = format!("{media_type}|{id}|{}", config_cache_segment(addon_url));
+        self.cache_put(&key, streams, self.cache_generation());
+    }
+}
+
 fn episode_matches_text(text: &str, season: u32, episode: u32) -> bool {
     episode_matches_text_final(text, season, episode, false)
 }
@@ -360,6 +373,11 @@ fn bare_anime_episode_ranges_are_not_exact_or_unbounded_packs() {
         ("Show - 01-12GB", 1),
         ("Show - 01-12 GB", 1),
         ("Show - 01-12.5 GB", 1),
+        ("Show.S01E05 - 2.5 GB", 3),
+        ("Show.S01E05 - 2,5 GiB", 3),
+        ("Show.1x05 - 2.5 MiB", 3),
+        ("Show.S01 E05 - 2.5 MB", 3),
+        ("Show.S01E05 - 1080p", 3),
     ] {
         let stream = named_stream(name);
         assert_eq!(
@@ -381,6 +399,8 @@ fn bare_anime_episode_ranges_are_not_exact_or_unbounded_packs() {
 fn stream_episode_range_endpoints_are_not_standalone_exact_tokens() {
     for name in [
         "Show.S01E03-E07.1080p",
+        "Show.S01E03-07.1080p",
+        "Show.S01 E03-E07.1080p",
         "Show.1x03-1x07.1080p",
         "Show.Season.1.Episode.03-07.1080p",
     ] {
@@ -502,11 +522,18 @@ fn episode_claim_gate_rejects_conflicting_numeric_claims() {
         ("Show.S01E05.1080p", false),
         ("Show.S02E05.1080p", true),
         ("Show.S01E06.1080p", true),
+        ("Show.S01E07 - 2.5 GB", true),
+        ("Show.1x07 - 2,5 GiB", true),
+        ("Show.S01 E07 - 2.5 MiB", true),
         ("Show.S01.E05.1080p", false),
         ("Show_S01_E06.1080p", true),
         ("Show.1x05.1080p", false),
         ("Show.2x05.1080p", true),
         ("Show.Episode.6.1080p", true),
+        ("Show - 005.1080p", false),
+        ("Show - 006.1080p", true),
+        ("Show #5.1080p", false),
+        ("Show #6.1080p", true),
         ("Show.1080p.Release", false),
         ("Show.S01.COMPLETE.1080p", false),
         ("Show.S02.COMPLETE.1080p", true),
@@ -580,6 +607,13 @@ fn episode_claim_gate_prioritizes_filename_over_name_and_title() {
         ..Default::default()
     });
     assert!(!stream_conflicts(&right_filename, &[(1, 5)]));
+    let mut absolute_filename = named_stream("Show.S01.Complete");
+    absolute_filename.behavior_hints = Some(BehaviorHints {
+        filename: Some("Show - 05.mkv".to_string()),
+        ..Default::default()
+    });
+    assert!(!stream_conflicts(&absolute_filename, &[(1, 5)]));
+    assert!(stream_conflicts(&absolute_filename, &[(1, 6)]));
 }
 
 #[test]
@@ -687,18 +721,56 @@ fn hydration_parses_grouped_seeders_without_truncating_decimals() {
 
 #[test]
 fn hydration_parses_emoji_binary_sizes_in_every_supported_unit() {
-    for (text, expected) in [
-        ("💾21GiB", 21 * 1024_u64.pow(3)),
-        ("💾1.5TiB", 3 * 1024_u64.pow(4) / 2),
-        ("💾10KiB", 10 * 1024),
-        ("💾2MiB", 2 * 1024_u64.pow(2)),
-        ("💾21gib", 21 * 1024_u64.pow(3)),
-        ("💾2GB", 2 * 1024_u64.pow(3)),
-        ("21 gib", 21 * 1024_u64.pow(3)),
+    for (text, video_size, expected) in [
+        ("💾21GiB", None, Some(21 * 1024_u64.pow(3))),
+        ("💾1.5TiB", None, Some(3 * 1024_u64.pow(4) / 2)),
+        ("💾10KiB", None, Some(10 * 1024)),
+        ("💾2MiB", None, Some(2 * 1024_u64.pow(2))),
+        ("💾21gib", None, Some(21 * 1024_u64.pow(3))),
+        ("💾2GB", None, Some(2 * 1024_u64.pow(3))),
+        ("21 gib", None, Some(21 * 1024_u64.pow(3))),
+        ("💾 60,0 GB 👤100", None, Some(60 * 1024_u64.pow(3))),
+        ("💾1,5TiB", None, Some(3 * 1024_u64.pow(4) / 2)),
+        ("1,234 MB", None, Some(1234 * 1024_u64.pow(2))),
+        ("60,0 GB", None, Some(60 * 1024_u64.pow(3))),
+        ("1,234,567 MB", None, None),
+        ("60,0,0 GB", None, None),
+        ("1.234.5 GB", None, None),
+        ("2 GB", Some(serde_json::json!(64)), Some(64)),
+        ("2 GB", Some(serde_json::json!(" 128 ")), Some(128)),
+        ("", Some(serde_json::json!(u64::MAX)), Some(u64::MAX)),
+        (
+            "2 GB",
+            Some(serde_json::json!(0)),
+            Some(2 * 1024_u64.pow(3)),
+        ),
+        (
+            "2 GB",
+            Some(serde_json::json!(-1)),
+            Some(2 * 1024_u64.pow(3)),
+        ),
+        (
+            "2 GB",
+            Some(serde_json::json!(1.5)),
+            Some(2 * 1024_u64.pow(3)),
+        ),
+        (
+            "2 GB",
+            Some(serde_json::json!("bad")),
+            Some(2 * 1024_u64.pow(3)),
+        ),
+        (
+            "2 GB",
+            Some(serde_json::json!({})),
+            Some(2 * 1024_u64.pow(3)),
+        ),
     ] {
         let mut stream = named_stream(text);
+        stream.behavior_hints = video_size.map(|size| {
+            serde_json::from_value(serde_json::json!({"videoSize": size})).expect("tolerant hints")
+        });
         AddonTransport::hydrate_stream(&mut stream);
-        assert_eq!(stream.size_bytes, Some(expected), "{text}");
+        assert_eq!(stream.size_bytes, expected, "{text}");
     }
 }
 
@@ -716,6 +788,45 @@ fn decode_stream_items_skips_malformed_siblings() {
         streams[1].url.as_deref(),
         Some("https://example.com/file.mp4")
     );
+}
+
+#[test]
+fn decode_stream_items_caps_valid_rows_in_source_order() {
+    let streams: Vec<_> = (0..=DECODED_STREAMS_MAX)
+        .flat_map(|index| {
+            [
+                serde_json::json!({"name": 42}),
+                serde_json::json!({"name": format!("stream-{index}")}),
+            ]
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({"streams": streams})).unwrap();
+    let decoded = decode_stream_items(&bytes).expect("streams");
+    assert_eq!(decoded.len(), DECODED_STREAMS_MAX);
+    for (index, stream) in decoded.iter().enumerate() {
+        assert_eq!(
+            stream.name.as_deref(),
+            Some(format!("stream-{index}").as_str())
+        );
+    }
+}
+
+#[test]
+fn decode_stream_items_keeps_missing_and_invalid_envelope_behavior() {
+    assert!(decode_stream_items(br#"{}"#).unwrap().is_empty());
+    assert!(decode_stream_items(br#"{"streams":[]}"#)
+        .unwrap()
+        .is_empty());
+    for bytes in [
+        br#"{"streams":null}"#.as_slice(),
+        br#"{"streams":{}}"#,
+        br#"{"streams":"invalid"}"#,
+    ] {
+        assert_eq!(
+            decode_stream_items(bytes).unwrap_err(),
+            "Invalid stream response format."
+        );
+    }
 }
 
 #[test]
@@ -871,6 +982,16 @@ fn stream_cache_put_enforces_hard_entry_bound_and_keeps_newest() {
         .cache
         .get(&format!("key-{}", STREAM_CACHE_MAX_ENTRIES + 4))
         .is_some());
+}
+
+#[tokio::test]
+async fn stream_request_builder_failure_does_not_cool_the_addon() {
+    let transport = AddonTransport::new();
+    let url = "ftp://addon.example/manifest.json";
+    assert!(transport.get_streams("movie", "tt1", url).await.is_err());
+    assert!(!transport
+        .fetch_failures
+        .cooling_down(&config_cache_segment(url)));
 }
 
 #[test]
@@ -1054,23 +1175,41 @@ fn decode_strips_blocked_url_but_keeps_stream_and_magnets() {
 }
 
 #[test]
-fn sanitize_redacts_mixed_case_signed_query_keys() {
-    for raw in [
-        "https://cdn.example/v.m3u8?Token=signed-secret",
-        "https://cdn.example/v.m3u8?APIKEY=signed-secret",
-        "https://cdn.example/v.m3u8?Sig=signed-secret",
-    ] {
-        let redacted = sanitize_addon_log(&format!("probe failed for url ({raw}): timeout"));
-        assert!(!redacted.contains("signed-secret"), "{redacted}");
-        assert!(redacted.contains("[redacted]"), "{redacted}");
+fn truncate_stream_item_rejects_oversized_info_hash() {
+    let mut stream = mk_stream(Some(&"a".repeat(113)), None, false);
+    truncate_stream_item(&mut stream);
+    assert!(stream.info_hash.is_none());
+}
+
+#[test]
+fn decode_rejects_oversized_stream_urls_without_aliasing() {
+    for character in ["a", "界"] {
+        let base = "https://cdn.example/video?signature=";
+        let prefix = format!("{base}{}", character.repeat(2_048 - base.len()));
+        let bytes = serde_json::to_vec(&serde_json::json!({"streams": [
+            {"url": prefix},
+            {"url": format!("{prefix}a")},
+            {"url": format!("{prefix}b")},
+            {"url": format!("{prefix}a"), "infoHash": "0123456789012345678901234567890123456789"}
+        ]}))
+        .unwrap();
+        let streams = decode_stream_items(&bytes).unwrap();
+        assert_eq!(streams.len(), 4);
+        assert_eq!(streams[0].url.as_deref(), Some(prefix.as_str()));
+        assert!(streams[1..].iter().all(|stream| stream.url.is_none()));
+        assert_eq!(
+            streams[3].info_hash.as_deref(),
+            Some("0123456789012345678901234567890123456789")
+        );
     }
 }
 
 #[test]
-fn sanitize_redacts_full_signed_hint_family() {
-    // Every signed-link query hint shape must be scrubbed: the redactor
-    // exists so credential-bearing URLs never reach logs or errors.
+fn sanitize_redacts_mixed_case_and_full_signed_query_hint_family() {
     for raw in [
+        "https://cdn.example/v.m3u8?Token=signed-secret",
+        "https://cdn.example/v.m3u8?APIKEY=signed-secret",
+        "https://cdn.example/v.m3u8?Sig=signed-secret",
         "https://cdn.example/v.m3u8?expires=1700000000&sig=signed-secret",
         "https://cdn.example/v.m3u8?exp=1700000000",
         "https://cdn.example/v.m3u8?policy=signed-secret",
@@ -1224,9 +1363,16 @@ fn release_flags_reject_lookalike_tokens() {
         "camp",
         "webcast",
         "show.ts",
-        "show.tc",
+        "video.ts",
+        "Movie.1080p.WEB-DL.ts",
+        "https://cdn.example/Movie.1080p.ts",
+        "https://cdn.example/video.ts?download=1",
+        "Movie.ts/1080p",
+        "Movie.r5:1080p",
         "hdcaster",
         "typescript",
+        "district",
+        "r500",
     ] {
         assert!(!flags_for(text).capture_release, "{text}");
     }
@@ -1242,12 +1388,23 @@ fn release_flags_keep_real_markers() {
     assert_eq!(flags.resolution, StreamResolutionTier::P2160);
     for marker in [
         "CAM", "CAMRip", "HDCAM", "HD-CAM", "TELESYNC", "HDTS", "HD-TS", "TELECINE", "HDTC",
-        "SCREENER", "DVDSCR",
+        "SCREENER", "DVDSCR", "TS", "TC", "R5",
     ] {
         assert!(
             flags_for(&format!("Show.{marker}.[1080p]")).capture_release,
             "{marker}"
         );
+    }
+    for text in [
+        "Movie.1080p.TS",
+        "show.tc",
+        "Movie.1080p-TC",
+        "Movie_1080p_r5",
+        "Movie [TS] (1080p)",
+        "Movie (tc) 1080p",
+        "Movie R5 1080p",
+    ] {
+        assert!(flags_for(text).capture_release, "{text}");
     }
 
     let flags = flags_for("Show.4K.HDR.WEB-DL");
@@ -1256,9 +1413,8 @@ fn release_flags_keep_real_markers() {
 }
 
 // ── wire contract ─────────────────────────────────────────────────────────
-// The selector keys badges, dot-field tiers, and aria strings on these exact
-// serialized values (`matchSummary.episode`/`title`); a casing drift here
-// silently drops two of three match badges and mis-sorts tier groups.
+// Match-summary wire values remain stable; the selector renders the backend-prepared
+// matchBadgeKinds, matchTier, and showPackBadge fields without reparsing this summary.
 #[test]
 fn match_summary_serializes_snake_case_tier_values() {
     for (kind, expected) in [
@@ -1286,9 +1442,74 @@ fn match_summary_serializes_snake_case_tier_values() {
     let summary = StreamMatchSummary {
         episode: Some(StreamEpisodeMatchKind::EpisodeRange),
         title: Some(StreamTitleMatch::Close),
+        pack_coverage: None,
     };
     assert_eq!(
         serde_json::to_value(summary).unwrap(),
         serde_json::json!({ "episode": "episode_range", "title": "close" })
     );
+}
+
+#[test]
+fn pack_coverage_uses_existing_season_and_episode_claims() {
+    use serde_json::json;
+    for (name, expected) in [
+        ("Show.S01.COMPLETE", json!({"seasons": [1]})),
+        ("Show.S03-S01.COMPLETE", json!({"seasons": [1, 2, 3]})),
+        (
+            "Show.S01E03-E05",
+            json!({"seasons": [1], "episodeRanges": [{"season": 1, "start": 3, "end": 5}]}),
+        ),
+        (
+            "Show.E03-E05",
+            json!({"seasons": [], "episodeRanges": [{"start": 3, "end": 5}]}),
+        ),
+        (
+            "Show.S01E03-E05.S01E08",
+            json!({"seasons": [1], "episodeRanges": [{"season": 1, "start": 3, "end": 5}, {"season": 1, "start": 8, "end": 8}]}),
+        ),
+        (
+            "Show.S01E03-E05 + - 08 #10",
+            json!({"seasons": [1], "episodeRanges": [{"season": 1, "start": 3, "end": 5}, {"start": 8, "end": 8}, {"start": 10, "end": 10}]}),
+        ),
+        (
+            "Show.1x12-2x03",
+            json!({"seasons": [1, 2], "episodeRanges": [{"season": 1, "start": 12, "end": u32::MAX}, {"season": 2, "start": 0, "end": 3}]}),
+        ),
+        ("Show.Second.Season.Batch", json!({"seasons": [2]})),
+        ("Show Batch", json!(null)),
+        ("Show.S01E03", json!(null)),
+        ("Show - 2020-2021 Batch", json!(null)),
+    ] {
+        assert_eq!(
+            serde_json::to_value(&named_stream(name).match_texts().pack_coverage).unwrap(),
+            expected,
+            "{name}"
+        );
+    }
+    let mut stream = named_stream("Show Batch");
+    stream.title = Some("Show.S01-S02.Complete".to_string());
+    stream.behavior_hints = Some(BehaviorHints {
+        filename: Some("Show.S01E01.mkv".to_string()),
+        ..Default::default()
+    });
+    assert_eq!(
+        serde_json::to_value(&stream.match_texts().pack_coverage).unwrap(),
+        json!({"seasons": [1, 2]})
+    );
+}
+
+#[test]
+fn stream_flags_share_badge_and_rank_vocabulary() {
+    // Match-text probes consume lowercase text for both badges and ranking.
+    assert!(detect_stream_flags("show s01e01 dual.audio 1080p").dual_audio);
+    assert!(detect_stream_flags("show s01e01 dub + sub 1080p").dual_audio);
+    assert!(detect_stream_flags("show s01e01 dubbed/subbed 1080p").dual_audio);
+    assert!(!detect_stream_flags("show s01e01 1080p").dual_audio);
+
+    assert!(detect_stream_flags("show s01e01 multiaudio 1080p").multi_audio);
+    assert!(detect_stream_flags("show s01e01 multi-lang 1080p").multi_audio);
+    assert!(detect_stream_flags("show s01e01 multi subtitle 1080p").multi_sub);
+    assert!(!detect_stream_flags("show s01e01 1080p").multi_audio);
+    assert!(!detect_stream_flags("show s01e01 1080p").multi_sub);
 }

@@ -4,6 +4,7 @@ fn track(id: i64, track_type: PlayerTrackType) -> PlayerTrack {
     PlayerTrack {
         id,
         r#type: track_type,
+        display_label: format!("Track {id}"),
         lang: None,
         title: None,
         selected: false,
@@ -60,6 +61,7 @@ fn merge_track_variants_lets_next_string_win() {
 #[test]
 fn player_track_serializes_with_frontend_field_names() {
     let sample = PlayerTrack {
+        display_label: "EN".to_string(),
         lang: Some("en".to_string()),
         selected: true,
         default_track: true,
@@ -70,6 +72,7 @@ fn player_track_serializes_with_frontend_field_names() {
     let json = serde_json::to_value(&sample).unwrap();
     assert_eq!(json["id"], 7);
     assert_eq!(json["type"], "sub");
+    assert_eq!(json["displayLabel"], "EN");
     assert_eq!(json["lang"], "en");
     assert_eq!(json["selected"], true);
     assert_eq!(json["defaultTrack"], true);

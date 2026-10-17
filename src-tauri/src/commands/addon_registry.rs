@@ -3,7 +3,7 @@ use super::config_store::{
     DEFAULT_OPENSUBTITLES_INSTALL_URL,
 };
 use super::media_normalization::{normalize_media_details, normalize_media_item};
-use super::SETTINGS_STORE_FILE;
+use super::{js_trim, SETTINGS_STORE_FILE};
 use crate::providers::addon_manifest::snapshot_is_classified;
 use crate::providers::addon_resource::{
     catalog_declares_extra, snapshot_supports_catalog, snapshot_supports_meta,
@@ -21,7 +21,6 @@ use tauri::AppHandle;
 const ADDON_RESOURCE_CONCURRENCY: usize = 4;
 const MAX_CATALOG_SOURCES: usize = 8;
 const MAX_SUBTITLE_SOURCES: usize = 8;
-const MAX_SUBTITLES_PER_ADDON: usize = 50;
 const MAX_SUBTITLES_TOTAL: usize = 200;
 /// First-capable-source hedge for meta fetches: a routine details open is
 /// answered by the highest-priority meta addon, so the rest of the registry
@@ -215,15 +214,11 @@ pub struct CatalogFetchPage {
     pub next_skip: Option<u32>,
 }
 
-/// Stable identity for a catalog card. Both segments fold to lowercase so the
-/// merge matches the frontend's `searchCatalogKey` and a case-variant id from
-/// one source cannot duplicate another's row.
+/// Stable identity shared by source merging and cross-page catalog deduplication.
 pub(crate) fn catalog_dedup_key(type_: &str, id: &str) -> String {
-    format!(
-        "{}:{}",
-        type_.trim().to_ascii_lowercase(),
-        id.trim().to_ascii_lowercase()
-    )
+    let mut key = format!("{}:{}", js_trim(type_), js_trim(id));
+    key.make_ascii_lowercase();
+    key
 }
 
 fn extra_skip_value(extras: &[CatalogExtra]) -> u32 {
@@ -240,7 +235,7 @@ fn extra_skip_value(extras: &[CatalogExtra]) -> u32 {
 /// with `hasMore: false` while deeper `skip` pages still hold titles, and
 /// `hasMore: true` is set on later pages of the same catalog. The only
 /// reliable end signal is an empty page, so any non-empty page offers the
-/// next cursor. The frontend additionally stops when a page contributes zero
+/// next cursor. Search paging additionally stops when a page contributes zero
 /// new titles, so a misbehaving provider cannot spin Load More forever.
 fn catalog_page_next_skip(skip: u32, item_count: usize) -> Option<u32> {
     if item_count > 0 {
@@ -288,7 +283,7 @@ pub(crate) fn merge_catalog_pages(
         }
     }
 
-    if !had_success {
+    if !had_success || (items.is_empty() && last_error.is_some()) {
         return Err(last_error.unwrap_or_else(|| empty_error.to_string()));
     }
 
@@ -577,21 +572,18 @@ pub async fn search_catalog_pages_for_genres(
         .map(|((bucket, error), paging)| match error {
             Some(error) => Err(error),
             None => merge_search_catalog_pages(
-                bucket
-                    .into_iter()
-                    .map(|(order, result)| {
-                        result.map(|page| {
-                            if paging[order] {
-                                catalog_fetch_page_from_source(page, skip)
-                            } else {
-                                CatalogFetchPage {
-                                    items: page.items,
-                                    next_skip: None,
-                                }
+                bucket.into_iter().map(|(order, result)| {
+                    result.map(|page| {
+                        if paging[order] {
+                            catalog_fetch_page_from_source(page, skip)
+                        } else {
+                            CatalogFetchPage {
+                                items: page.items,
+                                next_skip: None,
                             }
-                        })
+                        }
                     })
-                    .collect(),
+                }),
                 skip,
             ),
         })
@@ -619,10 +611,11 @@ fn catalog_search_extras(query: &str, genre: Option<&str>, skip: u32) -> Vec<Cat
 }
 
 fn merge_search_catalog_pages(
-    pages: Vec<Result<CatalogFetchPage, String>>,
+    pages: impl IntoIterator<Item = Result<CatalogFetchPage, String>>,
     skip: u32,
 ) -> Result<CatalogFetchPage, String> {
-    if pages.is_empty() && skip > 0 {
+    let mut pages = pages.into_iter().peekable();
+    if pages.peek().is_none() && skip > 0 {
         return Ok(CatalogFetchPage {
             items: Vec::new(),
             next_skip: None,
@@ -777,6 +770,7 @@ pub struct SourcedAddonSubtitle {
     pub lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    pub mpv_title: String,
     pub source_id: String,
     pub source_name: String,
 }
@@ -788,21 +782,26 @@ pub async fn fetch_addon_subtitles(
     app: &AppHandle,
     client: &AddonResourceClient,
     type_: &str,
-    id: &str,
+    query_ids: &[String],
 ) -> Result<Vec<SourcedAddonSubtitle>, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
     let requests: Vec<_> = snapshot
         .iter()
-        .filter(|addon| addon_allows_subtitles(addon, type_, id))
+        .filter(|addon| {
+            query_ids
+                .iter()
+                .any(|id| addon_allows_subtitles(addon, type_, id))
+        })
         .take(MAX_SUBTITLE_SOURCES)
         .enumerate()
         .map(|(index, addon)| async move {
-            let result = client.fetch_subtitles(&addon.url, type_, id).await;
+            let result = fetch_subtitles_for_addon(client, type_, query_ids, addon).await;
             (index, addon, result)
         })
         .collect();
 
     if requests.is_empty() {
+        let id = query_ids.first().map(String::as_str).unwrap_or_default();
         return Err(format!(
             "No enabled addon declares subtitle support for {type_}/{id}. Ensure OpenSubtitles ({DEFAULT_OPENSUBTITLES_INSTALL_URL}) or another subtitle addon is enabled in Settings → Streaming."
         ));
@@ -825,7 +824,7 @@ pub async fn fetch_addon_subtitles(
         match result {
             Ok(items) => {
                 had_success = true;
-                for item in items.into_iter().take(MAX_SUBTITLES_PER_ADDON) {
+                for item in items {
                     add_subtitle_if_unique(&mut subtitles, &mut seen, addon, item);
                     if subtitles.len() >= MAX_SUBTITLES_TOTAL {
                         break;
@@ -846,26 +845,57 @@ pub async fn fetch_addon_subtitles(
     Ok(subtitles)
 }
 
+async fn fetch_subtitles_for_addon(
+    client: &AddonResourceClient,
+    type_: &str,
+    query_ids: &[String],
+    addon: &AddonConfig,
+) -> Result<Vec<AddonSubtitle>, String> {
+    let mut had_success = false;
+    let mut last_error = None;
+    for id in query_ids
+        .iter()
+        .filter(|id| addon_allows_subtitles(addon, type_, id))
+    {
+        match client.fetch_subtitles(&addon.url, type_, id).await {
+            Ok(items) => {
+                had_success = true;
+                if !items.is_empty() {
+                    return Ok(items);
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if !had_success {
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+    }
+    Ok(Vec::new())
+}
+
 fn add_subtitle_if_unique(
     subtitles: &mut Vec<SourcedAddonSubtitle>,
     seen: &mut HashSet<String>,
     addon: &AddonConfig,
     item: AddonSubtitle,
 ) {
-    let lang = item
-        .lang
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(str::to_lowercase)
-        .unwrap_or_default();
-    let selection_key = serde_json::to_string(&(&addon.id, &item.id, &item.url, lang))
+    let (id, url, lang) = item.dedup_identity();
+    let selection_key = serde_json::to_string(&(&addon.id, id, url, lang))
         .expect("subtitle identity contains only strings");
     if !seen.insert(selection_key.clone()) {
         return;
     }
 
     subtitles.push(SourcedAddonSubtitle {
+        mpv_title: item
+            .label
+            .as_deref()
+            .map(js_trim)
+            .filter(|label| !label.is_empty())
+            .unwrap_or(&item.id)
+            .to_string(),
         id: item.id,
         selection_key,
         url: item.url,

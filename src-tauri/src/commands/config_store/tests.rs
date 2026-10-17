@@ -5,6 +5,7 @@ use super::{
     ProfilePreferences, ProfileViewMode, StreamSelectorBatch, StreamSelectorPreferences,
     StreamSelectorQuality, StreamSelectorSort, StreamSelectorSource,
 };
+use std::collections::BTreeMap;
 
 #[test]
 fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
@@ -48,7 +49,7 @@ fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
 }
 
 #[test]
-fn profile_avatar_patch_distinguishes_omission_clear_and_replacement() {
+fn profile_patches_ignore_legacy_avatar_fields() {
     let patch = |value| serde_json::from_value::<super::ProfilePreferencesPatch>(value).unwrap();
     let current = ProfilePreferences {
         profile: LocalProfile {
@@ -57,26 +58,17 @@ fn profile_avatar_patch_distinguishes_omission_clear_and_replacement() {
         },
         ..ProfilePreferences::default()
     };
-    for (edit, expected) in [
-        (
-            serde_json::json!({"viewMode":"list"}),
-            current.profile.avatar.as_deref(),
-        ),
-        (serde_json::json!({"avatar":null}), None),
-        (
-            serde_json::json!({"avatar":"data:image/webp;base64,BBBB"}),
-            Some("data:image/webp;base64,BBBB"),
-        ),
-        (
-            serde_json::json!({"avatar":"https://example.com/avatar.png"}),
-            None,
-        ),
+    for edit in [
+        serde_json::json!({"viewMode":"list"}),
+        serde_json::json!({"avatar":null}),
+        serde_json::json!({"avatar":"data:image/webp;base64,BBBB"}),
+        serde_json::json!({"avatar":"https://example.com/avatar.png"}),
+        serde_json::json!({"avatar":false}),
     ] {
         let saved = super::apply_profile_preferences_patch(current.clone(), patch(edit));
-        assert_eq!(saved.profile.avatar.as_deref(), expected);
+        assert_eq!(saved.profile.avatar, current.profile.avatar);
     }
     for invalid in [
-        serde_json::json!({"avatar":false}),
         serde_json::json!({"accentIntensity":256}),
         serde_json::json!({"accentTargets":{"actions":"false"}}),
     ] {
@@ -103,11 +95,26 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     assert_eq!(value["id"], "a1");
     assert_eq!(value["enabled"], true);
     assert_eq!(value["pinned"], false);
+    assert!(value.get("url").is_none());
     assert!(value.get("capabilities").is_none());
     let display = value["displayUrl"].as_str().expect("displayUrl present");
     assert!(!display.contains("sekrit") && !display.contains("user:pass"));
     assert_eq!(display, "•••@addon.example/•••/config?token=•••");
 
+    for (url, expected) in [
+        (
+            "https://addon.example/manifest.json?credential=demo-secret&mode=fast",
+            "addon.example/manifest.json?credential=•••&mode=•••",
+        ),
+        (
+            "https://addon.example/%7B%22credential%22%3A%22demo-secret%22%7D/manifest.json",
+            "addon.example/•••/manifest.json",
+        ),
+    ] {
+        let mut config = crate::test_helpers::cinemeta_addon();
+        config.url = url.to_string();
+        assert_eq!(AddonConfigView::from_config(config).display_url, expected);
+    }
     let cinemeta_url = normalize_addon_url(super::DEFAULT_CINEMETA_INSTALL_URL)
         .expect("valid default")
         .expect("non-empty default");
@@ -295,6 +302,106 @@ fn sanitize_stream_selector_preferences_canonicalizes_addon_token() {
 }
 
 #[test]
+fn selector_patch_initializes_media_defaults_before_applying_fields() {
+    for (episode_context, expected_batch) in [
+        (false, StreamSelectorBatch::All),
+        (true, StreamSelectorBatch::Episodes),
+    ] {
+        let saved = super::apply_stream_selector_preferences_patch(
+            StreamSelectorPreferences::default(),
+            false,
+            super::StreamSelectorPreferencesPatch {
+                episode_context,
+                quality: Some(StreamSelectorQuality::P1080),
+                ..Default::default()
+            },
+        );
+        assert_eq!(saved.quality, StreamSelectorQuality::P1080);
+        assert_eq!(saved.batch, expected_batch);
+        assert_eq!(saved.source, StreamSelectorSource::All);
+        assert_eq!(saved.addon, "all");
+        assert_eq!(saved.sort, StreamSelectorSort::Smart);
+    }
+    let saved = super::apply_stream_selector_preferences_patch(
+        StreamSelectorPreferences::default(),
+        false,
+        serde_json::from_value(serde_json::json!({
+            "episodeContext": true, "batch": "packs"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(saved.batch, StreamSelectorBatch::Packs);
+}
+
+#[test]
+fn selector_patches_merge_into_the_current_snapshot_and_sanitize() {
+    let current = StreamSelectorPreferences {
+        quality: StreamSelectorQuality::P2160,
+        source: StreamSelectorSource::Cached,
+        addon: "saved-addon".into(),
+        sort: StreamSelectorSort::Seeds,
+        batch: StreamSelectorBatch::Episodes,
+    };
+    let saved = super::apply_stream_selector_preferences_patch(
+        current.clone(),
+        true,
+        serde_json::from_value(serde_json::json!({
+            "episodeContext": true, "quality": "720p"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        saved,
+        StreamSelectorPreferences {
+            quality: StreamSelectorQuality::P720,
+            ..current
+        }
+    );
+    let next = super::apply_stream_selector_preferences_patch(
+        saved.clone(),
+        true,
+        serde_json::from_value(serde_json::json!({
+            "episodeContext": false, "source": "all", "addon": " ALL ", "sort": "quality"
+        }))
+        .unwrap(),
+    );
+    assert_eq!(
+        next,
+        StreamSelectorPreferences {
+            source: StreamSelectorSource::All,
+            addon: "all".into(),
+            sort: StreamSelectorSort::Quality,
+            ..saved
+        }
+    );
+}
+
+#[test]
+fn selector_patch_never_reinitializes_a_stored_batch() {
+    for batch in [
+        StreamSelectorBatch::All,
+        StreamSelectorBatch::Episodes,
+        StreamSelectorBatch::Packs,
+    ] {
+        for episode_context in [false, true] {
+            let current = StreamSelectorPreferences {
+                batch,
+                ..Default::default()
+            };
+            let saved = super::apply_stream_selector_preferences_patch(
+                current.clone(),
+                true,
+                super::StreamSelectorPreferencesPatch {
+                    episode_context,
+                    ..Default::default()
+                },
+            );
+            assert_eq!(saved, current);
+        }
+    }
+}
+
+#[test]
 fn sanitize_app_ui_preferences_clamps_runtime_values() {
     let preferences = sanitize_app_ui_preferences(AppUiPreferences {
         auto_play_next: false,
@@ -452,6 +559,23 @@ fn shell_preferences_parse_and_patch_without_resetting_siblings() {
 
 #[test]
 fn player_keybindings_keep_known_actions_and_first_claim_per_key() {
+    for (key, normalized) in [(" ", " "), ("K", "k"), ("ArrowRight", "arrowright")] {
+        assert_eq!(
+            super::normalize_player_binding_key(key),
+            Ok(normalized.to_string())
+        );
+    }
+    assert_eq!(
+        super::normalize_player_binding_key("5"),
+        Err("Number keys are reserved for seeking to a percentage.".to_string())
+    );
+    for key in ["", "Escape", "Tab", "   ", "\u{7}", "abcdefghijklmnopq"] {
+        assert_eq!(
+            super::normalize_player_binding_key(key),
+            Err("This key can’t be assigned.".to_string())
+        );
+    }
+
     let parsed = super::parse_app_ui_preferences(serde_json::json!({
         "closeToTray": true,
         "playerKeybindings": {
@@ -486,6 +610,135 @@ fn player_keybindings_keep_known_actions_and_first_claim_per_key() {
     .unwrap();
     assert!(malformed.player_keybindings.is_empty());
     assert!(malformed.close_to_tray);
+}
+
+#[test]
+fn player_keybindings_resolution_claims_overrides_before_defaults() {
+    let preferences = super::parse_app_ui_preferences(serde_json::json!({
+        "playerKeybindings": {
+            "toggleMute": ["k", "arrowleft"],
+            "shortcuts": ["i"]
+        }
+    }))
+    .unwrap();
+    let view = super::AppUiPreferencesView::from_preferences(preferences);
+    let effective = &view.effective_player_keybindings;
+    assert_eq!(effective["toggleMute"], vec!["k", "arrowleft"]);
+    assert_eq!(effective["togglePlay"], vec![" "]);
+    assert_eq!(effective["seekBackward"], vec!["j"]);
+    assert_eq!(effective["shortcuts"], vec!["i"]);
+    assert!(effective["dock"].is_empty());
+    assert_eq!(
+        view.default_player_keybindings["togglePlay"],
+        vec![" ", "k"]
+    );
+    assert_eq!(view.default_player_keybindings["dock"], vec!["i"]);
+
+    let conflicting = BTreeMap::from([
+        ("togglePlay".to_string(), vec!["p".to_string()]),
+        (
+            "toggleMute".to_string(),
+            vec!["p".to_string(), "m".to_string()],
+        ),
+    ]);
+    let effective = super::resolve_player_keybindings(&conflicting);
+    assert_eq!(effective["togglePlay"], vec!["p"]);
+    assert_eq!(effective["toggleMute"], vec!["m"]);
+}
+
+#[test]
+fn player_keybindings_bind_moves_keys_and_keeps_first_duplicate() {
+    let overrides = BTreeMap::from([(
+        "toggleMute".to_string(),
+        vec!["p".to_string(), "m".to_string()],
+    )]);
+    let moved = super::bind_player_key(overrides, "togglePlay", 1, Some("P")).unwrap();
+    assert_eq!(moved["togglePlay"], vec![" ", "p"]);
+    assert_eq!(moved["toggleMute"], vec!["m"]);
+    let deduped = super::bind_player_key(moved, "togglePlay", 0, Some("p")).unwrap();
+    assert_eq!(deduped["togglePlay"], vec!["p"]);
+    let effective = super::resolve_player_keybindings(&deduped);
+    assert_eq!(effective["togglePlay"], vec!["p"]);
+    assert_eq!(effective["toggleMute"], vec!["m"]);
+}
+
+#[test]
+fn player_keybindings_bind_clears_slots_and_removes_default_overrides() {
+    let cleared = super::bind_player_key(BTreeMap::new(), "togglePlay", 0, None).unwrap();
+    assert_eq!(cleared["togglePlay"], vec!["k"]);
+    let unbound = super::bind_player_key(cleared, "togglePlay", 0, None).unwrap();
+    assert!(unbound["togglePlay"].is_empty());
+    let first = super::bind_player_key(unbound, "togglePlay", 0, Some(" ")).unwrap();
+    let reset = super::bind_player_key(first, "togglePlay", 1, Some("K")).unwrap();
+    assert!(reset.is_empty());
+    assert_eq!(
+        super::bind_player_key(BTreeMap::new(), "unknown", 0, Some("p")).unwrap_err(),
+        "Unknown player action."
+    );
+    assert_eq!(
+        super::bind_player_key(BTreeMap::new(), "togglePlay", 0, Some("5")).unwrap_err(),
+        "Number keys are reserved for seeking to a percentage."
+    );
+}
+
+#[test]
+fn player_keybindings_resolution_keeps_empty_overrides_until_reset() {
+    let preferences = super::parse_app_ui_preferences(serde_json::json!({
+        "playerKeybindings": { "togglePlay": [], "toggleMute": ["k"] }
+    }))
+    .unwrap();
+    let view = super::AppUiPreferencesView::from_preferences(preferences);
+    assert!(view.effective_player_keybindings["togglePlay"].is_empty());
+    assert_eq!(view.effective_player_keybindings["toggleMute"], vec!["k"]);
+
+    let per_action_reset = serde_json::from_value(serde_json::json!({
+        "playerKeybindings": { "toggleMute": ["k"] }
+    }))
+    .unwrap();
+    let preferences = super::apply_app_ui_preferences_patch(view.preferences, per_action_reset);
+    let view = super::AppUiPreferencesView::from_preferences(preferences);
+    assert_eq!(view.effective_player_keybindings["togglePlay"], vec![" "]);
+    assert_eq!(view.effective_player_keybindings["toggleMute"], vec!["k"]);
+
+    let reset = serde_json::from_value(serde_json::json!({ "playerKeybindings": {} })).unwrap();
+    let preferences = super::apply_app_ui_preferences_patch(view.preferences, reset);
+    let view = super::AppUiPreferencesView::from_preferences(preferences);
+    assert_eq!(
+        view.effective_player_keybindings,
+        view.default_player_keybindings
+    );
+    assert_eq!(view.effective_player_keybindings.len(), 22);
+}
+
+#[test]
+fn player_keybindings_resolution_fields_are_response_only() {
+    let preferences = AppUiPreferences::default();
+    let stored = serde_json::to_value(&preferences).unwrap();
+    assert!(stored.get("effectivePlayerKeybindings").is_none());
+    assert!(stored.get("defaultPlayerKeybindings").is_none());
+
+    let patch = serde_json::from_value(serde_json::json!({
+        "effectivePlayerKeybindings": { "togglePlay": ["p"] },
+        "defaultPlayerKeybindings": { "togglePlay": ["p"] }
+    }))
+    .unwrap();
+    let preferences = super::apply_app_ui_preferences_patch(preferences, patch);
+    let view = super::AppUiPreferencesView::from_preferences(preferences);
+    assert_eq!(
+        view.effective_player_keybindings,
+        view.default_player_keybindings
+    );
+    let response = serde_json::to_value(view).unwrap();
+    assert_eq!(response["playerVolume"], 75);
+    assert_eq!(
+        response["effectivePlayerKeybindings"]["togglePlay"],
+        serde_json::json!([" ", "k"])
+    );
+    assert_eq!(
+        response["defaultPlayerKeybindings"]["toggleMute"],
+        serde_json::json!(["m"])
+    );
+    assert!(response.get("preferences").is_none());
 }
 
 #[test]
@@ -589,5 +842,51 @@ fn start_minimized_requires_login_or_a_tray_preference() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn resolve_addon_configs_drops_unclassified_stored_snapshots() {
+    use crate::test_helpers::{cinemeta_addon, cinemeta_manifest};
+    let mut nameless = cinemeta_manifest();
+    nameless.name = " \t".into();
+    let display_only = crate::providers::addon_manifest::AddonManifest {
+        name: "Cinemeta".into(),
+        resources: Vec::new(),
+        catalogs: Vec::new(),
+    };
+    for snapshot in [nameless, display_only] {
+        let resolved = super::resolve_addon_configs(Some(vec![AddonConfig {
+            capabilities: Some(snapshot),
+            ..cinemeta_addon()
+        }]));
+        assert_eq!(resolved.len(), 2);
+        assert!(resolved[0].capabilities.is_none());
+    }
+}
+
+#[test]
+fn selector_addon_ids_are_preserved_without_truncation_or_aliasing() {
+    let long_url_id = format!("https://addon.example/{}/manifest.json", "a".repeat(200));
+    let max_id = "界".repeat(super::STREAM_SELECTOR_ADDON_MAX_CHARS);
+    for (addon, expected) in [
+        (long_url_id.clone(), long_url_id.clone()),
+        (format!("  {long_url_id}  "), long_url_id),
+        (max_id.clone(), max_id.clone()),
+        (format!("{max_id}a"), "all".to_string()),
+        (format!("{max_id}b"), "all".to_string()),
+    ] {
+        let sanitized = sanitize_stream_selector_preferences(StreamSelectorPreferences {
+            addon: addon.clone(),
+            ..Default::default()
+        });
+        assert_eq!(sanitized.addon, expected);
+        let stored = super::parse_stream_selector_preferences(serde_json::json!({
+            "addon": addon,
+            "quality": "1080p",
+        }))
+        .unwrap();
+        assert_eq!(stored.addon, expected);
+        assert_eq!(stored.quality, StreamSelectorQuality::P1080);
     }
 }

@@ -73,15 +73,16 @@ fn parse_numeric_part(part: &str) -> Option<u32> {
 
 /// `inet_aton`-style numeric IPv4 (`a`, `a.b`, `a.b.c`, `a.b.c.d`); `None` on out-of-range/malformed.
 fn parse_numeric_ipv4(host: &str) -> Option<std::net::Ipv4Addr> {
-    let parts: Vec<&str> = host.split('.').collect();
-    if parts.is_empty() || parts.len() > 4 {
-        return None;
+    let mut values = [0_u32; 4];
+    let mut count = 0;
+    for part in host.split('.') {
+        if count == values.len() {
+            return None;
+        }
+        values[count] = parse_numeric_part(part)?;
+        count += 1;
     }
-    let mut values = Vec::with_capacity(parts.len());
-    for part in &parts {
-        values.push(parse_numeric_part(part)?);
-    }
-    let addr: u32 = match values.as_slice() {
+    let addr: u32 = match &values[..count] {
         [a] => *a,
         [a, b] if *a <= 0xFF && *b <= 0xFF_FFFF => (a << 24) | b,
         [a, b, c] if *a <= 0xFF && *b <= 0xFF && *c <= 0xFFFF => (a << 24) | (b << 16) | c,

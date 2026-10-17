@@ -3,6 +3,10 @@
 //! `loadfile` of arbitrary targets, `screenshot-to-file` writes) and unconstrained
 //! init options. These commands expose only the verbs/properties the player UI uses.
 
+use super::config_store::{
+    normalize_subtitle_delay, normalize_subtitle_pos, normalize_subtitle_scale, PLAYER_SPEED_MAX,
+    PLAYER_SPEED_MIN, PLAYER_VOLUME_MAX,
+};
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
 use serde::Serialize;
@@ -22,7 +26,7 @@ const MPV_COMMANDS: &[&str] = &[
     "sub-add",
 ];
 
-/// Properties writable via `set_property` or the `set`/`cycle` verbs.
+/// Properties writable via `set_property` or the `set` verb.
 const MPV_SETTABLE_PROPERTIES: &[&str] = &[
     "aid",
     "sid",
@@ -37,6 +41,10 @@ const MPV_SETTABLE_PROPERTIES: &[&str] = &[
     "sub-visibility",
     "http-header-fields",
 ];
+
+/// Properties the `cycle` verb may toggle; it carries no value, so numeric
+/// bounds cannot be enforced for anything else.
+const MPV_CYCLE_PROPERTIES: &[&str] = &["aid", "pause", "sub"];
 
 /// Properties readable via `get_property`.
 const MPV_READABLE_PROPERTIES: &[&str] = &[
@@ -212,6 +220,21 @@ fn is_scalar_arg(value: &Value) -> bool {
 }
 
 fn is_mpv_property_value(name: &str, value: &Value) -> bool {
+    if matches!(name, "volume" | "speed") {
+        let number = match value {
+            Value::Number(number) => number.as_f64(),
+            Value::String(text) if text.len() <= MPV_ARG_MAX_CHARS => text.parse::<f64>().ok(),
+            _ => None,
+        };
+        return number.is_some_and(|number| {
+            number.is_finite()
+                && if name == "volume" {
+                    (0.0..=f64::from(PLAYER_VOLUME_MAX)).contains(&number)
+                } else {
+                    (PLAYER_SPEED_MIN..=PLAYER_SPEED_MAX).contains(&number)
+                }
+        });
+    }
     if name == "http-header-fields" {
         // mpv escaping can double the bounded addon header blob's byte length.
         return value.as_str().is_some_and(|text| {
@@ -220,10 +243,6 @@ fn is_mpv_property_value(name: &str, value: &Value) -> bool {
         });
     }
     is_scalar_arg(value)
-}
-
-fn is_http_url(value: Option<&str>) -> bool {
-    value.is_some_and(|url| url.starts_with("https://") || url.starts_with("http://"))
 }
 
 fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
@@ -248,13 +267,28 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
     // Verbs whose first argument is a load target or property name need the
     // tighter checks; the rest take bounded scalars only.
     match name {
-        "loadfile" if !is_http_url(first) => Err(format!("mpv '{name}' requires an http(s) url")),
+        "loadfile"
+            if !matches!(args.len(), 1 | 2)
+                || args
+                    .get(1)
+                    .is_some_and(|mode| mode.as_str() != Some("replace"))
+                || !first
+                    .and_then(|url| reqwest::Url::parse(url).ok())
+                    .is_some_and(|url| {
+                        matches!(url.scheme(), "http" | "https") && url.has_host()
+                    }) =>
+        {
+            Err("mpv 'loadfile' requires an http(s) URL and optional 'replace' mode".to_string())
+        }
         "sub-add"
             if !first.is_some_and(crate::providers::addon_resource::is_fetchable_http_url) =>
         {
             Err("mpv 'sub-add' requires a subtitle URL allowed by fetch policy".to_string())
         }
-        "set" | "cycle" if !first.is_some_and(|p| MPV_SETTABLE_PROPERTIES.contains(&p)) => {
+        "set" if !first.is_some_and(|p| MPV_SETTABLE_PROPERTIES.contains(&p)) => {
+            Err(format!("mpv '{name}' property is not allowed"))
+        }
+        "cycle" if !first.is_some_and(|p| MPV_CYCLE_PROPERTIES.contains(&p)) => {
             Err(format!("mpv '{name}' property is not allowed"))
         }
         _ => Ok(()),
@@ -266,11 +300,14 @@ pub async fn player_mpv_command(
     app: AppHandle,
     window: Window,
     name: String,
-    args: Vec<Value>,
+    mut args: Vec<Value>,
 ) -> Result<(), String> {
     validate_mpv_command(&name, &args)?;
-    if name == "set" && args.len() < 2 {
-        return Err("mpv 'set' requires a property and value".to_string());
+    if name == "set" {
+        let [property, value, ..] = args.as_mut_slice() else {
+            return Err("mpv 'set' requires a property and value".to_string());
+        };
+        normalize_mpv_subtitle_property(property.as_str().unwrap_or_default(), value);
     }
     run_mpv_op("command", move || {
         app.mpv()
@@ -280,14 +317,45 @@ pub async fn player_mpv_command(
     .await
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MpvSetError {
+    message: String,
+    subtitle_properties: Vec<(String, Value)>,
+}
+
 #[command]
 pub async fn player_mpv_set_property(
     app: AppHandle,
     window: Window,
     name: String,
     value: Value,
-) -> Result<(), String> {
+) -> Result<Vec<(String, Value)>, MpvSetError> {
     player_mpv_set_properties(app, window, vec![(name, value)]).await
+}
+
+fn normalize_mpv_subtitle_property(name: &str, value: &mut Value) -> bool {
+    let normalize = match name {
+        "sub-delay" => normalize_subtitle_delay,
+        "sub-pos" => normalize_subtitle_pos,
+        "sub-scale" => normalize_subtitle_scale,
+        _ => return false,
+    };
+    let number = value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|text| text.parse().ok()));
+    *value = Value::from(normalize(number));
+    true
+}
+
+fn normalize_mpv_subtitle_properties(properties: &mut [(String, Value)]) -> Vec<(String, Value)> {
+    let mut normalized = Vec::new();
+    for (name, value) in properties {
+        if normalize_mpv_subtitle_property(name, value) {
+            normalized.push((name.clone(), value.clone()));
+        }
+    }
+    normalized
 }
 
 fn validate_mpv_properties(properties: &[(String, Value)]) -> Result<(), String> {
@@ -326,10 +394,14 @@ fn apply_mpv_properties(
 pub async fn player_mpv_set_properties(
     app: AppHandle,
     window: Window,
-    properties: Vec<(String, Value)>,
-) -> Result<(), String> {
-    validate_mpv_properties(&properties)?;
-    run_mpv_op("set", move || {
+    mut properties: Vec<(String, Value)>,
+) -> Result<Vec<(String, Value)>, MpvSetError> {
+    validate_mpv_properties(&properties).map_err(|message| MpvSetError {
+        message,
+        subtitle_properties: Vec::new(),
+    })?;
+    let subtitle_properties = normalize_mpv_subtitle_properties(&mut properties);
+    let result = run_mpv_op("set", move || {
         apply_mpv_properties(&properties, |name, value| {
             app.mpv()
                 .set_property(name, value, window.label())
@@ -349,7 +421,14 @@ pub async fn player_mpv_set_properties(
                 .map_err(|error| format!("mpv set '{name}' failed: {error}"))
         })
     })
-    .await
+    .await;
+    match result {
+        Ok(()) => Ok(subtitle_properties),
+        Err(message) => Err(MpvSetError {
+            message,
+            subtitle_properties,
+        }),
+    }
 }
 
 #[command]
@@ -438,3 +517,28 @@ pub async fn player_mpv_init(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[test]
+fn numeric_property_ranges_apply_to_batches_and_set_commands() {
+    for (name, valid, invalid) in [
+        ("volume", [0.0, 75.5, 100.0], [-0.01, 100.01]),
+        ("speed", [0.25, 1.0, 4.0], [0.24, 4.01]),
+    ] {
+        for number in valid {
+            for value in [Value::from(number), Value::String(number.to_string())] {
+                assert!(validate_mpv_properties(&[(name.to_string(), value.clone())]).is_ok());
+                assert!(validate_mpv_command("set", &[Value::from(name), value]).is_ok());
+            }
+        }
+        let invalid_values = invalid
+            .into_iter()
+            .flat_map(|number| [Value::from(number), Value::String(number.to_string())])
+            .chain(["NaN", "inf", "-inf", "1e999", "yes", ""].map(Value::from))
+            .chain([Value::Bool(true), Value::Null]);
+        for value in invalid_values {
+            assert!(validate_mpv_properties(&[(name.to_string(), value.clone())]).is_err());
+            assert!(validate_mpv_command("set", &[Value::from(name), value]).is_err());
+        }
+    }
+}

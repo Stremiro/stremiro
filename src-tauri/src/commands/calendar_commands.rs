@@ -1,12 +1,102 @@
+use super::config_store::addon_configs_generation;
 use super::media_commands::{fetch_media_schedules, MediaSchedule, MediaScheduleRequest};
 use super::media_normalization::days_in_month;
 use super::playback_state::PlaybackStateService;
 use super::store_helpers::{load_library_map, load_watch_statuses_map};
 use super::WatchProgress;
-use crate::providers::{addon_resource::AddonResourceClient, MediaItem};
+use crate::providers::{addon_resource::AddonResourceClient, ttl_cache::TtlCache, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::ops::Range;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
 use tauri::{command, AppHandle, State};
+
+// List members usually overlap the library; one full list of headroom keeps
+// list-only titles cached without sizing for every list at its cap.
+const CALENDAR_SCHEDULE_CACHE_MAX_ENTRIES: usize = super::library_commands::MAX_LIBRARY_ITEMS
+    + super::watch_status_commands::MAX_WATCH_STATUS_ITEMS
+    + super::list_helpers::MAX_LIST_ITEMS;
+const CALENDAR_SCHEDULE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+
+pub(crate) struct CalendarScheduleCache {
+    entries: TtlCache<Arc<MediaSchedule>>,
+    generation: AtomicU64,
+}
+
+impl Default for CalendarScheduleCache {
+    fn default() -> Self {
+        Self {
+            entries: TtlCache::new(
+                CALENDAR_SCHEDULE_CACHE_MAX_ENTRIES,
+                CALENDAR_SCHEDULE_CACHE_TTL,
+                CALENDAR_SCHEDULE_CACHE_TTL,
+            ),
+            generation: AtomicU64::new(0),
+        }
+    }
+}
+
+impl CalendarScheduleCache {
+    pub(crate) fn clear_cache(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.entries.clear();
+    }
+
+    pub(crate) fn purge_expired(&self) {
+        self.entries.purge_expired();
+    }
+
+    async fn fetch(
+        &self,
+        app: &AppHandle,
+        client: &AddonResourceClient,
+        requests: Vec<MediaScheduleRequest>,
+    ) -> Result<Vec<Arc<MediaSchedule>>, String> {
+        let generation = self.generation.load(Ordering::SeqCst);
+        // Registry generation identifies the source URLs, order and capabilities.
+        let source_generation = addon_configs_generation();
+        let mut keys = Vec::with_capacity(requests.len());
+        let mut schedules = HashMap::new();
+        let mut missing = Vec::new();
+        for mut request in requests {
+            let Some(id) = super::normalize_media_id(&request.id) else {
+                continue;
+            };
+            request.id = id;
+            request.media_type = request.media_type.trim().to_string();
+            let key = format!("{source_generation}:{}:{}", request.media_type, request.id);
+            if let Some(schedule) = self.entries.get(&key) {
+                schedules.insert(key.clone(), schedule);
+            } else {
+                missing.push(request);
+            }
+            keys.push(key);
+        }
+        if !missing.is_empty() {
+            match fetch_media_schedules(app, client, missing).await {
+                Ok(fetched) => {
+                    for schedule in fetched {
+                        let key = format!("{source_generation}:{}:{}", schedule.type_, schedule.id);
+                        let schedule = Arc::new(schedule);
+                        self.entries.put(&key, schedule.clone(), false, || {
+                            self.generation.load(Ordering::SeqCst) == generation
+                                && addon_configs_generation() == source_generation
+                        });
+                        schedules.insert(key, schedule);
+                    }
+                }
+                Err(error) if schedules.is_empty() => return Err(error),
+                Err(_) => {}
+            }
+        }
+        Ok(keys
+            .into_iter()
+            .filter_map(|key| schedules.remove(&key))
+            .collect())
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -14,7 +104,6 @@ pub struct CalendarRange {
     visible_start: String,
     visible_end: String,
     upcoming_start: String,
-    upcoming_end: String,
 }
 
 // Gregorian day ordinal, independent of UTC offsets and daylight saving.
@@ -45,25 +134,25 @@ pub(crate) fn date_ordinal(value: &str) -> Option<u32> {
 }
 
 impl CalendarRange {
-    fn validate(&self) -> Result<(), String> {
-        for (start, end, max_days) in [
-            (&self.visible_start, &self.visible_end, 42),
-            (&self.upcoming_start, &self.upcoming_end, 14),
-        ] {
-            let span = date_ordinal(start)
-                .zip(date_ordinal(end))
-                .and_then(|(start, end)| end.checked_sub(start));
-            if span.is_none_or(|span| span >= max_days) {
-                return Err("Invalid calendar date range.".to_string());
-            }
-        }
-        Ok(())
+    fn validate(&self) -> Result<Range<u32>, String> {
+        let visible_span = date_ordinal(&self.visible_start)
+            .zip(date_ordinal(&self.visible_end))
+            .and_then(|(start, end)| end.checked_sub(start));
+        let upcoming_start = visible_span
+            .filter(|span| *span < 42)
+            .and_then(|_| date_ordinal(&self.upcoming_start))
+            .ok_or_else(|| "Invalid calendar date range.".to_string())?;
+        Ok(upcoming_start..upcoming_start + 14)
     }
 
-    fn contains(&self, date: &str) -> bool {
+    fn contains(&self, date: &str, ordinal: u32, upcoming: &Range<u32>) -> bool {
         (date >= self.visible_start.as_str() && date <= self.visible_end.as_str())
-            || (date >= self.upcoming_start.as_str() && date <= self.upcoming_end.as_str())
+            || upcoming.contains(&ordinal)
     }
+}
+
+fn contains_upcoming(date: &str, upcoming: &Range<u32>) -> bool {
+    date_ordinal(date).is_some_and(|day| upcoming.contains(&day))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -99,6 +188,7 @@ pub struct CalendarDay {
 #[serde(rename_all = "camelCase")]
 pub struct CalendarSchedule {
     tracked_count: usize,
+    missing_count: usize,
     days: Vec<CalendarDay>,
     upcoming: Vec<CalendarScheduleEvent>,
 }
@@ -158,13 +248,15 @@ fn calendar_requests(
         );
     }
     let mut requests: Vec<_> = requests.into_values().collect();
-    requests.sort_by_cached_key(|request| format!("{}:{}", request.media_type, request.id));
+    requests
+        .sort_by(|left, right| (&left.media_type, &left.id).cmp(&(&right.media_type, &right.id)));
     requests
 }
 
-fn calendar_events(
-    schedules: Vec<MediaSchedule>,
+fn calendar_events<'a>(
+    schedules: impl IntoIterator<Item = &'a MediaSchedule>,
     range: &CalendarRange,
+    upcoming: &Range<u32>,
 ) -> Vec<CalendarScheduleEvent> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
@@ -178,27 +270,29 @@ fn calendar_events(
             else {
                 continue;
             };
-            if date_ordinal(date).is_none()
-                || !seen.insert(("movie", schedule.id.clone(), String::new()))
-                || !range.contains(date)
+            let Some(ordinal) = date_ordinal(date) else {
+                continue;
+            };
+            if !range.contains(date, ordinal, upcoming)
+                || !seen.insert(("movie", schedule.id.as_str(), "", 0, 0))
             {
                 continue;
             }
             events.push(CalendarScheduleEvent {
                 id: schedule.id.clone(),
-                media_id: schedule.id,
-                media_type: schedule.type_,
+                media_id: schedule.id.clone(),
+                media_type: schedule.type_.clone(),
                 title: Some(schedule.title.clone()),
-                series_title: schedule.title,
+                series_title: schedule.title.clone(),
                 season: None,
                 episode: None,
                 release_date: date.to_string(),
-                poster: schedule.poster,
+                poster: schedule.poster.clone(),
                 type_: "movie",
             });
             continue;
         }
-        for episode in schedule.episodes {
+        for episode in &schedule.episodes {
             let Some(date) = episode
                 .release_date
                 .as_deref()
@@ -206,15 +300,22 @@ fn calendar_events(
             else {
                 continue;
             };
-            // Claim valid identities before filtering, preserving alias precedence.
-            if date_ordinal(date).is_none()
-                || !seen.insert(("episode", schedule.id.clone(), episode.id.clone()))
-                || !range.contains(date)
+            let Some(ordinal) = date_ordinal(date) else {
+                continue;
+            };
+            if !range.contains(date, ordinal, upcoming)
+                || !seen.insert((
+                    "episode",
+                    schedule.id.as_str(),
+                    episode.id.as_str(),
+                    episode.season,
+                    episode.episode,
+                ))
             {
                 continue;
             }
             events.push(CalendarScheduleEvent {
-                id: episode.id,
+                id: episode.id.clone(),
                 media_id: schedule.id.clone(),
                 media_type: schedule.type_.clone(),
                 title: Some(
@@ -240,17 +341,14 @@ fn calendar_events(
 
 fn calendar_schedule(
     tracked_count: usize,
+    missing_count: usize,
     events: Vec<CalendarScheduleEvent>,
-    range: &CalendarRange,
+    upcoming: &Range<u32>,
 ) -> CalendarSchedule {
-    // `release_date` is a validated `YYYY-MM-DD` local day, so string bounds
-    // and a stable lexical sort reproduce the client's date-only ordering.
+    // `release_date` is a validated `YYYY-MM-DD` local day.
     let mut upcoming: Vec<_> = events
         .iter()
-        .filter(|event| {
-            event.release_date.as_str() >= range.upcoming_start.as_str()
-                && event.release_date.as_str() <= range.upcoming_end.as_str()
-        })
+        .filter(|event| contains_upcoming(&event.release_date, upcoming))
         .collect();
     upcoming.sort_by(|left, right| left.release_date.cmp(&right.release_date));
     let upcoming = upcoming
@@ -266,6 +364,7 @@ fn calendar_schedule(
     }
     CalendarSchedule {
         tracked_count,
+        missing_count,
         days: days
             .into_iter()
             .map(|(date, mut events)| {
@@ -290,9 +389,10 @@ pub async fn get_calendar_events(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     client: State<'_, AddonResourceClient>,
+    cache: State<'_, CalendarScheduleCache>,
     range: CalendarRange,
 ) -> Result<CalendarSchedule, String> {
-    range.validate()?;
+    let upcoming = range.validate()?;
     let store_app = app.clone();
     let service = playback_state.inner().clone();
     let requests = super::run_blocking_store_op(move || {
@@ -300,6 +400,10 @@ pub async fn get_calendar_events(
         let statuses = load_watch_statuses_map(&super::open_store(
             &store_app,
             super::WATCH_STATUS_STORE_FILE,
+        )?)?;
+        let list_items = super::list_commands::read_list_item_identities(&super::open_store(
+            &store_app,
+            super::LISTS_STORE_FILE,
         )?)?;
         let history = if statuses.values().any(|status| status == "watching") {
             service
@@ -310,15 +414,17 @@ pub async fn get_calendar_events(
         } else {
             Vec::new()
         };
-        Ok(calendar_requests(library.into_values(), history, &statuses))
+        let tracked = library.into_values().chain(list_items);
+        Ok(calendar_requests(tracked, history, &statuses))
     })
     .await?;
     let tracked_count = requests.len();
-    let schedules = fetch_media_schedules(&app, client.inner(), requests).await?;
+    let schedules = cache.fetch(&app, client.inner(), requests).await?;
     Ok(calendar_schedule(
         tracked_count,
-        calendar_events(schedules, &range),
-        &range,
+        tracked_count.saturating_sub(schedules.len()),
+        calendar_events(schedules.iter().map(Arc::as_ref), &range, &upcoming),
+        &upcoming,
     ))
 }
 
@@ -326,19 +432,18 @@ pub async fn get_calendar_events(
 mod tests {
     use super::super::media_commands::MediaScheduleEpisode;
     use super::*;
-    use crate::test_helpers::{test_media_item, test_progress};
+    use crate::test_helpers::{test_media_item, test_progress, test_store};
 
     fn range() -> CalendarRange {
         CalendarRange {
             visible_start: "2025-12-28".into(),
             visible_end: "2026-02-07".into(),
             upcoming_start: "2026-01-01".into(),
-            upcoming_end: "2026-01-14".into(),
         }
     }
 
     #[test]
-    fn calendar_ranges_validate_local_days_and_bound_both_windows() {
+    fn calendar_ranges_validate_local_days_and_derive_upcoming_window() {
         assert!(range().validate().is_ok());
         assert!(date_ordinal("2024-02-29").is_some());
         assert!(date_ordinal("2025-02-29").is_none());
@@ -353,11 +458,133 @@ mod tests {
         invalid.visible_end = "2026-02-08".into();
         assert!(invalid.validate().is_err());
         invalid = range();
-        invalid.upcoming_end = "2026-01-15".into();
+        invalid.upcoming_start = "2026-02-30".into();
         assert!(invalid.validate().is_err());
-        invalid = range();
-        invalid.upcoming_end = "2025-12-31".into();
-        assert!(invalid.validate().is_err());
+        for (start, end, after) in [
+            ("2026-01-01", "2026-01-14", "2026-01-15"),
+            ("2025-12-28", "2026-01-10", "2026-01-11"),
+            ("2024-02-23", "2024-03-07", "2024-03-08"),
+            ("2026-03-01", "2026-03-14", "2026-03-15"),
+            ("2026-10-25", "2026-11-07", "2026-11-08"),
+        ] {
+            let range = CalendarRange {
+                upcoming_start: start.into(),
+                ..range()
+            };
+            let upcoming = range.validate().unwrap();
+            assert!(contains_upcoming(start, &upcoming));
+            assert!(contains_upcoming(end, &upcoming));
+            assert!(!contains_upcoming(after, &upcoming));
+            assert!(!contains_upcoming("2025-12-27", &upcoming));
+        }
+    }
+
+    #[test]
+    fn calendar_requests_dedupe_library_and_list_members_and_skip_dropped_titles() {
+        let statuses = HashMap::from([("ttdrop".into(), "dropped".into())]);
+        let requests = calendar_requests(
+            vec![
+                test_media_item("ttshared", "series"),
+                test_media_item("ttlist", "series"),
+                test_media_item("ttshared", "series"),
+                test_media_item("ttdrop", "movie"),
+                test_media_item("ttchannel", "channel"),
+            ],
+            Vec::new(),
+            &statuses,
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.media_type.as_str(), request.id.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("series", "ttlist"), ("series", "ttshared")]
+        );
+    }
+
+    #[test]
+    fn calendar_reads_normalized_list_only_titles_and_repairs_membership() {
+        use super::super::list_helpers::{list_item_store_key, list_meta_key, LISTS_ORDER_KEY};
+        use serde_json::json;
+
+        let fixture = test_store();
+        fixture
+            .store
+            .set(LISTS_ORDER_KEY, json!(["list_a", "ghost"]));
+        fixture.store.set(
+            list_meta_key("list_a"),
+            json!({
+                "id": "drifted", "name": "List only", "icon": "star",
+                "item_ids": ["a", "b", "duplicate", "invalid", "absent"],
+            }),
+        );
+        for (key, id, media_type) in [
+            ("a", " b ", " Series "),
+            ("b", " a ", " Movie "),
+            ("duplicate", "b", "series"),
+        ] {
+            fixture.store.set(
+                list_item_store_key("list_a", key),
+                json!(MediaItem {
+                    description: Some(format!("Snapshot for {key}")),
+                    ..test_media_item(id, media_type)
+                }),
+            );
+        }
+        fixture.store.set(
+            list_item_store_key("list_a", "invalid"),
+            json!({"id": "bad", "title": "Bad snapshot", "type": "series", "poster": 42}),
+        );
+        fixture.store.save().unwrap();
+        let library = load_library_map(&fixture.store).unwrap();
+        assert!(library.is_empty());
+        let identities =
+            super::super::list_commands::read_list_item_identities(&fixture.store).unwrap();
+        assert!(identities.iter().all(|item| item.description.is_none()));
+        let requests = calendar_requests(
+            library.into_values().chain(identities),
+            Vec::new(),
+            &HashMap::new(),
+        );
+        assert_eq!(
+            requests
+                .iter()
+                .map(|request| (request.media_type.as_str(), request.id.as_str()))
+                .collect::<Vec<_>>(),
+            [("movie", "a"), ("series", "b")]
+        );
+        let list = super::super::list_helpers::load_list(&fixture.store, "list_a").unwrap();
+        assert_eq!(list.id, "list_a");
+        assert_eq!(list.item_ids, ["b", "a"]);
+        for id in ["duplicate", "invalid", "absent"] {
+            assert!(fixture
+                .store
+                .get(list_item_store_key("list_a", id))
+                .is_none());
+        }
+        assert_eq!(fixture.store.get(LISTS_ORDER_KEY), Some(json!(["list_a"])));
+        assert_eq!(fixture.store.save_count(), 2);
+
+        let reopened = super::super::DurableStoreRegistry::default()
+            .open_path(fixture.path.clone())
+            .unwrap();
+        let saved = super::super::list_commands::read_lists(&reopened).unwrap();
+        assert_eq!(saved[0].item_ids, ["b", "a"]);
+        assert_eq!(
+            saved[0].items[0].description.as_deref(),
+            Some("Snapshot for a")
+        );
+        assert_eq!(
+            saved[0].items[1].description.as_deref(),
+            Some("Snapshot for b")
+        );
+        assert_eq!(
+            super::super::list_commands::read_list_item_identities(&reopened)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(reopened.save_count(), 0);
     }
 
     #[test]
@@ -425,7 +652,7 @@ mod tests {
             episodes,
         };
         let events = calendar_events(
-            vec![
+            &[
                 schedule(
                     "anime",
                     vec![
@@ -433,6 +660,16 @@ mod tests {
                         episode("valid", "2026-01-01T00:00:00Z"),
                         episode("bad", "2026-02-30"),
                         episode("edge", "2026-02-07"),
+                        episode("reused", "2025-12-27"),
+                        episode("reused", "2026-01-01"),
+                        MediaScheduleEpisode {
+                            episode: 2,
+                            ..episode("reused", "2026-01-02")
+                        },
+                        MediaScheduleEpisode {
+                            season: 2,
+                            ..episode("reused", "2026-01-03")
+                        },
                     ],
                 ),
                 schedule(
@@ -441,6 +678,7 @@ mod tests {
                         episode("outside", "2026-01-02"),
                         episode("valid", "2026-01-01"),
                         episode("bad", "2026-01-02"),
+                        episode("reused", "2026-01-04"),
                     ],
                 ),
                 MediaSchedule {
@@ -453,17 +691,28 @@ mod tests {
                 },
             ],
             &range(),
+            &range().validate().unwrap(),
         );
         assert_eq!(
             events
                 .iter()
                 .map(|event| event.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["valid", "edge", "bad", "ttmovie"]
+            vec!["valid", "edge", "reused", "reused", "reused", "outside", "bad", "ttmovie"]
         );
         assert_eq!(events[0].release_date, "2026-01-01");
         assert_eq!(events[0].media_type, "anime");
-        assert_eq!(events[2].media_type, "series");
+        assert_eq!(events[2].release_date, "2026-01-01");
+        assert_eq!(events[2].media_type, "anime");
+        assert_eq!(events[5].media_type, "series");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.id == "reused")
+                .map(|event| (event.season, event.episode))
+                .collect::<Vec<_>>(),
+            vec![(Some(1), Some(1)), (Some(1), Some(2)), (Some(2), Some(1))]
+        );
 
         let other_month = CalendarRange {
             visible_start: "2025-10-01".into(),
@@ -472,8 +721,9 @@ mod tests {
         };
         assert!(other_month.validate().is_ok());
         let upcoming_only = calendar_events(
-            vec![schedule("series", vec![episode("today", "2026-01-01")])],
+            &[schedule("series", vec![episode("today", "2026-01-01")])],
             &other_month,
+            &other_month.validate().unwrap(),
         );
         assert_eq!(upcoming_only.len(), 1);
         assert_eq!(upcoming_only[0].id, "today");
@@ -493,7 +743,7 @@ mod tests {
             })
             .collect();
         let events = calendar_events(
-            vec![MediaSchedule {
+            &[MediaSchedule {
                 id: "tt123".into(),
                 type_: "series".into(),
                 title: "Series".into(),
@@ -502,6 +752,7 @@ mod tests {
                 episodes,
             }],
             &range(),
+            &range().validate().unwrap(),
         );
         assert_eq!(
             events
@@ -542,7 +793,8 @@ mod tests {
     #[test]
     fn calendar_schedule_groups_by_day_and_orders_events_within_it() {
         let schedule = calendar_schedule(
-            0,
+            3,
+            2,
             vec![
                 event("m-beta", "movie", "2026-01-02", None, None, "beta"),
                 event("s1e3", "episode", "2026-01-02", Some(1), Some(3), "Show"),
@@ -551,8 +803,11 @@ mod tests {
                 event("m-alpha", "movie", "2026-01-02", None, None, "Alpha"),
                 event("prev", "episode", "2026-01-01", Some(9), Some(9), "Show"),
             ],
-            &range(),
+            &range().validate().unwrap(),
         );
+        let serialized = serde_json::to_value(&schedule).unwrap();
+        assert_eq!(serialized["trackedCount"], 3);
+        assert_eq!(serialized["missingCount"], 2);
         assert_eq!(
             schedule
                 .days
@@ -592,7 +847,7 @@ mod tests {
             event("before", "episode", "2025-12-31", Some(1), Some(1), "Show"),
             event("after", "episode", "2026-01-15", Some(1), Some(1), "Show"),
         ]);
-        let schedule = calendar_schedule(0, events, &range());
+        let schedule = calendar_schedule(0, 0, events, &range().validate().unwrap());
         assert_eq!(
             schedule
                 .upcoming
@@ -609,7 +864,6 @@ mod tests {
             visible_start: "2025-12-28".into(),
             visible_end: "2026-01-07".into(),
             upcoming_start: "2025-12-28".into(),
-            upcoming_end: "2026-01-07".into(),
         };
         let events = vec![
             event("later", "movie", "2026-01-07", None, None, "Later"),
@@ -620,7 +874,7 @@ mod tests {
         ];
         let mut expected = events.clone();
         expected.sort_by_key(|event| date_ordinal(&event.release_date));
-        let schedule = calendar_schedule(0, events, &range);
+        let schedule = calendar_schedule(0, 0, events, &range.validate().unwrap());
         assert_eq!(
             schedule
                 .upcoming

@@ -1,7 +1,53 @@
 use super::{
-    collect_skip_db_segments, normalize_skip_segments, skip_times_body_failure, SkipDbSegmentEntry,
+    collect_skip_db_segments, normalize_skip_segments, skip_times_body_failure,
+    skip_times_fetch_failure, skip_times_http_failure, FetchFailure, SkipDbSegmentEntry,
     SkipDbSegmentsResponse, SkipSegment, TRANSIENT_ERROR,
 };
+
+#[test]
+fn skipdb_http_failures_retry_timeouts_rate_limits_and_all_server_errors() {
+    for status in [408, 429, 500, 501, 502, 503, 504, 505, 599] {
+        assert_eq!(
+            skip_times_http_failure(reqwest::StatusCode::from_u16(status).unwrap()).unwrap_err(),
+            TRANSIENT_ERROR,
+            "{status}"
+        );
+    }
+    for status in [301, 400, 401, 403, 404, 409, 422] {
+        assert!(
+            skip_times_http_failure(reqwest::StatusCode::from_u16(status).unwrap())
+                .unwrap()
+                .segments
+                .is_empty(),
+            "{status}"
+        );
+    }
+}
+
+#[test]
+fn skipdb_send_failures_only_retry_transient_errors() {
+    assert_eq!(
+        skip_times_fetch_failure(FetchFailure::Retryable(TRANSIENT_ERROR.to_string())).unwrap_err(),
+        TRANSIENT_ERROR
+    );
+    assert!(
+        skip_times_fetch_failure(FetchFailure::Fatal(TRANSIENT_ERROR.to_string()))
+            .unwrap()
+            .segments
+            .is_empty()
+    );
+
+    crate::providers::ensure_rustls_crypto_provider();
+    let error = reqwest::Client::new().get("not a URL").build().unwrap_err();
+    assert!(error.is_builder());
+    assert!(skip_times_fetch_failure(FetchFailure::from_send_error(
+        &error,
+        TRANSIENT_ERROR.to_string()
+    ))
+    .unwrap()
+    .segments
+    .is_empty());
+}
 
 #[test]
 fn skipdb_body_failures_distinguish_transient_reads_from_oversize_payloads() {

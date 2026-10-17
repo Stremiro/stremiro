@@ -61,12 +61,13 @@ pub(crate) fn strip_manifest_suffix(path: &str) -> &str {
 }
 
 /// Dedup-push for ordered string sets; empty values never enter.
-pub(crate) fn push_unique(values: &mut Vec<String>, value: &str) {
-    if value.is_empty() || values.iter().any(|existing| existing == value) {
+pub(crate) fn push_unique(values: &mut Vec<String>, value: impl AsRef<str> + Into<String>) {
+    let candidate = value.as_ref();
+    if candidate.is_empty() || values.iter().any(|existing| existing == candidate) {
         return;
     }
 
-    values.push(value.to_string());
+    values.push(value.into());
 }
 
 /// Poison-recovering mutex lock: a panicking holder must not wedge later callers.
@@ -185,6 +186,12 @@ pub(crate) struct MediaDetails {
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rating: Option<String>,
+    #[serde(
+        rename = "ratingPercent",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rating_percent: Option<u8>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

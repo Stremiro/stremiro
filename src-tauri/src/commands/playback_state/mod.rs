@@ -16,11 +16,12 @@ use self::language_preferences::{
     PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY, PLAYBACK_LANGUAGE_PREFERENCES_ITEM_PREFIX,
 };
 use self::stream_health::{
-    PLAYBACK_SOURCE_HEALTH_INDEX_KEY, PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX,
-    PLAYBACK_STREAM_FAMILY_INDEX_KEY, PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
+    remove_legacy_stream_family_reputation, PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+    PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX, PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+    PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
 };
 use super::history_helpers::should_skip_watch_progress_save;
-use super::resume_store::{ProgressWrite, ResumeStore};
+use super::resume_store::{HistoryMergeError, ProgressWrite, ResumeStore};
 use super::store_helpers::{clear_index_domain, decode_string_list};
 use super::{normalize_media_id, normalize_watch_progress_type, DurableStore, WatchProgress};
 use crate::providers::lock_or_recover;
@@ -68,6 +69,9 @@ pub(crate) struct PlaybackStateInner {
     persisted_history: Mutex<HashMap<String, WatchProgress>>,
     resume_store: Mutex<Option<ResumeStore>>,
     history_generation: AtomicU64,
+    /// Advanced only by clear and backup import: explicit restores and watched marks
+    /// must not be dropped by unrelated merges, which bump `history_generation`.
+    history_reset_epoch: AtomicU64,
     source_health_prune_at: AtomicU64,
     stream_family_prune_at: AtomicU64,
     /// `set()`-then-`save()` on the shared in-memory map is only atomic under this
@@ -77,6 +81,7 @@ pub(crate) struct PlaybackStateInner {
     state_file_write_lock: Mutex<()>,
     /// One pending deferred `playback_state.json` flush at a time.
     state_save_pending: AtomicBool,
+    stream_family_keys_migrated: AtomicBool,
 }
 
 /// State shared across Tauri commands. `Clone` shares the underlying state so owned
@@ -108,9 +113,38 @@ impl PlaybackStateService {
         self.history_generation.fetch_add(1, Ordering::SeqCst);
     }
 
+    pub(crate) fn history_reset_epoch(&self) -> u64 {
+        self.history_reset_epoch.load(Ordering::SeqCst)
+    }
+
+    fn bump_history_reset_epoch(&self) {
+        self.history_reset_epoch.fetch_add(1, Ordering::SeqCst);
+    }
+
     /// Serializes `playback_state.json` mutations — the generation-check-to-save contract lives on this lock.
     fn lock_state_file_write(&self) -> std::sync::MutexGuard<'_, ()> {
         lock_or_recover(&self.state_file_write_lock)
+    }
+
+    fn open_state_store(&self, app: &AppHandle) -> Result<DurableStore, String> {
+        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        self.migrate_legacy_stream_families(&store)?;
+        Ok(store)
+    }
+
+    fn migrate_legacy_stream_families(&self, store: &DurableStore) -> Result<(), String> {
+        if self.stream_family_keys_migrated.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let _guard = self.lock_state_file_write();
+        if !self.stream_family_keys_migrated.load(Ordering::Relaxed) {
+            remove_legacy_stream_family_reputation(store);
+            // A failed save leaves the migration retryable even after the shared map changed.
+            store.save()?;
+            self.stream_family_keys_migrated
+                .store(true, Ordering::Release);
+        }
+        Ok(())
     }
 
     /// Trailing flush for `record_stream_outcome`: one pending timer collapses an
@@ -256,8 +290,8 @@ impl PlaybackStateService {
             .iter()
             .map(|(key, item)| (item.last_watched, key))
             .collect();
-        ordered.sort();
         let overflow = cached.len() - MAX_CACHED_HISTORY;
+        ordered.select_nth_unstable(overflow - 1);
         let victims: Vec<String> = ordered
             .into_iter()
             .take(overflow)
@@ -284,7 +318,7 @@ impl PlaybackStateService {
     }
 
     pub(crate) fn has_learned_playback_data(&self, app: &AppHandle) -> Result<bool, String> {
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         Ok([
             PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
             PLAYBACK_STREAM_FAMILY_INDEX_KEY,
@@ -324,7 +358,27 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,
+        reject_growth_past_cap: bool,
     ) -> Result<usize, String> {
+        self.merge_history_entries_checked(app, entries, reject_growth_past_cap)
+            .map_err(String::from)
+    }
+
+    pub(crate) fn import_history_entries(
+        &self,
+        app: &AppHandle,
+        entries: Vec<(String, WatchProgress)>,
+    ) -> Result<usize, HistoryMergeError> {
+        self.bump_history_reset_epoch();
+        self.merge_history_entries_checked(app, entries, true)
+    }
+
+    pub(crate) fn merge_history_entries_checked(
+        &self,
+        app: &AppHandle,
+        entries: Vec<(String, WatchProgress)>,
+        reject_growth_past_cap: bool,
+    ) -> Result<usize, HistoryMergeError> {
         if entries.is_empty() {
             return Ok(0);
         }
@@ -338,13 +392,16 @@ impl PlaybackStateService {
         // never reached the database.
         let imported = self.with_resume_store(app, |resume_store| {
             if self.history_generation() != start_generation {
-                return Ok(0);
+                return Ok(Ok(0));
             }
-            let (imported_entries, pruned) = resume_store.merge_entries(entries)?;
-            let imported = imported_entries.len();
-            self.mark_history_persisted(imported_entries, pruned, start_generation);
-            Ok(imported)
-        })?;
+            Ok(resume_store
+                .merge_entries(entries, reject_growth_past_cap)
+                .map(|(imported_entries, pruned)| {
+                    let imported = imported_entries.len();
+                    self.mark_history_persisted(imported_entries, pruned, start_generation);
+                    imported
+                }))
+        })??;
         // Post-merge bump runs after marking so the check above still sees
         // `start_generation`; it drops saves that started mid-merge.
         self.bump_history_generation();
@@ -388,7 +445,8 @@ impl PlaybackStateService {
             persisted.clear();
         }
 
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
+        self.bump_history_reset_epoch();
         // Double-bump around the delete so a save starting during the slow IO still drops.
         self.bump_history_generation();
         self.with_resume_store(app, |resume_store| resume_store.clear())?;
@@ -480,6 +538,10 @@ fn insert_sorted_unique(index: &mut Vec<String>, value: &str) -> bool {
 fn merge_sorted_unique(index: &mut Vec<String>, mut values: Vec<String>) -> bool {
     values.sort_unstable();
     values.dedup();
+    merge_presorted_unique(index, values)
+}
+
+fn merge_presorted_unique(index: &mut Vec<String>, values: Vec<String>) -> bool {
     let previous_len = index.len();
     let mut merged = Vec::with_capacity(previous_len + values.len());
     let mut values = values.into_iter().peekable();

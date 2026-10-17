@@ -3,13 +3,23 @@ pub(crate) fn field(name: &'static str, value: impl ToString) -> (&'static str, 
 }
 
 fn normalize_field_value(value: &str) -> String {
-    value
-        .split(|character: char| character.is_control() || character.is_whitespace())
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    let mut normalized = String::with_capacity(value.len());
+    let mut pending_space = false;
+    for character in value.chars() {
+        if character.is_control() || character.is_whitespace() {
+            pending_space = !normalized.is_empty();
+            continue;
+        }
+        if pending_space {
+            normalized.push(' ');
+            pending_space = false;
+        }
+        if character == '\\' || character == '"' {
+            normalized.push('\\');
+        }
+        normalized.push(character);
+    }
+    normalized
 }
 
 pub(crate) fn log_warn(component: &str, action: &str, outcome: &str, fields: &[(&str, String)]) {

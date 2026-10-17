@@ -1,11 +1,12 @@
-use super::addons::sanitize_addon_log;
-use super::{has_manifest_suffix, non_blank, trim_to_max, MANIFEST_JSON_SUFFIX};
+use super::{bound_optional, has_manifest_suffix, non_blank, trim_to_max, MANIFEST_JSON_SUFFIX};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 const MANIFEST_MAX_BYTES: usize = 512 * 1024;
 const MANIFEST_TOO_LARGE_ERROR: &str = "Addon manifest exceeds the 512 KiB size limit.";
+pub(crate) const ADDON_CONFIGURATION_REQUIRED_MESSAGE: &str =
+    "This is a configure page — open it, finish setup, then paste the generated manifest URL.";
 const MAX_NAME_CHARS: usize = 128;
 const MAX_RESOURCE_CHARS: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
@@ -111,6 +112,8 @@ struct RawManifest {
     id_prefixes: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_item_list")]
     catalogs: Vec<RawCatalog>,
+    #[serde(default, rename = "behaviorHints")]
+    behavior_hints: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize)]
@@ -169,7 +172,7 @@ fn normalize_opaque_list(
     let mut seen = std::collections::HashSet::new();
 
     for value in values {
-        let Some(item) = trim_to_max(&value, max_chars) else {
+        let Some(item) = bound_optional(Some(value), max_chars) else {
             continue;
         };
         if !seen.insert(item.clone()) {
@@ -185,20 +188,21 @@ fn normalize_opaque_list(
 }
 
 fn normalize_resource_name(value: &str) -> Option<String> {
-    trim_to_max(value, MAX_RESOURCE_CHARS).map(|name| name.to_ascii_lowercase())
+    trim_to_max(value, MAX_RESOURCE_CHARS).map(|mut name| {
+        name.make_ascii_lowercase();
+        name
+    })
 }
 
 fn catalog_identity_key(type_: &str, id: &str) -> String {
-    format!(
-        "{}\u{1f}{}",
-        type_.to_ascii_lowercase(),
-        id.to_ascii_lowercase()
-    )
+    let mut key = format!("{type_}\u{1f}{id}");
+    key.make_ascii_lowercase();
+    key
 }
 
 fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
-    let type_ = trim_to_max(raw.type_.as_deref().unwrap_or(""), MAX_TYPE_CHARS)?;
-    let id = trim_to_max(raw.id.as_deref().unwrap_or(""), MAX_CATALOG_ID_CHARS)?;
+    let type_ = bound_optional(raw.type_, MAX_TYPE_CHARS)?;
+    let id = bound_optional(raw.id, MAX_CATALOG_ID_CHARS)?;
 
     let required = normalize_opaque_list(raw.extra_required, MAX_EXTRA_NAME_CHARS, MAX_EXTRAS);
     let mut extras = Vec::new();
@@ -218,8 +222,7 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
         }));
 
     for extra in extra_source {
-        let Some(name) = trim_to_max(extra.name.as_deref().unwrap_or(""), MAX_EXTRA_NAME_CHARS)
-        else {
+        let Some(name) = bound_optional(extra.name, MAX_EXTRA_NAME_CHARS) else {
             continue;
         };
         // Extra names match case-insensitively at request time — dedupe the same way.
@@ -295,13 +298,31 @@ fn normalize_resource(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn parse_addon_manifest(bytes: &[u8]) -> Result<AddonManifest, String> {
+    parse_addon_manifest_checked(bytes, false)
+}
+
+fn parse_addon_manifest_checked(
+    bytes: &[u8],
+    require_configured: bool,
+) -> Result<AddonManifest, String> {
     if bytes.len() > MANIFEST_MAX_BYTES {
         return Err(MANIFEST_TOO_LARGE_ERROR.to_string());
     }
 
     let raw: RawManifest =
         serde_json::from_slice(bytes).map_err(|_| "Invalid addon manifest format.".to_string())?;
+
+    if require_configured
+        && raw
+            .behavior_hints
+            .get("configurationRequired")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false)
+    {
+        return Err(ADDON_CONFIGURATION_REQUIRED_MESSAGE.to_string());
+    }
 
     let types = normalize_opaque_list(raw.types, MAX_TYPE_CHARS, MAX_TYPES);
     let id_prefixes = normalize_opaque_list(raw.id_prefixes, MAX_PREFIX_CHARS, MAX_PREFIXES);
@@ -390,6 +411,7 @@ pub(crate) fn snapshot_is_classified(snapshot: &AddonManifest) -> bool {
 pub(crate) async fn fetch_addon_manifest_snapshot(
     client: &reqwest::Client,
     normalized_base: &str,
+    require_configured: bool,
 ) -> Result<AddonManifest, String> {
     let manifest_url = build_manifest_url(normalized_base)?;
     let response = client
@@ -398,12 +420,7 @@ pub(crate) async fn fetch_addon_manifest_snapshot(
         .timeout(Duration::from_secs(10))
         .send()
         .await
-        .map_err(|error| {
-            format!(
-                "Failed to reach addon: {}",
-                sanitize_addon_log(&error.to_string())
-            )
-        })?;
+        .map_err(|error| format!("Failed to reach addon: {}", error.without_url()))?;
 
     if !response.status().is_success() {
         return Err(format!(
@@ -418,7 +435,7 @@ pub(crate) async fn fetch_addon_manifest_snapshot(
     .await
     .map_err(|error| error.into_message())?;
 
-    parse_addon_manifest(&bytes)
+    parse_addon_manifest_checked(&bytes, require_configured)
 }
 
 #[cfg(test)]

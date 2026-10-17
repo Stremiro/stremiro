@@ -1,18 +1,18 @@
 use super::{
     evict_least_active, insert_sorted_unique, load_advisory_index, playback_title_scope_key,
-    PlaybackStateService, PlaybackStreamOutcomeKind, PLAYBACK_STATE_STORE_FILE,
+    PlaybackStateService, PlaybackStreamOutcomeKind,
 };
 use crate::commands::history_helpers::normalize_episode_coordinate;
 use crate::commands::stream_coordinator::{
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
 use crate::commands::streaming_helpers::{
-    normalize_source_id, normalize_source_key, source_health_key,
+    is_current_stream_family, normalize_source_id, normalize_source_key, source_health_key,
 };
 use crate::commands::{now_unix_millis, DurableStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::AppHandle;
 
 pub(super) const PLAYBACK_SOURCE_HEALTH_INDEX_KEY: &str = "playback_source_health_index";
@@ -21,8 +21,11 @@ pub(super) const PLAYBACK_SOURCE_HEALTH_ITEM_PREFIX: &str = "playback_source_hea
 pub(super) const PLAYBACK_STREAM_FAMILY_ITEM_PREFIX: &str = "playback_stream_family_item:";
 const SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 30;
 const SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 6;
+const SOURCE_HEALTH_MAX_COOLDOWN_MS: u64 = 1000 * 60 * 15;
 const STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS: u64 = 1000 * 60 * 60 * 18;
 const STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 7;
+const STREAM_FAMILY_MAX_COOLDOWN_MS: u64 = 1000 * 60 * 12;
+const REPUTATION_FUTURE_SKEW_MS: u64 = 1000 * 60 * 5;
 // Hard count bound on top of the recency windows: a 7-day success window alone
 // still lets a heavy session grow the index without limit.
 const STREAM_FAMILY_INDEX_MAX_ENTRIES: usize = 512;
@@ -83,6 +86,25 @@ pub(super) fn playback_stream_family_item_key(key: &str) -> String {
 
 pub(super) fn playback_stream_family_snapshot_key(scope_key: &str, stream_family: &str) -> String {
     format!("{}|{}", scope_key, stream_family)
+}
+
+pub(super) fn remove_legacy_stream_family_reputation(store: &DurableStore) {
+    let current_snapshot_key = |key: &str| {
+        // Read from the right because media ids can contain `|`.
+        key.rmatch_indices('|')
+            .nth(1)
+            .is_some_and(|(separator, _)| is_current_stream_family(&key[separator + 1..]))
+    };
+    store.delete_matching(|key| {
+        key.strip_prefix(PLAYBACK_STREAM_FAMILY_ITEM_PREFIX)
+            .is_some_and(|key| !current_snapshot_key(key))
+    });
+    let mut index = load_advisory_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY);
+    let previous_len = index.len();
+    index.retain(|key| current_snapshot_key(key));
+    if index.len() != previous_len {
+        store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(index));
+    }
 }
 
 pub(super) fn load_playback_stream_family_snapshot(
@@ -163,22 +185,25 @@ pub(super) fn score_source_health_priority(
         return DEFAULT_SOURCE_HEALTH_PRIORITY;
     };
 
-    if snapshot
-        .cooldown_until
-        .is_some_and(|cooldown_until| cooldown_until > now_ms)
-    {
+    if snapshot.cooldown_until.is_some_and(|cooldown_until| {
+        cooldown_until > now_ms
+            && cooldown_until
+                <= now_ms.saturating_add(SOURCE_HEALTH_MAX_COOLDOWN_MS + REPUTATION_FUTURE_SKEW_MS)
+    }) {
         return 0;
     }
 
     if snapshot.last_failure_at.is_some_and(|last_failure_at| {
-        now_ms.saturating_sub(last_failure_at) <= SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS
+        last_failure_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
+            && now_ms.saturating_sub(last_failure_at) <= SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS
             && snapshot.consecutive_failures >= 1
     }) {
         return 1;
     }
 
     if snapshot.last_success_at.is_some_and(|last_success_at| {
-        now_ms.saturating_sub(last_success_at) <= SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS
+        last_success_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
+            && now_ms.saturating_sub(last_success_at) <= SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS
     }) {
         return 3;
     }
@@ -215,7 +240,8 @@ pub(super) fn score_stream_family_priority(
     };
 
     let recent_nearby_failure = snapshot.last_failure_at.is_some_and(|last_failure_at| {
-        now_ms.saturating_sub(last_failure_at) <= STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS
+        last_failure_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
+            && now_ms.saturating_sub(last_failure_at) <= STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS
             && is_nearby_episode(
                 season,
                 episode,
@@ -224,10 +250,11 @@ pub(super) fn score_stream_family_priority(
             )
     });
 
-    if snapshot
-        .cooldown_until
-        .is_some_and(|cooldown_until| cooldown_until > now_ms)
-        && recent_nearby_failure
+    if snapshot.cooldown_until.is_some_and(|cooldown_until| {
+        cooldown_until > now_ms
+            && cooldown_until
+                <= now_ms.saturating_add(STREAM_FAMILY_MAX_COOLDOWN_MS + REPUTATION_FUTURE_SKEW_MS)
+    }) && recent_nearby_failure
     {
         return 0;
     }
@@ -237,7 +264,8 @@ pub(super) fn score_stream_family_priority(
     }
 
     if snapshot.last_success_at.is_some_and(|last_success_at| {
-        now_ms.saturating_sub(last_success_at) <= STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS
+        last_success_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
+            && now_ms.saturating_sub(last_success_at) <= STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS
             && is_nearby_episode(
                 season,
                 episode,
@@ -256,11 +284,10 @@ pub(super) fn accepts_outcome(
     last_failure_at: Option<u64>,
     timestamp_ms: u64,
 ) -> bool {
-    [last_success_at, last_failure_at]
-        .into_iter()
-        .flatten()
-        .max()
-        .is_none_or(|latest| timestamp_ms >= latest)
+    last_success_at.max(last_failure_at).is_none_or(|latest| {
+        timestamp_ms >= latest
+            || latest > now_unix_millis().saturating_add(REPUTATION_FUTURE_SKEW_MS)
+    })
 }
 
 /// Shared upsert skeleton for the outcome-driven snapshot indexes: recency guard
@@ -284,6 +311,13 @@ fn upsert_outcome_snapshot<S: Default + Serialize>(
     let (last_success_at, last_failure_at) = outcome_times(&snapshot);
     if !accepts_outcome(last_success_at, last_failure_at, timestamp_ms) {
         return;
+    }
+    // Only an invalid future snapshot can accept an older outcome.
+    if last_success_at
+        .max(last_failure_at)
+        .is_some_and(|latest| timestamp_ms < latest)
+    {
+        snapshot = S::default();
     }
 
     let mut index = load_advisory_index(store, index_key);
@@ -320,6 +354,12 @@ pub(super) fn upsert_source_health_snapshot(
                 snapshot.cooldown_until = None;
             }
             _ => {
+                if snapshot.last_failure_at.is_none_or(|last_failure_at| {
+                    timestamp_ms.saturating_sub(last_failure_at)
+                        > SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS
+                }) {
+                    snapshot.consecutive_failures = 0;
+                }
                 snapshot.last_failure_at = Some(timestamp_ms);
                 snapshot.consecutive_failures = snapshot.consecutive_failures.saturating_add(1);
                 // A single blip must not bench a source — the fetcher skips score-0
@@ -327,7 +367,7 @@ pub(super) fn upsert_source_health_snapshot(
                 snapshot.cooldown_until = (snapshot.consecutive_failures >= 2).then(|| {
                     timestamp_ms.saturating_add(match outcome {
                         PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 12,
-                        PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 15,
+                        PlaybackStreamOutcomeKind::LoadFailed => SOURCE_HEALTH_MAX_COOLDOWN_MS,
                         PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
                         // The outer `_` arm already excludes Verified.
                         PlaybackStreamOutcomeKind::Verified => unreachable!(),
@@ -395,7 +435,7 @@ pub(super) fn upsert_stream_family_snapshot(
                     snapshot.cooldown_until =
                         Some(report.timestamp_ms.saturating_add(match report.outcome {
                             PlaybackStreamOutcomeKind::StartupTimeout => 1000 * 60 * 10,
-                            PlaybackStreamOutcomeKind::LoadFailed => 1000 * 60 * 12,
+                            PlaybackStreamOutcomeKind::LoadFailed => STREAM_FAMILY_MAX_COOLDOWN_MS,
                             PlaybackStreamOutcomeKind::Disconnected => 1000 * 60 * 6,
                             // The outer `_` arm already excludes Verified.
                             PlaybackStreamOutcomeKind::Verified => unreachable!(),
@@ -523,11 +563,9 @@ fn scored_priorities<'a>(
         let Some(key) = item.and_then(&normalize) else {
             continue;
         };
-        if priorities.contains_key(&key) {
-            continue;
-        }
-        let score = load_and_score(&key);
-        priorities.insert(key, score);
+        priorities
+            .entry(key)
+            .or_insert_with_key(|key| load_and_score(key));
     }
     priorities
 }
@@ -545,7 +583,7 @@ impl PlaybackStateService {
         // IPC-supplied coordinates go straight into the family snapshot — apply the shared ingress bound first.
         report.season = normalize_episode_coordinate(report.season);
         report.episode = normalize_episode_coordinate(report.episode);
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         // Health attribution uses the resolved stream's `source_id`; a name-only
         // report (legacy route state) skips the health write rather than guessing.
         let resolved_source_id = report.source_id.as_deref().and_then(normalize_source_id);
@@ -574,6 +612,7 @@ impl PlaybackStateService {
                 .stream_family
                 .as_deref()
                 .and_then(normalize_source_key)
+                .filter(|family| is_current_stream_family(family))
             {
                 upsert_stream_family_snapshot(
                     &store,
@@ -602,16 +641,20 @@ impl PlaybackStateService {
         app: &AppHandle,
         source_ids: impl IntoIterator<Item = Option<&'a str>>,
     ) -> Result<HashMap<String, u8>, String> {
+        let mut seen = HashSet::new();
         let mut priorities: HashMap<String, u8> = source_ids
             .into_iter()
             .flatten()
+            .filter(|source_id| seen.insert(*source_id))
             .filter_map(normalize_source_id)
             .map(|source_id| (source_id, DEFAULT_SOURCE_HEALTH_PRIORITY))
             .collect();
         if priorities.is_empty() {
             return Ok(priorities);
         }
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let Some(store) = self.open_advisory_store(app, "source-health-priorities") else {
+            return Ok(priorities);
+        };
         let now_ms = now_unix_millis();
 
         for (source_id, priority) in &mut priorities {
@@ -634,16 +677,21 @@ impl PlaybackStateService {
         let Some(scope_key) = playback_title_scope_key(Some(media_type), Some(media_id)) else {
             return Ok(HashMap::new());
         };
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_advisory_store(app, "stream-family-priorities");
         let now_ms = now_unix_millis();
 
         Ok(scored_priorities(
             stream_families.into_iter().map(Some),
             normalize_source_key,
             |stream_family| {
-                let snapshot_key = playback_stream_family_snapshot_key(&scope_key, stream_family);
-                let snapshot = load_playback_stream_family_snapshot(&store, &snapshot_key);
-                score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
+                store
+                    .as_ref()
+                    .map_or(DEFAULT_STREAM_FAMILY_PRIORITY, |store| {
+                        let snapshot_key =
+                            playback_stream_family_snapshot_key(&scope_key, stream_family);
+                        let snapshot = load_playback_stream_family_snapshot(store, &snapshot_key);
+                        score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
+                    })
             },
         ))
     }
@@ -659,11 +707,28 @@ impl PlaybackStateService {
         let Some(scope_key) = playback_title_scope_key(Some(media_type), Some(media_id)) else {
             return Ok(None);
         };
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let Some(store) = self.open_advisory_store(app, "preferred-title-source") else {
+            return Ok(None);
+        };
         Ok(preferred_title_source_id_from_success(
             &store,
             &scope_key,
             now_unix_millis(),
         ))
+    }
+
+    /// Reputation only orders sources, so an unreadable store ranks neutrally
+    /// instead of failing history and playback reads.
+    fn open_advisory_store(&self, app: &AppHandle, action: &str) -> Option<DurableStore> {
+        self.open_state_store(app)
+            .inspect_err(|error| {
+                crate::operational_log::log_warn(
+                    "playback-state",
+                    action,
+                    "store-unavailable",
+                    &[crate::operational_log::field("error", error)],
+                );
+            })
+            .ok()
     }
 }

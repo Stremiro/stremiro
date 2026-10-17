@@ -1,14 +1,14 @@
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
-    normalize_list_id, normalize_list_name, reorder_known_ids, ListItemIdentity, UserList,
-    UserListSummary, UserListWithItems, LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, MAX_LISTS,
-    MAX_LIST_ITEMS,
+    normalize_list_id, normalize_list_name, reorder_known_ids, ListError, ListErrorKind,
+    ListItemIdentity, UserList, UserListSummary, UserListWithItems, LISTS_ORDER_KEY,
+    LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::store_helpers::{merge_library_item, normalize_library_item, normalize_library_items};
-use super::{normalize_media_id, DurableStore, LISTS_STORE_FILE};
+use super::{normalize_media_id, run_typed_store_op, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use tauri::{command, AppHandle};
 
 #[command]
@@ -16,14 +16,15 @@ pub async fn create_list(
     app: AppHandle,
     name: String,
     icon: Option<String>,
-) -> Result<UserList, String> {
+) -> Result<UserList, ListError> {
     // Store file IO is blocking: run the read-modify-write off the async
     // worker, matching the library/history command pattern.
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
-        let name =
-            normalize_list_name(&name).ok_or_else(|| "List name is required.".to_string())?;
+        let name = normalize_list_name(&name).ok_or_else(|| {
+            ListError::new(ListErrorKind::ListNameRequired, "List name is required.")
+        })?;
         let id = format!("list_{}", uuid::Uuid::new_v4().simple());
 
         let list = UserList {
@@ -35,7 +36,10 @@ pub async fn create_list(
 
         let mut order = load_lists_order(&store)?;
         if order.len() >= MAX_LISTS {
-            return Err(format!("Too many lists. Maximum is {}.", MAX_LISTS));
+            return Err(ListError::new(
+                ListErrorKind::TooManyLists,
+                format!("Too many lists. Maximum is {}.", MAX_LISTS),
+            ));
         }
         order.push(id.clone());
 
@@ -49,9 +53,9 @@ pub async fn create_list(
 }
 
 #[command]
-pub async fn delete_list(app: AppHandle, list_id: String) -> Result<(), String> {
+pub async fn delete_list(app: AppHandle, list_id: String) -> Result<(), ListError> {
     let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         // Validate the order index before the first mutation — a corrupt header must
@@ -81,15 +85,16 @@ pub async fn rename_list(
     list_id: String,
     name: String,
     icon: Option<String>,
-) -> Result<(), String> {
+) -> Result<(), ListError> {
     let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let mut list = load_list(&store, &list_id)?;
 
-        list.name =
-            normalize_list_name(&name).ok_or_else(|| "List name is required.".to_string())?;
+        list.name = normalize_list_name(&name).ok_or_else(|| {
+            ListError::new(ListErrorKind::ListNameRequired, "List name is required.")
+        })?;
         if let Some(next_icon) = icon {
             list.icon = normalize_list_icon(Some(next_icon.as_str()));
         }
@@ -103,9 +108,13 @@ pub async fn rename_list(
 }
 
 #[command]
-pub async fn add_to_list(app: AppHandle, list_id: String, item: MediaItem) -> Result<(), String> {
+pub async fn add_to_list(
+    app: AppHandle,
+    list_id: String,
+    item: MediaItem,
+) -> Result<UserListSummary, ListError> {
     let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let mut list = load_list(&store, &list_id)?;
@@ -115,18 +124,24 @@ pub async fn add_to_list(app: AppHandle, list_id: String, item: MediaItem) -> Re
 
         if !list.item_ids.contains(&item.id) {
             if list.item_ids.len() >= MAX_LIST_ITEMS {
-                return Err(format!(
-                    "List is full. Maximum is {} items.",
-                    MAX_LIST_ITEMS
+                return Err(ListError::new(
+                    ListErrorKind::ListFull,
+                    format!("List is full. Maximum is {} items.", MAX_LIST_ITEMS),
                 ));
             }
             list.item_ids.push(item.id.clone());
             store.set(list_item_store_key(&list_id, &item.id), json!(item));
             store.set(list_meta_key(&list_id), json!(list));
-            store.save()?;
         }
+        store.save()?;
 
-        Ok(())
+        Ok(UserListSummary {
+            id: list_id,
+            name: list.name,
+            icon: list.icon,
+            item_count: list.item_ids.len(),
+            contains_item: true,
+        })
     })
     .await
 }
@@ -135,7 +150,7 @@ fn add_list_items(
     store: &DurableStore,
     list_id: &str,
     items: Vec<MediaItem>,
-) -> Result<usize, String> {
+) -> Result<usize, ListError> {
     let mut list = load_list(store, list_id)?;
     if items.is_empty() {
         return Ok(0);
@@ -146,10 +161,10 @@ fn add_list_items(
         .filter(|item| known.insert(&item.id))
         .map(|item| item.id.clone())
         .collect();
-    if list.item_ids.len() + new_ids.len() > MAX_LIST_ITEMS {
-        return Err(format!(
-            "A custom list cannot exceed {} items",
-            MAX_LIST_ITEMS
+    if !new_ids.is_empty() && list.item_ids.len() + new_ids.len() > MAX_LIST_ITEMS {
+        return Err(ListError::new(
+            ListErrorKind::ListFull,
+            format!("A custom list cannot exceed {} items", MAX_LIST_ITEMS),
         ));
     }
     drop(known);
@@ -159,14 +174,19 @@ fn add_list_items(
     // order and cost only one store read and one final write.
     let mut prepared = HashMap::<String, MediaItem>::with_capacity(items.len());
     for item in items {
-        let id = item.id.clone();
-        let existing = prepared.remove(&id).or_else(|| {
-            store
-                .get_typed(list_item_store_key(list_id, &id))
-                .and_then(normalize_library_item)
-                .filter(|existing| existing.id == id)
-        });
-        prepared.insert(id, merge_library_item(existing.as_ref(), item));
+        match prepared.entry(item.id.clone()) {
+            Entry::Occupied(mut entry) => {
+                let existing = entry.get_mut();
+                *existing = merge_library_item(Some(existing), item);
+            }
+            Entry::Vacant(entry) => {
+                let existing = store
+                    .get_typed(list_item_store_key(list_id, entry.key()))
+                    .and_then(normalize_library_item)
+                    .filter(|existing| existing.id == *entry.key());
+                entry.insert(merge_library_item(existing.as_ref(), item));
+            }
+        }
     }
     for (id, item) in prepared {
         store.set(list_item_store_key(list_id, &id), json!(item));
@@ -181,8 +201,8 @@ pub async fn bulk_add_to_list(
     app: AppHandle,
     list_id: String,
     items: Vec<MediaItem>,
-) -> Result<usize, String> {
-    super::run_blocking_store_op(move || {
+) -> Result<usize, ListError> {
+    run_typed_store_op(move || {
         let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
         let items = normalize_library_items(items)?;
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
@@ -196,11 +216,11 @@ pub async fn remove_from_list(
     app: AppHandle,
     list_id: String,
     item_id: String,
-) -> Result<(), String> {
+) -> Result<(), ListError> {
     let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
     let item_id =
         normalize_media_id(&item_id).ok_or_else(|| "Invalid list item id.".to_string())?;
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let mut list = load_list(&store, &list_id)?;
@@ -216,10 +236,10 @@ pub async fn remove_from_list(
 }
 
 #[command]
-pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, String> {
-    super::run_blocking_store_op(move || {
+pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, ListError> {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
-        read_lists(&store)
+        read_lists(&store).map_err(Into::into)
     })
     .await
 }
@@ -228,15 +248,17 @@ pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, String>
 pub async fn get_list_summaries(
     app: AppHandle,
     item_id: Option<String>,
-) -> Result<Vec<UserListSummary>, String> {
+) -> Result<Vec<UserListSummary>, ListError> {
     let item_id = item_id.as_deref().and_then(normalize_media_id);
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
         read_lists_with(
             &store,
             |store, key| {
-                let id = store.get_typed::<ListItemIdentity>(key)?.normalized_id()?;
-                Some((id, ()))
+                let item = store
+                    .get_typed::<ListItemIdentity>(key)?
+                    .normalized_item()?;
+                Some((item.id, ()))
             },
             |list, _| UserListSummary {
                 item_count: list.item_ids.len(),
@@ -248,6 +270,7 @@ pub async fn get_list_summaries(
                 icon: list.icon,
             },
         )
+        .map_err(Into::into)
     })
     .await
 }
@@ -269,6 +292,20 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
             items,
         },
     )
+}
+
+pub(super) fn read_list_item_identities(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
+    read_lists_with(
+        store,
+        |store, key| {
+            let item = store
+                .get_typed::<ListItemIdentity>(key)?
+                .normalized_item()?;
+            Some((item.id.clone(), item))
+        },
+        |_list, items| items,
+    )
+    .map(|lists| lists.into_iter().flatten().collect())
 }
 
 fn read_lists_with<T, R>(
@@ -301,7 +338,7 @@ fn read_lists_with<T, R>(
             .collect();
         let cleaned_item_ids: Vec<String> = rows.iter().map(|(_, id, _)| id.clone()).collect();
         if cleaned_item_ids != list.item_ids {
-            // Only damaged membership needs full snapshots in the summary path.
+            // Identity-only reads need full snapshots only to repair damaged membership.
             let repaired_items: Vec<MediaItem> = rows
                 .iter()
                 .filter_map(|(index, _, _)| {
@@ -350,17 +387,14 @@ pub async fn reorder_list_items(
     app: AppHandle,
     list_id: String,
     item_ids: Vec<String>,
-) -> Result<(), String> {
+) -> Result<(), ListError> {
     let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
     // Payload bound before spawning: the merge is O(n+m) but still allocates
     // per payload element, so reject oversized payloads up front.
     if item_ids.len() > MAX_LIST_ITEMS {
-        return Err(format!(
-            "Too many list items. Maximum is {}.",
-            MAX_LIST_ITEMS
-        ));
+        return Err(format!("Too many list items. Maximum is {}.", MAX_LIST_ITEMS).into());
     }
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let mut list = load_list(&store, &list_id)?;
@@ -376,11 +410,14 @@ pub async fn reorder_list_items(
 }
 
 #[command]
-pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), String> {
+pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), ListError> {
     if list_ids.len() > MAX_LISTS {
-        return Err(format!("Too many lists. Maximum is {}.", MAX_LISTS));
+        return Err(ListError::new(
+            ListErrorKind::TooManyLists,
+            format!("Too many lists. Maximum is {}.", MAX_LISTS),
+        ));
     }
-    super::run_blocking_store_op(move || {
+    run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
 
         let current_order = load_lists_order(&store)?;
@@ -474,7 +511,9 @@ mod tests {
             test_media_item("new", "movie"),
         ])
         .unwrap();
-        assert!(add_list_items(&fixture.store, "list_a", items).is_err());
+        let error = add_list_items(&fixture.store, "list_a", items).unwrap_err();
+        assert_eq!(error.kind, ListErrorKind::ListFull);
+        assert_eq!(error.message, "A custom list cannot exceed 2000 items");
         fixture.store.save().unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
         assert!(fixture
@@ -513,6 +552,7 @@ mod tests {
             test_media_item("a", "movie"),
             test_media_item("", "movie"),
         ])
+        .map_err(ListError::from)
         .and_then(|items| add_list_items(&fixture.store, "list_a", items));
         assert!(result.is_err());
         assert!(normalize_list_id("invalid:list").is_none());
@@ -520,7 +560,12 @@ mod tests {
             add_list_items(&fixture.store, "list_a", Vec::new()).unwrap(),
             0
         );
-        assert!(add_list_items(&fixture.store, "missing", Vec::new()).is_err());
+        assert_eq!(
+            add_list_items(&fixture.store, "missing", Vec::new())
+                .unwrap_err()
+                .kind,
+            ListErrorKind::ListNotFound
+        );
         fixture.store.save().unwrap();
         assert_eq!(fixture.store.save_count(), 1);
         assert!(load_list(&fixture.store, "list_a")

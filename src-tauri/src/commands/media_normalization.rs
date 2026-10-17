@@ -65,13 +65,22 @@ fn normalize_runtime(value: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_rating(value: Option<String>) -> Option<String> {
-    let value = value?.trim().to_string();
-    (value.chars().count() <= MEDIA_DETAILS_RATING_MAX_CHARS
-        && value
-            .parse::<f64>()
-            .is_ok_and(|rating| (0.0..=10.0).contains(&rating)))
-    .then_some(value)
+fn normalize_rating(value: Option<String>) -> Option<(String, u8)> {
+    let value = value?;
+    let trimmed = value.trim();
+    if trimmed.chars().count() > MEDIA_DETAILS_RATING_MAX_CHARS {
+        return None;
+    }
+    let rating = trimmed.parse::<f64>().ok()?;
+    if !(0.0..=10.0).contains(&rating) {
+        return None;
+    }
+    let value = if trimmed.len() == value.len() {
+        value
+    } else {
+        trimmed.to_string()
+    };
+    Some((value, (rating * 10.0).round() as u8))
 }
 
 pub(crate) fn build_display_year(value: Option<&str>) -> Option<String> {
@@ -233,7 +242,7 @@ pub(crate) fn normalize_media_details(details: MediaDetails, requested_id: &str)
     details.backdrop = details.backdrop.and_then(|s| normalize_media_image_url(&s));
     details.logo = details.logo.and_then(|s| normalize_media_image_url(&s));
     details.description = bound_optional(details.description, MEDIA_DESCRIPTION_MAX_CHARS);
-    details.rating = normalize_rating(details.rating);
+    (details.rating, details.rating_percent) = normalize_rating(details.rating).unzip();
     details.runtime = normalize_runtime(details.runtime);
     details.year = bound_optional(details.year, MEDIA_YEAR_MAX_CHARS);
     details.cast = bound_string_list(

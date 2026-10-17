@@ -11,16 +11,18 @@ use crate::test_helpers::test_media_item;
 #[test]
 fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     let page = |ids: &[&str], next_skip| {
-        Ok(super::SearchCatalogPage {
+        Ok(super::CatalogFetchPage {
             items: ids.iter().map(|id| test_media_item(id, "movie")).collect(),
             next_skip,
-            all_cursors: None,
         })
     };
     let merged = super::merge_all_browse_pages(
-        super::AllBrowseCursors {
-            movie: Some(0),
-            series: Some(100),
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: Some(0),
+                series: Some(100),
+            }),
+            ..Default::default()
         },
         Some(page(&["m1", "m2", "m3"], Some(100))),
         Some(page(&["s1"], Some(100))),
@@ -28,39 +30,43 @@ fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     .unwrap();
     assert_eq!(ids(&merged.items), ["m1", "s1", "m2", "m3"]);
     assert_eq!(
-        serde_json::to_value(&merged).unwrap()["allCursors"],
+        serde_json::to_value(&merged).unwrap()["continuation"]["allCursors"],
         serde_json::json!({"movie": 100})
     );
-    assert_eq!(merged.next_skip, None);
+    assert_eq!(merged.continuation.skip, None);
+    assert!(!merged.exhausted);
 }
 
 #[test]
 fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
-    let cursors = super::AllBrowseCursors {
-        movie: Some(0),
-        series: Some(100),
+    let continuation = || super::SearchCatalogContinuation {
+        all_cursors: Some(super::AllBrowseCursors {
+            movie: Some(0),
+            series: Some(100),
+        }),
+        ..Default::default()
     };
     let merged = super::merge_all_browse_pages(
-        cursors,
+        continuation(),
         Some(Err("movie offline".into())),
-        Some(Ok(super::SearchCatalogPage {
+        Some(Ok(super::CatalogFetchPage {
             items: vec![],
             next_skip: None,
-            all_cursors: None,
         })),
     )
     .unwrap();
     assert!(merged.items.is_empty());
     assert_eq!(
-        merged.all_cursors,
+        merged.continuation.all_cursors,
         Some(super::AllBrowseCursors {
             movie: Some(0),
             series: None
         })
     );
+    assert!(!merged.exhausted);
     assert_eq!(
         super::merge_all_browse_pages(
-            cursors,
+            continuation(),
             Some(Err("first".into())),
             Some(Err("second".into()))
         )
@@ -68,29 +74,27 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
         "first"
     );
     assert_eq!(
-        super::merge_all_browse_pages(
-            merged.all_cursors.unwrap(),
-            Some(Err("retry failed".into())),
-            None
-        )
-        .unwrap_err(),
+        super::merge_all_browse_pages(merged.continuation, Some(Err("retry failed".into())), None)
+            .unwrap_err(),
         "retry failed"
     );
     let merged = super::merge_all_browse_pages(
-        super::AllBrowseCursors {
-            movie: None,
-            series: Some(100),
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: None,
+                series: Some(100),
+            }),
+            ..Default::default()
         },
         None,
-        Some(Ok(super::SearchCatalogPage {
+        Some(Ok(super::CatalogFetchPage {
             items: vec![test_media_item("s", "series")],
             next_skip: Some(200),
-            all_cursors: None,
         })),
     )
     .unwrap();
     assert_eq!(
-        merged.all_cursors,
+        merged.continuation.all_cursors,
         Some(super::AllBrowseCursors {
             movie: None,
             series: Some(200)
@@ -102,20 +106,23 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
 fn all_browse_wire_cursors_are_typed_and_cannot_mix_request_modes() {
     let request = |value| serde_json::from_value::<super::SearchCatalogRequest>(value).unwrap();
     let criteria = super::build_search_criteria(request(serde_json::json!({
-        "allCursors": {"movie": 0}, "feed": "featured", "genres": [" Drama "],
+        "continuation": {"allCursors": {"movie": 0}, "seenKeys":[]},
+        "feed": "featured", "genres": [" Drama "],
         "yearFrom": 2026, "yearTo": 2026,
     })))
     .unwrap();
-    assert_eq!(criteria.all_cursors.unwrap().movie, Some(0));
+    assert_eq!(criteria.continuation.all_cursors.unwrap().movie, Some(0));
     assert_eq!(criteria.feed, SearchFeed::Featured);
     assert_eq!(criteria.genres, ["Drama"]);
     assert_eq!(criteria.year_range.single_year(), Some(2026));
     for extra in [
         serde_json::json!({"query":"test"}),
         serde_json::json!({"mediaType":"movie"}),
-        serde_json::json!({"skip":0}),
+        serde_json::json!({"continuation":{"skip":0,"allCursors":{"movie":0},"seenKeys":[]}}),
     ] {
-        let mut value = serde_json::json!({"allCursors":{"movie":0,"series":0}});
+        let mut value = serde_json::json!({
+            "continuation":{"allCursors":{"movie":0,"series":0},"seenKeys":[]}
+        });
         value
             .as_object_mut()
             .unwrap()
@@ -128,11 +135,185 @@ fn all_browse_wire_cursors_are_typed_and_cannot_mix_request_modes() {
         serde_json::json!("0"),
     ] {
         assert!(serde_json::from_value::<super::SearchCatalogRequest>(
-            serde_json::json!({"allCursors":{"movie":cursor}})
+            serde_json::json!({"continuation":{"allCursors":{"movie":cursor},"seenKeys":[]}})
         )
         .is_err());
     }
-    assert!(super::build_search_criteria(request(serde_json::json!({}))).is_err());
+    let initial = super::build_search_criteria(request(serde_json::json!({}))).unwrap();
+    assert_eq!(
+        initial.continuation.all_cursors,
+        Some(super::AllBrowseCursors {
+            movie: Some(0),
+            series: Some(0)
+        })
+    );
+}
+
+#[test]
+fn search_catalog_cross_page_dedup_uses_trimmed_ascii_identity() {
+    let first = super::finish_catalog_page(
+        vec![
+            test_media_item(" TT1 ", "movie"),
+            test_media_item("Ä", "series"),
+            test_media_item("custom", "OTHER:TYPE"),
+        ],
+        super::SearchCatalogContinuation {
+            skip: Some(0),
+            ..Default::default()
+        },
+        Some(100),
+        None,
+    );
+    assert!(!first.exhausted);
+    let second = super::finish_catalog_page(
+        vec![
+            test_media_item("tt1", "movie"),
+            test_media_item("\u{feff}tt1", "movie"),
+            test_media_item("Ä", "series"),
+            test_media_item("ä", "series"),
+            test_media_item("tt2", "movie"),
+            test_media_item("TT2", "movie"),
+            test_media_item("CUSTOM", "other:type"),
+        ],
+        first.continuation,
+        Some(200),
+        None,
+    );
+    assert_eq!(ids(&second.items), ["ä", "tt2"]);
+    assert_eq!(second.continuation.skip, Some(200));
+    assert_eq!(second.continuation.seen_keys.len(), 5);
+    assert!(!second.exhausted);
+    assert!(super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({
+            "mediaType": "movie", "continuation": &second.continuation,
+        }))
+        .unwrap(),
+    )
+    .is_ok());
+    let wire = serde_json::to_value(second).unwrap();
+    assert_eq!(wire["continuation"]["skip"], 200);
+    assert!(wire["continuation"]["seenKeys"].is_array());
+    assert_eq!(wire["exhausted"], false);
+}
+
+#[test]
+fn search_catalog_duplicate_only_branch_stops_independently() {
+    let page = super::merge_all_browse_pages(
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: Some(100),
+                series: Some(100),
+            }),
+            seen_keys: vec!["movie:tt1".into()],
+            ..Default::default()
+        },
+        Some(Ok(super::CatalogFetchPage {
+            items: vec![test_media_item("TT1", "movie")],
+            next_skip: Some(200),
+        })),
+        Some(Ok(super::CatalogFetchPage {
+            items: vec![test_media_item("tt2", "series")],
+            next_skip: Some(200),
+        })),
+    )
+    .unwrap();
+    assert_eq!(ids(&page.items), ["tt2"]);
+    assert_eq!(
+        page.continuation.all_cursors,
+        Some(super::AllBrowseCursors {
+            movie: None,
+            series: Some(200),
+        })
+    );
+    assert!(!page.exhausted);
+}
+
+#[test]
+fn search_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
+    for (items, next_skip) in [
+        (vec![test_media_item("TT1", "movie")], Some(200)),
+        (vec![], Some(200)),
+        (vec![test_media_item("new", "movie")], Some(100)),
+        (vec![test_media_item("new", "movie")], None),
+    ] {
+        let page = super::finish_catalog_page(
+            items,
+            super::SearchCatalogContinuation {
+                skip: Some(100),
+                seen_keys: vec!["movie:tt1".into()],
+                ..Default::default()
+            },
+            next_skip,
+            None,
+        );
+        assert!(page.exhausted);
+        assert_eq!(page.continuation.skip, None);
+    }
+    let page = super::merge_all_browse_pages(
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: Some(0),
+                series: None,
+            }),
+            ..Default::default()
+        },
+        Some(Ok(super::CatalogFetchPage {
+            items: vec![],
+            next_skip: None,
+        })),
+        None,
+    )
+    .unwrap();
+    assert!(page.exhausted);
+}
+
+#[test]
+fn search_catalog_seen_key_bound_validates_and_ends_paging() {
+    let seen_keys: Vec<_> = (0..super::MAX_CATALOG_SEEN_KEYS - 1)
+        .map(|id| format!("movie:{id}"))
+        .collect();
+    let page = super::finish_catalog_page(
+        vec![
+            test_media_item("last", "movie"),
+            test_media_item("overflow", "movie"),
+        ],
+        super::SearchCatalogContinuation {
+            skip: Some(100),
+            seen_keys,
+            ..Default::default()
+        },
+        Some(200),
+        None,
+    );
+    assert_eq!(ids(&page.items), ["last"]);
+    assert_eq!(
+        page.continuation.seen_keys.len(),
+        super::MAX_CATALOG_SEEN_KEYS
+    );
+    assert!(page.exhausted);
+    let request = |keys: &[String]| {
+        serde_json::from_value::<super::SearchCatalogRequest>(
+            serde_json::json!({"mediaType":"movie","continuation":{"skip":200,"seenKeys":keys}}),
+        )
+        .unwrap()
+    };
+    assert!(
+        super::build_search_criteria(request(&page.continuation.seen_keys))
+            .unwrap()
+            .continuation
+            .is_exhausted()
+    );
+    assert!(super::build_search_criteria(request(&[
+        "😀".repeat(super::MAX_CATALOG_SEEN_KEY_CHARS)
+    ]))
+    .is_ok());
+    for keys in [
+        vec!["movie:duplicate".into(); super::MAX_CATALOG_SEEN_KEYS + 1],
+        vec!["😀".repeat(super::MAX_CATALOG_SEEN_KEY_CHARS + 1)],
+        vec![String::new()],
+    ] {
+        assert!(super::build_search_criteria(request(&keys)).is_err());
+    }
 }
 
 // Mirrors production: year filters and ordering read `primary_year`,
@@ -177,8 +358,8 @@ fn cached_empty_titles_are_filtered_only_after_duplicate_selection() {
 }
 
 #[test]
-fn search_ranking_preserves_score_year_ties_and_year_filter_policy() {
-    let items = vec![
+fn search_ranking_preserves_catalog_order_and_year_filter_policy() {
+    let mut items = vec![
         build_item("first", "Match", Some("2024")),
         build_item("partial", "Match sequel", Some("2026")),
         build_item("older", "Match", Some("2020")),
@@ -187,8 +368,10 @@ fn search_ranking_preserves_score_year_ties_and_year_filter_policy() {
     ];
     assert_eq!(
         ids(&rank_search_results("match", items.clone(), NO_RANGE)),
-        ["first", "second", "older", "unknown", "partial"]
+        ["first", "older", "second", "unknown", "partial"]
     );
+    // Keep the existing year-filter checks independent of relevance ordering.
+    items.swap(2, 3);
     for (year_from, expected) in [
         (None, vec!["first", "second", "older", "unknown"]),
         (Some(2021), vec!["first", "second"]),
@@ -204,6 +387,94 @@ fn search_ranking_preserves_score_year_ties_and_year_filter_policy() {
             )),
             expected
         );
+    }
+}
+
+#[test]
+fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
+    let movies = [
+        ("movie-1936", "The Walking Dead", Some("1936")),
+        ("movie-1995", "The Walking Dead", Some("1995")),
+        (
+            "daryl-return",
+            "The Walking Dead: Daryl Dixon - The Return",
+            Some("2024"),
+        ),
+        ("return", "The Walking Dead: The Return", Some("2024")),
+        ("deceased", "The Walking Deceased", Some("2015")),
+        ("vampires", "Strange Love of the Vampires", Some("1975")),
+        (
+            "journey",
+            "The Walking Dead: The Journey So Far",
+            Some("2016"),
+        ),
+        ("dead-man", "Dead Man Walking", Some("1995")),
+        ("krays", "The Krays: Dead Man Walking", Some("2018")),
+        ("girls", "The Walking Dead Girls", Some("2011")),
+        ("creature", "Creature of the Walking Dead", Some("1965")),
+        ("hills", "The Walking Hills", Some("1949")),
+        ("zombies", "Cowboy Zombies", Some("2013")),
+    ]
+    .into_iter()
+    .map(|(id, title, year)| build_item(id, title, year));
+    let series = [
+        ("tt1520211", "The Walking Dead", Some("2010")),
+        ("dead-city", "The Walking Dead: Dead City", Some("2023")),
+        ("daryl", "The Walking Dead: Daryl Dixon", Some("2023")),
+        ("fear", "Fear the Walking Dead", Some("2015")),
+        ("ones", "The Walking Dead: The Ones Who Live", Some("2024")),
+        ("beyond", "The Walking Dead: World Beyond", Some("2020")),
+        ("tales", "Tales of the Walking Dead", Some("2022")),
+        ("flight", "Fear the Walking Dead: Flight 462", None),
+        ("webisodes", "The Walking Dead: Webisodes", Some("2011")),
+        ("origins", "The Walking Dead: Origins", Some("2021")),
+    ]
+    .into_iter()
+    .map(|(id, title, year)| MediaItem {
+        type_: "series".to_string(),
+        ..build_item(id, title, year)
+    });
+    let ranked = rank_search_results("The Walking Dead", movies.chain(series).collect(), NO_RANGE);
+    assert_eq!(
+        (
+            ranked[0].title.as_str(),
+            ranked[0].type_.as_str(),
+            ranked[0].primary_year,
+        ),
+        ("The Walking Dead", "series", Some(2010))
+    );
+    assert_eq!(ids(&ranked[..3]), ["tt1520211", "movie-1936", "movie-1995"]);
+    assert_eq!(
+        ids(&rank_search_results(
+            "dead",
+            vec![
+                build_item("embedded", "Undead", None),
+                build_item("word", "The Dead", None),
+            ],
+            NO_RANGE,
+        )),
+        ["word", "embedded"]
+    );
+    for title in ["The Walking Dead Girls", "Dead Man Walking"] {
+        let position = ranked.iter().position(|item| item.title == title).unwrap();
+        for (index, item) in ranked.iter().enumerate() {
+            if item.title.starts_with("The Walking Dead:") {
+                assert!(position > index, "{title} must rank below {}", item.title);
+            }
+        }
+    }
+    for (title, expected) in [
+        ("Amélie", "amelie"),
+        ("Ame\u{301}lie", "amelie"),
+        ("İstanbul", "istanbul"),
+        ("Pok\u{e9}mon", "pokemon"),
+        ("Grey's Anatomy", "greys anatomy"),
+        ("Pokémon: The Movie", "pokemon the movie"),
+        ("  GREY’S---ANATOMY!  ", "greys anatomy"),
+        ("ÉÀÇÑØÜÝŸẞÆŒ", "eacnouyyssaeoe"),
+        ("東京物語 / МОСКВА", "東京物語 москва"),
+    ] {
+        assert_eq!(super::normalize_search_text(title), expected);
     }
 }
 

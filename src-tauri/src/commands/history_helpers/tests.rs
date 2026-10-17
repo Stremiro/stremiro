@@ -87,6 +87,38 @@ fn progress_annotations_share_the_backend_thresholds_and_never_persist() {
 }
 
 #[test]
+fn progress_annotations_hydrate_coordinates_independently() {
+    for (season, episode, absolute_season, absolute_episode, expected) in [
+        (Some(2), Some(7), None, None, (Some(2), Some(7))),
+        (Some(0), Some(0), None, None, (Some(0), Some(0))),
+        (Some(2), Some(7), Some(0), Some(12), (Some(0), Some(12))),
+        (Some(2), Some(7), Some(3), None, (Some(3), Some(7))),
+        (Some(2), Some(7), None, Some(8), (Some(2), Some(8))),
+        (Some(0), None, None, None, (Some(0), None)),
+        (None, Some(7), None, None, (None, Some(7))),
+        (None, None, None, None, (None, None)),
+    ] {
+        let stored = WatchProgress {
+            season,
+            episode,
+            absolute_season,
+            absolute_episode,
+            ..sample_progress()
+        };
+        let annotated = with_progress_annotations(stored.clone());
+        assert_eq!(
+            (annotated.absolute_season, annotated.absolute_episode),
+            expected
+        );
+        assert_eq!((annotated.season, annotated.episode), (season, episode));
+        assert_eq!(
+            (stored.absolute_season, stored.absolute_episode),
+            (absolute_season, absolute_episode)
+        );
+    }
+}
+
+#[test]
 fn compare_continue_watching_sorts_recent_meaningful_before_older_deeper() {
     let mut recent = test_progress();
     recent.position = 600.0;

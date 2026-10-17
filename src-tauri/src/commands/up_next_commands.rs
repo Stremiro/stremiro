@@ -1,4 +1,5 @@
 use super::calendar_commands::date_ordinal;
+use super::episode_navigation::coordinate_neighbours;
 use super::history_helpers::{
     is_series_like_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
 };
@@ -12,7 +13,7 @@ use super::{now_unix_millis, WatchProgress};
 use crate::providers::addon_resource::AddonResourceClient;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
-use tauri::ipc::Channel;
+use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{command, AppHandle, State};
 
 #[derive(Debug, Serialize)]
@@ -28,8 +29,8 @@ pub struct UpNextCandidate {
 /// carries its badge flag; absent marks a continue-watching resume row.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ResumeRailEntry {
-    pub row: WatchProgress,
+pub struct ResumeRailEntry<T = WatchProgress> {
+    pub row: T,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub is_new_episode: Option<bool>,
 }
@@ -46,31 +47,34 @@ pub(crate) fn build_up_next_entries(
     now_ms: u64,
 ) -> Vec<UpNextCandidate> {
     let today_ordinal = date_ordinal(local_today);
-    let schedules_by_id: HashMap<_, _> = schedules
-        .into_iter()
-        .map(|schedule| (schedule.id.clone(), schedule))
+    let schedules_by_id: HashMap<&str, &MediaSchedule> = schedules
+        .iter()
+        .map(|schedule| (schedule.id.as_str(), schedule))
         .collect();
     sources
         .into_iter()
         .filter_map(|mut source| {
             let season = watch_progress_absolute_season(&source)?;
             let episode = watch_progress_absolute_episode(&source)?;
-            let schedule = schedules_by_id.get(&source.id)?;
-            let next = schedule
-                .episodes
-                .iter()
-                .filter(|candidate| candidate.season != 0 || season == 0)
-                .filter(|candidate| (candidate.season, candidate.episode) > (season, episode))
-                .min_by_key(|candidate| (candidate.season, candidate.episode))?;
+            let schedule = schedules_by_id.get(source.id.as_str())?;
+            let (_, next) = coordinate_neighbours(
+                schedule
+                    .episodes
+                    .iter()
+                    .filter(|candidate| candidate.season != 0 || season == 0),
+                (season, episode),
+                |candidate| (candidate.season, candidate.episode),
+            );
+            let next = next?;
             // Choose by episode coordinates first: an unaired, undated or
             // malformed successor must not skip forward to a later aired one.
-            let release_date = next
-                .release_date
-                .as_deref()
-                .filter(|date| date_ordinal(date).is_some() && *date <= local_today)?;
+            let release_date = next.release_date.as_deref()?;
+            let release_ordinal = date_ordinal(release_date)?;
+            if release_date > local_today {
+                return None;
+            }
             // Released-local-midnight on the epoch timeline — same day math the card
             // used. A DST gap can skew the instant an hour; harmless at badge scale.
-            let release_ordinal = date_ordinal(release_date)?;
             let released_ms = today_ordinal.map_or(0, |today| {
                 local_today_ms.saturating_add_signed(
                     (release_ordinal as i64 - today as i64) * MS_PER_DAY as i64,
@@ -168,7 +172,7 @@ pub async fn get_resume_rail(
     client: State<'_, AddonResourceClient>,
     local_today: String,
     local_today_ms: u64,
-    on_progress: Channel<Vec<ResumeRailEntry>>,
+    on_progress: Channel<InvokeResponseBody>,
 ) -> Result<Vec<ResumeRailEntry>, String> {
     if date_ordinal(&local_today).is_none() || local_today_ms == 0 {
         return Err("Invalid local schedule date.".to_string());
@@ -189,8 +193,20 @@ pub async fn get_resume_rail(
                 .filter(|row| is_series_like_watch_progress(row))
                 .map(|row| row.source_id.as_deref()),
         )?;
-        let status_store = super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)?;
-        let statuses = load_watch_statuses_map(&status_store)?;
+        let statuses = match super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)
+            .and_then(|store| load_watch_statuses_map(&store))
+        {
+            Ok(statuses) => statuses,
+            Err(error) => {
+                crate::operational_log::log_warn(
+                    "resume-rail",
+                    "load-watch-statuses",
+                    "degraded",
+                    &[crate::operational_log::field("error", error)],
+                );
+                return Ok((continue_watching, Vec::new()));
+            }
+        };
         let sources = build_up_next_sources(
             rows,
             &statuses,
@@ -200,7 +216,17 @@ pub async fn get_resume_rail(
         Ok((continue_watching, sources))
     })
     .await?;
-    let _ = on_progress.send(build_resume_rail(continue_watching.clone(), Vec::new()));
+    if let Ok(snapshot) = serde_json::to_string(
+        &continue_watching
+            .iter()
+            .map(|row| ResumeRailEntry {
+                row,
+                is_new_episode: None,
+            })
+            .collect::<Vec<_>>(),
+    ) {
+        let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
+    }
     let up_next =
         build_up_next_for_sources(&app, client.inner(), sources, &local_today, local_today_ms)
             .await?;

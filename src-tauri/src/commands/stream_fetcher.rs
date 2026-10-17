@@ -4,6 +4,7 @@ use super::playback_preferences_commands::{
     PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY,
 };
 use super::playback_state::PlaybackStateService;
+use super::probe_pool::{is_probeable_stream, BEST_STREAM_CANDIDATE_TIMEOUT_SECS};
 use super::stream_coordinator::{
     sort_streams_by_recommendation, StreamMatchContext, StreamRecommendationInputs,
     StreamSignalCache, DEFAULT_SOURCE_HEALTH_PRIORITY,
@@ -11,6 +12,7 @@ use super::stream_coordinator::{
 use super::streaming_helpers::{
     build_addon_source_priority_map, build_stream_query_ids, merge_unique_streams,
     normalize_source_id, normalize_source_key, prepare_addon_streams, push_bounded_error,
+    stream_absolute_episode_targets,
 };
 use super::{
     normalize_media_id, normalize_stream_media_type, PlaybackLanguagePreferences,
@@ -18,14 +20,18 @@ use super::{
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_manifest::snapshot_supports_request;
-use crate::providers::addons::{AddonStream, AddonTransport, StreamDeliveryKind, StreamResolution};
+use crate::providers::addons::{
+    stream_conflicts_with_episode_targets, AddonStream, AddonTransport, StreamDeliveryKind,
+    StreamResolution,
+};
 use crate::providers::trim_to_max;
 use futures_util::stream::{self, StreamExt};
 use serde::{ser::SerializeStruct, Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 
 // Bounded so one unhealthy source cannot dominate selector open time; matches the
 // resource request budget so a slow-but-alive source avoids the failure cooldown.
@@ -38,12 +44,62 @@ const ADDON_STREAM_FETCH_CONCURRENCY_LIMIT: usize = 4;
 /// the caller. Past the deadline the merge runs on whatever landed.
 const RESOLVE_FETCH_DEADLINE: Duration = Duration::from_secs(14);
 
+fn resolve_fetch_deadline(
+    now: tokio::time::Instant,
+    request_deadline: Option<tokio::time::Instant>,
+) -> tokio::time::Instant {
+    let fetch_budget = request_deadline.map_or(RESOLVE_FETCH_DEADLINE, |deadline| {
+        let remaining = deadline.saturating_duration_since(now);
+        // Late retries must leave time to probe whatever the fetch returns.
+        let probe_reserve =
+            Duration::from_secs(BEST_STREAM_CANDIDATE_TIMEOUT_SECS).min(remaining / 2);
+        RESOLVE_FETCH_DEADLINE.min(remaining.saturating_sub(probe_reserve))
+    });
+    now + fetch_budget
+}
+
 /// Resolve/recovery fan-out options (bounded by `RESOLVE_FETCH_DEADLINE`).
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ResolveFetch<'a> {
     /// Prepared key of the stream the probe pool tries first — once an addon
     /// returns it, slower addons are not awaited.
     pub settle_on_stream_key: Option<&'a str>,
+    pub settled_early: Option<&'a AtomicBool>,
+    pub preferred_source_id: Option<&'a str>,
+    /// Recovery's current failure overlays the snapshot even before async persistence lands.
+    pub failed_source_id: Option<&'a str>,
+    pub failed_stream_family: Option<&'a str>,
+    pub not_before: Option<Instant>,
+}
+
+impl ResolveFetch<'_> {
+    fn apply_source_failure(
+        self,
+        priorities: &mut HashMap<String, u8>,
+        preferred_title_source_id: &mut Option<String>,
+    ) {
+        let Some(source_id) = self.failed_source_id.and_then(normalize_source_id) else {
+            return;
+        };
+        // A first failure demotes, but must not lift an already active cooldown.
+        priorities
+            .entry(source_id.clone())
+            .and_modify(|priority| *priority = (*priority).min(1))
+            .or_insert(1);
+        if preferred_title_source_id.as_deref() == Some(source_id.as_str()) {
+            *preferred_title_source_id = None;
+        }
+    }
+
+    fn initial_family_priorities(self) -> HashMap<String, u8> {
+        // Families cool down on the first failure; seed before store-backed scores
+        // are filled so a stale positive snapshot cannot overwrite this failure.
+        self.failed_stream_family
+            .and_then(normalize_source_key)
+            .map(|family| (family, 0))
+            .into_iter()
+            .collect()
+    }
 }
 const ACTIVE_SOURCE_COOLDOWN_PRIORITY: u8 = 0;
 const SOURCE_COOLDOWN_ERROR_MESSAGE: &str =
@@ -235,11 +291,12 @@ fn summarize_cooldown_skipped_addon(addon: &AddonConfig) -> StreamSourceSummary 
     }
 }
 
-fn addon_declares_stream(addon: &AddonConfig, media_type: &str, media_id: &str) -> bool {
-    addon
-        .capabilities
-        .as_ref()
-        .is_none_or(|snapshot| snapshot_supports_request(snapshot, "stream", media_type, media_id))
+fn addon_declares_stream(addon: &AddonConfig, media_type: &str, query_ids: &[String]) -> bool {
+    query_ids.iter().any(|query_id| {
+        addon.capabilities.as_ref().is_none_or(|snapshot| {
+            snapshot_supports_request(snapshot, "stream", media_type, query_id)
+        })
+    })
 }
 
 fn load_effective_playback_language_preferences(
@@ -273,6 +330,80 @@ pub(crate) struct StreamQueryRequest<'a> {
     pub absolute_episode: Option<u32>,
 }
 
+impl StreamQueryRequest<'_> {
+    fn query_ids(&self, video_id: Option<&str>) -> Vec<String> {
+        let mut ids = build_stream_query_ids(
+            self.media_type,
+            self.id,
+            self.season,
+            self.episode,
+            self.absolute_episode,
+        );
+        if self.media_type != "movie" && self.season.zip(self.episode).is_some() {
+            if let Some(id) = video_id.and_then(|id| normalize_media_id(super::js_trim(id))) {
+                if !ids.contains(&id) {
+                    // Keep the working primary, then try Stremio's video.id before heuristic fallbacks.
+                    ids.insert(1, id);
+                }
+            }
+        }
+        ids
+    }
+
+    fn episode_targets_with_video_id(
+        &self,
+        ranking: &StreamRankingScope,
+        video_id: Option<&str>,
+    ) -> Vec<(u32, u32)> {
+        let mut targets = self.episode_targets(ranking);
+        if self.media_type != "movie" {
+            let target = video_id.and_then(|id| {
+                let id = normalize_media_id(super::js_trim(id))?;
+                let (base, episode) = id.rsplit_once(':')?;
+                let (base, season) = base.rsplit_once(':')?;
+                // kitsu:{title}:{episode} is flat, not season/episode numbering.
+                if base.is_empty() || base == "kitsu" {
+                    return None;
+                }
+                Some((season.parse().ok()?, episode.parse().ok()?))
+            });
+            if let Some(target) = target.filter(|target| !targets.contains(target)) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+
+    pub(crate) fn episode_targets(&self, ranking: &StreamRankingScope) -> Vec<(u32, u32)> {
+        if self.media_type == "movie" {
+            return Vec::new();
+        }
+        let mut targets = Vec::new();
+        for target in [
+            self.season.zip(self.episode),
+            ranking.season.zip(ranking.episode),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(
+            stream_absolute_episode_targets(
+                self.media_type,
+                self.id,
+                self.season,
+                self.episode,
+                self.absolute_episode,
+            )
+            .into_iter()
+            .flatten(),
+        ) {
+            if !targets.contains(&target) {
+                targets.push(target);
+            }
+        }
+        targets
+    }
+}
+
 pub(crate) struct StreamRankingScope {
     pub media_type: String,
     pub media_id: String,
@@ -294,17 +425,15 @@ pub(crate) struct StreamRankingOverrides {
 /// merge must rank on identical coordinates. `is_final_season` lets the episode
 /// battery resolve numberless "final season" naming claims.
 fn stream_match_context<'a>(
-    query: &StreamQueryRequest<'_>,
+    episode_targets: &'a [(u32, u32)],
     ranking: &'a StreamRankingScope,
     is_final_season: bool,
 ) -> StreamMatchContext<'a> {
     StreamMatchContext {
         media_type: &ranking.media_type,
         title: ranking.title.as_deref(),
-        query_season: query.season,
-        query_episode: query.episode,
+        episode_targets,
         canonical_season: ranking.season,
-        canonical_episode: ranking.episode,
         is_final_season,
     }
 }
@@ -340,18 +469,36 @@ pub(crate) fn resolve_stream_ranking_scope(
     })
 }
 
+#[derive(Clone, Copy)]
+struct EpisodeEligibility<'a> {
+    targets: &'a [(u32, u32)],
+    final_season: Option<u32>,
+}
+
 async fn fetch_prepared_streams_for_addon(
     provider: &AddonTransport,
     effective_type: &str,
     query_ids: &[String],
     addon: &AddonConfig,
+    episode_eligibility: Option<EpisodeEligibility<'_>>,
+    not_before: Option<Instant>,
 ) -> Result<Vec<AddonStream>, String> {
     let source_name = addon.name.as_str();
+    let resolve = episode_eligibility.is_some();
+    let episode_eligibility =
+        episode_eligibility.filter(|eligibility| !eligibility.targets.is_empty());
     let mut last_error: Option<String> = None;
     let mut any_succeeded = false;
+    let mut unprobeable_streams = Vec::new();
+    let mut attempted_queries = 0;
 
     for (index, query_id) in query_ids.iter().enumerate() {
-        let timeout_secs = if index == 0 {
+        if !addon_declares_stream(addon, effective_type, std::slice::from_ref(query_id)) {
+            continue;
+        }
+        let primary_attempt = attempted_queries == 0;
+        attempted_queries += 1;
+        let timeout_secs = if primary_attempt {
             ADDON_STREAM_FETCH_TIMEOUT_SECS
         } else {
             ADDON_STREAM_FALLBACK_QUERY_TIMEOUT_SECS
@@ -359,17 +506,42 @@ async fn fetch_prepared_streams_for_addon(
 
         // Snapshot before spawning: a `clear_cache` landing mid-flight revokes this attempt's cooldown right.
         let generation = provider.cache_generation();
-        let attempt = tokio::time::timeout(
-            Duration::from_secs(timeout_secs),
-            provider.get_streams(effective_type, query_id, &addon.url),
-        )
+        let attempt = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
+            match not_before {
+                Some(_) => {
+                    provider
+                        .get_streams_fresh(effective_type, query_id, &addon.url, not_before)
+                        .await
+                }
+                None => {
+                    provider
+                        .get_streams(effective_type, query_id, &addon.url)
+                        .await
+                }
+            }
+        })
         .await;
 
         match attempt {
             Ok(Ok(streams)) => {
                 any_succeeded = true;
-                let prepared = prepare_addon_streams(streams, source_name, &addon.id);
+                let mut prepared = prepare_addon_streams(streams, source_name, &addon.id);
+                if let Some(eligibility) = episode_eligibility {
+                    prepared.retain(|stream| {
+                        !stream_conflicts_with_episode_targets(
+                            stream.match_texts(),
+                            eligibility.targets,
+                            eligibility.final_season,
+                        )
+                    });
+                }
                 if prepared.is_empty() {
+                    continue;
+                }
+                if resolve && !prepared.iter().any(is_probeable_stream) {
+                    if unprobeable_streams.is_empty() {
+                        unprobeable_streams = prepared;
+                    }
                     continue;
                 }
 
@@ -395,7 +567,7 @@ async fn fetch_prepared_streams_for_addon(
                 // The dropped get_streams future can't record its own failure — a hung
                 // host would re-pay the timeout on every selector open. Only the primary
                 // attempt may cool the host: a fallback id's timeout proves nothing.
-                if index == 0 {
+                if primary_attempt {
                     provider.note_fetch_failure_for_url(&addon.url, generation);
                 }
                 log_warn(
@@ -410,7 +582,7 @@ async fn fetch_prepared_streams_for_addon(
                         field("timeout_secs", timeout_secs),
                     ],
                 );
-                if index == 0 {
+                if primary_attempt {
                     // The recorded cooldown would reject remaining ids and mask the
                     // timeout error — return the real failure.
                     return Err(error);
@@ -426,61 +598,116 @@ async fn fetch_prepared_streams_for_addon(
         }
     }
 
-    Ok(Vec::new())
+    Ok(unprobeable_streams)
 }
 
 pub(crate) async fn fetch_stream_for_link(
     app: &AppHandle,
     provider: &AddonTransport,
     query: &StreamQueryRequest<'_>,
+    ranking: &StreamRankingScope,
     stream_key: &str,
     source_id: Option<&str>,
 ) -> Result<Option<AddonStream>, String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
-    let query_ids = build_stream_query_ids(
-        query.media_type,
-        query.id,
-        query.season,
-        query.episode,
-        query.absolute_episode,
-    );
+    let video_id =
+        cached_episode_video_id(app, &app.state::<PlaybackStateService>(), ranking, None).await;
+    let query_ids = query.query_ids(video_id.as_deref());
     let addons = super::addon_registry::load_enabled_addons_snapshot(app).await?;
-    let mut stream_addons: Vec<&AddonConfig> = addons
+    let stream_addons = addons
         .iter()
-        .filter(|addon| addon_declares_stream(addon, effective_type, query.id))
+        .filter(|addon| addon_declares_stream(addon, effective_type, &query_ids))
         .collect();
+    fetch_stream_for_link_from_addons(
+        provider,
+        effective_type,
+        &query_ids,
+        stream_addons,
+        stream_key,
+        source_id,
+    )
+    .await
+}
+
+async fn fetch_stream_for_link_from_addons(
+    provider: &AddonTransport,
+    effective_type: &str,
+    query_ids: &[String],
+    mut stream_addons: Vec<&AddonConfig>,
+    stream_key: &str,
+    source_id: Option<&str>,
+) -> Result<Option<AddonStream>, String> {
     // The hint can only select an enabled, stream-capable addon from this snapshot.
-    if let Some(index) =
+    let hinted = if let Some(index) =
         source_id.and_then(|id| stream_addons.iter().position(|addon| addon.id == id))
     {
         let addon = stream_addons.remove(index);
-        if let Ok(streams) =
-            fetch_prepared_streams_for_addon(provider, effective_type, &query_ids, addon).await
-        {
-            if let Some(stream) = streams
-                .into_iter()
-                .find(|stream| stream.stream_key == stream_key)
-            {
-                return Ok(Some(stream));
-            }
-        }
-    }
-    let mut pending = stream::iter((0..stream_addons.len()).map(|index| {
-        fetch_prepared_streams_for_addon(provider, effective_type, &query_ids, stream_addons[index])
+        Some(
+            fetch_prepared_streams_for_addon(
+                provider,
+                effective_type,
+                query_ids,
+                addon,
+                None,
+                None,
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    let remaining = stream::iter((0..stream_addons.len()).map(|index| {
+        fetch_prepared_streams_for_addon(
+            provider,
+            effective_type,
+            query_ids,
+            stream_addons[index],
+            None,
+            None,
+        )
     }))
     .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
-
+    let mut pending = stream::iter(hinted).chain(remaining);
+    let mut first_error = None;
     while let Some(result) = pending.next().await {
-        if let Ok(streams) = result {
-            if let Some(stream) = streams
-                .into_iter()
-                .find(|stream| stream.stream_key == stream_key)
-            {
-                return Ok(Some(stream));
+        match result {
+            Ok(streams) => {
+                if let Some(stream) = streams
+                    .into_iter()
+                    .find(|stream| stream.stream_key == stream_key)
+                {
+                    return Ok(Some(stream));
+                }
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
         }
     }
-    Ok(None)
+    first_error.map_or(Ok(None), Err)
+}
+
+async fn cached_episode_video_id(
+    app: &AppHandle,
+    playback_state: &PlaybackStateService,
+    ranking: &StreamRankingScope,
+    deadline: Option<tokio::time::Instant>,
+) -> Option<String> {
+    if ranking.media_type == "movie" {
+        return None;
+    }
+    let (season, episode) = ranking.season.zip(ranking.episode)?;
+    let app = app.clone();
+    let service = playback_state.clone();
+    let media_type = ranking.media_type.clone();
+    let media_id = ranking.media_id.clone();
+    let read = super::run_blocking_store_op(move || {
+        service.get_episode_video_id(&app, &media_type, &media_id, season, episode)
+    });
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, read).await.ok()?.ok()?,
+        None => read.await.ok()?,
+    }
 }
 
 /// Batched single-store read, off the async worker: health, title affinities, language
@@ -491,6 +718,7 @@ async fn snapshot_selector_inputs(
     playback_state: &PlaybackStateService,
     ranking: &StreamRankingScope,
     stream_addons: &[(usize, &AddonConfig)],
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<
     (
         HashMap<String, u8>,
@@ -500,6 +728,9 @@ async fn snapshot_selector_inputs(
     ),
     String,
 > {
+    if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+        return Ok(Default::default());
+    }
     let app_owned = app.clone();
     let service = playback_state.clone();
     let media_id_owned = ranking.media_id.clone();
@@ -509,7 +740,7 @@ async fn snapshot_selector_inputs(
         .iter()
         .map(|(_, addon)| addon.id.clone())
         .collect();
-    super::run_blocking_store_op(move || {
+    let snapshot = super::run_blocking_store_op(move || {
         let store = super::open_store(&app_owned, super::SETTINGS_STORE_FILE)?;
         let preferred_audio_language =
             get_trimmed_store_string(&store, PREFERRED_AUDIO_LANGUAGE_STORE_KEY);
@@ -544,8 +775,13 @@ async fn snapshot_selector_inputs(
             ),
             is_final_season,
         ))
-    })
-    .await
+    });
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, snapshot)
+            .await
+            .unwrap_or_else(|_| Ok(Default::default())),
+        None => snapshot.await,
+    }
 }
 
 /// Fixed ranking inputs snapshot once per fetch — previews and the settled merge
@@ -556,11 +792,13 @@ struct SelectorFetchContext<'a> {
     provider: &'a AddonTransport,
     query: &'a StreamQueryRequest<'a>,
     ranking: &'a StreamRankingScope,
+    episode_targets: Vec<(u32, u32)>,
     addon_source_priorities: HashMap<String, u32>,
     source_health_priorities: HashMap<String, u8>,
     preferred_title_source_id: Option<String>,
     language_preferences: PlaybackLanguagePreferences,
     is_final_season: bool,
+    deadline: Option<tokio::time::Instant>,
 }
 
 impl SelectorFetchContext<'_> {
@@ -573,7 +811,11 @@ impl SelectorFetchContext<'_> {
             source_health_priorities: &self.source_health_priorities,
             stream_family_priorities,
             preferred_title_source_id: self.preferred_title_source_id.as_deref(),
-            match_context: stream_match_context(self.query, self.ranking, self.is_final_season),
+            match_context: stream_match_context(
+                &self.episode_targets,
+                self.ranking,
+                self.is_final_season,
+            ),
             preferred_audio_language: self
                 .language_preferences
                 .preferred_audio_language
@@ -591,9 +833,19 @@ async fn fetch_addon_stream_outcome(
     effective_type: &str,
     query_ids: &[String],
     addon: &AddonConfig,
+    episode_eligibility: Option<EpisodeEligibility<'_>>,
+    not_before: Option<Instant>,
 ) -> AddonStreamFetchOutcome {
     let started_at = Instant::now();
-    let result = fetch_prepared_streams_for_addon(provider, effective_type, query_ids, addon).await;
+    let result = fetch_prepared_streams_for_addon(
+        provider,
+        effective_type,
+        query_ids,
+        addon,
+        episode_eligibility,
+        not_before,
+    )
+    .await;
     // Exact cast: `min` caps the u128 at u64::MAX, so `as` cannot wrap.
     let latency_ms = started_at.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
 
@@ -650,24 +902,25 @@ async fn ensure_stream_family_priorities(
     ranking: &StreamRankingScope,
     merged: &[AddonStream],
     priorities: &mut HashMap<String, u8>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<(), String> {
-    let mut missing: HashSet<String> = HashSet::new();
+    let mut missing: HashSet<&str> = HashSet::new();
     for stream in merged {
-        let Some(family) = stream
-            .stream_family
-            .as_deref()
-            .and_then(normalize_source_key)
-        else {
+        let Some(family) = stream.stream_family.as_deref() else {
             continue;
         };
-        if !priorities.contains_key(&family) {
+        if !priorities.contains_key(family) {
             missing.insert(family);
         }
     }
     if missing.is_empty() {
         return Ok(());
     }
+    if deadline.is_some_and(|deadline| deadline <= tokio::time::Instant::now()) {
+        return Err("Background persistence timed out.".to_string());
+    }
 
+    let missing: Vec<String> = missing.into_iter().map(str::to_string).collect();
     let app_owned = app.clone();
     let service = playback_state.clone();
     let media_id_owned = ranking.media_id.clone();
@@ -683,8 +936,13 @@ async fn ensure_stream_family_priorities(
             episode_owned,
             missing.iter().map(String::as_str),
         )
-    })
-    .await?;
+    });
+    let fetched = match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, fetched)
+            .await
+            .map_err(|_| "Background persistence timed out.".to_string())??,
+        None => fetched.await?,
+    };
     priorities.extend(fetched);
     Ok(())
 }
@@ -692,6 +950,7 @@ async fn ensure_stream_family_priorities(
 /// Returns the selector payload plus the `is_final_season` fact the ranking snapshot
 /// computed — `StreamPoolQuery::fetch_pool` reuses it so pool gate and ranker share
 /// one source of truth. `resolve` bounds the fan-out for resolve/recovery.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn fetch_stream_selector_data(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -700,17 +959,25 @@ pub(crate) async fn fetch_stream_selector_data(
     ranking: &StreamRankingScope,
     progress: Option<&Channel>,
     resolve: Option<ResolveFetch<'_>>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<(StreamSelectorData, bool), String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
 
-    let query_ids = build_stream_query_ids(
-        query.media_type,
-        query.id,
-        query.season,
-        query.episode,
-        query.absolute_episode,
+    let enabled_addons = async {
+        let snapshot = super::addon_registry::load_enabled_addons_snapshot(app);
+        match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, snapshot)
+                .await
+                .map_err(|_| "Stream resolution timed out.".to_string())?,
+            None => snapshot.await,
+        }
+    };
+    let (video_id, enabled_addons) = tokio::join!(
+        cached_episode_video_id(app, playback_state, ranking, deadline),
+        enabled_addons
     );
-    let enabled_addons = super::addon_registry::load_enabled_addons_snapshot(app).await?;
+    let enabled_addons = enabled_addons?;
+    let query_ids = query.query_ids(video_id.as_deref());
 
     if enabled_addons.is_empty() {
         return Ok((
@@ -723,19 +990,24 @@ pub(crate) async fn fetch_stream_selector_data(
         ));
     }
 
-    // Single pass: capability predicate runs once per stream-declaring addon.
     let stream_addons: Vec<(usize, &AddonConfig)> = enabled_addons
         .iter()
         .enumerate()
-        .filter(|(_, addon)| addon_declares_stream(addon, effective_type, query.id))
+        .filter(|(_, addon)| addon_declares_stream(addon, effective_type, &query_ids))
         .collect();
 
     let (
-        source_health_priorities,
-        preferred_title_source_id,
+        mut source_health_priorities,
+        mut preferred_title_source_id,
         language_preferences,
         is_final_season,
-    ) = snapshot_selector_inputs(app, playback_state, ranking, &stream_addons).await?;
+    ) = snapshot_selector_inputs(app, playback_state, ranking, &stream_addons, deadline).await?;
+    if let Some(resolve) = resolve {
+        resolve.apply_source_failure(
+            &mut source_health_priorities,
+            &mut preferred_title_source_id,
+        );
+    }
 
     let stream_addons: Vec<(usize, &AddonConfig, u8)> = stream_addons
         .into_iter()
@@ -758,7 +1030,7 @@ pub(crate) async fn fetch_stream_selector_data(
         .collect();
 
     // One "can query" view — fetch targets and the source-priority map both derive from it.
-    let active_stream_addons: Vec<(usize, &AddonConfig)> = stream_addons
+    let mut active_stream_addons: Vec<(usize, &AddonConfig)> = stream_addons
         .iter()
         .filter(|(_, _, priority)| *priority > ACTIVE_SOURCE_COOLDOWN_PRIORITY)
         .map(|(index, addon, _)| (*index, *addon))
@@ -787,12 +1059,15 @@ pub(crate) async fn fetch_stream_selector_data(
         ));
     }
 
+    let fetch_deadline =
+        resolve.map(|_| resolve_fetch_deadline(tokio::time::Instant::now(), deadline));
     let ctx = SelectorFetchContext {
         app,
         playback_state,
         provider,
         query,
         ranking,
+        episode_targets: query.episode_targets_with_video_id(ranking, video_id.as_deref()),
         addon_source_priorities: build_addon_source_priority_map(
             active_stream_addons.iter().map(|(_, addon)| *addon),
         ),
@@ -800,7 +1075,19 @@ pub(crate) async fn fetch_stream_selector_data(
         preferred_title_source_id,
         language_preferences,
         is_final_season,
+        deadline: fetch_deadline.or(deadline),
     };
+
+    if let Some(index) = resolve
+        .and_then(|resolve| resolve.preferred_source_id)
+        .and_then(|id| {
+            active_stream_addons
+                .iter()
+                .position(|(_, addon)| addon.id == id)
+        })
+    {
+        active_stream_addons[..=index].rotate_right(1);
+    }
 
     let (outcomes, stream_family_priorities, signal_cache) = run_progressive_fetch(
         &ctx,
@@ -865,7 +1152,9 @@ async fn run_progressive_fetch(
     } else {
         BTreeMap::new()
     };
-    let mut stream_family_priorities: HashMap<String, u8> = HashMap::new();
+    let mut stream_family_priorities = resolve
+        .map(ResolveFetch::initial_family_priorities)
+        .unwrap_or_default();
     let mut signal_cache = StreamSignalCache::default();
     let mut outcomes: BTreeMap<usize, AddonStreamFetchOutcome> = BTreeMap::new();
 
@@ -876,18 +1165,32 @@ async fn run_progressive_fetch(
     }
 
     let provider = ctx.provider;
+    let final_season = ctx.ranking.season.filter(|_| ctx.is_final_season);
+    let episode_eligibility = resolve.map(|_| EpisodeEligibility {
+        targets: &ctx.episode_targets,
+        final_season,
+    });
+    let not_before = resolve.and_then(|resolve| resolve.not_before);
     // Index iteration keeps this borrowed future factory Send without boxing.
     let mut pending = stream::iter((0..prioritized_addons.len()).map(|position| async move {
         let (index, addon) = prioritized_addons[position];
         (
             index,
-            fetch_addon_stream_outcome(provider, effective_type, query_ids, addon).await,
+            fetch_addon_stream_outcome(
+                provider,
+                effective_type,
+                query_ids,
+                addon,
+                episode_eligibility,
+                not_before,
+            )
+            .await,
         )
     }))
     .buffer_unordered(ADDON_STREAM_FETCH_CONCURRENCY_LIMIT);
 
     // No deadline keeps the full selector wait; resolve/recovery bounds the fan-out.
-    let fetch_deadline = resolve.map(|_| tokio::time::Instant::now() + RESOLVE_FETCH_DEADLINE);
+    let fetch_deadline = resolve.and(ctx.deadline);
     let settle_on_stream_key = resolve.and_then(|resolve| resolve.settle_on_stream_key);
 
     loop {
@@ -921,6 +1224,7 @@ async fn run_progressive_fetch(
                 ctx.ranking,
                 &outcome.streams,
                 &mut stream_family_priorities,
+                ctx.deadline,
             )
             .await
             {
@@ -933,11 +1237,7 @@ async fn run_progressive_fetch(
             }
 
             if !outcome.streams.is_empty() {
-                merge_unique_streams(
-                    &mut preview_merged,
-                    &mut preview_seen,
-                    outcome.streams.iter().cloned(),
-                );
+                merge_unique_streams(&mut preview_merged, &mut preview_seen, &outcome.streams);
                 sort_streams_by_recommendation(
                     &mut preview_merged,
                     ctx.recommendation_inputs(&stream_family_priorities),
@@ -953,13 +1253,21 @@ async fn run_progressive_fetch(
             );
         }
         let settled = settle_on_stream_key.is_some_and(|key| {
-            outcome
-                .streams
-                .iter()
-                .any(|stream| stream.stream_key == key)
+            outcome.streams.iter().any(|stream| {
+                stream.stream_key == key
+                    && is_probeable_stream(stream)
+                    && !stream_conflicts_with_episode_targets(
+                        stream.match_texts(),
+                        &ctx.episode_targets,
+                        final_season,
+                    )
+            })
         });
         outcomes.insert(index, outcome);
         if settled {
+            if let Some(settled_early) = resolve.and_then(|resolve| resolve.settled_early) {
+                settled_early.store(outcomes.len() < prioritized_addons.len(), Ordering::Relaxed);
+            }
             break;
         }
     }
@@ -1002,8 +1310,8 @@ async fn merge_selector_outcomes(
         };
 
         let summary = summarize_addon_outcome(&outcome);
-        if let Some(error_message) = outcome.error_message.as_ref() {
-            push_bounded_error(&mut fatal_errors, error_message.clone());
+        if let Some(error_message) = outcome.error_message.as_deref() {
+            push_bounded_error(&mut fatal_errors, error_message);
         }
 
         merge_unique_streams(&mut merged, &mut seen, outcome.streams);
@@ -1023,6 +1331,7 @@ async fn merge_selector_outcomes(
             ctx.ranking,
             &merged,
             &mut stream_family_priorities,
+            ctx.deadline,
         )
         .await
         {
@@ -1060,8 +1369,9 @@ pub(crate) async fn fetch_ranked_streams(
     query: &StreamQueryRequest<'_>,
     ranking: &StreamRankingScope,
     resolve: ResolveFetch<'_>,
-) -> Result<(Vec<AddonStream>, bool), String> {
-    let (data, is_final_season) = fetch_stream_selector_data(
+    deadline: tokio::time::Instant,
+) -> Result<Vec<AddonStream>, String> {
+    let (data, _) = fetch_stream_selector_data(
         app,
         playback_state,
         provider,
@@ -1069,6 +1379,7 @@ pub(crate) async fn fetch_ranked_streams(
         ranking,
         None,
         Some(resolve),
+        Some(deadline),
     )
     .await?;
 
@@ -1078,7 +1389,7 @@ pub(crate) async fn fetch_ranked_streams(
         }
     }
 
-    Ok((data.streams, is_final_season))
+    Ok(data.streams)
 }
 
 #[cfg(test)]

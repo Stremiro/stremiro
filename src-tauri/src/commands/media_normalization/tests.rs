@@ -116,6 +116,7 @@ fn normalize_media_details_normalizes_years_and_episodes() {
         type_: "series".to_string(),
         description: None,
         rating: Some(" 8.30 ".into()),
+        rating_percent: None,
         runtime: Some("142 min".into()),
         cast: Some(vec![" Actor ".into(), "actor".into(), "Other".into()]),
         directors: Some(vec![" Director ".into(), "DIRECTOR".into()]),
@@ -243,6 +244,7 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
         type_: "movie".to_string(),
         description: None,
         rating: None,
+        rating_percent: None,
         runtime: None,
         cast: None,
         directors: None,
@@ -310,10 +312,10 @@ fn runtime_and_rating_reject_invalid_display_values() {
     for invalid in ["N/A", "0", "1441", "-1", "1.5", "2h 60m", "999999999999h"] {
         assert_eq!(normalize_runtime(Some(invalid.into())), None, "{invalid}");
     }
-    for valid in ["0", "10", "8.30"] {
+    for (valid, percent) in [("0", 0), ("10", 100), ("8.30", 83)] {
         assert_eq!(
-            normalize_rating(Some(format!(" {valid} "))).as_deref(),
-            Some(valid)
+            normalize_rating(Some(format!(" {valid} "))),
+            Some((valid.into(), percent))
         );
     }
     for invalid in ["N/A", "83", "-0.1", "10.1", "8.3/10", "NaN", "inf", ""] {
@@ -383,6 +385,7 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         type_: "series".to_string(),
         description: None,
         rating: Some("r".repeat(500)),
+        rating_percent: None,
         runtime: None,
         cast: Some((0..200).map(|index| format!("actor-{index}")).collect()),
         directors: Some(

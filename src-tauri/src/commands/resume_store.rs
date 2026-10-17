@@ -1,4 +1,6 @@
-use super::history_helpers::WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO;
+use super::history_helpers::{
+    WATCH_PROGRESS_FUTURE_SKEW_MS, WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO,
+};
 use super::streaming_helpers::is_persistable_stream_key;
 use crate::commands::WatchProgress;
 use rusqlite::{
@@ -23,6 +25,28 @@ pub(super) const MAX_RESUME_TOTAL_ENTRIES: i64 = 10_000;
 pub(crate) enum ProgressWrite {
     Skipped,
     Written { pruned: bool },
+}
+
+#[derive(Debug)]
+pub(crate) enum HistoryMergeError {
+    CapacityExceeded(String),
+    Failed(String),
+}
+
+impl From<String> for HistoryMergeError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<HistoryMergeError> for String {
+    fn from(error: HistoryMergeError) -> Self {
+        match error {
+            HistoryMergeError::CapacityExceeded(message) | HistoryMergeError::Failed(message) => {
+                message
+            }
+        }
+    }
 }
 
 pub(crate) struct ResumeStore {
@@ -62,39 +86,81 @@ impl ResumeStore {
         Ok(Self { connection })
     }
 
-    /// Opens the store, quarantining an unreadable file (not a database / corrupt
-    /// header) so history recovers instead of failing every command. Unsupported
-    /// schema versions still fail closed without touching the file.
+    /// Opens the store, repairing index damage or quarantining header/page corruption.
+    /// Unsupported schema versions still fail closed without touching the file.
     pub(crate) fn open_or_quarantine(path: &Path) -> Result<Self, String> {
+        let existed = path.exists();
         match Self::open(path) {
-            Err(_) if Self::is_unreadable_database(path) => {
-                Self::quarantine(path)?;
-                Self::open(path)
+            Ok(store) => {
+                if !existed {
+                    return Ok(store);
+                }
+                match store.quick_check() {
+                    Ok(true) => return Ok(store),
+                    Ok(false) => {}
+                    Err(error) if Self::is_corruption(&error) => {}
+                    Err(error) => {
+                        return Err(format!("Failed to check playback resume database: {error}"));
+                    }
+                }
+                match store
+                    .connection
+                    .execute_batch("REINDEX;")
+                    .and_then(|()| store.quick_check())
+                {
+                    Ok(true) => {
+                        crate::operational_log::log_warn("resume-store", "open", "repaired", &[]);
+                        return Ok(store);
+                    }
+                    Ok(false) => {}
+                    Err(error) if Self::is_corruption(&error) => {}
+                    Err(error) => {
+                        return Err(format!(
+                            "Failed to repair playback resume database: {error}"
+                        ));
+                    }
+                }
+                drop(store);
             }
-            result => result,
+            Err(_) if Self::is_unreadable_database(path) => {}
+            Err(error) => return Err(error),
         }
+        Self::quarantine(path)?;
+        Self::open(path)
+    }
+
+    fn quick_check(&self) -> rusqlite::Result<bool> {
+        let mut statement = self.connection.prepare("PRAGMA quick_check")?;
+        let mut rows = statement.query([])?;
+        let mut count = 0;
+        let mut passed = true;
+        while let Some(row) = rows.next()? {
+            count += 1;
+            passed &= row.get_ref(0)? == rusqlite::types::ValueRef::Text(b"ok");
+        }
+        Ok(passed && count == 1)
+    }
+
+    fn is_corruption(error: &rusqlite::Error) -> bool {
+        matches!(
+            error.sqlite_error_code(),
+            Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
+        )
     }
 
     /// True only when SQLite reports the file unreadable (not a database / corrupt
     /// header). Version mismatches and busy/permission errors must not be renamed aside.
     fn is_unreadable_database(path: &Path) -> bool {
-        fn is_corruption(error: &rusqlite::Error) -> bool {
-            matches!(
-                error.sqlite_error_code(),
-                Some(ErrorCode::NotADatabase | ErrorCode::DatabaseCorrupt)
-            )
-        }
-
         if !path.exists() {
             return false;
         }
         let probe = match Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) {
             Ok(connection) => connection,
-            Err(error) => return is_corruption(&error),
+            Err(error) => return Self::is_corruption(&error),
         };
         match probe.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)) {
             Ok(_) => false,
-            Err(error) => is_corruption(&error),
+            Err(error) => Self::is_corruption(&error),
         }
     }
 
@@ -381,10 +447,12 @@ impl ResumeStore {
 
     /// Returns the rows the recency guard admitted, plus whether cap pruning
     /// then deleted any rows (possibly some of those just admitted).
+    /// `reject_growth_past_cap` makes imports fail instead of evicting local rows.
     pub(crate) fn merge_entries(
         &mut self,
         entries: Vec<(String, WatchProgress)>,
-    ) -> Result<(Vec<(String, WatchProgress)>, bool), String> {
+        reject_growth_past_cap: bool,
+    ) -> Result<(Vec<(String, WatchProgress)>, bool), HistoryMergeError> {
         if entries.is_empty() {
             return Ok((Vec::new(), false));
         }
@@ -395,8 +463,28 @@ impl ResumeStore {
                 error
             )
         })?;
+        if reject_growth_past_cap {
+            let mut statement = transaction
+                .prepare("SELECT history_key FROM watch_progress")
+                .map_err(|error| format!("Failed to read playback resume keys: {error}"))?;
+            let existing: HashSet<String> = statement
+                .query_map([], |row| row.get(0))
+                .and_then(|rows| rows.collect())
+                .map_err(|error| format!("Failed to read playback resume keys: {error}"))?;
+            let new_keys: HashSet<&str> = entries
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .filter(|key| !existing.contains(*key))
+                .collect();
+            if !new_keys.is_empty()
+                && existing.len().saturating_add(new_keys.len()) > MAX_RESUME_TOTAL_ENTRIES as usize
+            {
+                return Err(HistoryMergeError::CapacityExceeded(format!(
+                    "This backup would exceed the {MAX_RESUME_TOTAL_ENTRIES}-entry watch history limit."
+                )));
+            }
+        }
         let mut imported = Vec::new();
-        let mut pruned_titles = std::collections::HashSet::new();
 
         {
             // Prepare once — a bulk import must not re-compile the 22-column upsert per row.
@@ -410,19 +498,18 @@ impl ResumeStore {
                 if upsert_progress_stmt(&mut upsert_statement, &key, &progress)? == 0 {
                     continue;
                 }
-                pruned_titles.insert((progress.type_.clone(), progress.id.clone()));
                 imported.push((key, progress));
             }
         }
 
+        let pruned_titles: HashSet<(&str, &str)> = imported
+            .iter()
+            .map(|(_, progress)| (progress.type_.as_str(), progress.id.as_str()))
+            .collect();
         // One prune per distinct title, not per row — a 10k import over few titles pays a few scans.
         let mut pruned = false;
         for (media_type, media_id) in &pruned_titles {
             pruned |= prune_title_history_tx(&transaction, media_type, media_id)?;
-        }
-
-        if count_history_tx(&transaction)? > MAX_RESUME_TOTAL_ENTRIES {
-            pruned |= prune_total_history_tx(&transaction)?;
         }
 
         transaction
@@ -531,6 +618,7 @@ const UPSERT_PROGRESS_SQL: &str = "
         stream_family = excluded.stream_family,
         source_id = excluded.source_id
     WHERE excluded.last_watched >= watch_progress.last_watched
+       OR watch_progress.last_watched > ?23
 ";
 
 /// One column list for every `watch_progress` read — `read_watch_progress_row`
@@ -624,6 +712,7 @@ fn upsert_progress_stmt(
             progress.source_name,
             progress.stream_family,
             progress.source_id,
+            to_sql_i64(super::now_unix_millis().saturating_add(WATCH_PROGRESS_FUTURE_SKEW_MS)),
         ])
         .map_err(|error| format!("Failed to save playback resume row: {}", error))
 }
@@ -642,15 +731,17 @@ fn prune_title_history_tx(
 ) -> Result<bool, String> {
     // Cheap overflow gate: one title's count is an indexed range count — steady-state saves skip the ordered delete.
     let in_progress_count: i64 = transaction
-        .query_row(
-            &format!("SELECT COUNT(*) {IN_PROGRESS_TITLE_ROWS}"),
-            params![
-                media_type,
-                media_id,
-                WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
-            ],
-            |row| row.get(0),
-        )
+        .prepare_cached(&format!("SELECT COUNT(*) {IN_PROGRESS_TITLE_ROWS}"))
+        .and_then(|mut statement| {
+            statement.query_row(
+                params![
+                    media_type,
+                    media_id,
+                    WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
+                ],
+                |row| row.get(0),
+            )
+        })
         .map_err(|error| format!("Failed to count playback resume title rows: {}", error))?;
     if in_progress_count <= MAX_RESUME_ROWS_PER_TITLE {
         return Ok(false);
@@ -678,7 +769,8 @@ fn prune_title_history_tx(
 
 fn count_history_tx(transaction: &Transaction<'_>) -> Result<i64, String> {
     transaction
-        .query_row("SELECT COUNT(*) FROM watch_progress", [], |row| row.get(0))
+        .prepare_cached("SELECT COUNT(*) FROM watch_progress")
+        .and_then(|mut statement| statement.query_row([], |row| row.get(0)))
         .map_err(|error| format!("Failed to count playback resume rows: {}", error))
 }
 

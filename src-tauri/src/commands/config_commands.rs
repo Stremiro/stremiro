@@ -1,25 +1,28 @@
 pub(crate) use super::addon_registry::schedule_capability_classification;
 use super::config_store::{
-    apply_app_ui_preferences_patch, apply_profile_preferences_patch, is_pinned_default_addon_url,
-    load_addon_configs, load_app_ui_preferences, load_last_notified_app_update_version,
-    load_profile_preferences, load_stream_selector_preferences_state, normalize_addon_url,
-    normalize_start_minimized, resolve_addon_configs, sanitize_stream_selector_preferences,
-    save_addon_configs_to_store, save_app_ui_preferences_to_store,
+    addon_display_url, apply_app_ui_preferences_patch, apply_profile_preferences_patch,
+    apply_stream_selector_preferences_patch, default_player_keybindings,
+    default_stream_selector_preferences, is_pinned_default_addon_url, load_addon_configs,
+    load_app_ui_preferences, load_last_notified_app_update_version, load_profile_preferences,
+    load_stream_selector_preferences_state, normalize_addon_url, normalize_start_minimized,
+    resolve_addon_configs, save_addon_configs_to_store, save_app_ui_preferences_to_store,
     save_last_notified_app_update_version_to_store, save_profile_preferences_to_store,
     save_stream_selector_preferences_to_store, startup_route, AddonConfig, AddonConfigView,
-    AppUiPreferences, AppUiPreferencesPatch, ProfilePreferences, ProfilePreferencesPatch,
-    StreamSelectorPreferences,
+    AppUiPreferencesPatch, AppUiPreferencesView, ProfilePreferences, ProfilePreferencesPatch,
+    StreamSelectorPreferences, StreamSelectorPreferencesPatch,
 };
 use super::DurableStore;
 use crate::providers::addon_manifest::{
     fetch_addon_manifest_snapshot, snapshot_is_classified, AddonManifest,
+    ADDON_CONFIGURATION_REQUIRED_MESSAGE,
 };
 use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
 use crate::providers::{build_provider_http_client, trim_to_max};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
 use tauri::{command, AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
@@ -29,6 +32,7 @@ const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
 /// instead of paying re-handshakes per burst.
 static CLASSIFY_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_provider_http_client(Some(ADDON_CLASSIFY_CONCURRENCY)));
+static STARTUP_CAPABILITY_REFRESH: AtomicBool = AtomicBool::new(true);
 /// Registry and reorder-payload bound, shared with backup import.
 const MAX_ADDON_CONFIGS: usize = 32;
 /// Bound client-supplied addon identity fields so an oversized IPC payload
@@ -76,24 +80,77 @@ pub(crate) fn merge_imported_addon_configs(
 pub struct StreamSelectorPreferencesState {
     pub preferences: StreamSelectorPreferences,
     pub initialized: bool,
+    pub default_preferences: StreamSelectorPreferences,
+    pub episode_default_preferences: StreamSelectorPreferences,
+}
+
+impl StreamSelectorPreferencesState {
+    fn new(preferences: StreamSelectorPreferences, initialized: bool) -> Self {
+        Self {
+            preferences,
+            initialized,
+            default_preferences: default_stream_selector_preferences(false),
+            episode_default_preferences: default_stream_selector_preferences(true),
+        }
+    }
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BootstrapSnapshot {
+    pub profile_preferences: ProfilePreferences,
+    pub app_ui_preferences: AppUiPreferencesView,
+    pub stream_selector_preferences: StreamSelectorPreferencesState,
+    pub startup_route: Option<String>,
 }
 
 #[command]
-pub async fn get_app_ui_preferences(app: AppHandle) -> Result<AppUiPreferences, String> {
+pub fn get_default_player_keybindings() -> BTreeMap<String, Vec<String>> {
+    default_player_keybindings()
+}
+
+#[command]
+pub fn bind_player_keybinding(
+    overrides: BTreeMap<String, Vec<String>>,
+    action: String,
+    slot: usize,
+    key: Option<String>,
+) -> Result<BTreeMap<String, Vec<String>>, String> {
+    super::config_store::bind_player_key(overrides, &action, slot, key.as_deref())
+}
+
+#[command]
+pub async fn get_app_ui_preferences(app: AppHandle) -> Result<AppUiPreferencesView, String> {
     // Settings store file IO is blocking: run every read-modify-write off
     // the async worker, matching the library/history command pattern.
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok(load_app_ui_preferences(&store))
+        let preferences = load_app_ui_preferences(&store);
+        super::app_shell_commands::hydrate_preferences(&app, &preferences);
+        Ok(AppUiPreferencesView::from_preferences(preferences))
     })
     .await
 }
 
 #[command]
-pub async fn get_startup_route(app: AppHandle) -> Result<Option<String>, String> {
+pub async fn get_bootstrap_snapshot(app: AppHandle) -> Result<BootstrapSnapshot, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok(startup_route(load_app_ui_preferences(&store)))
+        let profile_preferences = load_profile_preferences(&store);
+        let app_ui_preferences = load_app_ui_preferences(&store);
+        super::app_shell_commands::hydrate_preferences(&app, &app_ui_preferences);
+        let startup_route = startup_route(&app_ui_preferences);
+        let (selector_preferences, selector_initialized) =
+            load_stream_selector_preferences_state(&store);
+        Ok(BootstrapSnapshot {
+            profile_preferences,
+            app_ui_preferences: AppUiPreferencesView::from_preferences(app_ui_preferences),
+            stream_selector_preferences: StreamSelectorPreferencesState::new(
+                selector_preferences,
+                selector_initialized,
+            ),
+            startup_route,
+        })
     })
     .await
 }
@@ -102,7 +159,7 @@ pub async fn get_startup_route(app: AppHandle) -> Result<Option<String>, String>
 pub async fn save_app_ui_preferences(
     app: AppHandle,
     patch: AppUiPreferencesPatch,
-) -> Result<AppUiPreferences, String> {
+) -> Result<AppUiPreferencesView, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let sync_tray = patch.close_to_tray.is_some() || patch.minimize_to_tray.is_some();
@@ -122,19 +179,25 @@ pub async fn save_app_ui_preferences(
         }
 
         save_app_ui_preferences_to_store(&store, &preferences);
-        store.save()?;
         if sync_tray {
-            // The preference is already saved; closing still verifies the tray before hiding.
-            let _ = super::app_shell_commands::sync_preferences(&app, &preferences);
+            // Match the in-memory preference even if saving fails; closing still verifies the tray.
+            if let Err(error) = super::app_shell_commands::sync_preferences(&app, &preferences) {
+                crate::operational_log::log_warn(
+                    "window",
+                    "save-preferences-tray-sync",
+                    "failed",
+                    &[crate::operational_log::field("error", error)],
+                );
+            }
         }
+        store.save()?;
 
-        Ok(preferences)
+        Ok(AppUiPreferencesView::from_preferences(preferences))
     })
     .await
 }
 
-#[command]
-pub async fn get_last_notified_app_update_version(
+pub(crate) async fn get_last_notified_app_update_version(
     app: AppHandle,
 ) -> Result<Option<String>, String> {
     super::run_blocking_store_op(move || {
@@ -152,9 +215,8 @@ pub async fn save_last_notified_app_update_version(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
 
-        if save_last_notified_app_update_version_to_store(&store, version) {
-            store.save()?;
-        }
+        save_last_notified_app_update_version_to_store(&store, version);
+        store.save()?;
 
         Ok(load_last_notified_app_update_version(&store))
     })
@@ -194,27 +256,28 @@ pub async fn get_stream_selector_preferences(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let (preferences, initialized) = load_stream_selector_preferences_state(&store);
-        Ok(StreamSelectorPreferencesState {
+        Ok(StreamSelectorPreferencesState::new(
             preferences,
             initialized,
-        })
+        ))
     })
     .await
 }
 
 #[command]
-pub async fn save_stream_selector_preferences(
+pub async fn patch_stream_selector_preferences(
     app: AppHandle,
-    preferences: StreamSelectorPreferences,
-) -> Result<StreamSelectorPreferences, String> {
+    patch: StreamSelectorPreferencesPatch,
+) -> Result<StreamSelectorPreferencesState, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let preferences = sanitize_stream_selector_preferences(preferences);
+        let (preferences, initialized) = load_stream_selector_preferences_state(&store);
+        let preferences = apply_stream_selector_preferences_patch(preferences, initialized, patch);
 
         save_stream_selector_preferences_to_store(&store, &preferences);
         store.save()?;
 
-        Ok(preferences)
+        Ok(StreamSelectorPreferencesState::new(preferences, true))
     })
     .await
 }
@@ -281,7 +344,8 @@ pub(super) async fn classify_missing_addon_capabilities(
             let url = classified[index].url.clone();
             let client = client.clone();
             async move {
-                let snapshot = fetch_addon_manifest_snapshot(&client, &url).await;
+                let snapshot =
+                    fetch_addon_manifest_snapshot(&client, &url, require_valid_manifest).await;
                 (index, snapshot)
             }
         })
@@ -308,19 +372,53 @@ pub(super) async fn classify_missing_addon_capabilities(
     Ok(classified)
 }
 
-/// Reports whether a config gained a snapshot — an unreachable addon must not
-/// force a store write + generation bump (registry memo invalidation) per retry.
-fn merge_classified_capabilities(latest: &mut [AddonConfig], classified: Vec<AddonConfig>) -> bool {
-    let mut snapshots: std::collections::HashMap<String, AddonManifest> = classified
+async fn refresh_installed_addon_capabilities(
+    mut configs: Vec<AddonConfig>,
+    refresh_classified: bool,
+) -> Result<Vec<AddonConfig>, String> {
+    configs.retain(|config| {
+        config.enabled
+            && (refresh_classified
+                || config
+                    .capabilities
+                    .as_ref()
+                    .is_none_or(|snapshot| !snapshot_is_classified(snapshot)))
+    });
+    for config in &mut configs {
+        // Clear only the fetch candidates, never the stored offline fallback.
+        config.capabilities = None;
+    }
+    let mut classified = classify_missing_addon_capabilities(configs, false).await?;
+    classified.retain(|config| config.capabilities.is_some());
+    Ok(classified)
+}
+
+fn merge_classified_capabilities(
+    latest: &mut [AddonConfig],
+    classified: Vec<AddonConfig>,
+    new_install: bool,
+) -> bool {
+    let mut snapshots: HashMap<_, _> = classified
         .into_iter()
-        .filter_map(|config| config.capabilities.map(|snapshot| (config.url, snapshot)))
+        .filter_map(|config| {
+            config
+                .capabilities
+                .map(|snapshot| (config.id, (config.url, snapshot)))
+        })
         .collect();
 
     let mut changed = false;
     for config in latest {
-        if config.capabilities.is_none() {
-            if let Some(snapshot) = snapshots.remove(&config.url) {
-                changed |= apply_manifest_snapshot(config, snapshot);
+        if let Some((url, snapshot)) = snapshots.remove(&config.id) {
+            if config.url == url
+                && config.capabilities.as_ref() != Some(&snapshot)
+                && snapshot_is_classified(&snapshot)
+            {
+                if new_install && is_host_fallback_name(config) {
+                    config.name = snapshot.name.clone();
+                }
+                config.capabilities = Some(snapshot);
+                changed = true;
             }
         }
     }
@@ -333,28 +431,23 @@ pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Res
         let app = app.clone();
         move || {
             let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+            store.save()?;
             Ok::<_, String>(load_addon_configs(&store))
         }
     })
     .await?;
-    if current.iter().all(|config| {
-        !config.enabled
-            || config
-                .capabilities
-                .as_ref()
-                .is_some_and(snapshot_is_classified)
-    }) {
+    let refresh_classified = STARTUP_CAPABILITY_REFRESH.swap(false, Ordering::SeqCst);
+    let classified = refresh_installed_addon_capabilities(current, refresh_classified).await?;
+    if classified.is_empty() {
         return Ok(());
     }
 
-    let classified = classify_missing_addon_capabilities(current, false).await?;
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut latest = load_addon_configs(&store);
-        if !merge_classified_capabilities(&mut latest, classified) {
-            return Ok(());
+        if merge_classified_capabilities(&mut latest, classified, false) {
+            save_addon_configs_to_store(&store, &latest);
         }
-        save_addon_configs_to_store(&store, &latest);
         store.save()
     })
     .await
@@ -372,6 +465,23 @@ pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, S
     .await
 }
 
+fn load_addon_url(store: &DurableStore, id: &str) -> Result<String, String> {
+    load_addon_configs(store)
+        .into_iter()
+        .find(|addon| addon.id == id)
+        .map(|addon| addon.url)
+        .ok_or_else(|| "Addon not found.".to_string())
+}
+
+#[command]
+pub async fn get_addon_url(app: AppHandle, id: String) -> Result<String, String> {
+    super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+        load_addon_url(&store, &id)
+    })
+    .await
+}
+
 /// Pasted install URLs are short; anything longer is junk, not an addon.
 const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
 
@@ -380,9 +490,10 @@ const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
 #[derive(Debug, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AddonUrlInspection {
-    /// The URL `update_addon_configs` would store; absent when invalid.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub normalized_url: Option<String>,
+    pub display_url: Option<String>,
+    #[serde(skip)]
+    normalized_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// A `/configure` page, not a manifest: the user must finish setup first.
@@ -393,7 +504,7 @@ pub struct AddonUrlInspection {
 }
 
 fn validate_installable_addon_reference(url: &str) -> AddonUrlInspection {
-    if url.chars().count() > MAX_ADDON_URL_INPUT_CHARS {
+    if url.chars().nth(MAX_ADDON_URL_INPUT_CHARS).is_some() {
         return AddonUrlInspection {
             error: Some("Addon URL is too long.".to_string()),
             ..AddonUrlInspection::default()
@@ -413,12 +524,13 @@ fn validate_installable_addon_reference(url: &str) -> AddonUrlInspection {
         parsed
             .path()
             .trim_end_matches('/')
-            .to_ascii_lowercase()
-            .ends_with("/configure")
+            .rsplit_once('/')
+            .is_some_and(|(_, segment)| segment.eq_ignore_ascii_case("configure"))
     });
     AddonUrlInspection {
+        display_url: (!configure_page).then(|| addon_display_url(&normalized_url)),
         normalized_url: (!configure_page).then_some(normalized_url),
-        error: configure_page.then(|| "This is a configure page — open it, finish setup, then paste the generated manifest URL.".to_string()),
+        error: configure_page.then(|| ADDON_CONFIGURATION_REQUIRED_MESSAGE.to_string()),
         configure_page,
         duplicate_of: None,
     }
@@ -525,6 +637,7 @@ pub async fn update_addon_configs(
     app: AppHandle,
     provider: State<'_, AddonTransport>,
     client: State<'_, AddonResourceClient>,
+    calendar_cache: State<'_, super::calendar_commands::CalendarScheduleCache>,
     op: AddonConfigsOp,
 ) -> Result<Vec<AddonConfigView>, String> {
     let new_addon_id = if matches!(op, AddonConfigsOp::Add { .. }) {
@@ -555,18 +668,19 @@ pub async fn update_addon_configs(
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let latest = load_addon_configs(&store);
         let mut updated = apply_addon_configs_op(latest.clone(), op, &new_addon_id)?;
-        merge_classified_capabilities(&mut updated, classified);
+        merge_classified_capabilities(&mut updated, classified, true);
         let changed = updated != latest;
         if changed {
             save_addon_configs_to_store(&store, &updated);
-            store.save()?;
         }
+        store.save()?;
         Ok::<_, String>((updated, changed))
     })
     .await?;
     if changed {
         provider.clear_cache();
         client.clear_cache();
+        calendar_cache.clear_cache();
     }
     Ok(updated
         .into_iter()
@@ -589,6 +703,26 @@ mod tests {
                 })
                 .collect(),
         ))
+    }
+
+    #[test]
+    fn get_addon_url_reads_installed_ids_and_rejects_unknown_ids() {
+        let fixture = crate::test_helpers::test_store();
+        let url = "https://addon.example/config?token=private";
+        save_addon_configs_to_store(
+            &fixture.store,
+            &[AddonConfig {
+                url: url.to_string(),
+                enabled: false,
+                ..test_addon("addon-1", "Private addon")
+            }],
+        );
+
+        assert_eq!(load_addon_url(&fixture.store, "addon-1").unwrap(), url);
+        assert_eq!(
+            load_addon_url(&fixture.store, "missing").unwrap_err(),
+            "Addon not found."
+        );
     }
 
     #[test]
@@ -730,6 +864,148 @@ mod tests {
     }
 
     #[test]
+    fn refreshed_capabilities_merge_only_changed_matching_instances() {
+        let old = crate::test_helpers::classified_cinemeta_addon();
+        let mut fetched = old.clone();
+        fetched.capabilities.as_mut().unwrap().resources[0].id_prefixes = vec!["kitsu:".into()];
+        let mut latest = vec![
+            test_addon("other", "Other"),
+            AddonConfig {
+                enabled: false,
+                name: "v3-cinemeta.strem.io".into(),
+                ..old.clone()
+            },
+        ];
+        let mut expected = latest.clone();
+        expected[1].capabilities = fetched.capabilities.clone();
+        assert!(merge_classified_capabilities(
+            &mut latest,
+            vec![fetched.clone()],
+            false
+        ));
+        assert_eq!(latest, expected);
+        assert!(!merge_classified_capabilities(
+            &mut latest,
+            vec![fetched.clone()],
+            false
+        ));
+        for unmatched in [
+            Vec::new(),
+            vec![AddonConfig {
+                id: "reinstalled".into(),
+                ..old.clone()
+            }],
+            vec![AddonConfig {
+                url: "https://changed.example".into(),
+                ..old
+            }],
+        ] {
+            let mut latest = unmatched.clone();
+            assert!(!merge_classified_capabilities(
+                &mut latest,
+                vec![fetched.clone()],
+                false
+            ));
+            assert_eq!(latest, unmatched);
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_refresh_retains_fallbacks_and_skips_disabled_or_already_refreshed_addons() {
+        use std::io::{BufRead, BufReader, Write};
+        use std::time::{Duration, Instant};
+        let valid = r#"{"name":"Updated","resources":["meta","subtitles"],"types":["movie"],"idPrefixes":["kitsu:"],"catalogs":[{"type":"movie","id":"new"}],"behaviorHints":{"configurationRequired":true}}"#;
+        for (status, body) in [(200, valid), (200, "{}"), (200, "invalid"), (503, "{}")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let addon = AddonConfig {
+                url: format!("http://{}", listener.local_addr().unwrap()),
+                ..crate::test_helpers::classified_cinemeta_addon()
+            };
+            for (candidate, refresh) in [
+                (addon.clone(), false),
+                (
+                    AddonConfig {
+                        enabled: false,
+                        ..addon.clone()
+                    },
+                    true,
+                ),
+            ] {
+                assert!(
+                    refresh_installed_addon_capabilities(vec![candidate], refresh)
+                        .await
+                        .unwrap()
+                        .is_empty()
+                );
+                assert_eq!(
+                    listener.accept().unwrap_err().kind(),
+                    std::io::ErrorKind::WouldBlock
+                );
+            }
+            let server = std::thread::spawn(move || {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                let mut socket = loop {
+                    match listener.accept() {
+                        Ok((socket, _)) => break socket,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline);
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("{error}"),
+                    }
+                };
+                // Windows accepted sockets inherit the listener's nonblocking mode.
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(1)))
+                    .unwrap();
+                let mut reader = BufReader::new(&mut socket);
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let fetched = refresh_installed_addon_capabilities(vec![addon.clone()], true)
+                .await
+                .unwrap();
+            server.join().unwrap();
+            let mut latest = vec![addon.clone()];
+            let success = status == 200 && body == valid;
+            assert_eq!(
+                merge_classified_capabilities(&mut latest, fetched, false),
+                success
+            );
+            let expected = if success {
+                AddonConfig {
+                    capabilities: Some(
+                        crate::providers::addon_manifest::parse_addon_manifest(valid.as_bytes())
+                            .unwrap(),
+                    ),
+                    ..addon
+                }
+            } else {
+                addon
+            };
+            assert_eq!(latest, vec![expected]);
+        }
+        let offline = AddonConfig {
+            url: "http://127.0.0.1:0".into(),
+            ..crate::test_helpers::classified_cinemeta_addon()
+        };
+        let fetched = refresh_installed_addon_capabilities(vec![offline.clone()], true)
+            .await
+            .unwrap();
+        let mut latest = vec![offline.clone()];
+        assert!(!merge_classified_capabilities(&mut latest, fetched, false));
+        assert_eq!(latest, vec![offline]);
+    }
+
+    #[test]
     fn addon_url_inspection_matches_the_save_normalizer() {
         let installed = [AddonConfig {
             url: "https://addon.example/abc".to_string(),
@@ -746,14 +1022,33 @@ mod tests {
 
         let duplicate =
             inspect_addon_url_against("stremio://addon.example/abc/manifest.json/", &installed);
+        assert_eq!(duplicate.display_url.as_deref(), Some("addon.example/abc"));
         assert_eq!(
             duplicate.normalized_url.as_deref(),
             Some("https://addon.example/abc")
         );
         assert_eq!(duplicate.duplicate_of.as_deref(), Some("Torrent Source"));
         assert!(!duplicate.configure_page);
+        let value = serde_json::to_value(&duplicate).unwrap();
+        assert_eq!(value["displayUrl"], "addon.example/abc");
+        assert!(value.get("valid").is_none());
+        assert!(value.get("normalizedUrl").is_none());
+
+        let private = inspect_addon_url_against(
+            "stremio://addon.example/AbCdEfGhIjKlMnOpQrStUvWxYz012345/manifest.json?token=sekrit",
+            &installed,
+        );
+        assert_eq!(
+            private.display_url.as_deref(),
+            Some("addon.example/•••?token=•••")
+        );
+        let serialized = serde_json::to_string(&private).unwrap();
+        assert!(!serialized.contains("AbCdEfGhIjKlMnOpQrStUvWxYz012345"));
+        assert!(!serialized.contains("sekrit"));
+        assert!(!serialized.contains("normalizedUrl"));
 
         let configure = inspect_addon_url_against("https://addon.example/Configure/", &installed);
+        assert!(configure.display_url.is_none());
         assert!(configure.configure_page);
         assert_eq!(configure.duplicate_of, None);
 

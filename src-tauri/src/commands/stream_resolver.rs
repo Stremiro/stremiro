@@ -1,12 +1,11 @@
-use crate::providers::addons::sanitize_addon_log;
 use crate::providers::fetch_policy::MAX_REDIRECT_HOPS;
 use serde::Serialize;
 use std::sync::LazyLock;
 use std::time::Duration;
 
 /// Shared probe client. Redirects are disabled: `resolve_final_direct_url` walks hops
-/// manually so addon `proxyHeaders` secrets go to the first hop only — a bearer must
-/// never follow a `302` to an attacker host.
+/// manually so addon `proxyHeaders` secrets are forwarded only to the initial
+/// origin, including same-origin redirect hops, never to another host.
 static REDIRECT_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
     crate::providers::ensure_rustls_crypto_provider();
     reqwest::Client::builder()
@@ -30,6 +29,7 @@ pub struct ResolvedStream {
 #[serde(rename_all = "camelCase")]
 pub struct BestResolvedStream {
     pub url: String,
+    pub cache_ttl_ms: u64,
     /// Stable addon-instance id of the winner: feeds source-health attribution and resume binding.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub source_id: Option<String>,
@@ -52,6 +52,7 @@ pub enum ResolveStreamErrorKind {
     NoDirectUrl,
     RateLimited,
     Failed,
+    Cancelled,
 }
 
 #[derive(Debug, Serialize)]
@@ -107,6 +108,25 @@ fn is_advisory_probe_status(status: u16) -> bool {
     matches!(status, 401 | 403 | 407 | 405 | 501 | 416)
 }
 
+fn validate_probe_content_type(response: &reqwest::Response) -> Result<(), String> {
+    let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) else {
+        return Ok(());
+    };
+    let media_type = content_type
+        .as_bytes()
+        .split(|byte| *byte == b';')
+        .next()
+        .unwrap_or_default()
+        .trim_ascii();
+    if media_type.eq_ignore_ascii_case(b"text/html")
+        || media_type.eq_ignore_ascii_case(b"application/xhtml+xml")
+        || media_type.eq_ignore_ascii_case(b"application/json")
+    {
+        return Err("Direct stream probe returned HTML or JSON instead of media.".to_string());
+    }
+    Ok(())
+}
+
 /// Outbound header map for header-gated CDN playback — entries already bounded; never logged.
 fn proxy_header_map(headers: &[(String, String)]) -> reqwest::header::HeaderMap {
     let mut map = reqwest::header::HeaderMap::new();
@@ -149,6 +169,7 @@ async fn follow_redirect_hop(
         if !current.status().is_redirection() {
             let status = current.status();
             if status.is_success() {
+                validate_probe_content_type(&current)?;
                 return Ok(ProbeLanding::Landed(current.url().to_string()));
             }
             return Ok(ProbeLanding::TerminalStatus(status.as_u16()));
@@ -157,18 +178,17 @@ async fn follow_redirect_hop(
         if hops == MAX_REDIRECT_HOPS {
             return Err("Direct stream exceeded the redirect limit.".to_string());
         }
-        let location = current
+        let next_url = current
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .map(str::to_string);
+            .map(|location| base.join(location));
         drop(current);
-        let Some(location) = location else {
+        let Some(next_url) = next_url else {
             return Ok(ProbeLanding::DeadEnd);
         };
-        let next_url = base
-            .join(&location)
-            .map_err(|_| "Direct stream resolved to an invalid URL.".to_string())?;
+        let next_url =
+            next_url.map_err(|_| "Direct stream resolved to an invalid URL.".to_string())?;
         if !crate::providers::fetch_policy::redirect_target_allowed(initial, &next_url) {
             return Err("Direct stream resolved to a blocked redirect target.".to_string());
         }
@@ -183,7 +203,7 @@ async fn follow_redirect_hop(
         current = request.send().await.map_err(|error| {
             format!(
                 "Direct stream redirect probe failed: {}",
-                sanitize_addon_log(&error.to_string())
+                error.without_url()
             )
         })?;
         base = next_url;
@@ -197,16 +217,11 @@ async fn resolve_final_direct_url(
     request_headers: &[(String, String)],
 ) -> Result<String, ProbeError> {
     // Gate before any network probe — same check as subtitles/external URLs.
-    if !crate::providers::addon_resource::is_fetchable_http_url(direct_url) {
-        return Err("Direct stream URL is blocked by fetch policy."
-            .to_string()
-            .into());
-    }
+    let initial = crate::providers::addon_resource::parse_fetchable_http_url(direct_url)
+        .ok_or_else(|| "Direct stream URL is blocked by fetch policy.".to_string())?;
     let client = &*REDIRECT_CLIENT;
     // Header-gated CDNs answer probes only with their required headers — the same entries libmpv will send.
     let headers = proxy_header_map(request_headers);
-    // `resolve_stream_inner` owns the "validation failed" prefix — inner errors carry the bare cause.
-    let initial = reqwest::Url::parse(direct_url).map_err(|_| "invalid source URL.".to_string())?;
     // Hop-by-hop HEAD walk — only a HEAD transport failure falls through to the range probe.
     let head_error = match client
         .head(direct_url)
@@ -229,20 +244,18 @@ async fn resolve_final_direct_url(
                     .into()),
             };
         }
-        Ok(resp) if resp.status().is_success() => {
-            return Ok(initial.to_string());
-        }
+        // Some servers report a default type on HEAD only; the range GET decides.
+        Ok(resp) if resp.status().is_success() => match validate_probe_content_type(&resp) {
+            Ok(()) => return Ok(initial.to_string()),
+            Err(message) => message.into(),
+        },
         // HEAD-only advisory or hard status: the range GET still runs; its error context starts here.
         Ok(resp) => ProbeError::status(
             format!("HEAD probe returned HTTP {}", resp.status().as_u16()),
             resp.status().as_u16(),
         ),
-        // reqwest errors embed the full URL (possibly a signed token) — redact before IPC.
-        Err(error) => format!(
-            "HEAD probe failed: {}",
-            sanitize_addon_log(&error.to_string())
-        )
-        .into(),
+        // reqwest errors embed the full URL (possibly a signed token) — drop it before IPC.
+        Err(error) => format!("HEAD probe failed: {}", error.without_url()).into(),
     };
     let head_rate_limited = head_error.rate_limited;
     let head_error = head_error.message;
@@ -271,7 +284,10 @@ async fn resolve_final_direct_url(
                 }),
             }
         }
-        Ok(resp) if resp.status().is_success() => Ok(initial.to_string()),
+        Ok(resp) if resp.status().is_success() => {
+            validate_probe_content_type(&resp)?;
+            Ok(initial.to_string())
+        }
         // Only the GET's own advisory statuses pass — a HEAD-only advisory never overrides a hard GET failure.
         Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => Ok(direct_url.to_string()),
         Ok(resp) => {
@@ -282,11 +298,7 @@ async fn resolve_final_direct_url(
             ))
         }
         Err(error) => Err(ProbeError {
-            message: format!(
-                "{}; range probe failed: {}",
-                head_error,
-                sanitize_addon_log(&error.to_string())
-            ),
+            message: format!("{head_error}; range probe failed: {}", error.without_url()),
             rate_limited: head_rate_limited,
         }),
     }
@@ -294,12 +306,19 @@ async fn resolve_final_direct_url(
 
 fn format_mpv_http_header_fields(headers: &[(String, String)]) -> String {
     // mpv's string-list uses comma separators and backslash escaping.
-    let escape = |value: &str| value.replace('\\', "\\\\").replace(',', "\\,");
-    headers
-        .iter()
-        .map(|(name, value)| format!("{}: {}", escape(name), escape(value)))
-        .collect::<Vec<_>>()
-        .join(",")
+    let mut formatted = String::new();
+    for (index, (name, value)) in headers.iter().enumerate() {
+        if index > 0 {
+            formatted.push(',');
+        }
+        for ch in name.chars().chain(": ".chars()).chain(value.chars()) {
+            if matches!(ch, '\\' | ',') {
+                formatted.push('\\');
+            }
+            formatted.push(ch);
+        }
+    }
+    formatted
 }
 
 fn build_resolved_direct_stream(

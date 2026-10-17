@@ -1,17 +1,166 @@
 use super::{
     build_reference_title, canonicalize_language_prefs, is_neutral_title_extra,
     is_title_boundary_token, normalize_token_text, recommendation_reasons_from_key,
-    sort_streams_by_recommendation, stream_episode_relevance_priority,
+    set_stream_match_badges, sort_streams_by_recommendation, stream_episode_relevance_priority,
     stream_language_preference_priority, stream_recommendation_key, tokenize_title_words,
     StreamMatchContext, StreamRecommendationInputs, StreamRecommendationKey, StreamSignalCache,
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
 use crate::providers::addons::{
     detect_stream_flags, AddonStream, SelectionPriority, StreamEpisodeMatchKind,
-    StreamRecommendationReason, StreamResolution,
+    StreamMatchBadgeKind, StreamMatchSummary, StreamMatchTier, StreamPackCoverage,
+    StreamRecommendationReason, StreamResolution, StreamTitleMatch,
 };
 use crate::test_helpers::test_stream;
 use std::collections::HashMap;
+
+#[test]
+fn selector_badges_preserve_order_tier_precedence_and_pack_suppression() {
+    use StreamEpisodeMatchKind as Episode;
+    use StreamMatchBadgeKind as Badge;
+    use StreamMatchTier as Tier;
+
+    let mut stream = test_stream();
+    for (episode, seasons, badge, tier, pack_allowed) in [
+        (None, None, None, None, true),
+        (Some(Episode::None), None, None, None, false),
+        (
+            Some(Episode::Exact),
+            None,
+            Some(Badge::Episode),
+            Some(Tier::Exact),
+            true,
+        ),
+        (
+            Some(Episode::EpisodeRange),
+            None,
+            Some(Badge::Range),
+            Some(Tier::EpisodeRange),
+            false,
+        ),
+        (
+            Some(Episode::SeasonPack),
+            None,
+            Some(Badge::Season),
+            Some(Tier::SeasonPack),
+            false,
+        ),
+        (
+            Some(Episode::SeasonPack),
+            Some(vec![]),
+            Some(Badge::Season),
+            Some(Tier::SeasonPack),
+            false,
+        ),
+        (
+            Some(Episode::SeasonPack),
+            Some(vec![1]),
+            Some(Badge::Season),
+            Some(Tier::SeasonPack),
+            false,
+        ),
+        (
+            Some(Episode::SeasonPack),
+            Some(vec![1, 2]),
+            Some(Badge::MultiSeason),
+            Some(Tier::SeasonPack),
+            false,
+        ),
+    ] {
+        for (title, title_badge, title_tier) in [
+            (None, None, None),
+            (
+                Some(StreamTitleMatch::Close),
+                Some(Badge::Title),
+                Some(Tier::Title),
+            ),
+            (
+                Some(StreamTitleMatch::Partial),
+                Some(Badge::TitlePartial),
+                None,
+            ),
+        ] {
+            for is_batch in [false, true] {
+                stream.match_summary = Some(StreamMatchSummary {
+                    episode,
+                    title,
+                    pack_coverage: seasons.as_ref().map(|seasons| StreamPackCoverage {
+                        seasons: seasons.clone(),
+                        episode_ranges: None,
+                    }),
+                });
+                stream.presentation.is_batch = is_batch;
+                set_stream_match_badges(&mut stream);
+                assert_eq!(
+                    stream.match_badge_kinds,
+                    badge.into_iter().chain(title_badge).collect::<Vec<_>>()
+                );
+                assert_eq!(stream.match_tier, tier.or(title_tier));
+                assert_eq!(stream.show_pack_badge, is_batch && pack_allowed);
+            }
+        }
+    }
+    for is_batch in [false, true] {
+        stream.match_summary = None;
+        stream.presentation.is_batch = is_batch;
+        set_stream_match_badges(&mut stream);
+        assert!(stream.match_badge_kinds.is_empty());
+        assert_eq!(stream.match_tier, None);
+        assert_eq!(stream.show_pack_badge, is_batch);
+    }
+}
+
+#[test]
+fn selector_badge_fields_are_backend_owned_and_serialize_with_the_ui_contract() {
+    let mut stream: AddonStream = serde_json::from_value(serde_json::json!({
+        "matchBadgeKinds": { "spoofed": true },
+        "matchTier": 123,
+        "showPackBadge": "true",
+    }))
+    .unwrap();
+    assert!(stream.match_badge_kinds.is_empty());
+    assert!(stream.match_tier.is_none());
+    assert!(!stream.show_pack_badge);
+    stream.match_badge_kinds = vec![
+        StreamMatchBadgeKind::Episode,
+        StreamMatchBadgeKind::Range,
+        StreamMatchBadgeKind::Season,
+        StreamMatchBadgeKind::MultiSeason,
+        StreamMatchBadgeKind::Title,
+        StreamMatchBadgeKind::TitlePartial,
+    ];
+    stream.match_tier = Some(StreamMatchTier::SeasonPack);
+    stream.show_pack_badge = true;
+    let dto = serde_json::to_value(&stream).unwrap();
+    assert_eq!(
+        dto["matchBadgeKinds"],
+        serde_json::json!([
+            "episode",
+            "range",
+            "season",
+            "multi_season",
+            "title",
+            "title_partial"
+        ])
+    );
+    assert_eq!(dto["matchTier"], "season_pack");
+    assert_eq!(dto["showPackBadge"], true);
+    stream.match_tier = None;
+    assert_eq!(
+        serde_json::to_value(&stream).unwrap()["matchTier"],
+        serde_json::Value::Null
+    );
+    assert_eq!(
+        serde_json::to_value([
+            StreamMatchTier::Exact,
+            StreamMatchTier::EpisodeRange,
+            StreamMatchTier::SeasonPack,
+            StreamMatchTier::Title,
+        ])
+        .unwrap(),
+        serde_json::json!(["exact", "episode_range", "season_pack", "title"])
+    );
+}
 
 fn recommendation_reasons(
     stream: &AddonStream,
@@ -19,18 +168,7 @@ fn recommendation_reasons(
 ) -> Vec<StreamRecommendationReason> {
     // Single predicate pass shared with the sort key: the previous form
     // re-ran every relevance predicate once for the key and again here.
-    let reference = build_reference_title(inputs.match_context.title);
-    let language_prefs = canonicalize_language_prefs(
-        inputs.preferred_audio_language,
-        inputs.preferred_subtitle_language,
-    );
-    let key = stream_recommendation_key(
-        stream,
-        inputs,
-        reference.as_ref(),
-        language_prefs,
-        &mut StreamSignalCache::default(),
-    );
+    let key = stream_recommendation_key(stream, inputs, &mut StreamSignalCache::default());
     let mut reasons = Vec::new();
     recommendation_reasons_from_key(&key, &mut reasons);
     reasons
@@ -76,35 +214,29 @@ fn no_match_context() -> StreamMatchContext<'static> {
     StreamMatchContext {
         media_type: "series",
         title: None,
-        query_season: None,
-        query_episode: None,
+        episode_targets: &[],
         canonical_season: None,
-        canonical_episode: None,
         is_final_season: false,
     }
 }
 
-fn episode_match_context(
+fn episode_match_context<'a>(
     title: &'static str,
-    season: u32,
-    episode: u32,
-) -> StreamMatchContext<'static> {
-    episode_match_context_final(title, season, episode, false)
+    episode_targets: &'a [(u32, u32)],
+) -> StreamMatchContext<'a> {
+    episode_match_context_final(title, episode_targets, false)
 }
 
-fn episode_match_context_final(
+fn episode_match_context_final<'a>(
     title: &'static str,
-    season: u32,
-    episode: u32,
+    episode_targets: &'a [(u32, u32)],
     is_final_season: bool,
-) -> StreamMatchContext<'static> {
+) -> StreamMatchContext<'a> {
     StreamMatchContext {
         media_type: "series",
         title: Some(title),
-        query_season: Some(season),
-        query_episode: Some(episode),
-        canonical_season: Some(season),
-        canonical_episode: Some(episode),
+        episode_targets,
+        canonical_season: episode_targets.first().map(|&(season, _)| season),
         is_final_season,
     }
 }
@@ -174,198 +306,124 @@ fn recommendation_inputs<'a>(
     }
 }
 
-#[test]
-/// sorts healthier source first: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_healthier_source_with_same_viability() {
-    let (addon_priorities, mut source_health, stream_family_priorities) = tied_priorities();
-    source_health.insert("beta".to_string(), 0);
-    let alpha = sort_stream("alpha");
-    let beta = build_stream("beta", true, Some("https://beta.example/video.m3u8"), 2_500);
-
-    assert_sorts_first_for_test_inputs(
-        &alpha,
-        &beta,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            no_match_context(),
-            None,
-            None,
-        ),
-    );
+struct RecommendationFixture {
+    addon_priorities: HashMap<String, u32>,
+    source_health: HashMap<String, u8>,
+    family_priorities: HashMap<String, u8>,
+    title_affinity: Option<&'static str>,
+    match_context: StreamMatchContext<'static>,
+    audio_language: Option<&'static str>,
+    subtitle_language: Option<&'static str>,
 }
 
-#[test]
-/// sorts proven release family first: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_recently_successful_stream_family_when_health_is_tied() {
-    let (addon_priorities, source_health, mut family_health) = tied_priorities();
-    family_health.insert("alpha|release:test".to_string(), 4);
-    let alpha = sort_stream("alpha");
-    let beta = sort_stream("beta");
-
-    assert_sorts_first_for_test_inputs(
-        &alpha,
-        &beta,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &family_health,
-            None,
-            no_match_context(),
-            None,
-            None,
-        ),
-    );
+impl Default for RecommendationFixture {
+    fn default() -> Self {
+        let (addon_priorities, source_health, family_priorities) = tied_priorities();
+        Self {
+            addon_priorities,
+            source_health,
+            family_priorities,
+            title_affinity: None,
+            match_context: no_match_context(),
+            audio_language: None,
+            subtitle_language: None,
+        }
+    }
 }
 
-#[test]
-/// sorts previously working source first: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_recent_title_source_when_other_inputs_are_tied() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let title_affinity = Some("alpha");
-    let alpha = sort_stream("alpha");
-    let beta = sort_stream("beta");
-
-    assert_sorts_first_for_test_inputs(
-        &alpha,
-        &beta,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            title_affinity,
-            no_match_context(),
-            None,
-            None,
-        ),
-    );
+impl RecommendationFixture {
+    fn inputs(&self) -> StreamRecommendationInputs<'_> {
+        recommendation_inputs(
+            &self.addon_priorities,
+            &self.source_health,
+            &self.family_priorities,
+            self.title_affinity,
+            self.match_context,
+            self.audio_language,
+            self.subtitle_language,
+        )
+    }
 }
 
-#[test]
-/// sorts exact episode over batch range: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_exact_episode_over_batch_range() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut exact = sort_stream("alpha");
-    exact.name = Some("One Piece S01E08 1080p".to_string());
-
-    let mut batch = sort_stream("beta");
-    batch.name = Some("One Piece S01E01-E12 Batch 1080p".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &exact,
-        &batch,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context("One Piece", 1, 8),
-            None,
-            None,
-        ),
-    );
+// Each case lists (preferred, other); the assertion starts them in reverse order.
+macro_rules! recommendation_sort_tests {
+    ($($name:ident: |$fixture:ident| $cases:block;)*) => {
+        $(
+            #[test]
+            fn $name() {
+                let mut fixture = RecommendationFixture::default();
+                let cases = (|$fixture: &mut RecommendationFixture| $cases)(&mut fixture);
+                for (preferred, other) in cases {
+                    assert_sorts_first_for_test_inputs(&preferred, &other, &fixture.inputs());
+                }
+            }
+        )*
+    };
 }
 
-#[test]
-/// demotes spinoff title: key-ordered sort ranks the preferred stream first.
-fn sorts_demotes_spinoff_title_even_with_matching_episode() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut mainline = sort_stream("alpha");
-    mainline.name = Some("Attack on Titan S01E03 1080p".to_string());
-
-    let mut spinoff = sort_stream("beta");
-    spinoff.name = Some("Attack on Titan Junior High S01E03 1080p".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &mainline,
-        &spinoff,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context("Attack on Titan", 1, 3),
-            None,
-            None,
-        ),
-    );
-}
-
-#[test]
-/// sorts language-matching stream first: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_language_matching_stream_when_other_inputs_are_tied() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut japanese = sort_stream("alpha");
-    japanese.name = Some("[JA] Dual Audio 1080p".to_string());
-
-    let mut dubbed = sort_stream("beta");
-    dubbed.name = Some("English Dub 1080p".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &japanese,
-        &dubbed,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            no_match_context(),
-            Some("ja"),
-            Some("off"),
-        ),
-    );
-}
-
-#[test]
-fn sorts_prefers_language_match_over_health_family_affinity_quality() {
-    let (addon_priorities, mut source_health, mut stream_family_priorities) = tied_priorities();
-    source_health.insert("beta".to_string(), 3);
-    stream_family_priorities.insert("beta|release:test".to_string(), 4);
-    let title_affinity = Some("beta");
-
-    let mut english = sort_stream("alpha");
-    english.name = Some("Show S01E05 English 1080p".to_string());
-    let mut german = sort_stream("beta");
-    german.name = Some("Show S01E05 German 2160p".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &english,
-        &german,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            title_affinity,
-            episode_match_context("Show", 1, 5),
-            Some("en"),
-            Some("en"),
-        ),
-    );
-}
-
-#[test]
-fn sorts_prefers_episode_match_over_english_wrong_episode() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut correct = sort_stream("alpha");
-    correct.name = Some("Show S01E05 1080p".to_string());
-    let mut wrong = sort_stream("beta");
-    wrong.name = Some("Show S01E07 English Dub 2160p".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &correct,
-        &wrong,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context("Show", 1, 5),
-            Some("en"),
-            Some("en"),
-        ),
-    );
+recommendation_sort_tests! {
+    sorts_prefers_healthier_source_with_same_viability: |fixture| {
+        fixture.source_health.insert("beta".to_string(), 0);
+        let alpha = sort_stream("alpha");
+        let beta = build_stream("beta", true, Some("https://beta.example/video.m3u8"), 2_500);
+        [(alpha, beta)]
+    };
+    sorts_prefers_recently_successful_stream_family_when_health_is_tied: |fixture| {
+        fixture.family_priorities.insert("alpha|release:test".to_string(), 4);
+        [(sort_stream("alpha"), sort_stream("beta"))]
+    };
+    sorts_prefers_recent_title_source_when_other_inputs_are_tied: |fixture| {
+        fixture.title_affinity = Some("alpha");
+        [(sort_stream("alpha"), sort_stream("beta"))]
+    };
+    sorts_prefers_exact_episode_over_batch_range: |fixture| {
+        fixture.match_context = episode_match_context("One Piece", &[(1, 8)]);
+        let mut exact = sort_stream("alpha");
+        exact.name = Some("One Piece S01E08 1080p".to_string());
+        let mut batch = sort_stream("beta");
+        batch.name = Some("One Piece S01E01-E12 Batch 1080p".to_string());
+        [(exact, batch)]
+    };
+    sorts_demotes_spinoff_title_even_with_matching_episode: |fixture| {
+        fixture.match_context = episode_match_context("Attack on Titan", &[(1, 3)]);
+        let mut mainline = sort_stream("alpha");
+        mainline.name = Some("Attack on Titan S01E03 1080p".to_string());
+        let mut spinoff = sort_stream("beta");
+        spinoff.name = Some("Attack on Titan Junior High S01E03 1080p".to_string());
+        [(mainline, spinoff)]
+    };
+    sorts_prefers_language_matching_stream_when_other_inputs_are_tied: |fixture| {
+        fixture.audio_language = Some("ja");
+        fixture.subtitle_language = Some("off");
+        let mut japanese = sort_stream("alpha");
+        japanese.name = Some("[JA] Dual Audio 1080p".to_string());
+        let mut dubbed = sort_stream("beta");
+        dubbed.name = Some("English Dub 1080p".to_string());
+        [(japanese, dubbed)]
+    };
+    sorts_prefers_language_match_over_health_family_affinity_quality: |fixture| {
+        fixture.source_health.insert("beta".to_string(), 3);
+        fixture.family_priorities.insert("beta|release:test".to_string(), 4);
+        fixture.title_affinity = Some("beta");
+        fixture.match_context = episode_match_context("Show", &[(1, 5)]);
+        fixture.audio_language = Some("en");
+        fixture.subtitle_language = Some("en");
+        let mut english = sort_stream("alpha");
+        english.name = Some("Show S01E05 English 1080p".to_string());
+        let mut german = sort_stream("beta");
+        german.name = Some("Show S01E05 German 2160p".to_string());
+        [(english, german)]
+    };
+    sorts_prefers_episode_match_over_english_wrong_episode: |fixture| {
+        fixture.match_context = episode_match_context("Show", &[(1, 5)]);
+        fixture.audio_language = Some("en");
+        fixture.subtitle_language = Some("en");
+        let mut correct = sort_stream("alpha");
+        correct.name = Some("Show S01E05 1080p".to_string());
+        let mut wrong = sort_stream("beta");
+        wrong.name = Some("Show S01E07 English Dub 2160p".to_string());
+        [(correct, wrong)]
+    };
 }
 
 #[test]
@@ -412,6 +470,29 @@ fn language_priority_tracks_independent_memberships_without_double_counting() {
         ("hi score girl", "hi", "", 0),
         ("norwegian audio", "no", "", 4),
         ("hindi", "hi", "hi", 6),
+        ("[NL] show s01e05 1080p", "nl", "", 4),
+        ("(RU) show s01e05 1080p", "ru", "", 4),
+        ("[PL] show s01e05 1080p", "pl", "", 4),
+        ("[IT] show s01e05 1080p", "it", "", 4),
+        ("[NO] show s01e05 1080p", "no", "", 4),
+        ("[HDR] [DV] show s01e05 1080p", "nl", "", 0),
+        ("nl show s01e05 1080p", "nl", "", 0),
+        ("it follows 1080p", "it", "", 0),
+        ("show s01e05 english 2160p", "nl", "", 0),
+        ("japanese audio / subtitles: english", "en", "en", 3),
+        ("japanese audio / subtitles: english", "ja", "en", 6),
+        ("sub: english", "en", "en", 3),
+        ("subs english", "en", "en", 3),
+        ("subtitle english", "en", "en", 3),
+        ("subbed: english", "en", "en", 3),
+        ("audio: english", "en", "en", 4),
+        ("dub english", "en", "en", 4),
+        ("dubbed: english", "en", "en", 4),
+        ("subtitles: english / audio: japanese", "en", "en", 3),
+        ("subtitles | english", "en", "en", 6),
+        ("subtitles unrelated text english", "en", "en", 6),
+        ("subtitles: [NL]", "nl", "nl", 3),
+        ("(RU) subs", "ru", "ru", 3),
     ] {
         assert_eq!(
             stream_language_preference_priority(
@@ -435,7 +516,6 @@ fn ranking_language_evidence_excludes_reference_title_words() {
     ] {
         let mut plain = sort_stream("alpha");
         plain.name = Some(format!("{title} 1080p"));
-        let reference = build_reference_title(Some(title));
         let inputs = recommendation_inputs(
             &addon_priorities,
             &source_health,
@@ -458,13 +538,8 @@ fn ranking_language_evidence_excludes_reference_title_words() {
                 4,
             ),
         ] {
-            let key = stream_recommendation_key(
-                &stream,
-                &inputs,
-                reference.as_ref(),
-                canonicalize_language_prefs(Some(language), Some(language)),
-                &mut StreamSignalCache::default(),
-            );
+            let key =
+                stream_recommendation_key(&stream, &inputs, &mut StreamSignalCache::default());
             assert_eq!(key.language, expected, "{title}, {:?}", stream.name);
         }
     }
@@ -667,32 +742,16 @@ fn sorts_at_limit_size_before_oversize_same_tier() {
     );
 }
 
-#[test]
-/// sorts season-claimed match first: key-ordered sort ranks the preferred stream first.
-fn sorts_prefers_season_claimed_exact_match_over_assumed_higher_quality() {
-    // Attack on Titan Final Season request in a mixed pool: both files
-    // Exact-match the dash form; the titled release carries the verified
-    // season claim and must outrank the 2160p bare-dash file even at 1080p.
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut titled = sort_stream("alpha");
-    titled.name = Some("Shingeki no Kyojin - The Final Season - 04 [1080p]".to_string());
-
-    let mut bare = sort_stream("beta");
-    bare.name = Some("Shingeki no Kyojin - 04 [2160p]".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &titled,
-        &bare,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context_final("Shingeki no Kyojin", 4, 4, true),
-            None,
-            None,
-        ),
-    );
+recommendation_sort_tests! {
+    // The verified final-season claim beats the higher-quality bare-dash match.
+    sorts_prefers_season_claimed_exact_match_over_assumed_higher_quality: |fixture| {
+        fixture.match_context = episode_match_context_final("Shingeki no Kyojin", &[(4, 4)], true);
+        let mut titled = sort_stream("alpha");
+        titled.name = Some("Shingeki no Kyojin - The Final Season - 04 [1080p]".to_string());
+        let mut bare = sort_stream("beta");
+        bare.name = Some("Shingeki no Kyojin - 04 [2160p]".to_string());
+        [(titled, bare)]
+    };
 }
 
 #[test]
@@ -709,10 +768,8 @@ fn final_season_claim_scopes_to_the_canonical_season() {
     let context = StreamMatchContext {
         media_type: "series",
         title: Some("Show"),
-        query_season: Some(3),
-        query_episode: Some(5),
+        episode_targets: &[(3, 5)],
         canonical_season: Some(3),
-        canonical_episode: Some(5),
         is_final_season: true,
     };
     let matched = stream_episode_relevance_priority(&stream, context);
@@ -723,8 +780,7 @@ fn final_season_claim_scopes_to_the_canonical_season() {
     // season 3, so the query battery must see a conflicting season
     // claim — the canonical battery then finds no E08 either.
     let context = StreamMatchContext {
-        query_season: Some(1),
-        canonical_episode: Some(8),
+        episode_targets: &[(1, 5), (3, 8)],
         ..context
     };
     let matched = stream_episode_relevance_priority(&stream, context);
@@ -772,7 +828,7 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
                 &source_health,
                 &family_priorities,
                 None,
-                episode_match_context("One Piece", 1, 8),
+                episode_match_context("One Piece", &[(1, 8)]),
                 None,
                 None,
             ),
@@ -793,6 +849,88 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
 }
 
 #[test]
+fn resort_reuses_fetch_context_and_owned_pack_coverage() {
+    let (addon_priorities, source_health, family_priorities) = tied_priorities();
+    let inputs = recommendation_inputs(
+        &addon_priorities,
+        &source_health,
+        &family_priorities,
+        None,
+        episode_match_context("Show", &[(1, 8)]),
+        Some("en"),
+        Some("en"),
+    );
+    let mut pack = sort_stream("alpha");
+    pack.stream_key = "s:pack".to_string();
+    pack.name = Some("Show S01E01-E12 English 1080p [Batch]".to_string());
+    let original = pack.clone();
+    let mut streams = vec![pack];
+    let mut signals = StreamSignalCache::default();
+    sort_streams_by_recommendation(&mut streams, inputs, &mut signals);
+    let coverage_pointer = streams[0]
+        .match_summary
+        .as_ref()
+        .and_then(|summary| summary.pack_coverage.as_ref())
+        .expect("pack coverage")
+        .seasons
+        .as_ptr();
+    assert_eq!(
+        streams[0].match_badge_kinds,
+        vec![StreamMatchBadgeKind::Range, StreamMatchBadgeKind::Title]
+    );
+    assert_eq!(streams[0].match_tier, Some(StreamMatchTier::EpisodeRange));
+    assert!(!streams[0].show_pack_badge);
+    let badge_pointer = streams[0].match_badge_kinds.as_ptr();
+
+    // Even a new arrival uses the title/languages captured by this fetch's cache.
+    let mut arrival = sort_stream("beta");
+    arrival.stream_key = "s:arrival".to_string();
+    arrival.name = Some("Show S01E08 English 1080p".to_string());
+    streams.push(arrival);
+    let changed_inputs = StreamRecommendationInputs {
+        match_context: episode_match_context("Different Title", &[(1, 8)]),
+        preferred_audio_language: Some("ja"),
+        preferred_subtitle_language: None,
+        ..inputs
+    };
+    sort_streams_by_recommendation(&mut streams, changed_inputs, &mut signals);
+    let arrival = streams
+        .iter()
+        .find(|stream| stream.stream_key == "s:arrival")
+        .expect("new arrival");
+    let priority = arrival.selection_priority.expect("selection priority");
+    assert_eq!(priority.title_match, 4);
+    assert_eq!(priority.language, 6);
+    let pack = streams
+        .iter()
+        .find(|stream| stream.stream_key == "s:pack")
+        .expect("pack");
+    assert_eq!(pack.match_badge_kinds.as_ptr(), badge_pointer);
+    assert_eq!(
+        pack.match_summary
+            .as_ref()
+            .and_then(|summary| summary.pack_coverage.as_ref())
+            .expect("reused pack coverage")
+            .seasons
+            .as_ptr(),
+        coverage_pointer
+    );
+
+    // Final merge reuses cached signals but starts with the unranked addon rows.
+    let mut final_streams = vec![original];
+    sort_streams_by_recommendation(&mut final_streams, inputs, &mut signals);
+    assert_eq!(
+        serde_json::to_value(&final_streams[0]).unwrap(),
+        serde_json::to_value(pack).unwrap()
+    );
+    assert!(final_streams[0]
+        .match_summary
+        .as_ref()
+        .and_then(|summary| summary.pack_coverage.as_ref())
+        .is_some());
+}
+
+#[test]
 fn sort_assigns_selection_priority_from_key() {
     let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
     let mut exact = sort_stream("alpha");
@@ -808,7 +946,7 @@ fn sort_assigns_selection_priority_from_key() {
             &source_health,
             &stream_family_priorities,
             None,
-            episode_match_context("Show", 1, 5),
+            episode_match_context("Show", &[(1, 5)]),
             Some("en"),
             Some("en"),
         ),
@@ -943,31 +1081,36 @@ fn release_tag_spellings_never_count_as_title_extras() {
     }
 }
 
-#[test]
-/// sorts the right season first: key-ordered sort ranks the preferred stream first.
-fn sorts_titled_final_season_release_below_the_requested_season() {
-    // The reported case: an S01E04 request must not lose to a cached 2160p
-    // final-season release that loose-matched the same episode number —
-    // the S1 file's Exact match beats the titled release's None.
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let mut season_one = sort_stream("alpha");
-    season_one.name = Some("Shingeki no Kyojin - 04 [1080p]".to_string());
-
-    let mut final_named = sort_stream("beta");
-    final_named.name =
-        Some("[SubsPlease] Shingeki no Kyojin - The Final Season - 04 (2160p)".to_string());
-
-    assert_sorts_first_for_test_inputs(
-        &season_one,
-        &final_named,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context_final("Shingeki no Kyojin", 1, 4, false),
-            None,
-            None,
-        ),
-    );
+recommendation_sort_tests! {
+    // An S01E04 request must not lose to a higher-quality final-season release.
+    sorts_titled_final_season_release_below_the_requested_season: |fixture| {
+        fixture.match_context = episode_match_context_final("Shingeki no Kyojin", &[(1, 4)], false);
+        let mut season_one = sort_stream("alpha");
+        season_one.name = Some("Shingeki no Kyojin - 04 [1080p]".to_string());
+        let mut final_named = sort_stream("beta");
+        final_named.name =
+            Some("[SubsPlease] Shingeki no Kyojin - The Final Season - 04 (2160p)".to_string());
+        [(season_one, final_named)]
+    };
+    stream_priority_prefers_user_source_order_when_quality_is_tied: |fixture| {
+        fixture.addon_priorities =
+            crate::commands::streaming_helpers::build_addon_source_priority_map(&[
+                crate::test_helpers::test_addon("alpha", "Alpha"),
+                crate::test_helpers::test_addon("beta", "Beta"),
+            ]);
+        let mut preferred = sort_stream("alpha");
+        preferred.seeders = Some(10);
+        let mut fallback = sort_stream("beta");
+        fallback.seeders = Some(300);
+        [(preferred, fallback)]
+    };
+    stream_priority_prefers_multi_audio_when_other_signals_match: |_fixture| {
+        ["Dual Audio Release", "Multi Audio Release"].map(|title| {
+            let mut preferred = sort_stream("alpha");
+            preferred.title = Some(title.into());
+            let mut standard = sort_stream("beta");
+            standard.title = Some("Standard Release".into());
+            (preferred, standard)
+        })
+    };
 }

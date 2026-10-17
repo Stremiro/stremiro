@@ -76,21 +76,20 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
     layout: IndexStoreLayout,
     previous_index: &[String],
     map: &HashMap<String, T>,
-) -> Result<Vec<String>, String> {
+) -> Result<(), String> {
     for stale_id in previous_index {
         if !map.contains_key(stale_id) {
             store.delete((layout.item_key)(stale_id));
         }
     }
 
-    let mut index: Vec<String> = map.keys().cloned().collect();
+    let mut index: Vec<&str> = map.keys().map(String::as_str).collect();
     index.sort();
     for (item_id, item) in map {
         store.set((layout.item_key)(item_id), json!(item));
     }
     store.set(layout.index_key, json!(index));
-    store.save()?;
-    Ok(index)
+    store.save()
 }
 
 /// Shared prefix-sweep clear for index/item domains: deletes every key under
@@ -241,11 +240,16 @@ pub(super) const WATCH_STATUS_LAYOUT: IndexStoreLayout = IndexStoreLayout {
 /// `plan_to_watch`/`dropped`) — IPC, legacy stores, and backups funnel through
 /// here so arbitrary strings never persist.
 pub(crate) fn normalize_watch_status(value: &str) -> Option<String> {
-    match value.trim().to_ascii_lowercase().as_str() {
-        "watching" => Some("watching".to_string()),
-        "watched" => Some("watched".to_string()),
-        "plan_to_watch" | "plan to watch" => Some("plan_to_watch".to_string()),
-        "dropped" => Some("dropped".to_string()),
+    match value.trim() {
+        status if status.eq_ignore_ascii_case("watching") => Some("watching".to_string()),
+        status if status.eq_ignore_ascii_case("watched") => Some("watched".to_string()),
+        status
+            if status.eq_ignore_ascii_case("plan_to_watch")
+                || status.eq_ignore_ascii_case("plan to watch") =>
+        {
+            Some("plan_to_watch".to_string())
+        }
+        status if status.eq_ignore_ascii_case("dropped") => Some("dropped".to_string()),
         _ => None,
     }
 }
@@ -271,7 +275,8 @@ pub(super) fn read_watch_status_snapshot(
         store,
         WATCH_STATUS_LAYOUT,
         |item_id, status: String| {
-            normalize_watch_status(&status).map(|status| (item_id.to_string(), status))
+            let item_id = normalize_media_id(item_id)?;
+            normalize_watch_status(&status).map(|status| (item_id, status))
         },
         |_existing, incoming| incoming,
     )
@@ -320,5 +325,49 @@ mod tests {
         let merged = merge_library_item(None, item);
         assert_eq!(merged.primary_year, Some(2023));
         assert_eq!(merged.display_year.as_deref(), Some("2023"));
+    }
+
+    #[test]
+    fn watch_status_read_normalizes_ids_and_repairs_collisions() {
+        let test = crate::test_helpers::test_store();
+        let overlong = "a".repeat(super::super::MEDIA_ID_MAX_CHARS + 1);
+        let rows = [
+            (" tt123 ", " WATCHED "),
+            ("tt123", "watching"),
+            (" tt456 ", "invalid"),
+            ("tt456", "plan to watch"),
+            (" ", "watched"),
+            ("null", "watched"),
+            ("undefined", "watched"),
+            (overlong.as_str(), "watched"),
+        ];
+        for (id, status) in rows {
+            test.store.set(watch_status_item_key(id), json!(status));
+        }
+        test.store
+            .set(WATCH_STATUS_INDEX_KEY, json!(rows.map(|(id, _status)| id)));
+
+        let snapshot = read_watch_status_snapshot(&test.store).unwrap();
+        let expected = HashMap::from([
+            ("tt123".to_string(), "watching".to_string()),
+            ("tt456".to_string(), "plan_to_watch".to_string()),
+        ]);
+        assert_eq!(snapshot.items, expected);
+        assert!(snapshot.modified);
+        assert_eq!(test.store.save_count(), 0);
+        assert!(test.store.get(watch_status_item_key(" tt123 ")).is_some());
+        assert_eq!(load_watch_statuses_map(&test.store).unwrap(), expected);
+        assert_eq!(test.store.save_count(), 1);
+        assert_eq!(
+            load_watch_status_index(&test.store).unwrap(),
+            ["tt123", "tt456"]
+        );
+        for (id, _status) in rows {
+            if !expected.contains_key(id) {
+                assert!(test.store.get(watch_status_item_key(id)).is_none());
+            }
+        }
+        assert_eq!(load_watch_statuses_map(&test.store).unwrap(), expected);
+        assert_eq!(test.store.save_count(), 1);
     }
 }

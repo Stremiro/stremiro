@@ -22,7 +22,7 @@ const WATCH_PROGRESS_BETTER_RESUME_POSITION_DELTA_SECS: f64 = 45.0;
 const WATCH_PROGRESS_BETTER_RESUME_PROGRESS_RATIO_DELTA: f64 = 0.12;
 /// Clock-skew tolerance for `last_watched`: without clamping, one far-future row
 /// permanently wins the `excluded.last_watched >=` recency guard and drops later saves.
-const WATCH_PROGRESS_FUTURE_SKEW_MS: u64 = 5 * 60 * 1000;
+pub(super) const WATCH_PROGRESS_FUTURE_SKEW_MS: u64 = 5 * 60 * 1000;
 /// Char bounds for free-text watch-progress fields — past these caps is malformed input, not a real value.
 const STREAM_FORMAT_MAX_CHARS: usize = 64;
 pub(crate) const STREAM_KEY_MAX_CHARS: usize = 128;
@@ -131,6 +131,7 @@ pub(crate) fn should_skip_watch_progress_save(
         || existing.type_ != incoming.type_
         || existing.season != incoming.season
         || existing.episode != incoming.episode
+        || existing.last_watched > now_unix_millis().saturating_add(WATCH_PROGRESS_FUTURE_SKEW_MS)
     {
         return false;
     }
@@ -374,13 +375,39 @@ fn is_watched_progress(item: &WatchProgress) -> bool {
         && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
 }
 
+pub(super) fn continue_watching_candidates(
+    items: &[WatchProgress],
+) -> impl Iterator<Item = &WatchProgress> {
+    let mut completed = HashMap::new();
+    for row in items.iter().filter(|row| is_watched_progress(row)) {
+        if let Some((season, episode)) =
+            watch_progress_absolute_season(row).zip(watch_progress_absolute_episode(row))
+        {
+            completed
+                .entry((row.type_.as_str(), row.id.as_str(), season, episode))
+                .and_modify(|stamp: &mut u64| *stamp = (*stamp).max(row.last_watched))
+                .or_insert(row.last_watched);
+        }
+    }
+    items.iter().filter(move |row| {
+        is_continue_watching_candidate(row)
+            && !watch_progress_absolute_season(row)
+                .zip(watch_progress_absolute_episode(row))
+                .is_some_and(|(season, episode)| {
+                    completed
+                        .get(&(row.type_.as_str(), row.id.as_str(), season, episode))
+                        .is_some_and(|stamp| *stamp > row.last_watched)
+                })
+    })
+}
+
 /// Keeps latest title metadata/recency but advances from the furthest watched
 /// canonical episode so rewatches can't suggest an already-seen one.
 pub(crate) fn choose_up_next_source(
     items: Vec<WatchProgress>,
     source_health_priorities: &HashMap<String, u8>,
 ) -> Option<WatchProgress> {
-    if items.iter().any(is_continue_watching_candidate) {
+    if continue_watching_candidates(&items).next().is_some() {
         return None;
     }
     let latest = items
@@ -428,6 +455,7 @@ fn has_started_watching_progress(item: &WatchProgress) -> bool {
 /// The one read-side annotation pass: resume offer, watched mark, and started flag —
 /// the UI never re-derives thresholds.
 pub(crate) fn with_progress_annotations(mut item: WatchProgress) -> WatchProgress {
+    hydrate_watch_progress_coordinates(&mut item);
     item.resume_start_time = playable_resume_start_time(&item);
     item.is_watched = is_watched_progress(&item);
     item.has_started_watching = has_started_watching_progress(&item);
@@ -676,14 +704,21 @@ pub(crate) fn choose_entry(
 }
 
 fn choose_latest_entry(
-    items: Vec<WatchProgress>,
+    mut items: Vec<WatchProgress>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> Option<WatchProgress> {
     // `min_by_key` keeps stable-sort tie semantics (first wins) without the full ordering pass.
-    let chosen = items
+    let chosen_index = items
         .iter()
-        .min_by_key(|item| std::cmp::Reverse(item.last_watched))?
-        .clone();
+        .enumerate()
+        .min_by_key(|(_, item)| std::cmp::Reverse(item.last_watched))?
+        .0;
+    if !is_series_like_watch_progress(&items[chosen_index]) {
+        let mut chosen = items.swap_remove(chosen_index);
+        hydrate_watch_progress_lookup_id(&mut chosen);
+        return Some(chosen);
+    }
+    let chosen = items[chosen_index].clone();
     Some(merge_watch_progress_donors(
         chosen,
         items.into_iter().map(Cow::Owned),

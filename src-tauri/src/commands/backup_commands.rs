@@ -10,14 +10,16 @@ use super::config_store::{
 use super::history_helpers::{build_history_key, sanitize_watch_progress};
 use super::library_commands::MAX_LIBRARY_ITEMS;
 use super::list_helpers::{
-    list_item_store_key, list_meta_key, load_lists_order, normalize_list_icon, normalize_list_id,
-    normalize_list_name, UserList, UserListWithItems, LISTS_ORDER_KEY, MAX_LISTS, MAX_LIST_ITEMS,
+    list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
+    normalize_list_id, normalize_list_name, UserList, UserListWithItems, LISTS_ORDER_KEY,
+    MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::playback_preferences_commands::{
     read_playback_language_preferences_from_store, sanitize_language_pref,
     write_playback_language_preferences,
 };
 use super::playback_state::{PlaybackLanguagePreferencesSnapshot, PlaybackStateService};
+use super::resume_store::HistoryMergeError;
 use super::store_helpers::{
     load_library_index, load_library_map, load_watch_status_index, load_watch_statuses_map,
     normalize_library_item, normalize_watch_status, persist_index_map, LIBRARY_LAYOUT,
@@ -25,9 +27,10 @@ use super::store_helpers::{
 };
 use super::watch_status_commands::MAX_WATCH_STATUS_ITEMS;
 use super::{
-    normalize_media_id, normalize_non_empty, now_unix_millis, run_blocking_store_op,
+    normalize_media_id, normalize_non_empty, now_unix_millis, run_blocking_op, run_store_op_at,
     streaming_helpers::is_persistable_stream_key, PlaybackLanguagePreferences, WatchProgress,
-    LIBRARY_STORE_FILE, LISTS_STORE_FILE, SETTINGS_STORE_FILE, WATCH_STATUS_STORE_FILE,
+    BLOCKING_OP_TIMEOUT, LIBRARY_STORE_FILE, LISTS_STORE_FILE, SETTINGS_STORE_FILE,
+    WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
@@ -36,6 +39,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{command, AppHandle, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 
 /// Backup imports are untrusted input: reject oversized payloads before
 /// parsing/allocating (mirrors the 512 KiB manifest/stream body caps).
@@ -45,9 +49,50 @@ const MAX_IMPORT_LIBRARY: usize = 10_000;
 const MAX_IMPORT_LISTS: usize = 500;
 const MAX_IMPORT_STATUSES: usize = 10_000;
 const MAX_IMPORT_TITLE_LANGUAGES: usize = 10_000;
-/// Backup paths come from the save/open dialog as absolute `.json` paths; re-checked
-/// here so direct IPC calls can't turn export/import into relative-path file access.
+/// Native dialog selections must still be bounded, absolute `.json` paths.
 pub(super) const MAX_BACKUP_PATH_LEN: usize = 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupErrorKind {
+    InvalidBackup,
+    UnsupportedVersion,
+    TooLarge,
+    CapacityExceeded,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BackupError {
+    pub kind: BackupErrorKind,
+    pub message: String,
+}
+
+impl BackupError {
+    fn new(kind: BackupErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for BackupError {
+    fn from(message: String) -> Self {
+        Self::new(BackupErrorKind::Failed, message)
+    }
+}
+
+impl From<HistoryMergeError> for BackupError {
+    fn from(error: HistoryMergeError) -> Self {
+        match error {
+            HistoryMergeError::CapacityExceeded(message) => {
+                Self::new(BackupErrorKind::CapacityExceeded, message)
+            }
+            HistoryMergeError::Failed(message) => message.into(),
+        }
+    }
+}
 
 pub(super) fn normalize_backup_path(input: &str) -> Option<String> {
     const JSON_EXTENSION: &[u8; 5] = b".json";
@@ -104,14 +149,54 @@ pub(super) fn validate_backup_export_path(
 
 /// Single size bound for backup payloads in both directions — what export writes
 /// must be what import accepts.
-pub(super) fn validate_backup_size(len: usize) -> Result<(), String> {
+pub(super) fn validate_backup_size(len: usize) -> Result<(), BackupError> {
     if len > MAX_IMPORT_BYTES {
-        return Err(format!(
-            "Backup file is too large ({} bytes). Maximum is {} bytes.",
-            len, MAX_IMPORT_BYTES
+        return Err(BackupError::new(
+            BackupErrorKind::TooLarge,
+            format!(
+                "Backup file is too large ({} bytes). Maximum is {} bytes.",
+                len, MAX_IMPORT_BYTES
+            ),
         ));
     }
     Ok(())
+}
+
+#[derive(Default)]
+struct BackupWriter {
+    bytes: Vec<u8>,
+    len: usize,
+}
+
+impl std::io::Write for BackupWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.len = self.bytes.len().saturating_add(bytes.len());
+        if self.len > MAX_IMPORT_BYTES {
+            return Err(std::io::Error::other("Backup file is too large."));
+        }
+        if self.len > self.bytes.capacity() {
+            let capacity = self
+                .len
+                .max(self.bytes.capacity().saturating_mul(2))
+                .min(MAX_IMPORT_BYTES);
+            self.bytes.reserve_exact(capacity - self.bytes.len());
+        }
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_backup(export: &impl Serialize) -> Result<String, BackupError> {
+    let mut writer = BackupWriter::default();
+    if let Err(error) = serde_json::to_writer_pretty(&mut writer, export) {
+        validate_backup_size(writer.len)?;
+        return Err(error.to_string().into());
+    }
+    String::from_utf8(writer.bytes).map_err(|error| error.to_string().into())
 }
 
 /// Full data snapshot used for backup export.
@@ -155,7 +240,7 @@ struct AppDataImportPayload {
     #[serde(default)]
     lists: Vec<Value>,
     #[serde(default)]
-    watch_statuses: HashMap<String, Value>,
+    watch_statuses: BTreeMap<String, Value>,
     #[serde(default)]
     settings: AppSettingsImportPayload,
 }
@@ -190,27 +275,33 @@ pub(super) fn validate_import_capacity<'a>(
     incoming: impl IntoIterator<Item = &'a str>,
     limit: usize,
     domain: &str,
-) -> Result<(), String> {
+) -> Result<(), BackupError> {
     let mut known: HashSet<&str> = existing.iter().map(String::as_str).collect();
     let existing_count = known.len();
     for id in incoming {
         known.insert(id);
     }
     if known.len() > limit && known.len() > existing_count {
-        return Err(format!(
-            "Backup import would exceed the {domain} limit of {limit}."
+        return Err(BackupError::new(
+            BackupErrorKind::CapacityExceeded,
+            format!("Backup import would exceed the {domain} limit of {limit}."),
         ));
     }
     Ok(())
 }
 
 /// Parses the backup's list section before any store mutation: malformed records skip,
-/// known ids keep the local list, the rest get fresh `list_*` ids; live caps apply.
+/// readable local lists keep their edits; ghost order entries can be restored in place.
 pub(super) fn prepare_import_lists(
     raw_lists: Vec<Value>,
     existing_order: &[String],
-) -> Result<Vec<UserListWithItems>, String> {
-    let mut known_ids: HashSet<String> = existing_order.iter().cloned().collect();
+    store: &super::DurableStore,
+) -> Result<Vec<UserListWithItems>, BackupError> {
+    let mut known_ids: HashSet<String> = existing_order
+        .iter()
+        .filter(|id| load_list(store, id).is_ok())
+        .cloned()
+        .collect();
     let mut prepared = Vec::with_capacity(raw_lists.len());
     for list in raw_lists {
         let Ok(list) = serde_json::from_value::<UserListWithItems>(list) else {
@@ -244,9 +335,12 @@ pub(super) fn prepare_import_lists(
             }
         }
         if valid_items.len() > MAX_LIST_ITEMS {
-            return Err(format!(
-                "Backup import would exceed the list item limit of {}.",
-                MAX_LIST_ITEMS
+            return Err(BackupError::new(
+                BackupErrorKind::CapacityExceeded,
+                format!(
+                    "Backup import would exceed the list item limit of {}.",
+                    MAX_LIST_ITEMS
+                ),
             ));
         }
         let new_id = normalized_id
@@ -352,8 +446,17 @@ fn import_settings(
         .map(|value| merge_imported_addon_configs(&store, parse_stored_addon_configs(value)))
         .unwrap_or(0);
     if restored || addons_imported > 0 {
+        if let Err(error) =
+            super::app_shell_commands::sync_preferences(app, &load_app_ui_preferences(&store))
+        {
+            crate::operational_log::log_warn(
+                "window",
+                "import-preferences-tray-sync",
+                "failed",
+                &[crate::operational_log::field("error", error)],
+            );
+        }
         store.save()?;
-        let _ = super::app_shell_commands::sync_preferences(app, &load_app_ui_preferences(&store));
     }
 
     let titles_imported =
@@ -366,8 +469,9 @@ fn import_settings(
 pub(crate) async fn export_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
-) -> Result<String, String> {
-    run_blocking_store_op({
+) -> Result<String, BackupError> {
+    let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
+    let export = run_store_op_at(deadline, {
         let app = app.clone();
         let service = playback_state.inner().clone();
         move || {
@@ -393,7 +497,7 @@ pub(crate) async fn export_app_data(
             let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
             let watch_statuses = load_watch_statuses_map(&status_store)?;
 
-            let export = AppDataExport {
+            Ok::<_, BackupError>(AppDataExport {
                 version: 1,
                 exported_at: now_unix_millis(),
                 history,
@@ -401,12 +505,55 @@ pub(crate) async fn export_app_data(
                 lists,
                 watch_statuses,
                 settings: export_settings(&app, &service)?,
-            };
-
-            serde_json::to_string_pretty(&export).map_err(|e| e.to_string())
+            })
         }
     })
-    .await
+    .await?;
+    run_blocking_op(deadline, "Background persistence timed out.", move || {
+        Ok(serialize_backup(&export))
+    })
+    .await?
+}
+
+async fn parse_backup(
+    deadline: tokio::time::Instant,
+    data: String,
+) -> Result<AppDataImportPayload, BackupError> {
+    validate_backup_size(data.len())?;
+    run_blocking_op(deadline, "Background persistence timed out.", move || {
+        Ok(parse_backup_payload(&data))
+    })
+    .await?
+}
+
+fn parse_backup_payload(data: &str) -> Result<AppDataImportPayload, BackupError> {
+    let export: AppDataImportPayload = serde_json::from_str(data).map_err(|e| {
+        BackupError::new(
+            BackupErrorKind::InvalidBackup,
+            format!("Invalid backup file: {}", e),
+        )
+    })?;
+    if export.history.len() > MAX_IMPORT_HISTORY
+        || export.library.len() > MAX_IMPORT_LIBRARY
+        || export.lists.len() > MAX_IMPORT_LISTS
+        || export.watch_statuses.len() > MAX_IMPORT_STATUSES
+        || export.settings.title_language_preferences.len() > MAX_IMPORT_TITLE_LANGUAGES
+    {
+        return Err(BackupError::new(
+            BackupErrorKind::TooLarge,
+            "Backup file contains too many records and was rejected.",
+        ));
+    }
+    if export.version != 1 {
+        return Err(BackupError::new(
+            BackupErrorKind::UnsupportedVersion,
+            format!(
+                "Unsupported backup version: {}. Only version 1 is supported.",
+                export.version
+            ),
+        ));
+    }
+    Ok(export)
 }
 
 /// Merges an exported JSON backup into the current data stores. Non-destructive:
@@ -417,33 +564,13 @@ pub(crate) async fn import_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     data: String,
-) -> Result<ImportResult, String> {
-    validate_backup_size(data.len())?;
-
-    // Off the async worker: 5 MiB JSON parsing and full-table rewrites must not stall other commands.
+) -> Result<ImportResult, BackupError> {
+    let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
+    let export = parse_backup(deadline, data).await?;
     let service = playback_state.inner().clone();
     let app_owned = app.clone();
-    let result = run_blocking_store_op(move || {
+    run_store_op_at(deadline, move || {
         let app = &app_owned;
-        let export: AppDataImportPayload =
-            serde_json::from_str(&data).map_err(|e| format!("Invalid backup file: {}", e))?;
-
-        if export.history.len() > MAX_IMPORT_HISTORY
-            || export.library.len() > MAX_IMPORT_LIBRARY
-            || export.lists.len() > MAX_IMPORT_LISTS
-            || export.watch_statuses.len() > MAX_IMPORT_STATUSES
-            || export.settings.title_language_preferences.len() > MAX_IMPORT_TITLE_LANGUAGES
-        {
-            return Err("Backup file contains too many records and was rejected.".to_string());
-        }
-
-        if export.version != 1 {
-            return Err(format!(
-                "Unsupported backup version: {}. Only version 1 is supported.",
-                export.version
-            ));
-        }
-
         let result = import_app_data_entries(app, &service, export);
         if result.as_ref().map_or(true, |result| {
             result.addons_imported > 0 || result.settings_restored
@@ -451,19 +578,39 @@ pub(crate) async fn import_app_data(
             // Clear caches at actual completion — a later write can fail after earlier domains changed.
             app.state::<AddonTransport>().clear_cache();
             app.state::<AddonResourceClient>().clear_cache();
+            app.state::<super::calendar_commands::CalendarScheduleCache>()
+                .clear_cache();
         }
         result
     })
-    .await?;
-    Ok(result)
+    .await
 }
 
-/// Synchronous backup-merge body. Runs inside `run_blocking_store_op`.
+fn prepare_import_watch_statuses(raw_statuses: BTreeMap<String, Value>) -> HashMap<String, String> {
+    let mut statuses = HashMap::with_capacity(raw_statuses.len());
+    for (id, status) in raw_statuses {
+        let Some(clean_id) = normalize_media_id(&id) else {
+            continue;
+        };
+        let Some(clean_status) = status.as_str().and_then(normalize_watch_status) else {
+            continue;
+        };
+        // Canonical keys win; sorted raw keys make the first valid alias deterministic.
+        if id == clean_id {
+            statuses.insert(clean_id, clean_status);
+        } else {
+            statuses.entry(clean_id).or_insert(clean_status);
+        }
+    }
+    statuses
+}
+
+/// Synchronous backup-merge body. Runs inside `run_store_op_at`.
 fn import_app_data_entries(
     app: &AppHandle,
     service: &PlaybackStateService,
     export: AppDataImportPayload,
-) -> Result<ImportResult, String> {
+) -> Result<ImportResult, BackupError> {
     // Preflight before the first mutation: every touched store file must parse and capacities must hold.
     let lib_store = super::open_store(app, LIBRARY_STORE_FILE)?;
     let existing_library_index = load_library_index(&lib_store)?;
@@ -492,28 +639,15 @@ fn import_app_data_entries(
         "library",
     )?;
 
-    // Same store-key bound as the live path: overlong ids drop, not truncate, so two
-    // hostile ids can't collide onto one key. First normalized row wins a repeated id.
-    let mut seen_status_ids = HashSet::with_capacity(export.watch_statuses.len());
-    let incoming_statuses: Vec<(String, String)> = export
-        .watch_statuses
-        .into_iter()
-        .filter_map(|(id, status)| {
-            let clean_id = normalize_media_id(&id)?;
-            let clean_status = status.as_str().and_then(normalize_watch_status)?;
-            seen_status_ids
-                .insert(clean_id.clone())
-                .then_some((clean_id, clean_status))
-        })
-        .collect();
+    let incoming_statuses = prepare_import_watch_statuses(export.watch_statuses);
     validate_import_capacity(
         &existing_status_index,
-        incoming_statuses.iter().map(|(id, _)| id.as_str()),
+        incoming_statuses.keys().map(String::as_str),
         MAX_WATCH_STATUS_ITEMS,
         "watch status",
     )?;
 
-    let prepared_lists = prepare_import_lists(export.lists, &existing_order)?;
+    let prepared_lists = prepare_import_lists(export.lists, &existing_order, &lists_store)?;
 
     let mut history_entries = Vec::with_capacity(export.history.len());
     for item in export.history {
@@ -531,7 +665,7 @@ fn import_app_data_entries(
         );
         history_entries.push((key, sanitized));
     }
-    let history_imported = service.merge_history_entries(app, history_entries)?;
+    let history_imported = service.import_history_entries(app, history_entries)?;
 
     let mut lib_map = load_library_map(&lib_store)?;
     let mut library_imported = 0usize;
@@ -568,7 +702,9 @@ fn import_app_data_entries(
         for item in &list.items {
             lists_store.set(list_item_store_key(&list_id, &item.id), json!(item));
         }
-        new_order.push(list_id);
+        if !new_order.contains(&list_id) {
+            new_order.push(list_id);
+        }
         lists_imported += 1;
     }
     lists_store.set(LISTS_ORDER_KEY, json!(new_order));
@@ -602,15 +738,60 @@ fn import_app_data_entries(
     })
 }
 
-/// Exports all app data and writes it to `path`. Atomic: temp file fsynced and renamed
+fn backup_file_name() -> String {
+    // Convert UTC epoch days to a Gregorian date.
+    let days = now_unix_millis() / 86_400_000 + 719_468;
+    let era = days / 146_097;
+    let day_of_era = days % 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1_460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    let year = era * 400 + year_of_era + u64::from(month <= 2);
+    format!("stremiro-backup-{year:04}-{month:02}-{day:02}.json")
+}
+
+/// Exports app data to a native-dialog selection. Atomic: temp file fsynced and renamed
 /// over the target, so a crash mid-export can't leave a torn file.
 #[command]
-pub async fn export_app_data_to_file(app: AppHandle, path: String) -> Result<(), String> {
-    let target_path = normalize_backup_path(&path)
+pub async fn export_app_data_to_file(
+    app: AppHandle,
+    window: tauri::Window,
+) -> Result<bool, BackupError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Export Stremiro Backup")
+        .set_file_name(backup_file_name())
+        .add_filter("JSON", &["json"])
+        .save_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(path) = receiver.await.map_err(|error| error.to_string())? else {
+        return Ok(false);
+    };
+    let mut path = path.into_path().map_err(|error| error.to_string())?;
+    if !path
+        .as_os_str()
+        .to_string_lossy()
+        .as_bytes()
+        .last_chunk::<5>()
+        .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b".json"))
+    {
+        path.as_mut_os_string().push(".json");
+    }
+    let target_path = path
+        .to_str()
+        .and_then(normalize_backup_path)
         .ok_or_else(|| "Export path must be an absolute .json file path.".to_string())?;
     let payload = export_app_data(app.clone(), app.state::<PlaybackStateService>()).await?;
-    // Reject before touching the destination: an unreadable snapshot must not replace the last good backup.
-    validate_backup_size(payload.len())?;
     let target_path = std::path::PathBuf::from(target_path);
     let store_path = super::durable_store::resolve_store_path(&app, SETTINGS_STORE_FILE)?;
     // File write rides the blocking pool separately so no store lock is held across user-path IO.
@@ -622,32 +803,220 @@ pub async fn export_app_data_to_file(app: AppHandle, path: String) -> Result<(),
             super::write_atomic_file(&target_path, payload.as_bytes(), false)
         },
     )
-    .await
+    .await?;
+    Ok(true)
 }
 
-/// Reads backup JSON from the provided file path and imports it.
+/// Reads backup JSON from a native-dialog selection and imports it.
 #[command]
 pub async fn import_app_data_from_file(
     app: AppHandle,
-    path: String,
-) -> Result<ImportResult, String> {
-    let source_path = normalize_backup_path(&path)
-        .ok_or_else(|| "Import path must be an absolute .json file path.".to_string())?;
+    window: tauri::Window,
+) -> Result<Option<ImportResult>, BackupError> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    app.dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Import Stremiro Backup")
+        .add_filter("JSON", &["json"])
+        .pick_file(move |path| {
+            let _ = sender.send(path);
+        });
+    let Some(path) = receiver.await.map_err(|error| error.to_string())? else {
+        return Ok(None);
+    };
+    let path = path.into_path().map_err(|error| error.to_string())?;
+    let source_path = path
+        .to_str()
+        .and_then(normalize_backup_path)
+        .ok_or_else(|| {
+            BackupError::new(
+                BackupErrorKind::InvalidBackup,
+                "Import path must be an absolute .json file path.",
+            )
+        })?;
     // File IO must not hold the store gate; capped read avoids TOCTOU/RAM overshoot.
     let data = super::run_blocking_op(
         tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
         "Backup import timed out.",
-        move || {
-            use std::io::Read as _;
-            let limit = usize_to_u64_saturating(MAX_IMPORT_BYTES);
-            let file = std::fs::File::open(&source_path).map_err(|e| e.to_string())?;
-            let mut limited = file.take(limit.saturating_add(1));
-            let mut data = String::new();
-            std::io::Read::read_to_string(&mut limited, &mut data).map_err(|e| e.to_string())?;
-            validate_backup_size(data.len())?;
-            Ok(data)
-        },
+        move || Ok(read_backup_file(&source_path)),
     )
-    .await?;
-    import_app_data(app.clone(), app.state::<PlaybackStateService>(), data).await
+    .await??;
+    import_app_data(app.clone(), app.state::<PlaybackStateService>(), data)
+        .await
+        .map(Some)
+}
+
+fn read_backup_file(source_path: &str) -> Result<String, BackupError> {
+    use std::io::Read as _;
+    let limit = usize_to_u64_saturating(MAX_IMPORT_BYTES);
+    let file = std::fs::File::open(source_path).map_err(|e| e.to_string())?;
+    let mut limited = file.take(limit.saturating_add(1));
+    let mut bytes = Vec::new();
+    std::io::Read::read_to_end(&mut limited, &mut bytes).map_err(|e| {
+        let kind = if e.kind() == std::io::ErrorKind::InvalidData {
+            BackupErrorKind::InvalidBackup
+        } else {
+            BackupErrorKind::Failed
+        };
+        BackupError::new(kind, e.to_string())
+    })?;
+    validate_backup_size(bytes.len())?;
+    String::from_utf8(bytes).map_err(|_| {
+        BackupError::new(
+            BackupErrorKind::InvalidBackup,
+            "stream did not contain valid UTF-8",
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write as _;
+
+    #[test]
+    fn backup_serialization_preserves_pretty_json_bytes() {
+        let value = json!({
+            "version": 1,
+            "library": [{"title": "映画 🎬", "description": "line\n\"quoted\"\\path"}],
+            "settings": {"enabled": true, "optional": null},
+        });
+        assert_eq!(
+            serialize_backup(&value).unwrap(),
+            serde_json::to_string_pretty(&value).unwrap()
+        );
+    }
+
+    #[test]
+    fn backup_serialization_accepts_exact_limit_and_rejects_growth() {
+        let mut text = "a".repeat(MAX_IMPORT_BYTES - 2);
+        let payload = serialize_backup(&text).unwrap();
+        assert_eq!(payload.len(), MAX_IMPORT_BYTES);
+        assert_eq!(payload, serde_json::to_string_pretty(&text).unwrap());
+
+        text.push('a');
+        let error = serialize_backup(&text).unwrap_err();
+        let expected = validate_backup_size(MAX_IMPORT_BYTES + 1).unwrap_err();
+        assert_eq!(error.kind, expected.kind);
+        assert_eq!(error.message, expected.message);
+    }
+
+    #[test]
+    fn backup_writer_rejects_overflow_without_growing_its_buffer() {
+        let mut writer = BackupWriter::default();
+        writer.write_all(b"{").unwrap();
+        let capacity = writer.bytes.capacity();
+        assert!(writer.write_all(&vec![b'x'; MAX_IMPORT_BYTES]).is_err());
+        assert_eq!(writer.bytes, b"{");
+        assert_eq!(writer.bytes.capacity(), capacity);
+        assert_eq!(writer.len, MAX_IMPORT_BYTES + 1);
+    }
+
+    #[test]
+    fn backup_watch_status_collisions_prefer_canonical_keys_then_first_sorted_valid_alias() {
+        for (data, expected) in [
+            (
+                r#"{"version":1,"watch_statuses":{"tt123":"watching"," tt123 ":"dropped","tt123 ":"watched"}}"#,
+                "watching",
+            ),
+            (
+                r#"{"version":1,"watch_statuses":{"tt123 ":"watched"," tt123 ":"dropped","tt123":"watching"}}"#,
+                "watching",
+            ),
+            (
+                r#"{"version":1,"watch_statuses":{"tt123 ":"watching"," tt123 ":"dropped"}}"#,
+                "dropped",
+            ),
+            (
+                r#"{"version":1,"watch_statuses":{" tt123 ":"dropped","tt123 ":"watching","tt123":null,"  tt123":"invalid"}}"#,
+                "dropped",
+            ),
+        ] {
+            let export = parse_backup_payload(data).unwrap();
+            assert_eq!(
+                prepare_import_watch_statuses(export.watch_statuses),
+                HashMap::from([("tt123".to_string(), expected.to_string())]),
+                "{data}",
+            );
+        }
+    }
+
+    #[test]
+    fn backup_envelope_rejects_each_record_cap_before_version_validation() {
+        for (section, limit) in [
+            ("history", MAX_IMPORT_HISTORY),
+            ("library", MAX_IMPORT_LIBRARY),
+            ("lists", MAX_IMPORT_LISTS),
+            ("watch_statuses", MAX_IMPORT_STATUSES),
+            ("title_language_preferences", MAX_IMPORT_TITLE_LANGUAGES),
+        ] {
+            let mut value = json!({"version": 2});
+            if matches!(section, "watch_statuses" | "title_language_preferences") {
+                let records = (0..=limit)
+                    .map(|index| (index.to_string(), Value::Null))
+                    .collect::<serde_json::Map<_, _>>();
+                if section == "title_language_preferences" {
+                    value["settings"] = json!({section: records});
+                } else {
+                    value[section] = records.into();
+                }
+            } else {
+                value[section] = vec![Value::Null; limit + 1].into();
+            }
+            let error = parse_backup_payload(&value.to_string()).unwrap_err();
+            assert_eq!(error.kind, BackupErrorKind::TooLarge, "{section}");
+            assert_eq!(
+                error.message,
+                "Backup file contains too many records and was rejected."
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn backup_envelope_parsing_does_not_wait_for_the_store_gate() {
+        let _guard = super::super::STORE_OP_LOCK.lock().await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+        assert_eq!(
+            parse_backup(deadline, r#"{"version":1}"#.into())
+                .await
+                .unwrap()
+                .version,
+            1
+        );
+        let error = parse_backup(deadline, r#"{"version":2}"#.into())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, BackupErrorKind::UnsupportedVersion);
+        assert_eq!(
+            error.message,
+            "Unsupported backup version: 2. Only version 1 is supported."
+        );
+        let malformed = format!("{}{{", " ".repeat(MAX_IMPORT_BYTES - 1));
+        let expected = serde_json::from_str::<AppDataImportPayload>(&malformed).unwrap_err();
+        let error = parse_backup(deadline, malformed).await.unwrap_err();
+        assert_eq!(error.kind, BackupErrorKind::InvalidBackup);
+        assert_eq!(error.message, format!("Invalid backup file: {expected}"));
+    }
+
+    #[tokio::test]
+    async fn backup_import_store_phase_keeps_the_parsing_deadline() {
+        let _guard = super::super::STORE_OP_LOCK.lock().await;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(100);
+        let export = parse_backup(deadline, r#"{"version":1}"#.into())
+            .await
+            .unwrap();
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let operation = run_store_op_at(deadline, move || {
+            let _ = sender.send(export.version);
+            Ok::<_, BackupError>(())
+        });
+        let error = tokio::time::timeout(std::time::Duration::from_secs(1), operation)
+            .await
+            .expect("the store phase must not start a fresh ten-second budget")
+            .unwrap_err();
+        assert_eq!(error.kind, BackupErrorKind::Failed);
+        assert_eq!(error.message, "Background persistence timed out.");
+        assert!(receiver.await.is_err());
+    }
 }

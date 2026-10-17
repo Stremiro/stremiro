@@ -42,6 +42,8 @@ pub fn run() {
         .manage(commands::DurableStoreRegistry::default())
         .manage(commands::player_window_commands::PlayerPipState::default())
         .manage(commands::app_shell_commands::AppShellState::default())
+        .manage(commands::calendar_commands::CalendarScheduleCache::default())
+        .manage(commands::stream_commands::PlaybackRecoveryRegistry::default())
         .setup(|app| {
             if let Some(icon) = app.default_window_icon().cloned() {
                 if let Some(window) = app.get_webview_window("main") {
@@ -59,7 +61,7 @@ pub fn run() {
                     "startup",
                     "system_tray",
                     "unavailable",
-                    &[operational_log::field("error", error.to_string())],
+                    &[operational_log::field("error", error)],
                 );
             }
 
@@ -92,17 +94,22 @@ pub fn run() {
             commands::app_update_commands::get_current_app_version,
             commands::app_update_commands::get_app_release_notes,
             commands::app_update_commands::check_for_app_update,
+            commands::app_update_commands::download_app_update,
             commands::app_update_commands::install_app_update,
             commands::stream_commands::resolve_best_stream,
             commands::stream_commands::recover_playback_stream,
+            commands::stream_commands::cancel_playback_recovery,
             commands::stream_commands::get_stream_selector_data,
             commands::stream_commands::get_stream_link,
+            commands::stream_commands::get_stream_pack_episode_indices,
             commands::search_commands::query_search_catalog,
             commands::similar_titles_commands::query_similar_titles,
             commands::similar_titles_commands::get_recent_watch_seed,
             commands::browse_genre_commands::get_browse_genres,
 
             commands::media_commands::get_media_details,
+            commands::episode_navigation::get_episode_navigation,
+            commands::media_commands::search_episodes,
             commands::media_commands::get_details_prefetch_bundle,
             commands::up_next_commands::get_resume_rail,
             commands::calendar_commands::get_calendar_events,
@@ -118,6 +125,7 @@ pub fn run() {
             commands::watch_history_commands::get_total_watch_time_secs,
             commands::watch_history_commands::remove_all_from_watch_history,
             commands::config_commands::get_addon_configs,
+            commands::config_commands::get_addon_url,
             commands::config_commands::inspect_addon_url,
             commands::config_commands::update_addon_configs,
             commands::playback_preferences_commands::save_playback_language_preference,
@@ -140,19 +148,23 @@ pub fn run() {
             commands::player_window_commands::get_player_pip,
             commands::player_window_commands::snap_player_pip,
             commands::config_commands::get_app_ui_preferences,
-            commands::config_commands::get_startup_route,
+            commands::config_commands::get_default_player_keybindings,
+            commands::config_commands::bind_player_keybinding,
+            commands::config_commands::get_bootstrap_snapshot,
             commands::config_commands::save_app_ui_preferences,
-            commands::config_commands::get_last_notified_app_update_version,
             commands::config_commands::save_last_notified_app_update_version,
             commands::config_commands::get_profile_preferences,
             commands::config_commands::save_profile_preferences,
+            commands::avatar_commands::set_profile_avatar_from_bytes,
+            commands::avatar_commands::clear_profile_avatar,
             commands::config_commands::get_stream_selector_preferences,
-            commands::config_commands::save_stream_selector_preferences,
+            commands::config_commands::patch_stream_selector_preferences,
             commands::library_commands::add_to_library,
             commands::library_commands::remove_from_library,
             commands::library_commands::bulk_remove_from_library,
             commands::library_commands::get_library,
             commands::library_commands::get_profile_library,
+            commands::library_commands::search_titles,
             commands::list_commands::create_list,
             commands::list_commands::delete_list,
             commands::list_commands::rename_list,
@@ -178,9 +190,12 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|app, event| {
-            if matches!(event, tauri::RunEvent::Exit) {
+            if matches!(
+                event,
+                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+            ) {
                 // Persist whatever the trailing debounce window mutated —
-                // the store plugin autosave this replaces no longer exists.
+                // before the single-instance lock is released.
                 if let Some(registry) = app.try_state::<commands::DurableStoreRegistry>() {
                     if let Err(error) = registry.flush_dirty() {
                         operational_log::log_warn(

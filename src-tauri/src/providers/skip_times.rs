@@ -1,3 +1,4 @@
+use super::ttl_cache::FetchFailure;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -122,6 +123,24 @@ fn skip_times_body_failure(error: super::BoundedBodyError) -> Result<SkipTimesRe
     }
 }
 
+fn skip_times_fetch_failure(error: FetchFailure) -> Result<SkipTimesResult, String> {
+    match error {
+        FetchFailure::Retryable(message) => Err(message),
+        FetchFailure::Fatal(_) => Ok(SkipTimesResult::default()),
+    }
+}
+
+fn skip_times_http_failure(status: reqwest::StatusCode) -> Result<SkipTimesResult, String> {
+    if status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        Err(TRANSIENT_ERROR.to_string())
+    } else {
+        Ok(SkipTimesResult::default())
+    }
+}
+
 impl SkipTimesProvider {
     pub(crate) fn new() -> Self {
         super::ensure_rustls_crypto_provider();
@@ -145,9 +164,9 @@ impl SkipTimesProvider {
     /// Fetch skippable segments from SkipDB (`GET /api/segments`).
     /// `season`/`episode` are sent together or omitted together; `duration_secs`
     /// enables duration matching (`adjust=conservative` only shifts earlier — a
-    /// skip can't land past the content). Definitive answers (data, 4xx, bad
+    /// skip can't land past the content). Definitive answers (data, other 4xx, bad
     /// payload) are `Ok` — missing skip data is a normal crowdsourced condition.
-    /// Transient failures (transport, 429, 5xx) are `Err` so the caller neither
+    /// Transient failures (transport, 408, 429, 5xx) are `Err` so the caller neither
     /// caches them as "no data" nor skips its retry.
     pub(crate) async fn get_segments(
         &self,
@@ -166,10 +185,13 @@ impl SkipTimesProvider {
 
         let res = match self.client.get(&url).send().await {
             Ok(response) => response,
-            Err(_e) => {
+            Err(error) => {
                 #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] SkipDB request error: {}", _e);
-                return Err(TRANSIENT_ERROR.to_string());
+                eprintln!("[SkipTimes] SkipDB request error: {}", error);
+                return skip_times_fetch_failure(FetchFailure::from_send_error(
+                    &error,
+                    TRANSIENT_ERROR.to_string(),
+                ));
             }
         };
 
@@ -177,10 +199,7 @@ impl SkipTimesProvider {
         if !status.is_success() {
             #[cfg(debug_assertions)]
             eprintln!("[SkipTimes] SkipDB HTTP {status}");
-            if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
-                return Err(TRANSIENT_ERROR.to_string());
-            }
-            return Ok(SkipTimesResult::default());
+            return skip_times_http_failure(status);
         }
 
         let bytes = match read_skip_times_body(res).await {

@@ -1,4 +1,7 @@
-use super::{normalize_non_empty, normalize_query};
+use super::{
+    addon_registry::{catalog_dedup_key, CatalogFetchPage},
+    normalize_non_empty, normalize_query, MEDIA_ID_MAX_CHARS,
+};
 use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
     MediaItem,
@@ -12,14 +15,36 @@ const SEARCH_YEAR_MAX: u32 = 2100;
 const MAX_GENRE_FILTERS: usize = 6;
 const CINEMETA_ANIME_GENRE: &str = "Animation";
 const MAX_BROWSE_SOURCE_FETCHES: usize = 8;
+const MAX_CATALOG_SEEN_KEYS: usize = 10_000;
+// Provider type strings are bounded to 2,048 characters; ids use the IPC id bound.
+const MAX_CATALOG_SEEN_KEY_CHARS: usize = 2_048 + 1 + MEDIA_ID_MAX_CHARS;
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SearchCatalogPage {
     pub items: Vec<MediaItem>,
-    pub next_skip: Option<u32>,
+    pub continuation: SearchCatalogContinuation,
+    pub exhausted: bool,
+}
+
+#[derive(Debug, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SearchCatalogContinuation {
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub all_cursors: Option<AllBrowseCursors>,
+    skip: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    all_cursors: Option<AllBrowseCursors>,
+    seen_keys: Vec<String>,
+}
+
+impl SearchCatalogContinuation {
+    fn is_exhausted(&self) -> bool {
+        self.seen_keys.len() >= MAX_CATALOG_SEEN_KEYS
+            || self.all_cursors.map_or_else(
+                || self.skip.is_none(),
+                |cursors| cursors.movie.is_none() && cursors.series.is_none(),
+            )
+    }
 }
 
 #[derive(Debug, Default, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,15 +164,14 @@ impl SearchYearRange {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 struct SearchCatalogCriteria {
     query: Option<String>,
     media_type: Option<SearchMediaType>,
     feed: SearchFeed,
     genres: Vec<String>,
     year_range: SearchYearRange,
-    skip: u32,
-    all_cursors: Option<AllBrowseCursors>,
+    continuation: SearchCatalogContinuation,
 }
 
 #[derive(Debug, Deserialize)]
@@ -159,8 +183,7 @@ pub struct SearchCatalogRequest {
     genres: Option<Vec<String>>,
     year_from: Option<u32>,
     year_to: Option<u32>,
-    skip: Option<u32>,
-    all_cursors: Option<AllBrowseCursors>,
+    continuation: Option<SearchCatalogContinuation>,
 }
 
 impl SearchCatalogRequest {
@@ -172,8 +195,7 @@ impl SearchCatalogRequest {
             genres: Some(vec![genre]),
             year_from: None,
             year_to: None,
-            skip: None,
-            all_cursors: None,
+            continuation: None,
         }
     }
 }
@@ -203,15 +225,41 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     let normalized_query = request.query.as_deref().and_then(normalize_query);
     let parsed_media_type = SearchMediaType::parse(request.media_type.as_deref());
 
-    if request.all_cursors.is_some()
-        && (normalized_query.is_some() || request.media_type.is_some() || request.skip.is_some())
-    {
+    let all_browse = normalized_query.is_none() && request.media_type.is_none();
+    let continuation = request.continuation.unwrap_or_else(|| {
+        if all_browse {
+            SearchCatalogContinuation {
+                all_cursors: Some(AllBrowseCursors {
+                    movie: Some(0),
+                    series: Some(0),
+                }),
+                ..Default::default()
+            }
+        } else {
+            SearchCatalogContinuation {
+                skip: Some(0),
+                ..Default::default()
+            }
+        }
+    });
+    if continuation.all_cursors.is_some() && (!all_browse || continuation.skip.is_some()) {
         return Err(
             "All-browse cursors cannot be combined with a query, media type or skip.".into(),
         );
     }
-    if normalized_query.is_none() && parsed_media_type.is_none() && request.all_cursors.is_none() {
+    if all_browse && continuation.all_cursors.is_none() {
+        return Err("All-browse continuation requires branch cursors.".into());
+    }
+    if !all_browse && normalized_query.is_none() && parsed_media_type.is_none() {
         return Err("Media type is required to browse the search catalog.".to_string());
+    }
+    if continuation.seen_keys.len() > MAX_CATALOG_SEEN_KEYS
+        || continuation
+            .seen_keys
+            .iter()
+            .any(|key| key.is_empty() || key.chars().count() > MAX_CATALOG_SEEN_KEY_CHARS)
+    {
+        return Err("Invalid catalog continuation seen keys.".into());
     }
 
     Ok(SearchCatalogCriteria {
@@ -220,20 +268,35 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         feed: SearchFeed::resolve(request.feed.as_deref()),
         genres: normalize_genres(request.genres),
         year_range: SearchYearRange::resolve(request.year_from, request.year_to),
-        skip: request.skip.unwrap_or(0),
-        all_cursors: request.all_cursors,
+        continuation,
     })
 }
 
 fn normalize_search_text(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut separator_pending = false;
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() {
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if matches!(ch, '\'' | '’' | '\u{0300}'..='\u{036f}') {
+            continue;
+        }
+        if ch.is_alphanumeric() {
             if separator_pending && !normalized.is_empty() {
                 normalized.push(' ');
             }
-            normalized.push(ch.to_ascii_lowercase());
+            match ch {
+                'à'..='å' => normalized.push('a'),
+                'ç' => normalized.push('c'),
+                'è'..='ë' => normalized.push('e'),
+                'ì'..='ï' => normalized.push('i'),
+                'ñ' => normalized.push('n'),
+                'ò'..='ö' | 'ø' => normalized.push('o'),
+                'ù'..='ü' => normalized.push('u'),
+                'ý' | 'ÿ' => normalized.push('y'),
+                'ß' => normalized.push_str("ss"),
+                'æ' => normalized.push_str("ae"),
+                'œ' => normalized.push_str("oe"),
+                _ => normalized.push(ch),
+            }
             separator_pending = false;
         } else {
             separator_pending = true;
@@ -242,81 +305,59 @@ fn normalize_search_text(value: &str) -> String {
     normalized
 }
 
-fn score_search_item(
-    normalized_query: &str,
-    query_tokens: &[&str],
-    spaced_query: &str,
-    item: &MediaItem,
-) -> i32 {
-    let normalized_title = normalize_search_text(&item.title);
-    if normalized_title.is_empty() {
-        return 0;
-    }
-
-    if normalized_title == normalized_query {
-        return 1200;
-    }
-
-    let mut score = 0;
-
-    if normalized_title.starts_with(normalized_query) {
-        score += 900;
-    } else if normalized_title.contains(normalized_query) {
-        score += 400;
-    }
-
-    let title_tokens = normalized_title.split_whitespace();
-    let mut matched_tokens = 0i32;
-    let mut prefix_token_matches = 0i32;
-
-    for token in query_tokens.iter().copied() {
-        if title_tokens
-            .clone()
-            .any(|segment| segment.starts_with(token))
-        {
-            matched_tokens += 1;
-            prefix_token_matches += 1;
-        } else if normalized_title.contains(token) {
-            matched_tokens += 1;
-        }
-    }
-
-    if matched_tokens > 0 {
-        score += matched_tokens * 70;
-    }
-    if prefix_token_matches > 0 {
-        score += prefix_token_matches * 40;
-    }
-
-    if !normalized_query.is_empty() && normalized_title.contains(spaced_query) {
-        score += 120;
-    }
-
-    // Titles are truncated at ingress (2k chars), so the length penalty
-    // always fits in `i32`; saturate defensively instead of wrapping.
-    score.saturating_sub(i32::try_from(normalized_title.len()).unwrap_or(i32::MAX))
-}
-
 fn rank_search_results(
     query: &str,
     mut items: Vec<MediaItem>,
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
-    let normalized_query = normalize_search_text(query);
-    let query_tokens = normalized_query.split_whitespace().collect::<Vec<_>>();
-    let spaced_query = format!(" {normalized_query}");
     items.retain(|item| {
         !year_range.is_active() || year_range.contains(item.primary_year.unwrap_or(0))
     });
-    // Cache each score once and sort stably: tied scores/years keep catalog
-    // order without a parallel ranked-item vector or explicit input indices.
-    items.sort_by_cached_key(|item| {
-        std::cmp::Reverse((
-            score_search_item(&normalized_query, &query_tokens, &spaced_query, item),
-            item.primary_year.unwrap_or(0),
-        ))
+    let normalized_query = normalize_search_text(query);
+    if normalized_query.is_empty() {
+        return items;
+    }
+    let query_tokens = normalized_query.split_whitespace();
+    let word_start_query = format!(" {normalized_query}");
+    // Per-type catalog position preserves provider relevance across merged catalogs.
+    let provider_ranks = {
+        let mut next_ranks = std::collections::HashMap::new();
+        items
+            .iter()
+            .map(|item| {
+                let next_rank = next_ranks.entry(item.type_.as_str()).or_insert(0usize);
+                let rank = *next_rank;
+                *next_rank += 1;
+                rank
+            })
+            .collect::<Vec<_>>()
+    };
+    let mut ranked_items = items.into_iter().zip(provider_ranks).collect::<Vec<_>>();
+    ranked_items.sort_by_cached_key(|(item, provider_rank)| {
+        let title = normalize_search_text(&item.title);
+        let tier = if title.is_empty() {
+            0
+        } else if title == normalized_query {
+            4
+        } else if title.starts_with(&normalized_query) {
+            3
+        } else if title.contains(&word_start_query) {
+            2
+        } else if query_tokens
+            .clone()
+            .all(|token| title.split_whitespace().any(|word| word.starts_with(token)))
+        {
+            1
+        } else {
+            0
+        };
+        (
+            std::cmp::Reverse(tier),
+            *provider_rank,
+            std::cmp::Reverse(item.primary_year.unwrap_or(0)),
+        )
     });
-    items
+    ranked_items.into_iter().map(|(item, _)| item).collect()
 }
 
 fn item_has_genre(item: &MediaItem, genre: &str) -> bool {
@@ -349,12 +390,12 @@ fn browse_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<String> 
 /// extras and keeps titles also declaring Animation, instead of unioning the full
 /// Animation catalog with unrelated live-action catalogs.
 fn catalog_fetch_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<String> {
-    let injected = browse_genres(media_type, genres);
     match media_type {
         SearchMediaType::Anime => {
-            let extras = injected
-                .into_iter()
+            let extras = genres
+                .iter()
                 .filter(|genre| !is_animation_genre(genre))
+                .cloned()
                 .collect::<Vec<_>>();
             if extras.is_empty() {
                 vec![CINEMETA_ANIME_GENRE.to_string()]
@@ -362,7 +403,7 @@ fn catalog_fetch_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<S
                 extras
             }
         }
-        SearchMediaType::Movie | SearchMediaType::Series => injected,
+        SearchMediaType::Movie | SearchMediaType::Series => genres.to_vec(),
     }
 }
 
@@ -424,10 +465,7 @@ async fn fetch_query_results(
     let genre_extras: Vec<Option<String>> = if fetch_genres.is_empty() {
         vec![None]
     } else {
-        fetch_genres
-            .iter()
-            .map(|genre| Some(genre.clone()))
-            .collect()
+        fetch_genres.into_iter().map(Some).collect()
     };
 
     // One shared pool for the (genre × source) fan-out: per-genre outcomes stay
@@ -578,10 +616,9 @@ async fn fetch_browse_page(
     app: &AppHandle,
     client: &AddonResourceClient,
     criteria: &SearchCatalogCriteria,
-) -> Result<SearchCatalogPage, String> {
-    let media_type = criteria
-        .media_type
-        .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
+    media_type: SearchMediaType,
+    mut skip: u32,
+) -> Result<CatalogFetchPage, String> {
     let feed = criteria.feed;
     let fetch_genres = catalog_fetch_genres(media_type, &criteria.genres);
     // Prefer the provider `year` catalog for a single pinned year; when no enabled
@@ -590,7 +627,6 @@ async fn fetch_browse_page(
     // a fetch outcome cannot flip it or the client resumes with a foreign cursor.
     let mut year_catalog =
         browse_year_catalog(feed, media_type, &fetch_genres, criteria.year_range);
-    let mut skip = criteria.skip;
     if let Some(year) = year_catalog {
         let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
         let servable = super::addon_registry::select_catalog_targets(
@@ -632,7 +668,7 @@ async fn fetch_browse_page(
             criteria.year_range,
         );
         for item in batch {
-            let key = super::addon_registry::catalog_dedup_key(&item.type_, &item.id);
+            let key = catalog_dedup_key(&item.type_, &item.id);
             if seen.insert(key) {
                 items.push(item);
             }
@@ -648,18 +684,15 @@ async fn fetch_browse_page(
         }
     }
 
-    Ok(SearchCatalogPage {
-        items,
-        next_skip,
-        all_cursors: None,
-    })
+    Ok(CatalogFetchPage { items, next_skip })
 }
 
 fn merge_all_browse_pages(
-    cursors: AllBrowseCursors,
-    movie: Option<Result<SearchCatalogPage, String>>,
-    series: Option<Result<SearchCatalogPage, String>>,
+    continuation: SearchCatalogContinuation,
+    movie: Option<Result<CatalogFetchPage, String>>,
+    series: Option<Result<CatalogFetchPage, String>>,
 ) -> Result<SearchCatalogPage, String> {
+    let cursors = continuation.all_cursors.unwrap_or_default();
     let mut next = AllBrowseCursors::default();
     let mut pages = [Vec::new(), Vec::new()];
     let mut succeeded = false;
@@ -702,11 +735,52 @@ fn merge_all_browse_pages(
         items.extend(pair.0);
         items.extend(pair.1);
     }
-    Ok(SearchCatalogPage {
+    Ok(finish_catalog_page(items, continuation, None, Some(next)))
+}
+
+fn finish_catalog_page(
+    items: Vec<MediaItem>,
+    previous: SearchCatalogContinuation,
+    next_skip: Option<u32>,
+    all_cursors: Option<AllBrowseCursors>,
+) -> SearchCatalogPage {
+    let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
+    let mut added_movie = false;
+    let mut added_series = false;
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|item| {
+            if seen.len() >= MAX_CATALOG_SEEN_KEYS
+                || !seen.insert(catalog_dedup_key(&item.type_, &item.id))
+            {
+                return false;
+            }
+            added_movie |= item.type_.eq_ignore_ascii_case("movie");
+            added_series |= item.type_.eq_ignore_ascii_case("series");
+            true
+        })
+        .collect();
+    let continuation = SearchCatalogContinuation {
+        skip: next_skip
+            .filter(|next| !items.is_empty() && previous.skip.is_some_and(|skip| *next > skip)),
+        all_cursors: all_cursors.map(|cursors| {
+            let previous = previous.all_cursors.unwrap_or_default();
+            AllBrowseCursors {
+                movie: cursors
+                    .movie
+                    .filter(|skip| Some(*skip) == previous.movie || added_movie),
+                series: cursors
+                    .series
+                    .filter(|skip| Some(*skip) == previous.series || added_series),
+            }
+        }),
+        seen_keys: seen.into_iter().collect(),
+    };
+    SearchCatalogPage {
+        exhausted: continuation.is_exhausted(),
         items,
-        next_skip: None,
-        all_cursors: Some(next),
-    })
+        continuation,
+    }
 }
 
 #[command]
@@ -725,32 +799,30 @@ pub(crate) async fn query_search_catalog_for_request(
 ) -> Result<SearchCatalogPage, String> {
     let criteria = build_search_criteria(request)?;
 
-    if let Some(cursors) = criteria.all_cursors {
+    if criteria.continuation.is_exhausted() {
+        return Ok(SearchCatalogPage {
+            items: Vec::new(),
+            continuation: criteria.continuation,
+            exhausted: true,
+        });
+    }
+
+    if let Some(cursors) = criteria.continuation.all_cursors {
         let fetch = |media_type, skip: Option<u32>| {
             let criteria = &criteria;
             async move {
                 let skip = skip?;
-                Some(
-                    fetch_browse_page(
-                        app,
-                        client,
-                        &SearchCatalogCriteria {
-                            media_type: Some(media_type),
-                            skip,
-                            ..criteria.clone()
-                        },
-                    )
-                    .await,
-                )
+                Some(fetch_browse_page(app, client, criteria, media_type, skip).await)
             }
         };
         let (movie, series) = tokio::join!(
             fetch(SearchMediaType::Movie, cursors.movie),
             fetch(SearchMediaType::Series, cursors.series),
         );
-        return merge_all_browse_pages(cursors, movie, series);
+        return merge_all_browse_pages(criteria.continuation, movie, series);
     }
 
+    let skip = criteria.continuation.skip.unwrap_or(0);
     if let Some(query) = criteria.query.as_deref() {
         // Items arrive normalized, so the scorer reads `primary_year` instead
         // of re-parsing year strings per item.
@@ -760,19 +832,29 @@ pub(crate) async fn query_search_catalog_for_request(
             query,
             criteria.media_type,
             &criteria.genres,
-            criteria.skip,
+            skip,
         )
         .await?;
         let items = rank_search_results(query, page.items, criteria.year_range);
 
-        return Ok(SearchCatalogPage {
+        return Ok(finish_catalog_page(
             items,
-            next_skip: page.next_skip,
-            all_cursors: None,
-        });
+            criteria.continuation,
+            page.next_skip,
+            None,
+        ));
     }
 
-    fetch_browse_page(app, client, &criteria).await
+    let media_type = criteria
+        .media_type
+        .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
+    let page = fetch_browse_page(app, client, &criteria, media_type, skip).await?;
+    Ok(finish_catalog_page(
+        page.items,
+        criteria.continuation,
+        page.next_skip,
+        None,
+    ))
 }
 
 #[cfg(test)]

@@ -303,6 +303,7 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
     subtitle_track: Option<TrackLanguageCandidate>,
     subtitles_off: Option<bool>,
 ) -> Result<(), String> {
+    let expected_generation = playback_state.history_generation();
     let media_id = normalize_media_id(&media_id)
         .ok_or_else(|| "Media ID is required for playback preference outcomes.".to_string())?;
     let media_type = normalize_stream_media_type(&media_type, Some(&media_id))
@@ -333,6 +334,7 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
             preferred_audio_language,
             preferred_subtitle_language,
             now_unix_millis(),
+            expected_generation,
         )
     })
     .await

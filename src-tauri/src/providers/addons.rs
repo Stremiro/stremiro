@@ -3,18 +3,21 @@ mod transport;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::borrow::Cow;
 
 // Re-exports keep the `providers::addons::X` surface unchanged.
 pub(crate) use stream_match::{
     language_mention_is_audio, normalize_separators, stream_conflicts_with_episode_targets,
     stream_contains_batch_texts, stream_episode_match_texts, StreamEpisodeMatch,
-    StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary, StreamMatchText, StreamReleaseKind,
-    StreamResolutionTier, StreamTitleMatch,
+    StreamEpisodeMatchKind, StreamFlags, StreamMatchSummary, StreamMatchText, StreamPackCoverage,
+    StreamReleaseKind, StreamResolutionTier, StreamTitleMatch,
 };
 // Only test code calls this directly; production reads `StreamMatchText::flags`.
 #[cfg(test)]
 pub(crate) use stream_match::detect_stream_flags;
-pub(crate) use transport::{sanitize_addon_log, AddonTransport};
+pub(crate) use transport::{
+    remaining_stream_cache_ttl_ms, sanitize_addon_log, AddonTransport, STREAM_SIZE_REGEX,
+};
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum StreamResolution {
@@ -100,6 +103,26 @@ pub(crate) enum StreamRecommendationReason {
     Fallback,
 }
 
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamMatchBadgeKind {
+    Episode,
+    Range,
+    Season,
+    MultiSeason,
+    Title,
+    TitlePartial,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum StreamMatchTier {
+    Exact,
+    EpisodeRange,
+    SeasonPack,
+    Title,
+}
+
 /// Canonical Stremio stream object from any addon declaring `stream`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -124,12 +147,14 @@ pub(crate) struct AddonStream {
     /// Hydration-derived availability hint; the wire exposes only `presentation.deliveryKind`.
     #[serde(skip)]
     pub cached: bool,
+    #[serde(skip)]
+    pub(crate) pool_fetched_at: Option<std::time::Instant>,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub seeders: Option<u32>,
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub size_bytes: Option<u64>,
-    // Written only by `prepare_addon_streams`; a mistyped wire value would fail the row's decode.
-    /// Producing addon/source (set by commands.rs, not the addon payload).
+    // Backend-derived fields are ignored on ingress, including malformed wire values.
+    /// Producing addon/source, attached by `prepare_addon_streams`.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub source_name: Option<String>,
     /// Stable id of the producing addon config — the selector filters on this, not the name.
@@ -141,13 +166,18 @@ pub(crate) struct AddonStream {
     /// Canonical backend-issued identity for selection, history, and recovery.
     #[serde(skip_deserializing)]
     pub stream_key: String,
-    /// Coordinator ranking reasons; the UI owns the labels. Never decoded —
-    /// an injected malformed value would fail the stream's decode.
+    /// Backend-derived ranking reasons, ignored on ingress; the UI owns the labels.
     #[serde(skip_deserializing, skip_serializing_if = "Vec::is_empty")]
     pub recommendation_reasons: Vec<StreamRecommendationReason>,
     /// Structured episode/title match facts, set during coordinator ranking.
     #[serde(skip_deserializing, skip_serializing_if = "Option::is_none")]
     pub match_summary: Option<StreamMatchSummary>,
+    #[serde(skip_deserializing)]
+    pub match_badge_kinds: Vec<StreamMatchBadgeKind>,
+    #[serde(skip_deserializing)]
+    pub match_tier: Option<StreamMatchTier>,
+    #[serde(skip_deserializing)]
+    pub show_pack_badge: bool,
     #[serde(skip)]
     pub(crate) selection_priority: Option<SelectionPriority>,
     /// Backend-prepared presentation facts — the UI renders without reparsing raw text.
@@ -233,8 +263,29 @@ pub(crate) struct BehaviorHints {
     #[serde(rename = "bingeGroup", alias = "binge_group")]
     pub binge_group: Option<String>,
     pub filename: Option<String>,
+    #[serde(
+        default,
+        rename = "videoSize",
+        alias = "video_size",
+        deserialize_with = "deserialize_video_size",
+        skip_serializing
+    )]
+    pub video_size: Option<u64>,
     #[serde(rename = "proxyHeaders", alias = "proxy_headers")]
     pub proxy_headers: Option<Value>,
+}
+
+fn deserialize_video_size<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Value::deserialize(deserializer)?;
+    Ok(match value {
+        Value::Number(number) => number.as_u64(),
+        Value::String(text) => text.trim().parse().ok(),
+        _ => None,
+    }
+    .filter(|size| *size > 0))
 }
 
 /// `proxyHeaders.request` entries honored per stream; the cap blocks unbounded lists.
@@ -289,25 +340,28 @@ fn is_transport_owned_header(name: &str) -> bool {
 fn proxy_request_header(name: &str, value: &Value) -> Option<(String, String)> {
     let name = name.trim();
     if name.is_empty()
-        || name.chars().count() > MAX_PROXY_HEADER_NAME_CHARS
+        || name.chars().take(MAX_PROXY_HEADER_NAME_CHARS + 1).count() > MAX_PROXY_HEADER_NAME_CHARS
         || !is_http_token(name)
         || is_transport_owned_header(name)
     {
         return None;
     }
     let value = match value {
-        Value::String(text) => text.trim().to_string(),
-        Value::Number(number) => number.to_string(),
-        Value::Bool(flag) => flag.to_string(),
+        Value::String(text) => Cow::Borrowed(text.trim()),
+        Value::Number(number) => Cow::Owned(number.to_string()),
+        Value::Bool(flag) => Cow::Owned(flag.to_string()),
         _ => return None,
     };
     if value.is_empty()
-        || value.chars().count() > MAX_PROXY_HEADER_VALUE_CHARS
-        || value.contains(['\r', '\n'])
+        || value.chars().take(MAX_PROXY_HEADER_VALUE_CHARS + 1).count()
+            > MAX_PROXY_HEADER_VALUE_CHARS
+        || value
+            .bytes()
+            .any(|byte| (byte < 0x20 && byte != b'\t') || byte == 0x7f)
     {
         return None;
     }
-    Some((name.to_string(), value))
+    Some((name.to_string(), value.into_owned()))
 }
 
 impl BehaviorHints {

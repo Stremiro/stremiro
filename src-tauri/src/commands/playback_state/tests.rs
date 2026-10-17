@@ -4,9 +4,9 @@ use super::language_preferences::{
 };
 use super::playback_title_scope_key;
 use super::stream_health::{
-    accepts_outcome, recent_successful_source, score_source_health_priority,
-    score_stream_family_priority, update_verified_family_source_id, PlaybackSourceHealthSnapshot,
-    PlaybackStreamFamilySnapshot,
+    accepts_outcome, load_source_health_snapshot, recent_successful_source,
+    score_source_health_priority, score_stream_family_priority, update_verified_family_source_id,
+    upsert_source_health_snapshot, PlaybackSourceHealthSnapshot, PlaybackStreamFamilySnapshot,
 };
 use super::{PlaybackStateService, PlaybackStreamOutcomeKind};
 use crate::commands::stream_coordinator::{
@@ -52,6 +52,145 @@ fn source_health_priority_rewards_recent_success() {
     let snapshot = health(Some(58_000), None, 0, None);
 
     assert_eq!(score_source_health_priority(Some(&snapshot), now_ms), 3);
+}
+
+#[test]
+fn source_failure_streak_expires_before_the_next_failure() {
+    let fixture = crate::test_helpers::test_store();
+    let window_ms = 1000 * 60 * 30;
+    for (key, gap_ms, expected_streak) in [
+        ("at-window", window_ms, 2),
+        ("after-window", window_ms + 1, 1),
+    ] {
+        upsert_source_health_snapshot(
+            &fixture.store,
+            key,
+            PlaybackStreamOutcomeKind::LoadFailed,
+            1_000,
+            false,
+        );
+        let timestamp_ms = 1_000 + gap_ms;
+        upsert_source_health_snapshot(
+            &fixture.store,
+            key,
+            PlaybackStreamOutcomeKind::LoadFailed,
+            timestamp_ms,
+            false,
+        );
+        let snapshot = load_source_health_snapshot(&fixture.store, key).expect("source snapshot");
+        assert_eq!(snapshot.last_failure_at, Some(timestamp_ms));
+        assert_eq!(snapshot.consecutive_failures, expected_streak, "{key}");
+        assert_eq!(
+            snapshot.cooldown_until.is_some(),
+            expected_streak >= 2,
+            "{key}"
+        );
+        assert_eq!(
+            score_source_health_priority(Some(&snapshot), timestamp_ms),
+            if expected_streak >= 2 { 0 } else { 1 },
+            "{key}"
+        );
+    }
+}
+
+#[test]
+fn source_health_recovers_from_future_dated_reputation() {
+    use super::stream_health::playback_source_health_item_key;
+
+    let fixture = crate::test_helpers::test_store();
+    let now_ms = crate::commands::now_unix_millis();
+    let future_ms = now_ms + 24 * 60 * 60 * 1000;
+    let key = "clock-corrected-source";
+    let item_key = playback_source_health_item_key(key);
+    for outcome in [
+        PlaybackStreamOutcomeKind::Verified,
+        PlaybackStreamOutcomeKind::LoadFailed,
+    ] {
+        let snapshot = health(
+            Some(future_ms - 1),
+            Some(future_ms),
+            3,
+            Some(future_ms + 900_000),
+        );
+        fixture.store.set(&item_key, serde_json::json!(snapshot));
+        assert_eq!(
+            score_source_health_priority(Some(&snapshot), now_ms),
+            DEFAULT_SOURCE_HEALTH_PRIORITY
+        );
+        assert!(accepts_outcome(
+            snapshot.last_success_at,
+            snapshot.last_failure_at,
+            now_ms
+        ));
+
+        upsert_source_health_snapshot(&fixture.store, key, outcome, now_ms, false);
+        let updated = load_source_health_snapshot(&fixture.store, key).unwrap();
+        assert_eq!(updated.cooldown_until, None);
+        match outcome {
+            PlaybackStreamOutcomeKind::Verified => {
+                assert_eq!(updated.last_success_at, Some(now_ms));
+                assert_eq!(updated.last_failure_at, None);
+                assert_eq!(updated.consecutive_failures, 0);
+                assert_eq!(score_source_health_priority(Some(&updated), now_ms), 3);
+            }
+            _ => {
+                assert_eq!(updated.last_success_at, None);
+                assert_eq!(updated.last_failure_at, Some(now_ms));
+                assert_eq!(updated.consecutive_failures, 1);
+                assert_eq!(score_source_health_priority(Some(&updated), now_ms), 1);
+            }
+        }
+        let saved = fixture.store.get(&item_key);
+        upsert_source_health_snapshot(
+            &fixture.store,
+            key,
+            PlaybackStreamOutcomeKind::Verified,
+            now_ms - 10 * 60 * 1000,
+            false,
+        );
+        assert_eq!(fixture.store.get(&item_key), saved);
+    }
+}
+
+#[test]
+fn reputation_scoring_bounds_cooldowns_and_future_failures() {
+    let now_ms = 100_000;
+    let mut source = health(None, Some(now_ms - 1), 2, Some(now_ms + 20 * 60 * 1000));
+    assert_eq!(score_source_health_priority(Some(&source), now_ms), 0);
+    source.cooldown_until = source.cooldown_until.map(|until| until + 1);
+    assert_eq!(score_source_health_priority(Some(&source), now_ms), 1);
+    source.cooldown_until = None;
+    source.last_failure_at = Some(now_ms + 5 * 60 * 1000);
+    assert_eq!(score_source_health_priority(Some(&source), now_ms), 1);
+    source.last_failure_at = source.last_failure_at.map(|at| at + 1);
+    assert_eq!(
+        score_source_health_priority(Some(&source), now_ms),
+        DEFAULT_SOURCE_HEALTH_PRIORITY
+    );
+
+    let mut family = stream_family_snapshot(None, None, Some(now_ms - 1));
+    family.consecutive_failures = 2;
+    family.cooldown_until = Some(now_ms + 17 * 60 * 1000);
+    assert_eq!(
+        score_stream_family_priority(Some(&family), None, None, now_ms),
+        0
+    );
+    family.cooldown_until = family.cooldown_until.map(|until| until + 1);
+    assert_eq!(
+        score_stream_family_priority(Some(&family), None, None, now_ms),
+        1
+    );
+    family.cooldown_until = None;
+    family.last_failure_at = Some(now_ms + 5 * 60 * 1000);
+    assert_eq!(
+        score_stream_family_priority(Some(&family), None, None, now_ms),
+        1
+    );
+    family.last_failure_at = family.last_failure_at.map(|at| at + 1);
+    assert_eq!(
+        score_stream_family_priority(Some(&family), None, None, now_ms),
+        DEFAULT_STREAM_FAMILY_PRIORITY
+    );
 }
 
 #[test]
@@ -115,6 +254,191 @@ fn stream_family_snapshot(
         consecutive_failures: 0,
         cooldown_until: None,
     }
+}
+
+#[test]
+fn stream_family_recovers_from_future_dated_reputation() {
+    use super::stream_health::{
+        load_playback_stream_family_snapshot, playback_stream_family_item_key,
+        playback_stream_family_snapshot_key, upsert_stream_family_snapshot, StreamOutcomeReport,
+    };
+
+    let fixture = crate::test_helpers::test_store();
+    let now_ms = crate::commands::now_unix_millis();
+    let future_ms = now_ms + 24 * 60 * 60 * 1000;
+    let scope = "movie:tt1";
+    let family = "clock-corrected-family";
+    let key = playback_stream_family_snapshot_key(scope, family);
+    let item_key = playback_stream_family_item_key(&key);
+    for outcome in [
+        PlaybackStreamOutcomeKind::Verified,
+        PlaybackStreamOutcomeKind::LoadFailed,
+    ] {
+        let mut snapshot =
+            stream_family_snapshot(Some("old-source"), Some(future_ms - 1), Some(future_ms));
+        snapshot.consecutive_failures = 3;
+        snapshot.cooldown_until = Some(future_ms + 720_000);
+        fixture.store.set(&item_key, serde_json::json!(snapshot));
+        assert_eq!(
+            score_stream_family_priority(Some(&snapshot), None, None, now_ms),
+            DEFAULT_STREAM_FAMILY_PRIORITY
+        );
+        let report = StreamOutcomeReport {
+            media_id: "tt1".to_string(),
+            media_type: "movie",
+            season: None,
+            episode: None,
+            source_id: Some("current-source".to_string()),
+            stream_family: Some(family.to_string()),
+            outcome,
+            timestamp_ms: now_ms,
+        };
+        upsert_stream_family_snapshot(
+            &fixture.store,
+            scope,
+            family,
+            report.source_id.clone(),
+            &report,
+            false,
+        );
+        let updated = load_playback_stream_family_snapshot(&fixture.store, &key).unwrap();
+        assert_eq!(updated.scope_key.as_deref(), Some(scope));
+        match outcome {
+            PlaybackStreamOutcomeKind::Verified => {
+                assert_eq!(updated.last_success_at, Some(now_ms));
+                assert_eq!(updated.last_failure_at, None);
+                assert_eq!(updated.consecutive_failures, 0);
+                assert_eq!(updated.cooldown_until, None);
+                assert_eq!(updated.source_id.as_deref(), Some("current-source"));
+                assert_eq!(
+                    score_stream_family_priority(Some(&updated), None, None, now_ms),
+                    4
+                );
+            }
+            _ => {
+                assert_eq!(updated.last_success_at, None);
+                assert_eq!(updated.last_failure_at, Some(now_ms));
+                assert_eq!(updated.consecutive_failures, 1);
+                assert_eq!(updated.cooldown_until, Some(now_ms + 720_000));
+                assert_eq!(updated.source_id, None);
+            }
+        }
+    }
+}
+
+#[test]
+fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_once() {
+    use super::stream_health::{
+        playback_source_health_item_key, playback_stream_family_item_key,
+        playback_stream_family_snapshot_key, PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
+        PLAYBACK_STREAM_FAMILY_INDEX_KEY,
+    };
+    use crate::commands::streaming_helpers::{derive_stream_family, source_health_key};
+    use serde_json::json;
+
+    let fixture = crate::test_helpers::test_store();
+    let store = &fixture.store;
+    let source_id = "https://user:secret@addon.example/manifest.json";
+    let family = derive_stream_family(&crate::test_helpers::test_stream(), source_id).unwrap();
+    let current_key = playback_stream_family_snapshot_key("series:tt1|alternate", &family);
+    let snapshot = json!(stream_family_snapshot(Some(source_id), Some(50_000), None));
+    let legacy_keys = [
+        "series:tt1|shared|release:show",
+        "series:tt1|shared|binge:show",
+        "movie:tt1|shared|delivery:http",
+        "series:tt1|v2:not-a-digest|release:show",
+        "series:tt1|orphan|release:show",
+    ];
+    for key in legacy_keys {
+        store.set(playback_stream_family_item_key(key), snapshot.clone());
+    }
+    store.set(
+        playback_stream_family_item_key(&current_key),
+        snapshot.clone(),
+    );
+    let missing_legacy_key = "movie:tt2|missing|delivery:http";
+    let mut index: Vec<_> = legacy_keys[..4].iter().map(|key| key.to_string()).collect();
+    index.extend([missing_legacy_key.to_string(), current_key.clone()]);
+    store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(index));
+
+    let health_key = source_health_key(source_id);
+    upsert_source_health_snapshot(
+        store,
+        &health_key,
+        PlaybackStreamOutcomeKind::Verified,
+        50_000,
+        false,
+    );
+    let preserved = [
+        (
+            playback_source_health_item_key(&health_key),
+            store
+                .get(playback_source_health_item_key(&health_key))
+                .unwrap(),
+        ),
+        (
+            PLAYBACK_SOURCE_HEALTH_INDEX_KEY.to_string(),
+            store.get(PLAYBACK_SOURCE_HEALTH_INDEX_KEY).unwrap(),
+        ),
+        (
+            super::language_preferences::PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY.to_string(),
+            json!(["series:tt1"]),
+        ),
+        (
+            super::language_preferences::playback_language_preferences_item_key("series:tt1"),
+            json!({"preferredAudioLanguage": "ja", "preferredSubtitleLanguage": "en", "updatedAt": 42}),
+        ),
+        (
+            super::episode_mapping::PLAYBACK_EPISODE_MAPPING_INDEX_KEY.to_string(),
+            json!(["series:tt1:1:1"]),
+        ),
+        (
+            super::episode_mapping::playback_episode_mapping_item_key("series:tt1:1:1"),
+            json!({"sourceLookupId": "tt1", "sourceSeason": 1, "sourceEpisode": 1}),
+        ),
+        ("unrelated".to_string(), json!({"durable": true})),
+    ];
+    for (key, value) in &preserved {
+        store.set(key, value.clone());
+    }
+    store.save().unwrap();
+    let saves_before = store.save_count();
+
+    let service = PlaybackStateService::new();
+    service.migrate_legacy_stream_families(store).unwrap();
+    assert_eq!(store.save_count(), saves_before + 1);
+    assert_eq!(
+        store.get(PLAYBACK_STREAM_FAMILY_INDEX_KEY),
+        Some(json!([current_key]))
+    );
+    assert_eq!(
+        store.get(playback_stream_family_item_key(&current_key)),
+        Some(snapshot)
+    );
+    for key in legacy_keys {
+        assert!(store.get(playback_stream_family_item_key(key)).is_none());
+    }
+    let migrated_bytes = std::fs::read(&fixture.path).unwrap();
+    let persisted: serde_json::Value = serde_json::from_slice(&migrated_bytes).unwrap();
+    for (key, value) in preserved {
+        assert_eq!(store.get(&key), Some(value.clone()), "{key}");
+        assert_eq!(persisted.get(&key), Some(&value), "{key}");
+    }
+    assert_eq!(
+        score_source_health_priority(
+            load_source_health_snapshot(store, &health_key).as_ref(),
+            50_000
+        ),
+        3
+    );
+    for _ in 0..2 {
+        service.migrate_legacy_stream_families(store).unwrap();
+    }
+    PlaybackStateService::new()
+        .migrate_legacy_stream_families(store)
+        .unwrap();
+    assert_eq!(store.save_count(), saves_before + 1);
+    assert_eq!(std::fs::read(&fixture.path).unwrap(), migrated_bytes);
 }
 
 #[test]

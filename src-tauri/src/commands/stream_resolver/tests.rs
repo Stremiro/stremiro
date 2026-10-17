@@ -1,7 +1,8 @@
 use super::{
     build_resolved_direct_stream, format_mpv_http_header_fields, is_advisory_probe_status,
-    proxy_header_map, sanitize_addon_log,
+    proxy_header_map,
 };
+use crate::providers::addons::sanitize_addon_log;
 
 #[test]
 fn resolved_headers_stay_on_first_hop_origin() {

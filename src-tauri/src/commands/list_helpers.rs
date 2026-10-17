@@ -1,8 +1,39 @@
 use super::store_helpers::load_index;
-use super::{normalize_non_empty, DurableStore};
-use crate::providers::{trim_to_max, MediaItem};
+use super::DurableStore;
+use crate::providers::{bound_optional, trim_to_max, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ListErrorKind {
+    ListNameRequired,
+    ListNotFound,
+    TooManyLists,
+    ListFull,
+    Failed,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ListError {
+    pub kind: ListErrorKind,
+    pub message: String,
+}
+
+impl ListError {
+    pub(super) fn new(kind: ListErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl From<String> for ListError {
+    fn from(message: String) -> Self {
+        Self::new(ListErrorKind::Failed, message)
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserList {
@@ -94,7 +125,7 @@ fn validate_optional_genres<'de, D: serde::Deserializer<'de>>(
 }
 
 impl ListItemIdentity {
-    pub(super) fn normalized_id(self) -> Option<String> {
+    pub(super) fn normalized_item(self) -> Option<MediaItem> {
         super::store_helpers::normalize_library_item(MediaItem {
             id: self.id,
             title: self.title,
@@ -108,7 +139,6 @@ impl ListItemIdentity {
             display_year: None,
             genres: None,
         })
-        .map(|item| item.id)
     }
 }
 
@@ -131,15 +161,15 @@ pub(super) const MAX_LIST_ITEMS: usize = 2_000;
 /// bound so a hostile id can't probe or collide another key namespace.
 /// Read paths stay lenient for legacy data.
 pub(super) fn normalize_list_id(input: &str) -> Option<String> {
-    let id = super::normalize_opaque_field(input)?;
-    if id.chars().count() > MAX_LIST_ID_CHARS
+    let id = input.trim();
+    if id.chars().nth(MAX_LIST_ID_CHARS).is_some()
         || !id
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '_' || ch == '-')
     {
         return None;
     }
-    Some(id)
+    super::normalize_opaque_field(id)
 }
 
 /// Single ingress rule for list names/icons across live commands and backup
@@ -164,10 +194,10 @@ pub(super) fn list_item_store_key(list_id: &str, item_id: &str) -> String {
 
 /// Meta read for the mutation commands — absent or corrupt both fail as "not found"
 /// (a corrupt meta has no usable `item_ids` anyway).
-pub(super) fn load_list(store: &DurableStore, list_id: &str) -> Result<UserList, String> {
+pub(super) fn load_list(store: &DurableStore, list_id: &str) -> Result<UserList, ListError> {
     store
         .get_typed(list_meta_key(list_id))
-        .ok_or_else(|| "List not found".to_string())
+        .ok_or_else(|| ListError::new(ListErrorKind::ListNotFound, "List not found"))
 }
 
 /// Strict order read through the shared index policy — a non-array or
@@ -175,15 +205,16 @@ pub(super) fn load_list(store: &DurableStore, list_id: &str) -> Result<UserList,
 /// an empty index over orphaned `list:*` keys.
 pub(super) fn load_lists_order(store: &DurableStore) -> Result<Vec<String>, String> {
     let raw_order = load_index(store, LISTS_ORDER_KEY)?;
+    let has_raw_order = !raw_order.is_empty();
 
     let mut seen: HashSet<String> = HashSet::with_capacity(raw_order.len());
     let order: Vec<String> = raw_order
-        .iter()
-        .filter_map(|list_id| normalize_non_empty(list_id))
+        .into_iter()
+        .filter_map(|list_id| bound_optional(Some(list_id), usize::MAX))
         .filter(|list_id| seen.insert(list_id.clone()))
         .collect();
 
-    if !raw_order.is_empty() && order.is_empty() {
+    if has_raw_order && order.is_empty() {
         return Err(format!("Invalid {LISTS_ORDER_KEY} index."));
     }
     Ok(order)
@@ -193,17 +224,16 @@ pub(super) fn load_lists_order(store: &DurableStore) -> Result<Vec<String>, Stri
 /// reorder, not a delete — omitted ids append in current order so a stale snapshot
 /// can't orphan stored keys. O(n+m) via hash sets.
 pub(super) fn reorder_known_ids(current: &[String], requested: Vec<String>) -> Vec<String> {
-    let known: HashSet<&str> = current.iter().map(String::as_str).collect();
-    let mut seen: HashSet<String> = HashSet::with_capacity(current.len());
+    let mut remaining: HashSet<&str> = current.iter().map(String::as_str).collect();
     let mut merged: Vec<String> = Vec::with_capacity(current.len());
 
     for id in requested {
-        if known.contains(id.as_str()) && seen.insert(id.clone()) {
+        if remaining.remove(id.as_str()) {
             merged.push(id);
         }
     }
     for id in current {
-        if seen.insert(id.clone()) {
+        if remaining.remove(id.as_str()) {
             merged.push(id.clone());
         }
     }

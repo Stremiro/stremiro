@@ -3,22 +3,24 @@ use crate::providers::addon_resource::{build_resource_url, is_fetchable_http_url
 use crate::providers::ttl_cache::{
     hash_segment, FetchContract, FetchFailure, FetchFailureCooldown, InFlight, TtlCache,
 };
-use crate::providers::{ensure_rustls_crypto_provider, fetch_policy, non_blank, read_bounded_body};
+use crate::providers::{
+    ensure_rustls_crypto_provider, fetch_policy, lock_or_recover, non_blank, read_bounded_body,
+};
 use regex::Regex;
 use reqwest::{header, Client};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde::Deserialize;
+use serde_json::{value::RawValue, Value};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock};
-use std::time::Duration;
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 static SEEDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"👤\s*(\d{1,3}(?:[,.]\d{3})+|\d+)").expect("valid seeder regex"));
-static SIZE_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)💾\s*([\d\.]+)\s*([KMGT]i?B)\b").expect("valid size regex"));
-/// Plain-text size fallback (e.g. "1.2 GB") without the emoji prefix.
-static PLAIN_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)(?:^|\s)([\d\.]+)\s*([KMGT]i?B)\b").expect("valid plain size regex")
+pub(crate) static STREAM_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    // Exclude numeric punctuation at the left edge so malformed groups cannot match a suffix.
+    Regex::new(r"(?i)(?:^|[^\w.,])([0-9]+(?:[.,][0-9]+)?)\s*([KMGT]i?B)\b")
+        .expect("valid stream size regex")
 });
 
 /// `infoHash` persists inside `last_stream_key` (128-char cap) — unbounded would break the saved-stream round-trip.
@@ -33,20 +35,20 @@ pub(super) fn config_cache_segment(config_url: &str) -> String {
     format!("cfg:{}", hash_segment(url))
 }
 
-#[derive(Debug, Serialize, Deserialize, Default)]
-struct RawStreamResponse {
-    #[serde(default)]
-    streams: Vec<Value>,
+#[derive(Debug, Deserialize, Default)]
+struct RawStreamResponse<'a> {
+    #[serde(borrow, default)]
+    streams: Vec<&'a RawValue>,
 }
 
 /// Decode item-by-item so a malformed sibling can't discard valid streams; applies per-field truncation.
 pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, String> {
-    let body: RawStreamResponse =
+    let body: RawStreamResponse<'_> =
         serde_json::from_slice(bytes).map_err(|_| "Invalid stream response format.".to_string())?;
     Ok(body
         .streams
         .into_iter()
-        .filter_map(|item| serde_json::from_value::<AddonStream>(item).ok())
+        .filter_map(|item| serde_json::from_str::<AddonStream>(item.get()).ok())
         .take(DECODED_STREAMS_MAX)
         .map(|mut stream| {
             truncate_stream_item(&mut stream);
@@ -57,9 +59,12 @@ pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, Stri
 
 fn truncate_field(value: &mut Option<String>, max_chars: usize) {
     if let Some(text) = value {
-        // Byte length bounds char count from above: short fields skip the rebuild.
+        // Byte length bounds char count from above: short fields skip the scan.
         if text.len() > max_chars {
-            *text = text.chars().take(max_chars).collect();
+            if let Some((byte_idx, _)) = text.char_indices().nth(max_chars) {
+                text.truncate(byte_idx);
+                text.shrink_to_fit();
+            }
         }
         if !non_blank(text) {
             *value = None;
@@ -70,13 +75,17 @@ fn truncate_field(value: &mut Option<String>, max_chars: usize) {
 pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     truncate_field(&mut stream.name, 2_048);
     truncate_field(&mut stream.title, 2_048);
-    truncate_field(&mut stream.url, 2_048);
-    truncate_field(&mut stream.info_hash, INFO_HASH_MAX_CHARS);
-    // Strip non-fetchable URLs at ingress so they can't pollute selector rows/dedup keys.
-    let url_blocked = stream
-        .url
+    if stream
+        .info_hash
         .as_deref()
-        .is_some_and(|url| !is_magnet_url(url) && !is_fetchable_http_url(url));
+        .is_some_and(|hash| hash.chars().nth(INFO_HASH_MAX_CHARS).is_some() || !non_blank(hash))
+    {
+        stream.info_hash = None;
+    }
+    // Strip non-fetchable URLs at ingress so they can't pollute selector rows/dedup keys.
+    let url_blocked = stream.url.as_deref().is_some_and(|url| {
+        url.chars().nth(2_048).is_some() || (!is_magnet_url(url) && !is_fetchable_http_url(url))
+    });
     if url_blocked {
         stream.url = None;
     }
@@ -112,6 +121,15 @@ fn json_size_estimate(value: &Value) -> usize {
 
 /// Shared by selector fetches and best-stream resolution — one addon fetch serves both.
 const STREAM_CACHE_TTL: Duration = Duration::from_secs(180);
+const STREAM_REFRESH_CLAIMS_MAX: usize = 256;
+
+pub(crate) fn remaining_stream_cache_ttl_ms(fetched_at: Option<Instant>, now: Instant) -> u64 {
+    fetched_at.map_or(0, |fetched_at| {
+        STREAM_CACHE_TTL
+            .saturating_sub(now.saturating_duration_since(fetched_at))
+            .as_millis() as u64
+    })
+}
 
 /// Empty answers: a stream-less title must not re-fan-out per open, yet new content surfaces fast.
 const STREAM_CACHE_EMPTY_TTL: Duration = Duration::from_secs(30);
@@ -125,7 +143,7 @@ const STREAM_FETCH_FAILURE_TTL: Duration = Duration::from_secs(30);
 const STREAM_IN_FLIGHT_SWEEP_AT: usize = 64;
 
 /// Cut a pathological payload before the per-item regex hydration battery.
-const DECODED_STREAMS_MAX: usize = 512;
+pub(super) const DECODED_STREAMS_MAX: usize = 512;
 /// Same budget as subtitles; checked before allocation and during streaming.
 const STREAM_MAX_BYTES: usize = 512 * 1024;
 /// Feeds both the client `.timeout` and the retry loop's burned-timeout check.
@@ -150,6 +168,7 @@ pub(crate) struct AddonTransport {
     /// Short-TTL negative cache for deterministic per-request failures
     /// (status, size-limit, decode) — a content 404 must not mark the addon dead.
     failure_cache: TtlCache<String>,
+    refresh_claims: Mutex<HashMap<String, Instant>>,
 }
 
 impl AddonTransport {
@@ -239,6 +258,7 @@ impl AddonTransport {
                 STREAM_CACHE_EMPTY_TTL,
                 STREAM_CACHE_EMPTY_TTL,
             ),
+            refresh_claims: Mutex::new(HashMap::new()),
         }
     }
 
@@ -262,6 +282,32 @@ impl AddonTransport {
         self.cache.clear();
         self.failure_cache.clear();
         self.fetch_failures.clear();
+        lock_or_recover(&self.refresh_claims).clear();
+    }
+
+    pub(crate) fn purge_expired_caches(&self) {
+        self.cache.purge_expired();
+        self.failure_cache.purge_expired();
+    }
+
+    pub(crate) fn claim_stream_refresh(&self, key: &str) -> bool {
+        let mut claims = lock_or_recover(&self.refresh_claims);
+        let now = Instant::now();
+        claims.retain(|_, claimed_at| now.duration_since(*claimed_at) < STREAM_CACHE_TTL);
+        if claims.contains_key(key) {
+            return false;
+        }
+        if claims.len() >= STREAM_REFRESH_CLAIMS_MAX {
+            if let Some(oldest) = claims
+                .iter()
+                .min_by_key(|(_, claimed_at)| **claimed_at)
+                .map(|(key, _)| key.clone())
+            {
+                claims.remove(&oldest);
+            }
+        }
+        claims.insert(key.to_string(), now);
+        true
     }
 
     /// Generation snapshot for operations whose late write-back must not survive a clear.
@@ -297,6 +343,16 @@ impl AddonTransport {
         id: &str,
         addon_url: &str,
     ) -> Result<Vec<AddonStream>, String> {
+        self.get_streams_fresh(type_, id, addon_url, None).await
+    }
+
+    pub(crate) async fn get_streams_fresh(
+        &self,
+        type_: &str,
+        id: &str,
+        addon_url: &str,
+        not_before: Option<Instant>,
+    ) -> Result<Vec<AddonStream>, String> {
         // Validate before the contract: an unbuildable URL never had a fetch to cache.
         let base_url = addon_url.trim();
         if base_url.is_empty() {
@@ -304,19 +360,17 @@ impl AddonTransport {
         }
         let url = Self::build_stream_endpoint(base_url, type_, id)?;
 
-        #[cfg(debug_assertions)]
-        eprintln!("Addon stream URL: {}", sanitize_addon_log(&url));
-
         // Same-origin Origin/Referer satisfies CDN/WAF origin checks without leaking the API key.
         let origin = Self::build_request_origin(base_url)?;
 
         let addon_key = config_cache_segment(addon_url);
         let cache_key = format!("{}|{}|{}", type_, id, addon_key);
         self.fetch_contract()
-            .run(
+            .run_fresh(
                 &self.cache,
                 &cache_key,
                 &addon_key,
+                not_before,
                 |streams| streams.is_empty(),
                 || async { self.fetch_streams_once(&url, &origin).await.map(Arc::from) },
             )
@@ -331,6 +385,9 @@ impl AddonTransport {
         url: &str,
         origin: &str,
     ) -> Result<Vec<AddonStream>, FetchFailure> {
+        #[cfg(debug_assertions)]
+        eprintln!("Addon stream origin: {}", origin);
+
         let res = match self
             .client
             .get(url)
@@ -341,27 +398,26 @@ impl AddonTransport {
         {
             Ok(r) => r,
             Err(e) => {
-                // reqwest errors embed the URL (possibly credentials) — sanitize before IPC.
-                let error = sanitize_addon_log(&e.to_string());
+                let e = e.without_url();
+                let error = e.to_string();
                 #[cfg(debug_assertions)]
                 eprintln!("Addon stream request failed: {}", error);
-                return Err(FetchFailure::Retryable(error));
+                return Err(FetchFailure::from_send_error(&e, error));
             }
         };
 
         if !res.status().is_success() {
             let status = res.status();
             #[cfg(debug_assertions)]
-            eprintln!(
-                "Addon stream error {} for {}",
-                status,
-                sanitize_addon_log(url)
-            );
+            eprintln!("Addon stream error {} for {}", status, origin);
 
-            return Err(FetchFailure::Fatal(format!(
-                "Configured addon returned HTTP {}. Check the addon URL in Settings → Streaming.",
-                status.as_u16()
-            )));
+            return Err(FetchFailure::from_http_status(
+                status,
+                format!(
+                    "Configured addon returned HTTP {}. Check the addon URL in Settings → Streaming.",
+                    status.as_u16()
+                ),
+            ));
         }
 
         let bytes =
@@ -393,6 +449,10 @@ impl AddonTransport {
             }
         };
         Self::hydrate_streams(&mut streams);
+        let fetched_at = Instant::now();
+        for stream in &mut streams {
+            stream.pool_fetched_at = Some(fetched_at);
+        }
         Ok(streams)
     }
 
@@ -412,7 +472,7 @@ impl AddonTransport {
     }
 
     fn hydrate_stream_inner(stream: &mut AddonStream, combined: &mut String) {
-        // Seeders/size parse from name+title; wire-claimed values were discarded at decode.
+        // Derived top-level fields were discarded at decode.
         combined.clear();
         combined.push_str(stream.name.as_deref().unwrap_or(""));
         combined.push('\n');
@@ -427,23 +487,25 @@ impl AddonTransport {
             {
                 return None;
             }
-            captured
-                .as_str()
-                .replace([',', '.'], "")
-                .parse::<u32>()
-                .ok()
+            let count = captured.as_str();
+            if count.contains([',', '.']) {
+                count.replace([',', '.'], "").parse::<u32>().ok()
+            } else {
+                count.parse::<u32>().ok()
+            }
         });
 
-        stream.size_bytes = SIZE_REGEX
-            .captures(combined)
-            .and_then(|caps| Self::parse_size_to_bytes(&caps[1], &caps[2]))
+        stream.size_bytes = stream
+            .behavior_hints
+            .as_ref()
+            .and_then(|hints| hints.video_size)
             .or_else(|| {
-                PLAIN_SIZE_REGEX
+                STREAM_SIZE_REGEX
                     .captures(combined)
                     .and_then(|caps| Self::parse_size_to_bytes(&caps[1], &caps[2]))
             });
 
-        // ⚡ hints a cached/debrid stream; ⬇ explicitly opts out.
+        // The lightning marker is a cached-availability hint; the down arrow opts out.
         stream.cached = combined.contains('\u{26A1}') && !combined.contains('\u{2B07}');
 
         // Warm the match-text memo while the fields are final.
@@ -457,10 +519,21 @@ impl AddonTransport {
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss
         )]
-        let parsed = value
-            .parse::<f64>()
-            .ok()
-            .filter(|parsed| parsed.is_finite() && *parsed >= 0.0)?;
+        let parsed = if let Some((whole, fraction)) = value.split_once(',') {
+            let integer = whole.parse::<f64>().ok()?;
+            let fractional = fraction.parse::<f64>().ok()?;
+            // A single three-digit comma group is thousands; other comma groups are decimals.
+            if whole.len() <= 3 && fraction.len() == 3 {
+                integer * 1000.0 + fractional
+            } else {
+                integer + fractional / 10f64.powi(i32::try_from(fraction.len()).ok()?)
+            }
+        } else {
+            value.parse::<f64>().ok()?
+        };
+        if !parsed.is_finite() || parsed < 0.0 {
+            return None;
+        }
         let exponent = match unit.as_bytes().first().map(u8::to_ascii_uppercase) {
             Some(b'K') => 1,
             Some(b'M') => 2,
@@ -492,15 +565,11 @@ pub(crate) fn sanitize_addon_log(value: &str) -> String {
         Regex::new(r"/[-A-Za-z0-9_+=%~]{32,}").expect("valid regex")
     });
 
-    let redacted = TOKEN_RE.replace_all(value, "$1[redacted]").into_owned();
-    let redacted = CONFIG_PAIR_RE
-        .replace_all(&redacted, "$1[redacted]")
-        .into_owned();
-    let redacted = PATH_BLOB_RE
-        .replace_all(&redacted, "/[redacted-path]")
-        .into_owned();
+    let redacted_query = TOKEN_RE.replace_all(value, "$1[redacted]");
+    let redacted_config = CONFIG_PAIR_RE.replace_all(&redacted_query, "$1[redacted]");
+    let redacted_path = PATH_BLOB_RE.replace_all(&redacted_config, "/[redacted-path]");
     // Redact embedded userinfo too — reqwest errors embed the full URL.
-    redact_userinfo_authority(&redacted)
+    redact_userinfo_authority(&redacted_path)
 }
 
 /// Replace `scheme://user:pass@host` with `scheme://[redacted-userinfo]@host`.
@@ -517,4 +586,103 @@ impl Default for AddonTransport {
     fn default() -> Self {
         Self::new()
     }
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn fresh_stream_fetch_bypasses_seeded_values_but_keeps_negative_cache() {
+    let provider = AddonTransport::new();
+    let addon_url = "https://addon.example";
+    let key = format!("movie|tt123|{}", config_cache_segment(addon_url));
+    for streams in [vec![crate::test_helpers::test_stream()], Vec::new()] {
+        provider.seed_stream_cache("movie", "tt123", addon_url, streams);
+        let not_before = Instant::now() + Duration::from_nanos(1);
+        provider.fetch_contract().cache_failure(
+            &key,
+            "cached failure",
+            provider.cache_generation(),
+        );
+        assert!(provider
+            .get_streams("movie", "tt123", addon_url)
+            .await
+            .is_ok());
+        assert_eq!(
+            provider
+                .get_streams_fresh("movie", "tt123", addon_url, Some(not_before))
+                .await
+                .unwrap_err(),
+            "cached failure"
+        );
+
+        let not_before = Instant::now();
+        provider.seed_stream_cache(
+            "movie",
+            "tt123",
+            addon_url,
+            vec![crate::test_helpers::test_stream()],
+        );
+        assert_eq!(
+            provider
+                .get_streams_fresh("movie", "tt123", addon_url, Some(not_before))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn stream_refresh_claims_are_scoped_expiring_bounded_and_clearable() {
+    let provider = AddonTransport::new();
+    assert!(provider.claim_stream_refresh("movie|tt123|None|None|None"));
+    assert!(!provider.claim_stream_refresh("movie|tt123|None|None|None"));
+    assert!(provider.claim_stream_refresh("series|tt123|Some(1)|Some(2)|None"));
+
+    lock_or_recover(&provider.refresh_claims).insert(
+        "movie|tt123|None|None|None".to_string(),
+        Instant::now() - STREAM_CACHE_TTL,
+    );
+    assert!(provider.claim_stream_refresh("movie|tt123|None|None|None"));
+    lock_or_recover(&provider.refresh_claims).insert(
+        "oldest".to_string(),
+        Instant::now() - Duration::from_secs(1),
+    );
+    for index in 0..STREAM_REFRESH_CLAIMS_MAX {
+        assert!(provider.claim_stream_refresh(&format!("key-{index}")));
+        assert!(lock_or_recover(&provider.refresh_claims).len() <= STREAM_REFRESH_CLAIMS_MAX);
+    }
+    assert!(!lock_or_recover(&provider.refresh_claims).contains_key("oldest"));
+
+    provider.clear_cache();
+    assert!(lock_or_recover(&provider.refresh_claims).is_empty());
+    assert!(provider.claim_stream_refresh("key-0"));
+}
+
+#[cfg(test)]
+#[test]
+fn remaining_stream_cache_ttl_tracks_pool_age_and_saturates() {
+    let fetched_at = Instant::now();
+    let ttl_ms = STREAM_CACHE_TTL.as_millis() as u64;
+    assert_eq!(
+        remaining_stream_cache_ttl_ms(Some(fetched_at), fetched_at),
+        ttl_ms
+    );
+    assert_eq!(
+        remaining_stream_cache_ttl_ms(Some(fetched_at), fetched_at + Duration::from_millis(1_250)),
+        ttl_ms - 1_250
+    );
+    assert_eq!(
+        remaining_stream_cache_ttl_ms(Some(fetched_at), fetched_at + STREAM_CACHE_TTL),
+        0
+    );
+    assert_eq!(
+        remaining_stream_cache_ttl_ms(
+            Some(fetched_at),
+            fetched_at + STREAM_CACHE_TTL + Duration::from_secs(1)
+        ),
+        0
+    );
+    assert_eq!(remaining_stream_cache_ttl_ms(None, fetched_at), 0);
 }

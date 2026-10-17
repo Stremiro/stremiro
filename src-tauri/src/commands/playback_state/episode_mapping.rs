@@ -1,8 +1,11 @@
+#[cfg(test)]
+use super::merge_sorted_unique;
 use super::{
-    load_advisory_index, merge_sorted_unique, prune_index_to_cap, PlaybackStateService,
-    PLAYBACK_STATE_STORE_FILE,
+    load_advisory_index, merge_presorted_unique, prune_index_to_cap, PlaybackStateService,
 };
-use crate::commands::episode_navigation::build_source_episode_coordinates;
+use crate::commands::episode_navigation::{
+    additional_episode_video_id, build_source_episode_coordinates, SourceEpisodeCoordinates,
+};
 use crate::commands::{
     normalize_media_id, normalize_watch_progress_type, now_unix_millis, DurableStore,
 };
@@ -33,6 +36,15 @@ pub(crate) struct PlaybackEpisodeMappingSnapshot {
     pub source_season: u32,
     pub source_episode: u32,
     pub updated_at: u64,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CachedEpisodeMapping {
+    #[serde(flatten)]
+    snapshot: PlaybackEpisodeMappingSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    video_id: Option<String>,
 }
 
 pub(super) fn build_episode_mapping_snapshot(
@@ -80,11 +92,6 @@ fn episode_mapping_scope_key(snapshot_key: &str) -> Option<&str> {
     split_episode_snapshot_key(snapshot_key).map(|(scope, _)| scope)
 }
 
-/// Canonical season of a mapping-index key.
-fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
-    split_episode_snapshot_key(key)?.1.parse::<u32>().ok()
-}
-
 /// Highest canonical season the title's cached mappings cover. The episode battery
 /// resolves numberless "final season" claims through it: a requested season at/beyond
 /// the max is the only season such a claim can refer to. `None` → caller degrades to "not final".
@@ -96,8 +103,14 @@ pub(super) fn max_mapped_canonical_season(
     let scope_key = super::playback_title_scope_key(Some(media_type), Some(media_id))?;
     index_keys
         .iter()
-        .filter(|key| episode_mapping_scope_key(key) == Some(scope_key.as_str()))
-        .filter_map(|key| mapping_index_key_canonical_season(key))
+        .filter_map(|key| {
+            let (scope, season) = split_episode_snapshot_key(key)?;
+            if scope == scope_key.as_str() {
+                season.parse::<u32>().ok()
+            } else {
+                None
+            }
+        })
         .max()
 }
 
@@ -133,6 +146,7 @@ pub(super) fn episode_mappings_digest(
     media_id.hash(&mut hasher);
     fallback_lookup_id.hash(&mut hasher);
     for episode in episodes {
+        episode.id.hash(&mut hasher);
         episode.season.hash(&mut hasher);
         episode.episode.hash(&mut hasher);
         episode.stream_lookup_id.hash(&mut hasher);
@@ -168,18 +182,14 @@ pub(super) fn stored_episode_mapping_digest_matches(
 /// Diff pass for `cache_episode_mappings`: queues changed item writes and registers
 /// every snapshot key in the sorted index. The caller applies the writes only after
 /// a second generation check so a racing clear can't land orphaned items.
-pub(super) fn collect_episode_mapping_writes<'a>(
+pub(super) fn collect_episode_mapping_writes(
     store: &DurableStore,
     media_type: &str,
     media_id: &str,
     episodes: &[Episode],
-    snapshots: &'a [PlaybackEpisodeMappingSnapshot],
+    snapshots: &[PlaybackEpisodeMappingSnapshot],
     episode_mapping_index: &mut Vec<String>,
-) -> (
-    Vec<(String, &'a PlaybackEpisodeMappingSnapshot)>,
-    Vec<String>,
-    bool,
-) {
+) -> (Vec<(String, CachedEpisodeMapping)>, Vec<String>, bool) {
     let mut snapshot_keys = Vec::with_capacity(episodes.len().min(snapshots.len()));
     let mut pending_writes = Vec::new();
 
@@ -190,11 +200,29 @@ pub(super) fn collect_episode_mapping_writes<'a>(
             episode.season,
             episode.episode,
         );
-        let needs_write = load_playback_episode_mapping_snapshot(store, &snapshot_key)
-            .is_none_or(|existing| !episode_mapping_snapshot_matches(&existing, next_snapshot));
+        let video_id = additional_episode_video_id(
+            episode,
+            &SourceEpisodeCoordinates {
+                lookup_id: next_snapshot.source_lookup_id.clone(),
+                season: next_snapshot.source_season,
+                episode: next_snapshot.source_episode,
+            },
+        );
+        let existing: Option<CachedEpisodeMapping> =
+            store.get_typed(playback_episode_mapping_item_key(&snapshot_key));
+        let needs_write = existing.is_none_or(|existing| {
+            !episode_mapping_snapshot_matches(&existing.snapshot, next_snapshot)
+                || existing.video_id != video_id
+        });
 
         if needs_write {
-            pending_writes.push((snapshot_key.clone(), next_snapshot));
+            pending_writes.push((
+                snapshot_key.clone(),
+                CachedEpisodeMapping {
+                    snapshot: next_snapshot.clone(),
+                    video_id,
+                },
+            ));
         }
         snapshot_keys.push(snapshot_key);
     }
@@ -214,7 +242,7 @@ pub(super) fn collect_episode_mapping_writes<'a>(
         });
     }
     let mut changed = !pending_deletes.is_empty();
-    changed |= merge_sorted_unique(episode_mapping_index, snapshot_keys);
+    changed |= merge_presorted_unique(episode_mapping_index, snapshot_keys);
     (pending_writes, pending_deletes, changed)
 }
 
@@ -386,7 +414,7 @@ impl PlaybackStateService {
         let digest_key = playback_episode_mapping_digest_item_key(&scope_key);
 
         let start_generation = self.history_generation();
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         // `clear` wipes episode-mapping keys with history; a racing fetch must not
         // repopulate them (same `set` hazard as `record_stream_outcome`). The lock
         // makes check-vs-write atomic against `clear`/`remove_keys`.
@@ -453,6 +481,32 @@ impl PlaybackStateService {
         Ok(Some(snapshots))
     }
 
+    pub(crate) fn get_episode_video_id(
+        &self,
+        app: &AppHandle,
+        media_type: &str,
+        media_id: &str,
+        season: u32,
+        episode: u32,
+    ) -> Result<Option<String>, String> {
+        let Some(media_type) = normalize_watch_progress_type(media_type) else {
+            return Ok(None);
+        };
+        let Some(media_id) = normalize_media_id(media_id) else {
+            return Ok(None);
+        };
+        let store = self.open_state_store(app)?;
+        let key = playback_episode_mapping_snapshot_key(media_type, &media_id, season, episode);
+        let cached: Option<CachedEpisodeMapping> =
+            store.get_typed(playback_episode_mapping_item_key(&key));
+        Ok(cached.and_then(|cached| {
+            cached
+                .video_id
+                .as_deref()
+                .and_then(|id| normalize_media_id(crate::commands::js_trim(id)))
+        }))
+    }
+
     pub(crate) fn get_episode_mapping(
         &self,
         app: &AppHandle,
@@ -468,7 +522,7 @@ impl PlaybackStateService {
             return Ok(None);
         };
 
-        let store = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE)?;
+        let store = self.open_state_store(app)?;
         Ok(load_playback_episode_mapping_snapshot(
             &store,
             &playback_episode_mapping_snapshot_key(
@@ -492,7 +546,7 @@ impl PlaybackStateService {
         let Some(season) = season else {
             return false;
         };
-        let Ok(store) = crate::commands::open_store(app, PLAYBACK_STATE_STORE_FILE) else {
+        let Ok(store) = self.open_state_store(app) else {
             crate::operational_log::log_warn(
                 "playback-state",
                 "episode_is_final_season",

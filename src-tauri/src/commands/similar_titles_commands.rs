@@ -1,16 +1,19 @@
 use super::addon_registry::load_enabled_addons_snapshot;
 use super::browse_genre_commands::build_browse_genres;
+use super::js_trim;
 use super::media_normalization::normalize_media_item;
+use super::media_type::normalize_watch_progress_type;
 use super::resume_store::ResumeStore;
 use super::search_commands::{
     query_search_catalog_for_request, SearchCatalogPage, SearchCatalogRequest,
 };
+use super::store_helpers::load_watch_statuses_map;
 use crate::providers::{
     addon_resource::AddonResourceClient, first_ascii_year_run, MediaDetails, MediaItem,
 };
 use futures_util::future::join_all;
-use std::collections::{BTreeSet, HashMap, HashSet};
-use std::path::PathBuf;
+use std::collections::{hash_map::Entry, BTreeSet, HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use tauri::{command, AppHandle, Manager, State};
 
 const MAX_SIMILAR_TITLES: usize = 20;
@@ -25,14 +28,6 @@ const STOPWORDS: &[&str] = &[
     "two", "was", "were", "what", "when", "where", "which", "who", "will", "with", "would", "you",
     "your",
 ];
-
-/// Match the UI's genre seed/key normalization: JavaScript trim includes BOM
-/// and excludes NEXT LINE from Unicode whitespace.
-fn js_trim(value: &str) -> &str {
-    value.trim_matches(|character: char| {
-        character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
-    })
-}
 
 fn lower_genres(item: &MediaItem) -> BTreeSet<String> {
     item.genres
@@ -165,13 +160,17 @@ fn rank_similar_titles(
         return Vec::new();
     }
     let source_year = primary_year(source);
+    let source_type = normalize_watch_progress_type(&source.type_);
     let source_animated = source_genres.contains("animation");
     let source_description = tokens(source.description.as_deref().unwrap_or_default());
     let source_title = tokens(&source.title);
     let mut candidates = Vec::new();
     for list in lists {
         for (index, candidate) in list.into_iter().enumerate() {
-            if candidate.id == source.id || candidate.type_ != source.type_ {
+            let Some(candidate_type) = normalize_watch_progress_type(&candidate.type_) else {
+                continue;
+            };
+            if candidate.id == source.id || Some(candidate_type) != source_type {
                 continue;
             }
             let genres = lower_genres(&candidate);
@@ -247,14 +246,17 @@ fn rank_similar_titles(
             score,
             watched: watched.contains(&item.id),
         };
-        if let Some(&existing_index) = indices.get(item.id.as_str()) {
-            let existing = &mut ranked[existing_index];
-            if score > existing.score {
-                *existing = entry;
+        match indices.entry(item.id.as_str()) {
+            Entry::Occupied(index) => {
+                let existing = &mut ranked[*index.get()];
+                if score > existing.score {
+                    *existing = entry;
+                }
             }
-        } else {
-            indices.insert(item.id.as_str(), ranked.len());
-            ranked.push(entry);
+            Entry::Vacant(index) => {
+                index.insert(ranked.len());
+                ranked.push(entry);
+            }
         }
     }
 
@@ -302,7 +304,7 @@ fn ranked_catalog_pages(
 
 /// Animated series browse the anime catalog so recommendations stay animated.
 fn similar_titles_media_type(source: &MediaItem, source_genres: &BTreeSet<String>) -> &'static str {
-    if source.type_ == "movie" {
+    if normalize_watch_progress_type(&source.type_) == Some("movie") {
         "movie"
     } else if source_genres.contains("animation") {
         "anime"
@@ -328,6 +330,10 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     // specific ones first (stable sort keeps the source order otherwise).
     seeds.sort_by_key(|genre| matches!(genre.to_lowercase().as_str(), "drama" | "comedy"));
     seeds.truncate(MAX_SEED_GENRES);
+    if seeds.is_empty() && similar_titles_media_type(source, &lower_genres(source)) == "anime" {
+        // Animation is implied by the anime route and hidden from its browse menu.
+        seeds.push("Animation".to_string());
+    }
     seeds
 }
 
@@ -366,8 +372,12 @@ pub async fn get_recent_watch_seed(
     client: State<'_, AddonResourceClient>,
 ) -> Result<Option<MediaItem>, String> {
     let resume_path = resume_store_path(&app)?;
-    let titles =
-        super::run_blocking_store_op(move || ResumeStore::load_recent_titles(&resume_path)).await?;
+    let titles = super::run_blocking_op(
+        tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
+        "Recent watch history read timed out.",
+        move || ResumeStore::load_recent_titles(&resume_path),
+    )
+    .await?;
     for (media_type, id) in titles {
         if let Ok(details) =
             super::media_commands::fetch_media_details_inner(&app, &client, &media_type, &id, false)
@@ -379,6 +389,23 @@ pub async fn get_recent_watch_seed(
         }
     }
     Ok(None)
+}
+
+fn watched_title_ids(
+    resume_path: &Path,
+    media_type: &str,
+    status_store: &super::DurableStore,
+) -> Result<HashSet<String>, String> {
+    let mut watched = match normalize_watch_progress_type(media_type) {
+        Some(media_type) => ResumeStore::load_watched_title_ids(resume_path, media_type)?,
+        None => HashSet::new(),
+    };
+    watched.extend(
+        load_watch_statuses_map(status_store)?
+            .into_iter()
+            .filter_map(|(id, status)| (status == "watched").then_some(id)),
+    );
+    Ok(watched)
 }
 
 /// Fetch and rank inside Rust: seed selection reads the same manifest snapshot the
@@ -400,9 +427,11 @@ pub async fn query_similar_titles(
         return Ok(Vec::new());
     }
     let resume_path = resume_store_path(&app);
-    let watched_media_type = source.type_.clone();
+    let source_type = source.type_.clone();
+    let store_app = app.clone();
     let watched = super::run_blocking_store_op(move || {
-        ResumeStore::load_watched_title_ids(&resume_path?, &watched_media_type)
+        let status_store = super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)?;
+        watched_title_ids(&resume_path?, &source_type, &status_store)
     });
     let pages = join_all(seed_genres.into_iter().map(|genre| {
         query_search_catalog_for_request(
@@ -418,7 +447,7 @@ pub async fn query_similar_titles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::test_media_item;
+    use crate::test_helpers::{test_media_item, test_progress, test_store};
 
     fn item(id: &str, genres: &[&str], year: Option<&str>) -> MediaItem {
         MediaItem {
@@ -432,6 +461,46 @@ mod tests {
         MediaItem {
             description: Some(description.to_string()),
             ..item(id, genres, None)
+        }
+    }
+
+    #[test]
+    fn similar_titles_use_canonical_types_and_keep_animation_browse_policy() {
+        for (source_type, candidate_type, genres, browse_type, matches) in [
+            (" Movie ", "MOVIE", &["Drama"][..], "movie", true),
+            ("Movie", "movie", &["Animation"][..], "movie", true),
+            ("anime", "Series", &["Animation"][..], "anime", true),
+            ("SERIES", " Anime ", &["Animation"][..], "anime", true),
+            ("Anime", "series", &["Drama"][..], "series", true),
+            ("series", "movie", &["Drama"][..], "series", false),
+            ("series", "unsupported", &["Drama"][..], "series", false),
+            (
+                "unsupported",
+                "unsupported",
+                &["Drama"][..],
+                "series",
+                false,
+            ),
+            ("unsupported", "series", &["Animation"][..], "anime", false),
+        ] {
+            let mut source = item("source", genres, None);
+            source.type_ = source_type.into();
+            let mut candidate = item("candidate", genres, None);
+            candidate.type_ = candidate_type.into();
+            assert_eq!(
+                similar_titles_media_type(&source, &lower_genres(&source)),
+                browse_type,
+                "{source_type}"
+            );
+            let ranked = rank_similar_titles(&source, vec![vec![candidate]], &HashSet::new());
+            assert_eq!(
+                ranked.len(),
+                usize::from(matches),
+                "{source_type}/{candidate_type}"
+            );
+            if matches {
+                assert_eq!(ranked[0].id, "candidate");
+            }
         }
     }
 
@@ -629,6 +698,88 @@ mod tests {
     }
 
     #[test]
+    fn explicit_watched_statuses_demote_titles_without_creating_history() {
+        use super::super::store_helpers::watch_status_item_key;
+        use serde_json::json;
+
+        let fixture = test_store();
+        let resume_path = fixture.path.with_extension("sqlite3");
+        let statuses = [
+            (" explicit ", " WATCHED "),
+            ("watching", "watching"),
+            ("planned", "plan_to_watch"),
+            ("dropped", "dropped"),
+        ];
+        fixture.store.set(
+            super::super::WATCH_STATUS_INDEX_KEY,
+            json!(statuses.iter().map(|(id, _)| *id).collect::<Vec<_>>()),
+        );
+        for (id, status) in statuses {
+            fixture.store.set(watch_status_item_key(id), json!(status));
+        }
+        fixture.store.save().unwrap();
+        assert_eq!(
+            watched_title_ids(&resume_path, "series", &fixture.store).unwrap(),
+            HashSet::from(["explicit".into()])
+        );
+        assert!(!resume_path.exists());
+
+        let mut history = ResumeStore::open(&resume_path).unwrap();
+        for (id, media_type) in [("history", "series"), ("other-type", "movie")] {
+            history
+                .upsert_progress(
+                    id,
+                    &super::super::WatchProgress {
+                        id: id.into(),
+                        type_: media_type.into(),
+                        ..test_progress()
+                    },
+                )
+                .unwrap();
+        }
+        let watched = watched_title_ids(&resume_path, "series", &fixture.store).unwrap();
+        for media_type in ["Series", " Anime "] {
+            assert_eq!(
+                watched_title_ids(&resume_path, media_type, &fixture.store).unwrap(),
+                watched
+            );
+        }
+        assert_eq!(
+            watched_title_ids(&resume_path, "unsupported", &fixture.store).unwrap(),
+            HashSet::from(["explicit".into()])
+        );
+        assert!(watched_title_ids(&resume_path, " Movie ", &fixture.store)
+            .unwrap()
+            .contains("other-type"));
+        assert_eq!(
+            watched,
+            HashSet::from(["history".into(), "explicit".into()])
+        );
+        let ranked = rank_similar_titles(
+            &item("source", &["Drama", "Mystery"], Some("2024")),
+            vec![vec![
+                item("explicit", &["Drama", "Mystery"], Some("2024")),
+                item("unwatched", &["Drama"], Some("1980")),
+            ]],
+            &watched,
+        );
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["unwatched", "explicit"]
+        );
+        assert_eq!(history.count_entries().unwrap(), 2);
+        assert_eq!(
+            ResumeStore::load_recent_titles(&resume_path).unwrap().len(),
+            2
+        );
+        drop(history);
+        std::fs::remove_file(resume_path).unwrap();
+    }
+
+    #[test]
     fn seeds_defer_broad_genres_use_declared_spelling_and_cap_fetches() {
         let source = item(
             "s",
@@ -669,6 +820,38 @@ mod tests {
             similar_titles_media_type(&movie, &lower_genres(&movie)),
             "movie"
         );
+    }
+
+    #[test]
+    fn anime_seeds_fall_back_to_animation_only_when_specific_seeds_are_missing() {
+        let genres = build_browse_genres(&[]);
+        let supported = genres.for_media_type("anime");
+        assert!(!supported.iter().any(|genre| genre == "Animation"));
+        for source_genres in [
+            vec!["Animation"],
+            vec!["\u{feff} aNiMaTiOn \u{feff}", "Unknown"],
+        ] {
+            let source = item("source", &source_genres, None);
+            assert_eq!(
+                similar_titles_seed_genres(&source, supported),
+                ["Animation"]
+            );
+        }
+        assert_eq!(
+            similar_titles_seed_genres(
+                &item("specific", &["Animation", "Mystery"], None),
+                supported,
+            ),
+            ["Mystery"],
+        );
+        assert!(
+            similar_titles_seed_genres(&item("unknown", &["Unknown"], None), supported).is_empty()
+        );
+        let movie = MediaItem {
+            type_: "movie".into(),
+            ..item("movie", &["Animation"], None)
+        };
+        assert!(similar_titles_seed_genres(&movie, supported).is_empty());
     }
 
     #[test]
@@ -715,6 +898,7 @@ mod tests {
             display_year: None,
             release_date: None,
             rating: None,
+            rating_percent: None,
             runtime: None,
             cast: None,
             directors: None,
@@ -737,8 +921,8 @@ mod tests {
         let page = |items| {
             Ok(SearchCatalogPage {
                 items,
-                next_skip: Some(100),
-                all_cursors: None,
+                continuation: Default::default(),
+                exhausted: true,
             })
         };
         assert!(ranked_catalog_pages(

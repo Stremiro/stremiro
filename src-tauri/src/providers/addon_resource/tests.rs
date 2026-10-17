@@ -17,6 +17,10 @@ fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
     parse_catalog_item(serde_json::from_value(value).expect("catalog item"))
 }
 
+fn subtitle_item(value: serde_json::Value) -> Option<AddonSubtitle> {
+    parse_subtitle_item(serde_json::from_value(value).ok()?)
+}
+
 #[test]
 fn catalog_ids_reject_oversized_values_without_aliasing() {
     let prefix = "x".repeat(MAX_ID_CHARS);
@@ -37,21 +41,22 @@ fn catalog_ids_reject_oversized_values_without_aliasing() {
 }
 
 #[test]
-fn cached_catalog_page_applies_normalizer_without_changing_source_count_or_bounds() {
+fn cached_catalog_page_applies_normalizer_and_counts_consumed_entries_before_the_cap() {
     let mut metas = vec![serde_json::json!(null)];
     metas.extend((0..=MAX_CATALOG_ITEMS).map(|index| {
         serde_json::json!({
             "id": format!("tt{index}"), "type": "movie", "name": "Title"
         })
     }));
-    let page = parse_catalog_page(CatalogResponse { metas }, |mut item| {
+    let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
+    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |mut item| {
         item.primary_year = Some(2024);
         if item.id == "tt0" {
             item.title.clear();
         }
         item
     });
-    assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS + 2);
+    assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS + 1);
     assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
     assert!(page.items[0].title.is_empty());
     assert_eq!(page.items.last().unwrap().id, "tt499");
@@ -62,14 +67,108 @@ fn cached_catalog_page_applies_normalizer_without_changing_source_count_or_bound
 }
 
 #[tokio::test]
+async fn request_errors_omit_urls_with_short_credentials() {
+    let transport = crate::providers::addons::AddonTransport::new();
+    let client = Client::new();
+    let base = "ftp://user:pass@addon.test/key=short/blob?token=tiny";
+    let resource_error = match fetch_bounded_json(&client, base, "catalog", CATALOG_MAX_BYTES).await
+    {
+        Err(FetchFailure::Fatal(error)) => error,
+        Err(FetchFailure::Retryable(_)) => panic!("request builder failures must be fatal"),
+        Ok(_) => panic!("unsupported scheme must fail"),
+    };
+    let manifest_error =
+        crate::providers::addon_manifest::fetch_addon_manifest_snapshot(&client, base, false)
+            .await
+            .unwrap_err();
+    let stream_error = transport
+        .get_streams("movie", "tt1", base)
+        .await
+        .unwrap_err();
+    for error in [resource_error, manifest_error, stream_error] {
+        assert!(
+            !["addon.test", "short", "tiny", "user:pass"]
+                .iter()
+                .any(|secret| error.contains(secret)),
+            "{error}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn redirect_policy_failures_are_negative_cached_without_addon_cooldown() {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let mut socket = loop {
+            match listener.accept() {
+                Ok((socket, _)) => break socket,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(started.elapsed() < Duration::from_secs(10));
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Err(error) => panic!("{error}"),
+            }
+        };
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut reader = BufReader::new(&mut socket);
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" || line.is_empty() {
+                break;
+            }
+        }
+        write!(
+            socket,
+            "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+    });
+    let mut client = AddonResourceClient::new();
+    client.client = Client::builder()
+        .no_proxy()
+        .redirect(crate::providers::fetch_policy::ssrf_redirect_policy())
+        .build()
+        .unwrap();
+    let error = client
+        .fetch_catalog(&url, "movie", "top", &[], |item| item)
+        .await
+        .unwrap_err();
+    server.join().unwrap();
+    assert!(error.contains("redirect"));
+    assert!(!client.fetch_failures.cooling_down(&hash_segment(&url)));
+    let resource_url = build_resource_url(&url, "catalog", "movie", "top", &[]).unwrap();
+    assert_eq!(
+        client
+            .failure_cache
+            .get(&resource_cache_key("catalog", &resource_url)),
+        Some(error.clone())
+    );
+    assert_eq!(
+        client
+            .fetch_catalog(&url, "movie", "top", &[], |item| item)
+            .await
+            .unwrap_err(),
+        error
+    );
+}
+
+#[tokio::test]
 async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic() {
     let client = AddonResourceClient::new();
     let base = "https://addon.test";
     let catalog_url = build_resource_url(base, "catalog", "movie", "top", &[]).unwrap();
     let page = parse_catalog_page(
-        serde_json::from_value(serde_json::json!({
-            "metas": [{"id": "tt1", "name": " A\t title ", "type": "movie", "year": "2024"}]
-        }))
+        serde_json::from_slice(
+            br#"{"metas":[{"id":"tt1","name":" A\t title ","type":"movie","year":"2024"}]}"#,
+        )
         .unwrap(),
         |item| item,
     );
@@ -225,25 +324,125 @@ fn skip_is_transport_only_and_catalog_id_is_case_insensitive() {
 
 #[test]
 fn parse_catalog_skips_malformed_siblings() {
-    let page: CatalogResponse = serde_json::from_value(serde_json::json!({
-        "metas": [
+    let response: CatalogResponse<'_> = serde_json::from_slice(
+        br#"{"metas": [
             {"id": "tt1", "name": "Valid", "type": "movie"},
             {"name": "Missing id"},
             null,
             42,
-            {"id": "tt2", "name": "Also valid", "type": "series"},
-        ],
-    }))
+            {"id": "tt2", "name": "Also valid", "type": "series"}
+        ]}"#,
+    )
     .expect("catalog response");
-    let items: Vec<_> = page
-        .metas
-        .into_iter()
-        .filter_map(|value| serde_json::from_value::<CatalogItemJson>(value).ok())
-        .filter_map(parse_catalog_item)
+    let page = parse_catalog_page(response, |item| item);
+    assert_eq!(page.source_item_count, 5);
+    assert_eq!(page.items.len(), 2);
+    assert_eq!(page.items[0].id, "tt1");
+    assert_eq!(page.items[1].id, "tt2");
+}
+
+#[test]
+fn parse_catalog_caps_valid_rows_and_counts_consumed_source_rows() {
+    let metas: Vec<_> = (0..=MAX_CATALOG_ITEMS)
+        .flat_map(|index| {
+            [
+                serde_json::json!({"id": "missing-fields"}),
+                serde_json::json!({"id": index, "name": index, "type": "movie"}),
+            ]
+        })
         .collect();
-    assert_eq!(items.len(), 2);
-    assert_eq!(items[0].id, "tt1");
-    assert_eq!(items[1].id, "tt2");
+    let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
+    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |item| item);
+    assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS * 2);
+    assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
+    for (index, item) in page.items.iter().enumerate() {
+        assert_eq!(item.id, index.to_string());
+        assert_eq!(item.title, index.to_string());
+    }
+}
+
+#[test]
+fn resource_item_envelopes_keep_missing_and_invalid_field_behavior() {
+    for bytes in [br#"{}"#.as_slice(), br#"{"metas":[],"subtitles":[]}"#] {
+        let catalog = parse_catalog_page(
+            serde_json::from_slice::<CatalogResponse<'_>>(bytes).unwrap(),
+            |item| item,
+        );
+        assert_eq!(catalog.source_item_count, 0);
+        assert!(catalog.items.is_empty());
+        assert!(parse_subtitle_items(
+            serde_json::from_slice::<SubtitleResponse<'_>>(bytes).unwrap()
+        )
+        .is_empty());
+    }
+    for field in ["metas", "subtitles"] {
+        for value in ["null", "{}", "42", "\"invalid\""] {
+            let bytes = format!(r#"{{"{field}":{value}}}"#);
+            if field == "metas" {
+                assert!(serde_json::from_str::<CatalogResponse<'_>>(&bytes).is_err());
+            } else {
+                assert!(serde_json::from_str::<SubtitleResponse<'_>>(&bytes).is_err());
+            }
+        }
+    }
+}
+
+#[test]
+fn parse_subtitles_skips_malformed_siblings_and_keeps_label_coercions() {
+    let response = serde_json::from_slice(
+        br#"{"subtitles":[
+            {"id":"first","url":"https://subs.test/first.srt","label":{},"title":" ","name":42},
+            {"id":42,"url":"https://subs.test/invalid.srt"},
+            null,
+            42,
+            {"url":"http://127.0.0.1/blocked.srt"},
+            {"id":"last","url":"https://subs.test/last.srt","label":" Preferred ","title":"Ignored"}
+        ]}"#,
+    )
+    .unwrap();
+    let subtitles = parse_subtitle_items(response);
+    assert_eq!(subtitles.len(), 2);
+    assert_eq!(subtitles[0].id, "first");
+    assert_eq!(subtitles[0].label.as_deref(), Some("42"));
+    assert_eq!(subtitles[1].id, "last");
+    assert_eq!(subtitles[1].label.as_deref(), Some("Preferred"));
+}
+
+#[test]
+fn subtitle_urls_reject_oversized_values_without_aliasing() {
+    for character in ["a", "界"] {
+        let base = "https://subs.test/subtitle?signature=";
+        let prefix = format!("{base}{}", character.repeat(MAX_STRING_CHARS - base.len()));
+        let subtitle = subtitle_item(serde_json::json!({"url": prefix})).unwrap();
+        assert_eq!(subtitle.url, prefix);
+        for suffix in ["a", "b"] {
+            assert!(
+                subtitle_item(serde_json::json!({"url": format!("{prefix}{suffix}")})).is_none()
+            );
+        }
+    }
+}
+
+#[test]
+fn parse_subtitles_caps_first_valid_rows_in_source_order() {
+    let subtitles: Vec<_> = (0..=MAX_SUBTITLES_PER_ADDON)
+        .flat_map(|index| {
+            [
+                serde_json::json!({"id": false, "url": "https://subs.test/invalid.srt"}),
+                serde_json::json!({"url": "http://127.0.0.1/blocked.srt"}),
+                serde_json::json!({
+                    "id": format!("sub-{index}"), "url": format!("https://subs.test/{index}.srt")
+                }),
+            ]
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({"subtitles": subtitles})).unwrap();
+    let decoded = parse_subtitle_items(serde_json::from_slice(&bytes).unwrap());
+    assert_eq!(decoded.len(), MAX_SUBTITLES_PER_ADDON);
+    for (index, subtitle) in decoded.iter().enumerate() {
+        assert_eq!(subtitle.id, format!("sub-{index}"));
+        assert_eq!(subtitle.url, format!("https://subs.test/{index}.srt"));
+    }
 }
 
 #[test]
@@ -533,6 +732,33 @@ fn meta_images_and_thumbnails_are_fetch_gated() {
 }
 
 #[test]
+fn artwork_urls_reject_oversized_values_without_truncation() {
+    let base = "https://cdn.test/image?signature=";
+    let prefix = format!("{base}{}", "a".repeat(MAX_STRING_CHARS - base.len()));
+    for url in [&prefix, &format!("{prefix}a")] {
+        let expected = (url == &prefix).then_some(prefix.as_str());
+        let item = catalog_item(serde_json::json!({
+            "id": "tt1", "name": "Title", "type": "movie",
+            "poster": url, "background": url, "logo": url
+        }))
+        .unwrap();
+        assert_eq!(item.poster.as_deref(), expected);
+        assert_eq!(item.backdrop.as_deref(), expected);
+        assert_eq!(item.logo.as_deref(), expected);
+        let details = parse_meta_item(serde_json::json!({
+            "id": "tt1", "name": "Title", "type": "series",
+            "poster": url, "background": url, "logo": url,
+            "videos": [{"id": "tt1:1:1", "season": 1, "episode": 1, "thumbnail": url}]
+        }))
+        .unwrap();
+        assert_eq!(details.poster.as_deref(), expected);
+        assert_eq!(details.backdrop.as_deref(), expected);
+        assert_eq!(details.logo.as_deref(), expected);
+        assert_eq!(details.episodes.unwrap()[0].thumbnail.as_deref(), expected);
+    }
+}
+
+#[test]
 fn trailer_source_rejects_non_youtube_tokens() {
     let valid = parse_trailers(
         Some(&serde_json::json!([
@@ -655,7 +881,7 @@ fn subtitle_item_rejects_private_targets_and_userinfo() {
     // Plain public subtitle URLs pass, but mpv-fetchable targets aiming at
     // loopback, LAN, metadata IPs, non-http schemes, or embedded
     // credentials are dropped at parse time.
-    assert!(parse_subtitle_item(serde_json::json!({
+    assert!(subtitle_item(serde_json::json!({
         "id": "en",
         "url": "https://subs.test/en.srt",
         "lang": "en"
@@ -671,7 +897,7 @@ fn subtitle_item_rejects_private_targets_and_userinfo() {
         "https://user:pass@subs.test/en.srt",
     ] {
         assert!(
-            parse_subtitle_item(serde_json::json!({"id": "x", "url": blocked})).is_none(),
+            subtitle_item(serde_json::json!({"id": "x", "url": blocked})).is_none(),
             "{blocked} must be rejected"
         );
     }

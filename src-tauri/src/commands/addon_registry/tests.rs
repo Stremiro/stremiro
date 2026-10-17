@@ -1,12 +1,15 @@
 use super::{
     add_subtitle_if_unique, addon_allows_catalog, addon_allows_subtitles,
     catalog_fetch_page_from_source, catalog_page_next_skip, catalog_search_extras,
-    collect_catalog_outcomes, collect_with_deadline, extra_skip_value, merge_catalog_pages,
-    merge_search_catalog_pages, searchable_catalog_ids, CatalogFetchPage, SourcedAddonSubtitle,
+    collect_catalog_outcomes, collect_with_deadline, extra_skip_value, fetch_subtitles_for_addon,
+    merge_catalog_pages, merge_search_catalog_pages, searchable_catalog_ids, CatalogFetchPage,
+    SourcedAddonSubtitle,
 };
 use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
-use crate::providers::addon_resource::{AddonSubtitle, CatalogExtra, CatalogPage};
+use crate::providers::addon_resource::{
+    AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
+};
 use crate::test_helpers::{cinemeta_addon, classified_cinemeta_addon, test_media_item};
 use futures_util::StreamExt;
 use std::collections::HashSet;
@@ -282,6 +285,44 @@ fn merge_catalog_pages_keeps_partial_success_and_the_earliest_next_skip() {
 }
 
 #[test]
+fn empty_search_pages_preserve_constituent_failures_for_retry() {
+    for skip in [0, 50] {
+        for failure_first in [false, true] {
+            let mut pages = vec![
+                Ok(CatalogFetchPage {
+                    items: Vec::new(),
+                    next_skip: None,
+                }),
+                Err("movie search unavailable".to_string()),
+            ];
+            if failure_first {
+                pages.reverse();
+            }
+            assert_eq!(
+                merge_search_catalog_pages(pages, skip).unwrap_err(),
+                "movie search unavailable"
+            );
+        }
+        let page = merge_search_catalog_pages(
+            [
+                Ok(CatalogFetchPage {
+                    items: Vec::new(),
+                    next_skip: None,
+                }),
+                Ok(CatalogFetchPage {
+                    items: Vec::new(),
+                    next_skip: None,
+                }),
+            ],
+            skip,
+        )
+        .expect("all-success empty search");
+        assert!(page.items.is_empty());
+        assert_eq!(page.next_skip, None);
+    }
+}
+
+#[test]
 fn classified_catalog_allows_skip_and_animation_genre() {
     let addon = classified_cinemeta_addon();
     let extras = [
@@ -324,6 +365,7 @@ fn subtitle_routing_follows_declared_resource_type_and_prefix() {
     assert!(addon_allows_subtitles(&addon, "movie", "tt1234567"));
     assert!(addon_allows_subtitles(&addon, "series", "tt1234567:1:2"));
     assert!(!addon_allows_subtitles(&addon, "movie", "kitsu:42"));
+    assert!(!addon_allows_subtitles(&addon, "anime", "tt1234567:1:2"));
 
     let catalog_only = classified_cinemeta_addon();
     assert!(!addon_allows_subtitles(&catalog_only, "movie", "tt1234567"));
@@ -333,6 +375,185 @@ fn subtitle_routing_follows_declared_resource_type_and_prefix() {
         ..addon
     };
     assert!(addon_allows_subtitles(&unclassified, "movie", "tt1234567"));
+}
+
+fn subtitle_server(
+    responses: Vec<(u16, &'static str)>,
+) -> (
+    String,
+    std::sync::mpsc::Sender<()>,
+    std::thread::JoinHandle<Vec<String>>,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let server = std::thread::spawn(move || {
+        let mut paths = Vec::new();
+        let started = std::time::Instant::now();
+        while matches!(
+            stopped.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ) && started.elapsed() < Duration::from_secs(10)
+        {
+            let (mut socket, _) = match listener.accept() {
+                Ok(connection) => connection,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                Err(error) => panic!("{error}"),
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(1)))
+                .unwrap();
+            let mut line = String::new();
+            let mut reader = BufReader::new(&mut socket);
+            reader.read_line(&mut line).unwrap();
+            loop {
+                let mut header = String::new();
+                reader.read_line(&mut header).unwrap();
+                if header == "\r\n" || header.is_empty() {
+                    break;
+                }
+            }
+            let (status, body) = responses.get(paths.len()).copied().unwrap_or((404, "{}"));
+            paths.push(line.split_whitespace().nth(1).unwrap().to_string());
+            write!(
+                socket,
+                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+        }
+        paths
+    });
+    (url, stop, server)
+}
+
+#[tokio::test]
+async fn subtitle_queries_fall_back_in_order_and_cache_each_requested_id() {
+    let (url, stop, server) = subtitle_server(vec![
+        (200, r#"{"subtitles":[]}"#),
+        (
+            200,
+            r#"{"subtitles":[{"id":"flat","url":"https://subs.test/flat.srt","lang":"eng"}]}"#,
+        ),
+    ]);
+    let addon = AddonConfig {
+        url,
+        capabilities: None,
+        ..subtitle_addon()
+    };
+    let client = AddonResourceClient::new();
+    let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
+    for _ in 0..2 {
+        let result = fetch_subtitles_for_addon(&client, "series", &ids, &addon)
+            .await
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, "flat");
+    }
+    assert!(client
+        .fetch_subtitles(&addon.url, "series", &ids[0])
+        .await
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        client
+            .fetch_subtitles(&addon.url, "series", &ids[1])
+            .await
+            .unwrap()[0]
+            .id,
+        "flat"
+    );
+    stop.send(()).unwrap();
+    assert_eq!(
+        server.join().unwrap(),
+        [
+            "/subtitles/series/kitsu%3A48316%3A1%3A2.json",
+            "/subtitles/series/kitsu%3A48316%3A2.json",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn subtitle_queries_stop_at_first_nonempty_candidate_and_preserve_partial_success() {
+    let empty = r#"{"subtitles":[]}"#;
+    let found =
+        r#"{"subtitles":[{"id":"found","url":"https://subs.test/found.srt","lang":"eng"}]}"#;
+    for (responses, count, result_count, fails) in [
+        (vec![(200, found), (200, found)], 1, 1, false),
+        (vec![(404, "{}"), (200, found)], 2, 1, false),
+        (vec![(200, empty), (404, "{}")], 2, 0, false),
+        (vec![(404, "{}"), (200, empty)], 2, 0, false),
+        (vec![(200, empty), (200, empty)], 2, 0, false),
+        (vec![(404, "{}"), (404, "{}")], 2, 0, true),
+    ] {
+        let (url, stop, server) = subtitle_server(responses);
+        let addon = AddonConfig {
+            url,
+            capabilities: None,
+            ..subtitle_addon()
+        };
+        let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
+        let result =
+            fetch_subtitles_for_addon(&AddonResourceClient::new(), "series", &ids, &addon).await;
+        stop.send(()).unwrap();
+        assert_eq!(server.join().unwrap().len(), count);
+        assert_eq!(result.is_err(), fails);
+        if !fails {
+            assert_eq!(result.unwrap().len(), result_count);
+        }
+    }
+}
+
+#[tokio::test]
+async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate() {
+    let (url, stop, server) = subtitle_server(vec![(
+        200,
+        r#"{"subtitles":[{"id":"flat","url":"https://subs.test/flat.srt"}]}"#,
+    )]);
+    let addon = AddonConfig {
+        url,
+        capabilities: Some(
+            parse_addon_manifest(
+                br#"{
+                    "name":"Flat Subtitles",
+                    "resources":[{"name":"subtitles","types":["series"],"idPrefixes":["kitsu:48316:2"]}],
+                    "types":["movie","series"],
+                    "idPrefixes":["tt"]
+                }"#,
+            )
+            .unwrap(),
+        ),
+        ..subtitle_addon()
+    };
+    let client = AddonResourceClient::new();
+    let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
+    assert!(!addon_allows_subtitles(&addon, "series", &ids[0]));
+    assert!(addon_allows_subtitles(&addon, "series", &ids[1]));
+    assert!(fetch_subtitles_for_addon(&client, "movie", &ids, &addon)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        fetch_subtitles_for_addon(&client, "series", &ids, &classified_cinemeta_addon())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let result = fetch_subtitles_for_addon(&client, "series", &ids, &addon)
+        .await
+        .unwrap();
+    stop.send(()).unwrap();
+    assert_eq!(result[0].id, "flat");
+    assert_eq!(
+        server.join().unwrap(),
+        ["/subtitles/series/kitsu%3A48316%3A2.json"]
+    );
 }
 
 #[test]
@@ -357,6 +578,34 @@ fn subtitle_merge_dedupes_by_source_identity() {
         serde_json::to_value(&subtitles[0]).unwrap()["selectionKey"],
         r#"["https://subtitles-addon.test","sub-1","https://subtitles-addon.test/subs/en.srt","eng"]"#
     );
+}
+
+#[test]
+fn subtitle_mpv_title_uses_js_trimmed_label_or_original_id() {
+    for (label, expected) in [
+        (None, " sub-1 "),
+        (Some(""), " sub-1 "),
+        (Some("\u{feff} \t\n\u{a0}"), " sub-1 "),
+        (Some("\u{feff}  English \t"), "English"),
+        (Some("\u{85}English\u{85}"), "\u{85}English\u{85}"),
+    ] {
+        let mut subtitles = Vec::new();
+        add_subtitle_if_unique(
+            &mut subtitles,
+            &mut HashSet::new(),
+            &subtitle_addon(),
+            AddonSubtitle {
+                id: " sub-1 ".to_string(),
+                url: "https://subtitles-addon.test/subs/en.srt".to_string(),
+                lang: None,
+                label: label.map(str::to_string),
+            },
+        );
+        assert_eq!(
+            serde_json::to_value(&subtitles[0]).unwrap()["mpvTitle"],
+            expected
+        );
+    }
 }
 
 #[test]

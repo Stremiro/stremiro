@@ -3,12 +3,13 @@ use super::ttl_cache::{
 };
 use super::{
     addon_manifest::{snapshot_supports_request, AddonCatalogCapability, AddonManifest},
-    build_provider_http_client, normalize_media_year, strip_manifest_suffix, trim_to_max,
-    BoundedBodyError, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
+    bound_optional, build_provider_http_client, normalize_media_year, strip_manifest_suffix,
+    trim_to_max, BoundedBodyError, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{value::RawValue, Value};
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,6 +37,7 @@ const MAX_EXTRA_NAME_CHARS: usize = 64;
 const MAX_EXTRA_VALUE_CHARS: usize = 256;
 const MAX_EXTRAS: usize = 16;
 const MAX_SUBTITLE_LABEL_CHARS: usize = 256;
+pub(crate) const MAX_SUBTITLES_PER_ADDON: usize = 50;
 
 /// Addon payloads are stable for minutes; empty answers get the shorter window so new content surfaces fast.
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(180);
@@ -99,10 +101,9 @@ struct CatalogItemJson {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct CatalogResponse {
-    // Per-entry `Value`: one non-object row must not fail the whole `metas` decode.
-    #[serde(default)]
-    metas: Vec<Value>,
+struct CatalogResponse<'a> {
+    #[serde(borrow, default)]
+    metas: Vec<&'a RawValue>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -119,25 +120,28 @@ struct SubtitleItem {
     url: Option<String>,
     #[serde(default)]
     lang: Option<String>,
+    #[serde(default)]
+    label: Option<Value>,
+    #[serde(default)]
+    title: Option<Value>,
+    #[serde(default)]
+    name: Option<Value>,
+    #[serde(rename = "subtitleFileName", default)]
+    subtitle_file_name: Option<Value>,
+    #[serde(rename = "movieReleaseName", default)]
+    movie_release_name: Option<Value>,
+    #[serde(rename = "releaseName", default)]
+    release_name: Option<Value>,
+    #[serde(rename = "fileName", default)]
+    file_name: Option<Value>,
+    #[serde(default)]
+    filename: Option<Value>,
 }
 
-/// Display-hint keys, first non-empty wins — addons label subtitle entries
-/// differently (`subtitleFileName`, `title`, `name`, …).
-const SUBTITLE_LABEL_KEYS: [&str; 8] = [
-    "label",
-    "title",
-    "name",
-    "subtitleFileName",
-    "movieReleaseName",
-    "releaseName",
-    "fileName",
-    "filename",
-];
-
 #[derive(Debug, Deserialize, Default)]
-struct SubtitleResponse {
-    #[serde(default)]
-    subtitles: Vec<Value>,
+struct SubtitleResponse<'a> {
+    #[serde(borrow, default)]
+    subtitles: Vec<&'a RawValue>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -149,6 +153,19 @@ pub(crate) struct AddonSubtitle {
     pub lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+}
+
+impl AddonSubtitle {
+    pub(crate) fn dedup_identity(&self) -> (&str, &str, String) {
+        let lang = self
+            .lang
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase)
+            .unwrap_or_default();
+        (&self.id, &self.url, lang)
+    }
 }
 
 /// Cooldown message served while an addon sits inside its failure window.
@@ -192,6 +209,7 @@ pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> 
         type_: details.type_.clone(),
         description: details.description.clone(),
         rating: details.rating.clone(),
+        rating_percent: details.rating_percent,
         runtime: details.runtime.clone(),
         cast: None,
         directors: None,
@@ -247,6 +265,13 @@ impl AddonResourceClient {
         self.fetch_failures.clear();
     }
 
+    pub(crate) fn purge_expired_caches(&self) {
+        self.meta_cache.purge_expired();
+        self.catalog_cache.purge_expired();
+        self.subtitle_cache.purge_expired();
+        self.failure_cache.purge_expired();
+    }
+
     /// Shared fetch contract wired with this client's caches and resource policy.
     fn fetch_contract(&self) -> FetchContract<'_> {
         FetchContract {
@@ -282,7 +307,7 @@ impl AddonResourceClient {
                     let what = format!("catalog {type_}/{catalog_id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, CATALOG_MAX_BYTES).await?;
-                    let response: CatalogResponse =
+                    let response: CatalogResponse<'_> =
                         serde_json::from_slice(&bytes).map_err(|_| {
                             FetchFailure::Fatal("Invalid catalog response format.".to_string())
                         })?;
@@ -350,16 +375,12 @@ impl AddonResourceClient {
                     let what = format!("subtitles {type_}/{id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, SUBTITLE_MAX_BYTES).await?;
-                    let response: SubtitleResponse =
+                    let response: SubtitleResponse<'_> =
                         serde_json::from_slice(&bytes).map_err(|_| {
                             FetchFailure::Fatal("Invalid subtitle response format.".to_string())
                         })?;
 
-                    Ok(response
-                        .subtitles
-                        .into_iter()
-                        .filter_map(parse_subtitle_item)
-                        .collect::<Arc<[AddonSubtitle]>>())
+                    Ok(parse_subtitle_items(response))
                 },
             )
             .await?;
@@ -520,19 +541,26 @@ fn meta_link_names(value: &Value, category: &str, max_items: usize) -> Option<Ve
 }
 
 fn parse_catalog_page(
-    response: CatalogResponse,
+    response: CatalogResponse<'_>,
     normalize: fn(MediaItem) -> MediaItem,
 ) -> CatalogPage {
+    let mut items = Vec::new();
+    let mut source_item_count = 0;
+    for value in response.metas {
+        source_item_count += 1;
+        if let Some(item) = serde_json::from_str::<CatalogItemJson>(value.get())
+            .ok()
+            .and_then(parse_catalog_item)
+        {
+            items.push(normalize(item));
+            if items.len() == MAX_CATALOG_ITEMS {
+                break;
+            }
+        }
+    }
     CatalogPage {
-        source_item_count: response.metas.len(),
-        items: response
-            .metas
-            .into_iter()
-            .filter_map(|value| serde_json::from_value::<CatalogItemJson>(value).ok())
-            .filter_map(parse_catalog_item)
-            .take(MAX_CATALOG_ITEMS)
-            .map(normalize)
-            .collect(),
+        source_item_count,
+        items,
     }
 }
 
@@ -584,9 +612,9 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
         id: id.chars().take(MAX_ID_CHARS).collect(),
         imdb_id,
         title,
-        poster: sanitize_image_url_opt(json_string_field(&value, "poster")),
-        backdrop: sanitize_image_url_opt(json_string_field(&value, "background")),
-        logo: sanitize_image_url_opt(json_string_field(&value, "logo")),
+        poster: sanitize_image_url(value.get("poster")),
+        backdrop: sanitize_image_url(value.get("background")),
+        logo: sanitize_image_url(value.get("logo")),
         year: normalize_media_year(
             json_string_field(&value, "year"),
             json_string_field(&value, "releaseInfo"),
@@ -599,6 +627,7 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
         description: json_string_field(&value, "description"),
         rating: json_string_field(&value, "imdbRating")
             .or_else(|| json_string_field(&value, "rating")),
+        rating_percent: None,
         runtime: json_string_field(&value, "runtime"),
         cast: json_string_list(value.get("cast"), MAX_CAST)
             .or_else(|| meta_link_names(&value, "Cast", MAX_CAST)),
@@ -640,12 +669,13 @@ fn is_youtube_video_token(source: &str) -> bool {
 
 /// Image fields reach the webview `<img>`, so they share the subtitle/stream
 /// ingress gate; a rejected URL degrades to no artwork, not a dropped row.
-fn sanitize_image_url_opt(url: Option<String>) -> Option<String> {
-    url.filter(|value| is_fetchable_http_url(value))
-}
-
 fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
-    sanitize_image_url_opt(value.and_then(json_string))
+    let url = value?.as_str()?;
+    if url.chars().nth(MAX_STRING_CHARS).is_some() {
+        return None;
+    }
+    let url = url.trim();
+    is_fetchable_http_url(url).then(|| url.to_string())
 }
 
 fn normalize_trailer_name(title: &str) -> Option<String> {
@@ -730,7 +760,7 @@ fn parse_episodes(value: Option<&Value>) -> Option<Vec<Episode>> {
                 released: json_string_field(item, "released"),
                 release_date: None,
                 overview: json_string_field(item, "overview"),
-                thumbnail: sanitize_image_url_opt(json_string_field(item, "thumbnail")),
+                thumbnail: sanitize_image_url(item.get("thumbnail")),
                 stream_lookup_id: None,
                 stream_season: None,
                 stream_episode: None,
@@ -745,16 +775,42 @@ fn parse_episodes(value: Option<&Value>) -> Option<Vec<Episode>> {
     (!episodes.is_empty()).then_some(episodes)
 }
 
-fn parse_subtitle_item(value: Value) -> Option<AddonSubtitle> {
-    // Read the display hint before `from_value` consumes the payload.
-    let label = SUBTITLE_LABEL_KEYS
-        .iter()
-        .find_map(|key| json_string_field(&value, key))
-        .and_then(|text| trim_to_max(&text, MAX_SUBTITLE_LABEL_CHARS));
-    let parsed: SubtitleItem = serde_json::from_value(value).ok()?;
-    let url = trim_to_max(parsed.url.as_deref().unwrap_or(""), MAX_STRING_CHARS)?;
-    let id = trim_to_max(parsed.id.as_deref().unwrap_or(""), MAX_ID_CHARS)
-        .unwrap_or_else(|| url.clone());
+fn parse_subtitle_items(response: SubtitleResponse<'_>) -> Arc<[AddonSubtitle]> {
+    let mut seen = HashSet::new();
+    response
+        .subtitles
+        .into_iter()
+        .filter_map(|value| serde_json::from_str::<SubtitleItem>(value.get()).ok())
+        .filter_map(parse_subtitle_item)
+        .filter(|item| {
+            let (id, url, lang) = item.dedup_identity();
+            seen.insert((id.to_owned(), url.to_owned(), lang))
+        })
+        .take(MAX_SUBTITLES_PER_ADDON)
+        .collect()
+}
+
+fn parse_subtitle_item(parsed: SubtitleItem) -> Option<AddonSubtitle> {
+    let label = [
+        &parsed.label,
+        &parsed.title,
+        &parsed.name,
+        &parsed.subtitle_file_name,
+        &parsed.movie_release_name,
+        &parsed.release_name,
+        &parsed.file_name,
+        &parsed.filename,
+    ]
+    .into_iter()
+    .find_map(|value| value.as_ref().and_then(json_string))
+    .and_then(|text| trim_to_max(&text, MAX_SUBTITLE_LABEL_CHARS));
+    let url = bound_optional(
+        parsed
+            .url
+            .filter(|url| url.chars().nth(MAX_STRING_CHARS).is_none()),
+        MAX_STRING_CHARS,
+    )?;
+    let id = bound_optional(parsed.id, MAX_ID_CHARS).unwrap_or_else(|| url.clone());
 
     // mpv fetches subtitle URLs itself, outside the backend redirect/size
     // policy — gate here so a payload can't aim the player at loopback/LAN/metadata IPs.
@@ -765,10 +821,7 @@ fn parse_subtitle_item(value: Value) -> Option<AddonSubtitle> {
     Some(AddonSubtitle {
         id,
         url,
-        lang: parsed
-            .lang
-            .as_deref()
-            .and_then(|value| trim_to_max(value, MAX_EXTRA_NAME_CHARS)),
+        lang: bound_optional(parsed.lang, MAX_EXTRA_NAME_CHARS),
         label,
     })
 }
@@ -784,16 +837,16 @@ pub(crate) fn is_magnet_url(url: &str) -> bool {
 /// Gate for player-fetchable URLs before a privileged fetch path (mpv
 /// subtitle/stream fetch, direct-stream probe): http(s) only, no credentials, no non-routable IP literal.
 pub(crate) fn is_fetchable_http_url(url: &str) -> bool {
-    let Ok(parsed) = reqwest::Url::parse(url) else {
-        return false;
-    };
+    parse_fetchable_http_url(url).is_some()
+}
+
+pub(crate) fn parse_fetchable_http_url(url: &str) -> Option<reqwest::Url> {
+    let parsed = reqwest::Url::parse(url).ok()?;
     if !crate::providers::fetch_policy::is_plain_http_url(&parsed) {
-        return false;
+        return None;
     }
-    let Some(host) = parsed.host_str() else {
-        return false;
-    };
-    !crate::providers::fetch_policy::is_blocked_ip_literal(host)
+    let host = parsed.host_str()?;
+    (!crate::providers::fetch_policy::is_blocked_ip_literal(host)).then_some(parsed)
 }
 
 fn encode_path_segment(value: &str, max_chars: usize) -> Result<String, String> {
@@ -869,17 +922,16 @@ async fn fetch_bounded_json(
         .send()
         .await
         .map_err(|error| {
-            FetchFailure::Retryable(format!(
-                "Failed to reach addon {what}: {}",
-                super::addons::sanitize_addon_log(&error.to_string())
-            ))
+            let error = error.without_url();
+            let message = format!("Failed to reach addon {what}: {error}");
+            FetchFailure::from_send_error(&error, message)
         })?;
 
     if !response.status().is_success() {
-        return Err(FetchFailure::Fatal(format!(
-            "Addon {what} returned HTTP {}.",
-            response.status().as_u16()
-        )));
+        return Err(FetchFailure::from_http_status(
+            response.status(),
+            format!("Addon {what} returned HTTP {}.", response.status().as_u16()),
+        ));
     }
 
     super::read_bounded_body(response, max_bytes, |declared| match declared {

@@ -1,4 +1,7 @@
 use super::{ProgressWrite, ResumeStore};
+use crate::commands::history_helpers::{
+    should_skip_watch_progress_save, WATCH_PROGRESS_FUTURE_SKEW_MS,
+};
 use crate::commands::watch_history_commands::{
     prepare_episode_watch_changes, validate_history_batch, WatchedEpisode,
 };
@@ -245,34 +248,24 @@ fn watched_marks_do_not_overwrite_another_canonical_episode_at_a_raw_key() {
             .iter()
             .map(|&episode| WatchedEpisode { season: 1, episode })
             .collect();
-        let (writes, deletes) = prepare_episode_watch_changes(
+        let error = prepare_episode_watch_changes(
             &item,
             &episodes,
             store.load_entries().expect("read rows"),
             true,
             2_000,
+        )
+        .expect_err("conflicting episode mapping");
+        assert_eq!(
+            error,
+            "Some episodes couldn't be marked because of a conflicting saved episode."
         );
-        assert!(deletes.is_empty());
-        assert!(writes
-            .iter()
-            .all(|(_, row)| row.absolute_episode != Some(4)));
-        store.merge_entries(writes).expect("mark watched");
         let retained = read_entry(&mut store, &key);
         assert_eq!(retained.absolute_episode, Some(14));
         assert_eq!(retained.episode, Some(4));
         assert_eq!(retained.duration, prior.duration);
-        assert_eq!(
-            retained.position,
-            if requested.contains(&14) {
-                prior.duration
-            } else {
-                prior.position
-            },
-        );
-        assert_eq!(
-            store.count_entries().unwrap(),
-            if requested.contains(&15) { 2 } else { 1 }
-        );
+        assert_eq!(retained.position, prior.position);
+        assert_eq!(store.count_entries().unwrap(), 1);
     }
 }
 
@@ -310,7 +303,8 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
         store.load_entries().expect("read rows"),
         true,
         2_000,
-    );
+    )
+    .expect("prepare watched episodes");
     assert!(deletes.is_empty());
     assert_eq!(writes[0].0, key);
     assert_eq!(writes[0].1.season, Some(1));
@@ -325,7 +319,7 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
         assert_eq!(row.backdrop, item.backdrop);
     }
     assert!(writes[0].1.last_watched < writes[1].1.last_watched);
-    store.merge_entries(writes).expect("mark watched");
+    store.merge_entries(writes, false).expect("mark watched");
     assert_eq!(store.count_entries().expect("count rows"), 2);
     assert!(store
         .get_entry("series:tt1234567:1:14")
@@ -339,7 +333,8 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
         store.load_entries().expect("read rows"),
         false,
         3_000,
-    );
+    )
+    .expect("prepare unwatched episodes");
     assert!(writes.is_empty());
     assert_eq!(deletes, [key]);
     store.remove_keys(&deletes).expect("mark unwatched");
@@ -361,12 +356,16 @@ fn undo_restores_more_than_500_rows_for_one_title_in_one_merge() {
         })
         .collect();
     validate_history_batch(rows.iter().map(|(_, row)| row)).expect("single-title restore accepted");
-    store.merge_entries(rows.clone()).expect("seed title");
+    store
+        .merge_entries(rows.clone(), false)
+        .expect("seed title");
     store
         .remove_keys(&rows.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>())
         .expect("remove title");
     assert_eq!(store.count_entries().expect("empty history"), 0);
-    store.merge_entries(rows.clone()).expect("restore title");
+    store
+        .merge_entries(rows.clone(), false)
+        .expect("restore title");
     assert_eq!(store.count_entries().expect("restored history"), 501);
     let mut mixed = rows;
     mixed[0].1.id = "another-title".to_string();
@@ -467,6 +466,36 @@ fn stale_progress_write_does_not_regress_resume() {
     let kept = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(kept.last_watched, 2000);
     assert_eq!(kept.position, 900.0);
+
+    let now = crate::commands::now_unix_millis();
+    let incoming = sample_progress(now, 900.0);
+    for (skew, skipped) in [
+        (60_000, true),
+        (WATCH_PROGRESS_FUTURE_SKEW_MS + 60_000, false),
+    ] {
+        let existing = sample_progress(now + skew, 900.0);
+        store
+            .upsert_progress("movie:tt1234567", &existing)
+            .expect("future row lands");
+        assert_eq!(
+            should_skip_watch_progress_save(&existing, &incoming),
+            skipped
+        );
+        assert_eq!(
+            store
+                .upsert_progress("movie:tt1234567", &incoming)
+                .expect("clock-corrected write succeeds"),
+            if skipped {
+                ProgressWrite::Skipped
+            } else {
+                ProgressWrite::Written { pruned: false }
+            }
+        );
+        assert_eq!(
+            read_entry(&mut store, "movie:tt1234567").last_watched,
+            if skipped { existing.last_watched } else { now }
+        );
+    }
 }
 
 #[test]
@@ -493,6 +522,75 @@ fn upsert_drops_url_shaped_stream_keys() {
             expected
         );
     }
+}
+
+#[test]
+fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
+    let path = TempDbPath::new("mergecap");
+    let mut store = ResumeStore::open(&path).unwrap();
+    let rows = (0..super::MAX_RESUME_TOTAL_ENTRIES - 1)
+        .map(|index| {
+            (
+                format!("movie:tt{index}"),
+                WatchProgress {
+                    id: format!("tt{index}"),
+                    type_: "movie".to_string(),
+                    ..sample_progress(1, 10.0)
+                },
+            )
+        })
+        .collect();
+    store.merge_entries(rows, true).unwrap();
+    let added = WatchProgress {
+        id: "added".to_string(),
+        type_: "movie".to_string(),
+        ..sample_progress(2, 20.0)
+    };
+    store
+        .merge_entries(
+            vec![
+                ("movie:added".to_string(), added.clone()),
+                ("movie:added".to_string(), added),
+            ],
+            true,
+        )
+        .expect("duplicate incoming keys count once");
+    let update = WatchProgress {
+        id: "tt0".to_string(),
+        type_: "movie".to_string(),
+        ..sample_progress(3, 30.0)
+    };
+    store
+        .merge_entries(vec![("movie:tt0".to_string(), update.clone())], true)
+        .expect("existing keys fit at capacity");
+    let (mut writes, _) = prepare_episode_watch_changes(
+        &crate::test_helpers::test_media_item("tt1234567", "series"),
+        &[WatchedEpisode {
+            season: 1,
+            episode: 1,
+        }],
+        Vec::new(),
+        true,
+        4,
+    )
+    .unwrap();
+    writes.push((
+        "movie:tt0".to_string(),
+        WatchProgress {
+            last_watched: 4,
+            ..update
+        },
+    ));
+    let error = store
+        .merge_entries(writes, true)
+        .expect_err("growth must not evict local history");
+    assert!(String::from(error).contains("10000"));
+    assert_eq!(
+        store.count_entries().unwrap(),
+        super::MAX_RESUME_TOTAL_ENTRIES as usize
+    );
+    assert_eq!(read_entry(&mut store, "movie:tt0").last_watched, 3);
+    assert!(store.get_entry("series:tt1234567:1:1").unwrap().is_none());
 }
 
 #[test]
@@ -762,6 +860,69 @@ fn unreadable_database_file_is_quarantined_and_recreated() {
         garbage,
         "quarantined file keeps the original bytes"
     );
+}
+
+#[test]
+fn corrupt_table_page_with_intact_header_is_quarantined_and_recreated() {
+    use std::io::{Seek, SeekFrom, Write};
+
+    let dir = TempDbDir::new();
+    let path = dir.join("playback_resume.sqlite3");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    for index in 0..400 {
+        let progress = WatchProgress {
+            id: format!("tt{index}"),
+            type_: "movie".to_string(),
+            ..sample_progress(1_000, 300.0)
+        };
+        store
+            .upsert_progress(&format!("movie:{}", progress.id), &progress)
+            .expect("seed table pages");
+    }
+    assert_eq!(store.count_entries().expect("count seeded rows"), 400);
+    drop(store);
+
+    let connection = Connection::open(&path).expect("open for checkpoint");
+    connection
+        .execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .expect("checkpoint table pages");
+    let page_size: u32 = connection
+        .query_row("PRAGMA page_size", [], |row| row.get(0))
+        .expect("read page size");
+    let root_page: u32 = connection
+        .query_row(
+            "SELECT rootpage FROM sqlite_master WHERE name = 'watch_progress'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("find table root page");
+    assert!(root_page > 1, "table root is not the database header");
+    drop(connection);
+
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .expect("open table page for corruption");
+    file.seek(SeekFrom::Start(
+        u64::from(root_page - 1) * u64::from(page_size),
+    ))
+    .expect("seek to table root");
+    file.write_all(&[0xAB; 12])
+        .expect("corrupt table b-tree header");
+    drop(file);
+    assert_eq!(user_version(&path), 3, "database header stays readable");
+
+    let mut store = ResumeStore::open_or_quarantine(&path).expect("table corruption heals");
+    assert_eq!(
+        corrupt_siblings(&dir).len(),
+        1,
+        "table damage is quarantined"
+    );
+    assert_eq!(store.count_entries().expect("count fresh rows"), 0);
+    store
+        .upsert_progress("movie:tt1234567", &sample_progress(2_000, 600.0))
+        .expect("fresh store accepts progress");
+    assert_eq!(store.count_entries().expect("count new row"), 1);
 }
 
 #[test]

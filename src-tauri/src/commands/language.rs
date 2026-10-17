@@ -1,6 +1,13 @@
 use crate::providers::{bound_optional, push_unique};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::ops::Range;
+use std::sync::LazyLock;
+
+static STREAM_LANGUAGE_TAG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\[[a-z]{2,3}\]|\([a-z]{2,3}\)").expect("valid stream language tag regex")
+});
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
@@ -68,8 +75,8 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
     SupportedLanguage {
         code: "it",
         label: "Italian",
-        aliases: &["it", "ita", "italian"],
-        exact_aliases: &[],
+        aliases: &["ita", "italian"],
+        exact_aliases: &["it"],
     },
     SupportedLanguage {
         code: "pt",
@@ -223,19 +230,15 @@ pub(crate) fn supported_language_options() -> Vec<SupportedLanguageOption> {
 }
 
 pub(crate) fn canonicalize_language_token(value: &str) -> Option<&'static str> {
-    // Skip the lowercase copy when the token is already lowered — the
-    // coordinator's per-stream path feeds it normalized match text.
-    let trimmed = value.trim();
-    let owned;
-    let normalized = if trimmed.bytes().any(|byte| byte.is_ascii_uppercase()) {
-        owned = trimmed.to_ascii_lowercase();
-        owned.as_str()
-    } else {
-        trimmed
-    };
+    let value = value.trim();
     SUPPORTED_LANGUAGES
         .iter()
-        .find(|language| language.aliases.contains(&normalized))
+        .find(|language| {
+            language
+                .aliases
+                .iter()
+                .any(|alias| alias.eq_ignore_ascii_case(value))
+        })
         .map(|language| language.code)
 }
 
@@ -256,19 +259,36 @@ fn exact_language_aliases(canonical: &str) -> &'static [&'static str] {
 }
 
 pub(crate) fn canonicalize_language_value(value: &str) -> Option<&'static str> {
-    let normalized = value.trim().to_ascii_lowercase();
-    canonicalize_language_token(&normalized)
+    let value = value.trim();
+    canonicalize_language_token(value)
         .or_else(|| {
             SUPPORTED_LANGUAGES
                 .iter()
-                .find(|language| language.exact_aliases.contains(&normalized.as_str()))
+                .find(|language| {
+                    language
+                        .exact_aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(value))
+                })
                 .map(|language| language.code)
         })
         .or_else(|| {
-            let (language, region) = normalized.split_once('-')?;
+            let (language, region) = value.split_once('-')?;
             (!region.is_empty())
                 .then(|| canonicalize_language_value(language))
                 .flatten()
+        })
+}
+
+pub(crate) fn bracketed_language_tags(
+    text: &str,
+) -> impl Iterator<Item = (Range<usize>, &'static str)> + '_ {
+    STREAM_LANGUAGE_TAG_REGEX
+        .find_iter(text)
+        .filter_map(|matched| {
+            let tag = matched.as_str();
+            canonicalize_language_value(&tag[1..tag.len() - 1])
+                .map(|language| (matched.range(), language))
         })
 }
 
@@ -419,7 +439,7 @@ pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
     push_unique(&mut candidates, &normalized);
 
     for alias in language_aliases(&canonical) {
-        push_unique(&mut candidates, alias);
+        push_unique(&mut candidates, *alias);
     }
 
     let token_text = super::normalize_token_text(&normalized);
@@ -428,7 +448,7 @@ pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
             push_unique(&mut candidates, token_canonical);
 
             for alias in language_aliases(token_canonical) {
-                push_unique(&mut candidates, alias);
+                push_unique(&mut candidates, *alias);
             }
         }
     }
@@ -453,15 +473,6 @@ fn contains_phrase(tokens: &[&str], phrase: &[&str]) -> bool {
 }
 
 fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -> i32 {
-    let lang = normalize_lower(track.lang.as_deref()).unwrap_or_default();
-    let lang_text = super::normalize_token_text(track.lang.as_deref().unwrap_or_default());
-    let title_text = super::normalize_token_text(track.title.as_deref().unwrap_or_default());
-    let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
-    let combined_tokens = lang_text
-        .split_whitespace()
-        .chain(title_tokens.iter().copied())
-        .collect::<Vec<_>>();
-
     let tagged_language = normalize_language_token(track.lang.as_deref(), false);
     if tagged_language
         .as_ref()
@@ -470,6 +481,9 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
         return 0;
     }
 
+    let lang = normalize_lower(track.lang.as_deref()).unwrap_or_default();
+    let title_text = super::normalize_token_text(track.title.as_deref().unwrap_or_default());
+    let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
     let mut score = if canonicalize_language_value(&lang).is_some() {
         if lang.contains('-') {
             100
@@ -498,6 +512,12 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
     if score == 0 {
         return 0;
     }
+
+    let lang_text = super::normalize_token_text(track.lang.as_deref().unwrap_or_default());
+    let combined_tokens = lang_text
+        .split_whitespace()
+        .chain(title_tokens.iter().copied())
+        .collect::<Vec<_>>();
 
     if track.default_track {
         score += 15;

@@ -5,13 +5,14 @@ use tauri::{command, AppHandle, State};
 mod addon_registry;
 pub(crate) mod app_shell_commands;
 pub(crate) mod app_update_commands;
+pub(crate) mod avatar_commands;
 pub(crate) mod backup_commands;
 pub(crate) mod browse_genre_commands;
 pub(crate) mod calendar_commands;
 pub(crate) mod config_commands;
 pub(crate) mod config_store;
 mod durable_store;
-mod episode_navigation;
+pub(crate) mod episode_navigation;
 mod history_helpers;
 pub(crate) mod history_playback_commands;
 mod language;
@@ -62,16 +63,36 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
+    run_typed_store_op(operation).await
+}
+
+pub(crate) async fn run_typed_store_op<T, E, F>(operation: F) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
+    run_store_op_at(tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT, operation).await
+}
+
+pub(crate) async fn run_store_op_at<T, E, F>(
+    deadline: tokio::time::Instant,
+    operation: F,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce() -> Result<T, E> + Send + 'static,
+{
     // Wait before entering the blocking pool so expired waiters never submit a mutation after their caller failed.
     let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
         .map_err(|_| "Background persistence timed out.".to_string())?;
     run_blocking_op(deadline, "Background persistence timed out.", move || {
         let _guard = guard;
-        operation()
+        Ok(operation())
     })
-    .await
+    .await?
 }
 
 /// Bounds worker execution without taking the store gate for external file IO.
@@ -167,19 +188,25 @@ const LIBRARY_STORE_FILE: &str = "library.json";
 const LISTS_STORE_FILE: &str = "lists.json";
 const WATCH_STATUS_STORE_FILE: &str = "watch_status.json";
 
+/// JavaScript `trim()`: includes BOM and excludes NEXT LINE from Unicode whitespace.
+pub(crate) fn js_trim(value: &str) -> &str {
+    value.trim_matches(|character: char| {
+        character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
+    })
+}
+
 fn normalize_non_empty(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    crate::providers::trim_to_max(input, usize::MAX)
 }
 
 /// Media ids become store keys and addon request path segments — reject overlong
 /// input rather than truncate, so two hostile ids can't collide onto one key.
 pub(crate) fn normalize_media_id(input: &str) -> Option<String> {
-    normalize_opaque_field(input).filter(|id| id.chars().count() <= MEDIA_ID_MAX_CHARS)
+    let trimmed = input.trim();
+    if trimmed.chars().nth(MEDIA_ID_MAX_CHARS).is_some() {
+        return None;
+    }
+    normalize_opaque_field(trimmed)
 }
 
 /// Normalize a persisted media image URL: trimmed, char-bounded, gated by the
@@ -187,11 +214,11 @@ pub(crate) fn normalize_media_id(input: &str) -> Option<String> {
 /// host. Anything else degrades to "no artwork" instead of persisting.
 pub(crate) fn normalize_media_image_url(input: &str) -> Option<String> {
     let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > MEDIA_IMAGE_URL_MAX_CHARS {
+    if trimmed.is_empty() || trimmed.chars().nth(MEDIA_IMAGE_URL_MAX_CHARS).is_some() {
         return None;
     }
-    let normalized = streaming_helpers::normalize_http_url(trimmed)?;
-    crate::providers::addon_resource::is_fetchable_http_url(&normalized).then_some(normalized)
+    crate::providers::addon_resource::parse_fetchable_http_url(trimmed)
+        .map(|parsed| parsed.to_string())
 }
 
 /// Opaque free-text fields crossing IPC (source names, stream metadata, skip-segment
@@ -249,41 +276,36 @@ pub struct PlaybackLanguagePreferences {
 }
 
 /// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB.
-/// SkipDB keys on the IMDb id: supplied `imdb_id` wins, then a tt-shaped media id
-/// (Cinemeta ids are IMDb ids); `kitsu:` rows have no IMDb anchor and return empty.
+/// SkipDB keys on the first valid IMDb id: metadata, media id, then stream lookup id.
 /// Unkeyable input and missing data return empty; only transient upstream failures are errors.
 #[command]
+#[allow(clippy::too_many_arguments)]
 pub async fn get_skip_times(
     skip_provider: State<'_, crate::providers::skip_times::SkipTimesProvider>,
     media_type: String,
     id: String,
     imdb_id: Option<String>,
+    stream_lookup_id: Option<String>,
     season: Option<u32>,
     episode: Option<u32>,
     duration_secs: Option<f64>,
 ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
-    // The id bounds the IPC surface like other media ids; the lookup keys on the IMDb anchor.
-    let Some(id) = normalize_media_id(&id) else {
-        return Ok(crate::providers::skip_times::SkipTimesResult::default());
-    };
-
-    let imdb_id = imdb_id
-        .as_deref()
-        .and_then(crate::providers::skip_times::normalize_imdb_id)
-        .or_else(|| crate::providers::skip_times::normalize_imdb_id(&id));
+    let imdb_id = [
+        imdb_id.as_deref(),
+        Some(id.as_str()),
+        stream_lookup_id.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(crate::providers::skip_times::normalize_imdb_id);
     let Some(imdb_id) = imdb_id else {
         return Ok(crate::providers::skip_times::SkipTimesResult::default());
     };
 
     // SkipDB wants both coordinates for an episode, neither for a movie. A lone
     // coordinate can't name an episode — never silently default to S1.
-    let (season, episode) = if media_type.trim().eq_ignore_ascii_case("movie") {
-        (None, None)
-    } else {
-        match (season, episode) {
-            (Some(season), Some(episode)) => (Some(season), Some(episode)),
-            _ => return Ok(crate::providers::skip_times::SkipTimesResult::default()),
-        }
+    let Some((season, episode)) = skip_times_coordinates(&media_type, season, episode) else {
+        return Ok(crate::providers::skip_times::SkipTimesResult::default());
     };
 
     // Bound duration so a malformed value never reaches the outbound query (24h covers any stream).
@@ -295,6 +317,18 @@ pub async fn get_skip_times(
     skip_provider
         .get_segments(&imdb_id, season, episode, duration_secs)
         .await
+}
+
+fn skip_times_coordinates(
+    media_type: &str,
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Option<(Option<u32>, Option<u32>)> {
+    if js_trim(media_type).trim().eq_ignore_ascii_case("movie") {
+        Some((None, None))
+    } else {
+        Some((Some(season?), Some(episode?)))
+    }
 }
 
 #[derive(Debug, Serialize)]

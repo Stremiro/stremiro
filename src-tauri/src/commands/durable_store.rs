@@ -2,7 +2,7 @@
 //! `save`/exit; file locations and `{key: value}` schema unchanged from `tauri-plugin-store`.
 
 use serde_json::Value;
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -156,11 +156,17 @@ impl DurableStore {
 
     pub(crate) fn set(&self, key: impl Into<String>, value: Value) {
         let mut data = lock_or_recover(&self.data);
-        let key = key.into();
-        if data.entries.get(&key) == Some(&value) {
-            return;
+        match data.entries.entry(key.into()) {
+            Entry::Occupied(mut entry) => {
+                if entry.get() == &value {
+                    return;
+                }
+                entry.insert(value);
+            }
+            Entry::Vacant(entry) => {
+                entry.insert(value);
+            }
         }
-        data.entries.insert(key, value);
         data.dirty = true;
     }
 

@@ -1,14 +1,16 @@
 use super::config_store::AddonConfig;
 use super::history_helpers::STREAM_KEY_MAX_CHARS;
+use super::language::bracketed_language_tags;
 use crate::providers::addon_resource::is_magnet_url;
 use crate::providers::addons::{
     language_mention_is_audio, normalize_separators, stream_contains_batch_texts, AddonStream,
     StreamDeliveryKind, StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution,
-    StreamResolutionTier,
+    StreamResolutionTier, STREAM_SIZE_REGEX,
 };
 use crate::providers::{non_blank, push_unique};
 use regex::Regex;
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
@@ -18,22 +20,20 @@ static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         r"\bs\d{1,2}e\d{1,4}(?:-?e\d{1,4})*\b",
         r"|\b\d{1,2}x\d{1,4}\b",
         r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
-        r"|\b#\d{1,4}\b",
-        r"|\b(?:season\s*\d+\s*)?-\s*\d{2,4}\b"
+        r"|(?:^|\s|\b)(?:#(?P<hash_episode>\d{1,4})",
+        r"|(?:season\s*\d+\s*)?-\s*(?P<dash_episode>\d{2,4}))\b"
     ))
     .expect("valid stream family episode regex")
 });
 static STREAM_FAMILY_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b\d+(?:\.\d+)?\s*(?:k|m|g|t)i?b\b").expect("valid stream family size regex")
+    Regex::new(r"(?i)\b\d+(?:[.,]\d+)?\s*(?:k|m|g|t)i?b\b").expect("valid stream family size regex")
 });
 static STREAM_FAMILY_NON_WORD_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[^a-z0-9]+").expect("valid stream family non-word regex"));
-static STREAM_LANGUAGE_TAG_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\[[A-Z]{2,3}\]").expect("valid stream language tag regex"));
 /// Emoji/pictograph blocks addons decorate names with, plus joiners and variation selectors.
 const STREAM_PICTOGRAPH_CLASS: &str = r"\x{1F000}-\x{1FAFF}\x{2300}-\x{23FF}\x{2600}-\x{27BF}\x{2B00}-\x{2BFF}\x{200D}\x{20E3}\x{FE0E}\x{FE0F}\x{E0020}-\x{E007F}";
-static STREAM_META_ONLY_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(&format!(r"[{STREAM_PICTOGRAPH_CLASS}\s\[\]|]"))
+static STREAM_NON_META_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!(r"[^{STREAM_PICTOGRAPH_CLASS}\s\[\]|]"))
         .expect("valid stream meta-only regex")
 });
 static STREAM_PICTOGRAPH_REGEX: LazyLock<Regex> = LazyLock::new(|| {
@@ -47,48 +47,90 @@ static STREAM_EMPTY_BRACKETS_REGEX: LazyLock<Regex> =
 static STREAM_FILENAME_HINT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)([\w].*\d{3,4}p|S\d{1,2}E\d{1,4})").expect("valid stream filename hint regex")
 });
-static STREAM_SIZE_LABEL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)([\d.]+)\s*([KMGT]i?B)\b").expect("valid stream size label regex")
+static STREAM_CLIP_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    // Only release-position markers count; title words before episode/year/quality tokens do not.
+    Regex::new(concat!(
+        r"(?i)\b(?:s[0-9]{1,2}(?:e[0-9]{1,4})*|[0-9]{1,2}x[0-9]{1,4}",
+        r"|(?:19|20)[0-9]{2}|[0-9]{3,4}p|[48]k)\b[^\r\n]*\b(?:sample|trailer|teaser)\b",
+        r"|\b(?:sample|trailer|teaser)\.(?:mkv|mp4|avi|webm|mov|m4v|ts|m2ts)\b"
+    ))
+    .expect("valid stream clip regex")
 });
 
 fn normalize_stream_family_component(value: &str) -> Option<String> {
     // `_` is a word char and defeats the `\b` anchors below — normalize separators
     // first or `_`-joined release names keep episode/size tokens and fragment the key.
     let value = normalize_separators(value);
-    let normalized = STREAM_FAMILY_EPISODE_REGEX.replace_all(&value, " ");
-    let normalized = STREAM_FAMILY_SIZE_REGEX.replace_all(&normalized, " ");
+    // Strip sizes first so a dash followed by "12 GB" cannot leave a stray "GB".
+    let normalized = STREAM_FAMILY_SIZE_REGEX.replace_all(&value, " ");
+    let normalized =
+        STREAM_FAMILY_EPISODE_REGEX.replace_all(&normalized, |captures: &regex::Captures<'_>| {
+            let bare_episode = captures
+                .name("hash_episode")
+                .or_else(|| captures.name("dash_episode"))
+                .and_then(|value| value.as_str().parse::<u32>().ok());
+            if bare_episode.is_some_and(|number| (1900..=2099).contains(&number)) {
+                captures[0].to_string()
+            } else {
+                " ".to_string()
+            }
+        });
     let normalized_lower = normalized.to_ascii_lowercase();
     let normalized = STREAM_FAMILY_NON_WORD_REGEX.replace_all(&normalized_lower, " ");
-    let normalized = normalized
-        .split_whitespace()
-        .filter(|token| !token.is_empty())
-        .take(12)
-        .collect::<Vec<_>>()
-        .join("-");
+    let mut component = String::new();
+    for token in normalized.split_whitespace().take(12) {
+        if !component.is_empty() {
+            component.push('-');
+        }
+        component.push_str(token);
+    }
 
-    if normalized.is_empty() {
+    if component.is_empty() {
         None
     } else {
-        Some(normalized)
+        Some(component)
     }
 }
 
 /// Test wrapper — production batches call `derive_stream_family_normalized` directly.
 #[cfg(test)]
-pub(crate) fn derive_stream_family(stream: &AddonStream, source_name: &str) -> Option<String> {
-    let normalized_source = normalize_stream_family_component(source_name)?;
-    Some(derive_stream_family_normalized(stream, &normalized_source))
+pub(crate) fn derive_stream_family(stream: &AddonStream, source_id: &str) -> Option<String> {
+    let source_key = stream_family_source_key(source_id)?;
+    Some(derive_stream_family_normalized(stream, &source_key))
 }
 
-/// Source component already normalized — `prepare_addon_streams` computes it once per batch.
-fn derive_stream_family_normalized(stream: &AddonStream, normalized_source: &str) -> String {
+fn stream_family_source_key(source_id: &str) -> Option<String> {
+    let source_id = normalize_source_id(source_id)?;
+    Some(format!("v2:{:x}", Sha256::digest(source_id.as_bytes())))
+}
+
+pub(crate) fn is_current_stream_family(value: &str) -> bool {
+    let Some((source, family)) = value.split_once('|') else {
+        return false;
+    };
+    source.strip_prefix("v2:").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) && family.split_once(':').is_some_and(|(kind, component)| {
+        matches!(kind, "binge" | "release" | "delivery")
+            && !component.is_empty()
+            && component
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    })
+}
+
+/// Source digest is constant across the batch and never exposes credential-bearing addon ids.
+fn derive_stream_family_normalized(stream: &AddonStream, source_key: &str) -> String {
     if let Some(binge_group) = stream
         .behavior_hints
         .as_ref()
         .and_then(|hints| hints.binge_group.as_deref())
         .and_then(normalize_stream_family_component)
     {
-        return format!("{}|binge:{}", normalized_source, binge_group);
+        return stream_family(source_key, "binge", &binge_group);
     }
 
     let hint = stream
@@ -106,10 +148,22 @@ fn derive_stream_family_normalized(stream: &AddonStream, normalized_source: &str
                 StreamDeliveryKind::Http => "http",
                 StreamDeliveryKind::PeerToPeer => "p2p",
             };
-            format!("{}|delivery:{}", normalized_source, delivery)
+            stream_family(source_key, "delivery", delivery)
         },
-        |value| format!("{}|release:{}", normalized_source, value),
+        |value| stream_family(source_key, "release", &value),
     )
+}
+
+fn stream_family(source_key: &str, kind: &str, component: &str) -> String {
+    // Consumers drop identities past this bound; digest long components instead.
+    if source_key.len() + kind.len() + component.len() + 2 > SOURCE_IDENTITY_MAX_CHARS {
+        format!(
+            "{source_key}|{kind}:{:x}",
+            Sha256::digest(component.as_bytes())
+        )
+    } else {
+        format!("{source_key}|{kind}:{component}")
+    }
 }
 
 fn stream_delivery_kind(stream: &AddonStream) -> StreamDeliveryKind {
@@ -263,28 +317,26 @@ fn normalize_stream_dedup_url(raw: &str) -> Option<String> {
     if !matches!(parsed.scheme(), "http" | "https") {
         return None;
     }
-    if let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) {
-        parsed.set_host(Some(&host)).ok()?;
-    }
     parsed.set_username("").ok();
     parsed.set_password(None).ok();
     parsed.set_fragment(None);
     let mut pairs: Vec<(String, String)> = parsed
         .query_pairs()
         .filter(|(key, _)| {
-            !matches!(
-                key.to_ascii_lowercase().as_str(),
-                "utm_source"
-                    | "utm_medium"
-                    | "utm_campaign"
-                    | "utm_term"
-                    | "utm_content"
-                    | "fbclid"
-                    | "gclid"
-                    | "msclkid"
-                    | "ref"
-                    | "referrer"
-            )
+            ![
+                "utm_source",
+                "utm_medium",
+                "utm_campaign",
+                "utm_term",
+                "utm_content",
+                "fbclid",
+                "gclid",
+                "msclkid",
+                "ref",
+                "referrer",
+            ]
+            .iter()
+            .any(|tracking_key| key.eq_ignore_ascii_case(tracking_key))
         })
         .map(|(key, value)| (key.into_owned(), value.into_owned()))
         .collect();
@@ -319,32 +371,37 @@ fn stream_resolution(tier: StreamResolutionTier) -> StreamResolution {
 }
 
 fn is_meta_only(value: &str) -> bool {
-    value.len() < 6
-        || STREAM_META_ONLY_REGEX
-            .replace_all(value, "")
-            .trim()
-            .is_empty()
+    value.len() < 6 || !STREAM_NON_META_REGEX.is_match(value)
 }
 
 fn looks_like_filename(value: &str) -> bool {
     STREAM_FILENAME_HINT_REGEX.is_match(value) || value.len() > 30
 }
 
-fn get_display_lines(stream: &AddonStream) -> (String, String) {
+fn get_display_lines(stream: &AddonStream) -> (&str, Cow<'_, str>) {
     let raw_name = stream.name.as_deref().unwrap_or("");
     let raw_title = stream.title.as_deref().unwrap_or("");
     let name_first_line = raw_name.lines().next().map(str::trim).unwrap_or("");
     let title_first_line = raw_title.lines().next().map(str::trim).unwrap_or("");
 
     if is_meta_only(name_first_line) && looks_like_filename(title_first_line) {
-        let stream_title = raw_name.lines().skip(1).collect::<Vec<_>>().join(" ");
+        let mut stream_title = String::new();
+        for line in raw_name.lines().skip(1) {
+            if stream_title.is_empty() {
+                stream_title.push_str(line.trim_start());
+            } else {
+                stream_title.push(' ');
+                stream_title.push_str(line);
+            }
+        }
+        stream_title.truncate(stream_title.trim_end().len());
 
         return (
-            title_first_line.to_string(),
-            if non_blank(&stream_title) {
-                stream_title.trim().to_string()
+            title_first_line,
+            if stream_title.is_empty() {
+                Cow::Borrowed(title_first_line)
             } else {
-                title_first_line.to_string()
+                Cow::Owned(stream_title)
             },
         );
     }
@@ -352,27 +409,27 @@ fn get_display_lines(stream: &AddonStream) -> (String, String) {
     (
         if name_first_line.is_empty() {
             if title_first_line.is_empty() {
-                "Unknown".to_string()
+                "Unknown"
             } else {
-                title_first_line.to_string()
+                title_first_line
             }
         } else {
-            name_first_line.to_string()
+            name_first_line
         },
-        if title_first_line.is_empty() {
+        Cow::Borrowed(if title_first_line.is_empty() {
             if name_first_line.is_empty() {
-                "Unknown".to_string()
+                "Unknown"
             } else {
-                name_first_line.to_string()
+                name_first_line
             }
         } else {
-            title_first_line.to_string()
-        },
+            title_first_line
+        }),
     )
 }
 
 pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) -> Option<String> {
-    if let Some(captures) = STREAM_SIZE_LABEL_REGEX.captures(raw_text) {
+    if let Some(captures) = STREAM_SIZE_REGEX.captures(raw_text) {
         let amount = captures
             .get(1)
             .map(|capture| capture.as_str())
@@ -401,48 +458,86 @@ pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) 
 
 /// Display-only cleanup: drops addon emoji decoration. Pictographs become spaces first
 /// so `💾1.2GB👤5` cannot fuse into `1.2GB5`.
-fn strip_display_pictographs(value: &str) -> String {
+fn strip_display_pictographs(value: &str) -> Cow<'_, str> {
+    let trimmed =
+        value.trim_matches(|c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace());
+    let mut previous_space = false;
+    let needs_spacing = trimmed.chars().any(|character| {
+        let whitespace = character.is_whitespace();
+        let needs_spacing = whitespace && (character != ' ' || previous_space);
+        previous_space = whitespace;
+        needs_spacing
+    });
+    if !needs_spacing
+        && !STREAM_PICTOGRAPH_REGEX.is_match(trimmed)
+        && !STREAM_BRACKET_PADDING_REGEX.is_match(trimmed)
+        && !STREAM_EMPTY_BRACKETS_REGEX.is_match(trimmed)
+    {
+        return Cow::Borrowed(trimmed);
+    }
+
     let spaced = STREAM_PICTOGRAPH_REGEX.replace_all(value, " ");
-    let spaced = spaced.split_whitespace().collect::<Vec<_>>().join(" ");
-    let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&spaced, "${1}${2}");
+    let mut normalized = String::with_capacity(spaced.len());
+    for token in spaced.split_whitespace() {
+        if !normalized.is_empty() {
+            normalized.push(' ');
+        }
+        normalized.push_str(token);
+    }
+    let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&normalized, "${1}${2}");
     let cleaned = STREAM_EMPTY_BRACKETS_REGEX.replace_all(&unpadded, " ");
-    cleaned
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
+    let mut display = String::with_capacity(cleaned.len());
+    for token in cleaned
         .trim_matches(|c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace())
-        .to_string()
+        .split_whitespace()
+    {
+        if !display.is_empty() {
+            display.push(' ');
+        }
+        display.push_str(token);
+    }
+    Cow::Owned(display)
 }
 
 fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, bool) {
-    let language_tag_count = [stream.name.as_deref(), stream.title.as_deref()]
+    let mut languages = Vec::new();
+    'fields: for text in [stream.name.as_deref(), stream.title.as_deref()]
         .into_iter()
         .flatten()
-        .map(|text| {
-            STREAM_LANGUAGE_TAG_REGEX
-                .find_iter(text)
-                .filter(|matched| language_mention_is_audio(&text[matched.end()..]))
-                .count()
-        })
-        .sum::<usize>();
+    {
+        for (range, language) in bracketed_language_tags(text) {
+            if !language_mention_is_audio(&text[range.end..]) {
+                continue;
+            }
+            if languages.contains(&language) {
+                continue;
+            }
+            languages.push(language);
+            if languages.len() == 3 {
+                break 'fields;
+            }
+        }
+    }
+    let language_tag_count = languages.len();
     (
         language_tag_count == 2 || flags.dual_audio || flags.english_japanese_pair,
         language_tag_count > 2 || flags.multi_audio,
     )
 }
 
-fn build_stream_presentation(stream: &AddonStream) -> StreamPresentation {
+fn build_stream_presentation(stream: &AddonStream, raw_text: &mut String) -> StreamPresentation {
     let (raw_source_name, raw_stream_title) = get_display_lines(stream);
-    let source_name = strip_display_pictographs(&raw_source_name);
+    let source_name = strip_display_pictographs(raw_source_name);
     let stream_title = match strip_display_pictographs(&raw_stream_title) {
-        cleaned if cleaned.is_empty() => raw_stream_title,
-        cleaned => cleaned,
+        cleaned if cleaned.is_empty() || cleaned == raw_stream_title => {
+            raw_stream_title.into_owned()
+        }
+        cleaned => cleaned.into_owned(),
     };
-    let raw_text = format!(
-        "{} {}",
-        stream.name.as_deref().unwrap_or(""),
-        stream.title.as_deref().unwrap_or("")
-    );
+    raw_text.clear();
+    raw_text.push_str(stream.name.as_deref().unwrap_or(""));
+    raw_text.push(' ');
+    raw_text.push_str(stream.title.as_deref().unwrap_or(""));
     let texts = stream.match_texts();
     let flags = texts.flags;
 
@@ -454,7 +549,7 @@ fn build_stream_presentation(stream: &AddonStream) -> StreamPresentation {
         source_name: if source_name.is_empty() {
             "Unknown".to_string()
         } else {
-            source_name
+            source_name.into_owned()
         },
         stream_title,
         resolution: stream_resolution(flags.resolution),
@@ -502,7 +597,7 @@ fn build_stream_presentation(stream: &AddonStream) -> StreamPresentation {
         } else {
             None
         },
-        size_label: format_stream_size_label(&raw_text, stream.size_bytes),
+        size_label: format_stream_size_label(raw_text, stream.size_bytes),
         is_batch: stream_contains_batch_texts(texts),
     }
 }
@@ -512,11 +607,9 @@ pub(crate) fn prepare_addon_streams(
     source_name: &str,
     source_id: &str,
 ) -> Vec<AddonStream> {
-    let source_name = source_name.to_string();
-    let source_id = source_id.to_string();
-    // The source component is constant across the batch — normalize once.
-    let normalized_source = normalize_stream_family_component(&source_name);
+    let source_key = stream_family_source_key(source_id);
     let mut prepared = Vec::with_capacity(streams.len());
+    let mut raw_text = String::new();
 
     for mut stream in streams {
         // Playable-source probe first — the placeholder test allocates lowered match texts.
@@ -526,21 +619,28 @@ pub(crate) fn prepare_addon_streams(
 
         // The prepared key doubles as the opaque `stream_key` used by selector picks,
         // saved-stream resume, and recovery exclusion.
-        let Some(dedup_key) = prepared_stream_key(&stream, &source_id) else {
+        let Some(dedup_key) = prepared_stream_key(&stream, source_id) else {
             continue;
         };
 
-        stream.source_name = Some(source_name.clone());
-        stream.source_id = Some(source_id.clone());
-        stream.stream_family = normalized_source
+        stream.source_name = Some(source_name.to_string());
+        stream.source_id = Some(source_id.to_string());
+        stream.stream_family = source_key
             .as_deref()
             .map(|source| derive_stream_family_normalized(&stream, source));
         stream.stream_key = dedup_key;
-        stream.presentation = build_stream_presentation(&stream);
+        stream.presentation = build_stream_presentation(&stream, &mut raw_text);
         prepared.push(stream);
     }
 
     prepared
+}
+
+pub(crate) fn canonicalize_header_identity(headers: &mut [(String, String)]) {
+    for (name, _) in &mut *headers {
+        name.make_ascii_lowercase();
+    }
+    headers.sort();
 }
 
 /// Prepared identity key: content identity + source + transport shape (direct URL, request
@@ -550,10 +650,7 @@ fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> 
     let content_key = stream_dedup_key(stream)?;
     let direct_url = stream.url.as_deref().and_then(normalize_http_url);
     let mut headers = stream.request_headers();
-    for (name, _) in &mut headers {
-        name.make_ascii_lowercase();
-    }
-    headers.sort();
+    canonicalize_header_identity(&mut headers);
     let mut hasher = Sha256::new();
     serde_json::to_writer(&mut hasher, &(source_id, content_key, direct_url, headers)).ok()?;
     Some(format!("s:{:x}", hasher.finalize()))
@@ -587,15 +684,23 @@ pub(crate) fn push_bounded_error(errors: &mut Vec<String>, error: impl Into<Stri
     }
 }
 
-pub(crate) fn merge_unique_streams(
+impl From<&AddonStream> for AddonStream {
+    fn from(stream: &AddonStream) -> Self {
+        stream.clone()
+    }
+}
+
+pub(crate) fn merge_unique_streams<S: std::borrow::Borrow<AddonStream> + Into<AddonStream>>(
     merged: &mut Vec<AddonStream>,
     seen: &mut std::collections::HashSet<String>,
-    streams: impl IntoIterator<Item = AddonStream>,
+    streams: impl IntoIterator<Item = S>,
 ) {
     for stream in streams {
         // `prepare_addon_streams` already keyed the stream; recompute nothing.
-        if !stream.stream_key.is_empty() && seen.insert(stream.stream_key.clone()) {
-            merged.push(stream);
+        let key = &stream.borrow().stream_key;
+        if !key.is_empty() && !seen.contains(key) {
+            seen.insert(key.clone());
+            merged.push(stream.into());
         }
     }
 }
@@ -635,25 +740,25 @@ pub(crate) fn build_stream_query_ids(
             // the real or season-1 slot, season 0 for specials. Both media types try
             // absolute coordinates; anime additionally retries season-1 and season-0 forms.
             if media_type == "anime" && s != 1 {
-                push_unique(&mut ids, &format!("{}:1:{}", id, e));
+                push_unique(&mut ids, format!("{}:1:{}", id, e));
             }
             if let Some(targets) =
                 stream_absolute_episode_targets(media_type, id, season, episode, absolute_episode)
             {
                 for (target_season, target_episode) in targets {
-                    push_unique(&mut ids, &format!("{id}:{target_season}:{target_episode}"));
+                    push_unique(&mut ids, format!("{id}:{target_season}:{target_episode}"));
                 }
             }
             if media_type == "anime" {
-                push_unique(&mut ids, &format!("{}:0:{}", id, e));
+                push_unique(&mut ids, format!("{}:0:{}", id, e));
             }
         } else if media_type == "anime" {
             // Namespaced anime ids (kitsu:, …) index episodes flat — `{id}:{episode}` —
             // so the `{id}:{s}:{e}` probe above misses them. Retry bare-episode and
             // absolute-episode forms; the per-addon id-prefix gate still filters.
-            push_unique(&mut ids, &format!("{}:{}", id, e));
+            push_unique(&mut ids, format!("{}:{}", id, e));
             if let Some(abs_ep) = absolute_episode.filter(|abs_ep| *abs_ep != e) {
-                push_unique(&mut ids, &format!("{}:{}", id, abs_ep));
+                push_unique(&mut ids, format!("{}:{}", id, abs_ep));
             }
         }
     }
@@ -799,7 +904,18 @@ pub(crate) fn stream_resolution_priority(
     let has_info_hash = stream.info_hash.as_deref().is_some_and(non_blank)
         || stream.url.as_deref().and_then(magnet_xt_hash).is_some();
 
-    let viability = if matches!(
+    let texts = stream.match_texts();
+    let is_clip = [
+        texts.filename.as_deref(),
+        texts.title.as_deref(),
+        texts.name.as_deref(),
+    ]
+    .into_iter()
+    .flatten()
+    .any(|text| STREAM_CLIP_REGEX.is_match(text));
+    let viability = if is_clip {
+        0
+    } else if matches!(
         stream.presentation.delivery_kind,
         StreamDeliveryKind::Cached
     ) {

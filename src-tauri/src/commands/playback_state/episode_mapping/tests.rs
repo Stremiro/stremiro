@@ -2,11 +2,8 @@ use super::*;
 
 #[test]
 fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
-    let store = crate::commands::DurableStoreRegistry::default()
-        .open_path(
-            std::env::temp_dir().join(format!("stremiro-mappings-{}.json", uuid::Uuid::new_v4())),
-        )
-        .unwrap();
+    let fixture = crate::test_helpers::test_store();
+    let store = &fixture.store;
     let scope = "series:tt2560140";
     let digest_key = playback_episode_mapping_digest_item_key(scope);
     let mut index = Vec::new();
@@ -39,12 +36,12 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     store.set(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, json!(index));
     store.set(&digest_key, json!(1));
     assert!(!mapped_canonical_season_is_final(
-        &store,
+        store,
         "series",
         "tt2560140",
         1
     ));
-    let episodes = [Episode {
+    let mut episodes = [Episode {
         id: "tt2560140:1:1".to_string(),
         title: None,
         season: 1,
@@ -65,7 +62,7 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         2,
     )];
     let (writes, deletes, changed) = collect_episode_mapping_writes(
-        &store,
+        store,
         "series",
         "tt2560140",
         &episodes,
@@ -80,13 +77,13 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
     );
     assert_eq!(deletes.len(), 4);
     for key in deletes {
-        assert!(load_playback_episode_mapping_snapshot(&store, &key).is_some());
+        assert!(load_playback_episode_mapping_snapshot(store, &key).is_some());
         store.delete(playback_episode_mapping_item_key(&key));
-        assert!(load_playback_episode_mapping_snapshot(&store, &key).is_none());
+        assert!(load_playback_episode_mapping_snapshot(store, &key).is_none());
     }
     assert_eq!(index.len(), 3);
     for key in &index {
-        assert!(load_playback_episode_mapping_snapshot(&store, key).is_some());
+        assert!(load_playback_episode_mapping_snapshot(store, key).is_some());
     }
     store.set(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, json!(index));
     let digest = episode_mappings_digest("series", "tt2560140", None, &episodes);
@@ -95,30 +92,73 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         json!(EpisodeMappingDigestRecord { digest, seen_at: 2 }),
     );
     assert!(mapped_canonical_season_is_final(
-        &store,
+        store,
         "series",
         "tt2560140",
         1
     ));
     assert!(stored_episode_mapping_digest_matches(
-        &store,
+        store,
         &digest_key,
         digest,
         3
     ));
     let unchanged_index = index.clone();
     let (writes, deletes, changed) =
-        collect_episode_mapping_writes(&store, "series", "tt2560140", &[], &[], &mut index);
+        collect_episode_mapping_writes(store, "series", "tt2560140", &[], &[], &mut index);
     assert!(writes.is_empty());
     assert!(deletes.is_empty());
     assert!(!changed);
     assert_eq!(index, unchanged_index);
     assert!(stored_episode_mapping_digest_matches(
-        &store,
+        store,
         &digest_key,
         digest,
         4
     ));
+    episodes[0].id = "tt999:4:12".into();
+    assert_ne!(
+        digest,
+        episode_mappings_digest("series", "tt2560140", None, &episodes)
+    );
+    let (writes, _, _) = collect_episode_mapping_writes(
+        store,
+        "series",
+        "tt2560140",
+        &episodes,
+        &snapshots,
+        &mut index,
+    );
+    assert_eq!(writes.len(), 1);
+    let (key, cached) = &writes[0];
+    assert_eq!(cached.video_id.as_deref(), Some("tt999:4:12"));
+    assert_eq!(cached.snapshot.source_lookup_id, "tt2560140");
+    store.set(playback_episode_mapping_item_key(key), json!(cached));
+    assert_eq!(
+        load_playback_episode_mapping_snapshot(store, key)
+            .unwrap()
+            .source_season,
+        1
+    );
+    let (unchanged, _, _) = collect_episode_mapping_writes(
+        store,
+        "series",
+        "tt2560140",
+        &episodes,
+        &snapshots,
+        &mut index,
+    );
+    assert!(unchanged.is_empty());
+    episodes[0].id = "tt999:4:13".into();
+    let (changed, _, _) = collect_episode_mapping_writes(
+        store,
+        "series",
+        "tt2560140",
+        &episodes,
+        &snapshots,
+        &mut index,
+    );
+    assert_eq!(changed[0].1.video_id.as_deref(), Some("tt999:4:13"));
 }
 
 #[test]
@@ -149,6 +189,10 @@ fn episode_mapping_key_merge_matches_single_insert_semantics() {
 }
 
 // ── mapping_index_key_canonical_season ────────────────────────────────
+
+fn mapping_index_key_canonical_season(key: &str) -> Option<u32> {
+    split_episode_snapshot_key(key)?.1.parse::<u32>().ok()
+}
 
 #[test]
 fn reads_season_from_the_right_of_an_index_key() {
@@ -261,11 +305,8 @@ fn max_mapped_season_degrades_to_none_when_unmapped() {
 
 #[test]
 fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
-    let store = crate::commands::DurableStoreRegistry::default()
-        .open_path(
-            std::env::temp_dir().join(format!("stremiro-mappings-{}.json", uuid::Uuid::new_v4())),
-        )
-        .unwrap();
+    let fixture = crate::test_helpers::test_store();
+    let store = &fixture.store;
     let scope = "series:tt2560140";
     let digest_key = playback_episode_mapping_digest_item_key(scope);
     let mut index = Vec::new();
@@ -290,14 +331,14 @@ fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
     index.sort_unstable();
     store.set(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, json!(index));
     assert!(!mapped_canonical_season_is_final(
-        &store,
+        store,
         "series",
         "tt2560140",
         4
     ));
     store.set(&digest_key, json!("invalid"));
     assert!(!mapped_canonical_season_is_final(
-        &store,
+        store,
         "series",
         "tt2560140",
         4
@@ -311,20 +352,20 @@ fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
     ] {
         store.set(&digest_key, digest);
         assert!(mapped_canonical_season_is_final(
-            &store,
+            store,
             "anime",
             "tt2560140",
             4
         ));
         assert!(!mapped_canonical_season_is_final(
-            &store,
+            store,
             "series",
             "tt2560140",
             1
         ));
     }
     assert_eq!(
-        prune_episode_mapping_index(&store, &mut index, scope),
+        prune_episode_mapping_index(store, &mut index, scope),
         (true, true)
     );
     store.set(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, json!(index));
@@ -334,7 +375,7 @@ fn partial_mapping_eviction_cannot_promote_a_surviving_season_to_final() {
         Some(1)
     );
     assert!(!mapped_canonical_season_is_final(
-        &store,
+        store,
         "series",
         "tt2560140",
         1

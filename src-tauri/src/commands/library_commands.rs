@@ -5,8 +5,8 @@ use super::store_helpers::{
     WATCH_STATUS_LAYOUT,
 };
 use super::{
-    normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
-    WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
+    js_trim, normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY,
+    LIBRARY_STORE_FILE, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
@@ -17,16 +17,43 @@ use tauri::{command, AppHandle};
 /// Bound on the library index: every add rewrites the index key, so an
 /// unbounded index makes every read/write linear in junk entries.
 pub(super) const MAX_LIBRARY_ITEMS: usize = 5_000;
+const TITLE_SEARCH_MAX_TITLES: usize = 10_000;
+const TITLE_SEARCH_MAX_QUERY_CHARS: usize = 4_096;
+
+#[derive(Debug)]
+pub(super) enum LibraryWriteError {
+    InvalidItem(String),
+    CapacityExceeded(String),
+    Failed(String),
+}
+
+impl From<String> for LibraryWriteError {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+
+impl From<LibraryWriteError> for String {
+    fn from(error: LibraryWriteError) -> Self {
+        match error {
+            LibraryWriteError::InvalidItem(message)
+            | LibraryWriteError::CapacityExceeded(message)
+            | LibraryWriteError::Failed(message) => message,
+        }
+    }
+}
 
 /// Prepare without mutating either domain: status-set uses this preflight
 /// before writing its status, so a full library rejects the entire action.
 pub(super) fn prepare_library_write(
     store: &DurableStore,
     item: MediaItem,
-) -> Result<(MediaItem, Vec<String>), String> {
+) -> Result<(MediaItem, Vec<String>), LibraryWriteError> {
     let mut index = load_library_index(store)?;
     let item = normalize_library_item(item).ok_or_else(|| {
-        "Invalid library item. ID, title, and media type are required.".to_string()
+        LibraryWriteError::InvalidItem(
+            "Invalid library item. ID, title, and media type are required.".to_string(),
+        )
     })?;
     let existing = store
         .get_typed(library_item_key(&item.id))
@@ -35,7 +62,9 @@ pub(super) fn prepare_library_write(
     let item = merge_library_item(existing.as_ref(), item);
     if !index.contains(&item.id) {
         if index.len() >= MAX_LIBRARY_ITEMS {
-            return Err("Library is full.".to_string());
+            return Err(LibraryWriteError::CapacityExceeded(
+                "Library is full.".to_string(),
+            ));
         }
         index.push(item.id.clone());
         index.sort();
@@ -47,7 +76,7 @@ pub(super) fn prepare_library_write(
 pub async fn add_to_library(app: AppHandle, item: MediaItem) -> Result<(), String> {
     run_blocking_store_op(move || {
         let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        let (final_item, index) = prepare_library_write(&store, item)?;
+        let (final_item, index) = prepare_library_write(&store, item).map_err(String::from)?;
 
         store.set(library_item_key(&final_item.id), json!(final_item));
         store.set(LIBRARY_INDEX_KEY, json!(index));
@@ -79,8 +108,8 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
         status_index.retain(|entry| entry != &id);
         if removed_status || status_index.len() != original_status_len {
             status_store.set(WATCH_STATUS_INDEX_KEY, json!(status_index));
-            status_store.save()?;
         }
+        status_store.save()?;
 
         let deleted_item = store.delete(library_item_key(&id));
         let original_len = index.len();
@@ -88,8 +117,8 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
 
         if deleted_item || index.len() != original_len {
             store.set(LIBRARY_INDEX_KEY, json!(index));
-            store.save()?;
         }
+        store.save()?;
 
         Ok(())
     })
@@ -123,9 +152,13 @@ fn remove_library_items(
             &statuses.index,
             &statuses.items,
         )?;
+    } else {
+        status_store.save()?;
     }
     if removed > 0 {
         persist_index_map(store, LIBRARY_LAYOUT, &library.index, &library.items)?;
+    } else {
+        store.save()?;
     }
     Ok(removed)
 }
@@ -196,6 +229,30 @@ pub(crate) struct ProfileLibrary {
     status_counts: HashMap<String, usize>,
 }
 
+fn matching_title_key(title: &str, query: &str) -> Option<String> {
+    let title = title.to_lowercase();
+    title.contains(query).then_some(title)
+}
+
+#[command]
+pub fn search_titles(titles: Vec<String>, query: String) -> Result<Vec<u32>, String> {
+    if titles.len() > TITLE_SEARCH_MAX_TITLES {
+        return Err("Too many titles.".to_string());
+    }
+    if query.chars().nth(TITLE_SEARCH_MAX_QUERY_CHARS).is_some() {
+        return Err("Title search query is too long.".to_string());
+    }
+    let query = js_trim(&query).to_lowercase();
+    if query.is_empty() {
+        return Ok((0..titles.len() as u32).collect());
+    }
+    Ok(titles
+        .iter()
+        .enumerate()
+        .filter_map(|(index, title)| matching_title_key(title, &query).map(|_| index as u32))
+        .collect())
+}
+
 fn filter_profile_library(
     mut items: Vec<MediaItem>,
     statuses: &HashMap<String, String>,
@@ -209,7 +266,7 @@ fn filter_profile_library(
         }
     };
     // Keep literal Unicode/punctuation matching; remote search normalization is ASCII-only.
-    let query = filters.query.as_deref().unwrap_or("").trim().to_lowercase();
+    let query = js_trim(filters.query.as_deref().unwrap_or("")).to_lowercase();
     let mut status_counts = ["watching", "watched", "plan_to_watch", "dropped", "none"]
         .into_iter()
         .map(|status| (status.to_string(), 0))
@@ -230,23 +287,28 @@ fn filter_profile_library(
             && status.as_deref().is_none_or(|status| {
                 statuses.get(&item.id).map_or("none", String::as_str) == status
             })
-            && (query.is_empty() || item.title.to_lowercase().contains(&query))
     });
-    items.sort_by_cached_key(|item| {
-        let title = item.title.to_lowercase();
-        let year = item.primary_year;
-        let year_key = match filters.sort {
-            LibrarySort::YearDesc => year.map(|year| u32::MAX - year).unwrap_or(u32::MAX),
-            LibrarySort::YearAsc => year.unwrap_or(u32::MAX),
-            _ => 0,
-        };
-        (year_key, title, item.id.clone())
+    let mut items: Vec<_> = items
+        .into_iter()
+        .filter_map(|item| {
+            let title = matching_title_key(&item.title, &query)?;
+            let year = item.primary_year;
+            let year_key = match filters.sort {
+                LibrarySort::YearDesc => year.map(|year| u32::MAX - year).unwrap_or(u32::MAX),
+                LibrarySort::YearAsc => year.unwrap_or(u32::MAX),
+                _ => 0,
+            };
+            Some(((year_key, title), item))
+        })
+        .collect();
+    items.sort_by(|(left_key, left), (right_key, right)| {
+        left_key.cmp(right_key).then_with(|| left.id.cmp(&right.id))
     });
     if matches!(filters.sort, LibrarySort::TitleDesc) {
         items.reverse();
     }
     Ok(ProfileLibrary {
-        items,
+        items: items.into_iter().map(|(_, item)| item).collect(),
         status_counts,
     })
 }
@@ -279,6 +341,45 @@ fn read_profile_library(
 mod tests {
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn title_search_preserves_order_unicode_and_javascript_trim() {
+        let titles: Vec<_> = ["ÄPFEL", "東京: Dawn", "äpfel again", "İSTANBUL", "ΟΣ", ""]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for (query, expected) in [
+            ("\u{feff} ÄP \u{3000}", vec![0, 2]),
+            ("東京:", vec![1]),
+            ("i\u{307}", vec![3]),
+            ("ος", vec![4]),
+            ("\u{feff}\t\u{2028}", vec![0, 1, 2, 3, 4, 5]),
+            ("\u{85}äp\u{85}", vec![]),
+            ("missing", vec![]),
+        ] {
+            assert_eq!(
+                search_titles(titles.clone(), query.into()).unwrap(),
+                expected
+            );
+        }
+        assert!(search_titles(vec![], String::new()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn title_search_accepts_caps_and_rejects_excess_without_truncating() {
+        assert_eq!(
+            search_titles(vec![String::new(); 10_000], String::new())
+                .unwrap()
+                .len(),
+            10_000
+        );
+        assert_eq!(
+            search_titles(vec!["界".repeat(4_097)], "界".repeat(4_096)).unwrap(),
+            [0]
+        );
+        assert!(search_titles(vec![String::new(); 10_001], String::new()).is_err());
+        assert!(search_titles(vec![], "x".repeat(4_097)).is_err());
+    }
 
     fn profile_items() -> Vec<MediaItem> {
         [
@@ -327,6 +428,11 @@ mod tests {
     fn profile_search_matches_literal_titles_case_insensitively() {
         assert_eq!(profile_ids(json!({"query": "  ALP  "})), ["a"]);
         assert_eq!(profile_ids(json!({"query": " 東京: "})), ["j"]);
+        assert_eq!(
+            profile_ids(json!({"query": "\u{feff} ALP \u{3000}"})),
+            ["a"]
+        );
+        assert!(profile_ids(json!({"query": "\u{85}alp\u{85}"})).is_empty());
         assert!(profile_ids(json!({"query": "missing"})).is_empty());
     }
 
@@ -354,6 +460,43 @@ mod tests {
             ("year-desc", vec!["a", "z", "b", "u", "j"]),
         ] {
             assert_eq!(profile_ids(json!({"sort": sort})), expected, "{sort}");
+        }
+    }
+
+    #[test]
+    fn profile_search_keeps_unicode_matching_stable_ties_and_descending_reversal() {
+        let items: Vec<_> = [("z", "ÄPFEL"), ("a", "Äpfel"), ("a", "äPFEL")]
+            .into_iter()
+            .map(|(id, title)| {
+                let mut item = test_media_item(id, "movie");
+                item.title = title.to_string();
+                item
+            })
+            .collect();
+        for sort in [
+            "default",
+            "title-asc",
+            "title-desc",
+            "year-asc",
+            "year-desc",
+        ] {
+            let result = filter_profile_library(
+                items.clone(),
+                &HashMap::new(),
+                serde_json::from_value(json!({"query": "  ÄP  ", "sort": sort})).unwrap(),
+            )
+            .unwrap();
+            let titles: Vec<_> = result
+                .items
+                .iter()
+                .map(|item| item.title.as_str())
+                .collect();
+            let expected = if sort == "title-desc" {
+                ["ÄPFEL", "äPFEL", "Äpfel"]
+            } else {
+                ["Äpfel", "äPFEL", "ÄPFEL"]
+            };
+            assert_eq!(titles, expected, "{sort}");
         }
     }
 

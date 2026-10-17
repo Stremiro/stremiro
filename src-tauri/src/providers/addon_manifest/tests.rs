@@ -5,6 +5,56 @@ fn parse(json: &str) -> AddonManifest {
 }
 
 #[test]
+fn configuration_required_blocks_only_new_installations_without_changing_snapshots() {
+    let bytes = br#"{
+        "name": "Needs setup",
+        "resources": ["stream"],
+        "types": ["movie"],
+        "behaviorHints": {"configurationRequired": true, "configurable": true}
+    }"#;
+    assert_eq!(
+        parse_addon_manifest_checked(bytes, true).unwrap_err(),
+        ADDON_CONFIGURATION_REQUIRED_MESSAGE
+    );
+    let snapshot = parse_addon_manifest_checked(bytes, false).expect("installed addon refresh");
+    assert!(snapshot_supports_request(
+        &snapshot, "stream", "movie", "tt1"
+    ));
+    assert_eq!(
+        serde_json::to_value(snapshot).unwrap(),
+        serde_json::json!({
+            "name": "Needs setup",
+            "resources": [{"name": "stream", "types": ["movie"], "idPrefixes": []}],
+            "catalogs": []
+        })
+    );
+}
+
+#[test]
+fn configurable_and_malformed_optional_hints_do_not_require_setup() {
+    for hints in [
+        None,
+        Some(serde_json::Value::Null),
+        Some(serde_json::json!(true)),
+        Some(serde_json::json!([])),
+        Some(serde_json::json!({"configurable": true})),
+        Some(serde_json::json!({"configurationRequired": false, "configurable": true})),
+        Some(serde_json::json!({"configurationRequired": null})),
+        Some(serde_json::json!({"configurationRequired": "true"})),
+        Some(serde_json::json!({"configurationRequired": 1})),
+        Some(serde_json::json!({"configurationRequired": {}})),
+    ] {
+        let mut value = serde_json::json!({"name": "Ready", "resources": ["stream"]});
+        if let Some(hints) = hints {
+            value["behaviorHints"] = hints;
+        }
+        let bytes = serde_json::to_vec(&value).unwrap();
+        let snapshot = parse_addon_manifest_checked(&bytes, true).expect("installable manifest");
+        assert!(snapshot_is_classified(&snapshot));
+    }
+}
+
+#[test]
 fn repeated_resource_declarations_preserve_paired_scopes_and_dedupe_identical_rows() {
     let snapshot = parse(
         r#"{
