@@ -1,4 +1,4 @@
-import { useWindowVirtualizer } from '@tanstack/react-virtual';
+import { type Range, useWindowVirtualizer } from '@tanstack/react-virtual';
 import {
   Fragment,
   type ReactNode,
@@ -9,6 +9,7 @@ import {
   useState,
 } from 'react';
 
+import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useWindowScrollMargin } from '@/hooks/use-window-scroll-margin';
 
 const DEFAULT_GRID_GAP_PX = 16;
@@ -39,11 +40,8 @@ interface WindowVirtualizedGridProps<T> {
   renderItem: (item: T, index: number) => ReactNode;
   estimateItemHeight: (itemWidth: number) => number;
   getColumnCount?: (viewportWidth: number, containerWidth: number) => number;
-  overscan?: number;
   gap?: number;
   rowGap?: number;
-  virtualizationThreshold?: number;
-  fallbackItemWidth?: number;
 }
 
 export function WindowVirtualizedGrid<T>({
@@ -52,18 +50,16 @@ export function WindowVirtualizedGrid<T>({
   renderItem,
   estimateItemHeight,
   getColumnCount = getDefaultWindowGridColumnCount,
-  overscan = DEFAULT_OVERSCAN_ROWS,
   gap = DEFAULT_GRID_GAP_PX,
   rowGap = gap,
-  virtualizationThreshold = DEFAULT_VIRTUALIZATION_THRESHOLD,
-  fallbackItemWidth = DEFAULT_FALLBACK_ITEM_WIDTH_PX,
 }: WindowVirtualizedGridProps<T>) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
   const [metrics, setMetrics] = useState(() => ({
     columnCount: getColumnCount(typeof window === 'undefined' ? 1280 : window.innerWidth, 0),
     containerWidth: 0,
   }));
-  const shouldVirtualize = items.length >= virtualizationThreshold;
+  const shouldVirtualize = items.length >= DEFAULT_VIRTUALIZATION_THRESHOLD;
   // Metrics feed both plain and virtualized rendering, so the grid owns the resize wiring; the virtualized-only scroll margin comes from the hook.
   const scrollMargin = useWindowScrollMargin(containerRef, shouldVirtualize);
 
@@ -104,16 +100,21 @@ export function WindowVirtualizedGrid<T>({
   const estimatedItemWidth =
     metrics.containerWidth > 0
       ? (metrics.containerWidth - gap * (columnCount - 1)) / columnCount
-      : fallbackItemWidth;
+      : DEFAULT_FALLBACK_ITEM_WIDTH_PX;
   const estimatedRowHeight = estimateItemHeight(estimatedItemWidth) + rowGap;
+  const rangeExtractor = useCallback(
+    (range: Range) => focusedRowRange(range, focusedIndex),
+    [focusedIndex],
+  );
 
   const rowVirtualizer = useWindowVirtualizer({
     count: rowCount,
     enabled: shouldVirtualize,
     estimateSize: () => estimatedRowHeight,
-    overscan,
+    overscan: DEFAULT_OVERSCAN_ROWS,
     scrollMargin,
     getItemKey: (index) => `row-${index}`,
+    rangeExtractor,
   });
 
   const gridTemplateColumns = `repeat(${columnCount}, minmax(0, 1fr))`;
@@ -151,15 +152,18 @@ export function WindowVirtualizedGrid<T>({
             key={virtualRow.key}
             data-index={virtualRow.index}
             ref={rowVirtualizer.measureElement}
+            onFocusCapture={() => setFocusedIndex(virtualRow.index)}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
+            }}
             style={{
               position: 'absolute',
-              top: 0,
+              top: `${virtualRow.start - scrollMargin}px`,
               left: 0,
               width: '100%',
               display: 'grid',
               gap: `${gap}px`,
               gridTemplateColumns,
-              transform: `translateY(${virtualRow.start - scrollMargin}px)`,
               paddingBottom: `${rowGap}px`,
             }}
           >

@@ -4,7 +4,6 @@ import type { WatchProgress } from '@/lib/api';
 import {
   formatWatchRemaining,
   getWatchProgressPercent,
-  watchProgressCoordinates,
   watchProgressMediaItem,
 } from '@/lib/history-playback';
 import { formatSeasonEpisode } from '@/lib/utils';
@@ -30,7 +29,6 @@ export const WatchProgressCard = memo(function WatchProgressCard({
   const { play, isPending } = useHistoryPlayback(item, playErrorTitle);
   const progressPercent = getWatchProgressPercent(item.position, item.duration);
   const progress = progressPercent > 0 ? progressPercent : undefined;
-  const { season, episode } = watchProgressCoordinates(item);
 
   const mediaItem = useMemo(() => watchProgressMediaItem(item), [item]);
   // The S/E tag rides the poster badge (`subtitle`), so the meta line only
@@ -56,7 +54,12 @@ export const WatchProgressCard = memo(function WatchProgressCard({
       onPlay={play}
       isPlayPending={isPending}
       onRemoveFromContinue={onRemove ? handleRemove : undefined}
-      subtitle={formatSeasonEpisode(season, episode) || undefined}
+      subtitle={
+        formatSeasonEpisode(
+          item.absolute_season ?? undefined,
+          item.absolute_episode ?? undefined,
+        ) || undefined
+      }
     />
   );
 });

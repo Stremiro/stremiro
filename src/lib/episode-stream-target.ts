@@ -1,4 +1,5 @@
 import type { Episode } from '@/lib/api';
+import { nonBlank } from '@/lib/utils';
 
 type EpisodeCoordinates = Pick<
   Episode,
@@ -13,15 +14,12 @@ export interface NextEpisodeStreamCoordinates {
   absoluteEpisode: number;
 }
 
-// Blank addon IDs count as missing — mirrors Rust `non_blank_opt`.
-const nonEmpty = (value?: string) => (value && value.trim() ? value : undefined);
-
 export function buildEpisodeStreamTarget(
   fallbackStreamId: string,
   episode: EpisodeCoordinates,
 ): NextEpisodeStreamCoordinates {
   return {
-    streamLookupId: nonEmpty(episode.streamLookupId) ?? fallbackStreamId,
+    streamLookupId: nonBlank(episode.streamLookupId) ?? fallbackStreamId,
     streamSeason: episode.streamSeason ?? episode.season,
     streamEpisode: episode.streamEpisode ?? episode.episode,
     absoluteSeason: episode.season,
@@ -72,5 +70,6 @@ export function findEpisodeByCoordinates(
   season: number | undefined,
   episode: number | undefined,
 ): Episode | undefined {
+  if (season === undefined || episode === undefined) return undefined;
   return episodes?.find((candidate) => episodeMatchesCoordinates(candidate, season, episode));
 }

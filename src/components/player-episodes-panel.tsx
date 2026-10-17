@@ -1,4 +1,4 @@
-import { useVirtualizer } from '@tanstack/react-virtual';
+import { type Range, useVirtualizer } from '@tanstack/react-virtual';
 import { Check, ChevronDown, PanelRight, X } from 'lucide-react';
 import { memo, type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
@@ -7,6 +7,7 @@ import {
   CHROME_ICON_BUTTON_CLASS,
 } from '@/components/player-chrome-styles';
 import { RemoteImage } from '@/components/remote-image';
+import { RetryBanner } from '@/components/retry-banner';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -15,12 +16,12 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ScrollArea } from '@/components/ui/scroll-area';
 import { SearchInput } from '@/components/ui/search-input';
-import { useEffectiveEpisodeSearch } from '@/hooks/use-episode-search';
+import { focusedRowRange } from '@/components/window-virtualized-stack';
+import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
 import { useDebounce } from '@/hooks/use-debounce';
 import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
-import { EPISODE_SEARCH_MIN_COUNT, filterEpisodesBySearchQuery } from '@/lib/episode-search';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
 import { cn, formatAirDate, getEpisodeTitle } from '@/lib/utils';
@@ -104,26 +105,34 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     () => episodes.filter((ep) => ep.season === selectedSeason),
     [episodes, selectedSeason],
   );
-  // Same filter vocabulary as the details episode grid — shared via `episode-search` so the surfaces can't drift.
   const [episodeSearch, setEpisodeSearch] = useState('');
   // The field hides under the count threshold — a persisted query must not invisibly filter rows the user
   // can't see or clear. The text is kept so it returns with the field on a searchable season.
   const searchVisible = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
-  const effectiveEpisodeSearch = useEffectiveEpisodeSearch(episodeSearch, searchVisible);
-  const visibleEpisodes = useMemo(
-    () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
-    [effectiveEpisodeSearch, seasonEpisodes],
-  );
+  const {
+    effectiveEpisodeSearch,
+    filteredEpisodes: visibleEpisodes,
+    isSearchPending,
+    searchError,
+    isSearchFetching,
+    retrySearch,
+  } = useEpisodeSearch(seasonEpisodes, episodeSearch, searchVisible);
   const scrollViewportRef = useRef<HTMLDivElement | null>(null);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
   const shouldVirtualize = visibleEpisodes.length >= EPISODE_LIST_VIRTUALIZE_THRESHOLD;
   // Keep rows through the exit fade, then stop observing the hidden viewport.
   const listExiting = useDebounce(open, 180);
+  const rangeExtractor = useCallback(
+    (range: Range) => focusedRowRange(range, focusedIndex),
+    [focusedIndex],
+  );
   const episodeVirtualizer = useVirtualizer({
     count: visibleEpisodes.length,
     getScrollElement: () => scrollViewportRef.current,
     estimateSize: () => EPISODE_ROW_ESTIMATE_PX + EPISODE_ROW_GAP_PX,
     overscan: 6,
     enabled: shouldVirtualize && (open || listExiting),
+    rangeExtractor,
   });
 
   // A new filter result starts at the top — a stale offset could leave a short list scrolled past its end.
@@ -152,8 +161,8 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       onSeasonChange(currentSeason);
       return;
     }
-    // An empty list is still loading — consuming the once-per-open flag here would skip centering on arrival.
-    if (didScrollToCurrentRef.current || visibleEpisodes.length === 0) return;
+    // An empty list or pending search is still loading — consuming the once-per-open flag here would skip centering on arrival.
+    if (didScrollToCurrentRef.current || visibleEpisodes.length === 0 || isSearchPending) return;
     didScrollToCurrentRef.current = true;
 
     const index = visibleEpisodes.findIndex((ep) =>
@@ -176,6 +185,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   }, [
     open,
     visibleEpisodes,
+    isSearchPending,
     shouldVirtualize,
     episodeVirtualizer,
     currentSeason,
@@ -392,6 +402,14 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             )}
           </div>
         )}
+        {searchError && (
+          <RetryBanner
+            className='mx-4 mb-3 px-3 py-2'
+            message='Search failed.'
+            isRetrying={isSearchFetching}
+            onRetry={retrySearch}
+          />
+        )}
       </div>
 
       <ScrollArea viewportRef={scrollViewportRef} className='min-h-0 flex-1'>
@@ -418,6 +436,10 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                   key={`${ep.season}-${ep.episode}`}
                   data-index={virtualRow.index}
                   ref={episodeVirtualizer.measureElement}
+                  onFocusCapture={() => setFocusedIndex(virtualRow.index)}
+                  onBlurCapture={(event) => {
+                    if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
+                  }}
                   className='absolute left-2 right-2 top-2'
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,

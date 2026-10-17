@@ -16,7 +16,7 @@ interface SeasonSwitcherProps {
 }
 
 const SCROLL_BUTTON_CLASS =
-  'pointer-events-auto flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-black/50 text-white/70 backdrop-blur-xs transition-colors duration-150 hover:bg-black/70 hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
+  'pointer-events-auto flex h-9 w-9 items-center justify-center rounded-md border border-white/10 bg-black/50 text-white/70 backdrop-blur-xs transition-colors duration-150 not-aria-disabled:hover:bg-black/70 not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-40';
 
 export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: SeasonSwitcherProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -24,8 +24,9 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
   const {
     bind: bindScrollRef,
     syncScrollState,
-    canScrollLeft: showLeft,
-    canScrollRight: showRight,
+    hasOverflow,
+    canScrollLeft,
+    canScrollRight,
   } = useScrollEdgeIndicators(scrollRef);
   const hasMultipleSeasons = localSeasons.length > 1;
   const activeIndex = localSeasons.findIndex((season) => season.number === activeSeason);
@@ -136,26 +137,32 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
         })}
       </div>
 
-      {showLeft && (
+      {hasOverflow && (
         <div className='pointer-events-none absolute inset-y-0 left-0 z-10 flex w-12 items-center bg-linear-to-r from-background via-background/80 to-transparent'>
           <button
             type='button'
-            onClick={() => scroll('left')}
+            onClick={() => {
+              if (canScrollLeft) scroll('left');
+            }}
             className={`${SCROLL_BUTTON_CLASS} ml-1`}
             aria-label='Scroll seasons left'
+            aria-disabled={!canScrollLeft || undefined}
           >
             <ChevronLeft className='h-4 w-4' />
           </button>
         </div>
       )}
 
-      {showRight && (
+      {hasOverflow && (
         <div className='pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end bg-linear-to-l from-background via-background/80 to-transparent'>
           <button
             type='button'
-            onClick={() => scroll('right')}
+            onClick={() => {
+              if (canScrollRight) scroll('right');
+            }}
             className={`${SCROLL_BUTTON_CLASS} mr-1`}
             aria-label='Scroll seasons right'
+            aria-disabled={!canScrollRight || undefined}
           >
             <ChevronRight className='h-4 w-4' />
           </button>

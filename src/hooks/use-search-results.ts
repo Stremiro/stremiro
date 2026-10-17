@@ -2,7 +2,7 @@ import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
 import { useMemo } from 'react';
 
 import { useLocalDay } from '@/hooks/use-local-day';
-import { flattenCatalogPages, searchCatalogQueryOptions } from '@/lib/search-catalog';
+import { searchCatalogQueryOptions } from '@/lib/search-catalog';
 import type { SearchFeed, SearchMediaType } from '@/lib/search-page-state';
 
 interface UseSearchResultsArgs {
@@ -48,7 +48,7 @@ export function useSearchResults({
     enabled: isOnline,
   });
 
-  const results = useMemo(() => flattenCatalogPages(data?.pages ?? []), [data?.pages]);
+  const results = useMemo(() => data?.pages.flatMap((page) => page.items) ?? [], [data?.pages]);
 
   return {
     results,

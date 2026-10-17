@@ -4,6 +4,7 @@ import { ArrowUpRight, Download, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { ReleaseNotes } from '@/components/release-notes';
+import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { useAppReleaseNotes, useAppUpdater } from '@/hooks/use-app-updater';
 import { getErrorMessage } from '@/lib/api';
@@ -43,6 +44,12 @@ function AppChangelog({
   const version = showNewRelease ? pendingUpdate.version : currentVersion;
   const releaseDate = formatReleaseDate(release?.date);
   const isLoading = !showNewRelease && installedRelease.isLoading;
+  const showReleaseError =
+    !showNewRelease &&
+    !release &&
+    (installedRelease.isError ||
+      installedRelease.fetchStatus === 'paused' ||
+      (isLoading && installedRelease.errorUpdatedAt > 0));
 
   const handleOpenRelease = () => {
     if (!version) return;
@@ -133,6 +140,12 @@ function AppChangelog({
               ? 'Release notes will appear when the installed version is available.'
               : 'Release notes are available in the desktop app.'}
           </p>
+        ) : showReleaseError ? (
+          <RetryBanner
+            message='Release notes are unavailable right now.'
+            isRetrying={installedRelease.isFetching}
+            onRetry={() => void installedRelease.refetch()}
+          />
         ) : isLoading ? (
           <div role='status' className='space-y-3'>
             <span className='sr-only'>Loading release notes…</span>
@@ -153,25 +166,9 @@ function AppChangelog({
             ))}
           </div>
         ) : !showNewRelease && !release ? (
-          <div className='space-y-3'>
-            <p className='text-[13px] leading-relaxed text-zinc-400'>
-              {installedRelease.isError || installedRelease.fetchStatus === 'paused'
-                ? 'Release notes are unavailable right now.'
-                : 'No GitHub release was found for this version.'}
-            </p>
-            {installedRelease.isError || installedRelease.fetchStatus === 'paused' ? (
-              <Button
-                size='sm'
-                variant='outline'
-                disabled={installedRelease.isFetching}
-                onClick={() => void installedRelease.refetch()}
-                className={SETTINGS_OUTLINE_BUTTON_CLASS}
-              >
-                {installedRelease.isFetching && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
-                Retry
-              </Button>
-            ) : null}
-          </div>
+          <p className='text-[13px] leading-relaxed text-zinc-400'>
+            No GitHub release was found for this version.
+          </p>
         ) : (
           <ReleaseNotes notes={release?.notes} />
         )}

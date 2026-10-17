@@ -1,6 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  addDays,
   addMonths,
   differenceInCalendarDays,
   eachDayOfInterval,
@@ -17,7 +16,7 @@ import {
 import { CalendarDays, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
 import { memo, useCallback, useEffect, useEffectEvent, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router';
-import { RemoteImage } from '@/components/remote-image';
+import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
@@ -42,7 +41,6 @@ import {
 const MAX_VISIBLE_DAY_EVENTS = 3;
 // Shared empty fallback — a fresh `[]` would defeat the memoized cells' prop comparison.
 const EMPTY_DAY_EVENTS: CalendarEvent[] = [];
-const UPCOMING_WINDOW_DAYS = 14;
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 const CALENDAR_POPOVER_CLASS =
   'w-72 max-w-[calc(100vw-2rem)] bg-zinc-950/95 backdrop-blur-xl border-white/[0.1] text-white shadow-xl rounded-lg';
@@ -109,23 +107,20 @@ export function Calendar() {
 
   const visibleStartMs = days[0].getTime();
   const visibleEndMs = endOfDay(days[days.length - 1]).getTime();
-  const upcomingEndMs = endOfDay(
-    addDays(new Date(todayStartMs), UPCOMING_WINDOW_DAYS - 1),
-  ).getTime();
 
   const range = useMemo(
     () => ({
       visibleStart: format(new Date(visibleStartMs), 'yyyy-MM-dd'),
       visibleEnd: format(new Date(visibleEndMs), 'yyyy-MM-dd'),
       upcomingStart: format(new Date(todayStartMs), 'yyyy-MM-dd'),
-      upcomingEnd: format(new Date(upcomingEndMs), 'yyyy-MM-dd'),
     }),
-    [visibleStartMs, visibleEndMs, todayStartMs, upcomingEndMs],
+    [visibleStartMs, visibleEndMs, todayStartMs],
   );
   const {
     data: schedule,
-    isError: isScheduleError,
-    isLoading: isLoadingSchedules,
+    errorUpdatedAt,
+    dataUpdatedAt,
+    isLoading,
     isFetching: isFetchingSchedules,
     refetch: refetchSchedules,
   } = useQuery({
@@ -133,6 +128,9 @@ export function Calendar() {
     queryFn: () => api.getCalendarEvents(range),
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
   });
+  const isScheduleError = errorUpdatedAt > dataUpdatedAt;
+  const isLoadingSchedules = isLoading && !isScheduleError;
+  const hasMissingSchedules = (schedule?.missingCount ?? 0) > 0;
   const upcomingEvents = useMemo(() => toCalendarEvents(schedule?.upcoming ?? []), [schedule]);
 
   const eventsByDay = useMemo(
@@ -198,7 +196,7 @@ export function Calendar() {
       <div className='flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4'>
         <div>
           <h1 className='text-[20px] font-medium tracking-[-0.03em] text-white'>Calendar</h1>
-          <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library</p>
+          <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
         </div>
 
         <div className='flex w-full md:w-auto items-center gap-0.5'>
@@ -253,10 +251,10 @@ export function Calendar() {
         </div>
       </div>
 
-      {isScheduleError ? (
+      {isScheduleError || hasMissingSchedules ? (
         <RetryBanner
           className='mb-4'
-          title="Couldn't load release schedules"
+          title="Couldn't load all release schedules"
           message='Releases may be missing — try again.'
           onRetry={() => void refetchSchedules()}
           isRetrying={isFetchingSchedules}
@@ -269,7 +267,7 @@ export function Calendar() {
             </span>
             <h2 className='text-[15px] font-semibold text-white'>Your schedule is empty</h2>
             <p className='mt-1 max-w-sm text-[13px] leading-relaxed text-zinc-500'>
-              Add titles to your library to track their release dates.
+              Add titles to your library or a list to track their release dates.
             </p>
             <Button asChild size='sm' className='mt-4 h-9 rounded-md px-3 text-[12px]'>
               <Link to='/search?type=series'>Find shows</Link>
@@ -304,8 +302,8 @@ export function Calendar() {
               )}
               {isLoadingSchedules
                 ? 'Loading upcoming releases…'
-                : isScheduleError
-                  ? 'Release data is unavailable.'
+                : isScheduleError || hasMissingSchedules
+                  ? 'Release data is incomplete or unavailable.'
                   : 'No upcoming releases in the next two weeks.'}
             </div>
           ) : (
@@ -399,16 +397,11 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
       className='group min-w-0 rounded-md p-2 transition-colors duration-150 hover:bg-white/[0.04] focus-visible:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
     >
       <div className='flex items-center gap-2.5'>
-        <div className='w-9 h-[54px] rounded-sm overflow-hidden bg-black/30 shrink-0'>
-          {event.poster && (
-            <RemoteImage
-              src={event.poster}
-              alt=''
-              loading='lazy'
-              className='w-full h-full object-cover'
-            />
-          )}
-        </div>
+        <PosterThumb
+          poster={event.poster}
+          showFallback={false}
+          className='w-9 h-[54px] rounded-sm bg-black/30 ring-0'
+        />
         <div className='min-w-0 flex-1'>
           <div className='flex items-center gap-1 text-[11px] leading-4'>
             <span
@@ -496,14 +489,12 @@ const CalendarDayCell = memo(function CalendarDayCell({
                   )}
                 >
                   {event.poster && (
-                    <span className='hidden xl:block w-5 h-7 bg-zinc-900 rounded-sm overflow-hidden shrink-0'>
-                      <RemoteImage
-                        src={event.poster}
-                        alt=''
-                        loading='lazy'
-                        className='w-full h-full object-cover opacity-70'
-                      />
-                    </span>
+                    <PosterThumb
+                      poster={event.poster}
+                      showFallback={false}
+                      className='hidden xl:flex w-5 h-7 bg-zinc-900 rounded-sm ring-0'
+                      imageClassName='opacity-70'
+                    />
                   )}
                   <span className='min-w-0 flex-1'>
                     <span className='block truncate text-[12px] text-zinc-200 font-medium'>
@@ -526,16 +517,12 @@ const CalendarDayCell = memo(function CalendarDayCell({
                 sideOffset={6}
               >
                 <div className='flex gap-2.5 p-2.5'>
-                  <div className='w-16 shrink-0 aspect-2/3 bg-black/30 rounded-md overflow-hidden'>
-                    {event.poster && (
-                      <RemoteImage
-                        src={event.poster}
-                        alt={`${event.seriesTitle} poster`}
-                        loading='lazy'
-                        className='w-full h-full object-cover'
-                      />
-                    )}
-                  </div>
+                  <PosterThumb
+                    poster={event.poster}
+                    title={`${event.seriesTitle} poster`}
+                    showFallback={false}
+                    className='w-16 h-auto aspect-2/3 bg-black/30 ring-0'
+                  />
                   <div className='flex-1 min-w-0'>
                     <h4 className='font-semibold text-[13px] leading-tight mb-1'>
                       {event.seriesTitle}
@@ -592,14 +579,12 @@ const CalendarDayCell = memo(function CalendarDayCell({
                     className='flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
                   >
                     {event.poster && (
-                      <span className='block w-5 h-7 bg-zinc-900 rounded-[3px] overflow-hidden shrink-0'>
-                        <RemoteImage
-                          src={event.poster}
-                          alt=''
-                          loading='lazy'
-                          className='w-full h-full object-cover opacity-70'
-                        />
-                      </span>
+                      <PosterThumb
+                        poster={event.poster}
+                        showFallback={false}
+                        className='w-5 h-7 bg-zinc-900 rounded-[3px] ring-0'
+                        imageClassName='opacity-70'
+                      />
                     )}
                     <span className='min-w-0 flex-1 truncate text-[12px] text-zinc-200'>
                       {event.seriesTitle}

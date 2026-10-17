@@ -1,7 +1,8 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { type RefObject, useCallback, useEffect, useRef } from 'react';
+import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
-import type { PlaybackStreamOutcome } from '@/lib/api';
+import { api, type PlaybackStreamOutcome } from '@/lib/api';
+import { getErrorKind } from '@/lib/api-core';
 import { invalidateStreamQueries } from '@/lib/query-invalidation';
 import { applyResolvedStreamToSession, recoverPlayerStream } from '@/lib/resolve-player-stream';
 import { clearTimer, withTimeout } from '@/lib/utils';
@@ -21,22 +22,27 @@ interface UseStreamRecoveryOptions {
   absoluteEpisode?: number;
   streamLookupId?: string;
   currentTimeRef: RefObject<number>;
-  durationRef: RefObject<number>;
+  isLoading: boolean;
+  isPlaying: boolean;
   isPlayingRef: RefObject<boolean>;
+  isResumePending: () => boolean;
   mountedRef: RefObject<boolean>;
   errorRef: RefObject<string | null>;
   // Holds the last position before a failover swap so the resume controller continues there.
   failoverResumePositionRef: RefObject<number>;
   stopLoading: (makeTransparent?: boolean) => void;
   setError: (value: string | null) => void;
-  setIsResolving: (value: boolean) => void;
-  setResolveStatus: (value: string) => void;
+  setStreamError: (value: string) => void;
+  setResolveStatus: (value: string | null) => void;
   onSavedStreamUnavailable?: () => void;
 }
 
 interface UseStreamRecoveryResult {
+  cancelRecovery: () => number;
+  releaseManualSelection: (generation: number) => void;
   clearRecoveryTimers: () => void;
   markPlaybackStarted: () => void;
+  /** True when recovery or a newer playback owner handled the failure. */
   recoverFromSlowStartup: (
     sourceUrl: string,
     outcome?: Exclude<PlaybackStreamOutcome, 'verified'>,
@@ -55,55 +61,125 @@ export function useStreamRecovery({
   absoluteEpisode,
   streamLookupId,
   currentTimeRef,
-  durationRef,
+  isLoading,
+  isPlaying,
   isPlayingRef,
+  isResumePending,
   mountedRef,
   errorRef,
   failoverResumePositionRef,
   stopLoading,
   setError,
-  setIsResolving,
+  setStreamError,
   setResolveStatus,
   onSavedStreamUnavailable,
 }: UseStreamRecoveryOptions): UseStreamRecoveryResult {
   // The exclusion identity: winner-apply owns writes, recovery reads the current stream key.
   const { selectedStreamKeyRef } = stream;
   const queryClient = useQueryClient();
+  const isLoadingNow = useEffectEvent(() => isLoading);
   const playbackStartedRef = useRef(false);
   const startupWatchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const startupWatchdogCancelledRef = useRef(false);
+  const manualSelectionOwnsStreamRef = useRef<{
+    generation: number;
+    url: string | undefined;
+    streamKey: string | undefined;
+  } | null>(null);
+  const [startupWatchdogRevision, setStartupWatchdogRevision] = useState(0);
   const startupRecoveryAttemptedForRef = useRef<Set<string>>(new Set());
   // Failed keys in this episode's chain — excluding only the latest would let A→B→A bounce past a viable third.
   const failedStreamKeysRef = useRef<Set<string>>(new Set());
   // Shared with other callers — a watchdog verdict during an in-flight recovery must not error it out.
   const recoveryInFlightRef = useRef(false);
   const recoveryEpochRef = useRef(0);
+  const recoveryRequestIdRef = useRef<string | null>(null);
+
+  const cancelPendingRecovery = useCallback(() => {
+    const requestId = recoveryRequestIdRef.current;
+    recoveryRequestIdRef.current = null;
+    if (requestId) void api.cancelPlaybackRecovery(requestId).catch(() => {});
+  }, []);
 
   const clearRecoveryTimers = useCallback(() => {
     // Cancelled so in-flight recovery cannot swap streams after unmount.
     startupWatchdogCancelledRef.current = true;
     clearTimer(startupWatchdogTimerRef);
-  }, []);
+    cancelPendingRecovery();
+  }, [cancelPendingRecovery]);
+
+  const cancelRecovery = useCallback(() => {
+    const generation = ++recoveryEpochRef.current;
+    manualSelectionOwnsStreamRef.current = {
+      generation,
+      url: stream.committedStreamUrlRef.current,
+      streamKey: selectedStreamKeyRef.current,
+    };
+    recoveryInFlightRef.current = false;
+    clearRecoveryTimers();
+    return generation;
+  }, [clearRecoveryTimers, selectedStreamKeyRef, stream.committedStreamUrlRef]);
+
+  const releaseManualSelection = useCallback(
+    (generation: number) => {
+      const owner = manualSelectionOwnsStreamRef.current;
+      if (
+        !mountedRef.current ||
+        owner?.generation !== generation ||
+        owner.url !== stream.committedStreamUrlRef.current ||
+        owner.streamKey !== selectedStreamKeyRef.current
+      ) {
+        return;
+      }
+      manualSelectionOwnsStreamRef.current = null;
+      recoveryEpochRef.current += 1;
+      if (!playbackStartedRef.current) {
+        startupWatchdogCancelledRef.current = false;
+        setStartupWatchdogRevision((revision) => revision + 1);
+      }
+    },
+    [mountedRef, selectedStreamKeyRef, stream.committedStreamUrlRef],
+  );
 
   const markPlaybackStarted = useCallback(() => {
     playbackStartedRef.current = true;
+    recoveryEpochRef.current += 1;
+    if (recoveryInFlightRef.current) {
+      recoveryInFlightRef.current = false;
+      setResolveStatus(null);
+    }
     clearRecoveryTimers();
-  }, [clearRecoveryTimers]);
+  }, [clearRecoveryTimers, setResolveStatus]);
 
   useEffect(() => {
     recoveryEpochRef.current += 1;
     playbackStartedRef.current = false;
+    manualSelectionOwnsStreamRef.current = null;
     startupWatchdogCancelledRef.current = false;
     recoveryInFlightRef.current = false;
     return () => {
       recoveryEpochRef.current += 1;
+      cancelPendingRecovery();
     };
-  }, [stream.activeStreamUrl]);
+  }, [
+    cancelPendingRecovery,
+    stream.activeStreamUrl,
+    stream.activeStreamKey,
+    stream.activeStreamMpvHttpHeaderFields,
+  ]);
 
   useEffect(() => {
+    cancelPendingRecovery();
     startupRecoveryAttemptedForRef.current.clear();
     failedStreamKeysRef.current.clear();
-  }, [absoluteEpisode, absoluteSeason, mediaId, resolveSeason, resolveEpisode]);
+  }, [
+    absoluteEpisode,
+    absoluteSeason,
+    cancelPendingRecovery,
+    mediaId,
+    resolveSeason,
+    resolveEpisode,
+  ]);
 
   const recoverFromSlowStartup = useCallback(
     async (
@@ -112,8 +188,8 @@ export function useStreamRecovery({
     ) => {
       // Fast-fail only; Rust validates media types.
       const effectiveMediaType = mediaType?.trim();
-      if (startupWatchdogCancelledRef.current) return false;
-      if (playbackStartedRef.current) return false;
+      if (manualSelectionOwnsStreamRef.current) return true;
+      if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
       if (
         !mediaId ||
         !sourceUrl ||
@@ -123,23 +199,26 @@ export function useStreamRecovery({
       ) {
         return false;
       }
-      if (startupRecoveryAttemptedForRef.current.has(sourceUrl)) return false;
+      if (recoveryInFlightRef.current) return true;
+      const failedStreamKey = selectedStreamKeyRef.current;
+      const failedRequestIdentity = failedStreamKey || sourceUrl;
+      if (startupRecoveryAttemptedForRef.current.has(failedRequestIdentity)) return false;
 
       const epoch = recoveryEpochRef.current;
       const isCurrent = () => epoch === recoveryEpochRef.current && mountedRef.current;
-      startupRecoveryAttemptedForRef.current.add(sourceUrl);
-      const failedStreamKey = selectedStreamKeyRef.current;
+      const requestId = crypto.randomUUID();
+      recoveryRequestIdRef.current = requestId;
+      startupRecoveryAttemptedForRef.current.add(failedRequestIdentity);
       const excludedStreamKeys = [...failedStreamKeysRef.current];
       if (failedStreamKey) failedStreamKeysRef.current.add(failedStreamKey);
       recoveryInFlightRef.current = true;
       setError(null);
-      setIsResolving(true);
-      setResolveStatus('Slow start, trying a faster stream');
+      setResolveStatus('Trying another stream');
 
       try {
-        if (startupWatchdogCancelledRef.current || playbackStartedRef.current) return false;
         const resolved = await withTimeout(
           recoverPlayerStream({
+            requestId,
             mediaType: effectiveMediaType,
             mediaId,
             streamLookupId: streamLookupId || mediaId,
@@ -158,37 +237,51 @@ export function useStreamRecovery({
             outcome,
           }),
           STREAM_RECOVERY_TIMEOUT_MS,
-          () => null,
+          () => {
+            if (recoveryRequestIdRef.current === requestId) cancelPendingRecovery();
+            return null;
+          },
         );
 
         // The backend re-ranked past the failed stream — don't serve the stale ordering from cache.
         void invalidateStreamQueries(queryClient);
 
-        if (!isCurrent() || startupWatchdogCancelledRef.current || playbackStartedRef.current) {
+        if (!isCurrent()) return true;
+        if (startupWatchdogCancelledRef.current || playbackStartedRef.current) {
           return false;
         }
-        if (stream.committedStreamUrlRef.current !== sourceUrl) return false;
+        if (
+          stream.committedStreamUrlRef.current !== sourceUrl ||
+          selectedStreamKeyRef.current !== failedStreamKey
+        )
+          return true;
 
-        if (resolved?.url && resolved.url !== sourceUrl) {
+        if (
+          resolved?.url &&
+          (resolved.url !== sourceUrl ||
+            (failedStreamKey && resolved.streamKey && resolved.streamKey !== failedStreamKey))
+        ) {
           applyResolvedStreamToSession(stream, resolved);
           failoverResumePositionRef.current = currentTimeRef.current;
           return true;
         }
-      } catch {
+      } catch (error) {
+        if (getErrorKind(error) === 'cancelled') return true;
         // Best-effort only.
       } finally {
+        if (recoveryRequestIdRef.current === requestId) recoveryRequestIdRef.current = null;
         if (isCurrent()) {
           recoveryInFlightRef.current = false;
-          setIsResolving(false);
-          setResolveStatus('');
+          setResolveStatus(null);
         }
       }
 
-      return false;
+      return !isCurrent();
     },
     [
       stream,
       absoluteSeason,
+      cancelPendingRecovery,
       currentTimeRef,
       failoverResumePositionRef,
       mediaId,
@@ -201,7 +294,6 @@ export function useStreamRecovery({
       resolveSeason,
       selectedStreamKeyRef,
       setError,
-      setIsResolving,
       setResolveStatus,
       streamLookupId,
     ],
@@ -209,7 +301,13 @@ export function useStreamRecovery({
 
   useEffect(() => {
     // Recovery bails once playback started, so late dep changes never re-arm.
-    if (!stream.activeStreamUrl || playbackStartedRef.current) return;
+    if (
+      !stream.activeStreamUrl ||
+      (!isPlaying && !isResumePending()) ||
+      playbackStartedRef.current ||
+      manualSelectionOwnsStreamRef.current
+    )
+      return;
 
     // This effect re-arms as details/episodes land mid-load — reset the flag the cleanup set or the timer stays cancelled.
     startupWatchdogCancelledRef.current = false;
@@ -219,35 +317,38 @@ export function useStreamRecovery({
     const startupWatchdogDelayMs = isHistoryResume ? 10000 : 12000;
     const epoch = recoveryEpochRef.current;
 
-    startupWatchdogTimerRef.current = setTimeout(() => {
+    const checkStartup = () => {
       if (
         epoch !== recoveryEpochRef.current ||
         startupWatchdogCancelledRef.current ||
         playbackStartedRef.current ||
         !mountedRef.current ||
-        errorRef.current
+        errorRef.current ||
+        (!isPlayingRef.current && !isResumePending())
       ) {
         return;
       }
 
-      const hasAnyProgress = durationRef.current > 0 || currentTimeRef.current > 0.1;
-
-      // Paused with progress means the stream proved alive (pausing doesn't stop demuxing); paused at zero stays a stall candidate.
-      if (!isPlayingRef.current && hasAnyProgress) return;
-
-      const stalledAtStart = durationRef.current > 0 && currentTimeRef.current <= 0.15;
-      if (hasAnyProgress && !stalledAtStart) return;
+      if (document.hidden) {
+        startupWatchdogTimerRef.current = setTimeout(checkStartup, startupWatchdogDelayMs);
+        return;
+      }
 
       const currentUrl = stream.committedStreamUrlRef.current;
       if (!currentUrl) return;
 
-      void recoverFromSlowStartup(currentUrl, 'startup-timeout').then((didRecover) => {
+      void recoverFromSlowStartup(
+        currentUrl,
+        isLoadingNow() ? 'load-failed' : 'startup-timeout',
+      ).then((didRecover) => {
         if (
           epoch !== recoveryEpochRef.current ||
           startupWatchdogCancelledRef.current ||
           didRecover ||
           !mountedRef.current ||
+          errorRef.current ||
           playbackStartedRef.current ||
+          document.hidden ||
           // Deduped behind an in-flight recovery — let that attempt reach its own verdict.
           recoveryInFlightRef.current
         ) {
@@ -259,30 +360,42 @@ export function useStreamRecovery({
           onSavedStreamUnavailable?.();
           return;
         }
-        setError('This stream is taking too long to start. Try another stream.');
+        setStreamError('This stream is taking too long to start. Try another stream.');
         stopLoading();
       });
-    }, startupWatchdogDelayMs);
+    };
+    startupWatchdogTimerRef.current = setTimeout(checkStartup, startupWatchdogDelayMs);
+    const onVisibilityChange = () => {
+      clearTimer(startupWatchdogTimerRef);
+      if (!document.hidden && !playbackStartedRef.current && !startupWatchdogCancelledRef.current) {
+        startupWatchdogTimerRef.current = setTimeout(checkStartup, startupWatchdogDelayMs);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
 
     return () => {
       startupWatchdogCancelledRef.current = true;
       clearTimer(startupWatchdogTimerRef);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
     };
   }, [
     stream,
-    currentTimeRef,
-    durationRef,
     errorRef,
     isHistoryResume,
+    isPlaying,
     isPlayingRef,
+    isResumePending,
     mountedRef,
     recoverFromSlowStartup,
-    setError,
+    setStreamError,
     stopLoading,
     onSavedStreamUnavailable,
+    startupWatchdogRevision,
   ]);
 
   return {
+    cancelRecovery,
+    releaseManualSelection,
     clearRecoveryTimers,
     markPlaybackStarted,
     recoverFromSlowStartup,

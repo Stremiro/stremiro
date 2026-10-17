@@ -5,8 +5,6 @@ import {
   Move,
   Pause,
   Play,
-  RotateCcw,
-  SkipForward,
   TriangleAlert,
   VolumeX,
   X,
@@ -22,10 +20,16 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { createPortal } from 'react-dom';
+import {
+  MINI_ICON_BUTTON_CLASS,
+  PlayerMuteButton,
+  PlayerNextButton,
+  PlayerPlayButton,
+} from '@/components/player-control-buttons';
 import { PlayerSlider } from '@/components/player-slider';
 import { PlayerEndCard } from '@/components/player-state-overlays';
-import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { RemoteImage } from '@/components/remote-image';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import {
   PLAYER_SIDEBAR_WIDTH_PX,
   PLAYER_TITLEBAR_HEIGHT_PX,
@@ -33,7 +37,7 @@ import {
 } from '@/hooks/use-player-surface-layout';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { isEditableTarget } from '@/lib/dom';
-import type { PlaybackClock } from '@/lib/player-clock';
+import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import {
   ariaKeyShortcuts,
   formatBindingKey,
@@ -64,6 +68,7 @@ const DOCK_FLIP_MS = 260;
 const DOCK_FLIP_EASING = 'cubic-bezier(0.33, 1, 0.68, 1)';
 // The margin IPC lands a frame or two after the last rect report; the cover stays up so the surface is never seen chasing.
 const SURFACE_SETTLE_MS = 180;
+const SURFACE_RETRY_MAX_MS = 1_000;
 
 interface MiniPlayerMetrics {
   frameWidth: number;
@@ -125,9 +130,6 @@ function easeOutCubic(t: number): number {
   return 1 - Math.pow(1 - t, 3);
 }
 
-const MINI_ICON_BUTTON_CLASS =
-  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60';
-
 // Expand/close render twice (hover chrome + error/empty overlay), so the buttons live here once.
 function MiniExpandButton({ keymap, onClick }: { keymap: PlayerKeymap; onClick: () => void }) {
   return (
@@ -187,7 +189,6 @@ function MiniTitle({ title, episodeLabel }: { title: string; episodeLabel?: stri
 
 /** Scrub-preview store scoped to the mini player — a drag never re-renders the portal root. */
 type SeekPreviewStore = SubscribableStore<number | null>;
-const subscribeWhileHidden = () => () => {};
 
 function useMiniDisplayTime(
   clock: PlaybackClock,
@@ -263,6 +264,14 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
   onSeek,
 }: MiniPlayerSeekSliderProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
+  const isDraggingRef = useRef(false);
+  useEffect(() => {
+    return () => seekPreviewStore.publish(null);
+  }, [seekPreviewStore]);
+  const clearDragPreview = () => {
+    isDraggingRef.current = false;
+    seekPreviewStore.publish(null);
+  };
   return (
     <PlayerSlider
       variant='track'
@@ -272,14 +281,22 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       step={0.5}
       aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
       disabled={duration <= 0}
-      onValueChange={(value) => seekPreviewStore.publish(value[0] ?? null)}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        isDraggingRef.current = true;
+      }}
+      onValueChange={(value) => {
+        // Radix commits keyboard steps before firing onValueChange.
+        if (isDraggingRef.current) seekPreviewStore.publish(value[0] ?? null);
+      }}
       onValueCommit={(value) => {
         const target = value[0];
         seekPreviewStore.publish(null);
         if (typeof target === 'number') onSeek(target);
       }}
-      onPointerUp={() => seekPreviewStore.publish(null)}
-      onPointerCancel={() => seekPreviewStore.publish(null)}
+      onPointerUp={clearDragPreview}
+      onPointerCancel={clearDragPreview}
+      onLostPointerCapture={clearDragPreview}
       className='h-6 w-full'
     />
   );
@@ -370,7 +387,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const keymap = usePlayerKeymap();
   const playKey = keymap.keys.togglePlay[0];
   const expandKey = keymap.keys.toggleFullscreen[0];
-  const mountedRef = useRef(true);
+  const mountedRef = useMountedRef();
   const frameRef = useRef<HTMLDivElement | null>(null);
   const videoSurfaceRef = useRef<HTMLDivElement | null>(null);
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
@@ -418,6 +435,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   // Toggle intent for the flash icon — the prop can't keep up inside the double-tap window.
   const flashKindRef = useRef<'play' | 'pause' | null>(null);
   const settleTimerRef = useRef<number | null>(null);
+  const motionGenerationRef = useRef(0);
   const landingRef = useRef(false);
   const lastVideoTapAtRef = useRef(0);
   const renderPosition = positionRef.current;
@@ -435,6 +453,12 @@ export const MiniPlayer = memo(function MiniPlayer({
     });
   }, [metrics.frameWidth, metrics.videoHeight, onVideoRectChange]);
 
+  // Callback churn must not restart the dock flight.
+  const rectOpsRef = useRef({ reportVideoRect, onVideoRectChange, hasVideo });
+  useEffect(() => {
+    rectOpsRef.current = { reportVideoRect, onVideoRectChange, hasVideo };
+  });
+
   const scheduleVideoRectReport = useCallback(() => {
     if (reportFrameRef.current !== null) return;
     reportFrameRef.current = window.requestAnimationFrame(() => {
@@ -444,6 +468,8 @@ export const MiniPlayer = memo(function MiniPlayer({
   }, [reportVideoRect]);
 
   const cancelSnap = useCallback(() => {
+    motionGenerationRef.current += 1;
+    clearTimer(settleTimerRef);
     if (snapFrameRef.current !== null) {
       window.cancelAnimationFrame(snapFrameRef.current);
       snapFrameRef.current = null;
@@ -462,25 +488,53 @@ export const MiniPlayer = memo(function MiniPlayer({
     [metrics],
   );
 
+  const revealSurface = useCallback(
+    (generation: number) => {
+      const isCurrent = () =>
+        mountedRef.current &&
+        rectOpsRef.current.hasVideo &&
+        generation === motionGenerationRef.current;
+      const attempt = async (retryDelay: number) => {
+        if (!isCurrent()) return;
+        if (reportFrameRef.current !== null) {
+          window.cancelAnimationFrame(reportFrameRef.current);
+          reportFrameRef.current = null;
+        }
+        const holeReady = await Promise.resolve(rectOpsRef.current.reportVideoRect()).catch(
+          () => false,
+        );
+        if (!isCurrent()) return;
+        if (holeReady === true) {
+          setIsSettling(false);
+          return;
+        }
+        // A failed apply keeps the cover; retry with backoff until it lands or new motion supersedes it.
+        settleTimerRef.current = window.setTimeout(() => {
+          settleTimerRef.current = null;
+          void attempt(Math.min(retryDelay * 2, SURFACE_RETRY_MAX_MS));
+        }, retryDelay);
+      };
+      void attempt(SURFACE_SETTLE_MS);
+    },
+    [mountedRef],
+  );
+
   // Drop the motion cover only after the last margin IPC lands — earlier reveals the surface mid-chase.
   const startSurfaceSettle = useCallback(() => {
+    if (!rectOpsRef.current.hasVideo) return;
     setIsSettling(true);
     clearTimer(settleTimerRef);
+    const generation = ++motionGenerationRef.current;
     settleTimerRef.current = window.setTimeout(() => {
       settleTimerRef.current = null;
-      setIsSettling(false);
+      revealSurface(generation);
     }, SURFACE_SETTLE_MS);
-  }, []);
+  }, [revealSurface]);
 
   const endMotion = useCallback(() => {
     setIsMoving(false);
     startSurfaceSettle();
   }, [startSurfaceSettle]);
-
-  // Resize aborts the dock FLIP (render path snaps back); dependency-free so it fits the mount effect's dep list.
-  const cancelDockFlip = useCallback(() => {
-    setIsDocking(false);
-  }, []);
 
   // Click-to-toggle fires immediately; a double-click toggles twice (net: unchanged) before expand lands.
   const triggerPlaybackFlash = useCallback(() => {
@@ -551,12 +605,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     ],
   );
 
-  // Callback churn must not restart the dock flight.
-  const rectOpsRef = useRef({ reportVideoRect, onVideoRectChange });
-  useEffect(() => {
-    rectOpsRef.current = { reportVideoRect, onVideoRectChange };
-  });
-
   // The dock flight owns geometry until landing.
   useEffect(() => {
     if (isDocking) return;
@@ -570,6 +618,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   // IPC. The motion cover hides the interior until the landing hole is verified.
   useLayoutEffect(() => {
     if (!isDocking || !dockFlipFrom) return;
+    const generation = ++motionGenerationRef.current;
     const frame = frameRef.current;
     const target = positionRef.current;
     if (!frame || !target) {
@@ -591,21 +640,13 @@ export const MiniPlayer = memo(function MiniPlayer({
     let active = true;
     animation.finished.then(
       () => {
-        if (!active) return;
+        if (!active || generation !== motionGenerationRef.current) return;
         applyPosition(target);
         animation.cancel();
-        landingRef.current = true;
+        landingRef.current = rectOpsRef.current.hasVideo;
         onPositionChange(target);
         setIsDocking(false);
-        void Promise.resolve(rectOpsRef.current.reportVideoRect()).then((holeReady) => {
-          if (!mountedRef.current) return;
-          if (holeReady === true) {
-            clearTimer(settleTimerRef);
-            setIsSettling(false);
-          } else {
-            startSurfaceSettle();
-          }
-        });
+        revealSurface(generation);
       },
       () => undefined,
     );
@@ -613,7 +654,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       active = false;
       animation.cancel();
     };
-  }, [isDocking, dockFlipFrom, metrics, applyPosition, onPositionChange, startSurfaceSettle]);
+  }, [isDocking, dockFlipFrom, metrics, applyPosition, onPositionChange, revealSurface]);
 
   // Retain the mount-only claim through parent updates during docking.
   useEffect(() => {
@@ -628,6 +669,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   // A live surface or resize starts a margin chase — cover until margins settle; the dock FLIP holds its own
   // cover and the exiting instance never veils.
   useEffect(() => {
+    if (!hasVideo) clearTimer(settleTimerRef);
     // A just-landed FLIP owns its reveal via hole verification — arming the fixed cover would only extend it.
     if (landingRef.current) {
       landingRef.current = false;
@@ -646,26 +688,23 @@ export const MiniPlayer = memo(function MiniPlayer({
       }
       if (!dragStateRef.current) setIsMoving(false);
       setSnapTargetIndex(null);
-      cancelDockFlip();
+      setIsDocking(false);
       setMetrics(computeMiniMetrics());
       startSurfaceSettle();
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [cancelDockFlip, cancelSnap, startSurfaceSettle]);
+  }, [cancelSnap, startSurfaceSettle]);
 
   // Unmount-only teardown — a rebuilt `onVideoRectChange` mid-life would kill an in-flight snap.
   useEffect(() => {
-    mountedRef.current = true;
     return () => {
-      mountedRef.current = false;
       if (reportFrameRef.current !== null) {
         window.cancelAnimationFrame(reportFrameRef.current);
         reportFrameRef.current = null;
       }
       cancelSnap();
       clearTimer(flashTimerRef);
-      clearTimer(settleTimerRef);
       rectOpsRef.current.onVideoRectChange(null);
     };
   }, [cancelSnap]);
@@ -780,6 +819,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           }
         } else {
           setIsMoving(false);
+          if (isMoving || isSettling) startSurfaceSettle();
           onPositionChange(position);
           if (drag.videoClick) {
             // A second tap inside the window is a double-click: undo the first tap's toggle (net-zero) and expand.
@@ -800,11 +840,14 @@ export const MiniPlayer = memo(function MiniPlayer({
       animateTo,
       endMotion,
       findSnapAnchorIndex,
+      isMoving,
+      isSettling,
       onExpand,
       onPositionChange,
       onTogglePlay,
       releaseDrag,
       reportVideoRect,
+      startSurfaceSettle,
       triggerPlaybackFlash,
     ],
   );
@@ -821,9 +864,18 @@ export const MiniPlayer = memo(function MiniPlayer({
         if (position) onPositionChange(position);
       } else {
         setIsMoving(false);
+        if (isMoving || isSettling) startSurfaceSettle();
       }
     },
-    [endMotion, onPositionChange, releaseDrag, reportVideoRect],
+    [
+      endMotion,
+      isMoving,
+      isSettling,
+      onPositionChange,
+      releaseDrag,
+      reportVideoRect,
+      startSurfaceSettle,
+    ],
   );
 
   useEffect(() => {
@@ -1177,38 +1229,21 @@ export const MiniPlayer = memo(function MiniPlayer({
                     onSeek={onSeek}
                   />
                   <div className='flex items-center gap-1'>
-                    <button
-                      type='button'
-                      aria-label={upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play'}
-                      aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
-                      title={withShortcutHint(
-                        upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play',
-                        keymap,
-                        'togglePlay',
-                      )}
+                    <PlayerPlayButton
+                      variant='mini'
+                      keymap={keymap}
+                      icon={upNext ? 'replay' : isPlaying ? 'pause' : 'play'}
+                      label={upNext ? 'Watch again' : isPlaying ? 'Pause' : 'Play'}
                       onClick={upNext ? onReplay : onTogglePlay}
-                      className={cn(MINI_ICON_BUTTON_CLASS, 'bg-white/10 text-white')}
-                    >
-                      {upNext ? (
-                        <RotateCcw className='h-4 w-4' />
-                      ) : isPlaying ? (
-                        <Pause className='h-4 w-4 fill-white' />
-                      ) : (
-                        <Play className='ml-px h-4 w-4 fill-white' />
-                      )}
-                    </button>
+                    />
 
                     {canGoNext && !upNext && (
-                      <button
-                        type='button'
-                        aria-label='Next episode'
-                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
-                        title={withShortcutHint('Next episode', keymap, 'nextEpisode')}
+                      <PlayerNextButton
+                        variant='mini'
+                        keymap={keymap}
+                        label='Next episode'
                         onClick={onNextEpisode}
-                        className={MINI_ICON_BUTTON_CLASS}
-                      >
-                        <SkipForward className='h-[15px] w-[15px]' strokeWidth={2.25} />
-                      </button>
+                      />
                     )}
 
                     {/* Hover-state skip: the resting chip fades under the chrome. */}
@@ -1226,25 +1261,14 @@ export const MiniPlayer = memo(function MiniPlayer({
                     )}
 
                     <div className='ml-auto flex shrink-0 items-center gap-2'>
-                      <button
-                        type='button'
-                        aria-label={effectivelyMuted ? 'Unmute' : 'Mute'}
-                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
-                        title={withShortcutHint(
-                          effectivelyMuted ? 'Unmute' : 'Mute',
-                          keymap,
-                          'toggleMute',
-                        )}
+                      <PlayerMuteButton
+                        variant='mini'
+                        keymap={keymap}
+                        label={effectivelyMuted ? 'Unmute' : 'Mute'}
+                        muted={effectivelyMuted}
+                        volume={volume}
                         onClick={onToggleMute}
-                        className={MINI_ICON_BUTTON_CLASS}
-                      >
-                        <PlayerVolumeIcon
-                          muted={effectivelyMuted}
-                          volume={volume}
-                          className='h-[15px] w-[15px]'
-                          strokeWidth={2.25}
-                        />
-                      </button>
+                      />
                       <PlayerSlider
                         variant='bar'
                         aria-label='Volume'

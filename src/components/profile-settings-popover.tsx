@@ -1,15 +1,20 @@
 import { Check, ChevronRight, Loader2, Settings2, SlidersHorizontal } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
-import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
+import {
+  AccentControls,
+  normalizeAccentPreviewIntensity,
+  resolveAccentPreviewColor,
+} from '@/components/accent-controls';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
-import { clamp, getAccentTextColor, nonBlank } from '@/lib/utils';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
+import { getAccentTextColor, nonBlank } from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
@@ -33,6 +38,8 @@ export function ProfileSettingsPopover({
   const [draftName, setDraftName] = useState(profile.username);
   const [draftAccentColor, setDraftAccentColor] = useState(profile.accentColor);
   const [draftIntensity, setDraftIntensity] = useState(profile.accentIntensity);
+  const openingGenerationRef = useRef(0);
+  const mountedRef = useMountedRef();
 
   useEffect(() => {
     if (isHydrating) setOpen(false);
@@ -41,6 +48,7 @@ export function ProfileSettingsPopover({
   const handleOpenChange = (next: boolean) => {
     if (next) {
       if (isHydrating) return;
+      openingGenerationRef.current += 1;
       setDraftName(profile.username);
       setDraftAccentColor(profile.accentColor);
       setDraftIntensity(profile.accentIntensity);
@@ -49,13 +57,13 @@ export function ProfileSettingsPopover({
   };
 
   const previewAccentColor = resolveAccentPreviewColor(draftAccentColor, profile.accentColor);
-  // Clamp locally so the preview never lies; Rust clamps again at the boundary.
-  const previewIntensity = clamp(Math.round(draftIntensity), 0, 100);
+  const previewIntensity = normalizeAccentPreviewIntensity(draftIntensity);
   const previewName = nonBlank(draftName) || profile.username;
 
   const handleSave = async () => {
     const trimmedName = draftName.trim();
     if (!trimmedName || isSaving || isHydrating || isError) return;
+    const generation = openingGenerationRef.current;
 
     try {
       await onUpdate({
@@ -64,7 +72,7 @@ export function ProfileSettingsPopover({
         accentIntensity: previewIntensity,
       });
       toast.success('Profile saved');
-      setOpen(false);
+      if (mountedRef.current && generation === openingGenerationRef.current) setOpen(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to save profile');
     }
@@ -113,7 +121,11 @@ export function ProfileSettingsPopover({
           />
         ) : (
           <>
-            <div className='px-3.5 py-3 space-y-4'>
+            <fieldset
+              disabled={isSaving}
+              inert={isSaving}
+              className='min-w-0 px-3.5 py-3 space-y-4 disabled:opacity-50'
+            >
               <div className='flex items-center gap-2.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2'>
                 <ProfileAvatar
                   name={previewName}
@@ -174,7 +186,7 @@ export function ProfileSettingsPopover({
                 onAccentColorChange={setDraftAccentColor}
                 onIntensityChange={setDraftIntensity}
               />
-            </div>
+            </fieldset>
 
             <div className='px-3.5 pb-3.5 space-y-1.5'>
               <Button

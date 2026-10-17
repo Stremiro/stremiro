@@ -1,6 +1,6 @@
 import type { NavigateFunction } from 'react-router';
 import type { BestResolvedStream } from '@/lib/api';
-import { currentPathWithSearch } from '@/lib/navigation';
+import { currentPathWithSearch, navigateApp } from '@/lib/navigation';
 import {
   type PlayerStreamRequest,
   type PreferredStreamIdentity,
@@ -57,12 +57,8 @@ export function buildDetailsRoute(mediaType: string | null | undefined, mediaId:
 
 /// Details navigation with the caller's path as `from` — one shape so
 /// click sites can't drift.
-export function navigateToDetails(
-  navigate: NavigateFunction,
-  mediaType: string | null | undefined,
-  mediaId: string,
-): void {
-  navigate(buildDetailsRoute(mediaType, mediaId), {
+export function navigateToDetails(mediaType: string | null | undefined, mediaId: string): void {
+  navigateApp(buildDetailsRoute(mediaType, mediaId), {
     state: { from: currentPathWithSearch() },
   });
 }

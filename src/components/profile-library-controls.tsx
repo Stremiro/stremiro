@@ -15,7 +15,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { type RefObject, useState } from 'react';
+import { type RefObject, useId, useRef, useState } from 'react';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
@@ -382,7 +382,7 @@ interface LibraryBulkActionBarProps {
 }
 
 const BULK_BUTTON_CLASS = cn(
-  'h-8 gap-1.5 rounded-lg border-white/[0.1] bg-white/[0.03] px-2.5 text-xs text-zinc-300 hover:bg-white/[0.08] hover:text-white',
+  'h-8 gap-1.5 rounded-lg border-white/[0.1] bg-white/[0.03] px-2.5 text-xs text-zinc-300 hover:bg-white/[0.08] hover:text-white aria-disabled:cursor-default aria-disabled:opacity-50 aria-disabled:hover:bg-white/[0.03] aria-disabled:hover:text-zinc-300',
   LIBRARY_FOCUS_RING_CLASS,
 );
 const BULK_MENU_ITEM_CLASS = cn(
@@ -411,6 +411,9 @@ export function LibraryBulkActionBar({
   const [listsOpen, setListsOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
   const [createListItems, setCreateListItems] = useState<MediaItem[]>([]);
+  const addToListTriggerRef = useRef<HTMLButtonElement>(null);
+  const statusHeadingId = useId();
+  const listsHeadingId = useId();
   const {
     data: customLists = [],
     isPending: listsLoading,
@@ -444,12 +447,20 @@ export function LibraryBulkActionBar({
         </button>
       </div>
       <div className='flex flex-wrap items-center gap-1.5'>
-        <Popover open={statusOpen} onOpenChange={setStatusOpen}>
+        <Popover
+          open={statusOpen}
+          onOpenChange={(open) => {
+            if (!open || !actionsDisabled) setStatusOpen(open);
+          }}
+        >
           <PopoverTrigger asChild>
             <Button
               variant='outline'
               size='sm'
-              disabled={actionsDisabled}
+              aria-disabled={actionsDisabled || undefined}
+              onClick={(event) => {
+                if (actionsDisabled) event.preventDefault();
+              }}
               className={BULK_BUTTON_CLASS}
             >
               <CheckSquare className='h-3.5 w-3.5' />
@@ -459,9 +470,12 @@ export function LibraryBulkActionBar({
           </PopoverTrigger>
           <PopoverContent
             align='end'
+            aria-labelledby={statusHeadingId}
             className='w-44 rounded-xl border-white/10 bg-zinc-950/98 p-1.5 shadow-xl'
           >
-            <p className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>Set watch status</p>
+            <p id={statusHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
+              Set watch status
+            </p>
             {BULK_STATUS_OPTIONS.map(({ status, label }) => (
               <button
                 key={status ?? 'clear'}
@@ -485,12 +499,21 @@ export function LibraryBulkActionBar({
             ))}
           </PopoverContent>
         </Popover>
-        <Popover open={listsOpen} onOpenChange={setListsOpen}>
+        <Popover
+          open={listsOpen}
+          onOpenChange={(open) => {
+            if (!open || !actionsDisabled) setListsOpen(open);
+          }}
+        >
           <PopoverTrigger asChild>
             <Button
+              ref={addToListTriggerRef}
               variant='outline'
               size='sm'
-              disabled={actionsDisabled}
+              aria-disabled={actionsDisabled || undefined}
+              onClick={(event) => {
+                if (actionsDisabled) event.preventDefault();
+              }}
               className={BULK_BUTTON_CLASS}
             >
               <ListPlus className='h-3.5 w-3.5' />
@@ -500,9 +523,10 @@ export function LibraryBulkActionBar({
           </PopoverTrigger>
           <PopoverContent
             align='end'
+            aria-labelledby={listsHeadingId}
             className='w-72 rounded-xl border-white/10 bg-zinc-950/95 backdrop-blur-xl p-1.5 shadow-2xl'
           >
-            <p className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
+            <p id={listsHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
               Add selected titles
             </p>
             {listsError && (
@@ -565,6 +589,7 @@ export function LibraryBulkActionBar({
           open={createListOpen}
           onOpenChange={setCreateListOpen}
           onCreated={(list) => onBulkAddToList(list.id, list.name, createListItems)}
+          returnFocusRef={addToListTriggerRef}
         />
         <Button
           variant='outline'

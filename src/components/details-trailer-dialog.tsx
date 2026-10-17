@@ -1,6 +1,7 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ChevronLeft, ChevronRight, ExternalLink, Film, Loader2, X } from 'lucide-react';
 import { type KeyboardEvent, useEffect, useId, useRef } from 'react';
+import { Button } from '@/components/ui/button';
 import {
   Dialog,
   DialogClose,
@@ -112,12 +113,13 @@ export function DetailsTrailerDialog({
                   type='button'
                   aria-label='Previous trailer'
                   title='Previous trailer'
-                  disabled={activeIndex === 0}
+                  aria-disabled={activeIndex === 0 || undefined}
                   onClick={() => {
+                    if (activeIndex === 0) return;
                     const previous = trailers[activeIndex - 1];
                     if (previous) onSelectTrailer(previous.id);
                   }}
-                  className='inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:border-white/[0.16] hover:bg-white/[0.09] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 disabled:pointer-events-none disabled:opacity-35'
+                  className='inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors not-aria-disabled:hover:border-white/[0.16] not-aria-disabled:hover:bg-white/[0.09] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35 motion-reduce:transition-none'
                 >
                   <ChevronLeft aria-hidden='true' className='h-4 w-4' />
                 </button>
@@ -125,12 +127,13 @@ export function DetailsTrailerDialog({
                   type='button'
                   aria-label='Next trailer'
                   title='Next trailer'
-                  disabled={activeIndex === trailers.length - 1}
+                  aria-disabled={activeIndex === trailers.length - 1 || undefined}
                   onClick={() => {
+                    if (activeIndex === trailers.length - 1) return;
                     const next = trailers[activeIndex + 1];
                     if (next) onSelectTrailer(next.id);
                   }}
-                  className='inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors hover:border-white/[0.16] hover:bg-white/[0.09] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 disabled:pointer-events-none disabled:opacity-35'
+                  className='inline-flex h-9 w-9 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.04] text-zinc-300 transition-colors not-aria-disabled:hover:border-white/[0.16] not-aria-disabled:hover:bg-white/[0.09] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35 motion-reduce:transition-none'
                 >
                   <ChevronRight aria-hidden='true' className='h-4 w-4' />
                 </button>
@@ -146,18 +149,27 @@ export function DetailsTrailerDialog({
                     `https://www.youtube.com/watch?v=${encodeURIComponent(selectedTrailerId)}`,
                   ).catch(() => undefined)
                 }
-                className='inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 text-xs font-medium text-zinc-300 transition-colors hover:border-white/[0.16] hover:bg-white/[0.09] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+                className='inline-flex h-9 w-9 items-center justify-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.04] px-2 text-xs font-medium text-zinc-300 transition-colors hover:border-white/[0.16] hover:bg-white/[0.09] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none sm:w-auto'
               >
-                <ExternalLink aria-hidden='true' className='h-3.5 w-3.5' />
+                <ExternalLink aria-hidden='true' className='h-4 w-4' />
                 <span className='hidden sm:inline'>Watch on YouTube</span>
               </button>
             )}
-            <DialogClose
-              aria-label='Close trailer'
-              title='Close (Esc)'
-              className='inline-flex h-8 w-8 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.06] text-zinc-200 transition-colors hover:border-white/[0.2] hover:bg-white/[0.12] hover:text-white focus-visible:ring-2 focus-visible:ring-white/30 focus-visible:outline-hidden'
-            >
-              <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
+            {(hasPicker || selectedTrailerId) && (
+              <span aria-hidden='true' className='mx-1 h-5 w-px bg-white/[0.12]' />
+            )}
+            <DialogClose asChild>
+              <Button
+                type='button'
+                variant='ghost'
+                size='icon'
+                aria-label='Close trailer'
+                aria-keyshortcuts='Escape'
+                title='Close (Esc)'
+                className='shrink-0 rounded-lg border border-white/[0.2] bg-white/[0.12] text-white shadow-sm hover:border-white/[0.3] hover:bg-white/[0.2] hover:text-white focus-visible:bg-white/[0.2] focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none'
+              >
+                <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
+              </Button>
             </DialogClose>
           </div>
         </div>
@@ -167,7 +179,7 @@ export function DetailsTrailerDialog({
           role={hasPicker ? 'tabpanel' : undefined}
           aria-labelledby={hasPicker ? `${tabId}-${activeIndex}` : undefined}
           tabIndex={hasPicker ? 0 : undefined}
-          className='relative aspect-video w-full bg-black focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
+          className='relative aspect-video w-full bg-black focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
         >
           {/* Sits under the iframe until the embed paints over it. */}
           <Loader2
@@ -218,7 +230,7 @@ export function DetailsTrailerDialog({
                     className={cn(
                       'nav-switch-item flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border px-3 text-[13px] font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
                       isActive
-                        ? 'border-white/[0.22] bg-white/[0.12] text-white shadow-sm'
+                        ? 'border-white/[0.3] bg-white/[0.16] text-white shadow-sm'
                         : 'border-white/[0.06] bg-white/[0.03] text-zinc-400 hover:border-white/[0.14] hover:bg-white/[0.06] hover:text-zinc-200',
                     )}
                     onClick={() => onSelectTrailer(trailer.id)}
@@ -228,7 +240,7 @@ export function DetailsTrailerDialog({
                       aria-hidden='true'
                       className={cn(
                         'flex h-5 min-w-5 items-center justify-center rounded-md px-1 font-mono text-[10px] tabular-nums',
-                        isActive ? 'bg-white/[0.12] text-white' : 'bg-white/[0.05] text-zinc-500',
+                        isActive ? 'bg-white/[0.16] text-white' : 'bg-white/[0.05] text-zinc-500',
                       )}
                     >
                       {index + 1}

@@ -1,10 +1,24 @@
-import { useDebounce } from '@/hooks/use-debounce';
+import { useItemSearch } from '@/hooks/use-item-search';
+import { api, type Episode } from '@/lib/api';
 
-// Shared episode-search policy so the details pane and player episodes panel filter identically.
-const EPISODE_SEARCH_DEBOUNCE_MS = 180;
+export const EPISODE_SEARCH_MIN_COUNT = 5;
 
-/** Debounced episode-filter query: clearing applies immediately; `enabled=false` suppresses filtering but keeps the text. */
-export function useEffectiveEpisodeSearch(episodeSearch: string, enabled = true): string {
-  const debouncedQuery = useDebounce(episodeSearch.trim(), EPISODE_SEARCH_DEBOUNCE_MS);
-  return enabled && episodeSearch.trim() ? debouncedQuery : '';
+/** `effectiveEpisodeSearch` is the query `filteredEpisodes` answers, which lags the requested one while Rust searches. */
+export function useEpisodeSearch(episodes: Episode[], episodeSearch: string, enabled = true) {
+  const {
+    effectiveSearch,
+    filteredItems,
+    searchError,
+    isSearchFetching,
+    retrySearch,
+    isSearchPending,
+  } = useItemSearch(episodes, episodeSearch, enabled, 'episode-search', api.searchEpisodes);
+  return {
+    effectiveEpisodeSearch: effectiveSearch,
+    filteredEpisodes: filteredItems,
+    searchError,
+    isSearchFetching,
+    retrySearch,
+    isSearchPending,
+  };
 }

@@ -10,7 +10,7 @@ import {
   TriangleAlert,
   X,
 } from 'lucide-react';
-import { defaultRangeExtractor, type Range, useVirtualizer } from '@tanstack/react-virtual';
+import { type Range, useVirtualizer } from '@tanstack/react-virtual';
 import {
   Fragment,
   type Dispatch,
@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
+import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import {
@@ -790,15 +791,6 @@ const PACK_EPISODE_ROW_ESTIMATE_PX = 70;
 const PACK_HEADER_ROW_ESTIMATE_PX = 30;
 const PACK_ROW_GAP_PX = 6;
 const PACK_LIST_VIRTUALIZE_THRESHOLD = 40;
-
-export function focusedRowRange(range: Range, focusedIndex: number): number[] {
-  const indices = defaultRangeExtractor(range);
-  if (focusedIndex >= 0 && focusedIndex < range.count && !indices.includes(focusedIndex)) {
-    indices.push(focusedIndex);
-    indices.sort((left, right) => left - right);
-  }
-  return indices;
-}
 
 function packRowKey(row: PackListRow): string {
   return row.type === 'header'

@@ -1,9 +1,13 @@
-import { invoke } from '@tauri-apps/api/core';
+import { invoke, type InvokeArgs, type InvokeOptions } from '@tauri-apps/api/core';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
 
 const isDev = import.meta.env.DEV;
 
-export type InvokeApi = <T>(command: string, args?: object) => Promise<T>;
+export type InvokeApi = <T>(
+  command: string,
+  args?: InvokeArgs,
+  options?: InvokeOptions,
+) => Promise<T>;
 
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -23,13 +27,43 @@ export function getErrorMessage(error: unknown): string {
   return String(error);
 }
 
-// Exact Rust list validation messages that are safe to show; anything else stays generic.
-const USER_FACING_LIST_ERROR =
-  /^(?:List name is required\.|List not found|Too many lists\. Maximum is \d+\.|List is full\. Maximum is \d+ items\.|A custom list cannot exceed \d+ items)$/;
-
 export function getListErrorMessage(error: unknown): string | undefined {
-  const message = getErrorMessage(error);
-  return USER_FACING_LIST_ERROR.test(message) ? message : undefined;
+  switch (getErrorKind(error)) {
+    case 'list_name_required':
+    case 'list_not_found':
+    case 'too_many_lists':
+    case 'list_full':
+      return getErrorMessage(error);
+    default:
+      return undefined;
+  }
+}
+
+export function getWatchStatusErrorMessage(error: unknown): string | undefined {
+  switch (getErrorKind(error)) {
+    case 'invalid_item':
+    case 'invalid_status':
+    case 'status_capacity':
+    case 'library_capacity':
+      return getErrorMessage(error);
+    default:
+      return undefined;
+  }
+}
+
+export function getBackupImportErrorMessage(error: unknown): string {
+  switch (getErrorKind(error)) {
+    case 'invalid_backup':
+      return 'This file is not a valid Stremiro backup.';
+    case 'unsupported_version':
+      return 'This backup was created by a newer or unsupported version.';
+    case 'too_large':
+      return 'This file is too large to import.';
+    case 'capacity_exceeded':
+      return `${getErrorMessage(error)} Remove some items first, then try again.`;
+    default:
+      return getErrorMessage(error);
+  }
 }
 
 /** `kind` tag of a structured Rust command error (carried as the Error's `cause`). */
@@ -40,19 +74,26 @@ export function getErrorKind(error: unknown): string | undefined {
   return typeof kind === 'string' ? kind : undefined;
 }
 
-export async function safeInvoke<T>(command: string, args?: object): Promise<T> {
+export async function safeInvoke<T>(
+  command: string,
+  args?: InvokeArgs,
+  options?: InvokeOptions,
+): Promise<T> {
   // Tauri #[command] maps Rust params to camelCase JS keys (media_type→mediaType,
   // type_→type); nested struct payloads follow their own serde renames.
   try {
     if (isTauriDesktopRuntime()) {
-      return await invoke<T>(command, args as Record<string, unknown> | undefined);
+      return await invoke<T>(command, args, options);
     }
 
     // DEV gate keeps the browser-preview mock fork out of production builds.
     if (isDev) {
+      if (args instanceof Uint8Array || args instanceof ArrayBuffer || Array.isArray(args)) {
+        throw new Error(`Command "${command}" requires the Tauri desktop runtime.`);
+      }
       console.warn(`[Preview] invoking ${command}`);
       const { handlePreviewInvoke } = await import('@/lib/api-preview-mocks');
-      return await handlePreviewInvoke<T>(command, args as Record<string, unknown> | undefined);
+      return await handlePreviewInvoke<T>(command, args);
     }
   } catch (error) {
     if (isDev) console.error(`Raw invoke error for ${command}:`, error);

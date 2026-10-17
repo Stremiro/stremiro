@@ -186,14 +186,18 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
       return;
     }
 
-    const interval = window.setInterval(() => {
-      // Skip ticks while hidden/minimized — the next visible tick resumes rotation without a missed change.
-      if (!document.hidden) {
-        advanceSlide();
-      }
-    }, HERO_ROTATION_INTERVAL_MS);
+    let interval: number | undefined;
+    const syncRotation = () => {
+      window.clearInterval(interval);
+      interval = document.hidden
+        ? undefined
+        : window.setInterval(() => advanceSlide(), HERO_ROTATION_INTERVAL_MS);
+    };
+    syncRotation();
+    document.addEventListener('visibilitychange', syncRotation);
 
     return () => {
+      document.removeEventListener('visibilitychange', syncRotation);
       window.clearInterval(interval);
     };
   }, [isPaused, itemCount]);
@@ -213,6 +217,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const queryClient = useQueryClient();
   const [isHovered, setIsHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
+  const [isWindowFocused, setIsWindowFocused] = useState(() => document.hasFocus());
   const [isOffscreen, setIsOffscreen] = useState(false);
   const [isRotationPaused, setIsRotationPaused] = useState(false);
   const from = currentPathWithSearch();
@@ -220,8 +225,24 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const { activeIndex, handleSelect, isTransitioning } = useHeroCarouselState({
     itemCount: items.length,
     // Offscreen slides rotate state nobody can see; reduced-motion users get manual control only.
-    isPaused: isRotationPaused || isHovered || hasFocus || isOffscreen || prefersReducedMotion(),
+    isPaused:
+      isRotationPaused ||
+      isHovered ||
+      hasFocus ||
+      !isWindowFocused ||
+      isOffscreen ||
+      prefersReducedMotion(),
   });
+
+  useEffect(() => {
+    const syncWindowFocus = () => setIsWindowFocused(document.hasFocus());
+    window.addEventListener('focus', syncWindowFocus);
+    window.addEventListener('blur', syncWindowFocus);
+    return () => {
+      window.removeEventListener('focus', syncWindowFocus);
+      window.removeEventListener('blur', syncWindowFocus);
+    };
+  }, []);
 
   // Don't advance or repaint the crossfade while the hero is scrolled off under the rails. The section mounts
   // only once items exist, so a cold load re-runs this when they land.
@@ -242,7 +263,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const activeHeroDetailsType = resolvePlayerRouteMediaType(item?.type);
   const [logoUrl, onLogoError] = useFailedSrc(isHttpUrl(item?.logo) ? item?.logo : null);
 
-  const { data: heroDetails } = useQuery({
+  const { data: heroDetails, isFetched: isHeroDetailsFetched } = useQuery({
     // Card payload only (no episodes) — the hero never renders episode data and must not pay for it.
     queryKey: detailsCardQueryKey(activeHeroDetailsType, activeHeroItemId),
     queryFn: () =>
@@ -263,7 +284,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   });
 
   useEffect(() => {
-    if (items.length <= 1) {
+    if (items.length <= 1 || !isHeroDetailsFetched || isOffscreen || document.hidden) {
       return;
     }
 
@@ -272,27 +293,34 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
     // Two slides share one neighbor on both sides.
     const candidateItems = nextItem === previousItem ? [nextItem] : [nextItem, previousItem];
 
-    for (const candidate of candidateItems) {
-      // Also warms watch-progress so the next slide's primary button lands with its Resume label settled.
-      prefetchDetailsRouteData(queryClient, {
-        mediaId: candidate.id,
-        mediaType: candidate.type,
-      });
-      // Warm adjacent backdrops so rotation never flashes an empty frame — a plain Image probe, no React state.
-      const backdrop = candidate.backdrop || candidate.poster;
-      if (backdrop && isHttpUrl(backdrop)) {
-        const probe = new Image();
-        probe.decoding = 'async';
-        probe.referrerPolicy = 'no-referrer';
-        probe.src = backdrop;
+    const timer = window.setTimeout(() => {
+      if (document.hidden) return;
+      for (const candidate of candidateItems) {
+        // Also warms watch-progress so the next slide's primary button lands with its Resume label settled.
+        prefetchDetailsRouteData(queryClient, {
+          mediaId: candidate.id,
+          mediaType: candidate.type,
+          warmChunk: false,
+        });
+        // Warm adjacent backdrops so rotation never flashes an empty frame — a plain Image probe, no React state.
+        const backdrop = candidate.backdrop || candidate.poster;
+        if (backdrop && isHttpUrl(backdrop)) {
+          const probe = new Image();
+          probe.decoding = 'async';
+          probe.referrerPolicy = 'no-referrer';
+          probe.src = backdrop;
+        }
       }
-    }
-  }, [activeIndex, items, queryClient]);
+    }, 750);
+    return () => window.clearTimeout(timer);
+  }, [activeIndex, isHeroDetailsFetched, isOffscreen, items, queryClient]);
 
   const heroRating = heroDetails?.rating ?? null;
   const { data: isInLibrary = false } = useIsItemInLibrary(item?.id);
   const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
-  const { data: historyEntry } = useLatestWatchHistoryEntry(activeHeroItemId);
+  const { data: historyEntry } = useLatestWatchHistoryEntry(activeHeroItemId, {
+    staleTime: 1000 * 60 * 5,
+  });
   // Same primary-action pipeline as MediaCard: resume, resolve+play a movie, or land on details for a series.
   const primaryPlayback = useMediaPrimaryPlayback({
     from,
@@ -430,7 +458,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   {/* A late rating stays at the row's edge without shifting year/type. */}
                   {heroRating && (
                     <span className='flex items-center gap-1.5 font-semibold text-white animate-in fade-in duration-300'>
-                      <Star className='rating-star h-3 w-3 fill-amber-400 text-amber-400' />
+                      <Star className='h-3 w-3 fill-amber-400 text-amber-400' />
                       {heroRating}
                     </span>
                   )}

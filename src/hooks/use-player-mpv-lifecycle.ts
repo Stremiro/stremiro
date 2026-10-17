@@ -23,16 +23,17 @@ import {
   setMpvProperties,
 } from '@/lib/player-mpv';
 import { isNearMediaEnd } from '@/lib/player-skip';
+import { usePlayerSession } from '@/lib/player-session';
 import { sleep, type TimerHandle } from '@/lib/utils';
 
 const TIME_UPDATE_THROTTLE_MS = 350;
 const HIDDEN_TIME_UPDATE_THROTTLE_MS = 1000;
 // Position probe cadence: subscribers get ~3Hz while per-frame property events stay off.
 const POSITION_POLL_MS = 300;
+const POSITION_MAINTENANCE_POLL_MS = 1000;
 // Post-pause probe grace covers optimistic-seek settle ticks and a quick resume click.
 const PAUSED_POLL_GRACE_MS = 1500;
-// Consecutive null probes (~7.5s) = dead mpv IPC; legit nulls never reach this (probe runs only while playing/loading).
-const POSITION_POLL_STRIKE_OUT = 25;
+const POSITION_POLL_FAILURE_BUDGET_MS = 7500;
 // The buffered-ahead band only needs to move when it visibly would.
 const BUFFERED_PUBLISH_DELTA_SECS = 0.5;
 const IDLE_GRACE_MS = 4000;
@@ -41,9 +42,16 @@ const IDLE_DEAD_VERDICT_MS = 10_000;
 const MPV_TEARDOWN_SETTLE_MS = 150;
 const TRACK_REFRESH_COALESCE_MS = 120;
 const FORCE_SHOW_AFTER_MS = 6500;
-const FORCE_SHOW_VERDICT_MS = 5000;
 
 type StreamFailureOutcome = 'load-failed' | 'disconnected';
+
+export function getPlayerStreamLoadKey(stream: PlayerStreamSession): string {
+  return JSON.stringify([
+    stream.activeStreamUrl,
+    stream.activeStreamKey,
+    stream.activeStreamMpvHttpHeaderFields,
+  ]);
+}
 
 interface UsePlayerMpvLifecycleArgs {
   stream: PlayerStreamSession;
@@ -60,16 +68,20 @@ interface UsePlayerMpvLifecycleArgs {
   mpvInitializedRef: RefObject<boolean>;
   isLoading: boolean;
   isPlayingRef: RefObject<boolean>;
+  isBufferingRef: RefObject<boolean>;
   clock: PlaybackClock;
+  observedPositionRef: RefObject<number | null>;
   /** Buffered-ahead seconds store — feeds the seekbar band without player-tree renders. */
   bufferedClock: PlaybackClock;
   durationRef: RefObject<number>;
   playbackVerifiedAtRef: RefObject<number>;
   errorRef: RefObject<string | null>;
+  recoverableStreamErrorRef: RefObject<string | null>;
   forceShowTimeoutRef: RefObject<TimerHandle | null>;
   saveProgressRef: RefObject<(() => Promise<void>) | undefined>;
   setIsLoading: Dispatch<SetStateAction<boolean>>;
-  setError: Dispatch<SetStateAction<string | null>>;
+  setError: (value: string | null) => void;
+  setStreamError: (value: string) => void;
   setDuration: Dispatch<SetStateAction<number>>;
   setIsPlaying: Dispatch<SetStateAction<boolean>>;
   setVolume: Dispatch<SetStateAction<number>>;
@@ -98,7 +110,11 @@ interface UsePlayerMpvLifecycleArgs {
   /** True when a switch waiter owns the follow-up track refresh. */
   onObservedTrackSelection: (type: 'audio' | 'sub', id: number | null) => boolean;
   refreshTracks: () => Promise<unknown>;
-  reportStreamFailure: (outcome: StreamFailureOutcome, sourceUrl?: string) => void;
+  reportStreamFailure: (
+    outcome: StreamFailureOutcome,
+    sourceUrl?: string,
+    streamKey?: string,
+  ) => void;
   recoverFromSlowStartup: (sourceUrl: string, outcome: StreamFailureOutcome) => Promise<boolean>;
   reopenSelectorForSavedStreamFailure: () => void;
   stopLoading: (makeTransparent?: boolean) => void;
@@ -120,15 +136,19 @@ export function usePlayerMpvLifecycle({
   mpvInitializedRef,
   isLoading,
   isPlayingRef,
+  isBufferingRef,
   clock,
+  observedPositionRef,
   bufferedClock,
   durationRef,
   playbackVerifiedAtRef,
   errorRef,
+  recoverableStreamErrorRef,
   forceShowTimeoutRef,
   saveProgressRef,
   setIsLoading,
   setError,
+  setStreamError,
   setDuration,
   setIsPlaying,
   setVolume,
@@ -138,7 +158,14 @@ export function usePlayerMpvLifecycle({
   isResolvingRef,
   ...callbacks
 }: UsePlayerMpvLifecycleArgs) {
-  const { activeStreamUrl, activeStreamMpvHttpHeaderFields, committedStreamUrlRef } = stream;
+  const { trayPause } = usePlayerSession();
+  const {
+    activeStreamUrl,
+    activeStreamMpvHttpHeaderFields,
+    activeStreamKey,
+    committedStreamUrlRef,
+  } = stream;
+  const activeStreamLoadKey = getPlayerStreamLoadKey(stream);
   const isDev = import.meta.env.DEV;
   const currentTimeRef = clock.ref;
   // Effect events keep callback changes from restarting the native player.
@@ -175,10 +202,11 @@ export function usePlayerMpvLifecycle({
       // Paused polling may be idle when a hidden window becomes visible.
       clock.publish(clock.ref.current);
       bufferedClock.publish(bufferedClock.ref.current);
+      requestPositionRefresh();
     };
     document.addEventListener('visibilitychange', publishVisiblePosition);
     return () => document.removeEventListener('visibilitychange', publishVisiblePosition);
-  }, [clock, bufferedClock]);
+  }, [clock, bufferedClock, requestPositionRefresh]);
 
   useEffect(() => {
     if (!activeStreamUrl) return;
@@ -191,13 +219,22 @@ export function usePlayerMpvLifecycle({
     let loadfileSent = false;
     let trackRefreshTimer: TimerHandle | null = null;
     let surfaceRefreshFrame: number | null = null;
+    let idleGraceTimer: TimerHandle | null = null;
     let idleDeadTimer: TimerHandle | null = null;
+    let idleActive = false;
     let positionPollTimer: TimerHandle | null = null;
     let positionPollInFlight = false;
+    let positionPollRequested = false;
+    let positionGeneration = 0;
+    let previousNativePosition: { time: number; at: number; streamError: string | null } | null =
+      null;
+    let seeking = false;
+    let pendingEof = false;
+    let eofGeneration = 0;
     let lastTimePublishAt = 0;
     let lastBufferedPublishAt = 0;
     let pausedPollGraceUntil = 0;
-    let consecutiveProbeFailures = 0;
+    let probeFailuresSince: number | null = null;
     let nearCompletionSaved = false;
 
     // Cosmetic property writes must never fail init — a reject here would surface "Failed to initialize player" on a live mpv.
@@ -211,14 +248,23 @@ export function usePlayerMpvLifecycle({
     const isPlayheadNearEnd = () => isNearMediaEnd(currentTimeRef.current, durationRef.current);
 
     const clearTransientTimers = () => {
+      pendingEof = false;
+      eofGeneration += 1;
       if (trackRefreshTimer !== null) clearTimeout(trackRefreshTimer);
       if (surfaceRefreshFrame !== null) {
         window.cancelAnimationFrame(surfaceRefreshFrame);
         surfaceRefreshFrame = null;
       }
-      if (idleDeadTimer !== null) clearTimeout(idleDeadTimer);
+      if (idleGraceTimer !== null) {
+        clearTimeout(idleGraceTimer);
+        idleGraceTimer = null;
+      }
+      if (idleDeadTimer !== null) {
+        clearTimeout(idleDeadTimer);
+        idleDeadTimer = null;
+      }
       if (positionPollTimer !== null) {
-        clearInterval(positionPollTimer);
+        clearTimeout(positionPollTimer);
         positionPollTimer = null;
       }
     };
@@ -242,9 +288,83 @@ export function usePlayerMpvLifecycle({
       });
     };
 
+    const handleIdleActive = () => {
+      if (streamGone() || !idleActive || errorRef.current) return;
+      if (isLoadingNow() && !loadfileSent) return;
+
+      const verifiedAt = playbackVerifiedAtRef.current;
+      const graceRemaining = IDLE_GRACE_MS - (performance.now() - verifiedAt);
+      if (verifiedAt > 0 && graceRemaining > 0) {
+        if (idleGraceTimer === null) {
+          idleGraceTimer = setTimeout(() => {
+            idleGraceTimer = null;
+            handleIdleActive();
+          }, graceRemaining);
+        }
+        return;
+      }
+
+      const hasProgressedMeaningfully = currentTimeRef.current > 2 && durationRef.current > 0;
+
+      if (isPlayheadNearEnd()) return;
+
+      const currentUrl = committedStreamUrlRef.current;
+      if (!currentUrl) return;
+
+      const duringInitialLoad = isLoadingNow();
+      const outcome = duringInitialLoad ? 'load-failed' : 'disconnected';
+
+      // Report only where recovery never runs — `recover_playback_stream` records the outcome itself.
+      if (isHistoryResumeNow() && duringInitialLoad) {
+        reportStreamFailure(outcome, activeStreamUrl, activeStreamKey);
+        stopLoading();
+        reopenSelector();
+        return;
+      }
+
+      if (hasProgressedMeaningfully) {
+        reportStreamFailure(outcome, activeStreamUrl, activeStreamKey);
+        // Nothing reloads a mid-playback idle — arm a verdict; recovery, a swap, or position movement cancels it.
+        if (idleDeadTimer === null) {
+          const deadPosition = currentTimeRef.current;
+          idleDeadTimer = setTimeout(() => {
+            idleDeadTimer = null;
+            if (streamGone()) return;
+            if (errorRef.current || isResolvingRef.current || isLoadingNow()) {
+              return;
+            }
+            if (currentTimeRef.current > deadPosition + 0.5) return;
+            setStreamError('This stream disconnected. Try another stream.');
+          }, IDLE_DEAD_VERDICT_MS);
+        }
+        return;
+      }
+
+      // idle-active can fire mid-playback: re-check near-end/verified before failing after recovery.
+      void recoverFromSlowStartup(currentUrl, outcome).then((didRecover) => {
+        // A swap/unmount during the up-to-45s recovery must not fail the stream that replaced it.
+        if (streamGone() || didRecover || errorRef.current || isResolvingRef.current) return;
+
+        if (isPlayheadNearEnd()) return;
+
+        if (playbackVerifiedAtRef.current > 0 && currentTimeRef.current > 0.5) return;
+
+        setStreamError(
+          duringInitialLoad
+            ? 'Stream failed to load. Try another stream.'
+            : 'This stream disconnected. Try another stream.',
+        );
+        if (duringInitialLoad) stopLoading();
+      });
+    };
+
     // Playhead tick — driven by the position poll: optimistic-seek gate, publish, ready/resume signals.
-    const handleTimePos = (data: number, nearCompletion: boolean) => {
+    const handleTimePos = (data: number, nearCompletion: boolean, generation: number) => {
       const now = performance.now();
+      const seekPending = isSeekPending();
+      if (seekPending) {
+        previousNativePosition = null;
+      }
       // A pending optimistic seek owns the displayed position — swallow stale pre-seek ticks.
       if (observeTimeUpdate(data, now)) return;
 
@@ -254,9 +374,30 @@ export function usePlayerMpvLifecycle({
         lastTimePublishAt = now;
         clock.publish(data);
       }
-      if (data > 0.1) {
-        if (isLoadingNow()) markPlaybackReady();
-        markPlaybackVerified();
+      if (data > 0.1 && isLoadingNow()) markPlaybackReady();
+      const previous = previousNativePosition;
+      const streamError = recoverableStreamErrorRef.current;
+      if (
+        generation === positionGeneration &&
+        loadfileSent &&
+        isPlayingRef.current &&
+        !isBufferingRef.current &&
+        !seeking &&
+        !seekPending &&
+        !isResumePending()
+      ) {
+        // Seeks and native timeline jumps cannot prove playback.
+        if (
+          previous &&
+          previous.streamError === streamError &&
+          data - previous.time > 0.01 &&
+          data - previous.time <= ((now - previous.at) / 1000) * playbackSpeedRef.current + 1
+        ) {
+          markPlaybackVerified();
+        }
+        previousNativePosition = { time: data, at: now, streamError };
+      } else {
+        previousNativePosition = null;
       }
       // Rust owns the completion threshold; save only accepted native ticks, never a stale pre-seek or optimistic value.
       if (nearCompletion && isPlayingRef.current && !nearCompletionSaved) {
@@ -285,52 +426,127 @@ export function usePlayerMpvLifecycle({
       }
     };
 
-    const pollPlaybackPosition = async () => {
-      if (positionPollInFlight) return;
+    const nextPollDelay = () => {
+      if (
+        isLoadingNow() ||
+        seeking ||
+        isSeekPending() ||
+        isResumePending() ||
+        pendingEof ||
+        isBufferingRef.current ||
+        performance.now() <= pausedPollGraceUntil
+      ) {
+        return POSITION_POLL_MS;
+      }
+      return !isPlayingRef.current || (document.hidden && playbackVerifiedAtRef.current > 0)
+        ? POSITION_MAINTENANCE_POLL_MS
+        : POSITION_POLL_MS;
+    };
+
+    const schedulePositionPoll = (delay = nextPollDelay()) => {
+      if (positionPollTimer !== null) clearTimeout(positionPollTimer);
+      positionPollTimer = null;
+      if (streamGone() || !mpvInitializedRef.current) return;
+      positionPollTimer = window.setTimeout(() => {
+        positionPollTimer = null;
+        void pollPlaybackPosition();
+        schedulePositionPoll();
+      }, delay);
+    };
+
+    const pollPlaybackPosition = async (force = false) => {
+      if (positionPollInFlight) {
+        if (force) positionPollRequested = true;
+        return;
+      }
       if (streamGone()) return;
       if (!mpvInitializedRef.current) return;
-      if (errorRef.current && !isResolvingRef.current && !isLoadingNow()) return;
+      if (
+        !pendingEof &&
+        errorRef.current &&
+        !recoverableStreamErrorRef.current &&
+        !isResolvingRef.current &&
+        !isLoadingNow()
+      )
+        return;
       // Idle gate: a paused/EOF stream can't move on its own; grace covers settle ticks and a pending optimistic seek.
       if (
         !isPlayingRef.current &&
         !isLoadingNow() &&
+        !pendingEof &&
+        !seeking &&
         !isSeekPending() &&
         !isResumePending() &&
         performance.now() > pausedPollGraceUntil
       ) {
+        probeFailuresSince = null;
         return;
       }
       positionPollInFlight = true;
+      const generation = positionGeneration;
+      const eofReadGeneration = eofGeneration;
+      const streamError = recoverableStreamErrorRef.current;
       try {
         const { timePos, bufferedAhead, nearCompletion } = await readPlaybackPositionProbe(
           durationRef.current,
         );
-        if (streamGone()) return;
-        if (typeof timePos === 'number') handleTimePos(timePos, nearCompletion);
+        if (
+          streamGone() ||
+          committedStreamUrlRef.current !== activeStreamUrl ||
+          streamError !== recoverableStreamErrorRef.current
+        )
+          return;
+        if (typeof timePos === 'number' && Number.isFinite(timePos)) {
+          if (loadfileSent) observedPositionRef.current = timePos;
+          handleTimePos(timePos, nearCompletion, generation);
+        }
         if (typeof bufferedAhead === 'number') handleBufferedAhead(bufferedAhead);
+        if (
+          pendingEof &&
+          eofReadGeneration === eofGeneration &&
+          generation === positionGeneration &&
+          !isLoadingNow() &&
+          !seeking &&
+          !isSeekPending() &&
+          (durationRef.current <= 0 ||
+            (typeof timePos === 'number' && timePos >= durationRef.current - 2))
+        ) {
+          pendingEof = false;
+          onEndedChange(true);
+        }
         // Both fields null while NOT loading = dead IPC — a live-but-opening mpv legitimately reports null time-pos.
-        consecutiveProbeFailures =
+        const now = performance.now();
+        probeFailuresSince =
           !isLoadingNow() && timePos === null && bufferedAhead === null
-            ? consecutiveProbeFailures + 1
-            : 0;
-        if (consecutiveProbeFailures >= POSITION_POLL_STRIKE_OUT && positionPollTimer !== null) {
-          clearInterval(positionPollTimer);
+            ? (probeFailuresSince ?? now)
+            : null;
+        if (
+          probeFailuresSince !== null &&
+          now - probeFailuresSince >= POSITION_POLL_FAILURE_BUDGET_MS &&
+          positionPollTimer !== null &&
+          !errorRef.current &&
+          !isResolvingRef.current
+        ) {
+          clearTimeout(positionPollTimer);
           positionPollTimer = null;
           if (isDev) console.warn('[player] position probe stopped: mpv IPC unreachable');
           // Dead IPC is a player fault, not a stream fault: surface the dead end (retry re-inits via a fresh
           // resolve) without benching an innocent source. Gates match the idle-dead verdict's.
-          if (!errorRef.current && !isResolvingRef.current) {
-            setError('The player stopped responding. Try again.');
-          }
+          setError('The player stopped responding. Try again.');
         }
       } finally {
         positionPollInFlight = false;
+        if (positionPollRequested) {
+          positionPollRequested = false;
+          void pollPlaybackPosition(true);
+        }
       }
     };
 
     refreshPositionRef.current = () => {
       pausedPollGraceUntil = performance.now() + PAUSED_POLL_GRACE_MS;
-      void pollPlaybackPosition();
+      schedulePositionPoll(POSITION_POLL_MS);
+      void pollPlaybackPosition(true);
     };
 
     const initPlayer = async () => {
@@ -342,6 +558,7 @@ export function usePlayerMpvLifecycle({
       durationRef.current = 0;
       bufferedClock.publish(0);
       setDuration(0);
+      isBufferingRef.current = false;
       setIsBuffering(false);
 
       setTransparent(false);
@@ -349,7 +566,8 @@ export function usePlayerMpvLifecycle({
       try {
         setMpvSurfaceReady(false);
 
-        const shouldStartPaused = prepareForStreamLoad();
+        const resumeStartPaused = prepareForStreamLoad();
+        const shouldStartPaused = resumeStartPaused || trayPause.getSnapshot();
         const initialVolume = volumeRef.current;
         const initialMuted = isMutedRef.current;
         await mpvInit({
@@ -360,14 +578,25 @@ export function usePlayerMpvLifecycle({
         });
         if (cancelled) return;
 
-        // One parallel batch before loadfile — props, headers, listener registration are independent;
+        // One parallel batch before loadfile — headers and listener registration are independent;
         // allSettled so a listener rejection can't strand still-pending property writes.
         const startupResults = await Promise.allSettled([
           listenEvents((event) => {
             if (streamGone()) return;
 
             if (event.event !== 'property-change') {
-              if (event.event === 'playback-restart') {
+              if (event.event === 'seek') {
+                previousNativePosition = null;
+                positionGeneration += 1;
+                seeking = true;
+                pendingEof = false;
+                eofGeneration += 1;
+                refreshPositionRef.current?.();
+              } else if (event.event === 'playback-restart') {
+                previousNativePosition = null;
+                positionGeneration += 1;
+                seeking = false;
+                refreshPositionRef.current?.();
                 scheduleSurfaceRefresh();
               } else if (
                 event.event === 'file-loaded' ||
@@ -406,17 +635,20 @@ export function usePlayerMpvLifecycle({
                 break;
               case 'pause':
                 if (typeof data === 'boolean') {
+                  previousNativePosition = null;
+                  positionGeneration += 1;
                   isPlayingRef.current = !data;
                   setIsPlaying(!data);
-                  if (data) {
-                    // Keep the probe ticking briefly past the pause so settle ticks and a quick resume still land.
-                    pausedPollGraceUntil = performance.now() + PAUSED_POLL_GRACE_MS;
-                  }
+                  refreshPositionRef.current?.();
                 }
                 break;
               case 'paused-for-cache':
                 if (typeof data === 'boolean') {
+                  previousNativePosition = null;
+                  positionGeneration += 1;
+                  isBufferingRef.current = data;
                   setIsBuffering(data);
+                  refreshPositionRef.current?.();
                 }
                 break;
               case 'volume':
@@ -437,78 +669,36 @@ export function usePlayerMpvLifecycle({
                 break;
               case 'eof-reached':
                 if (data === false) {
+                  pendingEof = false;
+                  eofGeneration += 1;
                   onEndedChange(false);
                   break;
                 }
-                // mpv emits transient EOF at seek boundaries and live edges; terminal only once loaded at end.
-                if (data !== true || isLoadingNow()) break;
-                if (durationRef.current > 0 && currentTimeRef.current < durationRef.current - 2) {
-                  break;
+                if (data === true) {
+                  pendingEof = true;
+                  eofGeneration += 1;
+                  if (durationRef.current <= 0 && !isLoadingNow()) {
+                    pendingEof = false;
+                    onEndedChange(true);
+                  } else {
+                    refreshPositionRef.current?.();
+                  }
                 }
-                onEndedChange(true);
                 break;
               case 'idle-active':
                 if (data === true) {
-                  if (errorRef.current) break;
-                  if (isLoadingNow() && !loadfileSent) break;
-
-                  const verifiedAt = playbackVerifiedAtRef.current;
-                  if (verifiedAt > 0 && performance.now() - verifiedAt < IDLE_GRACE_MS) break;
-
-                  const hasProgressedMeaningfully =
-                    currentTimeRef.current > 2 && durationRef.current > 0;
-
-                  if (isPlayheadNearEnd()) break;
-
-                  const currentUrl = committedStreamUrlRef.current;
-                  if (!currentUrl) break;
-
-                  const duringInitialLoad = isLoadingNow();
-                  const outcome = duringInitialLoad ? 'load-failed' : 'disconnected';
-
-                  // Report only where recovery never runs — `recover_playback_stream` records the outcome itself.
-                  if (isHistoryResumeNow() && duringInitialLoad) {
-                    reportStreamFailure(outcome, currentUrl);
-                    stopLoading();
-                    reopenSelector();
-                    break;
+                  idleActive = true;
+                  handleIdleActive();
+                } else if (data === false) {
+                  idleActive = false;
+                  if (idleGraceTimer !== null) {
+                    clearTimeout(idleGraceTimer);
+                    idleGraceTimer = null;
                   }
-
-                  if (hasProgressedMeaningfully) {
-                    reportStreamFailure(outcome, currentUrl);
-                    // Nothing reloads a mid-playback idle — arm a verdict; recovery, a swap, or position movement cancels it.
-                    if (idleDeadTimer === null) {
-                      const deadPosition = currentTimeRef.current;
-                      idleDeadTimer = setTimeout(() => {
-                        idleDeadTimer = null;
-                        if (streamGone()) return;
-                        if (errorRef.current || isResolvingRef.current || isLoadingNow()) {
-                          return;
-                        }
-                        if (currentTimeRef.current > deadPosition + 0.5) return;
-                        setError('This stream disconnected. Try another stream.');
-                      }, IDLE_DEAD_VERDICT_MS);
-                    }
-                    break;
+                  if (idleDeadTimer !== null) {
+                    clearTimeout(idleDeadTimer);
+                    idleDeadTimer = null;
                   }
-
-                  // idle-active can fire mid-playback: re-check near-end/verified before failing after recovery.
-                  void recoverFromSlowStartup(currentUrl, outcome).then((didRecover) => {
-                    // A swap/unmount during the up-to-45s recovery must not fail the stream that replaced it.
-                    if (streamGone() || didRecover || errorRef.current || isResolvingRef.current)
-                      return;
-
-                    if (isPlayheadNearEnd()) return;
-
-                    if (playbackVerifiedAtRef.current > 0 && currentTimeRef.current > 0.5) return;
-
-                    setError(
-                      duringInitialLoad
-                        ? 'Stream failed to load. Try another stream.'
-                        : 'This stream disconnected. Try another stream.',
-                    );
-                    if (duringInitialLoad) stopLoading();
-                  });
                 }
                 break;
               case 'core-idle':
@@ -529,12 +719,7 @@ export function usePlayerMpvLifecycle({
               unlisten = registeredUnlisten;
             }
           }),
-          setMpvPropertiesBestEffort([
-            ['sub-delay', subtitleSettingsRef.current.delay],
-            ['sub-pos', subtitleSettingsRef.current.pos],
-            ...(subtitleSettingsRef.current.scale !== 1.0
-              ? [['sub-scale', subtitleSettingsRef.current.scale] as const]
-              : []),
+          setMpvProperties([
             // Headers apply before loadfile; empty clears so secrets never leak — never log header values.
             ['http-header-fields', activeStreamMpvHttpHeaderFields ?? ''],
           ]),
@@ -548,24 +733,29 @@ export function usePlayerMpvLifecycle({
         setMpvSurfaceReady(true);
 
         // Live refs after the init awaits — the `mpvInitializedRef` gate skips mid-init changes, so write the newest values.
-        const liveProperties: [string, number | boolean][] = [];
+        const liveProperties: [string, number | boolean][] = [
+          ['sub-delay', subtitleSettingsRef.current.delay],
+          ['sub-pos', subtitleSettingsRef.current.pos],
+          ['sub-scale', subtitleSettingsRef.current.scale],
+        ];
         if (playbackSpeedRef.current !== 1.0)
           liveProperties.push(['speed', playbackSpeedRef.current]);
         if (volumeRef.current !== initialVolume) liveProperties.push(['volume', volumeRef.current]);
         if (isMutedRef.current !== initialMuted) liveProperties.push(['mute', isMutedRef.current]);
-        if (liveProperties.length) await setMpvPropertiesBestEffort(liveProperties);
+        await setMpvPropertiesBestEffort(liveProperties);
         if (cancelled) return;
 
         // Start the probe once the instance is live so reads never hit a dead mpv.
-        positionPollTimer = window.setInterval(() => {
-          void pollPlaybackPosition();
-        }, POSITION_POLL_MS);
+        schedulePositionPoll();
 
+        // A tray hide during init may have paused an instance that did not exist yet.
+        await setMpvProperties([['pause', resumeStartPaused || trayPause.getSnapshot()]]);
+        if (cancelled) return;
         await mpvCommand('loadfile', [activeStreamUrl, 'replace']);
         loadfileSent = true;
         if (cancelled) return;
-        isPlayingRef.current = !shouldStartPaused;
-        setIsPlaying(!shouldStartPaused);
+        isPlayingRef.current = !(resumeStartPaused || trayPause.getSnapshot());
+        setIsPlaying(isPlayingRef.current);
         void applyResumeIfReady();
 
         clearUiTimers();
@@ -577,37 +767,6 @@ export function usePlayerMpvLifecycle({
             stopLoading(true);
             // A stuck load must never strand the user on a black frame — surface chrome while the verdict is pending.
             revealControls();
-            forceShowTimeoutRef.current = setTimeout(() => {
-              if (streamGone() || errorRef.current) return;
-              if (isResolvingRef.current) return;
-              if (playbackVerifiedAtRef.current > 0) return;
-              if (durationRef.current > 0 && currentTimeRef.current > 0.1) return;
-
-              const currentUrl = committedStreamUrlRef.current;
-              if (!currentUrl) {
-                reportStreamFailure('load-failed');
-                setError('Stream failed to load. Try another stream.');
-                stopLoading();
-                return;
-              }
-
-              // Fires before the startup watchdog — a hung connect gets one re-rank first; recovery records its own outcome.
-              void recoverFromSlowStartup(currentUrl, 'load-failed').then((didRecover) => {
-                // A newer recovery attempt took over — don't clobber it.
-                if (streamGone() || didRecover || errorRef.current || isResolvingRef.current)
-                  return;
-                if (playbackVerifiedAtRef.current > 0 || isPlayheadNearEnd()) return;
-
-                if (isHistoryResumeNow()) {
-                  stopLoading();
-                  reopenSelector();
-                  return;
-                }
-
-                setError('Stream failed to load. Try another stream.');
-                stopLoading();
-              });
-            }, FORCE_SHOW_VERDICT_MS);
           }
         }, FORCE_SHOW_AFTER_MS);
       } catch (error) {
@@ -615,7 +774,7 @@ export function usePlayerMpvLifecycle({
         if (cancelled) return;
         if (isDev) console.error('[player] mpv init failed:', error);
         // A failure before `loadfile` is player setup, not a stream fault — reporting would bench a source never attempted.
-        if (loadfileSent) reportStreamFailure('load-failed');
+        if (loadfileSent) reportStreamFailure('load-failed', activeStreamUrl, activeStreamKey);
         // Still serialized on the lifecycle queue — tear the half-built instance down so a remount's init can't race it.
         clearTransientTimers();
         unlisten?.();
@@ -641,6 +800,7 @@ export function usePlayerMpvLifecycle({
       isDestroyedRef.current = true;
       mpvInitializedRef.current = false;
       setMpvSurfaceReady(false);
+      isBufferingRef.current = false;
       setIsBuffering(false);
       clearTransientTimers();
       if (unlisten) unlisten();
@@ -659,9 +819,9 @@ export function usePlayerMpvLifecycle({
       // eslint-disable-next-line react-hooks/exhaustive-deps
       void saveProgressRef.current?.();
     };
-    // Keyed on URL only: header changes always come with a URL change; callbacks go through effect events so late renders can't re-init.
+    // Same-URL recovery can change credentials; apply the new headers before reloading.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeStreamUrl]);
+  }, [activeStreamLoadKey]);
 
   return { isBuffering, requestPositionRefresh };
 }

@@ -4,7 +4,7 @@ import { toast } from 'sonner';
 
 import type { PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
 import { type AddonSubtitle, api, getErrorMessage } from '@/lib/api';
-import { buildTrackLabelMap, isExternalSubtitleTrack, type Track } from '@/lib/player-track-utils';
+import { isExternalSubtitleTrack, type Track } from '@/lib/player-track-utils';
 import { addonSubtitlesQueryKey } from '@/lib/query-invalidation';
 import { nonBlank } from '@/lib/utils';
 
@@ -12,7 +12,7 @@ import { nonBlank } from '@/lib/utils';
 const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
 
 interface UsePlayerAddonSubtitlesOptions {
-  activeStreamUrl?: string;
+  activeStreamLoadKey: string;
   announce: (text: string, icon?: PlayerOsdMessageIcon) => void;
   effectiveResolveMediaType: string;
   id?: string;
@@ -31,7 +31,7 @@ interface UsePlayerAddonSubtitlesOptions {
 }
 
 export function usePlayerAddonSubtitles({
-  activeStreamUrl,
+  activeStreamLoadKey,
   announce,
   effectiveResolveMediaType,
   id,
@@ -49,7 +49,7 @@ export function usePlayerAddonSubtitles({
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
 
-  // External tracks die with the stream, so addon-sub identity resets on each new active URL.
+  // External tracks die with each native load, including same-URL credential swaps.
   useEffect(() => {
     subtitleSessionEpochRef.current += 1;
     setPickedAddonSubtitleId(null);
@@ -57,7 +57,7 @@ export function usePlayerAddonSubtitles({
     return () => {
       subtitleSessionEpochRef.current += 1;
     };
-  }, [activeStreamUrl]);
+  }, [activeStreamLoadKey]);
 
   useEffect(() => {
     if (!menuAvailable) setSubtitleMenuOpened(false);
@@ -92,9 +92,14 @@ export function usePlayerAddonSubtitles({
 
   const addonSubtitles: AddonSubtitle[] = subtitlesQuery.data ?? EMPTY_ADDON_SUBTITLES;
   const addonSubtitlesLoading = subtitlesQuery.isLoading && subtitlesEnabled;
-  // `isError` only after retries exhaust; a disabled query never reports.
+  // Keep the retry notice mounted while an initial error is retried.
   const addonSubtitlesError =
-    subtitlesEnabled && subtitlesQuery.isError ? getErrorMessage(subtitlesQuery.error) : undefined;
+    subtitlesEnabled &&
+    (subtitlesQuery.isError || (subtitlesQuery.isFetched && subtitlesQuery.isLoading))
+      ? subtitlesQuery.error
+        ? getErrorMessage(subtitlesQuery.error)
+        : "Couldn't load addon subtitles."
+      : undefined;
   // Distinguishes "asked, got nothing" from "never asked" — gates the empty-state hint.
   const addonSubtitlesQueried = subtitlesEnabled;
 
@@ -123,7 +128,6 @@ export function usePlayerAddonSubtitles({
     [addonSubtitleLoadingId, announce, mountedRef, selectAddonSubtitle],
   );
 
-  // Stable callback — the controls overlay re-renders per time update, so inline closures would defeat its memo.
   const handleSubTrackSelect = useCallback(
     (trackType: 'sub', trackId: number | 'no', options?: { persistPreference?: boolean }) => {
       const epoch = subtitleSessionEpochRef.current;
@@ -132,7 +136,7 @@ export function usePlayerAddonSubtitles({
         const label =
           trackId === 'no'
             ? 'Subtitles off'
-            : `Subtitles: ${buildTrackLabelMap(subTracks).get(trackId) ?? `Track ${trackId}`}`;
+            : `Subtitles: ${subTracks.find((track) => track.id === trackId)?.displayLabel ?? `Track ${trackId}`}`;
         announce(label, 'subtitles');
       });
     },
@@ -162,10 +166,12 @@ export function usePlayerAddonSubtitles({
     addonSubtitleLoadingId,
     addonSubtitles,
     addonSubtitlesError,
+    addonSubtitlesFetching: subtitlesQuery.isFetching && subtitlesEnabled,
     addonSubtitlesLoading,
     addonSubtitlesQueried,
     handleAddonSubtitleSelect: handleSelectAddonSubtitle,
     handleSubTrackSelect,
     handleSubtitleMenuOpenChange: setSubtitleMenuOpened,
+    refetchAddonSubtitles: subtitlesQuery.refetch,
   };
 }

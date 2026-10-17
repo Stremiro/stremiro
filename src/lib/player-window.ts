@@ -35,8 +35,10 @@ export async function syncPlayerPip(): Promise<void> {
   if (generation === pipReadGeneration) pipStore.publish(active);
 }
 
-export function returnFromPlayerPip(): Promise<void> {
-  return enqueueViewportTransition(() => setPlayerPip(false)).catch((error) => {
+export function returnFromPlayerPip(withinTransition = false): Promise<void> {
+  return (
+    withinTransition ? setPlayerPip(false) : enqueueViewportTransition(() => setPlayerPip(false))
+  ).catch((error) => {
     toast.error('Could not restore the app window. Please try again.');
     throw error;
   });

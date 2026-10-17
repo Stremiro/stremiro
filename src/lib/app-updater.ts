@@ -7,9 +7,6 @@ import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
 export const APP_VERSION_QUERY_KEY = ['appVersion'] as const;
 export const APP_RELEASE_NOTES_QUERY_KEY = ['app-release-notes'] as const;
-export const APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY = [
-  'app-update-last-notified-version',
-] as const;
 const APP_UPDATE_PROGRESS_EVENT = 'app-update-progress';
 
 // Release links resolve against the repo the updater endpoint polls (tauri.conf.json endpoints).
@@ -27,6 +24,7 @@ export interface ReleaseNoteBlock {
 
 export interface AppUpdateHandle {
   version: string;
+  notificationEligible: boolean;
   notes?: ReleaseNoteBlock[];
   date?: string | null;
 }
@@ -118,16 +116,6 @@ export function formatAppUpdateProgress(progress: AppUpdateProgress | null): str
   }
 }
 
-export async function getStoredLastNotifiedAppUpdateVersion(): Promise<string | null> {
-  if (!isTauriDesktopRuntime()) return null;
-
-  try {
-    return await invoke<string | null>('get_last_notified_app_update_version');
-  } catch {
-    return null;
-  }
-}
-
 export async function saveLastNotifiedAppUpdateVersion(
   version: string | null,
 ): Promise<string | null> {
@@ -182,10 +170,6 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
       const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
       const checkedAt = Date.now();
 
-      if (!update) {
-        queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
-      }
-
       // A late check must not stomp an in-progress install's status/progress/handle.
       writeAppUpdateState(queryClient, (current) =>
         current.status === 'installing'
@@ -239,13 +223,7 @@ export async function runScheduledAppUpdateCheck(
   const update = await runAppUpdateCheck(queryClient);
   if (!update || readAppUpdateState(queryClient).status === 'installing') return null;
 
-  const cached = queryClient.getQueryData<string | null>(
-    APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY,
-  );
-  const lastNotifiedVersion =
-    cached !== undefined ? cached : await getStoredLastNotifiedAppUpdateVersion();
-
-  return lastNotifiedVersion === update.version ? null : update;
+  return update.notificationEligible ? update : null;
 }
 
 // Low-level invoke: owns only the progress listener lifetime; dedup, state, and recovery live above.
@@ -261,6 +239,8 @@ async function installAppUpdate(
 
   try {
     // `version` pins the install to the presented handle — a newer release is rejected, not silently installed.
+    await invoke('download_app_update', { version });
+    await flushPendingAppWrites();
     await invoke('install_app_update', { version });
   } finally {
     unlisten();
@@ -303,10 +283,6 @@ export async function runAppUpdateInstall(
 
       // Windows exits the process once the installer launches — this await only resolves on failure.
       await installAppUpdate(targetUpdate.version, (progress) => {
-        // Saves keep running during the download — flush again at install-launch so debounced writes aren't lost at exit.
-        if (progress.phase === 'installing') {
-          void flushPendingAppWrites().catch(() => undefined);
-        }
         writeAppUpdateState(queryClient, (current) => ({
           ...current,
           isSupported: true,
@@ -327,10 +303,6 @@ export async function runAppUpdateInstall(
         recoveredCheckSucceeded = true;
       } catch {
         recoveredUpdate = null;
-      }
-
-      if (recoveredCheckSucceeded && !recoveredUpdate) {
-        queryClient.setQueryData<string | null>(APP_UPDATE_LAST_NOTIFIED_VERSION_QUERY_KEY, null);
       }
 
       // A failed install consumes the backend handle — only a fresh recovery check can re-arm retry.

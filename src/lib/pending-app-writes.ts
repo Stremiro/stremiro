@@ -16,6 +16,11 @@ export function trackPendingAppWrite<T>(write: Promise<T>): Promise<T> {
   return write;
 }
 
+export function trackNoncriticalAppWrite<T>(write: Promise<T>): Promise<T> {
+  trackPendingAppWrite(write.catch(() => undefined));
+  return write;
+}
+
 export function registerPendingAppWriteFlusher(flush: () => Promise<unknown>): () => void {
   pendingAppWriteFlushers.add(flush);
   return () => pendingAppWriteFlushers.delete(flush);

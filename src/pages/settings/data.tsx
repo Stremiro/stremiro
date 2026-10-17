@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { open as openDialog, save as saveDialog } from '@tauri-apps/plugin-dialog';
 import { Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -13,7 +12,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from '@/components/ui/dialog';
-import { api, getErrorMessage, type ImportResult } from '@/lib/api';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
+import { api, getBackupImportErrorMessage, getErrorMessage, type ImportResult } from '@/lib/api';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import {
   ADDON_CONFIGS_QUERY_KEY,
@@ -54,77 +54,56 @@ function BackupRestore() {
   const queryClient = useQueryClient();
   const [exporting, setExporting] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [importPath, setImportPath] = useState<string | null>(null);
+  const [confirmImport, setConfirmImport] = useState(false);
   const cancelImportRef = useRef<HTMLButtonElement>(null);
+  const mountedRef = useMountedRef();
 
   const handleExport = async () => {
     setExporting(true);
     try {
-      const selected = await saveDialog({
-        title: 'Export Stremiro Backup',
-        defaultPath: `stremiro-backup-${new Date().toISOString().slice(0, 10)}.json`,
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      });
-      if (!selected) return;
-      const path = selected.toLowerCase().endsWith('.json') ? selected : `${selected}.json`;
-
       await flushPendingAppWrites();
-      await api.exportAppDataToFile(path);
+      if (!(await api.exportAppDataToFile())) return;
       toast.success('Backup exported successfully');
     } catch (err) {
       toast.error(`Export failed: ${getErrorMessage(err)}`);
     } finally {
-      setExporting(false);
+      if (mountedRef.current) setExporting(false);
     }
   };
 
-  const chooseImport = async () => {
+  const handleImport = async () => {
     setImporting(true);
-    try {
-      const selected = await openDialog({
-        title: 'Import Stremiro Backup',
-        multiple: false,
-        directory: false,
-        filters: [{ name: 'JSON', extensions: ['json'] }],
-      });
-      if (selected) setImportPath(selected);
-    } catch (err) {
-      toast.error(`Import failed: ${getErrorMessage(err)}`);
-    } finally {
-      setImporting(false);
-    }
-  };
-
-  const handleImport = async (path: string) => {
-    setImporting(true);
-    setImportPath(null);
+    setConfirmImport(false);
     try {
       await flushPendingAppWrites();
-      let result: ImportResult | undefined;
+      let result: ImportResult | null | undefined;
       try {
-        result = await api.importAppDataFromFile(path);
+        result = await api.importAppDataFromFile();
       } finally {
         // Whole-snapshot writers (profile, selector prefs, addon list) compose
         // writes from cached state — reset, not just invalidate, so a settings
         // write can't re-persist pre-import values over the restore. The addon
         // reset also gates the list editor until the fresh registry lands.
         // Failed restores may have persisted earlier domains before failing.
-        const settingsChanged = result?.settings_restored ?? true;
-        if (settingsChanged) {
-          await Promise.all([
-            queryClient.resetQueries({ queryKey: PROFILE_PREFERENCES_QUERY_KEY }),
-            queryClient.resetQueries({ queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY }),
-            queryClient.resetQueries({ queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY }),
-          ]);
+        if (result !== null) {
+          const settingsChanged = result?.settings_restored ?? true;
+          if (settingsChanged) {
+            await Promise.all([
+              queryClient.resetQueries({ queryKey: PROFILE_PREFERENCES_QUERY_KEY }),
+              queryClient.resetQueries({ queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY }),
+              queryClient.resetQueries({ queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY }),
+            ]);
+          }
+          if (settingsChanged || (result?.addons_imported ?? 0) > 0) {
+            await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
+          }
+          await invalidateStoredDataQueries(
+            queryClient,
+            settingsChanged || (result?.addons_imported ?? 0) > 0,
+          );
         }
-        if (settingsChanged || (result?.addons_imported ?? 0) > 0) {
-          await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
-        }
-        await invalidateStoredDataQueries(
-          queryClient,
-          settingsChanged || (result?.addons_imported ?? 0) > 0,
-        );
       }
+      if (!result) return;
       const summary = [
         `${result.history_imported} history`,
         `${result.library_imported} library`,
@@ -135,9 +114,9 @@ function BackupRestore() {
       ].filter(Boolean);
       toast.success('Backup imported', { description: summary.join(' · ') });
     } catch (err) {
-      toast.error(`Import failed: ${getErrorMessage(err)}`);
+      toast.error(`Import failed: ${getBackupImportErrorMessage(err)}`);
     } finally {
-      setImporting(false);
+      if (mountedRef.current) setImporting(false);
     }
   };
 
@@ -154,7 +133,7 @@ function BackupRestore() {
         <BackupButton
           icon={Download}
           busy={exporting}
-          disabled={exporting || importing || importPath !== null}
+          disabled={exporting || importing || confirmImport}
           onClick={handleExport}
         >
           Export
@@ -162,18 +141,13 @@ function BackupRestore() {
         <BackupButton
           icon={Upload}
           busy={importing}
-          disabled={exporting || importing || importPath !== null}
-          onClick={chooseImport}
+          disabled={exporting || importing || confirmImport}
+          onClick={() => setConfirmImport(true)}
         >
           Import
         </BackupButton>
       </div>
-      <Dialog
-        open={importPath !== null}
-        onOpenChange={(open) => {
-          if (!open) setImportPath(null);
-        }}
-      >
+      <Dialog open={confirmImport} onOpenChange={setConfirmImport}>
         <DialogContent
           onOpenAutoFocus={(event) => {
             event.preventDefault();
@@ -189,12 +163,10 @@ function BackupRestore() {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
-            <Button ref={cancelImportRef} variant='outline' onClick={() => setImportPath(null)}>
+            <Button ref={cancelImportRef} variant='outline' onClick={() => setConfirmImport(false)}>
               Cancel
             </Button>
-            <Button onClick={() => importPath && void handleImport(importPath)}>
-              Import backup
-            </Button>
+            <Button onClick={() => void handleImport()}>Import backup</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -232,6 +204,7 @@ function BackupButton({
 function DataManager() {
   const queryClient = useQueryClient();
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
+  const mountedRef = useMountedRef();
 
   const {
     data: stats,
@@ -259,7 +232,7 @@ function DataManager() {
       });
     },
     onSettled: (_data, _error, cat) => {
-      setConfirmKey(null);
+      if (mountedRef.current) setConfirmKey(null);
       return cat.invalidateCaches();
     },
   });
@@ -272,18 +245,22 @@ function DataManager() {
 
   // Two-step confirm focus: arming lands on Cancel (a double Enter must never
   // hit "Clear permanently"); disarming with lost focus returns to the row's
-  // Clear button.
+  // Clear button or category heading.
   const previousConfirmKeyRef = useRef<string | null>(null);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (clearMutation.isPending) return;
     const armedKey = previousConfirmKeyRef.current;
     previousConfirmKeyRef.current = confirmKey;
     const row = document.querySelector<HTMLElement>(`[data-clear-row="${confirmKey ?? armedKey}"]`);
     if (confirmKey) {
       row?.querySelector<HTMLElement>('[data-clear-cancel]')?.focus();
-    } else if (armedKey && (!document.activeElement || document.activeElement === document.body)) {
-      row?.querySelector<HTMLElement>('[data-clear-arm]')?.focus();
+    } else if (armedKey && document.activeElement === document.body) {
+      (
+        row?.querySelector<HTMLElement>('[data-clear-arm]:not(:disabled)') ??
+        row?.querySelector<HTMLElement>('[data-clear-heading]')
+      )?.focus({ preventScroll: true });
     }
-  }, [confirmKey]);
+  }, [clearMutation.isPending, confirmKey]);
 
   const categories: DataCategory[] = [
     {
@@ -360,11 +337,18 @@ function DataManager() {
           return (
             <div
               key={cat.key}
+              data-clear-row={cat.key}
               className='flex flex-col items-start justify-between gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center'
             >
               <div className='min-w-0'>
                 <div className='flex flex-wrap items-center gap-2'>
-                  <span className='text-[14px] font-medium text-zinc-100'>{cat.label}</span>
+                  <h3
+                    data-clear-heading
+                    tabIndex={-1}
+                    className='text-[14px] font-medium text-zinc-100 focus:outline-hidden'
+                  >
+                    {cat.label}
+                  </h3>
                   <span className='text-[12px] tabular-nums text-zinc-500'>
                     {cat.count ?? '—'} {cat.unit}
                   </span>
@@ -372,10 +356,7 @@ function DataManager() {
                 <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>{cat.description}</p>
               </div>
 
-              <div
-                data-clear-row={cat.key}
-                className='flex max-w-full shrink-0 flex-wrap items-center gap-2'
-              >
+              <div className='flex max-w-full shrink-0 flex-wrap items-center gap-2'>
                 {isConfirming ? (
                   <>
                     <Button

@@ -2,11 +2,10 @@ import { type RefObject, useCallback, useEffect, useRef, useState } from 'react'
 
 import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 import { useDebouncedPrefsPersist } from '@/hooks/use-debounced-prefs-persist';
+import type { MpvSetScheduler } from '@/hooks/use-mpv-set-scheduler';
 import type { AppUiPreferencesPatch } from '@/lib/api';
 import { setMpvProperty } from '@/lib/player-mpv';
 import { clamp } from '@/lib/utils';
-
-type MpvSetScheduler = (property: string, value: number) => void;
 
 interface UsePlayerVolumeControlsArgs {
   playerVolume: number;
@@ -65,7 +64,7 @@ export function usePlayerVolumeControls({
       triggerOsd({ kind: 'volume', level: newVol });
       if (newVol > 0 && isMutedRef.current) {
         setIsMuted(false);
-        await setMpvProperty('mute', false);
+        await scheduleMpvSet('mute', false);
       }
     },
     [scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd],
@@ -131,7 +130,7 @@ export function usePlayerVolumeControls({
       scheduleMpvSet('volume', restored);
       triggerOsd({ kind: 'volume', level: restored });
     }
-    await setMpvProperty('mute', newMute);
+    await scheduleMpvSet('mute', newMute);
   }, [handleVolumeChange, scheduleMpvSet, scheduleVolumePersist, setIsMuted, triggerOsd]);
 
   return {

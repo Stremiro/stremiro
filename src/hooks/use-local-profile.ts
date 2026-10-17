@@ -76,6 +76,32 @@ export function useProfileAvatar(): ReturnType<typeof selectProfileAvatar> | und
   return useProfilePreferencesQuery(selectProfileAvatar).data;
 }
 
+export function useProfileAvatarMutation() {
+  const queryClient = useQueryClient();
+  return useCallback(
+    (file: Blob | null) =>
+      trackPendingAppWrite(
+        (async () => {
+          await queryClient.ensureQueryData({
+            queryKey: PROFILE_PREFERENCES_QUERY_KEY,
+            queryFn: api.getProfilePreferences,
+          });
+          return runOptimisticQueryMutation({
+            mutate: (image: Blob | null) =>
+              image ? api.setProfileAvatarFromBytes(image) : api.clearProfileAvatar(),
+            optimisticData:
+              queryClient.getQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY) ??
+              DEFAULT_PROFILE_PREFERENCES,
+            queryClient,
+            queryKey: PROFILE_PREFERENCES_QUERY_KEY,
+            variables: file,
+          });
+        })(),
+      ),
+    [queryClient],
+  );
+}
+
 export function useLocalProfile() {
   const queryClient = useQueryClient();
   const profilePreferencesQuery = useProfilePreferencesQuery();

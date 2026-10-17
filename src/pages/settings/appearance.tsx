@@ -7,6 +7,7 @@ import {
   type LocalProfileUpdate,
   useLocalProfile,
 } from '@/hooks/use-local-profile';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { getErrorMessage } from '@/lib/api';
 import { applyAccentVars } from '@/lib/utils';
 import {
@@ -93,6 +94,7 @@ export function AppearanceSettings() {
   const { profile, isHydrating, profilePreferencesQuery, updateProfile } = useLocalProfile();
   const [draftAccentColor, setDraftAccentColor] = useState<string>();
   const [draftIntensity, setDraftIntensity] = useState<number>();
+  const mountedRef = useMountedRef();
   const profileRef = useRef(profile);
   profileRef.current = profile;
 
@@ -118,7 +120,9 @@ export function AppearanceSettings() {
       toast.error(getErrorMessage(error));
       throw error;
     } finally {
-      setDraftAccentColor((draft) => (draft === color ? undefined : draft));
+      if (mountedRef.current) {
+        setDraftAccentColor((draft) => (draft === color ? undefined : draft));
+      }
     }
   };
 

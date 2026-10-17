@@ -2,6 +2,7 @@ import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import { api } from '@/lib/api';
 import { MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { seekAbsoluteSeconds, setMpvProperty } from '@/lib/player-mpv';
+import { usePlayerSession } from '@/lib/player-session';
 import { clearTimer, formatTime, isLocalMediaId } from '@/lib/utils';
 
 const RESUME_SEEK_MAX_ATTEMPTS = 6;
@@ -20,7 +21,7 @@ function hasResumeReadinessSignal(currentTime: number, duration: number): boolea
   );
 }
 
-// Session key minus the stream URL — watch progress is keyed by media only, so fetches stay valid across failover.
+// Watch progress is keyed by media only, so fetches stay valid across native loads.
 function buildResumeMediaKey(
   mediaId?: string,
   mediaType?: string,
@@ -41,6 +42,7 @@ interface UsePlayerResumeControllerArgs {
   mediaId?: string;
   mediaType?: string;
   activeStreamUrl?: string;
+  activeStreamLoadKey: string;
   startTime?: number;
   absoluteSeason?: number;
   absoluteEpisode?: number;
@@ -58,6 +60,7 @@ export function usePlayerResumeController({
   mediaId,
   mediaType,
   activeStreamUrl,
+  activeStreamLoadKey,
   startTime,
   absoluteSeason,
   absoluteEpisode,
@@ -70,8 +73,10 @@ export function usePlayerResumeController({
   failoverResumePositionRef,
   onResumeMessage,
 }: UsePlayerResumeControllerArgs) {
+  const { trayPause } = usePlayerSession();
   const resumeTimeRef = useRef(0);
   const resumeAppliedRef = useRef(false);
+  const automaticResumeCancelledRef = useRef(false);
   const resumeSeekAttemptsRef = useRef(0);
   const resumeSeekInFlightRef = useRef(false);
   const resumeSeekRetryTimerRef = useRef<number | null>(null);
@@ -79,9 +84,10 @@ export function usePlayerResumeController({
   const resumeOsdShownRef = useRef(false);
   const resumeSessionKeyRef = useRef('');
   const resumeMediaKeyRef = useRef('');
-  // Bumped per session change — a stale seek completion must never touch the new session's bookkeeping.
+  // Session changes and user seeks invalidate pending resume continuations.
   const resumeSessionEpochRef = useRef(0);
   const activeStreamUrlRef = useRef(activeStreamUrl);
+  const activeStreamLoadKeyRef = useRef(activeStreamLoadKey);
   const applyResumeIfReadyRef = useRef<() => Promise<void>>(async () => undefined);
   const suspendedRef = useRef(suspended);
 
@@ -101,6 +107,7 @@ export function usePlayerResumeController({
     }
 
     resumePausePendingRef.current = false;
+    if (trayPause.getSnapshot()) return;
 
     try {
       await setMpvProperty('pause', false);
@@ -108,7 +115,14 @@ export function usePlayerResumeController({
       // Best-effort only; dev-gated warn keeps prod silent.
       if (import.meta.env.DEV) console.warn('[player] resume unpause best-effort failed');
     }
-  }, [isDestroyedRef, mountedRef]);
+  }, [isDestroyedRef, mountedRef, trayPause]);
+
+  // Hands a resume-owned pause to another owner so finalization cannot unpause underneath it.
+  const takeResumePause = useCallback(() => {
+    const owned = resumePausePendingRef.current;
+    resumePausePendingRef.current = false;
+    return owned;
+  }, []);
 
   const finalizeResume = useCallback(
     async (resumeTime: number, didSeek: boolean) => {
@@ -127,6 +141,13 @@ export function usePlayerResumeController({
     },
     [clearResumeRetryTimer, onResumeMessage, releaseResumePause],
   );
+
+  const cancelAutomaticResume = useCallback(() => {
+    automaticResumeCancelledRef.current = true;
+    resumeSessionEpochRef.current += 1;
+    resumeTimeRef.current = 0;
+    void finalizeResume(0, false);
+  }, [finalizeResume]);
 
   const scheduleResumeRetry = useCallback(
     (delayMs = RESUME_SEEK_RETRY_DELAY_MS) => {
@@ -207,7 +228,7 @@ export function usePlayerResumeController({
       }
     }
 
-    // A session change mid-seek invalidates the whole tail — the old resumeTime must not finalize or retry for the new session.
+    // Cancellation or a session change invalidates the seek continuation.
     if (
       resumeSessionEpochRef.current !== seekEpoch ||
       suspendedRef.current ||
@@ -255,13 +276,13 @@ export function usePlayerResumeController({
       absoluteEpisode,
       startTime,
     );
-    const nextResumeSessionKey = [nextMediaKey, activeStreamUrl ?? ''].join('|');
+    const nextResumeSessionKey = JSON.stringify([nextMediaKey, activeStreamLoadKey]);
 
     // Same session: keep applied state so late fetches can't re-seek over the user's position.
     if (nextResumeSessionKey === resumeSessionKeyRef.current) return;
 
     const mediaChanged = nextMediaKey !== resumeMediaKeyRef.current;
-    const streamKept = activeStreamUrlRef.current === activeStreamUrl;
+    const streamKept = activeStreamLoadKeyRef.current === activeStreamLoadKey;
     // "Start over" on the still-loaded stream reloads nothing, so the sub-threshold sentinel must rewind here.
     const restartLoadedStream =
       mediaChanged &&
@@ -275,8 +296,10 @@ export function usePlayerResumeController({
     resumeMediaKeyRef.current = nextMediaKey;
     resumeSessionEpochRef.current += 1;
     activeStreamUrlRef.current = activeStreamUrl;
+    activeStreamLoadKeyRef.current = activeStreamLoadKey;
 
     if (mediaChanged) {
+      automaticResumeCancelledRef.current = false;
       resumeTimeRef.current = normalizedStartTime;
     } else {
       // Same title, new stream (resolve/failover): keep a delivered resume candidate — wiping it drops resume when the fetch beats resolution.
@@ -289,7 +312,7 @@ export function usePlayerResumeController({
         // Resume pending (or non-resume start): keep the intended point unless playback already moved past it.
         resumeTimeRef.current = Math.max(
           resumeTimeRef.current,
-          normalizedStartTime,
+          automaticResumeCancelledRef.current ? 0 : normalizedStartTime,
           failoverPosition,
         );
       }
@@ -309,7 +332,8 @@ export function usePlayerResumeController({
         .then(() =>
           restartEpoch === resumeSessionEpochRef.current &&
           mountedRef.current &&
-          !isDestroyedRef.current
+          !isDestroyedRef.current &&
+          !trayPause.getSnapshot()
             ? setMpvProperty('pause', false)
             : undefined,
         )
@@ -328,6 +352,7 @@ export function usePlayerResumeController({
     absoluteEpisode,
     absoluteSeason,
     activeStreamUrl,
+    activeStreamLoadKey,
     clearResumeRetryTimer,
     currentTimeRef,
     durationRef,
@@ -337,6 +362,7 @@ export function usePlayerResumeController({
     mediaType,
     mountedRef,
     startTime,
+    trayPause,
   ]);
 
   useEffect(() => {
@@ -346,7 +372,7 @@ export function usePlayerResumeController({
 
     // Deterministic discards skip the IPC: history-resume already refreshed progress, explicit start time wins, applied resume can't upgrade.
     if (isHistoryResume || normalizeResumeTime(startTime) > 0) return;
-    if (resumeAppliedRef.current) return;
+    if (resumeAppliedRef.current || automaticResumeCancelledRef.current) return;
 
     let cancelled = false;
     const requestMediaKey = buildResumeMediaKey(
@@ -366,7 +392,7 @@ export function usePlayerResumeController({
           return;
         }
         // Late history reads must not jump back over the user's position.
-        if (resumeAppliedRef.current) return;
+        if (resumeAppliedRef.current || automaticResumeCancelledRef.current) return;
         if (currentTimeRef.current >= candidate - RESUME_SEEK_SETTLE_TOLERANCE_SECS) return;
         const currentResume = resumeTimeRef.current;
         const shouldUpgradeResume =
@@ -415,8 +441,10 @@ export function usePlayerResumeController({
 
   return {
     applyResumeIfReady,
+    cancelAutomaticResume,
     clearResumeRetryTimer,
     isResumePending,
     prepareForStreamLoad,
+    takeResumePause,
   };
 }

@@ -9,14 +9,17 @@ import {
   getErrorMessage,
 } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
-import { type PlayerKeymap, resolvePlayerKeymap } from '@/lib/player-keybindings';
+import { createPlayerKeymap, type PlayerKeymap } from '@/lib/player-keybindings';
 import {
   claimOptimisticQueryWrite,
   runOptimisticQueryMutation,
   settleOptimisticQueryWrites,
 } from '@/lib/optimistic-query';
 import { registerPendingAppWriteFlusher } from '@/lib/pending-app-writes';
-import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
+import {
+  APP_UI_PREFERENCES_QUERY_KEY,
+  DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
+} from '@/lib/query-invalidation';
 
 // A fixed window persists held gestures without waiting for their release.
 const APP_UI_PREFERENCE_FLUSH_MS = 350;
@@ -75,11 +78,24 @@ export function useTrailerPreviews(): boolean {
   return preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES.trailerPreviews;
 }
 
-/// Resolved player keymap — re-renders only when the overrides change.
+/// Resolved player keymap — re-renders only when bindings change.
 export function usePlayerKeymap(): PlayerKeymap {
-  const preferencesQuery = useAppUiPreferencesQuery((preferences) => preferences.playerKeybindings);
-  const overrides = preferencesQuery.data ?? DEFAULT_APP_UI_PREFERENCES.playerKeybindings;
-  return useMemo(() => resolvePlayerKeymap(overrides), [overrides]);
+  const preferencesQuery = useAppUiPreferencesQuery((preferences) => ({
+    bindings: preferences.effectivePlayerKeybindings,
+    overrides: preferences.playerKeybindings,
+  }));
+  const defaultBindingsQuery = useQuery({
+    queryKey: DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
+    queryFn: api.getDefaultPlayerKeybindings,
+    enabled: preferencesQuery.isError && preferencesQuery.data === undefined,
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: Number.POSITIVE_INFINITY,
+  });
+  const { bindings, overrides } = preferencesQuery.data ?? {
+    bindings: defaultBindingsQuery.data ?? DEFAULT_APP_UI_PREFERENCES.effectivePlayerKeybindings,
+    overrides: DEFAULT_APP_UI_PREFERENCES.playerKeybindings,
+  };
+  return useMemo(() => createPlayerKeymap(bindings, overrides), [bindings, overrides]);
 }
 
 export function useAppUiPreferences<T = AppUiPreferences>(
@@ -106,7 +122,15 @@ export function useAppUiPreferences<T = AppUiPreferences>(
       DEFAULT_APP_UI_PREFERENCES;
     try {
       await runOptimisticQueryMutation({
-        mutate: api.saveAppUiPreferences,
+        mutate: async (patch: AppUiPreferencesPatch) => {
+          const saved = await api.saveAppUiPreferences(patch);
+          queryClient.setQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY, (current) => ({
+            ...(current ?? saved),
+            effectivePlayerKeybindings: saved.effectivePlayerKeybindings,
+            defaultPlayerKeybindings: saved.defaultPlayerKeybindings,
+          }));
+          return saved;
+        },
         optimisticData: { ...latest, ...mergedPatch },
         queryClient,
         queryKey: APP_UI_PREFERENCES_QUERY_KEY,
@@ -139,6 +163,14 @@ export function useAppUiPreferences<T = AppUiPreferences>(
     [queryClient, flushPreferences],
   );
 
+  const savePreferences = useCallback(
+    async (patch: AppUiPreferencesPatch) => {
+      updatePreferences(patch);
+      await flushPreferences();
+    },
+    [updatePreferences, flushPreferences],
+  );
+
   // Flush a pending patch on unmount so the last gesture is not lost.
   useEffect(() => () => void flushPreferences().catch(() => undefined), [flushPreferences]);
 
@@ -147,5 +179,6 @@ export function useAppUiPreferences<T = AppUiPreferences>(
     isHydrating: !preferencesQuery.isSuccess || preferencesQuery.isPlaceholderData,
     preferencesQuery,
     updatePreferences,
+    savePreferences,
   };
 }

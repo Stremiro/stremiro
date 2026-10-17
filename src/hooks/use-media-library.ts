@@ -1,11 +1,12 @@
 import {
   type QueryClient,
+  type QueryKey,
   useMutation,
   useMutationState,
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useCallback } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { Channel } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
@@ -14,6 +15,7 @@ import {
   type Episode,
   type LibraryFilters,
   type MediaItem,
+  type ProfileLibrary,
   type ResumeRailEntry,
   type TitleWatchProgress,
   toMediaItem,
@@ -22,9 +24,9 @@ import {
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
-import { watchProgressCoordinates } from '@/lib/history-playback';
+import { bumpWatchProgressEpoch, getWatchProgressEpoch } from '@/lib/api-cache';
 import { notifyAction } from '@/lib/notify';
-import { restoreQueryArrayEntry } from '@/lib/optimistic-query';
+import { reinsertSnapshotRows, restoreQueryArrayEntry } from '@/lib/optimistic-query';
 import {
   invalidateLibraryQueries,
   invalidateListQueries,
@@ -34,6 +36,7 @@ import {
   LISTS_QUERY_KEY,
   LISTS_VIEW_STALE_TIME_MS,
   listSummariesQueryKey,
+  PROFILE_LIBRARY_QUERY_KEY,
   profileLibraryQueryKey,
   RESUME_RAIL_QUERY_KEY,
   RESUME_SECTION_MIN_STALE_MS,
@@ -49,6 +52,13 @@ import { formatEpisodeHeading } from '@/lib/utils';
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
 
+export function getOwnWatchStatus(
+  statuses: Record<string, WatchStatus> | undefined,
+  itemId: string,
+): WatchStatus | undefined {
+  return statuses && Object.hasOwn(statuses, itemId) ? statuses[itemId] : undefined;
+}
+
 // Optimistic status write shared by the details chip group and library toggle.
 export function setCachedWatchStatus(
   queryClient: QueryClient,
@@ -57,7 +67,7 @@ export function setCachedWatchStatus(
 ): void {
   queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (old) => {
     if (status === null) {
-      if (!old || !(itemId in old)) return old;
+      if (!old || !Object.hasOwn(old, itemId)) return old;
       const next = { ...old };
       delete next[itemId];
       return next;
@@ -71,10 +81,6 @@ interface SharedCollectionQueryOptions {
   staleTime?: number;
 }
 
-interface UseLatestWatchHistoryEntryOptions {
-  enabled?: boolean;
-}
-
 interface UseMediaCollectionActionsOptions {
   item?: MediaItem | null;
   isInLibrary: boolean;
@@ -84,6 +90,7 @@ interface ToggleLibraryMutationContext {
   itemId?: string;
   previousLibraryItem?: MediaItem;
   previousStatus?: WatchStatus | null;
+  previousProfileEntries?: { queryKey: QueryKey; snapshot: MediaItem[]; index: number }[];
 }
 
 interface UseToggleLibraryItemOptions {
@@ -184,23 +191,39 @@ export function useResumeRail(
   options?: SharedCollectionQueryOptions,
 ) {
   const queryClient = useQueryClient();
+  const enabled = (options?.enabled ?? true) && Boolean(localToday) && Boolean(localTodayMs);
+  const fetchGenerationRef = useRef(0);
+  const observedRef = useRef(enabled);
+  useEffect(() => {
+    observedRef.current = enabled;
+    return () => {
+      observedRef.current = false;
+    };
+  }, [enabled]);
   return useQuery({
     queryKey: resumeRailQueryKey(localToday),
-    queryFn: ({ signal }) => {
+    // Do not consume signal: the IPC must finish caching after unmount.
+    queryFn: () => {
       if (!localToday || !localTodayMs) {
         return Promise.reject(new Error('Local day is required to read the resume rail.'));
       }
+      const generation = ++fetchGenerationRef.current;
+      const progressEpoch = getWatchProgressEpoch();
       const channel = new Channel<ResumeRailEntry[]>();
       // Channel is not an EventTarget — onmessage is its only surface.
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       channel.onmessage = (snapshot) => {
-        if (!signal.aborted) {
+        if (
+          observedRef.current &&
+          generation === fetchGenerationRef.current &&
+          progressEpoch === getWatchProgressEpoch()
+        ) {
           queryClient.setQueryData(resumeRailQueryKey(localToday), snapshot);
         }
       };
       return api.getResumeRail(localToday, localTodayMs, channel);
     },
-    enabled: (options?.enabled ?? true) && Boolean(localToday) && Boolean(localTodayMs),
+    enabled,
     staleTime: options?.staleTime ?? RESUME_SECTION_MIN_STALE_MS,
   });
 }
@@ -269,7 +292,8 @@ export function useIsItemInLibrary(itemId?: string, options?: SharedCollectionQu
 
 export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQueryOptions) {
   const selectWatchStatus = useCallback(
-    (statuses: Record<string, WatchStatus>) => (itemId ? (statuses[itemId] ?? null) : null),
+    (statuses: Record<string, WatchStatus>) =>
+      itemId ? (getOwnWatchStatus(statuses, itemId) ?? null) : null,
     [itemId],
   );
 
@@ -284,14 +308,14 @@ export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQu
 
 export function useLatestWatchHistoryEntry(
   itemId?: string,
-  options?: UseLatestWatchHistoryEntryOptions,
+  options?: SharedCollectionQueryOptions,
 ) {
   // `latestEntry` is the backend's `history[0]` pick (`last_watched` DESC).
   const selectLatestEntry = useCallback((progress: TitleWatchProgress) => progress.latestEntry, []);
 
   return useQuery({
     ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
-    staleTime: WATCH_HISTORY_STALE_TIME_MS,
+    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
     select: selectLatestEntry,
   });
 }
@@ -319,10 +343,25 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         return {};
       }
 
-      await queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY });
+      const profileQueries = { queryKey: PROFILE_LIBRARY_QUERY_KEY };
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY }),
+        ...(isInLibrary
+          ? [
+              queryClient.cancelQueries(profileQueries),
+              queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY }),
+            ]
+          : []),
+      ]);
       const previousLibraryItem = queryClient
         .getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY)
         ?.find((entry) => entry.id === item.id);
+      const previousProfileEntries = isInLibrary
+        ? queryClient.getQueriesData<ProfileLibrary>(profileQueries).flatMap(([queryKey, data]) => {
+            const index = data?.items.findIndex((entry) => entry.id === item.id) ?? -1;
+            return data && index !== -1 ? [{ queryKey, snapshot: data.items, index }] : [];
+          })
+        : [];
 
       queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) => {
         if (isInLibrary) {
@@ -334,16 +373,19 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
 
       let previousStatus: WatchStatus | null | undefined;
       if (isInLibrary) {
+        queryClient.setQueriesData<ProfileLibrary>(profileQueries, (old) =>
+          old ? { ...old, items: old.items.filter((entry) => entry.id !== item.id) } : old,
+        );
         // Mirror the status clear so the details chip can't show a stale status.
-        await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
         previousStatus =
-          queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY)?.[
-            item.id
-          ] ?? null;
+          getOwnWatchStatus(
+            queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY),
+            item.id,
+          ) ?? null;
         setCachedWatchStatus(queryClient, item.id, null);
       }
 
-      return { itemId: item.id, previousLibraryItem, previousStatus };
+      return { itemId: item.id, previousLibraryItem, previousStatus, previousProfileEntries };
     },
     onError: (_error, _variables, context) => {
       if (context?.itemId !== undefined) {
@@ -355,6 +397,16 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         );
         if (context.previousStatus !== undefined) {
           setCachedWatchStatus(queryClient, context.itemId, context.previousStatus);
+        }
+        for (const { queryKey, snapshot, index } of context.previousProfileEntries ?? []) {
+          queryClient.setQueryData<ProfileLibrary>(queryKey, (current) =>
+            !current || current.items.some((cached) => cached.id === context.itemId)
+              ? current
+              : {
+                  ...current,
+                  items: reinsertSnapshotRows(current.items, snapshot, [index], (row) => row.id),
+                },
+          );
         }
       }
 
@@ -376,14 +428,66 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
   });
 }
 
-function appendMissingMediaItems(current: MediaItem[], items: MediaItem[]): MediaItem[] {
-  const ids = new Set(current.map((item) => item.id));
-  const added = items.filter((item) => {
+function filterUnseenMediaItems(items: MediaItem[], ids: Set<string>): MediaItem[] {
+  return items.filter((item) => {
     if (ids.has(item.id)) return false;
     ids.add(item.id);
     return true;
   });
+}
+
+function appendMissingMediaItems(current: MediaItem[], items: MediaItem[]): MediaItem[] {
+  const added = filterUnseenMediaItems(items, new Set(current.map((item) => item.id)));
   return added.length > 0 ? [...current, ...added.map(toMediaItem)] : current;
+}
+
+function restoreSelectedLibraryItems(
+  queryClient: QueryClient,
+  ids: string[],
+  previousLibrary: MediaItem[],
+) {
+  if (ids.length === 0) return;
+  const selectedIds = new Set(ids);
+  const previousLibraryById = new Map<string, MediaItem>();
+  for (const item of previousLibrary) {
+    if (!previousLibraryById.has(item.id)) previousLibraryById.set(item.id, item);
+  }
+  queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (current) => {
+    const missingIds = new Set(selectedIds);
+    const restored: MediaItem[] = [];
+    for (const entry of current ?? []) {
+      if (!selectedIds.has(entry.id)) {
+        restored.push(entry);
+        continue;
+      }
+      missingIds.delete(entry.id);
+      const previous = previousLibraryById.get(entry.id);
+      if (previous) restored.push(previous);
+    }
+    for (const id of missingIds) {
+      const previous = previousLibraryById.get(id);
+      if (previous) restored.push(previous);
+    }
+    return current === undefined && restored.length === 0 ? current : restored;
+  });
+}
+
+function restoreSelectedWatchStatuses(
+  queryClient: QueryClient,
+  ids: string[],
+  previousStatuses: Record<string, WatchStatus>,
+) {
+  queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (current) => {
+    if (!current && !ids.some((id) => getOwnWatchStatus(previousStatuses, id) != null))
+      return current;
+    const next = { ...current };
+    for (const id of ids) {
+      const status = getOwnWatchStatus(previousStatuses, id) ?? null;
+      if (status === null) delete next[id];
+      else next[id] = status;
+    }
+    return next;
+  });
 }
 
 export function useBulkRemoveFromLibrary() {
@@ -409,10 +513,10 @@ export function useBulkRemoveFromLibrary() {
       );
       return { previousLibrary, previousStatuses };
     },
-    onError: (_error, _ids, context) => {
+    onError: (_error, ids, context) => {
       if (!context) return;
-      queryClient.setQueryData(LIBRARY_QUERY_KEY, context.previousLibrary);
-      queryClient.setQueryData(WATCH_STATUSES_QUERY_KEY, context.previousStatuses);
+      restoreSelectedLibraryItems(queryClient, ids, context.previousLibrary);
+      restoreSelectedWatchStatuses(queryClient, ids, context.previousStatuses);
     },
     onSettled: () => invalidateLibraryQueries(queryClient),
   });
@@ -445,12 +549,13 @@ export function useBulkSetWatchStatus() {
       }
       return { previousStatuses, previousLibrary };
     },
-    onError: (_error, { status }, context) => {
+    onError: (_error, { items, status }, context) => {
       if (!context) return;
-      queryClient.setQueryData(WATCH_STATUSES_QUERY_KEY, context.previousStatuses);
+      const ids = items.map((item) => item.id);
       if (status !== null) {
-        queryClient.setQueryData(LIBRARY_QUERY_KEY, context.previousLibrary);
+        restoreSelectedLibraryItems(queryClient, ids, context.previousLibrary);
       }
+      restoreSelectedWatchStatuses(queryClient, ids, context.previousStatuses);
     },
     onSettled: (_count, _error, { status }) =>
       status !== null
@@ -471,12 +576,7 @@ export function useBulkAddToList() {
         LISTS_QUERY_KEY,
         previousLists.map((list) => {
           if (list.id !== listId) return list;
-          const ids = new Set(list.item_ids);
-          const additions = items.filter((item) => {
-            if (ids.has(item.id)) return false;
-            ids.add(item.id);
-            return true;
-          });
+          const additions = filterUnseenMediaItems(items, new Set(list.item_ids));
           return {
             ...list,
             item_ids: [...list.item_ids, ...additions.map((item) => item.id)],
@@ -484,10 +584,24 @@ export function useBulkAddToList() {
           };
         }),
       );
-      return { previousLists };
+      return { previousList: previousLists.find((list) => list.id === listId) };
     },
-    onError: (_error, _variables, context) => {
-      if (context) queryClient.setQueryData(LISTS_QUERY_KEY, context.previousLists);
+    onError: (_error, { listId, items }, context) => {
+      const previousList = context?.previousList;
+      if (!previousList) return;
+      const previousIds = new Set(previousList.item_ids);
+      const addedIds = new Set(items.map((item) => item.id).filter((id) => !previousIds.has(id)));
+      queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) =>
+        current?.map((list) =>
+          list.id === listId
+            ? {
+                ...list,
+                item_ids: list.item_ids.filter((id) => !addedIds.has(id)),
+                items: list.items?.filter((entry) => !addedIds.has(entry.id)),
+              }
+            : list,
+        ),
+      );
     },
     onSettled: () => invalidateListQueries(queryClient),
   });
@@ -496,6 +610,10 @@ export function useBulkAddToList() {
 interface UseRemoveTitleWatchHistoryOptions extends UseRemoveFromContinueWatchingOptions {
   toastTitle: string;
   errorTitle: string;
+}
+
+function resumeRailEntryKey({ row }: ResumeRailEntry): string {
+  return `${row.type_}:${row.id}:${row.season ?? ''}:${row.episode ?? ''}`;
 }
 
 // Whole-title history delete: collapsed surfaces render one row per title —
@@ -527,12 +645,20 @@ function useRemoveTitleWatchHistory({
       return api.removeAllFromWatchHistory(itemId, normalizedMediaType);
     },
     onMutate: async () => {
+      bumpWatchProgressEpoch();
       await Promise.all([
         queryClient.cancelQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] }),
         queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
       ]);
       const previousWatchHistory =
         queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
+      const removedResumeEntries = queryClient
+        .getQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] })
+        .map(([queryKey, rows = []]) => ({
+          queryKey,
+          snapshot: rows,
+          indices: rows.flatMap((entry, index) => (matchesTitle(entry.row) ? [index] : [])),
+        }));
       // The rail cache holds ResumeRailEntry rows keyed per local day; filter all variants.
       queryClient.setQueriesData<ResumeRailEntry[]>(
         { queryKey: [RESUME_RAIL_QUERY_KEY] },
@@ -541,6 +667,7 @@ function useRemoveTitleWatchHistory({
       queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, withoutTitle);
       return {
         removedWatchHistory: previousWatchHistory?.filter(matchesTitle),
+        removedResumeEntries,
       };
     },
     onSuccess: (removedRows) => {
@@ -560,6 +687,14 @@ function useRemoveTitleWatchHistory({
       if (removedWatchHistory !== undefined) {
         queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (current) =>
           restore(current, removedWatchHistory),
+        );
+      }
+      for (const { queryKey, snapshot, indices } of context?.removedResumeEntries ?? []) {
+        if (indices.length === 0) continue;
+        queryClient.setQueryData<ResumeRailEntry[]>(queryKey, (current) =>
+          !current || current.some((entry) => matchesTitle(entry.row))
+            ? current
+            : reinsertSnapshotRows(current, snapshot, indices, resumeRailEntryKey),
         );
       }
       toast.error(error instanceof Error ? error.message : errorTitle);
@@ -615,12 +750,11 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
         episodes.map((episode) => `${episode.season}:${episode.episode}`),
       );
       const keep = (row: WatchProgress) => {
-        const rowCoords = watchProgressCoordinates(row);
         return !(
           row.id === item?.id &&
-          rowCoords.season !== undefined &&
-          rowCoords.episode !== undefined &&
-          targetCoords.has(`${rowCoords.season}:${rowCoords.episode}`)
+          row.absolute_season != null &&
+          row.absolute_episode != null &&
+          targetCoords.has(`${row.absolute_season}:${row.absolute_episode}`)
         );
       };
       // The selected single-row picks follow their source list's rule:
@@ -776,15 +910,8 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
     async (list: UserList) => {
       if (!item) return;
       try {
-        await api.addToList(list.id, item);
+        const summary = await api.addToList(list.id, item);
         queryClient.setQueryData<UserListSummary[]>(listSummariesQueryKey(item.id), (old) => {
-          const summary: UserListSummary = {
-            id: list.id,
-            name: list.name,
-            icon: list.icon,
-            item_count: list.item_ids.length + (list.item_ids.includes(item.id) ? 0 : 1),
-            contains_item: true,
-          };
           return old?.some((entry) => entry.id === list.id)
             ? old.map((entry) => (entry.id === list.id ? summary : entry))
             : [...(old ?? []), summary];

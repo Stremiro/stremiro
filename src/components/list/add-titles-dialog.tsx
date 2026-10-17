@@ -12,7 +12,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
-import { useBulkAddToList, useLibraryItems } from '@/hooks/use-media-library';
+import { useDebounce } from '@/hooks/use-debounce';
+import { useBulkAddToList, useLibraryItems, useProfileLibrary } from '@/hooks/use-media-library';
 import { getListErrorMessage, type UserList } from '@/lib/api';
 import { navigateApp } from '@/lib/navigation';
 import { notifyAction } from '@/lib/notify';
@@ -30,12 +31,21 @@ export function AddTitlesDialog({
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(150);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const { data: library = [], isPending, isError, isFetching, refetch } = useLibraryItems();
+  const libraryQuery = useLibraryItems();
+  const { data: library = [] } = libraryQuery;
+  const debouncedSearch = useDebounce(search, 180);
+  const matchingLibraryQuery = useProfileLibrary({
+    query: debouncedSearch,
+    sort: 'title-asc',
+  });
+  const hasLibraryError =
+    libraryQuery.isError ||
+    matchingLibraryQuery.isError ||
+    libraryQuery.errorUpdatedAt > libraryQuery.dataUpdatedAt ||
+    matchingLibraryQuery.errorUpdatedAt > matchingLibraryQuery.dataUpdatedAt;
+  const isSearchPending = search !== debouncedSearch || matchingLibraryQuery.isPlaceholderData;
+  const matchingItems = matchingLibraryQuery.data?.items ?? [];
   const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
-  const matchingItems = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return query ? library.filter((item) => item.title.toLowerCase().includes(query)) : library;
-  }, [library, search]);
   const selectedItems = useMemo(
     () => library.filter((item) => selectedIds.has(item.id) && !existingIds.has(item.id)),
     [existingIds, library, selectedIds],
@@ -91,8 +101,26 @@ export function AddTitlesDialog({
           className='h-10 rounded-lg border-white/10 bg-white/[0.03] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
         />
 
-        <div className='min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5'>
-          {isPending ? (
+        <span role='status' className='sr-only'>
+          {isSearchPending ? 'Searching library…' : ''}
+        </span>
+        <div
+          aria-busy={isSearchPending || libraryQuery.isPending || matchingLibraryQuery.isPending}
+          className={cn(
+            'min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5 transition-opacity duration-200',
+            matchingLibraryQuery.isPlaceholderData && 'opacity-60',
+          )}
+        >
+          {hasLibraryError ? (
+            <RetryBanner
+              message="Couldn't load your library."
+              onRetry={() => {
+                void libraryQuery.refetch();
+                void matchingLibraryQuery.refetch();
+              }}
+              isRetrying={libraryQuery.isFetching || matchingLibraryQuery.isFetching}
+            />
+          ) : libraryQuery.isPending || matchingLibraryQuery.isPending ? (
             <div
               role='status'
               className='flex items-center justify-center gap-2 py-12 text-sm text-zinc-500'
@@ -100,12 +128,6 @@ export function AddTitlesDialog({
               <Loader2 className='h-4 w-4 animate-spin' />
               Loading your library…
             </div>
-          ) : isError ? (
-            <RetryBanner
-              message="Couldn't load your library."
-              onRetry={() => void refetch()}
-              isRetrying={isFetching}
-            />
           ) : library.length === 0 ? (
             <div className='space-y-3 px-4 py-10 text-center'>
               <p className='text-sm font-medium text-zinc-300'>Your library is empty</p>

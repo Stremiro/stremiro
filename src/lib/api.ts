@@ -1,4 +1,4 @@
-import { BEST_STREAM_CACHE_TTL_MS, createRequestCache } from '@/lib/api-cache';
+import { createRequestCache } from '@/lib/api-cache';
 import { safeInvoke } from '@/lib/api-core';
 import { createDiscoveryApi } from '@/lib/api-discovery';
 import { createPlaybackApi } from '@/lib/api-playback';
@@ -7,7 +7,13 @@ import type { PlayerRouteState } from '@/lib/player-navigation';
 import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
 import type { StreamRankingOptions } from '@/lib/stream-ranking';
 
-export { getErrorKind, getErrorMessage, getListErrorMessage } from '@/lib/api-core';
+export {
+  getBackupImportErrorMessage,
+  getErrorKind,
+  getErrorMessage,
+  getListErrorMessage,
+  getWatchStatusErrorMessage,
+} from '@/lib/api-core';
 export { toMediaItem } from '@/lib/api-store';
 
 export interface MediaItem {
@@ -42,6 +48,18 @@ export interface Episode {
   streamEpisode?: number;
 }
 
+export interface EpisodeNavigationRequest {
+  episodes: Pick<Episode, 'season' | 'episode' | 'releaseDate'>[];
+  season: number;
+  episode: number;
+  today: string;
+}
+
+export interface EpisodeNavigation {
+  previousIndex: number | null;
+  nextIndex: number | null;
+}
+
 interface MediaSeason {
   number: number;
   episodeCount: number;
@@ -50,6 +68,7 @@ interface MediaSeason {
 export interface MediaDetails extends MediaItem {
   imdbId?: string;
   rating?: string;
+  ratingPercent?: number;
   runtime?: string;
   cast?: string[];
   directors?: string[];
@@ -67,7 +86,6 @@ export interface CalendarRange {
   visibleStart: string;
   visibleEnd: string;
   upcomingStart: string;
-  upcomingEnd: string;
 }
 
 export interface CalendarScheduleEvent {
@@ -85,6 +103,7 @@ export interface CalendarScheduleEvent {
 
 export interface CalendarSchedule {
   trackedCount: number;
+  missingCount: number;
   /** Days ascending; each day's events backend-sorted (episodes by
       season/episode, then movies by title). */
   days: { date: string; events: CalendarScheduleEvent[] }[];
@@ -166,6 +185,9 @@ export interface AddonStream {
   recommendationReasons?: AddonStreamRecommendationReason[];
   /** Structured episode/title match tiers for the selector badges. */
   matchSummary?: AddonStreamMatchSummary;
+  matchBadgeKinds: StreamMatchBadgeKind[];
+  matchTier: StreamMatchTier | null;
+  showPackBadge: boolean;
   /** Backend-prepared presentation facts so the UI can render without reparsing stream text. */
   presentation: AddonStreamPresentation;
 }
@@ -188,9 +210,22 @@ export type AddonStreamRecommendationReason =
 type AddonStreamEpisodeMatch = 'exact' | 'episode_range' | 'season_pack';
 type AddonStreamTitleMatch = 'close' | 'partial';
 
+export type StreamMatchBadgeKind =
+  | 'episode'
+  | 'range'
+  | 'season'
+  | 'multi_season'
+  | 'title'
+  | 'title_partial';
+export type StreamMatchTier = 'exact' | 'episode_range' | 'season_pack' | 'title';
+
 interface AddonStreamMatchSummary {
   episode?: AddonStreamEpisodeMatch;
   title?: AddonStreamTitleMatch;
+  packCoverage?: {
+    seasons: number[];
+    episodeRanges?: { season?: number; start: number; end: number }[];
+  };
 }
 
 export type AddonStreamResolution = '4k' | '1080p' | '720p' | 'sd';
@@ -246,12 +281,15 @@ export interface AddonSubtitle {
   lang?: string;
   /** Provider-supplied display hint (filename/release name/title) when present. */
   label?: string;
+  mpvTitle: string;
   sourceId: string;
   sourceName: string;
 }
 
 export interface BestResolvedStream {
   url: string;
+  /** Remaining Rust stream-pool lifetime; the frontend cache never outlives it. */
+  cacheTtlMs: number;
   /** Rust-encoded mpv headers, in-memory only. Never persisted or routed; empty clears. */
   mpvHttpHeaderFields: string;
   /** Stable addon-instance id (`AddonConfig.id`) of the resolved winner. */
@@ -318,17 +356,16 @@ export type AddonConfigsOp =
 
 /** Rust verdict for the add-addon box, from the save path's own normalizer. */
 export interface AddonUrlInspection {
-  normalizedUrl?: string;
+  displayUrl?: string;
   error?: string;
   configurePage: boolean;
   /** Installed addon name this URL already points at. */
   duplicateOf?: string;
 }
 
-/** User-configured addon source. `displayUrl` is Rust's credential-masked URL — present on responses, absent from input. */
+/** User-configured addon source. `displayUrl` is Rust's credential-masked URL. */
 export interface AddonConfig {
   id: string;
-  url: string;
   name: string;
   enabled: boolean;
   displayUrl: string;
@@ -337,7 +374,7 @@ export interface AddonConfig {
 }
 
 const apiCaches = {
-  bestStream: createRequestCache<BestResolvedStream>(BEST_STREAM_CACHE_TTL_MS),
+  bestStream: createRequestCache<BestResolvedStream>(),
 };
 
 export interface PlaybackLanguagePreferences {
@@ -381,7 +418,7 @@ export interface ProfilePreferences {
   viewMode: ProfileViewMode;
 }
 
-export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets'>> & {
+export type LocalProfileUpdate = Partial<Omit<LocalProfile, 'accentTargets' | 'avatar'>> & {
   accentTargets?: Partial<AccentTargets>;
 };
 
@@ -416,6 +453,15 @@ export interface AppUiPreferences {
   lastLocation: string | null;
   /** Per-action overrides (`[]` = unbound); see `src/lib/player-keybindings.ts`. */
   playerKeybindings: Record<string, string[]>;
+  effectivePlayerKeybindings: Record<string, string[]>;
+  defaultPlayerKeybindings: Record<string, string[]>;
+}
+
+export interface BootstrapSnapshot {
+  profilePreferences: ProfilePreferences;
+  appUiPreferences: AppUiPreferences;
+  streamSelectorPreferences: StreamSelectorPreferencesState;
+  startupRoute: string | null;
 }
 
 export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
@@ -436,6 +482,8 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   startupPage: 'home',
   lastLocation: null,
   playerKeybindings: {},
+  effectivePlayerKeybindings: {},
+  defaultPlayerKeybindings: {},
 };
 
 export interface AppUiPreferencesPatch {
@@ -475,6 +523,12 @@ export interface StreamSelectorPreferences {
 export interface StreamSelectorPreferencesState {
   preferences: StreamSelectorPreferences;
   initialized: boolean;
+  defaultPreferences: StreamSelectorPreferences;
+  episodeDefaultPreferences: StreamSelectorPreferences;
+}
+
+export interface StreamSelectorPreferencesPatch extends Partial<StreamSelectorPreferences> {
+  episodeContext: boolean;
 }
 
 export interface TrackLanguageCandidate {
@@ -491,9 +545,13 @@ export interface TrackLanguageSelectionResolution {
   matchedTrackId?: number;
 }
 
-export interface AllBrowseCursors {
-  movie?: number;
-  series?: number;
+export interface SearchCatalogContinuation {
+  skip?: number;
+  allCursors?: {
+    movie?: number;
+    series?: number;
+  };
+  seenKeys: string[];
 }
 
 export interface SearchCatalogQuery {
@@ -503,14 +561,13 @@ export interface SearchCatalogQuery {
   genres?: string[];
   yearFrom?: number;
   yearTo?: number;
-  skip?: number;
-  allCursors?: AllBrowseCursors;
+  continuation?: SearchCatalogContinuation;
 }
 
 export interface SearchCatalogPage {
   items: MediaItem[];
-  nextSkip?: number | null;
-  allCursors?: AllBrowseCursors;
+  continuation: SearchCatalogContinuation;
+  exhausted: boolean;
 }
 
 export type HistoryPlaybackPlanReason = 'missing-episode-context';
@@ -579,7 +636,6 @@ export interface WatchProgress {
   poster?: string;
   backdrop?: string;
   // Stream URLs are credential-bearing — never persisted; resume resolves via the opaque identities below.
-  last_stream_format?: string;
   last_stream_lookup_id?: string;
   last_stream_key?: string;
   source_name?: string;

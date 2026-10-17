@@ -1,12 +1,14 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
 
 import {
+  getOwnWatchStatus,
   setCachedWatchStatus,
   useIsItemInLibrary,
   useItemWatchStatus,
 } from '@/hooks/use-media-library';
 import {
   api,
+  getWatchStatusErrorMessage,
   type MediaItem,
   toMediaItem,
   WATCH_STATUS_COLORS,
@@ -49,8 +51,10 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
     onMutate: async (status) => {
       if (!itemId) return {};
       await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
-      const previousStatus =
-        queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY)?.[itemId];
+      const previousStatus = getOwnWatchStatus(
+        queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY),
+        itemId,
+      );
       setCachedWatchStatus(queryClient, itemId, status);
 
       // Mirror the track into the library cache before the refetch lands.
@@ -67,7 +71,7 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
       }
       return { itemId, previousStatus, previousLibraryItem };
     },
-    onError: (_err, _status, context) => {
+    onError: (error, _status, context) => {
       if (context?.itemId !== undefined) {
         setCachedWatchStatus(queryClient, context.itemId, context.previousStatus ?? null);
         if (context.previousLibraryItem !== undefined) {
@@ -79,7 +83,10 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
           );
         }
       }
-      notifyAction('Failed to update status', { tone: 'error' });
+      notifyAction('Failed to update status', {
+        tone: 'error',
+        detail: getWatchStatusErrorMessage(error),
+      });
     },
     onSuccess: (savedItem, status) => {
       if (savedItem) {

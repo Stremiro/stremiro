@@ -14,27 +14,26 @@ import {
   verticalListSortingStrategy,
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
-import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query';
 import {
   ChevronDown,
   ChevronRight,
-  Film,
   GripVertical,
   ListPlus,
   Pencil,
   Plus,
   Trash2,
-  Tv,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router';
+import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
 import { PosterThumb } from '@/components/poster-thumb';
 import { ViewToggle } from '@/components/profile-library-controls';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
 import { useLists } from '@/hooks/use-media-library';
+import { useTitleSearch } from '@/hooks/use-item-search';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { Button } from '@/components/ui/button';
@@ -56,6 +55,9 @@ import { cn, isHttpUrl } from '@/lib/utils';
 import { AddTitlesDialog } from './add-titles-dialog';
 import { ListIconTile } from './list-icons';
 
+const LIST_ITEMS_PAGE_SIZE = 150;
+const DELETE_LIST_MUTATION_KEY = ['delete-list'] as const;
+
 const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-1',
   'list-manager-skeleton-2',
@@ -71,7 +73,7 @@ function ListPosterStack({ items }: { items?: MediaItem[] }) {
           <PosterThumb
             key={item.id}
             poster={item.poster}
-            mediaType='movie'
+            mediaType={item.type}
             size='sm'
             className='bg-zinc-900 shadow-md ring-zinc-800'
           />
@@ -88,6 +90,7 @@ function ListPosterStack({ items }: { items?: MediaItem[] }) {
 interface SortableListCardProps {
   list: UserList;
   isExpanded: boolean;
+  isDeleting: boolean;
   onToggleExpand: (id: string) => void;
   onRename: (list: UserList) => void;
   onDelete: (list: UserList) => void;
@@ -96,6 +99,7 @@ interface SortableListCardProps {
 function SortableListCard({
   list,
   isExpanded,
+  isDeleting,
   onToggleExpand,
   onRename,
   onDelete,
@@ -177,6 +181,7 @@ function SortableListCard({
             size='icon'
             variant='ghost'
             onClick={() => onDelete(list)}
+            disabled={isDeleting}
             aria-label={`Delete ${list.name}`}
             title='Delete list'
             className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10'
@@ -188,7 +193,7 @@ function SortableListCard({
 
       {isExpanded && (
         <div className='border-t border-white/5'>
-          <ListItemsView list={list} />
+          <ListItemsView key={list.id} list={list} />
         </div>
       )}
     </div>
@@ -199,6 +204,7 @@ interface SortableItemRowProps {
   item: MediaItem;
   listId: string;
   viewMode: 'grid' | 'list';
+  onRemoved: (button: HTMLButtonElement | null) => void;
 }
 
 // memo: keystrokes re-render the view with the same item objects (structural sharing) — unaffected rows skip rendering.
@@ -206,9 +212,10 @@ const SortableItemRow = memo(function SortableItemRow({
   item,
   listId,
   viewMode,
+  onRemoved,
 }: SortableItemRowProps) {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
+  const removeButtonRef = useRef<HTMLButtonElement>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: `${listId}::${item.id}`,
   });
@@ -221,10 +228,11 @@ const SortableItemRow = memo(function SortableItemRow({
   const removeItem = useMutation({
     mutationFn: () => api.removeFromList(listId, item.id),
     onSuccess: () => {
-      void invalidateListQueries(queryClient);
+      onRemoved(removeButtonRef.current);
       notifyAction('Removed from list', { detail: item.title, thumb: item.poster });
     },
     onError: () => notifyAction('Failed to remove item', { tone: 'error' }),
+    onSettled: () => invalidateListQueries(queryClient),
   });
 
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
@@ -250,15 +258,17 @@ const SortableItemRow = memo(function SortableItemRow({
         </button>
 
         <button
+          ref={removeButtonRef}
+          data-list-remove={item.id}
           type='button'
           onClick={(e) => {
             e.stopPropagation();
-            removeItem.mutate();
+            if (!removeItem.isPending) removeItem.mutate();
           }}
-          disabled={removeItem.isPending}
+          aria-disabled={removeItem.isPending || undefined}
           aria-label={`Remove ${item.title} from list`}
           title='Remove from list'
-          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md not-aria-disabled:hover:bg-red-500/80 text-white aria-disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
         >
           <X className='w-3 h-3' />
         </button>
@@ -269,24 +279,15 @@ const SortableItemRow = memo(function SortableItemRow({
           className='aspect-2/3 w-full cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
           onPointerEnter={prefetchDetails}
           onFocus={prefetchDetails}
-          onClick={() => navigateToDetails(navigate, item.type, item.id)}
+          onClick={() => navigateToDetails(item.type, item.id)}
         >
-          {isHttpUrl(item.poster) ? (
-            <RemoteImage
-              src={item.poster}
-              alt={item.title}
-              className='w-full h-full object-cover group-hover:opacity-80 transition-opacity'
-              loading='lazy'
-            />
-          ) : (
-            <div className='w-full h-full flex items-center justify-center bg-zinc-800 p-2'>
-              {item.type === 'movie' ? (
-                <Film className='w-6 h-6 text-zinc-600' />
-              ) : (
-                <Tv className='w-6 h-6 text-zinc-600' />
-              )}
-            </div>
-          )}
+          <PosterThumb
+            poster={item.poster}
+            title={item.title}
+            mediaType={item.type}
+            className='h-full w-full rounded-none bg-zinc-800 ring-0'
+            imageClassName='group-hover:opacity-80 transition-opacity'
+          />
         </button>
         <div className='p-2'>
           <p
@@ -329,7 +330,7 @@ const SortableItemRow = memo(function SortableItemRow({
         className='flex flex-1 min-w-0 items-center gap-3 rounded-md cursor-pointer text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         onPointerEnter={prefetchDetails}
         onFocus={prefetchDetails}
-        onClick={() => navigateToDetails(navigate, item.type, item.id)}
+        onClick={() => navigateToDetails(item.type, item.id)}
       >
         <PosterThumb
           poster={item.poster}
@@ -358,13 +359,17 @@ const SortableItemRow = memo(function SortableItemRow({
       </button>
 
       <Button
+        ref={removeButtonRef}
+        data-list-remove={item.id}
         size='icon'
         variant='ghost'
-        onClick={() => removeItem.mutate()}
-        disabled={removeItem.isPending}
+        onClick={() => {
+          if (!removeItem.isPending) removeItem.mutate();
+        }}
+        aria-disabled={removeItem.isPending || undefined}
         aria-label={`Remove ${item.title} from list`}
         title='Remove from list'
-        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
+        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-500'
       >
         <X className='w-3.5 h-3.5' />
       </Button>
@@ -374,13 +379,18 @@ const SortableItemRow = memo(function SortableItemRow({
 
 function ListItemsView({ list }: { list: UserList }) {
   const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
 
   const [orderedIds, setOrderedIds] = useState<string[] | null>(null);
 
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
   const [search, setSearch] = useState('');
+  const [visibleLimit, setVisibleLimit] = useState(LIST_ITEMS_PAGE_SIZE);
   const [addTitlesOpen, setAddTitlesOpen] = useState(false);
+  const itemsContainerRef = useRef<HTMLDivElement>(null);
+  const addTitlesButtonRef = useRef<HTMLButtonElement>(null);
+  const removalFocusRef = useRef<{ button: HTMLButtonElement; candidates: string[] } | null>(null);
 
   const orderedItems = useMemo(() => {
     const sourceItems = list.items ?? [];
@@ -395,6 +405,23 @@ function ListItemsView({ list }: { list: UserList }) {
     return [...ordered, ...added];
   }, [orderedIds, list.items]);
 
+  const orderedItemsRef = useRef(orderedItems);
+  useLayoutEffect(() => {
+    orderedItemsRef.current = orderedItems;
+  }, [orderedItems]);
+
+  const handleRemoved = useCallback((button: HTMLButtonElement | null) => {
+    if (!button || document.activeElement !== button) return;
+    const items = orderedItemsRef.current;
+    const index = items.findIndex((item) => item.id === button.dataset.listRemove);
+    removalFocusRef.current = {
+      button,
+      candidates: [...items.slice(index + 1), ...items.slice(0, index).toReversed()].map(
+        (item) => item.id,
+      ),
+    };
+  }, []);
+
   const sensors = useSortableSensors();
 
   // Only the latest drag may release its local order after the persisted items have refetched.
@@ -406,13 +433,13 @@ function ListItemsView({ list }: { list: UserList }) {
       await queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
       if (latestReorderIdsRef.current === newIds) {
         latestReorderIdsRef.current = null;
-        setOrderedIds(null);
+        if (mountedRef.current) setOrderedIds(null);
       }
     },
     onError: (_error, newIds) => {
       if (latestReorderIdsRef.current === newIds) {
         latestReorderIdsRef.current = null;
-        setOrderedIds(null);
+        if (mountedRef.current) setOrderedIds(null);
       }
       void queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
       notifyAction('Failed to save order', { tone: 'error' });
@@ -453,27 +480,64 @@ function ListItemsView({ list }: { list: UserList }) {
     [list.id, orderedItems, reorderItems],
   );
 
-  const filtered = useMemo(() => {
-    const query = search.trim().toLowerCase();
-    return query ? orderedItems.filter((i) => i.title.toLowerCase().includes(query)) : orderedItems;
-  }, [orderedItems, search]);
+  const {
+    effectiveSearch,
+    filteredItems: filtered,
+    isSearchPending,
+    searchError,
+    isSearchFetching,
+    retrySearch,
+  } = useTitleSearch(orderedItems, search);
+
+  const visibleItems = useMemo(() => filtered.slice(0, visibleLimit), [filtered, visibleLimit]);
+
+  useLayoutEffect(() => {
+    const pending = removalFocusRef.current;
+    if (!pending) return;
+    if (pending.button.isConnected) {
+      if (document.activeElement !== pending.button) removalFocusRef.current = null;
+      return;
+    }
+    removalFocusRef.current = null;
+    if (document.activeElement !== document.body) return;
+    const buttons = new Map(
+      Array.from(
+        itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]') ?? [],
+        (button) => [button.dataset.listRemove, button] as const,
+      ),
+    );
+    const nextId = pending.candidates.find((id) => buttons.has(id));
+    (buttons.get(nextId) ?? addTitlesButtonRef.current)?.focus();
+  });
 
   // SortableContext diffs off this array's identity — keep it stable across membership-equal renders.
   const sortableItemIds = useMemo(
-    () => filtered.map((i) => `${list.id}::${i.id}`),
-    [filtered, list.id],
+    () => visibleItems.map((i) => `${list.id}::${i.id}`),
+    [visibleItems, list.id],
   );
 
   const activeItem = activeId ? orderedItems.find((i) => `${list.id}::${i.id}` === activeId) : null;
 
   return (
-    <div className='p-3 space-y-3' data-escape-capture={activeId !== null ? '' : undefined}>
+    <div
+      className='p-3 space-y-3'
+      data-escape-capture={activeId !== null ? '' : undefined}
+      aria-busy={isSearchPending}
+    >
+      {isSearchPending && (
+        <span role='status' className='sr-only'>
+          Searching list…
+        </span>
+      )}
       <div className='flex flex-wrap items-center gap-2'>
         {orderedItems.length > 0 ? (
           <>
             <SearchInput
               value={search}
-              onValueChange={setSearch}
+              onValueChange={(value) => {
+                setSearch(value);
+                setVisibleLimit(LIST_ITEMS_PAGE_SIZE);
+              }}
               placeholder='Search in list…'
               clearLabel='Clear list search'
               wrapperClassName='min-w-32 flex-1'
@@ -485,6 +549,7 @@ function ListItemsView({ list }: { list: UserList }) {
           <p className='flex-1 pl-1 text-xs font-medium text-zinc-500'>Your titles</p>
         )}
         <Button
+          ref={addTitlesButtonRef}
           variant='outline'
           size='sm'
           onClick={() => setAddTitlesOpen(true)}
@@ -494,6 +559,10 @@ function ListItemsView({ list }: { list: UserList }) {
           Add titles
         </Button>
       </div>
+
+      {searchError && (
+        <RetryBanner message='Search failed.' isRetrying={isSearchFetching} onRetry={retrySearch} />
+      )}
 
       {orderedItems.length === 0 && (
         <div className='flex flex-col items-center gap-3 px-4 py-7 text-center'>
@@ -528,14 +597,21 @@ function ListItemsView({ list }: { list: UserList }) {
           strategy={viewMode === 'grid' ? rectSortingStrategy : verticalListSortingStrategy}
         >
           <div
+            ref={itemsContainerRef}
             className={
               viewMode === 'grid'
                 ? 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2'
                 : 'space-y-0.5'
             }
           >
-            {filtered.map((item) => (
-              <SortableItemRow key={item.id} item={item} listId={list.id} viewMode={viewMode} />
+            {visibleItems.map((item) => (
+              <SortableItemRow
+                key={item.id}
+                item={item}
+                listId={list.id}
+                viewMode={viewMode}
+                onRemoved={handleRemoved}
+              />
             ))}
           </div>
         </SortableContext>
@@ -580,9 +656,25 @@ function ListItemsView({ list }: { list: UserList }) {
         </DragOverlay>
       </DndContext>
 
-      {search && filtered.length === 0 && (
+      {filtered.length > visibleItems.length && (
+        <div className='space-y-2 px-3 py-3 text-center'>
+          <p className='text-[11px] text-zinc-500'>
+            Showing {visibleItems.length} of {filtered.length}
+          </p>
+          <Button
+            variant='outline'
+            size='sm'
+            disabled={activeId !== null}
+            onClick={() => setVisibleLimit((limit) => limit + LIST_ITEMS_PAGE_SIZE)}
+          >
+            Show more
+          </Button>
+        </div>
+      )}
+
+      {effectiveSearch && filtered.length === 0 && (
         <p className='text-xs text-zinc-600 text-center py-4'>
-          No items match &ldquo;{search}&rdquo;
+          No items match &ldquo;{effectiveSearch}&rdquo;
         </p>
       )}
       {addTitlesOpen && <AddTitlesDialog list={list} onOpenChange={setAddTitlesOpen} />}
@@ -603,10 +695,12 @@ function ListGhostCard({ list }: { list: UserList }) {
 
 export function ListsManager() {
   const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<UserList | null>(null);
   const [activeListId, setActiveListId] = useState<UniqueIdentifier | null>(null);
+  const listOrderGenerationRef = useRef(0);
 
   const sensors = useSortableSensors();
 
@@ -620,25 +714,45 @@ export function ListsManager() {
   } = useLists();
 
   const reorderLists = useMutation({
-    mutationFn: (ids: string[]) => api.reorderLists(ids),
+    mutationFn: (next: UserList[]) => api.reorderLists(next.map((list) => list.id)),
+    onMutate: async (next) => {
+      const generation = ++listOrderGenerationRef.current;
+      await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
+      const previous = queryClient.getQueryData<UserList[]>(LISTS_QUERY_KEY);
+      if (generation === listOrderGenerationRef.current) {
+        queryClient.setQueryData(LISTS_QUERY_KEY, next);
+      }
+      return { previous, generation };
+    },
     onSettled: () => invalidateListQueries(queryClient),
-    onError: () => {
+    onError: (_, _next, context) => {
+      if (context?.generation === listOrderGenerationRef.current && context.previous) {
+        queryClient.setQueryData(LISTS_QUERY_KEY, context.previous);
+      }
       notifyAction('Failed to save list order', { tone: 'error' });
     },
   });
 
   const deleteList = useMutation({
+    mutationKey: DELETE_LIST_MUTATION_KEY,
     mutationFn: (id: string) => api.deleteList(id),
     onSuccess: (_, id) => {
-      void invalidateListQueries(queryClient);
-      setExpanded((prev) => {
-        const next = new Set(prev);
-        next.delete(id);
-        return next;
-      });
+      if (mountedRef.current) {
+        setExpanded((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
       notifyAction('List deleted');
     },
     onError: () => notifyAction('Failed to delete list', { tone: 'error' }),
+    onSettled: () => invalidateListQueries(queryClient),
+  });
+
+  const pendingDeleteIds = useMutationState({
+    filters: { mutationKey: DELETE_LIST_MUTATION_KEY, status: 'pending' },
+    select: (mutation) => mutation.state.variables as string,
   });
 
   const toggleExpand = (id: string) => {
@@ -658,7 +772,7 @@ export function ListsManager() {
   };
 
   const handleDragEnd = useCallback(
-    async (event: DragEndEvent) => {
+    (event: DragEndEvent) => {
       setActiveListId(null);
       const { active, over } = event;
       if (!over || active.id === over.id) return;
@@ -667,12 +781,9 @@ export function ListsManager() {
       const newIdx = lists.findIndex((l) => l.id === over.id);
       if (oldIdx === -1 || newIdx === -1) return;
 
-      const next = arrayMove(lists, oldIdx, newIdx);
-      await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
-      queryClient.setQueryData(LISTS_QUERY_KEY, next);
-      reorderLists.mutate(next.map((l) => l.id));
+      reorderLists.mutate(arrayMove(lists, oldIdx, newIdx));
     },
-    [lists, reorderLists, queryClient],
+    [lists, reorderLists],
   );
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
@@ -680,12 +791,11 @@ export function ListsManager() {
   // Non-empty lists confirm in-app; empty ones delete straight away.
   const [deleteTarget, setDeleteTarget] = useState<UserList | null>(null);
   const handleDeleteConfirm = (list: UserList) => {
+    if (pendingDeleteIds.includes(list.id)) return;
     if (list.item_ids.length > 0) {
       setDeleteTarget(list);
       return;
     }
-    // Gate repeat clicks on this list's in-flight delete — a double-click would issue a second request that fails after the first removed it.
-    if (deleteList.isPending && deleteList.variables === list.id) return;
     deleteList.mutate(list.id);
   };
 
@@ -710,13 +820,16 @@ export function ListsManager() {
       </div>
 
       {isLoading && !isFetched ? (
-        <div className='space-y-3'>
-          {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
-            <div
-              key={skeletonKey}
-              className='h-14 rounded-xl bg-zinc-900/40 border border-white/5 animate-pulse'
-            />
-          ))}
+        <div role='status' aria-busy='true'>
+          <span className='sr-only'>Loading lists…</span>
+          <div className='space-y-3' aria-hidden='true'>
+            {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
+              <div
+                key={skeletonKey}
+                className='h-14 rounded-xl bg-zinc-900/40 border border-white/5 animate-pulse'
+              />
+            ))}
+          </div>
         </div>
       ) : isLoadingError || (isFetched && isLoading) ? (
         <RetryBanner
@@ -750,6 +863,7 @@ export function ListsManager() {
                   key={list.id}
                   list={list}
                   isExpanded={expanded.has(list.id)}
+                  isDeleting={pendingDeleteIds.includes(list.id)}
                   onToggleExpand={toggleExpand}
                   onRename={setRenameTarget}
                   onDelete={handleDeleteConfirm}
@@ -796,9 +910,9 @@ export function ListsManager() {
             </Button>
             <Button
               variant='destructive'
-              disabled={deleteList.isPending}
+              disabled={!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)}
               onClick={() => {
-                if (!deleteTarget) return;
+                if (!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)) return;
                 deleteList.mutate(deleteTarget.id);
                 setDeleteTarget(null);
               }}

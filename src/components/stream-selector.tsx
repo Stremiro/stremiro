@@ -13,7 +13,6 @@ import {
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
-  focusedRowRange,
   StreamAddonHealthChips,
   StreamFilterToolbar,
   StreamListEmptyState,
@@ -35,6 +34,7 @@ import {
   ContextMenuItem,
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
+import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
 import { warmPlayerChunk } from '@/lib/player-session';
 import {
@@ -42,6 +42,8 @@ import {
   getErrorMessage,
   type AddonStream,
   type Episode,
+  type StreamMatchBadgeKind,
+  type StreamMatchTier,
   type StreamSelectorSort,
 } from '@/lib/api';
 import { isEditableTarget, whenRowMounted } from '@/lib/dom';
@@ -50,14 +52,11 @@ import { episodeProgressKey } from '@/lib/history-playback';
 import { copyText } from '@/lib/notify';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import {
-  buildStreamMatchBadges,
   buildStreamReasonChips,
   buildStreamTechBadges,
   DEFAULT_FILTERS,
-  streamMatchTier,
+  MATCH_BADGES,
   type StreamMatchBadge,
-  type StreamMatchBadgeKind,
-  type StreamMatchTier,
   type StreamReasonChip,
 } from '@/lib/stream-selector-utils';
 import { cn, mediaTypeLabel, nonBlank } from '@/lib/utils';
@@ -66,6 +65,7 @@ const MATCH_BADGE_ICONS: Record<StreamMatchBadgeKind, LucideIcon | null> = {
   episode: Check,
   range: Layers,
   season: Package,
+  multi_season: Package,
   title: Check,
   title_partial: null,
 };
@@ -128,7 +128,7 @@ interface StreamRowModel {
 function buildStreamRowModel(stream: AddonStream): StreamRowModel {
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
-  const matchBadges = buildStreamMatchBadges(stream);
+  const matchBadges = stream.matchBadgeKinds.map((kind) => MATCH_BADGES[kind]);
   const deliveryClass =
     presentation.deliveryKind === 'cached'
       ? 'text-(--accent-act)'
@@ -153,7 +153,7 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
     streamTitle: nonBlank(presentation.streamTitle) || 'Unknown',
     techBadges: buildStreamTechBadges(stream),
     matchBadges,
-    matchTier: streamMatchTier(stream),
+    matchTier: stream.matchTier,
     recommendationReasons: buildStreamReasonChips(stream),
     matchAria:
       matchBadges.length > 0 ? `, ${matchBadges.map((badge) => badge.label).join(', ')}` : '',
@@ -282,7 +282,7 @@ const StreamItem = memo(function StreamItem({
                 ))}
                 {isActive && (
                   <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
-                    <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act) motion-safe:animate-pulse' />
+                    <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
                     Current
                   </span>
                 )}
@@ -680,6 +680,7 @@ function StreamVirtualList({
 interface StreamSelectorProps {
   open: boolean;
   onClose: () => void;
+  onClosed?: () => void;
   onBeforePlayerNavigation?: () => void | Promise<void>;
   target: StreamSelectorTarget;
   currentStreamKey?: string;
@@ -690,6 +691,7 @@ interface StreamSelectorProps {
 export function StreamSelector({
   open,
   onClose,
+  onClosed,
   onBeforePlayerNavigation,
   target,
   currentStreamKey,
@@ -788,39 +790,78 @@ export function StreamSelector({
   const headerStartTime = open ? getStartTime?.() : undefined;
 
   // Pack browsing: a playable batch row opens the in-pack episode picker instead of resolving blind.
-  const [packStream, setPackStream] = useState<AddonStream | null>(null);
+  const [packSelection, setPackSelection] = useState<{
+    stream: AddonStream;
+    episodes: Episode[];
+  } | null>(null);
+  const packStream = packSelection?.stream;
+  const packEpisodes = packSelection?.episodes ?? EMPTY_PACK_EPISODES;
+  const [pendingPackStreamKey, setPendingPackStreamKey] = useState<string | null>(null);
+  const packRequestGenerationRef = useRef(0);
   // Row that opened the picker — refocused on return; the list stays mounted under the overlay, so the element survives.
   const packReturnFocusRef = useRef<HTMLElement | null>(null);
   useEffect(() => {
-    setPackStream(null);
+    packRequestGenerationRef.current += 1;
+    setPackSelection(null);
+    setPendingPackStreamKey(null);
     packReturnFocusRef.current = null;
+    return () => {
+      packRequestGenerationRef.current += 1;
+    };
   }, [open, selectorSessionKey]);
 
   const closePackPicker = useCallback(() => {
     cancelResolve();
-    setPackStream(null);
+    setPackSelection(null);
     // The picker unmounts with focus inside it — hand focus back to the pack row rather than dropping to <body>.
     requestAnimationFrame(() => packReturnFocusRef.current?.focus());
   }, [cancelResolve]);
 
-  const packEpisodes = episodes ?? EMPTY_PACK_EPISODES;
+  const allPackEpisodes = episodes ?? EMPTY_PACK_EPISODES;
 
   const handleStreamPress = useCallback(
-    (stream: AddonStream) => {
-      if (isAnyResolving) return;
+    async (stream: AddonStream) => {
+      if (isAnyResolving || pendingPackStreamKey !== null) return;
       if (
         stream.presentation.isBatch &&
         stream.presentation.isInstantlyPlayable &&
-        packEpisodes.length > 0
+        allPackEpisodes.length > 0
       ) {
+        const generation = ++packRequestGenerationRef.current;
         packReturnFocusRef.current =
           document.activeElement instanceof HTMLElement ? document.activeElement : null;
-        setPackStream(stream);
+        setPendingPackStreamKey(stream.streamKey);
+        try {
+          const indices = await api.getStreamPackEpisodeIndices(
+            stream.matchSummary?.packCoverage,
+            allPackEpisodes.map((ep) => ({
+              season: ep.season,
+              episode: ep.episode,
+              streamSeason: ep.streamSeason,
+              streamEpisode: ep.streamEpisode,
+            })),
+          );
+          if (generation !== packRequestGenerationRef.current) return;
+          if (indices.length > 0) {
+            setPackSelection({
+              stream,
+              episodes: indices.map((index) => allPackEpisodes[index]),
+            });
+          } else {
+            handleSelectStream(stream);
+          }
+        } catch (error) {
+          if (generation === packRequestGenerationRef.current) {
+            toast.error(getErrorMessage(error));
+          }
+        } finally {
+          if (generation === packRequestGenerationRef.current) setPendingPackStreamKey(null);
+        }
         return;
       }
       handleSelectStream(stream);
     },
-    [handleSelectStream, isAnyResolving, packEpisodes.length],
+    [allPackEpisodes, handleSelectStream, isAnyResolving, pendingPackStreamKey],
   );
 
   const packProgressFor = useCallback(
@@ -898,7 +939,7 @@ export function StreamSelector({
       {/* Stream list — or the in-selector pack episode picker. The tree stays mounted under the pack overlay
           (`inert` drops it from tab order/a11y) so scroll, roving tabindex, and virtualizer state survive. */}
       <div className='relative flex-1 min-h-0 bg-zinc-950'>
-        <div className='h-full min-h-0' inert={packStream !== null}>
+        <div className='h-full min-h-0' inert={packSelection !== null}>
           {isLoading ? (
             <StreamListLoadingState sourceCount={streamSourceCount} chips={healthChips} />
           ) : fatalAddonError ? (
@@ -949,13 +990,13 @@ export function StreamSelector({
                     <StreamVirtualList
                       key={listResetKey}
                       streams={sortedStreams}
-                      activeResolveKey={activeResolveKey}
+                      activeResolveKey={pendingPackStreamKey ?? activeResolveKey}
                       currentStreamKey={currentStreamKey}
                       lastStreamKey={lastStreamKey}
                       lastStreamFamily={lastStreamFamily}
                       handleSelectStream={handleStreamPress}
                       handleCopyLink={handleCopyLink}
-                      isAnyResolving={isAnyResolving}
+                      isAnyResolving={isAnyResolving || pendingPackStreamKey !== null}
                       initialFocusPending={listFocusPending}
                       onInitialFocusDone={handleInitialFocusDone}
                       sortMode={sortMode}
@@ -1017,6 +1058,9 @@ export function StreamSelector({
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           dialogContentRef.current?.focus({ preventScroll: true });
+        }}
+        onCloseAutoFocus={() => {
+          if (!open) onClosed?.();
         }}
         onKeyDown={(event) => {
           if (

@@ -1,8 +1,9 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { CalendarRange, LibraryFilters } from '@/lib/api';
+import { nonBlank } from '@/lib/utils';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
-const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
+export const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
 export function profileLibraryQueryKey(filters: LibraryFilters) {
   return [...PROFILE_LIBRARY_QUERY_KEY, filters] as const;
 }
@@ -13,12 +14,12 @@ export function resumeRailQueryKey(localToday: string | undefined) {
 }
 export const WATCH_HISTORY_QUERY_KEY = ['watch-history'] as const;
 export const RECENT_WATCH_SEED_QUERY_KEY = [...WATCH_HISTORY_QUERY_KEY, 'recent-seed'] as const;
-const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
+export const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
 export const TOTAL_WATCH_TIME_QUERY_KEY = ['total-watch-time'] as const;
 export const LISTS_QUERY_KEY = ['lists'] as const;
 const LIST_SUMMARIES_QUERY_KEY = ['list-summaries'] as const;
 export function listSummariesQueryKey(itemId?: string) {
-  return [...LIST_SUMMARIES_QUERY_KEY, itemId?.trim() || undefined] as const;
+  return [...LIST_SUMMARIES_QUERY_KEY, nonBlank(itemId)] as const;
 }
 export const WATCH_STATUSES_QUERY_KEY = ['watch-statuses'] as const;
 const CALENDAR_EVENTS_QUERY_KEY = ['calendar-events'] as const;
@@ -27,26 +28,26 @@ export const DATA_STATS_QUERY_KEY = ['dataStats'] as const;
 export const DATA_STATS_STALE_TIME_MS = 1000 * 30;
 export const PROFILE_PREFERENCES_QUERY_KEY = ['profilePreferences'] as const;
 export const APP_UI_PREFERENCES_QUERY_KEY = ['appUiPreferences'] as const;
+export const DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY = ['defaultPlayerKeybindings'] as const;
 export const PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY = ['playbackLanguagePreferences'] as const;
 export const STREAM_SELECTOR_PREFERENCES_QUERY_KEY = ['streamSelectorPreferences'] as const;
 // The language set is compile-time static in the backend; one entry per app run.
 export const SUPPORTED_LANGUAGES_QUERY_KEY = ['supportedLanguages'] as const;
 const STREAMS_QUERY_KEY = ['streams'] as const;
 const ADDON_SUBTITLES_QUERY_KEY = ['addonSubtitles'] as const;
-const DETAILS_QUERY_KEY = ['details'] as const;
+export const DETAILS_QUERY_KEY = ['details'] as const;
 // Shared addon-config entry so settings saves refresh the selector.
 export const ADDON_CONFIGS_QUERY_KEY = ['addonConfigs'] as const;
 export const ADDON_CONFIGS_STALE_TIME_MS = 1000 * 60 * 5;
-/** Installed URLs ride in the key; the duplicate verdict depends on them. */
-export function addonUrlInspectionQueryKey(url: string, installedUrls: readonly string[]) {
-  return ['addonUrlInspection', url, installedUrls] as const;
+/** Installed ids track registry membership for duplicate verdicts. */
+export function addonUrlInspectionQueryKey(url: string, installedIds: readonly string[]) {
+  return ['addonUrlInspection', url, installedIds] as const;
 }
 // Derived from the addon registry's manifests; refreshed with discovery.
 export const BROWSE_GENRES_QUERY_KEY = ['browseGenres'] as const;
 export const SEARCH_CATALOG_QUERY_KEY = ['search-catalog'] as const;
+// Search stays fresh until invalidated; unused catalogs expire after 10 minutes.
 export const SEARCH_CATALOG_GC_TIME_MS = 1000 * 60 * 10;
-// stale == GC so a cached multi-page browse is never refetched page-by-page on revisit; expiry restarts at page 1.
-export const SEARCH_CATALOG_STALE_TIME_MS = SEARCH_CATALOG_GC_TIME_MS;
 export const CALENDAR_EVENTS_STALE_TIME_MS = 1000 * 60 * 60;
 // Home rails key under this prefix; invalidateDiscoveryQueries sweeps by it.
 const TRENDING_QUERY_KEY = ['trending'] as const;
@@ -64,15 +65,22 @@ export function effectivePlaybackLanguagePreferencesQueryKey(mediaType?: string,
 async function invalidateQuery(
   queryClient: QueryClient,
   queryKey: readonly unknown[],
-  exact = false,
+  cancelInFlight: boolean | 'inactive' = false,
 ) {
-  await queryClient.invalidateQueries({ queryKey, exact });
+  const filters = { queryKey, exact: false };
+  if (cancelInFlight) {
+    await queryClient.cancelQueries(
+      { ...filters, type: cancelInFlight === 'inactive' ? 'inactive' : 'all' },
+      { revert: true },
+    );
+  }
+  await queryClient.invalidateQueries(filters);
 }
 
 function refreshScheduleQueries(queryClient: QueryClient) {
   // Nonblocking: write/exit barriers await local history, not remote providers.
-  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
-  void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
+  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY, true);
+  void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY], true);
 }
 
 // Trimmed id so details and card-hover share one cache entry.
@@ -96,35 +104,16 @@ export function calendarEventsQueryKey(range: CalendarRange) {
     range.visibleStart,
     range.visibleEnd,
     range.upcomingStart,
-    range.upcomingEnd,
   ] as const;
 }
 
-// Shared lifetimes so views agree. GC at 1h: episode arrays are the heaviest payload.
+// Shared lifetimes so views agree; inactive episode arrays expire after 10 minutes.
 export const DETAILS_STALE_TIME_MS = 1000 * 60 * 30;
-export const DETAILS_GC_TIME_MS = 1000 * 60 * 60;
+export const DETAILS_GC_TIME_MS = 1000 * 60 * 10;
 
 // Skip data changes rarely; one lookup per episode and stream duration per session.
 export const SKIP_TIMES_STALE_TIME_MS = 1000 * 60 * 60 * 12;
 export const SKIP_TIMES_GC_TIME_MS = 1000 * 60 * 60 * 24;
-
-// SkipDB only accepts IMDb ids; mirrors backend `normalize_imdb_id` so an
-// unkeyable id never enables the query.
-const SKIP_TIMES_IMDB_ID_PATTERN = /^tt\d{1,30}$/i;
-
-export function resolveSkipTimesImdbAnchor(
-  imdbId: string | undefined,
-  mediaId: string | undefined,
-  ...extraCandidates: Array<string | undefined>
-): string | undefined {
-  for (const candidate of [imdbId, mediaId, ...extraCandidates]) {
-    const normalized = candidate?.trim().toLowerCase();
-    if (normalized && SKIP_TIMES_IMDB_ID_PATTERN.test(normalized)) {
-      return normalized;
-    }
-  }
-  return undefined;
-}
 
 // SkipDB shifts segments to fit the reported duration, so the key buckets by it.
 export function skipTimesQueryKey(
@@ -133,9 +122,19 @@ export function skipTimesQueryKey(
   season: number | undefined,
   episode: number | undefined,
   imdbId: string | undefined,
+  streamLookupId: string | undefined,
   durationSecs: number | undefined,
 ) {
-  return ['skip-times', mediaType, id, season, episode, imdbId ?? '', durationSecs ?? 0] as const;
+  return [
+    'skip-times',
+    mediaType,
+    id,
+    season,
+    episode,
+    imdbId ?? '',
+    streamLookupId ?? '',
+    durationSecs ?? 0,
+  ] as const;
 }
 
 // Shared by MediaRow's default and parents keying the same row (e.g. home hero).
@@ -161,6 +160,7 @@ export async function invalidateLibraryQueries(queryClient: QueryClient) {
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
+    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -170,13 +170,14 @@ async function invalidateHistoryCollections(
   refetchTitleProgress = true,
 ) {
   await Promise.all([
-    invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
+    invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY, true),
     queryClient.invalidateQueries({
       queryKey: itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
       refetchType: refetchTitleProgress ? 'active' : 'none',
     }),
     invalidateQuery(queryClient, TOTAL_WATCH_TIME_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
+    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -197,7 +198,8 @@ export async function invalidatePlaybackHistoryQueriesForTitle(
 }
 
 export async function invalidateListQueries(queryClient: QueryClient) {
-  // lists_count lives inside the stats payload.
+  // Calendar tracks list members; lists_count lives inside the stats payload.
+  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY, true);
   await Promise.all([
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
@@ -212,6 +214,7 @@ export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
+    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -254,28 +257,40 @@ export function addonSubtitlesQueryKey(
 export async function invalidateStreamQueries(queryClient: QueryClient) {
   // Addon subtitles are an addon resource; a changed addon set drops them too.
   await Promise.all([
-    invalidateQuery(queryClient, STREAMS_QUERY_KEY),
+    invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive'),
     invalidateQuery(queryClient, ADDON_SUBTITLES_QUERY_KEY),
   ]);
 }
 
+let discoveryEpoch = 0;
+
+export function getDiscoveryEpoch() {
+  return discoveryEpoch;
+}
+
 export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
-  // Provider caches clear too; RQ must not serve the previous addon set.
+  discoveryEpoch += 1;
+  // Drop abandoned fetches, but keep mounted selectors attached to a refreshed query.
+  queryClient.removeQueries({ queryKey: STREAMS_QUERY_KEY, type: 'inactive' });
   await Promise.all([
-    invalidateQuery(queryClient, DETAILS_QUERY_KEY),
-    invalidateQuery(queryClient, SEARCH_CATALOG_QUERY_KEY),
-    invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]),
-    invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY),
-    invalidateQuery(queryClient, TRENDING_QUERY_KEY),
-    invalidateQuery(queryClient, BROWSE_GENRES_QUERY_KEY),
-    invalidateQuery(queryClient, RECENT_WATCH_SEED_QUERY_KEY),
+    queryClient.resetQueries({ queryKey: STREAMS_QUERY_KEY, type: 'active' }),
+    ...[
+      ADDON_SUBTITLES_QUERY_KEY,
+      DETAILS_QUERY_KEY,
+      SEARCH_CATALOG_QUERY_KEY,
+      [RESUME_RAIL_QUERY_KEY],
+      CALENDAR_EVENTS_QUERY_KEY,
+      TRENDING_QUERY_KEY,
+      BROWSE_GENRES_QUERY_KEY,
+      RECENT_WATCH_SEED_QUERY_KEY,
+    ].map((queryKey) => invalidateQuery(queryClient, queryKey, true)),
   ]);
 }
 
 export async function invalidatePlaybackLanguageQueries(queryClient: QueryClient) {
   await Promise.all([
     invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, STREAMS_QUERY_KEY),
+    invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive'),
   ]);
 }
 
@@ -284,7 +299,6 @@ async function invalidateSettingsQueries(queryClient: QueryClient) {
   await Promise.all([
     invalidateQuery(queryClient, APP_UI_PREFERENCES_QUERY_KEY),
     invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
-    invalidateStreamQueries(queryClient),
     invalidateDiscoveryQueries(queryClient),
   ]);
 }

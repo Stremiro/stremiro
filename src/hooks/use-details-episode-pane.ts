@@ -1,9 +1,8 @@
 import { useCallback, useMemo, useState } from 'react';
 
 import type { LocalSeasonEntry } from '@/components/details-season-switcher';
-import { useEffectiveEpisodeSearch } from '@/hooks/use-episode-search';
+import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
 import { type Episode, type MediaDetails } from '@/lib/api';
-import { EPISODE_SEARCH_MIN_COUNT, filterEpisodesBySearchQuery } from '@/lib/episode-search';
 import { boundedMapSet, clamp } from '@/lib/utils';
 
 const EPISODE_DISPLAY_PAGE_SIZE = 8;
@@ -42,6 +41,10 @@ interface UseDetailsEpisodePaneResult {
   seasonEpisodes: Episode[];
   visibleEpisodes: Episode[];
   episodeSearch: string;
+  episodeSearchError: boolean;
+  isEpisodeSearchFetching: boolean;
+  isEpisodeSearchPending: boolean;
+  retryEpisodeSearch: () => void;
   setEpisodeSearch: React.Dispatch<React.SetStateAction<string>>;
   selectSeason: (seasonNumber: number) => void;
   jumpToEpisode: (seasonNumber: number, episodeNumber: number) => void;
@@ -101,12 +104,10 @@ export function useDetailsEpisodePane({
     page: number;
   } | null>(null);
 
-  const effectiveEpisodeSearch = useEffectiveEpisodeSearch(episodeSearch);
   const selectedSeasonHint =
     userSelectedSeason ??
     locationSeason ??
     (typeof resumeSeason === 'number' ? resumeSeason : null);
-  const hasEpisodeSearch = effectiveEpisodeSearch.length > 0;
 
   // `item.seasons` is the backend summary of sorted `episodes`; numbers ascend.
   const seasons = useMemo(
@@ -150,11 +151,6 @@ export function useDetailsEpisodePane({
   // Key on the route id, not `item.id`: stable from mount (no flip when metadata
   // lands) and matches the identity progress reads/writes use.
   const currentEpisodeSeasonKey = `${effectiveRouteId || 'unknown'}:${selectedSeason ?? 'none'}`;
-  const episodePageKey = JSON.stringify([
-    locationKey,
-    currentEpisodeSeasonKey,
-    effectiveEpisodeSearch,
-  ]);
   const seasonEpisodes = useMemo(
     () =>
       selectedSeason === null
@@ -162,6 +158,24 @@ export function useDetailsEpisodePane({
         : (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === selectedSeason),
     [item?.episodes, selectedSeason],
   );
+  const {
+    effectiveEpisodeSearch,
+    filteredEpisodes: searchFilteredEpisodes,
+    searchError: episodeSearchError,
+    isSearchFetching: isEpisodeSearchFetching,
+    isSearchPending,
+    retrySearch: retryEpisodeSearch,
+  } = useEpisodeSearch(seasonEpisodes, episodeSearch);
+  const trimmedEpisodeSearch = episodeSearch.trim();
+  const isEpisodeSearchPending =
+    trimmedEpisodeSearch.length > 0 &&
+    (isSearchPending || trimmedEpisodeSearch !== effectiveEpisodeSearch);
+  const hasEpisodeSearch = effectiveEpisodeSearch.length > 0;
+  const episodePageKey = JSON.stringify([
+    locationKey,
+    currentEpisodeSeasonKey,
+    effectiveEpisodeSearch,
+  ]);
   const defaultEpisodeIndex = useMemo(
     () =>
       defaultEpisode == null
@@ -191,11 +205,6 @@ export function useDetailsEpisodePane({
   const requestedEpisodePageIndex =
     (episodePageOverride?.key === episodePageKey ? episodePageOverride.page : undefined) ??
     (hasEpisodeSearch ? 0 : initialEpisodePageIndex);
-
-  const searchFilteredEpisodes = useMemo(
-    () => filterEpisodesBySearchQuery(seasonEpisodes, effectiveEpisodeSearch),
-    [effectiveEpisodeSearch, seasonEpisodes],
-  );
 
   const totalEpisodeCount = searchFilteredEpisodes.length;
   const totalEpisodePages = Math.max(1, Math.ceil(totalEpisodeCount / EPISODE_DISPLAY_PAGE_SIZE));
@@ -272,6 +281,10 @@ export function useDetailsEpisodePane({
     seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
+    episodeSearchError,
+    isEpisodeSearchFetching,
+    isEpisodeSearchPending,
+    retryEpisodeSearch,
     setEpisodeSearch,
     selectSeason,
     jumpToEpisode,

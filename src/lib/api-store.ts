@@ -4,6 +4,7 @@ import type {
   AddonUrlInspection,
   AppUiPreferences,
   AppUiPreferencesPatch,
+  BootstrapSnapshot,
   DataStats,
   ImportResult,
   LibraryFilters,
@@ -11,7 +12,7 @@ import type {
   ProfileLibrary,
   ProfilePreferences,
   ProfilePreferencesPatch,
-  StreamSelectorPreferences,
+  StreamSelectorPreferencesPatch,
   StreamSelectorPreferencesState,
   TitleWatchProgress,
   UserList,
@@ -26,6 +27,7 @@ import {
 } from '@/lib/api-cache';
 import type { InvokeApi } from '@/lib/api-core';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
+import type { PlayerActionId } from '@/lib/player-keybindings';
 
 interface StoreApiContext {
   safeInvoke: InvokeApi;
@@ -67,18 +69,36 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
 
   return {
     getAddonConfigs,
+    getAddonUrl: (id: string) => safeInvoke<string>('get_addon_url', { id }),
     inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
     updateAddonConfigs: (op: AddonConfigsOp) =>
       // Track the full write incl. cache-clear so a close/export during save waits on it — and sees failure.
       trackPendingAppWrite(
         (async () => {
-          const saved = await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
-          clearProviderDataCaches(caches);
-          return saved;
+          try {
+            return await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
+          } finally {
+            // A failed save may still have applied the registry in memory.
+            clearProviderDataCaches(caches);
+          }
         })(),
       ),
     getAppUiPreferences: () => safeInvoke<AppUiPreferences>('get_app_ui_preferences'),
-    getStartupRoute: () => safeInvoke<string | null>('get_startup_route'),
+    getDefaultPlayerKeybindings: () =>
+      safeInvoke<Record<string, string[]>>('get_default_player_keybindings'),
+    bindPlayerKeybinding: (
+      overrides: Readonly<Record<string, string[]>>,
+      action: PlayerActionId,
+      slot: number,
+      key: string | null,
+    ) =>
+      safeInvoke<Record<string, string[]>>('bind_player_keybinding', {
+        overrides,
+        action,
+        slot,
+        key,
+      }),
+    getBootstrapSnapshot: () => safeInvoke<BootstrapSnapshot>('get_bootstrap_snapshot'),
     getLaunchAtLogin: () => safeInvoke<boolean>('get_launch_at_login'),
     setLaunchAtLogin: (enabled: boolean) => write<boolean>('set_launch_at_login', { enabled }),
     hideMainWindowToTray: () => safeInvoke<void>('hide_main_window_to_tray'),
@@ -90,15 +110,25 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     getProfilePreferences: () => safeInvoke<ProfilePreferences>('get_profile_preferences'),
     saveProfilePreferences: (patch: ProfilePreferencesPatch) =>
       safeInvoke<ProfilePreferences>('save_profile_preferences', {
-        // Omitted fields preserve in Rust; send explicit null only when the avatar was actually edited.
-        patch: 'avatar' in patch ? { ...patch, avatar: patch.avatar ?? null } : patch,
+        patch,
       }),
+    setProfileAvatarFromBytes: async (file: Blob) => {
+      const bytes = new Uint8Array(
+        await file.arrayBuffer().catch(() => {
+          throw new Error("Couldn't read that image — try a PNG, JPEG, or WebP");
+        }),
+      );
+      return safeInvoke<ProfilePreferences>('set_profile_avatar_from_bytes', bytes, {
+        headers: { 'Content-Type': 'application/octet-stream' },
+      });
+    },
+    clearProfileAvatar: () => safeInvoke<ProfilePreferences>('clear_profile_avatar'),
     getStreamSelectorPreferences: () =>
       safeInvoke<StreamSelectorPreferencesState>('get_stream_selector_preferences'),
     // Display filters only: ranking never reads them, so resolved winners stay cached.
-    saveStreamSelectorPreferences: (preferences: StreamSelectorPreferences) =>
-      safeInvoke<StreamSelectorPreferences>('save_stream_selector_preferences', {
-        preferences,
+    patchStreamSelectorPreferences: (patch: StreamSelectorPreferencesPatch) =>
+      safeInvoke<StreamSelectorPreferencesState>('patch_stream_selector_preferences', {
+        patch,
       }),
     addToLibrary: (item: MediaItem) => write<void>('add_to_library', { item: toMediaItem(item) }),
     removeFromLibrary: (id: string) => write<void>('remove_from_library', { id }),
@@ -114,7 +144,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     renameList: (listId: string, name: string, icon?: string) =>
       write<void>('rename_list', { listId, name, icon }),
     addToList: (listId: string, item: MediaItem) =>
-      write<void>('add_to_list', { listId, item: toMediaItem(item) }),
+      write<UserListSummary>('add_to_list', { listId, item: toMediaItem(item) }),
     bulkAddToList: async (listId: string, items: MediaItem[]): Promise<number> => {
       if (items.length === 0) return 0;
       return write<number>('bulk_add_to_list', { listId, items: items.map(toMediaItem) });
@@ -157,12 +187,17 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     clearLibrary: () => write<void>('clear_library'),
     clearAllLists: () => write<void>('clear_all_lists'),
     clearAllWatchStatuses: () => write<void>('clear_all_watch_statuses'),
-    exportAppDataToFile: (path: string) => write<void>('export_app_data_to_file', { path }),
-    importAppDataFromFile: (path: string) =>
-      trackPendingAppWrite(
-        safeInvoke<ImportResult>('import_app_data_from_file', { path }).finally(() =>
-          clearProviderDataCaches(caches),
-        ),
-      ),
+    exportAppDataToFile: () => write<boolean>('export_app_data_to_file'),
+    // Bump on both edges: a prefetch bundle started before or during the import
+    // must not publish a pre-import resume snapshot.
+    importAppDataFromFile: () => {
+      bumpWatchProgressEpoch();
+      return trackPendingAppWrite(
+        safeInvoke<ImportResult | null>('import_app_data_from_file').finally(() => {
+          bumpWatchProgressEpoch();
+          clearProviderDataCaches(caches);
+        }),
+      );
+    },
   };
 }

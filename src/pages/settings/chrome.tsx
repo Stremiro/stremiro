@@ -7,11 +7,17 @@ export function SettingsQueryError({
   message,
   className,
 }: {
-  query: { isError: boolean; isFetching: boolean; refetch: () => Promise<unknown> };
+  query: {
+    isError: boolean;
+    isFetching: boolean;
+    errorUpdatedAt: number;
+    dataUpdatedAt: number;
+    refetch: () => Promise<unknown>;
+  };
   message: string;
   className?: string;
 }) {
-  if (!query.isError) return null;
+  if (!query.isError && query.errorUpdatedAt <= query.dataUpdatedAt) return null;
   return (
     <RetryBanner
       className={className}
@@ -124,26 +130,33 @@ export function SettingsSwitch({
   ariaLabel,
   checked,
   disabled,
+  pending,
   onChange,
 }: {
   ariaLabel: string;
   checked: boolean;
   disabled?: boolean;
+  /** Blocks toggling but stays focusable, so a save never drops keyboard focus. */
+  pending?: boolean;
   onChange: () => void;
 }) {
+  const inactive = disabled || pending;
   return (
     <button
       type='button'
       role='switch'
       aria-label={ariaLabel}
       aria-checked={checked}
-      aria-disabled={disabled}
+      aria-disabled={inactive || undefined}
       disabled={disabled}
-      onClick={onChange}
+      onClick={() => {
+        if (!pending) onChange();
+      }}
       className={cn(
         'relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
-        !checked && 'bg-zinc-800 enabled:hover:bg-zinc-700',
-        disabled && 'cursor-not-allowed opacity-50',
+        !checked && 'bg-zinc-800',
+        !checked && !inactive && 'hover:bg-zinc-700',
+        inactive && 'cursor-not-allowed opacity-50',
       )}
       style={checked ? { backgroundColor: 'var(--accent-act)' } : undefined}
     >

@@ -1,7 +1,9 @@
 import { Channel } from '@tauri-apps/api/core';
 import type {
+  AddonStream,
   AddonSubtitle,
   BestResolvedStream,
+  Episode,
   HistoryPlaybackPlan,
   PlaybackLanguagePreferences,
   PlaybackStreamOutcomeReport,
@@ -21,13 +23,14 @@ import {
   type ApiCacheGroups,
   buildStreamCacheKey,
   bumpWatchProgressEpoch,
+  bumpWatchProgressSnapshotRevision,
   primeCachedRequest,
   type RequestCache,
   runCachedRequest,
   withStreamingCacheClear,
 } from '@/lib/api-cache';
 import type { InvokeApi } from '@/lib/api-core';
-import { trackPendingAppWrite } from '@/lib/pending-app-writes';
+import { trackNoncriticalAppWrite, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { buildStreamRankingCacheKey, type StreamRankingOptions } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
@@ -78,6 +81,10 @@ function bestStreamCacheKey(
 
 export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
   return {
+    getStreamPackEpisodeIndices: (
+      coverage: NonNullable<AddonStream['matchSummary']>['packCoverage'],
+      episodes: Pick<Episode, 'season' | 'episode' | 'streamSeason' | 'streamEpisode'>[],
+    ) => safeInvoke<number[]>('get_stream_pack_episode_indices', { coverage, episodes }),
     getStreamLink: (
       type: string,
       id: string,
@@ -89,8 +96,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       sourceId?: string,
     ) =>
       safeInvoke<{ url: string; kind: 'http' | 'magnet' }>('get_stream_link', {
-        mediaType: type.trim(),
-        id: id.trim(),
+        mediaType: type,
+        id,
         streamKey,
         sourceId,
         season,
@@ -109,24 +116,21 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     ) =>
       // No TS cache — RQ owns the UI entry, Rust owns ranking/cache. `onProgress` gets merged+ranked snapshots per addon.
       safeInvoke<StreamSelectorData>('get_stream_selector_data', {
-        mediaType: type.trim(),
-        id: id.trim(),
+        mediaType: type,
+        id,
         season,
         episode,
         absoluteEpisode,
         ...options,
         onProgress,
       }),
-    getAddonSubtitles: (type: string, id: string, season?: number, episode?: number) => {
-      const trimmedType = type.trim();
-      const trimmedId = id.trim();
-      return safeInvoke<AddonSubtitle[]>('get_addon_subtitles', {
-        mediaType: trimmedType,
-        id: trimmedId,
+    getAddonSubtitles: (type: string, id: string, season?: number, episode?: number) =>
+      safeInvoke<AddonSubtitle[]>('get_addon_subtitles', {
+        mediaType: type,
+        id,
         season,
         episode,
-      });
-    },
+      }),
     resolveBestStream: (
       type: string,
       id: string,
@@ -148,8 +152,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       );
       return runCachedRequest(caches.bestStream, cacheKey, () =>
         safeInvoke<BestResolvedStream>('resolve_best_stream', {
-          mediaType: trimmedType,
-          id: trimmedId,
+          mediaType: type,
+          id,
           season,
           episode,
           absoluteEpisode,
@@ -179,6 +183,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       primeCachedRequest(caches.bestStream, cacheKey, result);
     },
     recoverPlaybackStream: ({
+      requestId,
       mediaType,
       mediaId,
       streamSeason,
@@ -193,16 +198,14 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       excludedStreamKeys,
       outcome,
       ...rankingOptions
-    }: RecoverPlaybackStreamOptions) => {
-      const trimmedType = mediaType.trim();
-      const trimmedId = mediaId.trim();
-
+    }: RecoverPlaybackStreamOptions & { requestId: string }) => {
       // The backend re-ranked past the failure — drop cached entries so a later resolve can't re-serve the failed candidate.
       return withStreamingCacheClear(
         caches,
         safeInvoke<BestResolvedStream | null>('recover_playback_stream', {
-          mediaType: trimmedType,
-          id: trimmedId,
+          requestId,
+          mediaType,
+          id: mediaId,
           season: streamSeason,
           episode: streamEpisode,
           absoluteSeason,
@@ -218,6 +221,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         }),
       );
     },
+    cancelPlaybackRecovery: (requestId: string) =>
+      safeInvoke<void>('cancel_playback_recovery', { requestId }),
     /** Sets one global language default; `undefined` clears it. */
     savePlaybackLanguagePreference: (preferenceKind: 'audio' | 'sub', language?: string) =>
       withStreamingCacheClear(
@@ -267,24 +272,39 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       subtitlesOff?: boolean,
     ) =>
       // Learned per-title picks feed ranking when no global default is set.
-      withStreamingCacheClear(
-        caches,
-        safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
-          mediaId,
-          mediaType,
-          audioTrack,
-          subtitleTrack,
-          subtitlesOff,
-        }),
+      trackNoncriticalAppWrite(
+        withStreamingCacheClear(
+          caches,
+          safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
+            mediaId,
+            mediaType,
+            audioTrack,
+            subtitleTrack,
+            subtitlesOff,
+          }),
+        ),
       ),
     getSupportedLanguages: () => safeInvoke<SupportedLanguage[]>('get_supported_languages'),
     // Cooldowns change on every report — drop cached rankings so the next fetch re-ranks.
     reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
-      withStreamingCacheClear(caches, safeInvoke<void>('report_playback_stream_outcome', report)),
+      trackNoncriticalAppWrite(
+        withStreamingCacheClear(
+          caches,
+          safeInvoke<void>('report_playback_stream_outcome', { ...report }),
+        ),
+      ),
     saveWatchProgress: (progress: WatchProgress) =>
-      trackPendingAppWrite(safeInvoke<void>('save_watch_progress', { progress })),
+      trackPendingAppWrite(
+        safeInvoke<void>('save_watch_progress', { progress }).then(
+          bumpWatchProgressSnapshotRevision,
+        ),
+      ),
     saveWatchProgressBatch: (rows: WatchProgress[]) =>
-      trackPendingAppWrite(safeInvoke<void>('save_watch_progress_batch', { rows })),
+      trackPendingAppWrite(
+        safeInvoke<void>('save_watch_progress_batch', { rows }).then(
+          bumpWatchProgressSnapshotRevision,
+        ),
+      ),
     getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
     // Progressive rail: `onProgress` gets the local half early; the result is the merged rail.
     getResumeRail: (
@@ -320,14 +340,16 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       mediaType: string,
       id: string,
       imdbId: string | undefined,
+      streamLookupId: string | undefined,
       season: number | undefined,
       episode: number | undefined,
       durationSecs: number | undefined,
     ) =>
       safeInvoke<SkipTimesResult>('get_skip_times', {
-        mediaType: mediaType.trim(),
-        id: id.trim(),
-        imdbId: nonBlank(imdbId),
+        mediaType,
+        id,
+        imdbId,
+        streamLookupId,
         season,
         episode,
         durationSecs,

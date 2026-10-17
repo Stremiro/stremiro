@@ -33,7 +33,7 @@ import {
   usePlayerSession,
 } from '@/lib/player-session';
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
-import { routeChunks, warmRouteChunks } from '@/lib/route-chunks';
+import { routeChunks } from '@/lib/route-chunks';
 import { mpvDestroy, setMpvProperty } from '@/lib/player-mpv';
 import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
 import { boundedMapSet, clearTimer, withTimeout } from '@/lib/utils';
@@ -168,9 +168,6 @@ function RouteScrollManager() {
     const lastEntry = lastEntryRef.current;
     lastEntryRef.current = { key: location.key, pathname: location.pathname, path };
     savePausedRef.current = true;
-    const unpauseFrame = window.requestAnimationFrame(() => {
-      savePausedRef.current = false;
-    });
 
     const savedPosition =
       navigationType === 'POP'
@@ -179,20 +176,47 @@ function RouteScrollManager() {
           ? positionsByPathRef.current.get(path)
           : undefined;
 
+    let restoreFrame: number | undefined;
+    let restoreTimeout: number | undefined;
+    const intentEvents = ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const;
+    const cancelRestoration = () => {
+      if (restoreFrame !== undefined) window.cancelAnimationFrame(restoreFrame);
+      window.clearTimeout(restoreTimeout);
+      for (const eventName of intentEvents) {
+        window.removeEventListener(eventName, cancelRestoration, true);
+      }
+      savePausedRef.current = false;
+    };
+
     if (navigationType === 'REPLACE' && lastEntry.pathname === location.pathname) {
-      return () => window.cancelAnimationFrame(unpauseFrame);
+      restoreFrame = window.requestAnimationFrame(cancelRestoration);
+      return cancelRestoration;
     }
 
-    let restoreFrame: number | undefined;
-    if (savedPosition === undefined) {
-      // A POP without a remembered offset lands at top, not mid-list.
-      window.scrollTo(0, 0);
-    } else {
-      window.scrollTo(0, savedPosition);
-      // A still-mounting page can clamp the first attempt — retry after a frame.
-      restoreFrame = window.requestAnimationFrame(() => {
+    const restorePosition = () => {
+      if (savedPosition !== undefined) {
+        const scrollRoot = document.scrollingElement ?? document.documentElement;
+        if (scrollRoot.scrollHeight - scrollRoot.clientHeight < savedPosition) {
+          restoreFrame = window.requestAnimationFrame(restorePosition);
+          return;
+        }
         window.scrollTo(0, savedPosition);
-      });
+      }
+      cancelRestoration();
+    };
+
+    // A POP without a remembered offset lands at top, not mid-list.
+    window.scrollTo(0, savedPosition ?? 0);
+    restoreFrame = window.requestAnimationFrame(restorePosition);
+    if (savedPosition !== undefined) {
+      // Keep clamped skeleton offsets out of memory while async content mounts.
+      restoreTimeout = window.setTimeout(cancelRestoration, 2_500);
+      for (const eventName of intentEvents) {
+        window.addEventListener(eventName, cancelRestoration, {
+          capture: true,
+          passive: true,
+        });
+      }
     }
 
     // Land keyboard focus on the new page's landmark — a PUSH unmounts the
@@ -204,10 +228,7 @@ function RouteScrollManager() {
       }
     }
 
-    return () => {
-      window.cancelAnimationFrame(unpauseFrame);
-      if (restoreFrame !== undefined) window.cancelAnimationFrame(restoreFrame);
-    };
+    return cancelRestoration;
   }, [location.key, location.pathname, location.search, navigationType]);
 
   return null;
@@ -299,7 +320,7 @@ const CLOSE_MPV_TEARDOWN_TIMEOUT_MS = 2_000;
 
 function AppCloseManager() {
   const isDesktopRuntime = isTauriDesktopRuntime();
-  const { session } = usePlayerSession();
+  const { session, trayPause } = usePlayerSession();
   const hasSession = useEffectEvent(() => !!session);
 
   useEffect(() => {
@@ -340,6 +361,7 @@ function AppCloseManager() {
             await settleCloseStep(returnFromPlayerPip());
           }
           if (!quitRequested) {
+            await settleCloseStep(flushPendingAppWrites());
             try {
               const hidden = await withTimeout(
                 api.closeMainWindowToTray(),
@@ -350,7 +372,10 @@ function AppCloseManager() {
               );
               if (hidden) {
                 event.preventDefault();
-                if (hasSession()) await settleCloseStep(setMpvProperty('pause', true));
+                if (hasSession()) {
+                  trayPause.publish(true);
+                  await settleCloseStep(setMpvProperty('pause', true));
+                }
                 await settleCloseStep(flushPendingAppWrites());
                 return;
               }
@@ -425,7 +450,7 @@ function AppCloseManager() {
       unlisten?.();
       unlistenQuit?.();
     };
-  }, [isDesktopRuntime]);
+  }, [isDesktopRuntime, trayPause]);
 
   return null;
 }
@@ -447,16 +472,6 @@ function App() {
       document.removeEventListener('contextmenu', handleContextMenu);
       document.removeEventListener('dragstart', handleDragStart);
     };
-  }, []);
-
-  // Warm lazy route chunks on idle so first visits skip the loader.
-  useEffect(() => {
-    if (typeof window.requestIdleCallback === 'function') {
-      const id = window.requestIdleCallback(warmRouteChunks, { timeout: 4000 });
-      return () => window.cancelIdleCallback(id);
-    }
-    const timer = window.setTimeout(warmRouteChunks, 1500);
-    return () => window.clearTimeout(timer);
   }, []);
 
   return (

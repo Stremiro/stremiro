@@ -1,4 +1,3 @@
-import { Loader2 } from 'lucide-react';
 import {
   createContext,
   lazy,
@@ -14,10 +13,12 @@ import {
 } from 'react';
 import { useLocation, useMatch, useParams } from 'react-router';
 import { DesktopTitlebar } from '@/components/desktop-titlebar';
+import { PlayerLoadingOverlay } from '@/components/player-state-overlays';
 import { RemoteImage } from '@/components/remote-image';
 import { Sidebar } from '@/components/sidebar';
 import { type PlayerRouteState, sanitizePlayerRouteState } from '@/lib/player-navigation';
 import { routeChunks } from '@/lib/route-chunks';
+import { createSubscribableStore, type SubscribableStore } from '@/lib/subscribable-store';
 import { isHttpUrl } from '@/lib/utils';
 
 /** Playback is a root-level session, not a route — leaving /player flips to `mini` instead of tearing mpv down. */
@@ -49,8 +50,9 @@ interface PlayerSessionContextValue {
   session: PlayerSession | null;
   /** Null when no session exists; otherwise derived from the current route. */
   presentation: PlayerPresentation | null;
-  launch: (launch: PlayerSessionLaunch) => void;
+  launch: (launch: PlayerSessionLaunch, preserveTrayPause?: boolean) => void;
   close: () => void;
+  trayPause: SubscribableStore<boolean>;
   /** Survives remounts and close — a user-docked corner never jumps back to the default. */
   miniPositionRef: RefObject<MiniPlayerPosition | null>;
 }
@@ -69,19 +71,24 @@ function buildSessionKey(launch: PlayerSessionLaunch): string {
 
 export function PlayerSessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<PlayerSession | null>(null);
+  const [trayPause] = useState(() => createSubscribableStore(false));
   const miniPositionRef = useRef<MiniPlayerPosition | null>(null);
   const onPlayerRoute = useMatch('/player/*') !== null;
 
-  const launch = useCallback((next: PlayerSessionLaunch) => {
-    const key = buildSessionKey(next);
-    setSession((previous) => {
-      // Same key: refresh state/path in place so the mounted player does not remount.
-      if (previous && previous.key === key) {
-        return { ...previous, state: next.state, playerPath: next.playerPath };
-      }
-      return { ...next, key };
-    });
-  }, []);
+  const launch = useCallback(
+    (next: PlayerSessionLaunch, preserveTrayPause = false) => {
+      if (!preserveTrayPause) trayPause.publish(false);
+      const key = buildSessionKey(next);
+      setSession((previous) => {
+        // Same key: refresh state/path in place so the mounted player does not remount.
+        if (previous && previous.key === key) {
+          return { ...previous, state: next.state, playerPath: next.playerPath };
+        }
+        return { ...next, key };
+      });
+    },
+    [trayPause],
+  );
 
   const close = useCallback(() => {
     setSession(null);
@@ -95,8 +102,8 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
     : null;
 
   const value = useMemo<PlayerSessionContextValue>(
-    () => ({ session, presentation, launch, close, miniPositionRef }),
-    [session, presentation, launch, close],
+    () => ({ session, presentation, launch, close, miniPositionRef, trayPause }),
+    [session, presentation, launch, close, trayPause],
   );
 
   return <PlayerSessionContext.Provider value={value}>{children}</PlayerSessionContext.Provider>;
@@ -118,7 +125,10 @@ export function PlayerRouteRegistrar() {
 
   // Layout effect — the session must land before paint so PlayerHost never renders a "no session" frame.
   useLayoutEffect(() => {
-    launch({ type, id, season, episode, state: location.state, playerPath: location.pathname });
+    launch(
+      { type, id, season, episode, state: location.state, playerPath: location.pathname },
+      location.state?.preserveTrayPause === true,
+    );
   }, [launch, type, id, season, episode, location.state, location.pathname]);
 
   return null;
@@ -132,7 +142,7 @@ export function warmPlayerChunk() {
 }
 
 function PlayerRouteLoader({ state }: { state: unknown }) {
-  const { backdrop } = sanitizePlayerRouteState(state as PlayerRouteState | null);
+  const { backdrop, logo, title } = sanitizePlayerRouteState(state as PlayerRouteState | null);
   return (
     <div className='fixed inset-0 z-60 bg-black'>
       {isHttpUrl(backdrop) && (
@@ -146,10 +156,7 @@ function PlayerRouteLoader({ state }: { state: unknown }) {
           <div className='absolute inset-0 bg-black/50 backdrop-blur-xs' />
         </>
       )}
-      {/* Same 350ms debounce as the player's loading card — a warm chunk never flashes a spinner. */}
-      <div className='absolute inset-0 flex items-center justify-center animate-in fade-in duration-200 fill-mode-backwards [animation-delay:350ms] motion-reduce:[animation-delay:0ms]'>
-        <Loader2 className='h-8 w-8 animate-spin text-white/50' />
-      </div>
+      <PlayerLoadingOverlay headline='Finding the best stream' logo={logo} title={title} />
       {/* Same rail the player mounts, so the sidebar never blinks out while the chunk loads. */}
       <Sidebar className='fixed left-0 top-0 z-70 flex' />
       <DesktopTitlebar className='bg-linear-to-b from-black/70 via-black/35 to-transparent' />

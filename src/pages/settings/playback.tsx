@@ -219,7 +219,6 @@ function PlaybackLanguageConfig() {
   const handleLanguageChange = (kind: 'audio' | 'subtitle', value: string) => {
     const next = normalizeLanguageToken(value) || undefined;
     const save = saveGlobalPlaybackLanguagePreference(kind === 'audio' ? 'audio' : 'sub', next);
-    if (!save) return;
 
     pendingSavesRef.current += 1;
     setSaveState('saving');
@@ -239,7 +238,7 @@ function PlaybackLanguageConfig() {
       .catch((error) => {
         pendingSavesRef.current -= 1;
         // Failed writes surface via toast — never flash "Saved" for them.
-        if (pendingSavesRef.current === 0) setSaveState('idle');
+        if (mountedRef.current && pendingSavesRef.current === 0) setSaveState('idle');
         toast.error(getErrorMessage(error));
       });
   };

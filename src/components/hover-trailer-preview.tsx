@@ -46,7 +46,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     postYouTubeListening(iframe);
     postYouTubeCommand(iframe, 'addEventListener', ['onStateChange']);
     postYouTubeCommand(iframe, 'mute');
-    visibilityPausedRef.current = document.hidden || offscreenRef.current;
+    visibilityPausedRef.current = document.hidden || !document.hasFocus() || offscreenRef.current;
     postYouTubeCommand(iframe, visibilityPausedRef.current ? 'pauseVideo' : 'playVideo');
   }, []);
 
@@ -84,7 +84,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       connectedRef.current = true;
 
       // Autoplay can start after the visibility event already ran.
-      if (document.hidden || offscreenRef.current) {
+      if (document.hidden || !document.hasFocus() || offscreenRef.current) {
         visibilityPausedRef.current = true;
         setRevealed(false);
         if (
@@ -130,12 +130,12 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     };
   }, [handshake, videoId]);
 
-  // Pause on hide or scroll out of view; late autoplay completions are handled above.
+  // Pause while hidden, unfocused or offscreen; late autoplay is handled above.
   useEffect(() => {
     const iframe = iframeRef.current;
     if (!iframe) return;
     const syncVisibility = () => {
-      const shouldPause = document.hidden || offscreenRef.current;
+      const shouldPause = document.hidden || !document.hasFocus() || offscreenRef.current;
       const wasPaused = visibilityPausedRef.current;
       visibilityPausedRef.current = shouldPause;
       if (shouldPause) setRevealed(false);
@@ -149,9 +149,13 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     });
     observer.observe(iframe);
     document.addEventListener('visibilitychange', syncVisibility);
+    window.addEventListener('blur', syncVisibility);
+    window.addEventListener('focus', syncVisibility);
     return () => {
       observer.disconnect();
       document.removeEventListener('visibilitychange', syncVisibility);
+      window.removeEventListener('blur', syncVisibility);
+      window.removeEventListener('focus', syncVisibility);
     };
   }, [videoId]);
 

@@ -10,6 +10,8 @@ export interface PlaybackClock {
   subscribe: (onChange: () => void) => () => void;
 }
 
+export const subscribeWhileHidden = () => () => {};
+
 export function createPlaybackClock(): PlaybackClock {
   // The ref tracks every tick immediately; the store snapshot only notifies
   // subscribers on change.

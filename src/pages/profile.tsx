@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
 import { History, LayoutList, Library, Search } from 'lucide-react';
-import { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
 import { ListsManager } from '@/components/list/lists-manager';
@@ -34,12 +34,14 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useTitleSearch } from '@/hooks/use-item-search';
 import {
   type LocalProfile,
   type LocalProfileUpdate,
   useLocalProfile,
 } from '@/hooks/use-local-profile';
 import {
+  getOwnWatchStatus,
   useLibraryItems,
   useProfileLibrary,
   useBulkAddToList,
@@ -49,10 +51,13 @@ import {
   useWatchHistory,
   useWatchStatuses,
 } from '@/hooks/use-media-library';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import {
   api,
   getListErrorMessage,
+  getWatchStatusErrorMessage,
   type MediaItem,
+  type WatchProgress,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
   WATCH_STATUSES,
@@ -68,6 +73,7 @@ const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
   (_, index) => `profile-grid-skeleton-${index}`,
 );
 const EMPTY_LIBRARY_ITEMS: MediaItem[] = [];
+const EMPTY_HISTORY_ITEMS: WatchProgress[] = [];
 const EMPTY_STATUS_COUNTS: Record<WatchStatus | 'none', number> = {
   watching: 0,
   watched: 0,
@@ -88,12 +94,8 @@ function isProfileTabId(value: string | null): value is ProfileTabId {
   return PROFILE_TABS.some((tab) => tab.id === value);
 }
 
-// Deferred so typing in the field never blocks on the filtered render.
-function useNormalizedSearchQuery(value: string): string {
-  return useDeferredValue(value).trim().toLowerCase();
-}
-
 export function Profile() {
+  const mountedRef = useMountedRef();
   const location = useLocation();
   useDocumentTitle(location.pathname === '/library' ? 'Library' : 'Profile');
   const {
@@ -326,8 +328,10 @@ export function Profile() {
           ? `Cleared status for ${count} title${count === 1 ? '' : 's'}`
           : `Set ${count} title${count === 1 ? '' : 's'} to ${WATCH_STATUS_LABELS[status]}`,
       );
-    } catch {
-      toast.error('Failed to update watch statuses');
+    } catch (error) {
+      toast.error('Failed to update watch statuses', {
+        description: getWatchStatusErrorMessage(error),
+      });
     }
   };
 
@@ -355,10 +359,10 @@ export function Profile() {
     try {
       const count = await bulkRemoveFromLibrary.mutateAsync(ids);
       toast.success(`Removed ${count} title${count === 1 ? '' : 's'} from Library`);
-      exitSelectionMode();
+      if (mountedRef.current) exitSelectionMode();
     } catch {
       toast.error('Failed to remove titles from Library');
-      setConfirmBulkRemoveOpen(false);
+      if (mountedRef.current) setConfirmBulkRemoveOpen(false);
     }
   };
 
@@ -371,12 +375,14 @@ export function Profile() {
 
   const [historySearch, setHistorySearch] = useState('');
   const historySearchRef = useRef<HTMLInputElement>(null);
-  const normalizedHistorySearch = useNormalizedSearchQuery(historySearch);
-  const filteredHistory = useMemo(() => {
-    if (!history) return [];
-    if (!normalizedHistorySearch) return history;
-    return history.filter((item) => item.title.toLowerCase().includes(normalizedHistorySearch));
-  }, [history, normalizedHistorySearch]);
+  const {
+    effectiveSearch: effectiveHistorySearch,
+    filteredItems: filteredHistory,
+    isSearchPending: historySearchPending,
+    searchError: historySearchError,
+    isSearchFetching: historySearchFetching,
+    retrySearch: retryHistorySearch,
+  } = useTitleSearch(history ?? EMPTY_HISTORY_ITEMS, historySearch, activeTab === 'history');
 
   // Per-tab counters for the pill labels — 0/loading reads as no badge.
   const tabCounts: Partial<Record<ProfileTabId, number>> = {
@@ -523,7 +529,7 @@ export function Profile() {
               renderItem={(item) => (
                 <MediaCard
                   item={item}
-                  currentStatusOverride={allWatchStatuses?.[item.id] ?? null}
+                  currentStatusOverride={getOwnWatchStatus(allWatchStatuses, item.id) ?? null}
                   isInLibraryOverride
                   selectionMode={selectionMode}
                   isSelected={selectedIds.has(item.id)}
@@ -571,7 +577,12 @@ export function Profile() {
             <ListsManager />
           </TabsContent>
 
-          <TabsContent value='history' className='space-y-4'>
+          <TabsContent value='history' className='space-y-4' aria-busy={historySearchPending}>
+            {historySearchPending && (
+              <span role='status' className='sr-only'>
+                Searching history…
+              </span>
+            )}
             {history && history.length > 0 && (
               <div className='flex items-center gap-2'>
                 <SearchInput
@@ -584,12 +595,19 @@ export function Profile() {
                   className='h-9 text-[13px] bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25 rounded-lg'
                 />
                 <output className='shrink-0 text-[12px] tabular-nums text-zinc-400'>
-                  {normalizedHistorySearch
+                  {effectiveHistorySearch
                     ? `${filteredHistory.length} of ${history.length}`
                     : `${history.length} ${history.length === 1 ? 'title' : 'titles'}`}
                 </output>
                 <ViewToggle viewMode={viewMode} onChange={handleViewModeChange} />
               </div>
+            )}
+            {historySearchError && (
+              <RetryBanner
+                message='Search failed.'
+                isRetrying={historySearchFetching}
+                onRetry={retryHistorySearch}
+              />
             )}
             <CollectionTabContent
               isError={
@@ -605,11 +623,11 @@ export function Profile() {
               renderItem={(item) => <HistoryItem item={item} />}
               renderList={(items) => <HistoryListView items={items} />}
               empty={
-                historySearch ? (
+                effectiveHistorySearch ? (
                   <EmptyState
                     icon={<Search className='w-6 h-6 text-zinc-600' />}
                     title='No results'
-                    subtitle={`Nothing in your history matches "${historySearch}".`}
+                    subtitle={`Nothing in your history matches "${effectiveHistorySearch}".`}
                     action={
                       <Button
                         size='sm'
@@ -713,7 +731,7 @@ function ProfileHeader({
       <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
         <div className='flex flex-col gap-5 lg:flex-row lg:items-center lg:gap-8'>
           <div className='flex min-w-0 items-center gap-4 lg:w-56 lg:shrink-0'>
-            <ProfileAvatarEditor profile={profile} onUpdate={onUpdateProfile} />
+            <ProfileAvatarEditor profile={profile} />
 
             <div className='min-w-0'>
               <div className='flex min-w-0 items-center gap-2'>
@@ -875,21 +893,24 @@ function CollectionTabContent<T>({
   }
   if (isLoading) {
     return (
-      <div
-        aria-hidden='true'
-        className={
-          viewMode === 'grid'
-            ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
-            : 'flex flex-col gap-1.5'
-        }
-      >
-        {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) =>
-          viewMode === 'grid' ? (
-            <MediaCardSkeleton key={key} />
-          ) : (
-            <Skeleton key={key} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
-          ),
-        )}
+      <div role='status' aria-busy='true'>
+        <span className='sr-only'>Loading…</span>
+        <div
+          aria-hidden='true'
+          className={
+            viewMode === 'grid'
+              ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
+              : 'flex flex-col gap-1.5'
+          }
+        >
+          {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) =>
+            viewMode === 'grid' ? (
+              <MediaCardSkeleton key={key} />
+            ) : (
+              <Skeleton key={key} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
+            ),
+          )}
+        </div>
       </div>
     );
   }

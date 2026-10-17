@@ -101,7 +101,8 @@
 
   /* Native-app feel: no sweep-highlight or ghost-drag outside real inputs. */
   *:not(input):not(textarea):not(select):not([contenteditable='true']):not(
-      [data-selectable='true']
+      [data-selectable='true'],
+      [data-selectable='true'] *
     ) {
     -webkit-user-select: none;
     user-select: none;
@@ -111,7 +112,8 @@
   textarea,
   select,
   [contenteditable='true'],
-  [data-selectable='true'] {
+  [data-selectable='true'],
+  [data-selectable='true'] * {
     -webkit-user-select: text;
     user-select: text;
   }
@@ -234,19 +236,6 @@
     100% {
       opacity: 0;
       transform: scale(0.9);
-    }
-  }
-
-  /* Barely-there breathing for the rating star: transform/opacity only. */
-  @keyframes rating-star-shimmer {
-    0%,
-    100% {
-      transform: scale(1);
-      opacity: 1;
-    }
-    50% {
-      transform: scale(1.14);
-      opacity: 0.72;
     }
   }
 }
@@ -429,20 +418,9 @@
       color 180ms ease;
   }
 
-  .rating-star {
-    animation: rating-star-shimmer 3.2s ease-in-out infinite;
-    transform-origin: center;
-  }
-
   /* Film grain that dithers large gradients so they never band. */
   .grain-overlay {
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
     background-size: 160px 160px;
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .rating-star {
-      animation: none;
-    }
   }
 }

@@ -1,23 +1,19 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import {
-  ArrowDownRight,
-  ArrowUpRight,
-  Loader2,
-  Pause,
-  Play,
-  RotateCcw,
-  SkipForward,
-  X,
-} from 'lucide-react';
-import { memo, useState } from 'react';
+import { ArrowDownRight, ArrowUpRight, Loader2, X } from 'lucide-react';
+import { memo, useState, useSyncExternalStore } from 'react';
 import { CHROME_ICON_BUTTON_CLASS } from '@/components/player-chrome-styles';
+import {
+  PlayerMuteButton,
+  PlayerNextButton,
+  PlayerPlayButton,
+} from '@/components/player-control-buttons';
 import { PlayerProgressBar, PlayerTimeDisplay } from '@/components/player-progress-bar';
-import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import type { SkipSegment } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
-import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { snapPlayerPip } from '@/lib/player-window';
+import type { SubscribableStore } from '@/lib/subscribable-store';
 import { cn } from '@/lib/utils';
 
 interface PlayerPipChromeProps {
@@ -36,7 +32,7 @@ interface PlayerPipChromeProps {
   status?: string;
   error?: string | null;
   ended: boolean;
-  autoPlaySecondsLeft: number | null;
+  autoPlayCountdown: SubscribableStore<number | null>;
   canGoNext: boolean;
   skipAction?: { label: string; onSkip: () => void } | null;
   onReturn: () => Promise<void>;
@@ -52,7 +48,12 @@ interface PlayerPipChromeProps {
 }
 
 export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChromeProps) {
+  const mountedRef = useMountedRef();
   const { title, episodeLabel, visible, status, error, ended, onReturn } = props;
+  const autoPlaySecondsLeft = useSyncExternalStore(
+    props.autoPlayCountdown.subscribe,
+    props.autoPlayCountdown.getSnapshot,
+  );
   const keymap = usePlayerKeymap();
   const [snapping, setSnapping] = useState(false);
   const [focused, setFocused] = useState(false);
@@ -64,7 +65,9 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
     setSnapping(true);
     void snapPlayerPip()
       .catch(() => undefined)
-      .finally(() => setSnapping(false));
+      .finally(() => {
+        if (mountedRef.current) setSnapping(false);
+      });
   };
   return (
     <>
@@ -85,8 +88,8 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             >
               {error ||
                 status ||
-                (props.autoPlaySecondsLeft !== null
-                  ? `Next episode in ${props.autoPlaySecondsLeft}s`
+                (autoPlaySecondsLeft !== null
+                  ? `Next episode in ${autoPlaySecondsLeft}s`
                   : 'Playback finished')}
             </p>
           </div>
@@ -102,7 +105,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             setFocused(false);
         }}
         className={cn(
-          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-150 motion-reduce:transition-none',
+          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-150 ease-out motion-reduce:transition-none',
           chromeVisible ? 'opacity-100' : 'opacity-0',
         )}
       >
@@ -178,23 +181,14 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             onSeek={props.onSeek}
           />
           <div className='flex items-center gap-1'>
-            <button
-              type='button'
-              className={cn(
-                CHROME_ICON_BUTTON_CLASS,
-                'cursor-pointer bg-white/10 text-white hover:bg-white/20',
-              )}
-              aria-label={
+            <PlayerPlayButton
+              variant='pip'
+              keymap={keymap}
+              icon={error || ended ? 'replay' : props.isPlaying ? 'pause' : 'play'}
+              label={
                 error ? 'Try again' : ended ? 'Watch again' : props.isPlaying ? 'Pause' : 'Play'
               }
-              title={
-                error
-                  ? 'Try again'
-                  : ended
-                    ? 'Watch again'
-                    : withShortcutHint(props.isPlaying ? 'Pause' : 'Play', keymap, 'togglePlay')
-              }
-              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
+              title={error ? 'Try again' : ended ? 'Watch again' : undefined}
               onClick={() =>
                 error
                   ? props.onRetry()
@@ -202,23 +196,16 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                     ? props.onReplay()
                     : void props.onTogglePlay().catch(() => undefined)
               }
-            >
-              {error || ended ? (
-                <RotateCcw className='h-4 w-4' />
-              ) : props.isPlaying ? (
-                <Pause className='h-4 w-4 fill-current' />
-              ) : (
-                <Play className='h-4 w-4 fill-current' />
-              )}
-            </button>
-            <button
-              type='button'
-              className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
-              aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
-              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
+            />
+            <PlayerMuteButton
+              variant='pip'
+              keymap={keymap}
+              label={volumeIsSilent ? 'Unmute' : 'Mute'}
+              muted={volumeIsSilent}
+              volume={props.volume}
               title={
                 volumeIsSilent
-                  ? withShortcutHint('Unmute', keymap, 'toggleMute')
+                  ? undefined
                   : `Volume ${Math.round(props.volume)}% · scroll to adjust`
               }
               onClick={() => void props.onToggleMute().catch(() => undefined)}
@@ -227,23 +214,17 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                 event.stopPropagation();
                 void props.onVolumeWheel(event).catch(() => undefined);
               }}
-            >
-              <PlayerVolumeIcon muted={volumeIsSilent} volume={props.volume} className='h-4 w-4' />
-            </button>
+            />
             {props.canGoNext && (
-              <button
-                type='button'
-                className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
-                aria-label='Next episode'
-                title={withShortcutHint('Next episode', keymap, 'nextEpisode')}
-                aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
+              <PlayerNextButton
+                variant='pip'
+                keymap={keymap}
+                label='Next episode'
                 onClick={props.onNext}
-              >
-                <SkipForward className='h-4 w-4' />
-              </button>
+              />
             )}
             <div className='ml-auto flex min-w-0 items-center gap-1'>
-              {ended && props.autoPlaySecondsLeft !== null ? (
+              {ended && autoPlaySecondsLeft !== null ? (
                 <button
                   type='button'
                   className='min-w-0 cursor-pointer truncate rounded-md px-2 py-1.5 text-xs text-white/75 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'

@@ -12,7 +12,6 @@ import {
   setMpvProperty,
 } from '@/lib/player-mpv';
 import {
-  addonSubtitleTitleArg,
   areTrackListsEqual,
   buildTrackAutoApplyFingerprint,
   buildTrackLanguageCandidateFingerprint,
@@ -53,6 +52,7 @@ interface ManualTrackPreference {
   id: number | 'no';
   generation: number;
   language: string | null;
+  pending: boolean;
 }
 
 interface SelectionWaiter {
@@ -126,11 +126,14 @@ export function usePlayerTrackController({
     resetTrackAutoApplyAttempts(),
   );
   const previousPreferencesRef = useRef<Record<TrackType, string> | null>(null);
+  const manualTrackSelectionEpochRef = useRef({ audio: 0, sub: 0 });
   const manualTrackPreferencesRef = useRef<Record<TrackType, ManualTrackPreference | null>>({
     audio: null,
     sub: null,
   });
   const [preferenceSaveEpoch, setPreferenceSaveEpoch] = useState({ audio: 0, sub: 0 });
+  const [autoApplySettlementRevision, setAutoApplySettlementRevision] = useState(0);
+  const autoApplySettlementRevisionRef = useRef(0);
   const lastRecordedTrackOutcomeRef = useRef<string | null>(null);
 
   const resetTrackSelectionObservations = useCallback(() => {
@@ -379,6 +382,7 @@ export function usePlayerTrackController({
 
   const persistTrackSelection = useCallback(
     (type: TrackType, id: number | 'no', explicitTrack?: Track) => {
+      manualTrackSelectionEpochRef.current[type] += 1;
       const selectedTrack =
         explicitTrack ??
         trackListRef.current.find((track) => track.type === type && track.id === id);
@@ -386,6 +390,7 @@ export function usePlayerTrackController({
         id,
         generation: trackRefreshGenerationRef.current,
         language: null,
+        pending: true,
       };
       manualTrackPreferencesRef.current[type] = manual;
       const storedPreference = normalizeLanguageToken(
@@ -424,6 +429,7 @@ export function usePlayerTrackController({
             manualTrackPreferencesRef.current[type] = null;
         })
         .finally(() => {
+          manual.pending = false;
           if (
             manual.generation === trackRefreshGenerationRef.current &&
             (manualTrackPreferencesRef.current[type] === manual ||
@@ -577,8 +583,6 @@ export function usePlayerTrackController({
         return false;
       }
 
-      const titleArg = addonSubtitleTitleArg(subtitle);
-
       const existing = findExternalSubtitleTrack(trackListRef.current, subtitle);
       if (existing) {
         return setTrack('sub', existing.id, { persistPreference: true });
@@ -590,7 +594,7 @@ export function usePlayerTrackController({
         // Read the native baseline before adding; the local list can lag file-load.
         const baseTrackCount = (await readPlayerTrackCount()) ?? trackListRef.current.length;
         if (generation !== trackRefreshGenerationRef.current) return false;
-        await addSubtitleTrack(subtitle.url, titleArg, subtitle.lang);
+        await addSubtitleTrack(subtitle.url, subtitle.mpvTitle, subtitle.lang);
         if (generation !== trackRefreshGenerationRef.current) return false;
 
         let addedTrack = findExternalSubtitleTrack(trackListRef.current, subtitle) ?? null;
@@ -705,6 +709,7 @@ export function usePlayerTrackController({
       fingerprint: string,
       isCancelled: () => boolean,
     ) => {
+      const manualSelectionEpoch = manualTrackSelectionEpochRef.current[kind];
       let resolution;
       try {
         resolution = await api.resolvePreferredTrackSelection(
@@ -716,7 +721,8 @@ export function usePlayerTrackController({
         return;
       }
 
-      if (isCancelled()) return;
+      if (isCancelled() || manualSelectionEpoch !== manualTrackSelectionEpochRef.current[kind])
+        return;
 
       if (resolution.selectedMatches) {
         markApplied(kind, fingerprint);
@@ -725,7 +731,11 @@ export function usePlayerTrackController({
       if (typeof resolution.matchedTrackId !== 'number') return;
 
       const switched = await setTrack(kind, resolution.matchedTrackId, { silent: true });
-      if (!isCancelled() && switched) {
+      if (
+        !isCancelled() &&
+        manualSelectionEpoch === manualTrackSelectionEpochRef.current[kind] &&
+        switched
+      ) {
         markApplied(kind, fingerprint);
       }
     },
@@ -735,13 +745,17 @@ export function usePlayerTrackController({
   const launchPreferredTrackAutoApply = useCallback(
     (kind: TrackType, fingerprint: string, task: (isCancelled: () => boolean) => Promise<void>) => {
       let cancelled = false;
+      const generation = trackRefreshGenerationRef.current;
       autoApplyingTrackPrefsRef.current[kind] = true;
       recordAttempt(kind, fingerprint);
 
       void task(() => cancelled).finally(() => {
+        if (generation !== trackRefreshGenerationRef.current) return;
         if (!cancelled) {
           autoApplyingTrackPrefsRef.current[kind] = false;
         }
+        autoApplySettlementRevisionRef.current += 1;
+        setAutoApplySettlementRevision(autoApplySettlementRevisionRef.current);
       });
 
       return () => {
@@ -850,13 +864,29 @@ export function usePlayerTrackController({
   ]);
 
   useEffect(() => {
-    if (!hasPlaybackStarted || isLoading || isResolving || !mediaId || isLocalMediaId(mediaId)) {
+    if (
+      effectivePlaybackLanguagePreferences === undefined ||
+      !hasPlaybackStarted ||
+      isLoading ||
+      isResolving ||
+      !mediaId ||
+      isLocalMediaId(mediaId)
+    ) {
       return;
     }
     // Duration can mark playback ready before the first track read — an empty outcome would delete this title's learned languages.
     if (audioTracks.length === 0 && subTracks.length === 0) {
       return;
     }
+
+    const isTrackSelectionPending = () =>
+      trackSwitchingRef.current.audio ||
+      trackSwitchingRef.current.sub ||
+      autoApplyingTrackPrefsRef.current.audio ||
+      autoApplyingTrackPrefsRef.current.sub ||
+      manualTrackPreferencesRef.current.audio?.pending ||
+      manualTrackPreferencesRef.current.sub?.pending;
+    if (isTrackSelectionPending()) return;
 
     const fingerprint = JSON.stringify([
       activeStreamUrl ?? '',
@@ -868,30 +898,52 @@ export function usePlayerTrackController({
       return;
     }
 
-    lastRecordedTrackOutcomeRef.current = fingerprint;
-    void api
-      .savePlaybackLanguagePreferenceOutcomeFromTracks(
-        mediaId,
-        mediaType ?? 'series',
-        activeAudioTrack ? toTrackLanguageCandidate(activeAudioTrack) : undefined,
-        subtitlesOff || !activeSubTrack ? undefined : toTrackLanguageCandidate(activeSubTrack),
-        subtitlesOff,
+    const generation = trackRefreshGenerationRef.current;
+    const settlementRevision = autoApplySettlementRevision;
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (
+        cancelled ||
+        generation !== trackRefreshGenerationRef.current ||
+        settlementRevision !== autoApplySettlementRevisionRef.current ||
+        isTrackSelectionPending()
       )
-      .catch(() => {
-        // Title-scoped playback preference memory is best-effort only.
-      });
+        return;
+
+      lastRecordedTrackOutcomeRef.current = fingerprint;
+      void api
+        .savePlaybackLanguagePreferenceOutcomeFromTracks(
+          mediaId,
+          mediaType ?? 'series',
+          activeAudioTrack ? toTrackLanguageCandidate(activeAudioTrack) : undefined,
+          subtitlesOff || !activeSubTrack ? undefined : toTrackLanguageCandidate(activeSubTrack),
+          subtitlesOff,
+        )
+        .catch(() => {
+          // Title-scoped playback preference memory is best-effort only.
+        });
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [
     activeAudioTrack,
     activeStreamUrl,
     activeSubTrack,
     audioTracks.length,
+    autoApplySettlementRevision,
+    effectivePlaybackLanguagePreferences,
     hasPlaybackStarted,
     isLoading,
     isResolving,
     mediaId,
     mediaType,
+    preferenceSaveEpoch.audio,
+    preferenceSaveEpoch.sub,
     subTracks.length,
     subtitlesOff,
+    trackSwitching.audio,
+    trackSwitching.sub,
   ]);
 
   useEffect(() => {

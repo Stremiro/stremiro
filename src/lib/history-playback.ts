@@ -84,22 +84,9 @@ export async function getLatestEpisodeResumeStartTime(
   }
 }
 
-// Absolute (normalized) season/episode wins over raw stream coordinates.
-// One owner for resume targets, lookups, and subtitles.
-export function watchProgressCoordinates(
-  item?: Pick<WatchProgress, 'absolute_season' | 'absolute_episode' | 'season' | 'episode'> | null,
-): { season?: number; episode?: number } {
-  // Rust serializes `Option<u32>` as `null`; collapse to `undefined` for downstream guards.
-  return {
-    season: item?.absolute_season ?? item?.season ?? undefined,
-    episode: item?.absolute_episode ?? item?.episode ?? undefined,
-  };
-}
-
 // Shared row identity for Home's resume rail and Profile's grid/list views.
 export function watchProgressItemKey(item: WatchProgress): string {
-  const { season, episode } = watchProgressCoordinates(item);
-  return `${item.type_}-${item.id}-${season ?? ''}-${episode ?? ''}`;
+  return `${item.type_}-${item.id}-${item.absolute_season ?? ''}-${item.absolute_episode ?? ''}`;
 }
 
 /** `id:season:episode` — lookup key for the backend's per-episode progress index. */
@@ -117,32 +104,25 @@ export function watchProgressMediaItem(item: WatchProgress): MediaItem {
   };
 }
 
+function isValidProgressTiming(position: number, duration: number): boolean {
+  return (
+    typeof position === 'number' &&
+    typeof duration === 'number' &&
+    Number.isFinite(position) &&
+    Number.isFinite(duration) &&
+    duration > 0
+  );
+}
+
 // Shared progress percent; invalid inputs render as 0.
 export function getWatchProgressPercent(position: number, duration: number): number {
-  if (
-    typeof position !== 'number' ||
-    typeof duration !== 'number' ||
-    !Number.isFinite(position) ||
-    !Number.isFinite(duration) ||
-    duration <= 0
-  ) {
-    return 0;
-  }
-
+  if (!isValidProgressTiming(position, duration)) return 0;
   return clamp((position / duration) * 100, 0, 100);
 }
 
 // Compact "time left" label; tails under 30s read as finished so nothing claims "0m left".
 export function formatWatchRemaining(position: number, duration: number): string | null {
-  if (
-    typeof position !== 'number' ||
-    typeof duration !== 'number' ||
-    !Number.isFinite(position) ||
-    !Number.isFinite(duration) ||
-    duration <= 0
-  ) {
-    return null;
-  }
+  if (!isValidProgressTiming(position, duration)) return null;
 
   const remainingSecs = Math.max(0, duration - position);
   if (remainingSecs < 30) return null;

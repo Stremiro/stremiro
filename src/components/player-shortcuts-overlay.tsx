@@ -18,6 +18,7 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
   const rows = buildPlayerShortcutRows(keymap);
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  const viewportRef = useRef<HTMLDivElement>(null);
 
   // `aria-modal` must be honest: grab focus on open so Tab starts inside the
   // dialog instead of reaching the chrome under it, and hand focus back to
@@ -42,8 +43,6 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
         onClick={onClose}
         className='absolute inset-0 cursor-default bg-black/60 animate-in fade-in duration-200'
       />
-      {/* The close button is the dialog's only tabbable control, so pinning
-          Tab to it is the whole focus trap. */}
       {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
       <div
         ref={dialogRef}
@@ -54,7 +53,12 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
         onKeyDown={(event) => {
           if (event.key !== 'Tab') return;
           event.preventDefault();
-          closeButtonRef.current?.focus();
+          const target =
+            document.activeElement === closeButtonRef.current ||
+            (document.activeElement === dialogRef.current && event.shiftKey)
+              ? viewportRef.current
+              : closeButtonRef.current;
+          target?.focus();
         }}
         className='relative w-full max-w-2xl overflow-hidden rounded-2xl border border-white/[0.08] bg-zinc-950/95 shadow-2xl shadow-black/70 animate-in fade-in zoom-in-95 duration-200 outline-hidden'
       >
@@ -73,9 +77,17 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
             <X className='w-4 h-4' strokeWidth={2.25} />
           </button>
         </div>
-        <div className='max-h-[70vh] overflow-y-auto p-4'>
+        {/* eslint-disable jsx-a11y/no-noninteractive-tabindex -- Keyboard-scrollable viewport. */}
+        <div
+          ref={viewportRef}
+          role='region'
+          aria-label='Player shortcuts'
+          tabIndex={0}
+          className='max-h-[70vh] overflow-y-auto p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
+        >
           <ShortcutTable shortcuts={rows} />
         </div>
+        {/* eslint-enable jsx-a11y/no-noninteractive-tabindex */}
         <p className='border-t border-white/[0.07] px-5 py-3 text-[12px] text-zinc-500'>
           Change these keys in Settings → Shortcuts.
         </p>

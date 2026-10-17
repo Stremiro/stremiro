@@ -1,54 +1,22 @@
-import { infiniteQueryOptions, type QueryClient } from '@tanstack/react-query';
-
-import { api, type AllBrowseCursors, type MediaItem, type SearchCatalogPage } from '@/lib/api';
-import { canonicalizeSearchText, foldAsciiCase } from '@/lib/api-cache';
 import {
-  SEARCH_CATALOG_GC_TIME_MS,
-  SEARCH_CATALOG_QUERY_KEY,
-  SEARCH_CATALOG_STALE_TIME_MS,
-} from '@/lib/query-invalidation';
+  infiniteQueryOptions,
+  replaceEqualDeep,
+  type InfiniteData,
+  type QueryClient,
+} from '@tanstack/react-query';
+
+import { api, type SearchCatalogContinuation, type SearchCatalogPage } from '@/lib/api';
+import { canonicalizeSearchText } from '@/lib/api-cache';
+import { SEARCH_CATALOG_GC_TIME_MS, SEARCH_CATALOG_QUERY_KEY } from '@/lib/query-invalidation';
 import type { SearchFacets } from '@/lib/search-page-state';
 
-interface CatalogPageSummary {
-  items: MediaItem[];
-  lastPageAddedTypes: Set<MediaItem['type']>;
-}
-
-// Key the whole immutable pages array so middle-page refetches invalidate the summary.
-const pageSummaries = new WeakMap<readonly SearchCatalogPage[], CatalogPageSummary>();
-const itemKeys = new WeakMap<Pick<MediaItem, 'id' | 'type'>, string>();
-
-export function searchCatalogKey(item: Pick<MediaItem, 'id' | 'type'>): string {
-  let cached = itemKeys.get(item);
-  if (!cached) {
-    cached = `${foldAsciiCase(item.type.trim())}:${foldAsciiCase(item.id.trim())}`;
-    itemKeys.set(item, cached);
-  }
-  return cached;
-}
-
-function getCatalogPageSummary(pages: readonly SearchCatalogPage[]): CatalogPageSummary {
-  const cached = pageSummaries.get(pages);
-  if (cached) return cached;
-
-  const seen = new Set<string>();
-  const items: MediaItem[] = [];
-  const lastPageAddedTypes = new Set<MediaItem['type']>();
-  const lastIndex = pages.length - 1;
-  pages.forEach((page, index) => {
-    for (const item of page.items) {
-      const key = searchCatalogKey(item);
-      if (seen.has(key)) continue;
-      seen.add(key);
-      items.push(item);
-      if (index === lastIndex) lastPageAddedTypes.add(item.type);
-    }
-  });
-
-  const summary = { items, lastPageAddedTypes };
-  pageSummaries.set(pages, summary);
-  return summary;
-}
+type CachedSearchCatalogPage = Omit<SearchCatalogPage, 'continuation'> & {
+  continuation?: SearchCatalogContinuation;
+};
+type CachedSearchCatalogData = InfiniteData<
+  CachedSearchCatalogPage,
+  SearchCatalogContinuation | undefined
+>;
 
 export function searchCatalogQueryOptions(facets: SearchFacets, localYear: number) {
   // The UI key and request share the same bounded text; Rust validates it.
@@ -58,11 +26,13 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
   // so a feed must neither filter it nor split its cache key.
   const browseFeed = normalizedQuery ? undefined : facets.feed;
   const newFeedYear = browseFeed === 'new' ? localYear : undefined;
-  // `all` with no query merges both browse catalogs; with a query the backend
-  // already fans out to the movie and series search catalogs on its own.
-  const allBrowse = facets.type === 'all' && !normalizedQuery;
-
-  return infiniteQueryOptions({
+  return infiniteQueryOptions<
+    CachedSearchCatalogPage,
+    Error,
+    CachedSearchCatalogData,
+    readonly unknown[],
+    SearchCatalogContinuation | undefined
+  >({
     // Browse and text search share paging; the key head matches the invalidation sweep.
     queryKey: [
       ...SEARCH_CATALOG_QUERY_KEY,
@@ -82,23 +52,27 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
         genres: normalizedGenre ? [normalizedGenre] : undefined,
         yearFrom: newFeedYear,
         yearTo: newFeedYear,
-        skip: typeof pageParam === 'number' && pageParam > 0 ? pageParam : undefined,
-        allCursors: allBrowse ? (pageParam as AllBrowseCursors) : undefined,
+        continuation: pageParam,
       });
     },
-    initialPageParam: (allBrowse ? { movie: 0, series: 0 } : 0) as number | AllBrowseCursors,
-    getNextPageParam: (lastPage, allPages, lastPageParam) => {
-      if (!allBrowse) {
-        return nextCatalogSkip(lastPage, allPages, lastPageParam as number);
-      }
-      const previousCursors = lastPageParam as AllBrowseCursors;
-      const cursors = {
-        movie: nextCatalogSkip(lastPage, allPages, previousCursors.movie, 'movie'),
-        series: nextCatalogSkip(lastPage, allPages, previousCursors.series, 'series'),
+    initialPageParam: undefined as SearchCatalogContinuation | undefined,
+    getNextPageParam: (lastPage) => (lastPage.exhausted ? undefined : lastPage.continuation),
+    structuralSharing: (previous, next) => {
+      const data = next as CachedSearchCatalogData | undefined;
+      if (!Array.isArray(data?.pages)) return next;
+      // Seen keys accumulate; only the last continuation is read. Revisit for backward paging/maxPages.
+      const compacted = {
+        ...data,
+        pages: data.pages.map((page, index) =>
+          index < data.pages.length - 1 && page.continuation
+            ? { items: page.items, exhausted: page.exhausted }
+            : page,
+        ),
+        pageParams: data.pageParams.map((param, index) => (index === 0 ? param : undefined)),
       };
-      return cursors.movie !== undefined || cursors.series !== undefined ? cursors : undefined;
+      return replaceEqualDeep(previous, compacted);
     },
-    staleTime: SEARCH_CATALOG_STALE_TIME_MS,
+    staleTime: Infinity,
     gcTime: SEARCH_CATALOG_GC_TIME_MS,
   });
 }
@@ -108,29 +82,4 @@ export function prefetchSearchCatalog(queryClient: QueryClient, facets: SearchFa
   void queryClient.prefetchInfiniteQuery(
     searchCatalogQueryOptions(facets, new Date().getFullYear()),
   );
-}
-
-export function flattenCatalogPages(pages: readonly SearchCatalogPage[]): MediaItem[] {
-  return getCatalogPageSummary(pages).items;
-}
-
-function nextCatalogSkip(
-  lastPage: SearchCatalogPage,
-  allPages: SearchCatalogPage[],
-  lastPageParam: number | undefined,
-  mediaType?: MediaItem['type'],
-): number | undefined {
-  if (lastPageParam === undefined) return undefined;
-  const nextSkip = mediaType ? lastPage.allCursors?.[mediaType] : lastPage.nextSkip;
-  // All browse retains the same cursor only when a branch failed and needs a retry.
-  if (mediaType && nextSkip === lastPageParam) return nextSkip;
-  // Rust emits `Option<u32>`; only a non-advancing (saturated) cursor needs a guard.
-  if (nextSkip == null || nextSkip <= lastPageParam) {
-    return undefined;
-  }
-
-  // A page with no unseen titles ends pagination despite an advancing source cursor.
-  const { lastPageAddedTypes } = getCatalogPageSummary(allPages);
-  const addsItems = mediaType ? lastPageAddedTypes.has(mediaType) : lastPageAddedTypes.size > 0;
-  return addsItems ? nextSkip : undefined;
 }

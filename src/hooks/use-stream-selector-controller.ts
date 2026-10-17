@@ -22,6 +22,8 @@ import { filterSelectorStreams } from '@/lib/stream-selector-utils';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { isSeriesLikeMediaType } from '@/lib/utils';
 
+const STREAM_SELECTOR_GC_TIME_MS = 1000 * 60 * 2;
+
 // Stable fallback so `?? []` never changes memo identity across renders.
 const EMPTY_SOURCE_SUMMARIES: StreamSourceSummary[] = [];
 const EMPTY_STREAM_STATS: StreamSelectorStats = {
@@ -160,9 +162,7 @@ export function useStreamSelectorController({
     error: addonConfigsError,
   } = useAddonConfigs({ enabled: open && isOnline });
 
-  const hasEnabledAddons = addonConfigs.some(
-    (addon) => addon.enabled && addon.url.trim().length > 0,
-  );
+  const hasEnabledAddons = addonConfigs.some((addon) => addon.enabled);
 
   // Ranking inputs are part of the key so titles/episodes never share pages.
   const selectorQueryKey = streamSelectorQueryKey(
@@ -178,6 +178,9 @@ export function useStreamSelectorController({
   const selectorOpenRef = useRef(open);
   useEffect(() => {
     selectorOpenRef.current = open;
+    return () => {
+      selectorOpenRef.current = false;
+    };
   }, [open]);
   const {
     data: streamSelectorData,
@@ -186,18 +189,15 @@ export function useStreamSelectorController({
     refetch: refetchStreamSelectorData,
   } = useQuery({
     queryKey: selectorQueryKey,
-    queryFn: ({ signal }) => {
+    // Do not consume signal: TanStack would cancel and revert this fetch on unmount.
+    queryFn: () => {
       // The backend emits a merged+ranked snapshot per addon — cache each so rows appear progressively.
       const generation = ++selectorFetchGenerationRef.current;
       const onProgress = new Channel<StreamSelectorData>();
       // Channel is not an EventTarget — onmessage is its only surface.
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       onProgress.onmessage = (snapshot) => {
-        if (
-          selectorOpenRef.current &&
-          !signal.aborted &&
-          generation === selectorFetchGenerationRef.current
-        ) {
+        if (selectorOpenRef.current && generation === selectorFetchGenerationRef.current) {
           queryClient.setQueryData(selectorQueryKey, snapshot);
         }
       };
@@ -214,6 +214,7 @@ export function useStreamSelectorController({
     structuralSharing: shareStreamSelectorData,
     enabled: open && !!lookupId?.trim() && isOnline,
     staleTime: 1000 * 60 * 3,
+    gcTime: STREAM_SELECTOR_GC_TIME_MS,
     retry: 0,
   });
   const streams = useMemo(() => streamSelectorData?.streams ?? [], [streamSelectorData?.streams]);

@@ -116,19 +116,14 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
       {historyControls && <TitlebarHistoryControls />}
 
       {/* Drag region fills remaining space. Tauri's drag script already maximizes
-          on double-click; a React handler here would toggle a second time. */}
+          on double-click; React only handles keyboard and assistive activation. */}
       <button
         type='button'
         data-tauri-drag-region
         aria-label='Toggle maximize window'
         className='flex min-w-0 flex-1 items-center select-none focus:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/20'
-        onKeyDown={(event) => {
-          if (event.key !== 'Enter' && event.key !== ' ') {
-            return;
-          }
-
-          event.preventDefault();
-          handleToggleMaximize();
+        onClick={(event) => {
+          if (event.detail === 0) handleToggleMaximize();
         }}
       />
 

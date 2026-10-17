@@ -1,13 +1,15 @@
 import { useQuery } from '@tanstack/react-query';
 import { WifiOff } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { type ReactNode, useMemo, useState } from 'react';
 import { Hero } from '@/components/hero';
 import { HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from '@/components/horizontal-media-rail';
 import { MediaRow } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
+import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
+import { similarTitlesQueryKey } from '@/lib/api-discovery';
 import {
   MEDIA_ROW_STALE_TIME_MS,
   RECENT_WATCH_SEED_QUERY_KEY,
@@ -34,6 +36,45 @@ function fetchCatalogItems(options: {
     .then((page) => page.items);
 }
 
+function HomeRowPlaceholder() {
+  return <div aria-hidden='true' className='h-[450px] md:h-[480px]' />;
+}
+
+function DeferredHomeRow({ children }: { children: ReactNode }) {
+  const { anchorRef, nearViewport } = useNearViewport();
+
+  return <div ref={anchorRef}>{nearViewport ? children : <HomeRowPlaceholder />}</div>;
+}
+
+function RecentWatchRecommendations() {
+  const isOnline = useOnlineStatus();
+  const {
+    data: recentWatchSeed,
+    isLoading,
+    isSuccess: isRecentSeedReady,
+  } = useQuery({
+    queryKey: RECENT_WATCH_SEED_QUERY_KEY,
+    queryFn: api.getRecentWatchSeed,
+    staleTime: WATCH_HISTORY_STALE_TIME_MS,
+    enabled: isOnline,
+    retry: false,
+  });
+
+  if (isLoading) return <HomeRowPlaceholder />;
+  if (!isRecentSeedReady || !recentWatchSeed) return null;
+
+  return (
+    <MediaRow
+      key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
+      title={`Because you watched ${recentWatchSeed.title}`}
+      queryKey={similarTitlesQueryKey(recentWatchSeed)}
+      queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+      enabled={isOnline}
+      minItems={4}
+    />
+  );
+}
+
 export function Home() {
   const isOnline = useOnlineStatus();
   const [genre, setGenre] = useState(ALL_GENRES);
@@ -56,14 +97,6 @@ export function Home() {
     queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
     staleTime: MEDIA_ROW_STALE_TIME_MS,
     enabled: isOnline,
-  });
-
-  const { data: recentWatchSeed, isSuccess: isRecentSeedReady } = useQuery({
-    queryKey: RECENT_WATCH_SEED_QUERY_KEY,
-    queryFn: api.getRecentWatchSeed,
-    staleTime: WATCH_HISTORY_STALE_TIME_MS,
-    enabled: isOnline,
-    retry: false,
   });
 
   // Stable slice so Hero's memo holds across unrelated home re-renders.
@@ -121,48 +154,41 @@ export function Home() {
           }}
         />
 
-        <MediaRow
-          title='Trending Series'
-          titleHref='/search?type=series'
-          queryKey={trendingRowQueryKey('series', 'All')}
-          queryFn={() => fetchCatalogItems({ mediaType: 'series' })}
-          enabled={isOnline}
-        />
-
-        {isRecentSeedReady && recentWatchSeed && (
+        <DeferredHomeRow>
           <MediaRow
-            key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
-            title={`Because you watched ${recentWatchSeed.title}`}
-            queryKey={trendingRowQueryKey(
-              'similar',
-              recentWatchSeed.type,
-              recentWatchSeed.id,
-              recentWatchSeed.year ?? '',
-              ...(recentWatchSeed.genres ?? []),
-            )}
-            queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+            title='Trending Series'
+            titleHref='/search?type=series'
+            queryKey={trendingRowQueryKey('series', 'All')}
+            queryFn={() => fetchCatalogItems({ mediaType: 'series' })}
             enabled={isOnline}
-            minItems={4}
           />
-        )}
+        </DeferredHomeRow>
+
+        <DeferredHomeRow>
+          <RecentWatchRecommendations />
+        </DeferredHomeRow>
 
         {/* Provider "Animation" series also carries western cartoons — hence the title. */}
-        <MediaRow
-          title='Trending Animation'
-          titleHref='/search?type=anime'
-          queryKey={trendingRowQueryKey('anime', 'All')}
-          queryFn={() => fetchCatalogItems({ mediaType: 'anime' })}
-          enabled={isOnline}
-        />
+        <DeferredHomeRow>
+          <MediaRow
+            title='Trending Animation'
+            titleHref='/search?type=anime'
+            queryKey={trendingRowQueryKey('anime', 'All')}
+            queryFn={() => fetchCatalogItems({ mediaType: 'anime' })}
+            enabled={isOnline}
+          />
+        </DeferredHomeRow>
 
-        <MediaRow
-          title='Top Rated'
-          titleHref='/search?type=movie&feed=featured'
-          // Under the `trending` prefix so invalidateDiscoveryQueries covers it.
-          queryKey={trendingRowQueryKey('top-rated', 'movies')}
-          queryFn={() => fetchCatalogItems({ mediaType: 'movie', feed: 'featured' })}
-          enabled={isOnline}
-        />
+        <DeferredHomeRow>
+          <MediaRow
+            title='Top Rated'
+            titleHref='/search?type=movie&feed=featured'
+            // Under the `trending` prefix so invalidateDiscoveryQueries covers it.
+            queryKey={trendingRowQueryKey('top-rated', 'movies')}
+            queryFn={() => fetchCatalogItems({ mediaType: 'movie', feed: 'featured' })}
+            enabled={isOnline}
+          />
+        </DeferredHomeRow>
       </div>
     </div>
   );

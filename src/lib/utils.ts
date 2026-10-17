@@ -159,7 +159,7 @@ export function clamp(value: number, min: number, max: number): number {
 
 /** Renderable remote art check — mirrors backend `is_fetchable_http_url`; http:// addon art must not render as no-art. */
 export function isHttpUrl(value?: string | null): value is string {
-  return !!value && /^https?:\/\//.test(value);
+  return !!value && /^https?:\/\//i.test(value);
 }
 
 /** Episode fallback — single owner for `title || Episode N` across cards/panels/calendar. */

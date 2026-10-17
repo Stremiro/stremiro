@@ -1,18 +1,18 @@
 import { Plus, RotateCcw } from 'lucide-react';
-import { type KeyboardEvent, useState } from 'react';
+import { type KeyboardEvent, useRef, useState } from 'react';
 import { ShortcutTable } from '@/components/shortcut-table';
 import { Button } from '@/components/ui/button';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
+import { api, getErrorMessage } from '@/lib/api';
 import {
-  bindPlayerKey,
+  createPlayerKeymap,
   FIXED_PLAYER_SHORTCUTS,
   formatBindingKey,
   MAX_KEYS_PER_PLAYER_ACTION,
-  normalizeBindingKey,
   PLAYER_ACTIONS,
   type PlayerActionId,
   type PlayerKeymap,
-  resolvePlayerKeymap,
 } from '@/lib/player-keybindings';
 import { BROWSE_SHORTCUTS, CALENDAR_SHORTCUTS } from '@/lib/shortcuts';
 import { cn } from '@/lib/utils';
@@ -28,7 +28,7 @@ const SLOT_IDS = ['primary', 'secondary'] as const;
 const MODIFIER_KEYS = new Set(['shift', 'control', 'alt', 'altgraph', 'meta', 'os']);
 
 const KEY_SLOT_CLASS =
-  'inline-flex h-7 min-w-[1.85rem] cursor-pointer items-center justify-center rounded-md border px-2 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50';
+  'inline-flex h-7 min-w-[1.85rem] cursor-pointer items-center justify-center rounded-md border px-2 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
 
 interface Capture {
   action: PlayerActionId;
@@ -36,22 +36,41 @@ interface Capture {
 }
 
 export function ShortcutsSection() {
-  const {
-    preferences: overrides,
-    isHydrating,
-    preferencesQuery,
-    updatePreferences,
-  } = useAppUiPreferences((preferences) => preferences.playerKeybindings);
-  const keymap = resolvePlayerKeymap(overrides);
+  const { preferences, isHydrating, preferencesQuery, savePreferences } = useAppUiPreferences();
+  const keymap = createPlayerKeymap(
+    preferences.effectivePlayerKeybindings,
+    preferences.playerKeybindings,
+  );
+  const [isSaving, setIsSaving] = useState(false);
   const [capture, setCapture] = useState<Capture | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const hasOverrides = Object.keys(overrides).length > 0;
+  const captureSequence = useRef(0);
+  const mountedRef = useMountedRef();
+  const hasOverrides = Object.keys(preferences.playerKeybindings).length > 0;
 
-  const save = (next: Record<string, string[]>) => updatePreferences({ playerKeybindings: next });
+  const save = (next: Record<string, string[]>): Promise<boolean> => {
+    setNotice(null);
+    setIsSaving(true);
+    return savePreferences({ playerKeybindings: next })
+      .then(
+        () => true,
+        () => false,
+      )
+      .finally(() => {
+        if (mountedRef.current) setIsSaving(false);
+      });
+  };
 
   const startCapture = (next: Capture) => {
+    if (isHydrating || isSaving) return;
+    captureSequence.current += 1;
     setNotice(null);
     setCapture(next);
+  };
+
+  const cancelCapture = () => {
+    captureSequence.current += 1;
+    setCapture(null);
   };
 
   const handleCaptureKey = (event: KeyboardEvent<HTMLButtonElement>) => {
@@ -63,41 +82,51 @@ export function ShortcutsSection() {
     event.preventDefault();
     event.stopPropagation();
     if (event.repeat) return;
+    const sequence = ++captureSequence.current;
     const label = PLAYER_ACTIONS.find((action) => action.id === capture.action)?.label ?? '';
 
     if (raw === 'escape') {
-      setCapture(null);
+      cancelCapture();
       return;
     }
-    if (raw === 'backspace' || raw === 'delete') {
-      if (capture.slot < keymap.keys[capture.action].length) {
-        save(bindPlayerKey(keymap, capture.action, capture.slot, null));
-        setNotice(`Removed a key from ${label}.`);
-      }
-      setCapture(null);
+    const clearing = raw === 'backspace' || raw === 'delete';
+    if (clearing && capture.slot >= keymap.keys[capture.action].length) {
+      cancelCapture();
       return;
     }
-    if (event.ctrlKey || event.altKey || event.metaKey) {
+    if (!clearing && (event.ctrlKey || event.altKey || event.metaKey)) {
       setNotice('Ctrl, Alt and Win combinations can’t be used in the player.');
       return;
     }
-    const key = normalizeBindingKey(event.key);
-    if (key === null) {
-      setNotice(
-        /^[0-9]$/.test(event.key)
-          ? 'Number keys are reserved for seeking to a percentage.'
-          : `${formatBindingKey(raw)} can’t be assigned.`,
+    void api
+      .bindPlayerKeybinding(
+        keymap.overrides,
+        capture.action,
+        capture.slot,
+        clearing ? null : event.key,
+      )
+      .then(
+        async (next) => {
+          if (!mountedRef.current || sequence !== captureSequence.current) return;
+          const previousOwner = keymap.byKey.get(raw);
+          const saving = save(next);
+          cancelCapture();
+          const saveSequence = captureSequence.current;
+          const saved = await saving;
+          if (!saved || !mountedRef.current || saveSequence !== captureSequence.current) return;
+          setNotice(
+            clearing
+              ? `Removed a key from ${label}.`
+              : previousOwner && previousOwner !== capture.action
+                ? `${formatBindingKey(raw)} moved from ${PLAYER_ACTIONS.find((action) => action.id === previousOwner)?.label} to ${label}.`
+                : null,
+          );
+        },
+        (error: unknown) => {
+          if (!mountedRef.current || sequence !== captureSequence.current) return;
+          setNotice(getErrorMessage(error));
+        },
       );
-      return;
-    }
-    const previousOwner = keymap.byKey.get(key);
-    save(bindPlayerKey(keymap, capture.action, capture.slot, key));
-    setCapture(null);
-    setNotice(
-      previousOwner && previousOwner !== capture.action
-        ? `${formatBindingKey(key)} moved from ${PLAYER_ACTIONS.find((action) => action.id === previousOwner)?.label} to ${label}.`
-        : null,
-    );
   };
 
   return (
@@ -111,13 +140,21 @@ export function ShortcutsSection() {
             <Button
               size='sm'
               variant='outline'
-              disabled={isHydrating || !hasOverrides}
+              disabled={isHydrating}
+              aria-disabled={isSaving || !hasOverrides || undefined}
               onClick={() => {
-                setCapture(null);
-                setNotice('All player shortcuts restored to their defaults.');
-                save({});
+                if (isSaving || !hasOverrides) return;
+                cancelCapture();
+                void save({}).then((saved) => {
+                  if (saved && mountedRef.current) {
+                    setNotice('All player shortcuts restored to their defaults.');
+                  }
+                });
               }}
-              className={cn('h-9 gap-2 px-3.5 text-[13px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
+              className={cn(
+                'h-9 gap-2 px-3.5 text-[13px] aria-disabled:pointer-events-none aria-disabled:opacity-50',
+                SETTINGS_OUTLINE_BUTTON_CLASS,
+              )}
             >
               <RotateCcw className='h-3.5 w-3.5' />
               Reset all
@@ -142,15 +179,15 @@ export function ShortcutsSection() {
               keymap={keymap}
               capture={capture}
               disabled={isHydrating}
+              isSaving={isSaving}
               onStartCapture={startCapture}
               onCaptureKey={handleCaptureKey}
-              onCancelCapture={() => setCapture(null)}
+              onCancelCapture={cancelCapture}
               onReset={() => {
-                setCapture(null);
-                setNotice(null);
+                cancelCapture();
                 const next = { ...keymap.overrides };
                 delete next[action.id];
-                save(next);
+                void save(next);
               }}
             />
           ))}
@@ -190,6 +227,7 @@ function PlayerBindingRow({
   keymap,
   capture,
   disabled,
+  isSaving,
   onStartCapture,
   onCaptureKey,
   onCancelCapture,
@@ -200,6 +238,7 @@ function PlayerBindingRow({
   keymap: PlayerKeymap;
   capture: Capture | null;
   disabled: boolean;
+  isSaving: boolean;
   onStartCapture: (capture: Capture) => void;
   onCaptureKey: (event: KeyboardEvent<HTMLButtonElement>) => void;
   onCancelCapture: () => void;
@@ -231,6 +270,7 @@ function PlayerBindingRow({
               key={slotId}
               type='button'
               disabled={disabled}
+              aria-disabled={isSaving || undefined}
               data-key-capture={listening ? '' : undefined}
               aria-label={
                 listening
@@ -239,7 +279,11 @@ function PlayerBindingRow({
                     ? `${label}: ${keyLabel}. Change key`
                     : `Add a key for ${label}`
               }
-              onClick={() => (listening ? onCancelCapture() : onStartCapture({ action, slot }))}
+              onClick={() => {
+                if (isSaving) return;
+                if (listening) onCancelCapture();
+                else onStartCapture({ action, slot });
+              }}
               onKeyDown={listening ? onCaptureKey : undefined}
               onBlur={listening ? onCancelCapture : undefined}
               className={cn(
@@ -266,9 +310,12 @@ function PlayerBindingRow({
           aria-label={`Reset ${label} to default`}
           title='Reset to default'
           disabled={disabled || !customized}
-          onClick={onReset}
+          aria-disabled={isSaving || undefined}
+          onClick={() => {
+            if (!isSaving) onReset();
+          }}
           className={cn(
-            'flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45',
+            'flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 aria-disabled:pointer-events-none',
             !customized && 'invisible',
           )}
         >

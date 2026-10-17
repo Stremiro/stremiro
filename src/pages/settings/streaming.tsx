@@ -8,7 +8,15 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, GripVertical, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -19,10 +27,10 @@ import {
   ADDON_CONFIGS_QUERY_KEY,
   addonUrlInspectionQueryKey,
   invalidateDiscoveryQueries,
-  invalidateStreamQueries,
 } from '@/lib/query-invalidation';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn } from '@/lib/utils';
 import {
@@ -58,6 +66,7 @@ function addonMonogram(name: string) {
 
 function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: AddonRowProps) {
   const [copied, setCopied] = useState(false);
+  const mountedRef = useMountedRef();
   useEffect(() => {
     if (!copied) return;
     const timer = window.setTimeout(() => setCopied(false), ADDON_COPIED_FEEDBACK_MS);
@@ -65,8 +74,16 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
   }, [copied]);
 
   const handleCopyLink = async () => {
-    if (await copyText(addon.url, 'Addon link copied', 'Could not copy addon link')) {
-      setCopied(true);
+    try {
+      const url = await api.getAddonUrl(addon.id);
+      if (
+        (await copyText(url, 'Addon link copied', 'Could not copy addon link')) &&
+        mountedRef.current
+      ) {
+        setCopied(true);
+      }
+    } catch {
+      toast.error('Could not copy addon link');
     }
   };
 
@@ -106,6 +123,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
       <div className='col-start-2 flex shrink-0 items-center justify-self-end gap-1'>
         <button
           type='button'
+          data-addon-control='copy'
           title={copied ? 'Copied' : 'Copy addon link'}
           aria-label={`Copy ${addon.name} addon link`}
           onClick={() => void handleCopyLink()}
@@ -123,13 +141,16 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
         {!pinned && onRemove ? (
           <button
             type='button'
+            data-addon-control='remove'
             title='Remove'
             aria-label={`Remove ${addon.name}`}
-            onClick={() => onRemove(addon.id)}
-            disabled={isWorking}
+            onClick={() => {
+              if (!isWorking) onRemove(addon.id);
+            }}
+            aria-disabled={isWorking || undefined}
             className={cn(
               ADDON_ICON_BUTTON_CLASS,
-              'text-zinc-500 hover:bg-red-500/15 hover:text-red-400 disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100',
+              'text-zinc-500 not-aria-disabled:hover:bg-red-500/15 not-aria-disabled:hover:text-red-400 aria-disabled:opacity-40 md:opacity-0 md:group-focus-within/row:opacity-100 md:group-hover/row:opacity-100',
             )}
           >
             <Trash2 aria-hidden='true' className='h-4 w-4' />
@@ -141,7 +162,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
         <SettingsSwitch
           ariaLabel={addon.enabled ? `Disable ${addon.name}` : `Enable ${addon.name}`}
           checked={addon.enabled}
-          disabled={isWorking}
+          pending={isWorking}
           onChange={() => onToggle(addon.id)}
         />
       </div>
@@ -161,6 +182,7 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
   return (
     <div
       ref={setNodeRef}
+      data-addon-row={props.addon.id}
       style={{ transform: CSS.Transform.toString(transform), transition }}
       className={cn(
         ADDON_ROW_CLASS,
@@ -172,10 +194,10 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
         handle={
           <button
             type='button'
+            data-addon-control='reorder'
             {...attributes}
             {...listeners}
-            disabled={props.isWorking}
-            className='-ml-2 flex h-8 w-8 shrink-0 items-center justify-center cursor-grab touch-none rounded-md text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:cursor-grabbing disabled:cursor-not-allowed disabled:opacity-30'
+            className='-ml-2 flex h-8 w-8 shrink-0 items-center justify-center cursor-grab touch-none rounded-md text-zinc-500 transition-colors hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:cursor-grabbing aria-disabled:cursor-not-allowed aria-disabled:opacity-30'
             aria-label={`Reorder ${props.addon.name}`}
           >
             <GripVertical className='h-4 w-4 shrink-0' />
@@ -189,7 +211,7 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
 // Pinned rows live outside DndContext — a plain row, no sortable wiring.
 function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
   return (
-    <div className={ADDON_ROW_CLASS}>
+    <div data-addon-row={props.addon.id} className={ADDON_ROW_CLASS}>
       <AddonRow
         {...props}
         pinned
@@ -211,6 +233,12 @@ export function StreamingSources() {
   const [newUrl, setNewUrl] = useState('');
   const [isDragging, setIsDragging] = useState(false);
   const newUrlInputRef = useRef<HTMLInputElement | null>(null);
+  const addonRowsRef = useRef<HTMLDivElement>(null);
+  const removalFocusRef = useRef<{
+    button: HTMLButtonElement;
+    control: string;
+    candidates: string[];
+  } | null>(null);
 
   const {
     data: addons = [],
@@ -223,13 +251,75 @@ export function StreamingSources() {
 
   const saveMutation = useMutation({
     mutationFn: api.updateAddonConfigs,
-    onSuccess: (savedConfigs) => {
+    onSuccess: (savedConfigs, action) => {
+      if (action.kind === 'remove' && document.activeElement instanceof HTMLButtonElement) {
+        const button = document.activeElement;
+        const rows = Array.from(
+          addonRowsRef.current?.querySelectorAll<HTMLElement>('[data-addon-row]') ?? [],
+        );
+        const index = rows.findIndex(
+          (row) => row.dataset.addonRow === action.id && row.contains(button),
+        );
+        const control = button.dataset.addonControl
+          ? `[data-addon-control="${button.dataset.addonControl}"]`
+          : button.getAttribute('role') === 'switch'
+            ? '[role="switch"]'
+            : null;
+        if (index >= 0 && control) {
+          removalFocusRef.current = {
+            button,
+            control,
+            candidates: [...rows.slice(index + 1), ...rows.slice(0, index).toReversed()].map(
+              (row) => row.dataset.addonRow!,
+            ),
+          };
+        }
+      }
       void queryClient.cancelQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY, exact: true });
       queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, savedConfigs);
-      void invalidateStreamQueries(queryClient);
       void invalidateDiscoveryQueries(queryClient);
     },
-    onError: (err: unknown) => toast.error(getErrorMessage(err)),
+    onError: (err: unknown) => {
+      toast.error(getErrorMessage(err));
+      // A failed disk save can still leave the registry applied in memory.
+      const previous = queryClient.getQueryData<AddonConfig[]>(ADDON_CONFIGS_QUERY_KEY);
+      void queryClient
+        .fetchQuery({
+          queryKey: ADDON_CONFIGS_QUERY_KEY,
+          queryFn: api.getAddonConfigs,
+          staleTime: 0,
+        })
+        .then((current) => {
+          if (JSON.stringify(current) !== JSON.stringify(previous)) {
+            void invalidateDiscoveryQueries(queryClient);
+          }
+        })
+        .catch(() => {});
+    },
+  });
+
+  useLayoutEffect(() => {
+    const pending = removalFocusRef.current;
+    if (!pending) return;
+    if (pending.button.isConnected) {
+      if (document.activeElement !== pending.button) removalFocusRef.current = null;
+      return;
+    }
+    if (saveMutation.isPending) return;
+    removalFocusRef.current = null;
+    if (document.activeElement !== document.body) return;
+    const controls = new Map(
+      Array.from(
+        addonRowsRef.current?.querySelectorAll<HTMLElement>('[data-addon-row]') ?? [],
+        (row) =>
+          [
+            row.dataset.addonRow,
+            row.querySelector<HTMLButtonElement>(`${pending.control}:not(:disabled)`),
+          ] as const,
+      ),
+    );
+    const nextId = pending.candidates.find((id) => controls.get(id));
+    (controls.get(nextId) ?? newUrlInputRef.current)?.focus({ preventScroll: true });
   });
 
   const sensors = useSortableSensors();
@@ -237,9 +327,9 @@ export function StreamingSources() {
   // Rust judges the add box with the save path's normalizer, so verdicts can't drift.
   const trimmedNewUrl = newUrl.trim();
   const debouncedNewUrl = useDebounce(trimmedNewUrl, ADDON_URL_INSPECT_DEBOUNCE_MS);
-  const installedAddonUrls = useMemo(() => addons.map((addon) => addon.url), [addons]);
+  const installedAddonIds = useMemo(() => addons.map((addon) => addon.id), [addons]);
   const inspectionQuery = useQuery({
-    queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonUrls),
+    queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonIds),
     queryFn: () => api.inspectAddonUrl(debouncedNewUrl),
     enabled: debouncedNewUrl !== '',
     staleTime: Infinity,
@@ -248,11 +338,11 @@ export function StreamingSources() {
   // A verdict only describes the text on screen; mid-debounce there is none.
   const inspectionCurrent = trimmedNewUrl !== '' && debouncedNewUrl === trimmedNewUrl;
   const inspection = inspectionCurrent ? inspectionQuery.data : undefined;
-  const normalizedNewUrl = inspection?.normalizedUrl;
+  const isValidNewUrl = !!inspection?.displayUrl;
   const isConfigureCandidate = !!inspection?.configurePage;
   const duplicateAddonName = inspection?.duplicateOf;
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
-  const canSubmitNewAddon = !!normalizedNewUrl && !duplicateAddonName && !isWorking;
+  const canSubmitNewAddon = isValidNewUrl && !duplicateAddonName && !isWorking;
 
   const handleToggle = (id: string) => {
     if (isWorking) return;
@@ -335,7 +425,7 @@ export function StreamingSources() {
               ref={newUrlInputRef}
               aria-label='Addon manifest URL'
               aria-describedby='addon-url-hint'
-              aria-invalid={!!trimmedNewUrl && !!inspection && !normalizedNewUrl}
+              aria-invalid={!!trimmedNewUrl && !!inspection && !isValidNewUrl}
               placeholder='https://addon.host/.../manifest.json'
               value={newUrl}
               onChange={(e) => setNewUrl(e.target.value)}
@@ -372,7 +462,7 @@ export function StreamingSources() {
                   : 'text-zinc-500'
                 : isConfigureCandidate || duplicateAddonName
                   ? 'text-amber-400'
-                  : !normalizedNewUrl
+                  : !isValidNewUrl
                     ? 'text-red-400'
                     : 'text-emerald-400',
             )}
@@ -381,11 +471,11 @@ export function StreamingSources() {
               ? inspectionCurrent && inspectionQuery.isError
                 ? getErrorMessage(inspectionQuery.error)
                 : 'Checking…'
-              : !normalizedNewUrl
+              : !isValidNewUrl
                 ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
                 : duplicateAddonName
                   ? `Already configured as ${duplicateAddonName}.`
-                  : `Ready: ${normalizedNewUrl}`}
+                  : `Ready: ${inspection.displayUrl}`}
           </p>
         ) : (
           <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
@@ -418,6 +508,7 @@ export function StreamingSources() {
       ) : (
         // No empty state: the backend always pins default addons.
         <div
+          ref={addonRowsRef}
           className='divide-y divide-white/[0.05]'
           data-escape-capture={isDragging ? '' : undefined}
         >

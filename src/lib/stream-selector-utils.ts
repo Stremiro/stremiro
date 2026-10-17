@@ -2,6 +2,7 @@ import type {
   AddonStream,
   AddonStreamRecommendationReason,
   AddonStreamResolution,
+  StreamMatchBadgeKind,
   StreamSelectorPreferences,
 } from '@/lib/api';
 
@@ -18,8 +19,6 @@ interface TechBadge {
   cls: string;
 }
 
-export type StreamMatchBadgeKind = 'episode' | 'range' | 'season' | 'title' | 'title_partial';
-
 export interface StreamMatchBadge {
   kind: StreamMatchBadgeKind;
   label: string;
@@ -29,56 +28,22 @@ export interface StreamMatchBadge {
 
 const MATCH_BADGE_NEUTRAL_CLASS = 'border-white/[0.1] bg-white/[0.04] text-zinc-200';
 
-// Match tiers come from the Rust coordinator; the UI styles, never re-derives.
-export function buildStreamMatchBadges(stream: AddonStream): StreamMatchBadge[] {
-  const summary = stream.matchSummary;
-  if (!summary) return [];
-
-  const badges: StreamMatchBadge[] = [];
-  switch (summary.episode) {
-    case 'exact':
-      badges.push({
-        kind: 'episode',
-        label: 'Exact episode',
-        cls: 'accent-lattice-soft',
-      });
-      break;
-    case 'episode_range':
-      badges.push({ kind: 'range', label: 'Includes episode', cls: MATCH_BADGE_NEUTRAL_CLASS });
-      break;
-    case 'season_pack':
-      badges.push({ kind: 'season', label: 'Season pack', cls: MATCH_BADGE_NEUTRAL_CLASS });
-      break;
-  }
-
-  if (summary.title === 'close') {
-    badges.push({ kind: 'title', label: 'Title match', cls: MATCH_BADGE_NEUTRAL_CLASS });
-  } else if (summary.title === 'partial') {
-    badges.push({
-      kind: 'title_partial',
-      label: 'Similar title',
-      cls: 'border-white/[0.08] bg-transparent text-zinc-400',
-    });
-  }
-
-  return badges;
-}
-
-// Tier that earns the card's corner accent: episode tiers win, else a close
-// title match (the strongest fact a movie row can have). Partial stays unaccented.
-export type StreamMatchTier = 'exact' | 'episode_range' | 'season_pack' | 'title';
-
-export function streamMatchTier(stream: AddonStream): StreamMatchTier | null {
-  const summary = stream.matchSummary;
-  switch (summary?.episode) {
-    case 'exact':
-    case 'episode_range':
-    case 'season_pack':
-      return summary.episode;
-    default:
-      return summary?.title === 'close' ? 'title' : null;
-  }
-}
+export const MATCH_BADGES: Record<StreamMatchBadgeKind, StreamMatchBadge> = {
+  episode: { kind: 'episode', label: 'Exact episode', cls: 'accent-lattice-soft' },
+  range: { kind: 'range', label: 'Includes episode', cls: MATCH_BADGE_NEUTRAL_CLASS },
+  season: { kind: 'season', label: 'Season pack', cls: MATCH_BADGE_NEUTRAL_CLASS },
+  multi_season: {
+    kind: 'multi_season',
+    label: 'Multi-season pack',
+    cls: MATCH_BADGE_NEUTRAL_CLASS,
+  },
+  title: { kind: 'title', label: 'Title match', cls: MATCH_BADGE_NEUTRAL_CLASS },
+  title_partial: {
+    kind: 'title_partial',
+    label: 'Similar title',
+    cls: 'border-white/[0.08] bg-transparent text-zinc-400',
+  },
+};
 
 export interface StreamReasonChip {
   kind: AddonStreamRecommendationReason;
@@ -247,9 +212,7 @@ export function buildStreamTechBadges(stream: AddonStream): TechBadge[] {
           : 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',
     });
   }
-  // An episode match badge already carries the pack fact; only batch rows
-  // without one need this badge.
-  if (stream.presentation.isBatch && !stream.matchSummary?.episode) {
+  if (stream.showPackBadge) {
     techBadges.push({
       label: 'Pack',
       cls: 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',

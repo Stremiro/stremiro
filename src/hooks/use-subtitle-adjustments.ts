@@ -1,10 +1,9 @@
 import { type RefObject, useCallback, useEffect, useRef, useState } from 'react';
 
 import { useDebouncedPrefsPersist } from '@/hooks/use-debounced-prefs-persist';
+import type { MpvSetScheduler } from '@/hooks/use-mpv-set-scheduler';
 import type { AppUiPreferences, AppUiPreferencesPatch } from '@/lib/api';
-import { clamp } from '@/lib/utils';
 
-type MpvSetScheduler = (property: string, value: number) => void;
 type SubtitlePreferenceValues = Pick<
   AppUiPreferences,
   'subtitleDelay' | 'subtitlePos' | 'subtitleScale'
@@ -23,107 +22,135 @@ interface UseSubtitleAdjustmentsArgs {
   scheduleMpvSet: MpvSetScheduler;
 }
 
-// Subtitle fine-tuning for the player popover: all entry points clamp/quantize here so they
-// converge on mpv-safe numbers; `scheduleMpvSet` coalesces drags; prefs persist via app-UI prefs.
+const SUBTITLE_FIELDS = {
+  delay: { property: 'sub-delay', preference: 'subtitleDelay' },
+  pos: { property: 'sub-pos', preference: 'subtitlePos' },
+  scale: { property: 'sub-scale', preference: 'subtitleScale' },
+} as const;
+
+type SubtitleSetting = keyof SubtitleAdjustmentSettings;
+
 export function useSubtitleAdjustments({
   preferences,
   updatePreferences,
   scheduleMpvSet,
 }: UseSubtitleAdjustmentsArgs) {
-  const [subtitleDelay, setSubtitleDelay] = useState(preferences.subtitleDelay);
-  const [subtitlePos, setSubtitlePos] = useState(preferences.subtitlePos);
-  const [subtitleScale, setSubtitleScale] = useState(preferences.subtitleScale);
-
-  // What mpv should run: lifecycle load-time read + echo guard — a pref equal to this was our own write.
-  const settingsRef: RefObject<SubtitleAdjustmentSettings> = useRef({
+  const [settings, setSettings] = useState<SubtitleAdjustmentSettings>({
     delay: preferences.subtitleDelay,
     pos: preferences.subtitlePos,
     scale: preferences.subtitleScale,
   });
-
-  // External writes (hydration) apply only when they differ from our last write — same echo guard as volume.
-  useEffect(() => {
-    const current = settingsRef.current;
-    if (
-      current.delay === preferences.subtitleDelay &&
-      current.pos === preferences.subtitlePos &&
-      current.scale === preferences.subtitleScale
-    ) {
-      return;
-    }
-    settingsRef.current = {
-      delay: preferences.subtitleDelay,
-      pos: preferences.subtitlePos,
-      scale: preferences.subtitleScale,
-    };
-    setSubtitleDelay(preferences.subtitleDelay);
-    setSubtitlePos(preferences.subtitlePos);
-    setSubtitleScale(preferences.subtitleScale);
-    scheduleMpvSet('sub-delay', preferences.subtitleDelay);
-    scheduleMpvSet('sub-pos', preferences.subtitlePos);
-    scheduleMpvSet('sub-scale', preferences.subtitleScale);
-  }, [
-    preferences.subtitleDelay,
-    preferences.subtitlePos,
-    preferences.subtitleScale,
-    scheduleMpvSet,
-  ]);
-
-  // Slider ticks fire per pointermove — `updatePreferences` re-renders the whole player tree, so debounce it.
+  const settingsRef: RefObject<SubtitleAdjustmentSettings> = useRef(settings);
+  const canonicalDelayRef = useRef(settings.delay);
+  const delayNudgeGenerationRef = useRef(0);
+  const delayNudgeChainRef = useRef<Promise<number | undefined>>(Promise.resolve(undefined));
+  const sequenceRef = useRef({ delay: 0, pos: 0, scale: 0 });
+  const pendingRef = useRef(new Set<SubtitleSetting>());
+  const preferencesRef = useRef(preferences);
   const schedulePrefsPersist = useDebouncedPrefsPersist(updatePreferences);
 
-  // Returns the applied value so echoing callers (z/x hotkey OSD) never drift from what mpv got.
-  const applySubtitleDelay = useCallback(
-    (value: number): number => {
-      const next = Math.round(clamp(value, -5, 5) * 10) / 10;
-      if (next === settingsRef.current.delay) return next;
-      settingsRef.current = { ...settingsRef.current, delay: next };
-      setSubtitleDelay(next);
-      scheduleMpvSet('sub-delay', next);
-      schedulePrefsPersist({ subtitleDelay: next });
-      return next;
+  const applySubtitleSetting = useCallback(
+    (key: SubtitleSetting, value: number, persist = true): Promise<number | undefined> => {
+      const sequence = ++sequenceRef.current[key];
+      const { property, preference } = SUBTITLE_FIELDS[key];
+      pendingRef.current.add(key);
+      settingsRef.current = { ...settingsRef.current, [key]: value };
+      setSettings((current) => (current[key] === value ? current : { ...current, [key]: value }));
+      // Preserve write-barrier/unmount flushes while native replies are pending; preference saves normalize in Rust too.
+      if (persist) schedulePrefsPersist({ [preference]: value });
+      return scheduleMpvSet(property, value).then((normalized) => {
+        if (sequenceRef.current[key] !== sequence) return undefined;
+        pendingRef.current.delete(key);
+        if (normalized === undefined) return undefined;
+        if (key === 'delay') canonicalDelayRef.current = normalized;
+        settingsRef.current = { ...settingsRef.current, [key]: normalized };
+        setSettings((current) =>
+          current[key] === normalized ? current : { ...current, [key]: normalized },
+        );
+        if (persist) schedulePrefsPersist({ [preference]: normalized });
+        return normalized;
+      });
     },
     [scheduleMpvSet, schedulePrefsPersist],
+  );
+
+  const applySubtitleDelay = useCallback(
+    (value: number, persist = true) => {
+      delayNudgeGenerationRef.current += 1;
+      const pending = applySubtitleSetting('delay', value, persist);
+      delayNudgeChainRef.current = pending.catch(() => undefined);
+      return pending;
+    },
+    [applySubtitleSetting],
+  );
+
+  useEffect(() => {
+    const previous = preferencesRef.current;
+    preferencesRef.current = preferences;
+    for (const key of Object.keys(SUBTITLE_FIELDS) as SubtitleSetting[]) {
+      const { preference } = SUBTITLE_FIELDS[key];
+      const value = preferences[preference];
+      if (
+        value !== previous[preference] &&
+        value !== settingsRef.current[key] &&
+        !pendingRef.current.has(key)
+      ) {
+        if (key === 'delay') void applySubtitleDelay(value, false);
+        else void applySubtitleSetting(key, value, false);
+      }
+    }
+  }, [preferences, applySubtitleDelay, applySubtitleSetting]);
+
+  useEffect(
+    () => () => {
+      delayNudgeGenerationRef.current += 1;
+      for (const key of Object.keys(SUBTITLE_FIELDS) as SubtitleSetting[]) {
+        sequenceRef.current[key] += 1;
+      }
+      pendingRef.current.clear();
+    },
+    [],
   );
 
   const applySubtitlePos = useCallback(
-    (value: number) => {
-      const next = clamp(value, 0, 100);
-      if (next === settingsRef.current.pos) return;
-      settingsRef.current = { ...settingsRef.current, pos: next };
-      setSubtitlePos(next);
-      scheduleMpvSet('sub-pos', next);
-      schedulePrefsPersist({ subtitlePos: next });
-    },
-    [scheduleMpvSet, schedulePrefsPersist],
+    (value: number) => applySubtitleSetting('pos', value),
+    [applySubtitleSetting],
   );
 
   const applySubtitleScale = useCallback(
-    (value: number) => {
-      const next = Math.round(clamp(value, 0.25, 3.0) * 20) / 20; // round to 0.05
-      if (next === settingsRef.current.scale) return;
-      settingsRef.current = { ...settingsRef.current, scale: next };
-      setSubtitleScale(next);
-      scheduleMpvSet('sub-scale', next);
-      schedulePrefsPersist({ subtitleScale: next });
+    (value: number) => applySubtitleSetting('scale', value),
+    [applySubtitleSetting],
+  );
+
+  const stepSubtitleDelay = useCallback(
+    (direction: 1 | -1) => {
+      const generation = delayNudgeGenerationRef.current;
+      delayNudgeChainRef.current = delayNudgeChainRef.current
+        .then(() => {
+          if (delayNudgeGenerationRef.current !== generation) return undefined;
+          return applySubtitleSetting('delay', canonicalDelayRef.current + direction * 0.1);
+        })
+        .catch(() => undefined);
+      return delayNudgeChainRef.current;
     },
-    [scheduleMpvSet, schedulePrefsPersist],
+    [applySubtitleSetting],
   );
 
   const resetSubtitleSettings = useCallback(() => {
-    applySubtitleDelay(0);
-    applySubtitlePos(100);
-    applySubtitleScale(1.0);
+    void applySubtitleDelay(0);
+    void applySubtitlePos(100);
+    void applySubtitleScale(1.0);
   }, [applySubtitleDelay, applySubtitlePos, applySubtitleScale]);
 
   return {
-    subtitleDelay,
-    subtitlePos,
-    subtitleScale,
+    subtitleDelay: settings.delay,
+    subtitlePos: settings.pos,
+    subtitleScale: settings.scale,
     subtitleSettingsRef: settingsRef,
     applySubtitleDelay,
     applySubtitlePos,
     applySubtitleScale,
+    stepSubtitleDelay,
     resetSubtitleSettings,
   };
 }

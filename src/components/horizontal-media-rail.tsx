@@ -32,6 +32,7 @@ interface HorizontalMediaRailProps<T> {
   isLoading: boolean;
   isPlaceholderData?: boolean;
   items: readonly T[];
+  notice?: ReactNode;
   /** Stable identity for cross-remount scroll memory (e.g. 'continue-watching'). */
   railId?: string;
   renderItem: (item: T, index: number) => ReactNode;
@@ -49,6 +50,7 @@ export function HorizontalMediaRail<T>({
   isLoading,
   isPlaceholderData = false,
   items,
+  notice,
   railId,
   renderItem,
   scrollerClassName,
@@ -57,6 +59,7 @@ export function HorizontalMediaRail<T>({
   title,
   viewportClassName,
 }: HorizontalMediaRailProps<T>) {
+  const hasNotice = notice !== undefined;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const lastScrollLeftRef = useRef(0);
   const {
@@ -73,12 +76,20 @@ export function HorizontalMediaRail<T>({
   const activeRailIdRef = useRef<string | undefined>(undefined);
 
   useLayoutEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    if (!scrollContainer) {
+      if (activeRailIdRef.current) {
+        rememberRailScrollPosition(activeRailIdRef.current, lastScrollLeftRef.current);
+      }
+      activeRailIdRef.current = undefined;
+      previousKeysRef.current = null;
+      syncScrollState();
+      return;
+    }
     if (isPlaceholderData || isLoading) {
       syncScrollState();
       return;
     }
-    const scrollContainer = scrollContainerRef.current;
-    if (!scrollContainer) return;
     const previousRailId = activeRailIdRef.current;
     const identityChanged = previousRailId !== railId;
     if (identityChanged && previousRailId) {
@@ -111,15 +122,18 @@ export function HorizontalMediaRail<T>({
       scrollContainer.scrollLeft = 0;
     }
     syncScrollState();
-  }, [isLoading, isPlaceholderData, itemKeys, railId, syncScrollState]);
+  }, [hasNotice, isLoading, isPlaceholderData, itemKeys, railId, syncScrollState]);
 
   useLayoutEffect(() => {
-    const scrollContainer = scrollContainerRef.current;
+    const scrollContainer = scrollContainerRef;
     const position = lastScrollLeftRef;
     return () => {
       const activeRailId = activeRailIdRef.current;
       if (activeRailId) {
-        rememberRailScrollPosition(activeRailId, scrollContainer?.scrollLeft ?? position.current);
+        rememberRailScrollPosition(
+          activeRailId,
+          scrollContainer.current?.scrollLeft ?? position.current,
+        );
       }
     };
   }, []);
@@ -143,11 +157,11 @@ export function HorizontalMediaRail<T>({
       aria-busy={isLoading || isPlaceholderData || undefined}
       className={cn('py-4 relative group/section', sectionClassName)}
     >
-      <div className={`${contentInsetsClassName} mb-3`}>
-        <div className='flex min-h-9 items-center justify-between mb-3'>
+      <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
+        <div className={cn('flex items-center justify-between mb-3', !hasNotice && 'min-h-9')}>
           <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>{title}</h2>
 
-          {scrollState.hasOverflow && (
+          {!hasNotice && scrollState.hasOverflow && (
             <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150'>
               <Button
                 aria-label='Scroll rail left'
@@ -181,26 +195,34 @@ export function HorizontalMediaRail<T>({
         {headerContent}
       </div>
 
-      <div className={`${contentInsetsClassName} ${cn('overflow-hidden', viewportClassName)}`}>
+      {hasNotice ? (
         <div
-          ref={bindScrollContainer}
-          data-media-scroller
-          className={cn(DEFAULT_SCROLLER_CLASS_NAME, scrollerClassName)}
-          style={edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : undefined}
+          className={`${contentInsetsClassName} pt-4 flex flex-wrap items-center gap-3 text-[13px] text-zinc-400`}
         >
-          {isLoading
-            ? Array.from({ length: skeletonCount }, (_, index) => (
-                <div key={`rail-skeleton-${index + 1}`} className={DEFAULT_ITEM_CLASS_NAME}>
-                  <MediaCardSkeleton />
-                </div>
-              ))
-            : items.slice(0, RAIL_MAX_ITEMS).map((item, index) => (
-                <div key={getItemKey(item, index)} className={DEFAULT_ITEM_CLASS_NAME}>
-                  {renderItem(item, index)}
-                </div>
-              ))}
+          {notice}
         </div>
-      </div>
+      ) : (
+        <div className={`${contentInsetsClassName} ${cn('overflow-hidden', viewportClassName)}`}>
+          <div
+            ref={bindScrollContainer}
+            data-media-scroller
+            className={cn(DEFAULT_SCROLLER_CLASS_NAME, scrollerClassName)}
+            style={edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : undefined}
+          >
+            {isLoading
+              ? Array.from({ length: skeletonCount }, (_, index) => (
+                  <div key={`rail-skeleton-${index + 1}`} className={DEFAULT_ITEM_CLASS_NAME}>
+                    <MediaCardSkeleton />
+                  </div>
+                ))
+              : items.slice(0, RAIL_MAX_ITEMS).map((item, index) => (
+                  <div key={getItemKey(item, index)} className={DEFAULT_ITEM_CLASS_NAME}>
+                    {renderItem(item, index)}
+                  </div>
+                ))}
+          </div>
+        </div>
+      )}
     </section>
   );
 }

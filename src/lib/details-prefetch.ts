@@ -1,7 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query';
 
 import { api } from '@/lib/api';
-import { getWatchProgressEpoch } from '@/lib/api-cache';
+import { getWatchProgressEpoch, getWatchProgressSnapshotRevision } from '@/lib/api-cache';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { routeChunks } from '@/lib/route-chunks';
 import {
@@ -9,6 +9,7 @@ import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
   DETAILS_STALE_TIME_MS,
+  getDiscoveryEpoch,
   titleWatchProgressQueryKey,
 } from '@/lib/query-invalidation';
 import { isSeriesLikeMediaType } from '@/lib/utils';
@@ -42,7 +43,11 @@ function prefetchQueryOnce(
 
 export function prefetchDetailsRouteData(
   queryClient: QueryClient,
-  { mediaId, mediaType }: PrefetchDetailsRouteDataOptions,
+  {
+    mediaId,
+    mediaType,
+    warmChunk = true,
+  }: PrefetchDetailsRouteDataOptions & { warmChunk?: boolean },
 ) {
   const normalizedId = mediaId.trim();
   if (!normalizedId) {
@@ -51,7 +56,7 @@ export function prefetchDetailsRouteData(
 
   const routeType = resolvePlayerRouteMediaType(mediaType);
 
-  void routeChunks.details().catch(() => undefined);
+  if (warmChunk) void routeChunks.details().catch(() => undefined);
 
   // One IPC warms both reads: the episode-free card payload (hover stays cheap;
   // the route fetches the full payload on commit) plus the resume snapshot.
@@ -74,14 +79,18 @@ export function prefetchDetailsRouteData(
   // mounted query's own fetch; a failed bundle leaves no state entry, so the
   // next hover retries instead of blocking until GC.
   const progressEpoch = getWatchProgressEpoch();
+  const progressRevision = getWatchProgressSnapshotRevision();
+  const discoveryEpoch = getDiscoveryEpoch();
   const request = api
     .getDetailsPrefetchBundle(routeType, normalizedId)
     .then((bundle) => {
+      if (discoveryEpoch !== getDiscoveryEpoch()) return;
       if (bundle.details && queryClient.getQueryData(detailsKey) === undefined) {
         queryClient.setQueryData(detailsKey, bundle.details);
       }
       if (
         progressEpoch === getWatchProgressEpoch() &&
+        progressRevision === getWatchProgressSnapshotRevision() &&
         queryClient.getQueryData(progressKey) === undefined
       ) {
         queryClient.setQueryData(progressKey, bundle.progress);

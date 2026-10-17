@@ -38,13 +38,18 @@ function mpvGetProperty<T>(
   return invoke<T | null>('player_mpv_get_property', { name, format });
 }
 
-export function setMpvProperty(name: string, value: string | number | boolean): Promise<void> {
+export type MpvSubtitleProperties = readonly (readonly [string, number])[];
+
+export function setMpvProperty(
+  name: string,
+  value: string | number | boolean,
+): Promise<MpvSubtitleProperties> {
   return invoke('player_mpv_set_property', { name, value });
 }
 
 export function setMpvProperties(
   properties: readonly (readonly [string, string | number | boolean])[],
-): Promise<void> {
+): Promise<MpvSubtitleProperties> {
   return invoke('player_mpv_set_properties', { properties });
 }
 

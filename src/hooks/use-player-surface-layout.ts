@@ -232,7 +232,7 @@ export function usePlayerSurfaceLayout({
       // deferred mask keeps the surface where the frame left it. A failed or
       // deduped send must not lift the mask on an unverified paint.
       void applyVideoMargins(generation).then((applied) => {
-        if (applied) releaseDeferredMiniMasks();
+        if (applied && generation === marginGenerationRef.current) releaseDeferredMiniMasks();
       });
     };
   });
@@ -283,6 +283,9 @@ export function usePlayerSurfaceLayout({
 
   useEffect(() => {
     marginRequestRef.current();
+    return () => {
+      marginGenerationRef.current += 1;
+    };
   }, [activeStreamUrl, applyVideoMargins, isMini, mpvSurfaceReady]);
 
   // Stable handle for mpv reconfig triggers; routes to the latest gated apply.
@@ -324,7 +327,7 @@ export interface MiniVideoRect {
 const MINI_MASK_IMAGES = 'linear-gradient(#000 0 0), linear-gradient(#000 0 0)';
 // The base layer deliberately overcovers the element: a 100% base would clip
 // descendants painting outside the border box; only the second layer cuts the hole.
-const MINI_MASK_BASE_SIZE = '12000px 12000px';
+const MINI_MASK_BASE_SIZE = 'calc(100% + 10000px) calc(100% + 10000px)';
 const MINI_MASK_BASE_POSITION = '-5000px -5000px';
 
 const MINI_MASK_PROPERTIES = [
@@ -432,6 +435,7 @@ export function useMiniPlayerSurface({
   holdHoleOnRelease,
 }: UseMiniPlayerSurfaceArgs) {
   const marginFingerprintRef = useRef<string | null>(null);
+  const marginApplyGenerationRef = useRef(0);
   const holeAppliedRef = useRef(false);
   // Ratio mpv verifiably paints AND the hole was cut for — scroll/resize
   // applies reuse it to reposition holes without an IPC resend.
@@ -465,6 +469,7 @@ export function useMiniPlayerSurface({
     const viewportHeight = window.innerHeight;
     if (viewportWidth <= 0 || viewportHeight <= 0) return Promise.resolve(false);
 
+    const generation = ++marginApplyGenerationRef.current;
     const ratio = buildVideoMarginRatio(viewportWidth, viewportHeight, {
       leftPx: rect.x,
       topPx: rect.y,
@@ -486,10 +491,16 @@ export function useMiniPlayerSurface({
 
     // The send records `fingerprint` as intent synchronously — the stale-send
     // check below relies on that.
+    holeFingerprintRef.current = null;
     return sendMarginRatio(marginFingerprintRef, ratio, fingerprint).then((applied) => {
       // Only a verified margin may own the hole: a reject leaves mpv at its
       // previous rect, a stale send would cut a hole for a rect mpv no longer paints.
-      if (!applied || marginFingerprintRef.current !== fingerprint) return false;
+      if (
+        !applied ||
+        generation !== marginApplyGenerationRef.current ||
+        marginFingerprintRef.current !== fingerprint
+      )
+        return false;
 
       // A verified apply supersedes any deferred clear left over from an expand.
       cancelDeferredMiniMaskClear();
@@ -520,6 +531,7 @@ export function useMiniPlayerSurface({
     window.addEventListener('scroll', scheduleSync, { passive: true });
 
     return () => {
+      marginApplyGenerationRef.current += 1;
       window.removeEventListener('resize', scheduleSync);
       window.removeEventListener('scroll', scheduleSync);
       if (frameId !== null) {

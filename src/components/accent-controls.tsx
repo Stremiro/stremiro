@@ -38,10 +38,14 @@ export function resolveAccentPreviewColor(draft: string, committed: string): str
   return HEX_COLOR_PATTERN.test(draft) ? draft : committed;
 }
 
+export function normalizeAccentPreviewIntensity(value: number): number {
+  return clamp(Math.round(value), 0, 100);
+}
+
 function setGlowVar(value: number) {
   document.documentElement.style.setProperty(
     '--app-glow',
-    String(clamp(Math.round(value), 0, 100) / 100),
+    String(normalizeAccentPreviewIntensity(value) / 100),
   );
 }
 
@@ -107,8 +111,7 @@ export function AccentControls({
       void flushColor().catch(() => undefined);
     };
   }, [flushColor]);
-  // Clamp locally so the preview never lies; Rust clamps again at the boundary.
-  const previewIntensity = clamp(Math.round(intensity), 0, 100);
+  const previewIntensity = normalizeAccentPreviewIntensity(intensity);
 
   useLayoutEffect(() => setGlowVar(previewIntensity), [previewIntensity]);
 

@@ -10,7 +10,7 @@ import {
   RotateCcw,
   Star,
 } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useParams } from 'react-router';
 import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
@@ -54,7 +54,6 @@ import {
   episodeProgressKey,
   formatWatchRemaining,
   getWatchProgressPercent,
-  watchProgressCoordinates,
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
 import {
@@ -67,7 +66,6 @@ import {
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
-  getEpisodeTitle,
   isSeriesLikeMediaType,
   isAiredByLocalDay,
   mediaTypeLabel,
@@ -191,8 +189,11 @@ function DetailsContent() {
     data: item,
     isLoading,
     isFetching,
+    isPaused,
     isPlaceholderData,
     error,
+    errorUpdatedAt,
+    dataUpdatedAt,
   } = useQuery({
     queryKey: detailsQueryKey(baseRouteType, baseRouteId),
     queryFn: () => api.getMediaDetails(baseRouteType, baseRouteId),
@@ -204,6 +205,9 @@ function DetailsContent() {
     staleTime: DETAILS_STALE_TIME_MS,
     gcTime: DETAILS_GC_TIME_MS,
   });
+  // Keep the first offline notice mounted through manual and reconnect retries.
+  const [hasPausedDetails, setHasPausedDetails] = useState(false);
+  if (isPaused && dataUpdatedAt === 0 && !hasPausedDetails) setHasPausedDetails(true);
 
   // The OS taskbar still uses this in the frameless window.
   useDocumentTitle(item?.title);
@@ -221,10 +225,6 @@ function DetailsContent() {
   // `latestSeriesEntry` is the backend's first series-like row of the
   // `last_watched` DESC history list.
   const latestSeriesProgress = titleProgress?.latestSeriesEntry ?? null;
-  const latestSeriesProgressCoords = useMemo(
-    () => watchProgressCoordinates(latestSeriesProgress),
-    [latestSeriesProgress],
-  );
 
   const isLoadingWatchHistoryForItem = item?.type === 'series' && isLoadingWatchHistory;
 
@@ -234,11 +234,11 @@ function DetailsContent() {
   const seriesProgress =
     item?.type === 'series' ? (titleProgress?.seriesResumeEntry ?? null) : null;
   const seriesCanResume = seriesProgress !== null;
-  const { season: seriesResumeSeason, episode: seriesResumeEpisode } =
-    watchProgressCoordinates(seriesProgress);
+  const seriesResumeSeason = seriesProgress?.absolute_season;
+  const seriesResumeEpisode = seriesProgress?.absolute_episode;
   const resumeEpisodeCoords = useMemo(
     () =>
-      seriesCanResume && seriesResumeSeason !== undefined && seriesResumeEpisode !== undefined
+      seriesCanResume && seriesResumeSeason != null && seriesResumeEpisode != null
         ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
         : null,
     [seriesCanResume, seriesResumeSeason, seriesResumeEpisode],
@@ -298,6 +298,10 @@ function DetailsContent() {
     seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
+    episodeSearchError,
+    isEpisodeSearchFetching,
+    isEpisodeSearchPending,
+    retryEpisodeSearch,
     setEpisodeSearch,
     selectSeason,
     jumpToEpisode,
@@ -318,8 +322,9 @@ function DetailsContent() {
     locationKey: location.key,
     locationSeason,
     locationEpisode,
-    resumeSeason: resumeEpisodeCoords?.season ?? latestSeriesProgressCoords.season,
-    resumeEpisode: resumeEpisodeCoords?.episode ?? latestSeriesProgressCoords.episode,
+    resumeSeason: resumeEpisodeCoords?.season ?? latestSeriesProgress?.absolute_season ?? undefined,
+    resumeEpisode:
+      resumeEpisodeCoords?.episode ?? latestSeriesProgress?.absolute_episode ?? undefined,
     isLoadingWatchHistory: isLoadingWatchHistoryForItem,
   });
 
@@ -380,6 +385,32 @@ function DetailsContent() {
   }, [seasonEpisodes, episodeProgress, localDayMs, baseRouteId, optimisticEpisodeWatched]);
 
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
+  const episodeSearchInputRef = useRef<HTMLInputElement>(null);
+  const episodeActionFocusRef = useRef<{
+    button: HTMLButtonElement;
+    target: 'resume' | 'heading' | 'search';
+  } | null>(null);
+  useLayoutEffect(() => {
+    const pending = episodeActionFocusRef.current;
+    if (!pending) return;
+    if (pending.button.isConnected) {
+      if (document.activeElement !== pending.button) episodeActionFocusRef.current = null;
+      return;
+    }
+    if (document.activeElement !== document.body) {
+      episodeActionFocusRef.current = null;
+      return;
+    }
+    const target =
+      pending.target === 'resume'
+        ? resumeEpisodeRef.current
+        : pending.target === 'search'
+          ? episodeSearchInputRef.current
+          : document.getElementById('details-episodes-heading');
+    if (!target) return;
+    episodeActionFocusRef.current = null;
+    target.focus({ preventScroll: true });
+  });
   const {
     streamSelectorOpen,
     streamTarget,
@@ -387,12 +418,16 @@ function DetailsContent() {
     openEpisodeStreamSelector,
     openEpisodeSelectorForCoordinates,
     handleSelectorClose,
+    handleSelectorClosed,
     getStreamTargetStartTime,
   } = useDetailsStreamSelector({
     item,
     isPlaceholderData,
     baseRouteType,
+    baseRouteId,
     locationState: location.state,
+    spoilerProtection,
+    titleProgress,
   });
 
   const handleWatchEpisode = useCallback(
@@ -400,26 +435,11 @@ function DetailsContent() {
       if (!item) return;
 
       const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-      const hideSpoiler = isEpisodeSpoiler(
-        ep,
-        spoilerProtection,
-        titleProgress?.watchedEpisodeCeiling,
-        epProgress,
-      );
       openEpisodeStreamSelector(ep, {
-        episodeTitle: getEpisodeTitle(hideSpoiler ? undefined : ep.title, ep.episode),
-        overview: hideSpoiler ? item.description : ep.overview || item.description,
         startTime: epProgress?.resume_start_time,
       });
     },
-    [
-      episodeProgress,
-      item,
-      baseRouteId,
-      openEpisodeStreamSelector,
-      spoilerProtection,
-      titleProgress?.watchedEpisodeCeiling,
-    ],
+    [episodeProgress, item, baseRouteId, openEpisodeStreamSelector],
   );
 
   // Destructured `mutate` keeps this stable — the mutation object is
@@ -502,14 +522,16 @@ function DetailsContent() {
       return;
     }
 
-    const { season, episode } = watchProgressCoordinates(primaryPlaybackHistoryEntry);
-    if (season === undefined || episode === undefined) return;
+    const { absolute_season: season, absolute_episode: episode } = primaryPlaybackHistoryEntry;
+    if (season == null || episode == null) return;
     openEpisodeSelectorForCoordinates(season, episode, startTime);
   }, [handleWatchMovie, item, openEpisodeSelectorForCoordinates, primaryPlaybackHistoryEntry]);
 
-  const handleRetryDetails = () => {
+  const handleRetryDetails = async () => {
     if (!baseRouteId || isFetching) return;
-    void queryClient.invalidateQueries({ queryKey: detailsQueryKey(baseRouteType, baseRouteId) });
+    const filters = { queryKey: detailsQueryKey(baseRouteType, baseRouteId) };
+    await queryClient.cancelQueries(filters, { revert: true });
+    await queryClient.invalidateQueries(filters);
   };
 
   // Center the resume episode once per landing — re-centering on each
@@ -548,18 +570,25 @@ function DetailsContent() {
     baseRouteId,
   ]);
 
-  if (isLoading) return <DetailsSkeleton />;
+  const showOfflineDetails =
+    dataUpdatedAt === 0 && (isPaused || (hasPausedDetails && errorUpdatedAt === 0));
 
-  if (error && !item) {
+  if (isLoading && errorUpdatedAt === 0 && !showOfflineDetails) return <DetailsSkeleton />;
+
+  if ((showOfflineDetails || errorUpdatedAt > dataUpdatedAt) && !item) {
     return (
       <div
         role='alert'
         className={`${DETAILS_COLUMN_CLASS} min-h-[75vh] flex flex-col items-center justify-center gap-3 text-center`}
       >
         <Clapperboard className='w-10 h-10 text-zinc-600 opacity-40' />
-        <p className='text-lg font-semibold text-white'>Couldn&apos;t load this title</p>
+        <p className='text-lg font-semibold text-white'>
+          {showOfflineDetails ? "You're offline" : "Couldn't load this title"}
+        </p>
         <p className='text-sm text-zinc-500 max-w-sm leading-relaxed'>
-          The details request failed — check your connection, then try again.
+          {showOfflineDetails
+            ? 'Reconnect to load this title, or try again.'
+            : 'The details request failed — check your connection, then try again.'}
         </p>
         <Button
           variant='outline'
@@ -699,7 +728,7 @@ function DetailsContent() {
                         ·
                       </span>
                       <div className='flex items-baseline gap-1.5'>
-                        <Star className='rating-star h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400' />
+                        <Star className='h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400' />
                         <span className='text-[15px] font-semibold tabular-nums text-white'>
                           {item.rating}
                         </span>
@@ -958,12 +987,21 @@ function DetailsContent() {
               )}
               {shouldShowEpisodeSearch && (
                 <SearchInput
+                  inputRef={episodeSearchInputRef}
                   placeholder='Search episodes…'
                   aria-label='Search episodes'
                   value={episodeSearch}
                   onValueChange={setEpisodeSearch}
                   clearLabel='Clear episode search'
                   className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-500 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
+                />
+              )}
+              {episodeSearchError && (
+                <RetryBanner
+                  className='px-3 py-2'
+                  message='Search failed.'
+                  isRetrying={isEpisodeSearchFetching}
+                  onRetry={retryEpisodeSearch}
                 />
               )}
               <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
@@ -987,9 +1025,13 @@ function DetailsContent() {
                       episodeSearch.trim().length > 0) && (
                       <button
                         type='button'
-                        onClick={() =>
-                          jumpToEpisode(resumeEpisodeCoords.season, resumeEpisodeCoords.episode)
-                        }
+                        onClick={(event) => {
+                          episodeActionFocusRef.current =
+                            document.activeElement === event.currentTarget
+                              ? { button: event.currentTarget, target: 'resume' }
+                              : null;
+                          jumpToEpisode(resumeEpisodeCoords.season, resumeEpisodeCoords.episode);
+                        }}
                         className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
                       >
                         <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
@@ -1006,12 +1048,16 @@ function DetailsContent() {
                           episodeWatchedPending ||
                           undefined
                         }
-                        onClick={() => {
+                        onClick={(event) => {
                           if (
                             hasWatchProgress &&
                             !markSeasonWatched.isPending &&
                             !episodeWatchedPending
                           ) {
+                            episodeActionFocusRef.current =
+                              document.activeElement === event.currentTarget
+                                ? { button: event.currentTarget, target: 'heading' }
+                                : null;
                             markSeasonWatched.mutate({
                               episodes: seasonWatchTargets,
                               watched: true,
@@ -1066,10 +1112,22 @@ function DetailsContent() {
                 )}
               </div>
 
-              <div className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'>
+              <div
+                aria-busy={!episodeSearchError && isEpisodeSearchPending}
+                className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'
+              >
                 {shouldShowEpisodeProgressSkeleton ? (
                   EPISODE_SKELETON_TILES
-                ) : visibleEpisodes.length === 0 && episodeSearch.trim() ? (
+                ) : !episodeSearchError &&
+                  visibleEpisodes.length === 0 &&
+                  isEpisodeSearchPending ? (
+                  <div
+                    role='status'
+                    className='col-span-full flex flex-col items-center gap-3 py-14 text-center'
+                  >
+                    <p className='text-sm text-zinc-400'>Searching episodes…</p>
+                  </div>
+                ) : !episodeSearchError && visibleEpisodes.length === 0 && episodeSearch.trim() ? (
                   <div className='col-span-full flex flex-col items-center gap-3 py-14 text-center'>
                     <p className='text-sm text-zinc-400'>
                       No episodes match &ldquo;
@@ -1077,7 +1135,13 @@ function DetailsContent() {
                     </p>
                     <button
                       type='button'
-                      onClick={() => setEpisodeSearch('')}
+                      onClick={(event) => {
+                        episodeActionFocusRef.current =
+                          document.activeElement === event.currentTarget
+                            ? { button: event.currentTarget, target: 'search' }
+                            : null;
+                        setEpisodeSearch('');
+                      }}
                       className='h-8 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
                     >
                       Clear search
@@ -1108,7 +1172,7 @@ function DetailsContent() {
 
                     return (
                       <EpisodeCard
-                        key={ep.id}
+                        key={`${ep.id}:${ep.season}:${ep.episode}`}
                         episode={ep}
                         isResume={isResumeEp}
                         isSpoiler={isEpisodeSpoiler(
@@ -1147,11 +1211,11 @@ function DetailsContent() {
 
       <DetailsSimilarTitles item={item} contentInsetsClassName={DETAILS_COLUMN_CLASS} />
 
-      {/* Target stays mounted after close so Radix plays the exit animation. */}
       {streamTarget && (
         <StreamSelector
           open={streamSelectorOpen}
           onClose={handleSelectorClose}
+          onClosed={handleSelectorClosed}
           target={streamTarget}
           getStartTime={getStreamTargetStartTime}
         />
@@ -1172,14 +1236,17 @@ function DetailsContent() {
 
 function DetailsSkeleton() {
   return (
-    <div className='min-h-screen bg-background'>
-      <div className='relative h-[70vh] w-full -mt-8 overflow-hidden'>
+    <div className='min-h-screen bg-background' aria-busy='true'>
+      <span role='status' className='sr-only'>
+        Loading…
+      </span>
+      <div className='relative h-[70vh] w-full -mt-8 overflow-hidden' aria-hidden='true'>
         <div className='absolute inset-0 bg-zinc-950' />
         <div className='absolute inset-0 bg-linear-to-t from-background via-background/60 to-transparent' />
         <div className='absolute bottom-0 left-0 right-0 h-64 bg-linear-to-t from-background to-transparent' />
       </div>
 
-      <div className={`${DETAILS_COLUMN_CLASS} -mt-56 relative z-10`}>
+      <div className={`${DETAILS_COLUMN_CLASS} -mt-56 relative z-10`} aria-hidden='true'>
         <div className='flex flex-col gap-6 w-full max-w-4xl animate-pulse'>
           <Skeleton className='h-10 w-72 max-w-full bg-zinc-800/60' />
           <div className='flex gap-3'>

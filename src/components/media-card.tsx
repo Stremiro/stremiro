@@ -46,6 +46,7 @@ import {
   DETAILS_GC_TIME_MS,
   DETAILS_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
+import { routeChunks } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clamp,
@@ -57,12 +58,6 @@ import {
   primaryGenrePills,
 } from '@/lib/utils';
 
-function normalizeRating(raw: string | null | undefined): number | null {
-  if (!raw) return null;
-  const val = parseFloat(raw);
-  if (Number.isNaN(val)) return null;
-  return Math.round(val * 10);
-}
 function getRatingStyle(score: number | null) {
   if (score === null) return null;
   if (score >= 70)
@@ -280,12 +275,13 @@ function MediaCardPoster({
         aria-busy={isPlayPending || undefined}
         className='block relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
         onClick={(event) => {
+          if (event.detail === 0) onPrefetchDetails?.();
           onPlay?.(event);
           navigateOnAnchorClick(event, detailsPath, {
             state: { from: currentPathWithSearch() },
           });
         }}
-        onFocus={onPrefetchDetails}
+        onFocus={() => void routeChunks.details().catch(() => undefined)}
         onPointerDown={onPrefetchDetails}
       >
         {poster}
@@ -384,7 +380,7 @@ function MediaCardOverlay({
     surface: 'card',
   });
 
-  const ratingScore = normalizeRating(details?.rating ?? null);
+  const ratingScore = details?.ratingPercent ?? null;
   const ratingStyle = getRatingStyle(ratingScore);
 
   const trailerVideoId = details?.trailers?.[0]?.id;
@@ -734,13 +730,13 @@ export const MediaCard = memo(function MediaCard({
         ? HOVER_CHAIN_DELAY_MS
         : HOVER_EXPAND_DELAY_MS;
     expandTimer.current = setTimeout(() => {
-      prefetchDetails();
+      void routeChunks.details().catch(() => undefined);
       warmPlayerChunk();
       setPopoverAlign(resolvePopoverAlign());
       setExpanded(true);
       expandTimer.current = null;
     }, delay);
-  }, [clearExpandTimer, expanded, prefetchDetails, resolvePopoverAlign, selectionMode]);
+  }, [clearExpandTimer, expanded, resolvePopoverAlign, selectionMode]);
 
   const handleMouseLeave = useCallback(() => {
     if (
@@ -847,7 +843,6 @@ export const MediaCard = memo(function MediaCard({
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
     <article
       ref={cardRef}
-      data-media-card='true'
       data-media-card-expanded={(!selectionMode && expanded) || undefined}
       className={cn('relative', !selectionMode && expanded && 'z-30')}
       aria-label={item.title}

@@ -11,6 +11,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { api, getListErrorMessage, type UserList } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import { invalidateListQueries } from '@/lib/query-invalidation';
@@ -74,7 +75,12 @@ function ListEditorDialog({
   const canSubmit = nameLength <= 64 && submitReady({ icon: selectedIcon, trimmedName });
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!isPending) onOpenChange(nextOpen);
+      }}
+    >
       <DialogContent
         className='sm:max-w-md max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 border-white/10 text-zinc-200'
         onOpenAutoFocus={(event) => {
@@ -170,6 +176,7 @@ function ListEditorDialog({
             <Button
               type='button'
               variant='ghost'
+              disabled={isPending}
               onClick={() => onOpenChange(false)}
               className='text-zinc-400 hover:text-white hover:bg-white/5'
             >
@@ -204,6 +211,7 @@ export function CreateListDialog({
   returnFocusRef,
 }: CreateListDialogProps) {
   const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
 
   const createList = useMutation({
     mutationFn: ({ icon, name }: { icon: string; name: string }) => api.createList(name, icon),
@@ -211,10 +219,12 @@ export function CreateListDialog({
       notifyAction('List created', { detail: newList.name });
       // Refresh after any follow-up write (e.g. adding the item) settles, so lists don't refetch empty first.
       void Promise.resolve(onCreated?.(newList)).finally(() => invalidateListQueries(queryClient));
-      onOpenChange(false);
+      if (mountedRef.current) onOpenChange(false);
     },
-    onError: (error) =>
-      notifyAction(getListErrorMessage(error) ?? 'Failed to create list', { tone: 'error' }),
+    onError: (error) => {
+      notifyAction(getListErrorMessage(error) ?? 'Failed to create list', { tone: 'error' });
+      void invalidateListQueries(queryClient);
+    },
   });
 
   return (
@@ -241,17 +251,18 @@ interface RenameListDialogProps {
 
 export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogProps) {
   const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
 
   const renameList = useMutation({
     mutationFn: ({ icon, name }: { icon: string; name: string }) =>
       api.renameList(list.id, name, icon),
     onSuccess: (_result, variables) => {
-      void invalidateListQueries(queryClient);
       notifyAction('List renamed', { detail: variables.name });
-      onOpenChange(false);
+      if (mountedRef.current) onOpenChange(false);
     },
     onError: (error) =>
       notifyAction(getListErrorMessage(error) ?? 'Failed to rename list', { tone: 'error' }),
+    onSettled: () => invalidateListQueries(queryClient),
   });
 
   return (

@@ -1,5 +1,5 @@
 import { Camera, ImagePlus, Loader2, Trash2 } from 'lucide-react';
-import { type ChangeEvent, type CSSProperties, useRef, useState } from 'react';
+import { type ChangeEvent, type CSSProperties, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import {
@@ -8,44 +8,14 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import type { LocalProfile, LocalProfileUpdate } from '@/hooks/use-local-profile';
+import { type LocalProfile, useProfileAvatarMutation } from '@/hooks/use-local-profile';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { getErrorMessage } from '@/lib/api';
 import { cn } from '@/lib/utils';
 
-const AVATAR_SIZE_PX = 256;
-const AVATAR_WEBP_QUALITY = 0.85;
 const AVATAR_SOURCE_MAX_BYTES = 25 * 1024 * 1024;
-const AVATAR_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,image/avif,image/bmp';
+const AVATAR_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif,image/bmp';
 const MENU_ITEM_CLASS = 'cursor-pointer gap-2 text-[12.5px]';
-
-// Center-crop to a square and re-encode small: the result rides the
-// preferences blob, so a raw multi-MB photo must never reach IPC.
-async function encodeAvatar(file: Blob): Promise<string> {
-  const bitmap = await createImageBitmap(file);
-  try {
-    const side = Math.min(bitmap.width, bitmap.height);
-    const canvas = document.createElement('canvas');
-    canvas.width = AVATAR_SIZE_PX;
-    canvas.height = AVATAR_SIZE_PX;
-    const context = canvas.getContext('2d');
-    if (!context) throw new Error('Image processing is unavailable');
-    context.imageSmoothingQuality = 'high';
-    context.drawImage(
-      bitmap,
-      (bitmap.width - side) / 2,
-      (bitmap.height - side) / 2,
-      side,
-      side,
-      0,
-      0,
-      AVATAR_SIZE_PX,
-      AVATAR_SIZE_PX,
-    );
-    return canvas.toDataURL('image/webp', AVATAR_WEBP_QUALITY);
-  } finally {
-    bitmap.close();
-  }
-}
 
 export function ProfileAvatar({
   avatar,
@@ -71,61 +41,85 @@ export function ProfileAvatar({
 }
 
 /** Profile-header avatar: click to upload, or change/remove once one is set. */
-export function ProfileAvatarEditor({
-  onUpdate,
-  profile,
-}: {
-  onUpdate: (updates: LocalProfileUpdate) => Promise<void>;
-  profile: LocalProfile;
-}) {
+export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
   const inputRef = useRef<HTMLInputElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const focusIntentRef = useRef<HTMLElement | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
+  const mountedRef = useMountedRef();
+  const updateAvatar = useProfileAvatarMutation();
   const { accentColor, avatar, username } = profile;
 
-  const openPicker = () => inputRef.current?.click();
+  const restoreTriggerFocus = (event?: Event) => {
+    const previous = focusIntentRef.current;
+    if (!previous) return;
+    if (!previous.isConnected && document.activeElement === document.body) {
+      triggerRef.current?.focus({ preventScroll: true });
+      focusIntentRef.current = triggerRef.current;
+    } else if (document.activeElement !== previous) {
+      focusIntentRef.current = null;
+    }
+    if (focusIntentRef.current) event?.preventDefault();
+  };
+
+  useLayoutEffect(() => {
+    restoreTriggerFocus();
+    if (!isProcessing) focusIntentRef.current = null;
+  });
+
+  const openPicker = () => {
+    if (!isProcessing) inputRef.current?.click();
+  };
 
   const handleFile = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     // Reset so re-picking the same file still fires `change`.
     event.target.value = '';
-    if (!file) return;
-    if (!file.type.startsWith('image/')) {
-      toast.error('Choose an image file');
-      return;
-    }
+    if (!file || isProcessing) return;
     if (file.size > AVATAR_SOURCE_MAX_BYTES) {
       toast.error('That image is over 25 MB');
       return;
     }
 
     setIsProcessing(true);
+    focusIntentRef.current =
+      document.activeElement === triggerRef.current ? triggerRef.current : null;
     try {
-      const encoded = await encodeAvatar(file).catch(() => {
-        throw new Error("Couldn't read that image — try a PNG, JPEG, or WebP");
-      });
-      await onUpdate({ avatar: encoded });
+      await updateAvatar(file);
       toast.success('Profile photo updated');
     } catch (error) {
       toast.error(getErrorMessage(error));
     } finally {
-      setIsProcessing(false);
+      if (mountedRef.current) setIsProcessing(false);
     }
   };
 
   const handleRemove = () => {
-    onUpdate({ avatar: undefined }).then(
-      () => toast.success('Profile photo removed'),
-      (error: unknown) => toast.error(getErrorMessage(error)),
-    );
+    if (isProcessing) return;
+    setIsProcessing(true);
+    focusIntentRef.current =
+      document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+        ? document.activeElement
+        : null;
+    updateAvatar(null)
+      .then(
+        () => toast.success('Profile photo removed'),
+        (error: unknown) => toast.error(getErrorMessage(error)),
+      )
+      .finally(() => {
+        if (mountedRef.current) setIsProcessing(false);
+      });
   };
 
   const trigger = (
     <button
+      ref={triggerRef}
       type='button'
       title={avatar ? 'Change photo' : 'Add a photo'}
       aria-label={avatar ? 'Change profile photo' : 'Add profile photo'}
       aria-busy={isProcessing}
-      disabled={isProcessing}
+      aria-disabled={isProcessing || undefined}
       onClick={avatar ? undefined : openPicker}
       className='group/avatar relative shrink-0 rounded-full p-[2px] transition-all duration-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black'
       style={{
@@ -158,9 +152,18 @@ export function ProfileAvatarEditor({
   return (
     <>
       {avatar ? (
-        <DropdownMenu>
+        <DropdownMenu
+          open={menuOpen}
+          onOpenChange={(open) => {
+            if (!isProcessing || !open) setMenuOpen(open);
+          }}
+        >
           <DropdownMenuTrigger asChild>{trigger}</DropdownMenuTrigger>
-          <DropdownMenuContent align='start' className='w-44'>
+          <DropdownMenuContent
+            align='start'
+            className='w-44'
+            onCloseAutoFocus={restoreTriggerFocus}
+          >
             <DropdownMenuItem onSelect={openPicker} className={MENU_ITEM_CLASS}>
               <ImagePlus className='h-3.5 w-3.5' />
               Change photo…

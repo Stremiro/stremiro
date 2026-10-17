@@ -8,7 +8,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import type { SkipSegment } from '@/lib/api';
-import type { PlaybackClock } from '@/lib/player-clock';
+import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { getSkipLabel } from '@/lib/player-skip';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
@@ -23,7 +23,6 @@ const FALLBACK_SKIP_SEGMENT_STYLE = {
   badge: 'bg-orange-500 text-black',
 };
 
-const subscribeWhileHidden = () => () => {};
 const ENDS_AT_FORMATTER = new Intl.DateTimeFormat([], { hour: 'numeric', minute: '2-digit' });
 
 function getSegmentStyle(type: string): { color: string; badge: string } {
@@ -55,7 +54,7 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
   );
   const [endsAtText, setEndsAtText] = useState<string | null>(null);
   const endsAtMinuteRef = useRef<number | null>(null);
-  useEffect(() => {
+  const updateEndsAt = useCallback(() => {
     const remainingWallClockSecs = (duration - clock.getSnapshot()) / (playbackSpeed || 1);
     const endsAtMinute =
       duration > 0 && remainingWallClockSecs >= 60
@@ -64,18 +63,25 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
     if (endsAtMinute === endsAtMinuteRef.current) return;
     endsAtMinuteRef.current = endsAtMinute;
     setEndsAtText(endsAtMinute === null ? null : ENDS_AT_FORMATTER.format(endsAtMinute * 60_000));
-  }, [clock, displayTime, duration, playbackSpeed]);
+  }, [clock, duration, playbackSpeed]);
+  useEffect(() => {
+    updateEndsAt();
+  }, [displayTime, updateEndsAt]);
 
   const toggleLabel = showRemainingTime ? 'Show elapsed time' : 'Show remaining time';
+  const displayedTime =
+    showRemainingTime && duration > 0 ? `−${formatTime(displayTime)}` : formatTime(displayTime);
+  const totalTime = formatTime(duration);
   return (
     <button
       type='button'
+      onPointerEnter={updateEndsAt}
       onClick={(e) => {
         e.stopPropagation();
         setShowRemainingTime((value) => !value);
       }}
       aria-pressed={showRemainingTime}
-      aria-label={toggleLabel}
+      aria-label={`${displayedTime} of ${totalTime}, ${toggleLabel}`}
       className={cn(
         // Cap-height trimming centers the digits optically; line-box centering leaves them sitting low.
         'flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[13px] font-semibold leading-none tabular-nums tracking-tight text-white transition-colors hover:bg-white/12 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 [&>span]:[text-box:trim-both_cap_alphabetic]',
@@ -83,13 +89,9 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
       )}
       title={endsAtText ? `${toggleLabel} · Ends at ${endsAtText}` : toggleLabel}
     >
-      <span>
-        {showRemainingTime && duration > 0
-          ? `−${formatTime(displayTime)}`
-          : formatTime(displayTime)}
-      </span>
+      <span>{displayedTime}</span>
       <span className='font-medium text-white/40'>/</span>
-      <span className='font-medium text-white/60'>{formatTime(duration)}</span>
+      <span className='font-medium text-white/60'>{totalTime}</span>
     </button>
   );
 });

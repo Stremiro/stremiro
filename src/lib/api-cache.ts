@@ -1,6 +1,7 @@
 const API_CACHE_MAX_ENTRIES = 200;
 
-export const BEST_STREAM_CACHE_TTL_MS = 1000 * 60 * 8;
+type CacheLifetime = { cacheTtlMs: number };
+const resultExpirations = new WeakMap<CacheLifetime, number>();
 
 // UI query keys use the Rust `normalize_query` bound.
 const SEARCH_QUERY_MAX_CHARS = 120;
@@ -28,7 +29,6 @@ export function foldAsciiCase(value: string): string {
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
 
 export interface RequestCache<T> {
-  ttlMs: number;
   values: Map<string, TimedCacheEntry<T>>;
   inFlight: Map<string, Promise<T>>;
   clear: () => void;
@@ -38,12 +38,11 @@ export interface ApiCacheGroups {
   bestStream: { clear: () => void };
 }
 
-export function createRequestCache<T>(ttlMs: number): RequestCache<T> {
+export function createRequestCache<T>(): RequestCache<T> {
   const values = new Map<string, TimedCacheEntry<T>>();
   const inFlight = new Map<string, Promise<T>>();
 
   const cache: RequestCache<T> = {
-    ttlMs,
     values,
     inFlight,
     clear: () => {
@@ -57,7 +56,7 @@ export function createRequestCache<T>(ttlMs: number): RequestCache<T> {
 }
 
 function pruneTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>) {
-  const now = Date.now();
+  const now = performance.now();
 
   for (const [key, entry] of cache) {
     if (entry.expiresAt <= now) cache.delete(key);
@@ -70,19 +69,26 @@ function pruneTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>) {
   }
 }
 
-function setTimedCache<T>(
+function setTimedCache<T extends CacheLifetime>(
   cache: Map<string, TimedCacheEntry<T>>,
   key: string,
   value: T,
-  ttlMs: number,
 ) {
-  cache.set(key, { value, expiresAt: Date.now() + ttlMs });
+  const ttlMs = value.cacheTtlMs;
+  if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
+    cache.delete(key);
+    return;
+  }
+  // Reusing a resolved result must not restart its remaining pool lifetime.
+  const expiresAt = resultExpirations.get(value) ?? performance.now() + ttlMs;
+  resultExpirations.set(value, expiresAt);
+  cache.set(key, { value, expiresAt });
   pruneTimedCache(cache);
 }
 
 // Miss is `undefined`, not falsy — valid falsy payloads (false, 0, '') still serve from cache.
 function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
-  const now = Date.now();
+  const now = performance.now();
   const cached = cache.get(key);
   if (!cached) return undefined;
   if (cached.expiresAt <= now) {
@@ -93,7 +99,7 @@ function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): 
   return cached.value;
 }
 
-export function runCachedRequest<T>(
+export function runCachedRequest<T extends CacheLifetime>(
   cache: RequestCache<T>,
   cacheKey: string,
   load: () => Promise<T>,
@@ -108,11 +114,16 @@ export function runCachedRequest<T>(
     return inFlight;
   }
 
+  // Rust measures the TTL before the response crosses IPC; anchor it at request start, never later.
+  const requestedAt = performance.now();
   const request = load()
     .then((result) => {
+      if (!resultExpirations.has(result)) {
+        resultExpirations.set(result, requestedAt + result.cacheTtlMs);
+      }
       // Only the key's current owner publishes — a clear/prime since request start revokes it.
       if (cache.inFlight.get(cacheKey) === request) {
-        setTimedCache(cache.values, cacheKey, result, cache.ttlMs);
+        setTimedCache(cache.values, cacheKey, result);
       }
       return result;
     })
@@ -127,9 +138,13 @@ export function runCachedRequest<T>(
 }
 
 /** Seeds a known result and revokes any older in-flight publisher for the key. */
-export function primeCachedRequest<T>(cache: RequestCache<T>, cacheKey: string, value: T): void {
+export function primeCachedRequest<T extends CacheLifetime>(
+  cache: RequestCache<T>,
+  cacheKey: string,
+  value: T,
+): void {
   cache.inFlight.delete(cacheKey);
-  setTimedCache(cache.values, cacheKey, value, cache.ttlMs);
+  setTimedCache(cache.values, cacheKey, value);
 }
 
 // Streaming writes always clear the best-stream cache — server re-ranks/cooldowns must not be re-served from TTL.
@@ -137,10 +152,7 @@ export function withStreamingCacheClear<T>(
   caches: ApiCacheGroups,
   request: Promise<T>,
 ): Promise<T> {
-  return request.then((result) => {
-    clearProviderDataCaches(caches);
-    return result;
-  });
+  return request.finally(() => clearProviderDataCaches(caches));
 }
 
 export function clearProviderDataCaches(caches: ApiCacheGroups) {
@@ -172,4 +184,13 @@ export function getWatchProgressEpoch(): number {
 }
 export function bumpWatchProgressEpoch(): void {
   watchProgressEpoch += 1;
+}
+
+// Save revisions fence stale snapshots without discarding queued progress writes.
+let watchProgressSnapshotRevision = 0;
+export function getWatchProgressSnapshotRevision(): number {
+  return watchProgressSnapshotRevision;
+}
+export function bumpWatchProgressSnapshotRevision(): void {
+  watchProgressSnapshotRevision += 1;
 }

@@ -1,4 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
+import { format } from 'date-fns';
 import { Copy, Loader2 } from 'lucide-react';
 import {
   type MouseEvent,
@@ -52,7 +53,7 @@ import { usePlayerAutoResolve } from '@/hooks/use-player-auto-resolve';
 import { usePlayerBackNavigation } from '@/hooks/use-player-back-navigation';
 import { usePlayerHotkeys } from '@/hooks/use-player-hotkeys';
 import { usePlayerIdleOverlay } from '@/hooks/use-player-idle-overlay';
-import { usePlayerMpvLifecycle } from '@/hooks/use-player-mpv-lifecycle';
+import { getPlayerStreamLoadKey, usePlayerMpvLifecycle } from '@/hooks/use-player-mpv-lifecycle';
 import { usePlayerRouteState } from '@/hooks/use-player-route-state';
 import { usePlayerSessionBoundary } from '@/hooks/use-player-session-boundary';
 import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
@@ -85,7 +86,6 @@ import {
   episodeProgressKey,
   getLatestEpisodeResumeStartTime,
   MIN_RESUME_POSITION_SECS,
-  watchProgressCoordinates,
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
 import { copyText } from '@/lib/notify';
@@ -101,26 +101,24 @@ import {
 } from '@/lib/player-dom';
 import { mpvCommand, setMpvProperty } from '@/lib/player-mpv';
 import { getSkipLabel, getSkippedLabel, isNearMediaEnd } from '@/lib/player-skip';
-import { buildTrackLabelMap } from '@/lib/player-track-utils';
 import { type MiniPlayerPosition, usePlayerSession } from '@/lib/player-session';
 import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
   DETAILS_STALE_TIME_MS,
-  resolveSkipTimesImdbAnchor,
   SKIP_TIMES_GC_TIME_MS,
   SKIP_TIMES_STALE_TIME_MS,
   skipTimesQueryKey,
 } from '@/lib/query-invalidation';
 import { type PlayerStreamRequest, resolvePlayerStream } from '@/lib/resolve-player-stream';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
+import { createSubscribableStore } from '@/lib/subscribable-store';
 import {
   clearTimer,
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
   formatTime,
-  isAiredByLocalDay,
   isHttpUrl,
   isSeriesLikeMediaType,
   nonBlank,
@@ -128,11 +126,6 @@ import {
   type TimerHandle,
   withTimeout,
 } from '@/lib/utils';
-
-interface PlayerLoadingCopy {
-  headline: string;
-  detail: string;
-}
 
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
 // A cold addon resolve can take ~14s — past this the picker beats a blank loader.
@@ -144,7 +137,7 @@ type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: 
 interface StreamSelectorState {
   open: boolean;
   target: SelectedEpisodeStreamTarget | null;
-  // Stays true after first open so the exit animation can play; same for target.
+  // Retained through the exit animation, then released with the target.
   mounted: boolean;
 }
 
@@ -188,7 +181,8 @@ export function Player() {
 
 function InnerPlayer() {
   const navigate = useNavigate();
-  const { session, presentation, close, miniPositionRef } = usePlayerSession();
+  const { session, presentation, close, miniPositionRef, trayPause } = usePlayerSession();
+  const pausedByTrayHide = useSyncExternalStore(trayPause.subscribe, trayPause.getSnapshot);
   const isExpanded = presentation === 'expanded';
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const topChromeRef = useRef<HTMLDivElement | null>(null);
@@ -250,6 +244,7 @@ function InnerPlayer() {
     streamLookupIdRef,
     committedStreamUrlRef,
   } = stream;
+  const activeStreamLoadKey = getPlayerStreamLoadKey(stream);
   const handleCopyStreamLink = useCallback(() => {
     const url = committedStreamUrlRef.current;
     if (url) void copyText(url, 'Stream link copied');
@@ -265,9 +260,9 @@ function InnerPlayer() {
   const [hasPlaybackAdvanced, setHasPlaybackAdvanced] = useState(false);
   /** Reactive mirror of playbackEndedRef so the EOF "Up Next" card can render. */
   const [hasEnded, setHasEnded] = useState(false);
-  const [isResolving, setIsResolving] = useState(false);
-  const [resolveStatus, setResolveStatus] = useState<string>('');
-  const [error, setError] = useState<string | null>(null);
+  const [resolveStatus, setResolveStatus] = useState<string | null>(null);
+  const isResolving = resolveStatus !== null;
+  const [error, setErrorState] = useState<string | null>(null);
   const [playbackSpeed, setPlaybackSpeed] = useState(() => appUiPreferences.playerSpeed);
   const [showEpisodes, setShowEpisodes] = useState(false);
   const keymap = usePlayerKeymap();
@@ -346,6 +341,7 @@ function InnerPlayer() {
   // Same external-store pattern so seekbar updates skip the player tree.
   const [bufferedClock] = useState(() => createPlaybackClock());
   const currentTimeRef = clock.ref;
+  const observedPositionRef = useRef<number | null>(null);
   const durationRef = useRef(0);
   const isDestroyedRef = useRef(false);
   // Must survive stream swaps so stale-link recovery can re-resolve on the same screen.
@@ -356,14 +352,29 @@ function InnerPlayer() {
   const autoResolveGenRef = useRef(0);
   /** True when the selector paused live playback — a dismiss resumes it. */
   const resumeAfterSelectorDismissRef = useRef(false);
-  const selectorCommittedPauseRef = useRef<{ state: unknown; url: string } | null>(null);
+  const selectorCommittedReloadRef = useRef<{ state: unknown; url: string } | null>(null);
+  const manualSelectionGenerationRef = useRef<number | null>(null);
   const errorRef = useRef<string | null>(error);
+  const recoverableStreamErrorRef = useRef<string | null>(null);
+  const setError = useCallback((value: string | null) => {
+    errorRef.current = value;
+    recoverableStreamErrorRef.current = null;
+    setErrorState(value);
+  }, []);
+  const setStreamError = useCallback(
+    (value: string) => {
+      setError(value);
+      recoverableStreamErrorRef.current = value;
+    },
+    [setError],
+  );
   const isResolvingRef = useRef(false);
   const selectorOpenRequestIdRef = useRef(0);
   // Shared adjacent-episode latch — `isResolving` isn't set fast enough to stop a double-click.
   const nextEpisodeRequestRef = useRef<number | null>(null);
   /** Always-current playing state — used in closures to avoid stale captures. */
   const isPlayingRef = useRef(false);
+  const isBufferingRef = useRef(false);
   /** Timestamp (ms) when playback was first verified — used to suppress transient idle events. */
   const playbackVerifiedAtRef = useRef(0);
   /** mpv reported end-of-file for the current stream — Back may reopen the selector. */
@@ -371,6 +382,7 @@ function InnerPlayer() {
   // Position where the previous stream died, captured before the swap zeroes currentTimeRef.
   const failoverResumePositionRef = useRef(0);
   const resetStreamScopedState = useEffectEvent(() => {
+    observedPositionRef.current = null;
     setHasPlaybackStarted(false);
     setHasPlaybackAdvanced(false);
     clock.publish(0);
@@ -410,12 +422,6 @@ function InnerPlayer() {
     setShowControls,
     shouldHoldControls: () => pointerOverControlsRef.current || isPlayerChromeEngaged(),
   });
-  const { isSeekPending, observeTimeUpdate, seek, seekRelative } = useOptimisticSeek({
-    clock,
-    durationRef,
-    resetKey: activeStreamUrl,
-    triggerOsd,
-  });
   const clearUiTimers = useCallback(() => {
     clearManagedUiTimers();
     clearTimer(forceShowTimeoutRef);
@@ -452,17 +458,21 @@ function InnerPlayer() {
     )
       return;
     nextEpisodeRequestRef.current = null;
-    setIsResolving(false);
-    setResolveStatus('');
+    setResolveStatus(null);
   }, []);
 
   useEffect(() => {
+    // Stream cleanup snapshots the old observed position before this reset.
     resetStreamScopedState();
-  }, [activeStreamUrl]);
+  }, [activeStreamLoadKey]);
 
   // -- Queries --
   // Shared details key reuses the cached entry; movies fetch too — `imdbId` widens the SkipDB anchor.
-  const { data: details, isLoading: isLoadingDetails } = useQuery({
+  const {
+    data: details,
+    dataUpdatedAt: detailsDataUpdatedAt,
+    isLoading: isLoadingDetails,
+  } = useQuery({
     queryKey: detailsQueryKey(effectiveResolveMediaType, id),
     queryFn: () =>
       id
@@ -472,6 +482,7 @@ function InnerPlayer() {
     staleTime: DETAILS_STALE_TIME_MS,
     gcTime: DETAILS_GC_TIME_MS,
   });
+  const rankingTitle = nonBlank(details?.title) ?? resolveTitle;
   const episodes = details?.episodes;
 
   // Route season/episode may be anime stream-query coords — prefer the absolute match; season-less absolute routes match on episode number alone.
@@ -485,6 +496,43 @@ function InnerPlayer() {
       null,
     [episodes, routeSeason, routeEpisode, routeAbsoluteEpisode, routeAbsoluteSeason],
   );
+
+  const localToday = format(useLocalDay(), 'yyyy-MM-dd');
+  const episodeNavigationScopeKey = [
+    ...detailsQueryKey(effectiveResolveMediaType, id),
+    'episode-navigation',
+    currentEpisode?.season,
+    currentEpisode?.episode,
+  ];
+  const { data: episodeNavigation, isFetching: isLoadingEpisodeNavigation } = useQuery({
+    queryKey: [...episodeNavigationScopeKey, localToday, detailsDataUpdatedAt],
+    queryFn: async () => {
+      const sourceEpisodes = episodes!;
+      const { previousIndex, nextIndex } = await api.getEpisodeNavigation({
+        episodes: sourceEpisodes.map((ep) => ({
+          season: ep.season,
+          episode: ep.episode,
+          releaseDate: ep.releaseDate,
+        })),
+        season: currentEpisode!.season,
+        episode: currentEpisode!.episode,
+        today: localToday,
+      });
+      return {
+        previous: previousIndex === null ? undefined : sourceEpisodes[previousIndex],
+        next: nextIndex === null ? undefined : sourceEpisodes[nextIndex],
+      };
+    },
+    enabled: !!episodes && !!currentEpisode,
+    placeholderData: (previous, previousQuery) =>
+      episodeNavigationScopeKey.every((part, index) => previousQuery?.queryKey[index] === part)
+        ? previous
+        : undefined,
+    staleTime: Infinity,
+    gcTime: DETAILS_GC_TIME_MS,
+  });
+  const previousEpisode = episodeNavigation?.previous ?? undefined;
+  const nextEpisode = episodeNavigation?.next ?? undefined;
 
   const currentEpisodeStream = useMemo(() => {
     if (!currentEpisode || !type || !id) return null;
@@ -506,7 +554,10 @@ function InnerPlayer() {
   );
   // The backend's resumable pick — the latest history row can be a finished episode, which must not badge "Resume".
   const episodeResumeTarget = useMemo(
-    () => watchProgressCoordinates(titleWatchProgress?.seriesResumeEntry),
+    () => ({
+      season: titleWatchProgress?.seriesResumeEntry?.absolute_season ?? undefined,
+      episode: titleWatchProgress?.seriesResumeEntry?.absolute_episode ?? undefined,
+    }),
     [titleWatchProgress],
   );
   const resolvedAbsoluteSeason = currentEpisode?.season ?? routeAbsoluteSeason;
@@ -515,8 +566,6 @@ function InnerPlayer() {
     routeStreamSeason ?? currentEpisodeStream?.streamSeason ?? routeSeason;
   const resolvedStreamEpisode =
     routeStreamEpisode ?? currentEpisodeStream?.streamEpisode ?? routeEpisode;
-  // SkipDB needs an IMDb anchor (loaded details or a tt-shaped id); the normalized anchor feeds key and call.
-  const skipTimesImdbAnchor = resolveSkipTimesImdbAnchor(details?.imdbId, id, routeStreamLookupId);
   // Latch the first duration per stream — mpv refines it mid-play and each new second would refetch skip times.
   const [skipDurationLatch, setSkipDurationLatch] = useState<{
     url: string | undefined;
@@ -532,7 +581,7 @@ function InnerPlayer() {
   const skipTimesEnabled =
     !!type &&
     !!id &&
-    !!skipTimesImdbAnchor &&
+    !!(nonBlank(details?.imdbId) || nonBlank(id) || nonBlank(routeStreamLookupId)) &&
     skipTimesDurationSecs !== undefined &&
     (!isSeriesLike ||
       (resolvedAbsoluteSeason !== undefined && resolvedAbsoluteEpisode !== undefined));
@@ -543,7 +592,8 @@ function InnerPlayer() {
       id,
       resolvedAbsoluteSeason,
       resolvedAbsoluteEpisode,
-      skipTimesImdbAnchor,
+      details?.imdbId,
+      routeStreamLookupId,
       skipTimesDurationSecs,
     ),
     queryFn: () =>
@@ -551,7 +601,8 @@ function InnerPlayer() {
         ? api.getSkipTimes(
             effectiveResolveMediaType,
             id,
-            skipTimesImdbAnchor,
+            details?.imdbId,
+            routeStreamLookupId,
             resolvedAbsoluteSeason,
             resolvedAbsoluteEpisode,
             skipTimesDurationSecs,
@@ -582,10 +633,10 @@ function InnerPlayer() {
     }
   }
 
-  const episodeCountInSeason = useMemo(() => {
-    if (resolvedAbsoluteSeason === undefined || !episodes) return null;
-    return details?.seasons?.find((s) => s.number === resolvedAbsoluteSeason)?.episodeCount ?? 0;
-  }, [details?.seasons, episodes, resolvedAbsoluteSeason]);
+  const episodeCountInSeason =
+    resolvedAbsoluteSeason === undefined || !episodes
+      ? null
+      : (seasons.find((s) => s.number === resolvedAbsoluteSeason)?.episodeCount ?? 0);
 
   const detailsImdbId = details?.imdbId;
   const streamLookupId =
@@ -606,68 +657,19 @@ function InnerPlayer() {
         !currentEpisodeStream))
   );
 
-  const playerLoadingCopy = useMemo<PlayerLoadingCopy>(() => {
-    if (isResolving) {
-      return {
-        headline: resolveStatus || 'Finding the best stream',
-        detail: shouldWaitForResolvedLookupId
-          ? 'Confirming the episode first'
-          : 'Checking your sources for a fast, exact match',
-      };
-    }
-
-    if (activeStreamUrl) {
-      if (isHistoryResume) {
-        return {
-          headline:
-            startTime !== undefined && startTime >= MIN_RESUME_POSITION_SECS
-              ? 'Restoring saved stream'
-              : 'Opening saved stream',
-          detail: 'Using your last working source',
-        };
-      }
-
-      if (openingStreamName) {
-        return {
-          headline: 'Opening selected stream',
-          detail: nonBlank(openingStreamSource) || openingStreamName.trim(),
-        };
-      }
-
-      return {
-        headline: 'Opening stream',
-        detail: 'Connecting and buffering',
-      };
-    }
-
-    if (shouldWaitForResolvedLookupId) {
-      return {
-        headline: 'Matching the right episode',
-        detail: 'Confirming the episode before searching',
-      };
-    }
-
-    if (isHistoryResume) {
-      return {
-        headline: 'Resuming where you left off',
-        detail: 'Picking the best stream',
-      };
-    }
-
-    return {
-      headline: 'Preparing playback',
-      detail: 'Getting the player ready',
-    };
-  }, [
-    activeStreamUrl,
-    isHistoryResume,
-    isResolving,
-    resolveStatus,
-    shouldWaitForResolvedLookupId,
-    startTime,
-    openingStreamName,
-    openingStreamSource,
-  ]);
+  const playerLoadingHeadline =
+    resolveStatus ||
+    (!activeStreamUrl
+      ? 'Finding the best stream'
+      : openingStreamName
+        ? 'Opening selected stream'
+        : startTime !== undefined && startTime >= MIN_RESUME_POSITION_SECS
+          ? 'Resuming playback'
+          : 'Starting playback');
+  const playerLoadingDetail =
+    !resolveStatus && activeStreamUrl && openingStreamName
+      ? nonBlank(openingStreamSource) || openingStreamName.trim()
+      : undefined;
 
   /** Skip segment under the playhead (1s lead-in); clock-subscribed so only segment changes re-render. */
   const activeSkipSegment = useSyncExternalStore(clock.subscribe, () => {
@@ -703,6 +705,7 @@ function InnerPlayer() {
   const {
     applyResumeIfReady,
     audioTracks,
+    cancelAutomaticResume,
     clearResumeRetryTimer,
     cycleTrack,
     flushPlaybackBeforeNavigation,
@@ -717,11 +720,19 @@ function InnerPlayer() {
     selectAddonSubtitle,
     setTrack,
     subTracks,
+    takeResumePause,
     trackSwitching,
   } = usePlayerSessionBoundary({
     absoluteEpisode: resolvedAbsoluteEpisode,
     absoluteSeason: resolvedAbsoluteSeason,
-    activeStreamResetKey: `${activeStreamUrl ?? 'stream'}:${id ?? 'id'}:${season ?? 'season'}:${episode ?? 'episode'}:${effectiveResolveMediaType}`,
+    activeStreamLoadKey,
+    activeStreamResetKey: JSON.stringify([
+      activeStreamLoadKey,
+      id,
+      season,
+      episode,
+      effectiveResolveMediaType,
+    ]),
     stream,
     backdrop,
     clock,
@@ -735,6 +746,7 @@ function InnerPlayer() {
     mediaId: id,
     mediaType: type,
     mountedRef,
+    observedPositionRef,
     onResumeMessage: handleResumeMessage,
     playbackLanguageMediaType: effectiveResolveMediaType,
     poster,
@@ -745,6 +757,13 @@ function InnerPlayer() {
     failoverResumePositionRef,
     title,
   });
+  const { isSeekPending, observeTimeUpdate, seek, seekRelative } = useOptimisticSeek({
+    clock,
+    durationRef,
+    resetKey: activeStreamLoadKey,
+    onUserSeek: cancelAutomaticResume,
+    triggerOsd,
+  });
 
   // -- Addon subtitles (manifest-routed) --
   const {
@@ -752,13 +771,15 @@ function InnerPlayer() {
     addonSubtitleLoadingId,
     addonSubtitles,
     addonSubtitlesError,
+    addonSubtitlesFetching,
     addonSubtitlesLoading,
     addonSubtitlesQueried,
     handleAddonSubtitleSelect,
     handleSubTrackSelect,
     handleSubtitleMenuOpenChange,
+    refetchAddonSubtitles,
   } = usePlayerAddonSubtitles({
-    activeStreamUrl,
+    activeStreamLoadKey,
     announce,
     effectiveResolveMediaType,
     id,
@@ -777,7 +798,8 @@ function InnerPlayer() {
     (trackType: 'audio', trackId: number, options?: { persistPreference?: boolean }) => {
       void setTrack(trackType, trackId, options).then((applied) => {
         if (!applied) return;
-        const label = buildTrackLabelMap(audioTracks).get(trackId) ?? `Track ${trackId}`;
+        const label =
+          audioTracks.find((track) => track.id === trackId)?.displayLabel ?? `Track ${trackId}`;
         announce(`Audio: ${label}`, 'audio');
       });
     },
@@ -848,6 +870,7 @@ function InnerPlayer() {
 
   const openPreparedStreamSelector = useCallback(
     (nextTarget: SelectedEpisodeStreamTarget | null) => {
+      selectorCommittedReloadRef.current = null;
       selectorOpenRequestIdRef.current += 1;
       clearNextEpisodeRequest();
       setError(null);
@@ -858,8 +881,58 @@ function InnerPlayer() {
       });
       closeEpisodesPanel();
     },
-    [clearNextEpisodeRequest, closeEpisodesPanel],
+    [clearNextEpisodeRequest, closeEpisodesPanel, setError],
   );
+
+  const reopenSelectorForSavedStreamFailure = useCallback(() => {
+    setResolveStatus(null);
+    setShowControls(true);
+    openPreparedStreamSelector(null);
+  }, [openPreparedStreamSelector]);
+
+  const {
+    cancelRecovery,
+    releaseManualSelection,
+    clearRecoveryTimers,
+    markPlaybackStarted,
+    recoverFromSlowStartup,
+  } = useStreamRecovery({
+    stream,
+    isHistoryResume,
+    mediaType: effectiveResolveMediaType,
+    mediaId: id,
+    title: rankingTitle,
+    resolveSeason: resolvedStreamSeason,
+    resolveEpisode: resolvedStreamEpisode,
+    absoluteSeason: resolvedAbsoluteSeason,
+    absoluteEpisode: resolvedAbsoluteEpisode,
+    streamLookupId,
+    currentTimeRef,
+    isLoading,
+    isPlaying,
+    isPlayingRef,
+    isResumePending,
+    mountedRef,
+    errorRef,
+    failoverResumePositionRef,
+    stopLoading,
+    setError,
+    setStreamError,
+    setResolveStatus,
+    onSavedStreamUnavailable: reopenSelectorForSavedStreamFailure,
+  });
+
+  const cancelAutomaticStreamSelection = useCallback(() => {
+    autoResolveGenRef.current += 1;
+    manualSelectionGenerationRef.current = cancelRecovery();
+    setResolveStatus(null);
+  }, [cancelRecovery]);
+
+  // An early load failure leaves the watchdog armed; hold the manual lease so it cannot swap behind the selector.
+  const reopenSelectorForSavedStreamLoadFailure = useCallback(() => {
+    cancelAutomaticStreamSelection();
+    reopenSelectorForSavedStreamFailure();
+  }, [cancelAutomaticStreamSelection, reopenSelectorForSavedStreamFailure]);
 
   const closeStreamSelector = useCallback(() => {
     selectorOpenRequestIdRef.current += 1;
@@ -867,65 +940,47 @@ function InnerPlayer() {
     // Dismiss without a pick hands back the pause the selector took on the way in.
     if (resumeAfterSelectorDismissRef.current) {
       resumeAfterSelectorDismissRef.current = false;
-      void setMpvProperty('pause', false).catch(() => undefined);
-      setIsPlaying(true);
+      if (!trayPause.getSnapshot()) {
+        void setMpvProperty('pause', false).catch(() => undefined);
+        setIsPlaying(true);
+      }
     }
-    // Keep target/mounted so the exit animation can play; `open` alone drives behavior.
+    const generation = manualSelectionGenerationRef.current;
+    manualSelectionGenerationRef.current = null;
+    if (generation !== null) {
+      releaseManualSelection(generation);
+    }
+    // Keep target/mounted until the exit animation finishes.
     setStreamSelectorState((state) => (state.mounted ? { ...state, open: false } : state));
-  }, [clearNextEpisodeRequest]);
+  }, [clearNextEpisodeRequest, releaseManualSelection, trayPause]);
 
-  const reopenSelectorForSavedStreamFailure = useCallback(() => {
-    setIsResolving(false);
-    setResolveStatus('');
-    setShowControls(true);
-    openPreparedStreamSelector(null);
-  }, [openPreparedStreamSelector]);
-
-  const { clearRecoveryTimers, markPlaybackStarted, recoverFromSlowStartup } = useStreamRecovery({
-    stream,
-    isHistoryResume,
-    mediaType: effectiveResolveMediaType,
-    mediaId: id,
-    title: resolveTitle,
-    resolveSeason: resolvedStreamSeason,
-    resolveEpisode: resolvedStreamEpisode,
-    absoluteSeason: resolvedAbsoluteSeason,
-    absoluteEpisode: resolvedAbsoluteEpisode,
-    streamLookupId,
-    currentTimeRef,
-    durationRef,
-    isPlayingRef,
-    mountedRef,
-    errorRef,
-    failoverResumePositionRef,
-    stopLoading,
-    setError,
-    setIsResolving,
-    setResolveStatus,
-    onSavedStreamUnavailable: reopenSelectorForSavedStreamFailure,
-  });
+  const handleStreamSelectorClosed = useCallback(() => {
+    setStreamSelectorState((state) => (state.open ? state : CLOSED_STREAM_SELECTOR_STATE));
+  }, []);
 
   // Metadata or a first tick lifts the loading card; the startup watchdog still owns a pre-playhead stall.
   const markPlaybackReady = useCallback(() => {
     stopLoading(true);
     setHasPlaybackStarted(true);
-    setError(null);
     clearTimer(forceShowTimeoutRef);
     showControlsWithAutoHide(PLAYBACK_READY_AUTO_HIDE_DELAY_MS);
   }, [showControlsWithAutoHide, stopLoading]);
 
   // Only an advancing playhead proves the stream: duration alone can precede a stall, and must neither cancel recovery nor credit the source.
   const markPlaybackVerified = useCallback(() => {
-    // Metadata and the paused resume seek can arrive before playback actually runs.
-    if (isPlayingRef.current) setHasPlaybackAdvanced(true);
+    if (errorRef.current) {
+      if (recoverableStreamErrorRef.current !== errorRef.current) return;
+      setError(null);
+      markPlaybackReady();
+    }
     if (playbackVerifiedAtRef.current > 0) return;
+    setHasPlaybackAdvanced(true);
     markPlaybackStarted();
     playbackVerifiedAtRef.current = performance.now();
     reportStreamVerified();
-  }, [markPlaybackStarted, reportStreamVerified]);
+  }, [markPlaybackReady, markPlaybackStarted, reportStreamVerified, setError]);
 
   useEffect(() => {
-    errorRef.current = error;
     isResolvingRef.current = isResolving;
     isPlayingRef.current = isPlaying;
     // Resuming past EOF retires the "Up Next" card and the Back→selector latch.
@@ -933,25 +988,18 @@ function InnerPlayer() {
       playbackEndedRef.current = false;
       setHasEnded(false);
     }
-  }, [error, hasEnded, isResolving, isPlaying]);
+  }, [hasEnded, isResolving, isPlaying]);
 
   useEffect(() => {
-    const paused = selectorCommittedPauseRef.current;
-    if (!paused || paused.state === session?.state) return;
-    selectorCommittedPauseRef.current = null;
-    // A changed route seed drops the native URL; only a retained stream needs the selector's pause released.
-    if (activeStreamUrl === paused.url) {
-      void setMpvProperty('pause', false).catch(() => undefined);
-      setIsPlaying(true);
-    }
-  }, [activeStreamUrl, session?.state]);
+    const committed = selectorCommittedReloadRef.current;
+    if (!committed || committed.state === session?.state) return;
+    selectorCommittedReloadRef.current = null;
+    // A changed route seed already drops the native URL; a retained one (same stream picked) must reload.
+    if (activeStreamUrl === committed.url) setActiveStreamUrl(undefined);
+  }, [activeStreamUrl, session?.state, setActiveStreamUrl]);
 
   const prepareForPlayerNavigation = useCallback(
     (flushProgress = true) => {
-      selectorCommittedPauseRef.current =
-        resumeAfterSelectorDismissRef.current && activeStreamUrl
-          ? { state: session?.state, url: activeStreamUrl }
-          : null;
       resumeAfterSelectorDismissRef.current = false;
       prepareForInternalPlayerNavigation();
       setShowControls(true);
@@ -959,13 +1007,16 @@ function InnerPlayer() {
       // Synchronous progress snapshot; also covers same-session stream picks that skip the exit guard.
       if (flushProgress) void flushPlaybackBeforeNavigation();
     },
-    [
-      activeStreamUrl,
-      flushPlaybackBeforeNavigation,
-      prepareForInternalPlayerNavigation,
-      session?.state,
-    ],
+    [flushPlaybackBeforeNavigation, prepareForInternalPlayerNavigation],
   );
+
+  const prepareForSelectorNavigation = useCallback(() => {
+    trayPause.publish(false);
+    selectorCommittedReloadRef.current = activeStreamUrl
+      ? { state: session?.state, url: activeStreamUrl }
+      : null;
+    prepareForPlayerNavigation();
+  }, [activeStreamUrl, prepareForPlayerNavigation, session?.state, trayPause]);
 
   const expandPlayer = useCallback(() => {
     if (!session) return;
@@ -982,7 +1033,7 @@ function InnerPlayer() {
     const baseState =
       typeof session.state === 'object' && session.state !== null ? session.state : {};
     navigate(session.playerPath, {
-      state: { ...baseState, from: currentPathWithSearch() },
+      state: { ...baseState, from: currentPathWithSearch(), preserveTrayPause: true },
     });
   }, [navigate, session]);
 
@@ -1012,12 +1063,12 @@ function InnerPlayer() {
       setHasEnded(ended);
       if (!ended) return;
       setIsPlaying(false);
-      void saveProgressRef.current?.();
+      void flushPlaybackBeforeNavigation();
       // Pin chrome for the EOF card — isPlayingRef can read stale-true here, so drive controls directly.
       clearControlsAutoHide();
       setShowControls(true);
     },
-    [clearControlsAutoHide, saveProgressRef],
+    [clearControlsAutoHide, flushPlaybackBeforeNavigation],
   );
 
   const scheduleMpvSet = useMpvSetScheduler();
@@ -1029,6 +1080,7 @@ function InnerPlayer() {
     applySubtitleDelay,
     applySubtitlePos,
     applySubtitleScale,
+    stepSubtitleDelay,
     resetSubtitleSettings,
   } = useSubtitleAdjustments({
     preferences: appUiPreferences,
@@ -1069,15 +1121,19 @@ function InnerPlayer() {
     mpvInitializedRef,
     isLoading,
     isPlayingRef,
+    isBufferingRef,
     clock,
+    observedPositionRef,
     bufferedClock,
     durationRef,
     playbackVerifiedAtRef,
     errorRef,
+    recoverableStreamErrorRef,
     forceShowTimeoutRef,
     saveProgressRef,
     setIsLoading,
     setError,
+    setStreamError,
     setDuration,
     setIsPlaying,
     setVolume,
@@ -1101,7 +1157,7 @@ function InnerPlayer() {
     reportStreamFailure,
     recoverFromSlowStartup,
     isResolvingRef,
-    reopenSelectorForSavedStreamFailure,
+    reopenSelectorForSavedStreamFailure: reopenSelectorForSavedStreamLoadFailure,
     stopLoading,
     setTransparent: setPlayerDocumentBackground,
     restorePlayerSurface,
@@ -1132,15 +1188,21 @@ function InnerPlayer() {
     return () => {
       playbackControlEpochRef.current += 1;
     };
-  }, [activeStreamUrl]);
+  }, [activeStreamLoadKey]);
 
   const restartPlayback = useCallback(async () => {
+    trayPause.publish(false);
     const epoch = playbackControlEpochRef.current;
     await seek(0);
-    if (epoch !== playbackControlEpochRef.current || !mountedRef.current || isDestroyedRef.current)
+    if (
+      epoch !== playbackControlEpochRef.current ||
+      !mountedRef.current ||
+      isDestroyedRef.current ||
+      trayPause.getSnapshot()
+    )
       return;
     await setMpvProperty('pause', false);
-  }, [mountedRef, seek]);
+  }, [mountedRef, seek, trayPause]);
 
   // keep-open parks mpv on the last frame at terminal EOF — Play must rewind and resume, not just clear `pause`.
   const isTerminalEof = useCallback(
@@ -1151,23 +1213,24 @@ function InnerPlayer() {
   );
 
   // Seeking back after EOF resumes the selected position; Watch again always restarts.
-  const togglePlay = useCallback(
-    () => (isTerminalEof() ? restartPlayback() : mpvCommand('cycle', ['pause'])),
-    [isTerminalEof, restartPlayback],
-  );
+  const togglePlay = useCallback(() => {
+    trayPause.publish(false);
+    return isTerminalEof() ? restartPlayback() : mpvCommand('cycle', ['pause']);
+  }, [isTerminalEof, restartPlayback, trayPause]);
 
   // mpv's frame steps pause internally; the `pause` property keeps `isPlaying` in sync.
   const frameStep = useCallback(
     async (direction: 1 | -1) => {
+      cancelAutomaticResume();
       await mpvCommand(direction > 0 ? 'frame-step' : 'frame-back-step');
       requestPositionRefresh();
     },
-    [requestPositionRefresh],
+    [cancelAutomaticResume, requestPositionRefresh],
   );
 
   const openStreamSelectorForEpisode = useCallback(
     (
-      nextEpisode: Episode,
+      selectedEpisode: Episode,
       options?: {
         pauseCurrentPlayback?: boolean;
         resumeStartTimePromise?: Promise<number | undefined>;
@@ -1177,14 +1240,16 @@ function InnerPlayer() {
         return;
       }
 
+      cancelAutomaticStreamSelection();
       if (options?.pauseCurrentPlayback) {
         // Fire-and-forget pause under the selector; remember pre-pause state so dismiss can resume.
-        resumeAfterSelectorDismissRef.current = isPlayingRef.current;
+        const resumeOwnedPause = takeResumePause();
+        resumeAfterSelectorDismissRef.current = isPlayingRef.current || resumeOwnedPause;
         void setMpvProperty('pause', true).catch(() => undefined);
         setIsPlaying(false);
       }
 
-      const target = buildEpisodeStreamTarget(streamLookupId || id, nextEpisode);
+      const target = buildEpisodeStreamTarget(streamLookupId || id, selectedEpisode);
 
       // The resume lookup is advisory for a different episode only — a same-episode pick reads the live clock.
       const targetsCurrentEpisode = sameEpisodeCoordinates(target, {
@@ -1195,7 +1260,7 @@ function InnerPlayer() {
       });
 
       // Open immediately — the advisory lookup fills startTime behind the dialog before any pick.
-      openPreparedStreamSelector({ ...target });
+      openPreparedStreamSelector(target);
       const requestId = selectorOpenRequestIdRef.current;
 
       if (!targetsCurrentEpisode) {
@@ -1221,6 +1286,7 @@ function InnerPlayer() {
       }
     },
     [
+      cancelAutomaticStreamSelection,
       effectiveResolveMediaType,
       id,
       isSelectorRequestStale,
@@ -1230,6 +1296,7 @@ function InnerPlayer() {
       resolvedStreamEpisode,
       resolvedStreamSeason,
       streamLookupId,
+      takeResumePause,
     ],
   );
 
@@ -1240,35 +1307,12 @@ function InnerPlayer() {
     [openStreamSelectorForEpisode],
   );
 
-  const localDayMs = useLocalDay().getTime();
-  const previousEpisode = useMemo(() => {
-    const current = currentEpisode;
-    if (!episodes || !current) return undefined;
-    return episodes.findLast(
-      (ep) =>
-        ep.season < current.season ||
-        (ep.season === current.season && ep.episode < current.episode),
-    );
-  }, [episodes, currentEpisode]);
-
-  const nextEpisode = useMemo(() => {
-    const current = currentEpisode;
-    if (!episodes || !current) return undefined;
-    // Episodes arrive (season, episode)-sorted — first match after current is next; an unaired successor ends the run.
-    const next = episodes.find(
-      (ep) =>
-        ep.season > current.season ||
-        (ep.season === current.season && ep.episode > current.episode),
-    );
-    return next && isAiredByLocalDay(next.releaseDate, localDayMs) ? next : undefined;
-  }, [episodes, currentEpisode, localDayMs]);
-
   const previousEpisodeLabel = previousEpisode
-    ? `Previous: ${formatSeasonEpisode(previousEpisode.season, previousEpisode.episode)}${previousEpisode.title ? ` · ${previousEpisode.title}` : ''}`
+    ? `Previous: ${formatEpisodeHeading(previousEpisode.season, previousEpisode.episode, previousEpisode.title)}`
     : undefined;
 
   const nextEpisodeLabel = nextEpisode
-    ? `Next: ${formatSeasonEpisode(nextEpisode.season, nextEpisode.episode)}${nextEpisode.title ? ` · ${nextEpisode.title}` : ''}`
+    ? `Next: ${formatEpisodeHeading(nextEpisode.season, nextEpisode.episode, nextEpisode.title)}`
     : undefined;
 
   // Shared silent resolve so the EOF/tail prefetch warms the same cache key the click uses.
@@ -1283,7 +1327,7 @@ function InnerPlayer() {
         streamEpisode: target.streamEpisode,
         absoluteSeason: target.absoluteSeason,
         absoluteEpisode: target.absoluteEpisode,
-        title: resolveTitle,
+        title: rankingTitle,
       };
       return {
         target,
@@ -1304,7 +1348,7 @@ function InnerPlayer() {
       activeStreamSourceIdRef,
       activeStreamSourceNameRef,
       effectiveResolveMediaType,
-      resolveTitle,
+      rankingTitle,
       streamLookupId,
     ],
   );
@@ -1320,9 +1364,9 @@ function InnerPlayer() {
       }
 
       const requestId = ++selectorOpenRequestIdRef.current;
+      trayPause.publish(false);
       nextEpisodeRequestRef.current = requestId;
       const { target, request, resolve } = resolveEpisodeStream(ep, id);
-      setIsResolving(true);
       setResolveStatus(`Loading ${direction} episode`);
 
       const resumeStartTimePromise = getLatestEpisodeResumeStartTime(
@@ -1336,7 +1380,7 @@ function InnerPlayer() {
         throw new Error('adjacent-episode resolve timed out');
       })
         .then(([resolved, resumeStartTime]) => {
-          if (isSelectorRequestStale(requestId)) {
+          if (isSelectorRequestStale(requestId) || trayPause.getSnapshot()) {
             clearNextEpisodeRequest(requestId);
             return;
           }
@@ -1352,7 +1396,7 @@ function InnerPlayer() {
           });
         })
         .catch(() => {
-          if (isSelectorRequestStale(requestId)) {
+          if (isSelectorRequestStale(requestId) || trayPause.getSnapshot()) {
             clearNextEpisodeRequest(requestId);
             return;
           }
@@ -1382,6 +1426,7 @@ function InnerPlayer() {
       poster,
       prepareForPlayerNavigation,
       resolveEpisodeStream,
+      trayPause,
     ],
   );
 
@@ -1399,10 +1444,11 @@ function InnerPlayer() {
   // Auto-play counts down to the same silent resolve `N` runs — a gate flip disarms the timer.
   const playbackIntact = !error && !isLoading && !isResolving;
   const panelsOwnSurface = showStreamSelector || showEpisodes || showShortcuts;
-  const eofCardOpen = hasEnded && playbackIntact && !panelsOwnSurface;
+  const eofCardOpen =
+    hasEnded && playbackIntact && !panelsOwnSurface && !isLoadingEpisodeNavigation;
   const showUpNextCard = eofCardOpen && !!nextEpisode;
   const showEndCard = eofCardOpen && !nextEpisode;
-  const [autoPlayNextIn, setAutoPlayNextIn] = useState<number | null>(null);
+  const [autoPlayCountdown] = useState(() => createSubscribableStore<number | null>(null));
   const [eofAutoPlayCancelled, setEofAutoPlayCancelled] = useState(false);
 
   useEffect(() => {
@@ -1416,35 +1462,38 @@ function InnerPlayer() {
   ]);
 
   // Docked EOF never counts down — the advance would yank the user into the expanded player with no visible cancel.
-  const autoPlayNext = appUiPreferences.autoPlayNext;
+  const canAutoPlayNext =
+    appUiPreferences.autoPlayNext &&
+    showUpNextCard &&
+    isExpanded &&
+    !eofAutoPlayCancelled &&
+    !pausedByTrayHide;
+  const advanceAfterCountdown = useEffectEvent(() => {
+    if (canAutoPlayNext && !trayPause.getSnapshot()) playNextEpisode();
+  });
   useEffect(() => {
-    if (!autoPlayNext || !showUpNextCard || !isExpanded || eofAutoPlayCancelled) {
-      setAutoPlayNextIn(null);
+    if (!canAutoPlayNext) {
+      autoPlayCountdown.publish(null);
       return;
     }
-    setAutoPlayNextIn(appUiPreferences.nextEpisodeCountdownSecs);
+    autoPlayCountdown.publish(appUiPreferences.nextEpisodeCountdownSecs);
     const timer = window.setInterval(() => {
-      setAutoPlayNextIn((current) => (current === null ? current : current - 1));
+      const current = autoPlayCountdown.getSnapshot();
+      if (current === null) return;
+      const next = current - 1;
+      autoPlayCountdown.publish(next === 0 ? null : next);
+      if (next === 0) {
+        window.clearInterval(timer);
+        advanceAfterCountdown();
+      }
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [
-    appUiPreferences.nextEpisodeCountdownSecs,
-    autoPlayNext,
-    eofAutoPlayCancelled,
-    isExpanded,
-    showUpNextCard,
-  ]);
-
-  useEffect(() => {
-    if (autoPlayNextIn !== 0) return;
-    setAutoPlayNextIn(null);
-    playNextEpisode();
-  }, [autoPlayNextIn, playNextEpisode]);
+  }, [appUiPreferences.nextEpisodeCountdownSecs, autoPlayCountdown, canAutoPlayNext]);
 
   const cancelAutoPlayNext = useCallback(() => {
     setEofAutoPlayCancelled(true);
-    setAutoPlayNextIn(null);
-  }, []);
+    autoPlayCountdown.publish(null);
+  }, [autoPlayCountdown]);
 
   // Every EOF play affordance uses the same rewind-and-resume path.
   const replayFromStart = useCallback(() => {
@@ -1487,10 +1536,12 @@ function InnerPlayer() {
     isPlaying,
     playbackSpeed,
     clock,
-    onPlay: () =>
+    onPlay: () => {
+      trayPause.publish(false);
       void (isTerminalEof() ? restartPlayback() : setMpvProperty('pause', false)).catch(
         () => undefined,
-      ),
+      );
+    },
     onPause: () => void setMpvProperty('pause', true).catch(() => undefined),
     onPreviousTrack: () => void seek(0).catch(() => undefined),
     onNextTrack: nextEpisode ? playNextEpisode : undefined,
@@ -1542,8 +1593,8 @@ function InnerPlayer() {
     }
     return {
       label: getSkipLabel(activeSkipSegment.type),
-      onSkip: () => {
-        void seek(activeSkipSegment.end_time)
+      onSkip: (source: 'user' | 'automatic' = 'user') => {
+        void seek(activeSkipSegment.end_time, source)
           .then(() => announce(getSkippedLabel(activeSkipSegment.type), 'skip'))
           .catch(() => undefined);
       },
@@ -1570,7 +1621,7 @@ function InnerPlayer() {
     const segmentKey = `${id}:${resolvedAbsoluteSeason}:${resolvedAbsoluteEpisode}:${segmentType}:${start}:${end}`;
     if (lastAutoSkipSegmentRef.current === segmentKey) return;
     lastAutoSkipSegmentRef.current = segmentKey;
-    activeSkipAction.onSkip();
+    activeSkipAction.onSkip('automatic');
   }, [
     activeSkipAction,
     activeSkipSegment,
@@ -1583,25 +1634,29 @@ function InnerPlayer() {
   ]);
 
   const openManualStreamFallback = useCallback(() => {
-    // Cancel in-flight auto-resolve first so a late result can't clobber the manual open.
-    autoResolveGenRef.current += 1;
-    setIsResolving(false);
-    setResolveStatus('');
     if (isSeriesLike && currentEpisode) {
       openStreamSelectorForEpisode(currentEpisode);
       return;
     }
     // Movies and pre-details series open against route coords with the remembered timestamp.
+    cancelAutomaticStreamSelection();
     openPreparedStreamSelector(null);
-  }, [isSeriesLike, openPreparedStreamSelector, openStreamSelectorForEpisode, currentEpisode]);
+  }, [
+    cancelAutomaticStreamSelection,
+    isSeriesLike,
+    openPreparedStreamSelector,
+    openStreamSelectorForEpisode,
+    currentEpisode,
+  ]);
 
   // Clear the failed stream and error so auto-resolve re-ranks and retries in place.
   const handleRetryFailedStream = useCallback(() => {
+    trayPause.publish(false);
     // A manual retry is a same-title failover — preserve the live playhead so the re-resolve resumes here.
     failoverResumePositionRef.current = currentTimeRef.current;
     setActiveStreamUrl(undefined);
     setError(null);
-  }, [currentTimeRef, setActiveStreamUrl]);
+  }, [currentTimeRef, setActiveStreamUrl, setError, trayPause]);
 
   // `cycleTrack` runs switch-flag + persist bookkeeping a bare `cycle` skips — without it the language auto-apply reverts.
   const cycleSubtitles = useCallback(async () => {
@@ -1620,7 +1675,7 @@ function InnerPlayer() {
     announce(
       landed === 'no'
         ? 'Audio off'
-        : `Audio: ${buildTrackLabelMap(audioTracks).get(landed) ?? `Track ${landed}`}`,
+        : `Audio: ${audioTracks.find((track) => track.id === landed)?.displayLabel ?? `Track ${landed}`}`,
       'audio',
     );
   }, [announce, audioTracks, cycleTrack]);
@@ -1655,10 +1710,13 @@ function InnerPlayer() {
   // `z`/`x` nudge subtitle delay by one slider quantum.
   const nudgeSubtitleDelay = useCallback(
     (direction: 1 | -1) => {
-      const next = applySubtitleDelay(subtitleDelay + direction * 0.1);
-      announce(`Subtitles ${next > 0 ? '+' : ''}${next.toFixed(1)}s`, 'subtitles');
+      void stepSubtitleDelay(direction).then((next) => {
+        if (next !== undefined) {
+          announce(`Subtitles ${next > 0 ? '+' : ''}${next.toFixed(1)}s`, 'subtitles');
+        }
+      });
     },
-    [announce, applySubtitleDelay, subtitleDelay],
+    [announce, stepSubtitleDelay],
   );
 
   const toggleEpisodesPanel = useCallback(() => {
@@ -1723,13 +1781,12 @@ function InnerPlayer() {
     routeRequestedStreamKey,
     routeSelectedStreamKey,
     setError,
-    setIsResolving,
     setResolveStatus,
     shouldWaitForResolvedLookupId,
     showStreamSelector,
     stopLoading,
     streamLookupId,
-    title: resolveTitle,
+    title: rankingTitle,
     type,
   });
 
@@ -1914,11 +1971,17 @@ function InnerPlayer() {
     [details?.episodes, selectorAbsoluteSeason, selectorAbsoluteEpisode],
   );
   // Held a beat past the flag so the loading card dissolves out.
-  const loadingOverlay = useDelayedUnmount((isLoading || isResolving) && !error, 180);
+  const startupLoading = isLoading || isResolving || (isBuffering && !hasPlaybackAdvanced);
+  const loadingOverlay = useDelayedUnmount(startupLoading && !error, 180);
   const loadingBackdrop = useDelayedUnmount(isLoading, 500);
   // Same dissolve for the stall spinner.
   const bufferingOverlay = useDelayedUnmount(
-    isBuffering && playbackIntact && !hasEnded && !panelsOwnSurface && !loadingOverlay.mounted,
+    isBuffering &&
+      hasPlaybackAdvanced &&
+      playbackIntact &&
+      !hasEnded &&
+      !panelsOwnSurface &&
+      !loadingOverlay.mounted,
     150,
   );
   const centerStatusVisible = loadingOverlay.mounted || bufferingOverlay.mounted || !!error;
@@ -1933,7 +1996,7 @@ function InnerPlayer() {
       episode: selectorStreamEpisode,
       absoluteSeason: selectorAbsoluteSeason,
       absoluteEpisode: selectorAbsoluteEpisode,
-      title: details?.title || resolveTitle,
+      title: rankingTitle,
       episodeTitle: selectorEpisode?.title,
       overview: selectorEpisode?.overview || details?.description,
       poster,
@@ -1951,8 +2014,7 @@ function InnerPlayer() {
       selectorStreamEpisode,
       selectorAbsoluteSeason,
       selectorAbsoluteEpisode,
-      details?.title,
-      resolveTitle,
+      rankingTitle,
       selectorEpisode,
       details?.description,
       details?.episodes,
@@ -1971,7 +2033,8 @@ function InnerPlayer() {
         clock={clock}
         open={showStreamSelector}
         onClose={closeStreamSelector}
-        onBeforePlayerNavigation={prepareForPlayerNavigation}
+        onClosed={handleStreamSelectorClosed}
+        onBeforePlayerNavigation={prepareForSelectorNavigation}
         target={selectorTarget}
         isCurrentEpisode={isSelectorForCurrentEpisode}
         routeStartTime={startTime}
@@ -1981,7 +2044,8 @@ function InnerPlayer() {
     ) : null;
 
   // Docked EOF gate: expanded-only panels can't cover the mini, but a resolve or the selector must not leave strips clickable beneath.
-  const miniEofOpen = hasEnded && playbackIntact && !showStreamSelector;
+  const miniEofOpen =
+    hasEnded && playbackIntact && !showStreamSelector && !isLoadingEpisodeNavigation;
   const nextEpisodeThumbnail = nextEpisode?.thumbnail ?? backdrop ?? poster ?? undefined;
   // Memoized for MiniPlayer.
   const miniPlayerUpNext = useMemo(
@@ -2007,8 +2071,8 @@ function InnerPlayer() {
       episodeLabel={currentEpisodeLabel || undefined}
       backdrop={backdrop ?? poster}
       isPlaying={isPlaying}
-      isWorking={isLoading || isResolving || isBuffering}
-      statusText={playerLoadingCopy.headline}
+      isWorking={startupLoading || isBuffering}
+      statusText={startupLoading ? playerLoadingHeadline : 'Buffering'}
       error={showErrorOverlay ? error : null}
       clock={clock}
       duration={duration}
@@ -2152,8 +2216,8 @@ function InnerPlayer() {
       {/* Loading — held mounted a beat past the flag so the card dissolves. */}
       {!isPip && loadingOverlay.mounted && !error && !panelsOwnSurface && (
         <PlayerLoadingOverlay
-          headline={playerLoadingCopy.headline}
-          detail={playerLoadingCopy.detail}
+          headline={playerLoadingHeadline}
+          detail={playerLoadingDetail}
           logo={logo || details?.logo}
           title={title}
           context={playerLoadingContext}
@@ -2230,20 +2294,20 @@ function InnerPlayer() {
           <div
             aria-hidden='true'
             className={cn(
-              'absolute inset-x-0 top-0 h-32 bg-linear-to-b from-black/65 via-black/25 to-transparent transition-opacity duration-150 motion-reduce:transition-none',
+              'absolute inset-x-0 top-0 h-32 bg-linear-to-b from-black/65 via-black/25 to-transparent transition-opacity duration-150 ease-out motion-reduce:transition-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
           />
           <div
             aria-hidden='true'
             className={cn(
-              'absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent transition-opacity duration-150 motion-reduce:transition-none',
+              'absolute inset-x-0 bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent transition-opacity duration-150 ease-out motion-reduce:transition-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
           />
           <div
             className={cn(
-              'transition-opacity duration-150 motion-reduce:transition-none has-[:focus-visible]:opacity-100',
+              'transition-opacity duration-150 ease-out motion-reduce:transition-none has-[:focus-visible]:opacity-100',
               chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
               chromeVisible ? 'opacity-100' : 'opacity-0',
             )}
@@ -2287,7 +2351,7 @@ function InnerPlayer() {
                 <PlayerUpNextCard
                   episode={nextEpisode}
                   thumbnail={nextEpisodeThumbnail}
-                  autoPlaySecondsLeft={autoPlayNextIn}
+                  autoPlayCountdown={autoPlayCountdown}
                   autoPlayDurationSeconds={appUiPreferences.nextEpisodeCountdownSecs}
                   onCancelAutoPlay={cancelAutoPlayNext}
                   onPlayNext={playNextEpisode}
@@ -2304,7 +2368,7 @@ function InnerPlayer() {
             </div>
             <div
               className={cn(
-                'transition-opacity duration-150 motion-reduce:transition-none has-[:focus-visible]:opacity-100',
+                'transition-opacity duration-150 ease-out motion-reduce:transition-none has-[:focus-visible]:opacity-100',
                 chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
                 chromeVisible ? 'opacity-100' : 'opacity-0',
               )}
@@ -2315,7 +2379,7 @@ function InnerPlayer() {
                 clock={clock}
                 bufferedClock={bufferedClock}
                 skipSegments={skipSegments}
-                resetKey={activeStreamUrl}
+                resetKey={activeStreamLoadKey}
                 onSeek={seek}
               />
 
@@ -2355,7 +2419,9 @@ function InnerPlayer() {
                 subtitleScale={subtitleScale}
                 addonSubtitles={addonSubtitles}
                 addonSubtitlesLoading={addonSubtitlesLoading}
+                addonSubtitlesFetching={addonSubtitlesFetching}
                 addonSubtitlesError={addonSubtitlesError}
+                onRetryAddonSubtitles={refetchAddonSubtitles}
                 addonSubtitlesQueried={addonSubtitlesQueried}
                 activeAddonSubtitleId={activeAddonSubtitleId}
                 addonSubtitleLoadingId={addonSubtitleLoadingId}
@@ -2427,19 +2493,11 @@ function InnerPlayer() {
           duration={duration}
           playbackSpeed={playbackSpeed}
           skipSegments={skipSegments}
-          resetKey={activeStreamUrl}
-          status={
-            isResolving
-              ? resolveStatus || 'Finding stream…'
-              : isLoading
-                ? 'Starting playback…'
-                : isBuffering
-                  ? 'Buffering…'
-                  : undefined
-          }
+          resetKey={activeStreamLoadKey}
+          status={startupLoading ? playerLoadingHeadline : isBuffering ? 'Buffering' : undefined}
           error={error}
           ended={hasEnded && !isResolving}
-          autoPlaySecondsLeft={autoPlayNextIn}
+          autoPlayCountdown={autoPlayCountdown}
           canGoNext={!!nextEpisode}
           skipAction={activeSkipAction}
           onReturn={returnFromPip}
@@ -2457,8 +2515,8 @@ function InnerPlayer() {
       <div
         aria-hidden='true'
         className={cn(
-          'pointer-events-none absolute inset-0 z-90 bg-black/80 transition-opacity duration-150 motion-reduce:transition-none',
-          isViewportTransitioning ? 'opacity-100' : 'opacity-0',
+          'pointer-events-none absolute inset-0 z-90 bg-black transition-opacity ease-out motion-reduce:transition-none',
+          isViewportTransitioning ? 'opacity-100 duration-[90ms]' : 'opacity-0 duration-[180ms]',
         )}
       />
       {/* Expand handoff: the mini chrome lingers one beat and dissolves out. */}

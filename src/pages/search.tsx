@@ -32,7 +32,9 @@ import {
   MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX,
   MediaCard,
   MediaCardSkeleton,
+  mediaCardRailKey,
 } from '@/components/media-card';
+import { RetryBanner } from '@/components/retry-banner';
 import { Input } from '@/components/ui/input';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
@@ -45,7 +47,7 @@ import { useSearchResults } from '@/hooks/use-search-results';
 import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
 import { navigateAppBack } from '@/lib/navigation';
-import { prefetchSearchCatalog, searchCatalogKey } from '@/lib/search-catalog';
+import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import {
   sameSearchGenre,
   searchGenreOptions,
@@ -223,6 +225,20 @@ const SearchResults = memo(function SearchResults({
     );
   }
 
+  if (results.length === 0 && hasNextPage && !isPlaceholderData) {
+    return (
+      <RetryBanner
+        className='mx-auto mt-10 max-w-xl'
+        title='Failed to load content'
+        message={isError ? getErrorMessage(errorObj) : 'Try the request again.'}
+        isRetrying={isFetchingNextPage}
+        onRetry={() => {
+          if (!isFetchingNextPage) void fetchNextPage();
+        }}
+      />
+    );
+  }
+
   if (showSkeleton) {
     return (
       <div aria-hidden='true' className={SEARCH_RESULTS_CLASS_NAME}>
@@ -327,7 +343,7 @@ const SearchResults = memo(function SearchResults({
       )}
       <WindowVirtualizedGrid
         items={results}
-        getItemKey={searchCatalogKey}
+        getItemKey={mediaCardRailKey}
         renderItem={renderSearchResult}
         estimateItemHeight={estimateSearchItemHeight}
         getColumnCount={getSearchGridColumnCount}
@@ -383,6 +399,7 @@ export function Search() {
     activeType,
     clearGenre,
     debouncedQuery,
+    flushQuery,
     handleFeedChange,
     handleGenreChange,
     handleTypeChange,
@@ -562,10 +579,9 @@ export function Search() {
                   event.metaKey
                 )
                   return;
-                // Not a form submit — Enter only dismisses the software keyboard.
                 if (event.key === 'Enter') {
                   event.preventDefault();
-                  event.currentTarget.blur();
+                  flushQuery();
                   return;
                 }
                 // Progressive dismissal: Esc clears text, then becomes back.
@@ -791,6 +807,11 @@ export function Search() {
           ref={resultsRef}
           aria-busy={(isOnline && (showSkeleton || isUpdating || isFetching)) || undefined}
           className='pt-5'
+          onClickCapture={flushQuery}
+          onKeyDownCapture={(event) => {
+            if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing)
+              flushQuery();
+          }}
           onAnimationEnd={(event) => {
             if (event.target === event.currentTarget) {
               event.currentTarget.classList.remove('search-results-enter');

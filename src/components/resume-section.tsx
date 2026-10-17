@@ -41,18 +41,23 @@ export function ResumeSection() {
     refetch,
   } = useResumeRail(format(localDay, 'yyyy-MM-dd'), localDay.getTime());
 
+  const retryBanner = (
+    <RetryBanner
+      className='w-full max-w-xl'
+      message={
+        entries.length > 0
+          ? "Couldn't refresh continue watching."
+          : "Couldn't load continue watching — try again."
+      }
+      isRetrying={isFetching}
+      onRetry={() => void refetch()}
+    />
+  );
+
   // A failed read must not collapse into "no items" (hides the section with no
   // recovery); a failed refetch with cached rows keeps the playable stale rail.
   if ((isError || (isFetched && isLoading)) && entries.length === 0) {
-    return (
-      <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>
-        <RetryBanner
-          message="Couldn't load continue watching — try again."
-          isRetrying={isFetching}
-          onRetry={() => void refetch()}
-        />
-      </div>
-    );
+    return <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>{retryBanner}</div>;
   }
 
   // Hidden until there is something to resume.
@@ -69,6 +74,7 @@ export function ResumeSection() {
       getItemKey={resumeEntryKey}
       renderItem={renderResumeEntry}
       skeletonCount={5}
+      headerContent={isError && <div className='mt-3'>{retryBanner}</div>}
       scrollerClassName='gap-4 pt-4 relative z-0'
       viewportClassName='relative'
     />

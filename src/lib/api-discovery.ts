@@ -3,15 +3,31 @@ import type {
   CalendarRange,
   CalendarSchedule,
   DetailsPrefetchBundle,
+  Episode,
+  EpisodeNavigation,
+  EpisodeNavigationRequest,
   MediaDetails,
   MediaItem,
   SearchCatalogPage,
   SearchCatalogQuery,
 } from '@/lib/api';
 import type { InvokeApi } from '@/lib/api-core';
+import { trendingRowQueryKey } from '@/lib/query-invalidation';
 
 interface DiscoveryApiContext {
   safeInvoke: InvokeApi;
+}
+
+export function similarTitlesQueryKey({ id, title, type, year, genres, description }: MediaItem) {
+  return trendingRowQueryKey(
+    'similar',
+    type,
+    id,
+    title,
+    description ?? '',
+    year ?? '',
+    ...(genres ?? []),
+  );
 }
 
 export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
@@ -25,6 +41,23 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       id,
       includeEpisodes: true,
     });
+
+  const getEpisodeNavigation = (request: EpisodeNavigationRequest) =>
+    safeInvoke<EpisodeNavigation>('get_episode_navigation', { request });
+
+  const searchEpisodes = (episodes: Episode[], query: string) =>
+    safeInvoke<number[]>('search_episodes', {
+      query,
+      episodes: episodes.map(({ season, episode, title, overview }) => ({
+        season,
+        episode,
+        title,
+        overview,
+      })),
+    });
+
+  const searchTitles = (titles: string[], query: string) =>
+    safeInvoke<number[]>('search_titles', { titles, query });
 
   const getMediaCardDetails = (type: string, id: string) =>
     safeInvoke<MediaDetails>('get_media_details', {
@@ -63,6 +96,9 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
   return {
     querySearchCatalogPage,
     getMediaDetails,
+    getEpisodeNavigation,
+    searchEpisodes,
+    searchTitles,
     getMediaCardDetails,
     getDetailsPrefetchBundle,
     getCalendarEvents,

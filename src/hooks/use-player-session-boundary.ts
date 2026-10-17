@@ -13,6 +13,7 @@ import { withTimeout } from '@/lib/utils';
 interface UsePlayerSessionBoundaryArgs {
   absoluteEpisode?: number;
   absoluteSeason?: number;
+  activeStreamLoadKey: string;
   activeStreamResetKey: string;
   backdrop?: string;
   clock: PlaybackClock;
@@ -27,6 +28,7 @@ interface UsePlayerSessionBoundaryArgs {
   mediaId?: string;
   mediaType?: string;
   mountedRef: RefObject<boolean>;
+  observedPositionRef: RefObject<number | null>;
   onResumeMessage: (text: string) => void;
   playbackLanguageMediaType?: 'movie' | 'series' | 'anime';
   poster?: string;
@@ -41,6 +43,7 @@ interface UsePlayerSessionBoundaryArgs {
 export function usePlayerSessionBoundary({
   absoluteEpisode,
   absoluteSeason,
+  activeStreamLoadKey,
   activeStreamResetKey,
   stream,
   backdrop,
@@ -56,6 +59,7 @@ export function usePlayerSessionBoundary({
   mediaId,
   mediaType,
   mountedRef,
+  observedPositionRef,
   onResumeMessage,
   playbackLanguageMediaType,
   poster,
@@ -101,7 +105,7 @@ export function usePlayerSessionBoundary({
     streamSeason,
     streamEpisode,
     isPlaying,
-    clock,
+    observedPositionRef,
     durationRef,
     stream,
   });
@@ -115,23 +119,30 @@ export function usePlayerSessionBoundary({
       stream,
     });
 
-  const { applyResumeIfReady, clearResumeRetryTimer, isResumePending, prepareForStreamLoad } =
-    usePlayerResumeController({
-      mediaId,
-      mediaType,
-      activeStreamUrl,
-      startTime,
-      absoluteSeason,
-      absoluteEpisode,
-      isHistoryResume,
-      suspended: resumeSuspended,
-      mountedRef,
-      isDestroyedRef,
-      currentTimeRef: clock.ref,
-      durationRef,
-      failoverResumePositionRef,
-      onResumeMessage,
-    });
+  const {
+    applyResumeIfReady,
+    cancelAutomaticResume,
+    clearResumeRetryTimer,
+    isResumePending,
+    prepareForStreamLoad,
+    takeResumePause,
+  } = usePlayerResumeController({
+    mediaId,
+    mediaType,
+    activeStreamUrl,
+    activeStreamLoadKey,
+    startTime,
+    absoluteSeason,
+    absoluteEpisode,
+    isHistoryResume,
+    suspended: resumeSuspended,
+    mountedRef,
+    isDestroyedRef,
+    currentTimeRef: clock.ref,
+    durationRef,
+    failoverResumePositionRef,
+    onResumeMessage,
+  });
 
   useEffect(() => {
     playbackLanguagePreferencesRef.current = {
@@ -170,6 +181,7 @@ export function usePlayerSessionBoundary({
   return {
     applyResumeIfReady,
     audioTracks,
+    cancelAutomaticResume,
     clearResumeRetryTimer,
     cycleTrack,
     flushPlaybackBeforeNavigation,
@@ -184,6 +196,7 @@ export function usePlayerSessionBoundary({
     selectAddonSubtitle,
     setTrack,
     subTracks,
+    takeResumePause,
     trackSwitching,
   };
 }

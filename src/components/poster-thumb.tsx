@@ -9,14 +9,18 @@ export function PosterThumb({
   mediaType,
   progressPct,
   size = 'md',
+  showFallback = true,
   className,
+  imageClassName,
 }: {
   poster?: string;
   title?: string;
   mediaType?: string;
   progressPct?: number;
   size?: 'sm' | 'md';
+  showFallback?: boolean;
   className?: string;
+  imageClassName?: string;
 }) {
   const Icon = mediaType === 'movie' ? Film : Tv;
 
@@ -28,16 +32,17 @@ export function PosterThumb({
         className,
       )}
     >
-      {mediaType ? (
-        <Icon className={cn('text-zinc-600', size === 'sm' ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
-      ) : (
-        <span className='text-[8px] font-bold text-white/10'>N/A</span>
-      )}
+      {showFallback &&
+        (mediaType ? (
+          <Icon className={cn('text-zinc-600', size === 'sm' ? 'h-3 w-3' : 'h-3.5 w-3.5')} />
+        ) : (
+          <span className='text-[8px] font-bold text-white/10'>N/A</span>
+        ))}
       {isHttpUrl(poster) && (
         <RemoteImage
           src={poster}
           alt={title}
-          className='absolute inset-0 h-full w-full object-cover'
+          className={cn('absolute inset-0 h-full w-full object-cover', imageClassName)}
           loading='lazy'
         />
       )}

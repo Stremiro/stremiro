@@ -11,6 +11,8 @@ import {
   type ProfilePreferences,
   type ProfilePreferencesPatch,
   type StreamSelectorData,
+  type StreamSelectorPreferences,
+  type StreamSelectorPreferencesState,
   type UserList,
   type WatchStatus,
 } from '@/lib/api';
@@ -33,17 +35,52 @@ let previewProfilePreferences: ProfilePreferences = {
   },
   viewMode: 'grid',
 };
-let previewAppUiPreferences: AppUiPreferences = structuredClone(DEFAULT_APP_UI_PREFERENCES);
-let previewLaunchAtLogin = false;
-let previewStreamSelectorPreferences = {
+const PREVIEW_PLAYER_KEYBINDINGS: Record<string, string[]> = {
+  togglePlay: [' ', 'k'],
+  seekBackward: ['arrowleft', 'j'],
+  seekForward: ['arrowright', 'l'],
+  volumeUp: ['arrowup'],
+  volumeDown: ['arrowdown'],
+  toggleMute: ['m'],
+  toggleFullscreen: ['f'],
+  frameBackward: [','],
+  frameForward: ['.'],
+  speedDown: ['['],
+  speedUp: [']'],
+  speedReset: ['\\'],
+  cycleSubtitles: ['c'],
+  cycleAudio: ['a'],
+  subtitleEarlier: ['z'],
+  subtitleLater: ['x'],
+  skipSegment: ['s', 'enter'],
+  nextEpisode: ['n'],
+  episodes: ['e'],
+  streamSelector: ['q'],
+  dock: ['i'],
+  shortcuts: ['?'],
+};
+let previewAppUiPreferences: AppUiPreferences = structuredClone({
+  ...DEFAULT_APP_UI_PREFERENCES,
+  effectivePlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
+  defaultPlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
+});
+const PREVIEW_STREAM_SELECTOR_DEFAULTS: StreamSelectorPreferences = {
   quality: 'all',
   source: 'all',
   addon: 'all',
   sort: 'smart',
   batch: 'all',
 };
+const PREVIEW_STREAM_SELECTOR_PREFERENCES: StreamSelectorPreferencesState = {
+  initialized: false,
+  preferences: PREVIEW_STREAM_SELECTOR_DEFAULTS,
+  defaultPreferences: PREVIEW_STREAM_SELECTOR_DEFAULTS,
+  episodeDefaultPreferences: { ...PREVIEW_STREAM_SELECTOR_DEFAULTS, batch: 'episodes' },
+};
+let previewLaunchAtLogin = false;
 let previewPlaybackLanguagePreferences: PlaybackLanguagePreferences = {};
 let previewAddonConfigs: AddonConfig[] = [];
+const previewAddonUrls = new Map<string, string>();
 let previewAddonConfigSeq = 0;
 let previewLibrary: MediaItem[] = [];
 let previewWatchStatuses: Record<string, WatchStatus> = {};
@@ -52,7 +89,8 @@ let previewListSeq = 0;
 
 const EMPTY_SEARCH_CATALOG_PAGE = {
   items: [],
-  nextSkip: null,
+  continuation: { seenKeys: [] },
+  exhausted: true,
 };
 
 const EMPTY_STREAM_SELECTOR_DATA: StreamSelectorData = {
@@ -176,7 +214,7 @@ function removePreviewLibraryItems(ids: ReadonlySet<string>): number {
 
 function addPreviewListItems(listId: string, items: MediaItem[]): number {
   const list = previewLists.find((entry) => entry.id === listId);
-  if (!list) throw new Error('List not found');
+  if (!list) throw { kind: 'list_not_found', message: 'List not found' };
   const existingIds = new Set(list.item_ids);
   const additions = items.filter((item) => {
     if (existingIds.has(item.id)) return false;
@@ -219,6 +257,12 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const delay = readFiniteNumber(patch, 'subtitleDelay');
   const pos = readFiniteNumber(patch, 'subtitlePos');
   const scale = readFiniteNumber(patch, 'subtitleScale');
+  // Preview trusts the settings UI, which only writes normalized keys.
+  const overrides =
+    patch.playerKeybindings && typeof patch.playerKeybindings === 'object'
+      ? (patch.playerKeybindings as Record<string, string[]>)
+      : current.playerKeybindings;
+  const claimedKeys = new Set(Object.values(overrides).flat());
 
   previewAppUiPreferences = {
     playerVolume: volume === undefined ? current.playerVolume : clamp(Math.round(volume), 0, 100),
@@ -272,11 +316,14 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
         : scale > 0
           ? Math.round(clamp(scale, 0.25, 3) * 20) / 20
           : 1.0,
-    // Preview trusts the settings UI, which only writes normalized keys.
-    playerKeybindings:
-      patch.playerKeybindings && typeof patch.playerKeybindings === 'object'
-        ? (patch.playerKeybindings as Record<string, string[]>)
-        : current.playerKeybindings,
+    playerKeybindings: overrides,
+    effectivePlayerKeybindings: Object.fromEntries(
+      Object.entries(PREVIEW_PLAYER_KEYBINDINGS).map(([action, keys]) => [
+        action,
+        overrides[action] ?? keys.filter((key) => !claimedKeys.has(key)),
+      ]),
+    ),
+    defaultPlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
   };
 }
 
@@ -285,11 +332,12 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
   switch (op.kind) {
     case 'add': {
       previewAddonConfigSeq += 1;
+      const id = `preview-addon-${previewAddonConfigSeq}`;
+      previewAddonUrls.set(id, op.url);
       previewAddonConfigs = [
         ...previewAddonConfigs,
         {
-          id: `preview-addon-${previewAddonConfigSeq}`,
-          url: op.url,
+          id,
           name: '',
           enabled: true,
           displayUrl: op.url,
@@ -299,6 +347,7 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
       return;
     }
     case 'remove':
+      previewAddonUrls.delete(op.id);
       previewAddonConfigs = previewAddonConfigs.filter((config) => config.id !== op.id);
       return;
     case 'setEnabled':
@@ -329,6 +378,17 @@ export async function handlePreviewInvoke<T>(
       return EMPTY_SEARCH_CATALOG_PAGE as T;
     case 'get_app_ui_preferences':
       return previewAppUiPreferences as T;
+    case 'get_stream_selector_preferences':
+      return PREVIEW_STREAM_SELECTOR_PREFERENCES as T;
+    case 'get_default_player_keybindings':
+      return PREVIEW_PLAYER_KEYBINDINGS as T;
+    case 'get_bootstrap_snapshot':
+      return {
+        profilePreferences: previewProfilePreferences,
+        appUiPreferences: previewAppUiPreferences,
+        streamSelectorPreferences: PREVIEW_STREAM_SELECTOR_PREFERENCES,
+        startupRoute: null,
+      } as T;
     case 'get_launch_at_login':
       return previewLaunchAtLogin as T;
     case 'set_launch_at_login':
@@ -343,18 +403,21 @@ export async function handlePreviewInvoke<T>(
     }
     case 'get_profile_preferences':
       return previewProfilePreferences as T;
-    case 'save_profile_preferences': {
-      const patch = (args?.patch ?? {}) as Omit<ProfilePreferencesPatch, 'avatar'> & {
-        avatar?: string | null;
+    case 'set_profile_avatar_from_bytes':
+      throw new Error('Profile photo updates require the desktop app');
+    case 'clear_profile_avatar':
+      previewProfilePreferences = {
+        ...previewProfilePreferences,
+        profile: { ...previewProfilePreferences.profile, avatar: undefined },
       };
-      const { viewMode, avatar, ...profile } = patch;
+      return previewProfilePreferences as T;
+    case 'save_profile_preferences': {
+      const { viewMode, ...profile } = (args?.patch ?? {}) as ProfilePreferencesPatch;
       // Preview only displays edits; persistence and validation belong to Rust.
       previewProfilePreferences = {
         profile: {
           ...previewProfilePreferences.profile,
           ...profile,
-          avatar:
-            'avatar' in patch ? (avatar ?? undefined) : previewProfilePreferences.profile.avatar,
           accentTargets: {
             ...previewProfilePreferences.profile.accentTargets,
             ...profile.accentTargets,
@@ -364,42 +427,22 @@ export async function handlePreviewInvoke<T>(
       };
       return previewProfilePreferences as T;
     }
-    case 'get_stream_selector_preferences':
-      return {
-        preferences: previewStreamSelectorPreferences,
-        initialized: true,
-      } as T;
-    case 'save_stream_selector_preferences': {
-      const preferences = (
-        typeof args?.preferences === 'object' && args.preferences !== null ? args.preferences : {}
-      ) as Record<string, unknown>;
-      previewStreamSelectorPreferences = {
-        quality:
-          typeof preferences.quality === 'string'
-            ? preferences.quality
-            : previewStreamSelectorPreferences.quality,
-        source:
-          typeof preferences.source === 'string'
-            ? preferences.source
-            : previewStreamSelectorPreferences.source,
-        addon: typeof preferences.addon === 'string' ? preferences.addon.trim() || 'all' : 'all',
-        sort:
-          typeof preferences.sort === 'string'
-            ? preferences.sort
-            : previewStreamSelectorPreferences.sort,
-        batch:
-          typeof preferences.batch === 'string'
-            ? preferences.batch
-            : previewStreamSelectorPreferences.batch,
-      };
-      return previewStreamSelectorPreferences as T;
-    }
     case 'get_skip_times':
       return { segments: [] } as T;
     case 'get_watch_history':
     case 'get_resume_rail':
     case 'query_similar_titles':
+    case 'search_episodes':
       return [] as T;
+    case 'search_titles': {
+      const titles = (args?.titles ?? []) as string[];
+      const query = String(args?.query ?? '')
+        .trim()
+        .toLowerCase();
+      return titles.flatMap((title, index) =>
+        title.toLowerCase().includes(query) ? [index] : [],
+      ) as T;
+    }
     case 'get_total_watch_time_secs':
       return 0 as T;
     case 'get_recent_watch_seed':
@@ -523,9 +566,19 @@ export async function handlePreviewInvoke<T>(
           : list,
       );
       return undefined as T;
-    case 'add_to_list':
-      addPreviewListItems(readStringArg(args, 'listId', ''), [readPreviewMediaItem(args?.item)]);
-      return undefined as T;
+    case 'add_to_list': {
+      const listId = readStringArg(args, 'listId', '');
+      addPreviewListItems(listId, [readPreviewMediaItem(args?.item)]);
+      const list = previewLists.find((entry) => entry.id === listId);
+      if (!list) throw { kind: 'list_not_found', message: 'List not found' };
+      return {
+        id: list.id,
+        name: list.name,
+        icon: list.icon,
+        item_count: list.item_ids.length,
+        contains_item: true,
+      } as T;
+    }
     case 'bulk_add_to_list':
       return addPreviewListItems(readStringArg(args, 'listId', ''), readPreviewItems(args)) as T;
     case 'remove_from_list':
@@ -567,6 +620,8 @@ export async function handlePreviewInvoke<T>(
       } as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
+    case 'get_episode_navigation':
+      return { previousIndex: null, nextIndex: null } as T;
     case 'get_media_details':
       return {
         id: readStringArg(args, 'id', 'mock-id'),
@@ -594,6 +649,11 @@ export async function handlePreviewInvoke<T>(
       } as T;
     case 'get_addon_configs':
       return previewAddonConfigs as T;
+    case 'get_addon_url': {
+      const url = previewAddonUrls.get(readStringArg(args, 'id', ''));
+      if (url === undefined) throw new Error('Addon not found.');
+      return url as T;
+    }
     case 'update_addon_configs': {
       const op =
         typeof args?.op === 'object' && args.op !== null ? (args.op as AddonConfigsOp) : null;
@@ -612,6 +672,8 @@ export async function handlePreviewInvoke<T>(
     case 'get_watch_progress':
     case 'recover_playback_stream':
       return null as T;
+    case 'cancel_playback_recovery':
+      return undefined as T;
     case 'remove_all_from_watch_history':
       // The command returns the rows it deleted — preview holds no history.
       return [] as T;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useSearchParams } from 'react-router';
+import { useLocation, useSearchParams } from 'react-router';
 
 import { useDebounce } from '@/hooks/use-debounce';
 import {
@@ -12,14 +12,10 @@ import {
 // Search-page state: debounced query text plus browse facets. The URL carries
 // `?q=`, `?type=`, `?feed=`, `?genre=`; the backend defaults anything omitted.
 export function useSearchPageState() {
+  const { pathname } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const urlQuery = searchParams.get('q') || '';
   const { type: activeType, feed: activeFeed, genre: activeGenre } = readSearchFacets(searchParams);
-
-  // Remember the last Search URL so the sidebar and `/` hotkey reopen it.
-  useEffect(() => {
-    rememberSearchParams(searchParams);
-  }, [searchParams]);
 
   const [query, setQuery] = useState(urlQuery);
   const debouncedInput = useDebounce(query, 250);
@@ -45,29 +41,36 @@ export function useSearchPageState() {
     },
     [searchParams, setSearchParams],
   );
+  const flushQuery = useCallback(() => {
+    if (window.location.pathname !== pathname) return;
+    updateSearchParams((params) => {
+      if (trimmedQuery) params.set('q', trimmedQuery);
+      else params.delete('q');
+    });
+  }, [pathname, trimmedQuery, updateSearchParams]);
 
-  // Reflect state back into the URL without growing history entries; cloning
-  // preserves unknown keys. The guards below skip reflection while the
+  // Remember drafts immediately; reflect settled queries without adding history.
+  // Cloning preserves unknown keys. Skip reflection while the
   // debounce still lags raw input or a navigation-side `q` change is pending.
   const lastReflectedUrlQueryRef = useRef(urlQuery);
   useEffect(() => {
     if (urlQuery !== lastReflectedUrlQueryRef.current) {
       lastReflectedUrlQueryRef.current = urlQuery;
+      rememberSearchParams(searchParams);
       return;
     }
+
+    const rememberedParams = new URLSearchParams(searchParams);
+    if (query) rememberedParams.set('q', query);
+    else rememberedParams.delete('q');
+    rememberSearchParams(rememberedParams);
 
     if (trimmedQuery !== trimmedDebouncedQuery) {
       return;
     }
 
-    updateSearchParams((params) => {
-      if (trimmedDebouncedQuery) {
-        params.set('q', trimmedDebouncedQuery);
-      } else {
-        params.delete('q');
-      }
-    });
-  }, [updateSearchParams, trimmedDebouncedQuery, trimmedQuery, urlQuery]);
+    flushQuery();
+  }, [flushQuery, query, searchParams, trimmedDebouncedQuery, trimmedQuery, urlQuery]);
 
   const handleTypeChange = useCallback(
     (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
@@ -118,6 +121,7 @@ export function useSearchPageState() {
     activeType,
     clearGenre,
     debouncedQuery,
+    flushQuery,
     handleFeedChange,
     handleGenreChange,
     handleTypeChange,

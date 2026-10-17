@@ -23,6 +23,32 @@ export function restoreQueryArrayEntry<T extends { id: string }>(
   });
 }
 
+// Anchors each restored row beside its nearest snapshot neighbour still cached (predecessor first, then successor), so overlapping removals keep relative order.
+export function reinsertSnapshotRows<T>(
+  current: readonly T[],
+  snapshot: readonly T[],
+  indices: readonly number[],
+  key: (row: T) => string,
+): T[] {
+  const rows = [...current];
+  const cachedIndex = (neighbour: number) => {
+    const neighbourKey = key(snapshot[neighbour]);
+    return rows.findIndex((row) => key(row) === neighbourKey);
+  };
+  for (const index of indices) {
+    let at = -1;
+    for (let prior = index - 1; prior >= 0 && at === -1; prior--) {
+      const found = cachedIndex(prior);
+      if (found !== -1) at = found + 1;
+    }
+    for (let next = index + 1; next < snapshot.length && at === -1; next++) {
+      at = cachedIndex(next);
+    }
+    rows.splice(at === -1 ? 0 : at, 0, snapshot[index]);
+  }
+  return rows;
+}
+
 // Serialize native writes per query key; only the newest write owns the cache.
 const writeTails = new Map<string, Promise<unknown>>();
 // Monotonic write generations: a racing refetch can overwrite the optimistic marker, so ownership is "latest write", never payload identity.

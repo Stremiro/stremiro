@@ -1,14 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
-import { useEffect, useRef, useState } from 'react';
+import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api, type MediaItem } from '@/lib/api';
-import { MEDIA_ROW_STALE_TIME_MS, trendingRowQueryKey } from '@/lib/query-invalidation';
+import { similarTitlesQueryKey } from '@/lib/api-discovery';
+import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
 import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
 
-// Starts the catalog fetch a screen early so the rail is ready before it scrolls in.
-const PREFETCH_ROOT_MARGIN = '600px';
 /** Fewer matches than this reads as filler — the rail hides instead. */
 const MIN_SIMILAR_TITLES = 4;
 
@@ -18,22 +17,8 @@ interface DetailsSimilarTitlesProps {
 }
 
 export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSimilarTitlesProps) {
-  const anchorRef = useRef<HTMLDivElement>(null);
-  const [nearViewport, setNearViewport] = useState(false);
+  const { anchorRef, nearViewport } = useNearViewport();
   const isOnline = useOnlineStatus();
-
-  useEffect(() => {
-    const anchor = anchorRef.current;
-    if (!anchor || nearViewport) return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        if (entries[0]?.isIntersecting) setNearViewport(true);
-      },
-      { rootMargin: PREFETCH_ROOT_MARGIN },
-    );
-    observer.observe(anchor);
-    return () => observer.disconnect();
-  }, [nearViewport]);
 
   const queryEnabled = isOnline && nearViewport && (item.genres?.length ?? 0) > 0;
   const {
@@ -44,15 +29,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
     isFetching,
     refetch,
   } = useQuery({
-    // Under the `trending` prefix so invalidateDiscoveryQueries covers it;
-    // year/genres in the key refresh the rail when full metadata lands.
-    queryKey: trendingRowQueryKey(
-      'similar',
-      item.type,
-      item.id,
-      item.year ?? '',
-      ...(item.genres ?? []),
-    ),
+    queryKey: similarTitlesQueryKey(item),
     queryFn: () => api.querySimilarTitles(item),
     enabled: queryEnabled,
     staleTime: MEDIA_ROW_STALE_TIME_MS,

@@ -1,10 +1,11 @@
 import { ArrowLeft, Loader2, Play, RotateCcw, X } from 'lucide-react';
-import { memo, useEffect, useState } from 'react';
+import { memo, useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
+import type { SubscribableStore } from '@/lib/subscribable-store';
 import { clamp, cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
 
 // Presentational player states, memoized like PlayerActionOverlays — unchanged overlays skip the commit.
@@ -16,6 +17,8 @@ const EOF_CARD_SLOT_CLASS =
   'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in duration-150 motion-reduce:animate-none';
 const EOF_GLASS_CLASS = 'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60';
 const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
+let visibleLoadingOverlays = 0;
+let loadingOverlayVisibleUntil = 0;
 
 function EofCardThumbnail({ src }: { src: string }) {
   return (
@@ -79,8 +82,8 @@ interface PlayerLoadingOverlayProps {
   context?: string;
   /** Parent holds the mount briefly after the flag clears so the card dissolves out instead of popping off. */
   exiting?: boolean;
-  onChooseStream: () => void;
-  onBack: () => void;
+  onChooseStream?: () => void;
+  onBack?: () => void;
 }
 
 export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
@@ -93,20 +96,35 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   onChooseStream,
   onBack,
 }: PlayerLoadingOverlayProps) {
-  const [revealed, setRevealed] = useState(false);
+  const [reveal, setReveal] = useState<'pending' | 'enter' | 'handoff'>(() =>
+    visibleLoadingOverlays > 0 || performance.now() < loadingOverlayVisibleUntil
+      ? 'handoff'
+      : 'pending',
+  );
   const [wasExiting, setWasExiting] = useState(exiting);
   if (wasExiting !== exiting) {
     setWasExiting(exiting);
-    // A load that restarts mid-exit gets the full reveal debounce again.
-    if (!exiting) setRevealed(false);
+    // A visible card that restarts mid-exit fades straight back in instead of vanishing for the debounce.
+    if (!exiting && reveal !== 'pending') setReveal('enter');
   }
   useEffect(() => {
-    if (exiting || revealed) return;
+    if (exiting || reveal !== 'pending') return;
     // A CSS exit animation would paint a warm load that never finished its delayed entrance.
-    const timer = window.setTimeout(() => setRevealed(true), 350);
+    const timer = window.setTimeout(() => setReveal('enter'), 350);
     return () => window.clearTimeout(timer);
-  }, [exiting, revealed]);
-  if (!revealed) return null;
+  }, [exiting, reveal]);
+  useLayoutEffect(() => {
+    if (reveal === 'pending') return;
+    visibleLoadingOverlays += 1;
+    return () => {
+      // Suspense replaces the route card without an exit; retain its reveal across that commit.
+      visibleLoadingOverlays -= 1;
+      if (visibleLoadingOverlays === 0) {
+        loadingOverlayVisibleUntil = exiting ? 0 : performance.now() + 100;
+      }
+    };
+  }, [exiting, reveal]);
+  if (reveal === 'pending') return null;
 
   return (
     <div className='pointer-events-none absolute inset-0 z-50 flex items-center justify-center'>
@@ -116,7 +134,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
           'relative mx-4 w-full max-w-[19rem] overflow-hidden rounded-2xl border border-white/[0.07] bg-zinc-950/75 px-4 pb-3 pt-3.5 shadow-xl shadow-black/50 backdrop-blur-2xl motion-reduce:animate-none',
           exiting
             ? 'opacity-0 animate-out fade-out duration-180 fill-mode-forwards'
-            : 'animate-in fade-in duration-150',
+            : reveal === 'enter' && 'animate-in fade-in duration-150',
         )}
       >
         {(isHttpUrl(logo) || title || context) && (
@@ -144,7 +162,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
         )}
 
         <div role='status' className='flex items-start gap-2.5'>
-          <Loader2 className='mt-0.5 h-4 w-4 shrink-0 animate-spin text-white/60' />
+          <Loader2 className='mt-0.5 h-4 w-4 shrink-0 animate-spin text-white/60 motion-reduce:animate-none' />
           <div className='min-w-0 flex-1'>
             <p className='text-[14px] font-medium leading-snug text-white'>{headline}</p>
             {detail && (
@@ -153,22 +171,28 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
           </div>
         </div>
 
-        <div className='mt-3 flex items-center gap-1.5 pl-[26px] pointer-events-auto'>
-          <button
-            type='button'
-            onClick={onChooseStream}
-            className='h-7 rounded-md bg-white/[0.07] px-2.5 text-[12px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
-          >
-            Choose Stream
-          </button>
-          <button
-            type='button'
-            onClick={onBack}
-            className='h-7 rounded-md px-2.5 text-[12px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
-          >
-            Go Back
-          </button>
-        </div>
+        {(onChooseStream || onBack) && (
+          <div className='mt-3 flex items-center gap-1.5 pl-[26px] pointer-events-auto'>
+            {onChooseStream && (
+              <button
+                type='button'
+                onClick={onChooseStream}
+                className='h-7 rounded-md bg-white/[0.07] px-2.5 text-[12px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+              >
+                Choose Stream
+              </button>
+            )}
+            {onBack && (
+              <button
+                type='button'
+                onClick={onBack}
+                className='h-7 rounded-md px-2.5 text-[12px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+              >
+                Go Back
+              </button>
+            )}
+          </div>
+        )}
 
         <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
           <div className='h-full w-1/3 bg-linear-to-r from-transparent via-white/60 to-transparent motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
@@ -305,8 +329,8 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
 interface PlayerUpNextCardProps {
   episode: Episode;
   thumbnail?: string;
-  /** Auto-play countdown seconds, or null when the card is manual-only. */
-  autoPlaySecondsLeft: number | null;
+  /** Null snapshots keep the card manual-only. */
+  autoPlayCountdown: SubscribableStore<number | null>;
   autoPlayDurationSeconds: number;
   onCancelAutoPlay: () => void;
   onPlayNext: () => void;
@@ -320,11 +344,15 @@ const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   episode,
   thumbnail,
-  autoPlaySecondsLeft,
+  autoPlayCountdown,
   autoPlayDurationSeconds,
   onCancelAutoPlay,
   onPlayNext,
 }: PlayerUpNextCardProps) {
+  const autoPlaySecondsLeft = useSyncExternalStore(
+    autoPlayCountdown.subscribe,
+    autoPlayCountdown.getSnapshot,
+  );
   const keymap = usePlayerKeymap();
   const nextEpisodeKey = keymap.keys.nextEpisode[0];
   const countingDown = autoPlaySecondsLeft !== null;

@@ -5,15 +5,12 @@ import {
   Gauge,
   Maximize,
   Minimize,
-  Pause,
   PictureInPicture2,
-  Play,
   RotateCcw,
   RotateCw,
   SkipBack,
-  SkipForward,
 } from 'lucide-react';
-import { memo, type Ref, useState } from 'react';
+import { memo, type Ref, useId, useState } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
@@ -21,11 +18,15 @@ import {
   CHROME_PILL_CLASS,
   CHROME_POPOVER_CLASS,
 } from '@/components/player-chrome-styles';
+import {
+  PlayerMuteButton,
+  PlayerNextButton,
+  PlayerPlayButton,
+} from '@/components/player-control-buttons';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { PlayerSlider } from '@/components/player-slider';
 import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
-import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { AddonSubtitle } from '@/lib/api';
@@ -186,7 +187,9 @@ interface PlayerControlsRowProps {
   subtitleScale: number;
   addonSubtitles: AddonSubtitle[];
   addonSubtitlesLoading: boolean;
+  addonSubtitlesFetching: boolean;
   addonSubtitlesError?: string;
+  onRetryAddonSubtitles: () => void;
   addonSubtitlesQueried: boolean;
   activeAddonSubtitleId: string | null;
   addonSubtitleLoadingId: string | null;
@@ -252,7 +255,9 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   subtitleScale,
   addonSubtitles,
   addonSubtitlesLoading,
+  addonSubtitlesFetching,
   addonSubtitlesError,
+  onRetryAddonSubtitles,
   addonSubtitlesQueried,
   activeAddonSubtitleId,
   addonSubtitleLoadingId,
@@ -265,6 +270,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   onSelectSubTrack,
 }: PlayerControlsRowProps) {
   const keymap = usePlayerKeymap();
+  const speedHeadingId = useId();
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const volumeIsSilent = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
@@ -290,37 +296,26 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
               <SkipBack className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
             </button>
           )}
-          <button
-            type='button'
-            aria-label={isPlaying ? 'Pause' : 'Play'}
-            aria-keyshortcuts={ariaKeyShortcuts(keymap, 'togglePlay')}
-            title={withShortcutHint(isPlaying ? 'Pause' : 'Play', keymap, 'togglePlay')}
+          <PlayerPlayButton
+            variant='full'
+            keymap={keymap}
+            icon={isPlaying ? 'pause' : 'play'}
+            label={isPlaying ? 'Pause' : 'Play'}
             onClick={() => {
               void onTogglePlay().catch(() => undefined);
             }}
-            className={CHROME_ICON_BUTTON_CLASS}
-          >
-            {isPlaying ? (
-              <Pause className='h-6 w-6 fill-current' strokeWidth={CHROME_ICON_STROKE} />
-            ) : (
-              <Play className='h-6 w-6 fill-current' strokeWidth={CHROME_ICON_STROKE} />
-            )}
-          </button>
+          />
           {hasEpisodes && (
-            <button
-              type='button'
-              aria-label={nextEpisodeLabel ?? 'Next episode'}
-              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
-              title={withShortcutHint(nextEpisodeLabel ?? 'Next episode', keymap, 'nextEpisode')}
+            <PlayerNextButton
+              variant='full'
+              keymap={keymap}
+              label={nextEpisodeLabel ?? 'Next episode'}
               disabled={!canGoNext}
               onClick={(e) => {
                 e.stopPropagation();
                 onNextEpisode();
               }}
-              className={CHROME_ICON_BUTTON_CLASS}
-            >
-              <SkipForward className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-            </button>
+            />
           )}
         </div>
 
@@ -335,21 +330,14 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             void onVolumeWheel(e).catch(() => undefined);
           }}
         >
-          <button
-            type='button'
-            aria-label={volumeIsSilent ? 'Unmute' : 'Mute'}
-            aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleMute')}
-            title={withShortcutHint(volumeIsSilent ? 'Unmute' : 'Mute', keymap, 'toggleMute')}
+          <PlayerMuteButton
+            variant='full'
+            keymap={keymap}
+            label={volumeIsSilent ? 'Unmute' : 'Mute'}
+            muted={volumeIsSilent}
+            volume={volume}
             onClick={() => void onToggleMute().catch(() => undefined)}
-            className={CHROME_ICON_BUTTON_CLASS}
-          >
-            <PlayerVolumeIcon
-              muted={volumeIsSilent}
-              volume={volume}
-              className={CHROME_ICON_CLASS}
-              strokeWidth={CHROME_ICON_STROKE}
-            />
-          </button>
+          />
 
           <PlayerSlider
             variant='bar'
@@ -413,7 +401,9 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           subtitleScale={subtitleScale}
           addonSubtitles={addonSubtitles}
           addonSubtitlesLoading={addonSubtitlesLoading}
+          addonSubtitlesFetching={addonSubtitlesFetching}
           addonSubtitlesError={addonSubtitlesError}
+          onRetryAddonSubtitles={onRetryAddonSubtitles}
           addonSubtitlesQueried={addonSubtitlesQueried}
           activeAddonSubtitleId={activeAddonSubtitleId}
           addonSubtitleLoadingId={addonSubtitleLoadingId}
@@ -461,6 +451,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           <PopoverContent
             side='top'
             sideOffset={10}
+            aria-labelledby={speedHeadingId}
             className={cn(
               CHROME_POPOVER_CLASS,
               'max-h-(--radix-popover-content-available-height) w-32 overflow-y-auto overscroll-contain p-1.5',
@@ -469,7 +460,9 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
               event.stopPropagation();
             }}
           >
-            <h4 className='px-2.5 py-2 text-xs font-semibold text-zinc-300'>Speed</h4>
+            <h4 id={speedHeadingId} className='px-2.5 py-2 text-xs font-semibold text-zinc-300'>
+              Speed
+            </h4>
             <div className='flex flex-col'>
               {SPEED_OPTIONS.map((s) => (
                 <button

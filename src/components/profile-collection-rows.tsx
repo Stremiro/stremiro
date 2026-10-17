@@ -1,13 +1,12 @@
 import { formatDistanceToNow } from 'date-fns';
 import { Check, Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
-import { useNavigate } from 'react-router';
 import { PosterThumb } from '@/components/poster-thumb';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
-import { useRemoveFromWatchHistory } from '@/hooks/use-media-library';
+import { getOwnWatchStatus, useRemoveFromWatchHistory } from '@/hooks/use-media-library';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import {
   type MediaItem,
@@ -16,11 +15,7 @@ import {
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
-import {
-  getWatchProgressPercent,
-  watchProgressCoordinates,
-  watchProgressItemKey,
-} from '@/lib/history-playback';
+import { getWatchProgressPercent, watchProgressItemKey } from '@/lib/history-playback';
 import { navigateToDetails } from '@/lib/player-navigation';
 import { cn, formatSeasonEpisode, mediaTypeLabel } from '@/lib/utils';
 import { mediaCardRailKey } from './media-card';
@@ -46,7 +41,7 @@ export function LibraryList({
       renderItem={(item) => (
         <LibraryListRow
           item={item}
-          status={watchStatuses?.[item.id]}
+          status={getOwnWatchStatus(watchStatuses, item.id)}
           selectionMode={selectionMode}
           isSelected={selectedIds?.has(item.id) ?? false}
           onToggleSelect={onToggleSelect}
@@ -69,7 +64,6 @@ const LibraryListRow = memo(function LibraryListRow({
   isSelected?: boolean;
   onToggleSelect?: (item: MediaItem) => void;
 }) {
-  const navigate = useNavigate();
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
 
   return (
@@ -91,7 +85,7 @@ const LibraryListRow = memo(function LibraryListRow({
           onToggleSelect?.(item);
           return;
         }
-        navigateToDetails(navigate, item.type, item.id);
+        navigateToDetails(item.type, item.id);
       }}
     >
       {selectionMode && (
@@ -107,7 +101,7 @@ const LibraryListRow = memo(function LibraryListRow({
           <Check className='h-3 w-3' strokeWidth={3} />
         </span>
       )}
-      <PosterThumb poster={item.poster} title={item.title} />
+      <PosterThumb poster={item.poster} title={item.title} mediaType={item.type} />
 
       <div className='flex-1 min-w-0'>
         <p
@@ -145,11 +139,12 @@ export function HistoryListView({ items }: { items: WatchProgress[] }) {
 }
 
 const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgress }) {
-  const navigate = useNavigate();
   const prefetchDetails = usePrefetchDetails(item.id, item.type_);
   const progressPct = getWatchProgressPercent(item.position, item.duration);
-  const { season, episode } = watchProgressCoordinates(item);
-  const seasonEpisodeLabel = formatSeasonEpisode(season, episode);
+  const seasonEpisodeLabel = formatSeasonEpisode(
+    item.absolute_season ?? undefined,
+    item.absolute_episode ?? undefined,
+  );
   const watchedAgo =
     item.last_watched > 0
       ? formatDistanceToNow(new Date(item.last_watched), { addSuffix: true })
@@ -170,12 +165,17 @@ const HistoryListRow = memo(function HistoryListRow({ item }: { item: WatchProgr
       <button
         type='button'
         aria-label={`Open details for ${item.title}`}
-        onClick={() => navigateToDetails(navigate, item.type_, item.id)}
+        onClick={() => navigateToDetails(item.type_, item.id)}
         onPointerEnter={prefetchDetails}
         onFocus={prefetchDetails}
         className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
       >
-        <PosterThumb poster={item.poster} title={item.title} progressPct={progressPct} />
+        <PosterThumb
+          poster={item.poster}
+          title={item.title}
+          mediaType={item.type_}
+          progressPct={progressPct}
+        />
         <div className='flex-1 min-w-0'>
           <p
             dir='auto'

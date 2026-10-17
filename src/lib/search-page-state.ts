@@ -1,5 +1,6 @@
 import { foldAsciiCase } from '@/lib/api-cache';
 import type { BrowseGenres } from '@/lib/api';
+import { nonBlank } from '@/lib/utils';
 
 // `all` is a frontend-only facet: it browses the movie and series catalogs in
 // parallel and lets the backend's untyped text search fan out to both, so it
@@ -27,11 +28,6 @@ function resolveSearchUrlFeed(value: string | null): SearchFeed {
   return value === 'featured' || value === 'new' ? value : 'popular';
 }
 
-function resolveSearchUrlGenre(value: string | null): string | undefined {
-  const trimmed = value?.trim();
-  return trimmed ? trimmed : undefined;
-}
-
 /** ASCII-folded genre equality — the single comparison the menu checkmark,
     the URL toggle-off, and the deep-link dedupe share so casing can't drift
     (mirrors the backend's ASCII-folding match). */
@@ -57,7 +53,7 @@ export function readSearchFacets(params: URLSearchParams): SearchFacets {
     query: params.get('q') ?? '',
     type: resolveSearchUrlType(params.get('type')),
     feed: resolveSearchUrlFeed(params.get('feed')),
-    genre: resolveSearchUrlGenre(params.get('genre')),
+    genre: nonBlank(params.get('genre')),
   };
 }
 

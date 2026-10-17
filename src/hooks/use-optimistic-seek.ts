@@ -23,6 +23,7 @@ interface UseOptimisticSeekArgs {
   durationRef: RefObject<number>;
   /** Stream-scoped reset — a swap abandons in-flight seeks, so pending targets must not swallow new-stream ticks. */
   resetKey?: string;
+  onUserSeek: () => void;
   triggerOsd: (action: PlayerOsdAction) => void;
 }
 
@@ -30,6 +31,7 @@ export function useOptimisticSeek({
   clock,
   durationRef,
   resetKey,
+  onUserSeek,
   triggerOsd,
 }: UseOptimisticSeekArgs) {
   const pendingSeekTargetRef = useRef<number | null>(null);
@@ -100,7 +102,9 @@ export function useOptimisticSeek({
       targetTime: number,
       command: (boundedTarget: number) => Promise<void>,
       osd: (boundedTarget: number) => PlayerOsdAction,
+      source: 'user' | 'automatic' = 'user',
     ) => {
+      if (source !== 'automatic') onUserSeek();
       const previousTime = currentTimeRef.current;
       const boundedTarget = primeOptimisticSeek(targetTime);
       const generation = seekGenerationRef.current;
@@ -122,17 +126,18 @@ export function useOptimisticSeek({
         triggerOsd(osd(boundedTarget));
       }
     },
-    [clearOptimisticSeek, clock, currentTimeRef, primeOptimisticSeek, triggerOsd],
+    [clearOptimisticSeek, clock, currentTimeRef, onUserSeek, primeOptimisticSeek, triggerOsd],
   );
 
   const seek = useCallback(
-    (seconds: number) => {
+    (seconds: number, source: 'user' | 'automatic' = 'user') => {
       seekStreakRef.current = null;
       return runSeek(
         seconds,
         seekAbsoluteSeconds,
         // Absolute jumps (percent keys, bar release, skips) had no feedback — show the landing point.
         (boundedTarget) => ({ kind: 'seek', target: boundedTarget }),
+        source,
       );
     },
     [runSeek],

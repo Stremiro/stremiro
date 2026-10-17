@@ -11,10 +11,25 @@ import {
   syncPlayerPip,
   waitForViewportTransition,
 } from '@/lib/player-window';
-import { prefersReducedMotion, sleep } from '@/lib/utils';
+import { prefersReducedMotion, sleep, withTimeout } from '@/lib/utils';
 
 const FULLSCREEN_VERIFY_ATTEMPTS = 12;
 const FULLSCREEN_VERIFY_DELAY_MS = 50;
+// Paired with the curtain's duration-[90ms] in player.tsx.
+const VIEWPORT_CURTAIN_FADE_IN_MS = 90;
+const VIEWPORT_SETTLE_TIMEOUT_MS = 100;
+
+function nextFrames(count: number): Promise<void> {
+  return new Promise((resolve) => {
+    let remaining = count;
+    const nextFrame = () => {
+      remaining -= 1;
+      if (remaining > 0) requestAnimationFrame(nextFrame);
+      else resolve();
+    };
+    requestAnimationFrame(nextFrame);
+  });
+}
 
 // Module-level so fullscreen state survives episode remounts.
 let desktopFullscreen = false;
@@ -61,6 +76,7 @@ export function usePlayerViewportMode(
   const isPip = useSyncExternalStore(subscribePlayerPip, isPlayerPip);
   const [isViewportTransitioning, setIsViewportTransitioning] = useState(false);
   const transitionInFlightRef = useRef(false);
+  const pipReturnRef = useRef<Promise<void> | null>(null);
   const preserveViewportOnUnmountRef = useRef(false);
   const viewportCleanupHandledRef = useRef(false);
   const expandedRef = useRef(expanded);
@@ -117,86 +133,123 @@ export function usePlayerViewportMode(
     return cleanupViewportOnUnmount;
   }, [cleanupViewportOnUnmount]);
 
+  const withViewportMask = useCallback(async (operation: () => Promise<void>) => {
+    const animate = !prefersReducedMotion();
+    if (animate) {
+      setIsViewportTransitioning(true);
+      await sleep(VIEWPORT_CURTAIN_FADE_IN_MS);
+    }
+    try {
+      await operation();
+    } finally {
+      try {
+        if (animate) await withTimeout(nextFrames(2), VIEWPORT_SETTLE_TIMEOUT_MS, () => undefined);
+      } finally {
+        if (!viewportCleanupHandledRef.current) setIsViewportTransitioning(false);
+      }
+    }
+  }, []);
+
   const toggleFullscreen = useCallback(async () => {
-    if (transitionInFlightRef.current) return;
+    if (transitionInFlightRef.current || pipReturnRef.current) return;
     transitionInFlightRef.current = true;
     try {
       await enqueueViewportTransition(async () => {
         if (viewportCleanupHandledRef.current) return;
         ++syncGenerationRef.current;
-        const animate = !prefersReducedMotion();
-        if (animate) {
-          setIsViewportTransitioning(true);
-          await sleep(100);
-        }
-        try {
-          if (isPlayerPip()) await setPlayerPip(false);
-          const nativeFullscreen = appWindow ? await appWindow.isFullscreen() : false;
-          if (!expandedRef.current || nativeFullscreen || document.fullscreenElement) {
-            await exitFullscreenIfNeeded();
-          } else {
-            preserveViewportOnUnmountRef.current = false;
-            await onBeforeEnterFullscreen?.();
-            setIsFullscreen(true);
-            if (appWindow) {
-              restoreMaximized ||= await appWindow.isMaximized();
-              try {
-                if (restoreMaximized) await appWindow.unmaximize();
-                // Native fullscreen drops the Windows frame so video covers the taskbar.
-                await appWindow.setFullscreen(true);
-                await waitForFullscreenState(appWindow, true);
-                desktopFullscreen = true;
-              } catch (error) {
-                await exitFullscreenIfNeeded();
-                throw error;
-              }
-            } else {
-              await document.documentElement.requestFullscreen();
-            }
-          }
-        } catch (error) {
-          toast.error('Could not change fullscreen. Please try again.');
-          throw error;
-        } finally {
+        await withViewportMask(async () => {
           try {
-            await syncFullscreenState(true);
-            if (animate) await sleep(60);
+            if (isPlayerPip()) await setPlayerPip(false);
+            const nativeFullscreen = appWindow ? await appWindow.isFullscreen() : false;
+            if (!expandedRef.current || nativeFullscreen || document.fullscreenElement) {
+              await exitFullscreenIfNeeded();
+            } else {
+              preserveViewportOnUnmountRef.current = false;
+              await onBeforeEnterFullscreen?.();
+              setIsFullscreen(true);
+              if (appWindow) {
+                restoreMaximized ||= await appWindow.isMaximized();
+                try {
+                  if (restoreMaximized) await appWindow.unmaximize();
+                  // Native fullscreen drops the Windows frame so video covers the taskbar.
+                  await appWindow.setFullscreen(true);
+                  await waitForFullscreenState(appWindow, true);
+                  desktopFullscreen = true;
+                } catch (error) {
+                  await exitFullscreenIfNeeded();
+                  throw error;
+                }
+              } else {
+                await document.documentElement.requestFullscreen();
+              }
+            }
+          } catch (error) {
+            toast.error('Could not change fullscreen. Please try again.');
+            throw error;
           } finally {
-            if (!viewportCleanupHandledRef.current) setIsViewportTransitioning(false);
+            await syncFullscreenState(true);
           }
-        }
+        });
       });
     } finally {
       transitionInFlightRef.current = false;
     }
-  }, [appWindow, exitFullscreenIfNeeded, onBeforeEnterFullscreen, syncFullscreenState]);
+  }, [
+    appWindow,
+    exitFullscreenIfNeeded,
+    onBeforeEnterFullscreen,
+    syncFullscreenState,
+    withViewportMask,
+  ]);
 
   const togglePip = useCallback(async () => {
-    if (!appWindow || transitionInFlightRef.current) return;
+    if (!appWindow || transitionInFlightRef.current || pipReturnRef.current) return;
     transitionInFlightRef.current = true;
     try {
       await enqueueViewportTransition(async () => {
         if (viewportCleanupHandledRef.current || !expandedRef.current) return;
-        try {
-          if (isPlayerPip()) {
-            await setPlayerPip(false);
-          } else {
-            await onBeforeEnterFullscreen?.();
-            await exitFullscreenIfNeeded();
-            await syncFullscreenState(true);
-            await setPlayerPip(true);
+        await withViewportMask(async () => {
+          try {
+            if (isPlayerPip()) {
+              await setPlayerPip(false);
+            } else {
+              await onBeforeEnterFullscreen?.();
+              await exitFullscreenIfNeeded();
+              await syncFullscreenState(true);
+              await setPlayerPip(true);
+            }
+          } catch (error) {
+            // Retrying return also recovers a partially applied native entry.
+            await setPlayerPip(false).catch(() => undefined);
+            toast.error('Could not change picture in picture. Please try again.');
+            throw error;
           }
-        } catch (error) {
-          // Retrying return also recovers a partially applied native entry.
-          await setPlayerPip(false).catch(() => undefined);
-          toast.error('Could not change picture in picture. Please try again.');
-          throw error;
-        }
+        });
       });
     } finally {
       transitionInFlightRef.current = false;
     }
-  }, [appWindow, exitFullscreenIfNeeded, onBeforeEnterFullscreen, syncFullscreenState]);
+  }, [
+    appWindow,
+    exitFullscreenIfNeeded,
+    onBeforeEnterFullscreen,
+    syncFullscreenState,
+    withViewportMask,
+  ]);
+
+  const returnFromPip = useCallback(() => {
+    if (!appWindow) return Promise.resolve();
+    if (pipReturnRef.current) return pipReturnRef.current;
+    // Panel restoration must wait for PiP entry rather than being dropped by its guard.
+    const pending = enqueueViewportTransition(async () => {
+      if (viewportCleanupHandledRef.current) return;
+      await withViewportMask(() => returnFromPlayerPip(true));
+    }).finally(() => {
+      pipReturnRef.current = null;
+    });
+    pipReturnRef.current = pending;
+    return pending;
+  }, [appWindow, withViewportMask]);
 
   useEffect(() => {
     const sync = () => {
@@ -246,7 +299,7 @@ export function usePlayerViewportMode(
     isViewportTransitioning,
     canPip: isDesktopRuntime,
     togglePip,
-    returnFromPip: returnFromPlayerPip,
+    returnFromPip,
     prepareForInternalPlayerNavigation,
     toggleFullscreen,
   };

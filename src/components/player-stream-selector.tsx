@@ -8,6 +8,7 @@ interface PlayerStreamSelectorProps {
   clock: PlaybackClock;
   open: boolean;
   onClose: () => void;
+  onClosed: () => void;
   onBeforePlayerNavigation: () => void;
   target: StreamSelectorTarget;
   /** True when the picker targets the episode currently playing. */
@@ -25,6 +26,7 @@ export const PlayerStreamSelector = memo(function PlayerStreamSelector({
   clock,
   open,
   onClose,
+  onClosed,
   onBeforePlayerNavigation,
   target,
   isCurrentEpisode,
@@ -43,6 +45,7 @@ export const PlayerStreamSelector = memo(function PlayerStreamSelector({
     <StreamSelector
       open={open}
       onClose={onClose}
+      onClosed={onClosed}
       onBeforePlayerNavigation={onBeforePlayerNavigation}
       target={target}
       getStartTime={getStartTime}

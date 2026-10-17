@@ -1,10 +1,10 @@
 import type { RefObject } from 'react';
 import { api, type BestResolvedStream, type PlaybackStreamOutcome } from '@/lib/api';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
-import { buildStreamRankingOptions, buildStreamRankingTarget } from '@/lib/stream-ranking';
+import { buildStreamRankingOptions } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
-/** All the coordinates a resolve/recover/prime needs — ranking collapses `absolute ?? source`, commands route on source, `streamLookupId` defaults to `mediaId`. */
+/** Resolve/recover/prime coordinates: commands route on source, ranking overrides are canonical, `streamLookupId` defaults to `mediaId`. */
 export interface PlayerStreamRequest {
   mediaId: string;
   mediaType: PlayerRouteMediaType;
@@ -62,19 +62,14 @@ interface FailedStreamIdentity extends PreferredStreamIdentity {
   streamUrl?: string;
 }
 
-// One ranking target for resolve + rank — source coords must ride along or the `absolute ?? source` collapse mismatches the selector key.
 export function playerStreamRankingOptions(request: PlayerStreamRequest) {
-  return buildStreamRankingOptions(
-    buildStreamRankingTarget({
-      mediaId: request.mediaId,
-      mediaType: request.mediaType,
-      season: request.streamSeason,
-      episode: request.streamEpisode,
-      absoluteSeason: request.absoluteSeason,
-      absoluteEpisode: request.absoluteEpisode,
-      title: request.title,
-    }),
-  );
+  return buildStreamRankingOptions({
+    mediaId: request.mediaId,
+    mediaType: request.mediaType,
+    season: request.absoluteSeason,
+    episode: request.absoluteEpisode,
+    title: request.title,
+  });
 }
 
 export function resolvePlayerStream(
@@ -102,14 +97,16 @@ export function resolvePlayerStream(
 
 export function recoverPlayerStream(
   request: PlayerStreamRequest & {
+    requestId: string;
     outcome: Exclude<PlaybackStreamOutcome, 'verified'>;
     failed?: FailedStreamIdentity;
     excludedStreamKeys?: string[];
   },
 ): Promise<BestResolvedStream | null> {
-  const { outcome, failed, excludedStreamKeys, ...coords } = request;
+  const { requestId, outcome, failed, excludedStreamKeys, ...coords } = request;
 
   return api.recoverPlaybackStream({
+    requestId,
     mediaType: coords.mediaType,
     mediaId: coords.mediaId,
     streamLookupId: coords.streamLookupId || coords.mediaId,

@@ -20,39 +20,42 @@ export function usePlaybackStreamHealth({
   absoluteEpisode,
   stream,
 }: UsePlaybackStreamHealthArgs) {
-  const { activeStreamUrl, activeStreamSourceIdRef, activeStreamFamilyRef } = stream;
+  const { activeStreamUrl, activeStreamKey, activeStreamSourceIdRef, activeStreamFamilyRef } =
+    stream;
   const queryClient = useQueryClient();
-  const lastVerifiedUrlRef = useRef<string | null>(null);
+  const lastVerifiedRequestRef = useRef<string | null>(null);
   const reportedFailureKeysRef = useRef<Set<string>>(new Set());
   // A failure can dispatch after failover to the next stream — reading the
-  // identity refs live would pin the failed URL onto the new source. Bind
-  // each active URL to its identity when the session adopts it.
-  const identityByUrlRef = useRef(new Map<string, { sourceId?: string; streamFamily?: string }>());
+  // identity refs live would pin the failed request onto the new source. Bind
+  // each active URL + stream key to its identity when the session adopts it.
+  const identityByRequestRef = useRef(
+    new Map<string, { sourceId?: string; streamFamily?: string }>(),
+  );
 
   useEffect(() => {
-    lastVerifiedUrlRef.current = null;
+    lastVerifiedRequestRef.current = null;
     reportedFailureKeysRef.current.clear();
-    identityByUrlRef.current.clear();
+    identityByRequestRef.current.clear();
   }, [mediaId, mediaType, absoluteSeason, absoluteEpisode]);
 
   useEffect(() => {
-    lastVerifiedUrlRef.current = null;
+    lastVerifiedRequestRef.current = null;
     reportedFailureKeysRef.current.clear();
 
     const url = activeStreamUrl?.trim();
     if (url) {
-      identityByUrlRef.current.set(url, {
+      identityByRequestRef.current.set(`${url}\n${activeStreamKey ?? ''}`, {
         sourceId: activeStreamSourceIdRef.current ?? undefined,
         streamFamily: activeStreamFamilyRef.current ?? undefined,
       });
     }
-  }, [activeStreamUrl, activeStreamSourceIdRef, activeStreamFamilyRef]);
+  }, [activeStreamUrl, activeStreamKey, activeStreamSourceIdRef, activeStreamFamilyRef]);
 
   const reportOutcome = useCallback(
-    async (outcome: PlaybackStreamOutcome, streamUrl?: string) => {
+    async (outcome: PlaybackStreamOutcome, streamUrl: string, streamKey?: string) => {
       const normalizedMediaId = nonBlank(mediaId);
       const normalizedMediaType = nonBlank(mediaType);
-      const normalizedStreamUrl = nonBlank(streamUrl) || nonBlank(activeStreamUrl);
+      const normalizedStreamUrl = nonBlank(streamUrl);
 
       if (!normalizedMediaId || !normalizedMediaType || isLocalMediaId(normalizedMediaId)) {
         return;
@@ -61,15 +64,18 @@ export function usePlaybackStreamHealth({
         return;
       }
 
-      const identity = identityByUrlRef.current.get(normalizedStreamUrl);
+      const requestKey = `${normalizedStreamUrl}\n${streamKey ?? ''}`;
+      const identity = identityByRequestRef.current.get(requestKey);
+      if (!identity) return;
+
       await api.reportPlaybackStreamOutcome({
         id: normalizedMediaId,
         type: normalizedMediaType,
         season: absoluteSeason,
         episode: absoluteEpisode,
         // Instance id is the health key of record.
-        sourceId: identity?.sourceId ?? activeStreamSourceIdRef.current,
-        streamFamily: identity?.streamFamily ?? activeStreamFamilyRef.current,
+        sourceId: identity.sourceId,
+        streamFamily: identity.streamFamily,
         outcome,
       });
       // A failure just re-ranked the backend's stream ordering; the selector
@@ -78,49 +84,49 @@ export function usePlaybackStreamHealth({
         void invalidateStreamQueries(queryClient);
       }
     },
-    [
-      activeStreamFamilyRef,
-      activeStreamSourceIdRef,
-      absoluteEpisode,
-      absoluteSeason,
-      activeStreamUrl,
-      mediaId,
-      mediaType,
-      queryClient,
-    ],
+    [absoluteEpisode, absoluteSeason, mediaId, mediaType, queryClient],
   );
 
   const reportVerified = useCallback(() => {
     const normalizedStreamUrl = activeStreamUrl?.trim();
-    if (!normalizedStreamUrl || lastVerifiedUrlRef.current === normalizedStreamUrl) {
+    if (!normalizedStreamUrl) return;
+
+    const requestKey = `${normalizedStreamUrl}\n${activeStreamKey ?? ''}`;
+    if (lastVerifiedRequestRef.current === requestKey) {
       return;
     }
 
-    lastVerifiedUrlRef.current = normalizedStreamUrl;
+    lastVerifiedRequestRef.current = requestKey;
     reportedFailureKeysRef.current.clear();
-    void reportOutcome('verified', normalizedStreamUrl).catch(() => {
+    void reportOutcome('verified', normalizedStreamUrl, activeStreamKey).catch(() => {
       // Best-effort telemetry only.
     });
-  }, [activeStreamUrl, reportOutcome]);
+  }, [activeStreamUrl, activeStreamKey, reportOutcome]);
 
   const reportFailure = useCallback(
-    (outcome: Exclude<PlaybackStreamOutcome, 'verified'>, streamUrl?: string) => {
+    (
+      outcome: Exclude<PlaybackStreamOutcome, 'verified'>,
+      streamUrl?: string,
+      streamKey?: string,
+    ) => {
       const normalizedStreamUrl = nonBlank(streamUrl) || nonBlank(activeStreamUrl);
       if (!normalizedStreamUrl) {
         return;
       }
 
-      const failureKey = `${normalizedStreamUrl}|${outcome}`;
+      const failedStreamKey = streamUrl === undefined ? activeStreamKey : streamKey;
+      const requestKey = `${normalizedStreamUrl}\n${failedStreamKey ?? ''}`;
+      const failureKey = `${requestKey}|${outcome}`;
       if (reportedFailureKeysRef.current.has(failureKey)) {
         return;
       }
 
       reportedFailureKeysRef.current.add(failureKey);
-      void reportOutcome(outcome, normalizedStreamUrl).catch(() => {
+      void reportOutcome(outcome, normalizedStreamUrl, failedStreamKey).catch(() => {
         // Best-effort telemetry only.
       });
     },
-    [activeStreamUrl, reportOutcome],
+    [activeStreamUrl, activeStreamKey, reportOutcome],
   );
 
   return {

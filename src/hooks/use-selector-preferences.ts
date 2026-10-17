@@ -4,14 +4,15 @@ import {
   useCallback,
   useEffect,
   useEffectEvent,
-  useMemo,
   useRef,
   useState,
 } from 'react';
 import { useDebounce } from '@/hooks/use-debounce';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import {
   api,
   type StreamSelectorPreferences,
+  type StreamSelectorPreferencesPatch,
   type StreamSelectorPreferencesState,
 } from '@/lib/api';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
@@ -57,19 +58,26 @@ export function useSelectorPreferencesState({
   selectorSessionKey,
 }: UseSelectorPreferencesStateArgs) {
   const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
   const openSessionKeyRef = useRef<string | null>(null);
   const hasHydratedFiltersRef = useRef(false);
   const lastRequestedPreferenceKeyRef = useRef<string | null>(null);
-  // This instance's last hydrated/adopted snapshot — merge base for whole-snapshot saves shared across selector instances.
+  // This instance's last hydrated/adopted snapshot is the dequeue-time diff base.
   const persistedBaselineRef = useRef<StreamSelectorPreferences | null>(null);
 
   const showBatchFilter = isSeriesLike && season !== undefined && episode !== undefined;
-  const defaultFilters = useMemo<StreamSelectorPreferences>(() => {
-    return {
-      ...DEFAULT_FILTERS,
-      batch: showBatchFilter ? 'episodes' : 'all',
-    };
-  }, [showBatchFilter]);
+  const streamSelectorPreferencesQuery = useQuery({
+    queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
+    queryFn: api.getStreamSelectorPreferences,
+    enabled: open,
+    staleTime: Infinity,
+    gcTime: Infinity,
+  });
+  const defaultFilters = streamSelectorPreferencesQuery.data
+    ? showBatchFilter
+      ? streamSelectorPreferencesQuery.data.episodeDefaultPreferences
+      : streamSelectorPreferencesQuery.data.defaultPreferences
+    : DEFAULT_FILTERS;
 
   const [filters, setFiltersState] = useState<StreamSelectorPreferences>(defaultFilters);
   const latestFiltersRef = useRef(filters);
@@ -96,14 +104,6 @@ export function useSelectorPreferencesState({
     latestFiltersRef.current = filters;
   }, [filters]);
 
-  const streamSelectorPreferencesQuery = useQuery({
-    queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
-    queryFn: api.getStreamSelectorPreferences,
-    enabled: open,
-    staleTime: Infinity,
-    gcTime: Infinity,
-  });
-
   // Rust sanitizes on read/save so the snapshot is used as-is; the stored batch survives
   // movie sessions (no batch control) so it can't overwrite a series `episodes` pref.
   const normalizedPersistedFilters =
@@ -120,24 +120,15 @@ export function useSelectorPreferencesState({
 
       lastRequestedPreferenceKeyRef.current = nextPreferenceKey;
       const operation = streamSelectorPreferencesSaveQueue.then(async () => {
-        // The command replaces the whole shared snapshot — merge this instance's
-        // changed fields over the freshest persisted one so a parallel edit isn't clobbered.
-        const freshest = queryClient.getQueryData<StreamSelectorPreferencesState>(
-          STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
-        )?.preferences;
-        // Hydration and lifecycle flushes adopt the stored baseline before composing a write.
-        const baseline = persistedBaselineRef.current ?? freshest;
-        const changedFields: Partial<StreamSelectorPreferences> = {};
-        if (freshest && baseline) {
-          for (const field of STREAM_SELECTOR_PREFERENCE_FIELDS) {
-            if (nextFilters[field] !== baseline[field]) {
-              changedFields[field] = nextFilters[field] as never;
-            }
+        const baseline = persistedBaselineRef.current;
+        const patch: StreamSelectorPreferencesPatch = { episodeContext: showBatchFilter };
+        for (const field of STREAM_SELECTOR_PREFERENCE_FIELDS) {
+          if (!baseline || nextFilters[field] !== baseline[field]) {
+            patch[field] = nextFilters[field] as never;
           }
         }
-        const merged: StreamSelectorPreferences =
-          freshest && baseline ? { ...freshest, ...changedFields } : nextFilters;
-        const savedPreferences = await api.saveStreamSelectorPreferences(merged);
+        const saved = await api.patchStreamSelectorPreferences(patch);
+        const savedPreferences = saved.preferences;
         persistedBaselineRef.current = savedPreferences;
         if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
           lastRequestedPreferenceKeyRef.current =
@@ -145,6 +136,7 @@ export function useSelectorPreferencesState({
         }
         // The server canonicalizes — adopt its value unless the user already moved past this request.
         if (
+          mountedRef.current &&
           areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters) &&
           !areStreamSelectorPreferencesEqual(savedPreferences, nextFilters)
         ) {
@@ -152,10 +144,7 @@ export function useSelectorPreferencesState({
         }
         queryClient.setQueryData<StreamSelectorPreferencesState>(
           STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
-          {
-            preferences: savedPreferences,
-            initialized: true,
-          },
+          saved,
         );
       });
       lastPersistOperationRef.current = operation;
@@ -182,7 +171,11 @@ export function useSelectorPreferencesState({
       });
       let nextFilters = latestFiltersRef.current;
       if (needsHydration) {
-        const storedFilters = stored.initialized ? stored.preferences : defaultFilters;
+        const storedFilters = stored.initialized
+          ? stored.preferences
+          : showBatchFilter
+            ? stored.episodeDefaultPreferences
+            : stored.defaultPreferences;
         nextFilters = { ...storedFilters };
         for (const field of editedFields) {
           nextFilters[field] = latestFiltersRef.current[field] as never;
@@ -199,7 +192,9 @@ export function useSelectorPreferencesState({
       if (!areStreamSelectorPreferencesEqual(nextFilters, latestFiltersRef.current)) {
         // Commit synchronously so a stale debounced value can't overwrite it.
         latestFiltersRef.current = nextFilters;
-        setFiltersState(nextFilters);
+        if (mountedRef.current) {
+          setFiltersState(nextFilters);
+        }
       }
       await persistStreamSelectorPreferences(latestFiltersRef.current);
     }

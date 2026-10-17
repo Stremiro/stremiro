@@ -1,9 +1,9 @@
 import type { TrackLanguageCandidate } from '@/lib/api';
-import { nonBlank } from '@/lib/utils';
 
 export interface Track {
   id: number;
   type: 'video' | 'audio' | 'sub';
+  displayLabel: string;
   lang?: string;
   title?: string;
   selected?: boolean;
@@ -33,6 +33,7 @@ export function toTrackLanguageCandidate(track: Track): TrackLanguageCandidate {
 function trackFingerprintFields(track: Track, includeSelected: boolean): Array<number | string> {
   const fields: Array<number | string> = [
     track.id,
+    track.displayLabel,
     normalizeLanguageToken(track.lang),
     track.title?.trim().toLowerCase() ?? '',
   ];
@@ -56,26 +57,22 @@ export function buildTrackAutoApplyFingerprint(preferredLanguage: string, tracks
   ]);
 }
 
-export function addonSubtitleTitleArg(subtitle: { id: string; label?: string }): string {
-  return nonBlank(subtitle.label) || subtitle.id;
-}
-
 /** Prefer mpv's external filename; fall back to the submitted title when unavailable. */
 export function isExternalSubtitleTrack(
   track: Track,
-  subtitle: { id: string; label?: string; url: string },
+  subtitle: { mpvTitle: string; url: string },
 ): boolean {
   return (
     track.type === 'sub' &&
     !!track.external &&
     (track.externalFilename === subtitle.url ||
-      (!track.externalFilename && track.title === addonSubtitleTitleArg(subtitle)))
+      (!track.externalFilename && track.title === subtitle.mpvTitle))
   );
 }
 
 export function findExternalSubtitleTrack(
   tracks: readonly Track[],
-  subtitle: { id: string; label?: string; url: string },
+  subtitle: { mpvTitle: string; url: string },
 ): Track | undefined {
   return tracks.find((track) => isExternalSubtitleTrack(track, subtitle));
 }
@@ -90,6 +87,7 @@ export function areTrackListsEqual(left: readonly Track[], right: readonly Track
     if (
       leftTrack.id !== rightTrack.id ||
       leftTrack.type !== rightTrack.type ||
+      leftTrack.displayLabel !== rightTrack.displayLabel ||
       leftTrack.lang !== rightTrack.lang ||
       leftTrack.title !== rightTrack.title ||
       !!leftTrack.selected !== !!rightTrack.selected ||
@@ -116,33 +114,4 @@ export function doesTrackSelectionMatch(
   }
 
   return tracks.some((track) => track.type === type && track.id === id && !!track.selected);
-}
-
-function formatTrackLabel(track: Track): string {
-  const lang = track.lang?.toUpperCase();
-  const title = track.title;
-  // Muxers write opaque titles ("Stereo 1") while mpv reports the language separately — lead with `lang` unless the title already says it.
-  const base =
-    title && lang
-      ? title.toLowerCase().includes(lang.toLowerCase())
-        ? title
-        : `${lang} · ${title}`
-      : title || lang || `Track ${track.id}`;
-  const flags = [track.forced ? 'Forced' : null, track.hearingImpaired ? 'SDH' : null].filter(
-    Boolean,
-  );
-  return flags.length > 0 ? `${base} · ${flags.join(' · ')}` : base;
-}
-
-export function buildTrackLabelMap(tracks: Track[]): Map<number, string> {
-  const labels = tracks.map(formatTrackLabel);
-  const counts = new Map<string, number>();
-  for (const label of labels) counts.set(label, (counts.get(label) ?? 0) + 1);
-
-  return new Map(
-    tracks.map((track, index) => {
-      const label = labels[index] ?? `Track ${track.id}`;
-      return [track.id, (counts.get(label) ?? 0) > 1 ? `${label} #${track.id}` : label] as const;
-    }),
-  );
 }

@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useRef, useState } from 'react';
+import { type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
 
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
@@ -20,8 +20,7 @@ interface UsePlayerAutoResolveOptions {
   routeRequestedStreamKey?: string;
   stream: PlayerStreamSession;
   setError: (value: string | null) => void;
-  setIsResolving: (value: boolean) => void;
-  setResolveStatus: (value: string) => void;
+  setResolveStatus: (value: string | null) => void;
   shouldWaitForResolvedLookupId: boolean;
   showStreamSelector: boolean;
   stopLoading: (makeTransparent?: boolean) => void;
@@ -45,7 +44,6 @@ export function usePlayerAutoResolve({
   routeRequestedStreamKey,
   routeSelectedStreamKey,
   setError,
-  setIsResolving,
   setResolveStatus,
   shouldWaitForResolvedLookupId,
   showStreamSelector,
@@ -58,6 +56,7 @@ export function usePlayerAutoResolve({
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
   // Ref, not state — `isResolving` as a dep made each attempt cancel itself (infinite resolve loop).
   const resolveInFlightRef = useRef(false);
+  const getTitle = useEffectEvent(() => title);
 
   useEffect(() => {
     if (!error) return;
@@ -84,9 +83,8 @@ export function usePlayerAutoResolve({
       !cancelled && attemptGen === autoResolveGenRef.current && mountedRef.current;
 
     const resolve = async () => {
-      setIsResolving(true);
+      setResolveStatus('');
       setError(null);
-      setResolveStatus('Selecting the best stream');
       const lookupId = streamLookupId || id;
       lastAutoResolveLookupIdRef.current = lookupId;
 
@@ -100,7 +98,7 @@ export function usePlayerAutoResolve({
             streamEpisode: resolvedStreamEpisode,
             absoluteSeason: resolvedAbsoluteSeason,
             absoluteEpisode: resolvedAbsoluteEpisode,
-            title,
+            title: getTitle(),
             preferred: {
               // Replay the clicked key verbatim; otherwise source/family hints soft-match
               // the prior stream (`uh:` keys rot). Hints fork the cache key — omitted when a replay key exists.
@@ -124,15 +122,14 @@ export function usePlayerAutoResolve({
         );
         if (isCurrent()) {
           applyResolvedStreamToSession(stream, result);
-          setIsResolving(false);
-          setResolveStatus('');
+          setResolveStatus(null);
           return;
         }
       } catch (err: unknown) {
         if (isCurrent()) {
           if (import.meta.env.DEV) console.warn('[player] auto-resolve failed');
           setError(err instanceof Error ? err.message : 'Failed to resolve stream automatically.');
-          setIsResolving(false);
+          setResolveStatus(null);
           stopLoading();
           return;
         }
@@ -143,8 +140,7 @@ export function usePlayerAutoResolve({
       }
       // Late winners/timeouts must not clobber a newer pick, but the newest attempt still releases `isResolving`.
       if (mountedRef.current && attemptGen === autoResolveGenRef.current) {
-        setIsResolving(false);
-        setResolveStatus('');
+        setResolveStatus(null);
       }
     };
 
@@ -163,7 +159,6 @@ export function usePlayerAutoResolve({
     resolvedAbsoluteSeason,
     resolvedAbsoluteEpisode,
     error,
-    title,
     shouldWaitForResolvedLookupId,
     showStreamSelector,
     streamLookupId,
@@ -174,7 +169,6 @@ export function usePlayerAutoResolve({
     autoResolveGenRef,
     mountedRef,
     setError,
-    setIsResolving,
     setResolveStatus,
   ]);
 }

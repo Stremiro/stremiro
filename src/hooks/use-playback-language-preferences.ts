@@ -36,9 +36,15 @@ function enqueueSave(
       queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
       exact: true,
     });
-    let savedPreferences: PlaybackLanguagePreferences;
     try {
-      savedPreferences = await task();
+      const savedPreferences = await task();
+      if (patch) pendingLanguagePatches.delete(patch);
+      const currentPreferences = { ...savedPreferences };
+      for (const pending of pendingLanguagePatches) {
+        Object.assign(currentPreferences, pending);
+      }
+      queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, currentPreferences);
+      return savedPreferences;
     } catch (error) {
       if (patch) pendingLanguagePatches.delete(patch);
       void queryClient.invalidateQueries({
@@ -46,15 +52,9 @@ function enqueueSave(
         exact: true,
       });
       throw error;
+    } finally {
+      await invalidatePlaybackLanguageQueries(queryClient);
     }
-    if (patch) pendingLanguagePatches.delete(patch);
-    const currentPreferences = { ...savedPreferences };
-    for (const pending of pendingLanguagePatches) {
-      Object.assign(currentPreferences, pending);
-    }
-    queryClient.setQueryData(PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, currentPreferences);
-    await invalidatePlaybackLanguageQueries(queryClient);
-    return savedPreferences;
   });
   saveQueue = queuedSave.catch(() => undefined);
   // The queue swallows so later saves serialize; the raw op is what the app barrier tracks.
@@ -94,11 +94,6 @@ export function usePlaybackLanguagePreferences({
     (preferenceKind: 'audio' | 'sub', language?: string) => {
       const field =
         preferenceKind === 'audio' ? 'preferredAudioLanguage' : 'preferredSubtitleLanguage';
-      const current = queryClient.getQueryData<PlaybackLanguagePreferences>(
-        PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
-      );
-      // The cache includes queued picks, not just the last native acknowledgement.
-      if (current && current[field] === language) return;
       return enqueueSave(
         queryClient,
         () => api.savePlaybackLanguagePreference(preferenceKind, language),

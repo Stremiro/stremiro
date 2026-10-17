@@ -5,7 +5,7 @@ import { Link } from 'react-router';
 import type { MediaItem } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
-import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
+import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
 
@@ -93,57 +93,38 @@ export function MediaRow({
     </div>
   ) : null;
 
-  const renderNotice = (notice: ReactNode) => (
-    <section className='py-4 relative'>
-      <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-1')}>
-        <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white mb-3'>{title}</h2>
-        {genreTabs}
-      </div>
-      <div
-        className={cn(
-          HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
-          'pt-4 flex flex-wrap items-center gap-3 text-[13px] text-zinc-400',
-        )}
-      >
-        {notice}
-      </div>
-    </section>
+  const retryBanner = (
+    <RetryBanner
+      className='w-full max-w-xl'
+      message={data.length > 0 ? "Couldn't refresh this row." : "Couldn't load this row."}
+      isRetrying={isFetching}
+      onRetry={() => void refetch()}
+    />
   );
 
+  let notice: ReactNode;
   if (!enabled && data.length === 0) {
-    return genreFilter ? renderNotice(<p>Reconnect to browse this catalog.</p>) : null;
-  }
-
-  // A failed refetch can still hold placeholder data — keep the stale rail + genre tabs; only a failure with nothing to show gets retry.
-  if ((error || (isFetched && isLoading)) && data.length === 0) {
-    return renderNotice(
-      <RetryBanner
-        className='w-full max-w-xl'
-        message="Couldn't load this row."
-        isRetrying={isFetching}
-        onRetry={() => void refetch()}
-      />,
-    );
-  }
-
-  // An empty row is dead space — hide it. Genre-filtered rows keep their tabs (the way back) with a compact hint.
-  if (!isLoading && data.length === 0) {
     if (!genreFilter) return null;
-    return renderNotice(
+    notice = <p>Reconnect to browse this catalog.</p>;
+  } else if ((error || (isFetched && isLoading)) && data.length === 0) {
+    notice = retryBanner;
+  } else if (!isLoading && data.length === 0) {
+    if (!genreFilter) return null;
+    notice = (
       <p>
         {genreFilter.active === genreFilter.allOption
           ? 'Nothing to show right now.'
           : `Nothing in ${genreFilter.active} right now — try another genre.`}
-      </p>,
+      </p>
     );
+  } else if (!isLoading && data.length < minItems) {
+    return null;
   }
-
-  if (!isLoading && data.length < minItems) return null;
 
   return (
     <HorizontalMediaRail
       title={
-        titleHref ? (
+        titleHref && !notice ? (
           <Link
             to={titleHref}
             className='group/rail-title inline-flex items-center gap-0.5 rounded-xs transition-colors hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--accent-nav)/60'
@@ -160,9 +141,15 @@ export function MediaRow({
       items={data}
       isLoading={isLoading}
       isPlaceholderData={isPlaceholderData}
+      notice={notice}
       getItemKey={mediaCardRailKey}
       renderItem={renderMediaCardRailItem}
-      headerContent={genreTabs}
+      headerContent={
+        <>
+          {genreTabs}
+          {error && !notice && <div className='mt-3'>{retryBanner}</div>}
+        </>
+      }
       viewportClassName={cn('transition-opacity duration-200', isPlaceholderData && 'opacity-60')}
     />
   );

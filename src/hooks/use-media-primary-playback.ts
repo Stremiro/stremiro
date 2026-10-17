@@ -7,7 +7,7 @@ import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { type HistoryPlaybackPlanReason, type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
-import { openHistoryPlaybackPlan, watchProgressCoordinates } from '@/lib/history-playback';
+import { openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
   buildDetailsRoute,
@@ -178,7 +178,7 @@ export function useMediaPrimaryPlayback({
       }
 
       setIsResolvingPrimaryAction(true);
-      const toastId = toast.loading('Finding best stream…', { description: item.title });
+      const toastId = toast.loading('Finding the best stream…', { description: item.title });
 
       try {
         // Same resolve as the player path; ranking context lets title affinity and language prefs score.
@@ -233,19 +233,18 @@ export function useMediaPrimaryPlayback({
     surface,
   ]);
 
-  const { season: resumeSeason, episode: resumeEpisode } = watchProgressCoordinates(historyEntry);
   const resumeDetail =
     formatSeasonEpisode(
       activeSession
         ? activeSession.season === undefined
           ? undefined
           : Number(activeSession.season)
-        : resumeSeason,
+        : (historyEntry?.absolute_season ?? undefined),
       activeSession
         ? activeSession.episode === undefined
           ? undefined
           : Number(activeSession.episode)
-        : resumeEpisode,
+        : (historyEntry?.absolute_episode ?? undefined),
     ) || undefined;
   const primaryActionLabel = getPrimaryPlaybackLabel(
     surface,

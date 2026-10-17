@@ -1,9 +1,10 @@
+import { useQueryClient } from '@tanstack/react-query';
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type WatchProgress } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
-import type { PlaybackClock } from '@/lib/player-clock';
+import { TITLE_WATCH_PROGRESS_QUERY_KEY } from '@/lib/query-invalidation';
 import { isLocalMediaId } from '@/lib/utils';
 
 interface UsePlaybackProgressPersistenceArgs {
@@ -17,7 +18,7 @@ interface UsePlaybackProgressPersistenceArgs {
   streamSeason?: number;
   streamEpisode?: number;
   isPlaying: boolean;
-  clock: PlaybackClock;
+  observedPositionRef: RefObject<number | null>;
   durationRef: RefObject<number>;
   stream: PlayerStreamSession;
 }
@@ -33,10 +34,11 @@ export function usePlaybackProgressPersistence({
   streamSeason,
   streamEpisode,
   isPlaying,
-  clock,
+  observedPositionRef,
   durationRef,
   stream,
 }: UsePlaybackProgressPersistenceArgs) {
+  const queryClient = useQueryClient();
   const {
     activeStreamSourceIdRef,
     activeStreamSourceNameRef,
@@ -48,14 +50,10 @@ export function usePlaybackProgressPersistence({
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveRef = useRef<{ fingerprint: string; operation: Promise<void> } | null>(null);
   const lastSavedFingerprintRef = useRef<string | null>(null);
-  const currentTimeRef = clock.ref;
-
-  useEffect(() => {
-    pendingSaveRef.current = null;
-  }, [stream.activeStreamUrl]);
 
   const buildWatchProgressPayload = useCallback((): WatchProgress | null => {
-    if (!mediaType || !mediaId || isLocalMediaId(mediaId)) return null;
+    const position = observedPositionRef.current;
+    if (position === null || !mediaType || !mediaId || isLocalMediaId(mediaId)) return null;
 
     return {
       id: mediaId,
@@ -66,7 +64,7 @@ export function usePlaybackProgressPersistence({
       absolute_episode: absoluteEpisode,
       stream_season: streamSeason,
       stream_episode: streamEpisode,
-      position: currentTimeRef.current,
+      position,
       duration: durationRef.current,
       last_watched: Date.now(),
       title,
@@ -86,7 +84,7 @@ export function usePlaybackProgressPersistence({
     absoluteEpisode,
     streamSeason,
     streamEpisode,
-    currentTimeRef,
+    observedPositionRef,
     durationRef,
     title,
     poster,
@@ -124,6 +122,17 @@ export function usePlaybackProgressPersistence({
       const operation = saveQueueRef.current.then(async () => {
         if (getWatchProgressEpoch() !== enqueuedEpoch) return;
         await api.saveWatchProgress(payload);
+        // Cancel pre-save reads; only first-load observers need an immediate restart.
+        await queryClient.cancelQueries({ queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY });
+        await queryClient.invalidateQueries({
+          queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY,
+          refetchType: 'none',
+        });
+        void queryClient.refetchQueries({
+          queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY,
+          type: 'active',
+          predicate: (query) => query.state.data === undefined,
+        });
         lastSavedFingerprintRef.current = fingerprint;
       });
       pendingSaveRef.current = { fingerprint, operation };
@@ -137,7 +146,7 @@ export function usePlaybackProgressPersistence({
       // Global tracking covers the op after player unmount — the hook flusher only runs while registered.
       return trackPendingAppWrite(operation);
     },
-    [buildWatchProgressPayload, stream.activeStreamUrl],
+    [buildWatchProgressPayload, queryClient, stream.activeStreamUrl],
   );
 
   // Never rejects, so every fire-and-forget trigger keeps its old contract.
