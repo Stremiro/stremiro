@@ -1,6 +1,6 @@
-import { useQuery } from '@tanstack/react-query';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { WifiOff } from 'lucide-react';
-import { type ReactNode, useMemo, useState } from 'react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { Hero } from '@/components/hero';
 import { HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from '@/components/horizontal-media-rail';
 import { MediaRow } from '@/components/media-row';
@@ -36,6 +36,19 @@ function fetchCatalogItems(options: {
     .then((page) => page.items);
 }
 
+export const homeTrendingMoviesQueryOptions = {
+  queryKey: trendingRowQueryKey('movies', ALL_GENRES),
+  queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
+  staleTime: MEDIA_ROW_STALE_TIME_MS,
+};
+
+const recentWatchSeedQueryOptions = {
+  queryKey: RECENT_WATCH_SEED_QUERY_KEY,
+  queryFn: api.getRecentWatchSeed,
+  staleTime: WATCH_HISTORY_STALE_TIME_MS,
+  retry: false,
+};
+
 function HomeRowPlaceholder() {
   return <div aria-hidden='true' className='h-[450px] md:h-[480px]' />;
 }
@@ -53,11 +66,8 @@ function RecentWatchRecommendations() {
     isLoading,
     isSuccess: isRecentSeedReady,
   } = useQuery({
-    queryKey: RECENT_WATCH_SEED_QUERY_KEY,
-    queryFn: api.getRecentWatchSeed,
-    staleTime: WATCH_HISTORY_STALE_TIME_MS,
+    ...recentWatchSeedQueryOptions,
     enabled: isOnline,
-    retry: false,
   });
 
   if (isLoading) return <HomeRowPlaceholder />;
@@ -77,33 +87,39 @@ function RecentWatchRecommendations() {
 
 export function Home() {
   const isOnline = useOnlineStatus();
+  const queryClient = useQueryClient();
   const [genre, setGenre] = useState(ALL_GENRES);
+
+  useEffect(() => {
+    if (!isOnline) return;
+    const prefetch = () => void queryClient.prefetchQuery(recentWatchSeedQueryOptions);
+    if (typeof window.requestIdleCallback === 'function') {
+      const idle = window.requestIdleCallback(prefetch, { timeout: 1500 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(prefetch, 1000);
+    return () => window.clearTimeout(timer);
+  }, [isOnline, queryClient]);
 
   // Same manifest-driven genre list as the search filter.
   const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
-  const genreOptions = useMemo(
-    // A manifest genre literally named "All" would render a second tab for the
-    // same unfiltered state — drop it.
-    () => [
-      ALL_GENRES,
-      ...(browseGenres?.movie ?? []).filter((option) => !sameSearchGenre(option, ALL_GENRES)),
-    ],
-    [browseGenres],
-  );
+  // A manifest genre literally named "All" would render a second tab for the
+  // same unfiltered state — drop it.
+  const genreOptions = [
+    ALL_GENRES,
+    ...(browseGenres?.movie ?? []).filter((option) => !sameSearchGenre(option, ALL_GENRES)),
+  ];
 
   // Same key/queryFn/staleTime as the `All` movie row — hero and row share one fetch.
   const { data: heroItems, isPending: isHeroPending } = useQuery({
-    queryKey: trendingRowQueryKey('movies', 'All'),
-    queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
-    staleTime: MEDIA_ROW_STALE_TIME_MS,
+    ...homeTrendingMoviesQueryOptions,
     enabled: isOnline,
   });
 
-  // Stable slice so Hero's memo holds across unrelated home re-renders.
-  const heroSlice = useMemo(() => (heroItems ?? []).slice(0, 5), [heroItems]);
+  const heroSlice = (heroItems ?? []).slice(0, 5);
 
   const activeGenre = genre === ALL_GENRES ? undefined : genre;
-  const showHero = isOnline && (isHeroPending || heroSlice.length > 0);
+  const showHero = heroSlice.length > 0 || (isOnline && isHeroPending);
 
   return (
     <div className='flex flex-col min-h-screen pb-20 relative page-enter'>

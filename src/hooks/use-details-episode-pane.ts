@@ -30,7 +30,6 @@ interface UseDetailsEpisodePaneArgs {
   locationEpisode?: number | null;
   resumeSeason?: number;
   resumeEpisode?: number;
-  isLoadingWatchHistory: boolean;
 }
 
 interface UseDetailsEpisodePaneResult {
@@ -58,7 +57,6 @@ interface UseDetailsEpisodePaneResult {
   hasPreviousEpisodes: boolean;
   hasMoreEpisodes: boolean;
   changeEpisodePage: (direction: 'previous' | 'next') => void;
-  shouldShowEpisodeProgressSkeleton: boolean;
 }
 
 export function useDetailsEpisodePane({
@@ -69,7 +67,6 @@ export function useDetailsEpisodePane({
   locationEpisode,
   resumeSeason,
   resumeEpisode,
-  isLoadingWatchHistory,
 }: UseDetailsEpisodePaneArgs): UseDetailsEpisodePaneResult {
   // Keyed by navigation: a fresh navigation to the same title must not inherit
   // a stale season pick.
@@ -158,18 +155,15 @@ export function useDetailsEpisodePane({
         : (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === selectedSeason),
     [item?.episodes, selectedSeason],
   );
+  const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const {
     effectiveEpisodeSearch,
     filteredEpisodes: searchFilteredEpisodes,
     searchError: episodeSearchError,
     isSearchFetching: isEpisodeSearchFetching,
-    isSearchPending,
+    isSearchPending: isEpisodeSearchPending,
     retrySearch: retryEpisodeSearch,
-  } = useEpisodeSearch(seasonEpisodes, episodeSearch);
-  const trimmedEpisodeSearch = episodeSearch.trim();
-  const isEpisodeSearchPending =
-    trimmedEpisodeSearch.length > 0 &&
-    (isSearchPending || trimmedEpisodeSearch !== effectiveEpisodeSearch);
+  } = useEpisodeSearch(seasonEpisodes, episodeSearch, shouldShowEpisodeSearch);
   const hasEpisodeSearch = effectiveEpisodeSearch.length > 0;
   const episodePageKey = JSON.stringify([
     locationKey,
@@ -233,7 +227,6 @@ export function useDetailsEpisodePane({
     return searchFilteredEpisodes.slice(start, start + EPISODE_DISPLAY_PAGE_SIZE);
   }, [activeEpisodePageIndex, searchFilteredEpisodes]);
 
-  const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const hasPreviousEpisodes = activeEpisodePageIndex > 0;
   const hasMoreEpisodes = activeEpisodePageIndex < totalEpisodePages - 1;
   const visibleEpisodeStart =
@@ -244,7 +237,6 @@ export function useDetailsEpisodePane({
       : Math.min(totalEpisodeCount, visibleEpisodeStart + visibleEpisodes.length - 1);
   const episodeRangeLabel =
     visibleEpisodeStart > 0 ? `Episodes ${visibleEpisodeStart}-${visibleEpisodeEnd}` : 'Episodes';
-  const shouldShowEpisodeProgressSkeleton = item?.type === 'series' && isLoadingWatchHistory;
 
   const selectSeason = useCallback(
     (seasonNumber: number) => {
@@ -298,6 +290,5 @@ export function useDetailsEpisodePane({
     hasPreviousEpisodes,
     hasMoreEpisodes,
     changeEpisodePage,
-    shouldShowEpisodeProgressSkeleton,
   };
 }

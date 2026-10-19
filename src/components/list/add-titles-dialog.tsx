@@ -41,17 +41,29 @@ export function AddTitlesDialog({
   const hasLibraryError =
     libraryQuery.isError ||
     matchingLibraryQuery.isError ||
-    libraryQuery.errorUpdatedAt > libraryQuery.dataUpdatedAt ||
-    matchingLibraryQuery.errorUpdatedAt > matchingLibraryQuery.dataUpdatedAt;
+    (libraryQuery.isFetched && libraryQuery.isPending) ||
+    (matchingLibraryQuery.isFetched &&
+      (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
   const isSearchPending = search !== debouncedSearch || matchingLibraryQuery.isPlaceholderData;
   const matchingItems = matchingLibraryQuery.data?.items ?? [];
   const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
   const selectedItems = useMemo(
-    () => library.filter((item) => selectedIds.has(item.id) && !existingIds.has(item.id)),
+    () =>
+      selectedIds.size === 0
+        ? []
+        : library.filter((item) => selectedIds.has(item.id) && !existingIds.has(item.id)),
     [existingIds, library, selectedIds],
   );
 
   const addTitles = useBulkAddToList();
+  const selectionDisabled =
+    addTitles.isPending ||
+    hasLibraryError ||
+    isSearchPending ||
+    libraryQuery.isPending ||
+    matchingLibraryQuery.isPending ||
+    libraryQuery.isFetching ||
+    matchingLibraryQuery.isFetching;
 
   const toggleSelection = (id: string) => {
     setSelectedIds((previous) => {
@@ -225,9 +237,37 @@ export function AddTitlesDialog({
         </div>
 
         <DialogFooter className='shrink-0 items-center gap-3 sm:justify-between'>
-          <span role='status' className='text-xs tabular-nums text-zinc-500'>
-            {selectedItems.length} selected
-          </span>
+          <div className='flex flex-wrap items-center gap-3'>
+            <span role='status' className='text-xs tabular-nums text-zinc-500'>
+              {selectedItems.length} selected
+            </span>
+            <button
+              type='button'
+              disabled={
+                selectionDisabled || !matchingItems.some((item) => !existingIds.has(item.id))
+              }
+              onClick={() =>
+                setSelectedIds((previous) => {
+                  const next = new Set(previous);
+                  for (const item of matchingItems) {
+                    if (!existingIds.has(item.id)) next.add(item.id);
+                  }
+                  return next;
+                })
+              }
+              className='rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40'
+            >
+              Select all
+            </button>
+            <button
+              type='button'
+              disabled={selectionDisabled || selectedIds.size === 0}
+              onClick={() => setSelectedIds(new Set())}
+              className='rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40'
+            >
+              Clear
+            </button>
+          </div>
           <div className='flex items-center gap-2'>
             <Button
               variant='ghost'
@@ -241,7 +281,7 @@ export function AddTitlesDialog({
               disabled={selectedItems.length === 0 || addTitles.isPending}
               onClick={() =>
                 addTitles.mutate(
-                  { listId: list.id, items: selectedItems },
+                  { listId: list.id, itemIds: selectedItems.map((item) => item.id) },
                   {
                     onSuccess: (count) => {
                       notifyAction(`Added ${count} title${count === 1 ? '' : 's'}`, {

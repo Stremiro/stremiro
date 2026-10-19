@@ -1,4 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { format } from 'date-fns';
 import {
   Check,
   ChevronLeft,
@@ -11,7 +12,7 @@ import {
   Star,
 } from 'lucide-react';
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useParams } from 'react-router';
+import { Link, useLocation, useNavigationType, useParams } from 'react-router';
 import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
@@ -25,7 +26,7 @@ import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -60,15 +61,15 @@ import {
   detailsCardQueryKey,
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
-  DETAILS_STALE_TIME_MS,
   WATCH_HISTORY_VIEW_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
+  GENRE_LINK_CLASS,
   isSeriesLikeMediaType,
-  isAiredByLocalDay,
   mediaTypeLabel,
+  queryNeedsRetry,
   scrollBehavior,
   SIDEBAR_PAGE_COLUMN_INSETS,
 } from '@/lib/utils';
@@ -87,6 +88,10 @@ const EPISODE_PAGE_BUTTON_CLASS =
   'flex h-9 w-9 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35';
 
 const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-6xl ${SIDEBAR_PAGE_COLUMN_INSETS}`;
+const DETAILS_HERO_CLASS =
+  'relative -mt-8 flex min-h-[70vh] w-full items-end pb-12 pt-24 lg:pb-16 lg:pt-28';
+const DETAILS_STATUS_STRIP_CLASS =
+  'inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-1 scrollbar-hide';
 
 const WATCH_STATUS_ORDER: WatchStatus[] = ['plan_to_watch', 'watching', 'watched', 'dropped'];
 
@@ -181,12 +186,15 @@ function DetailsContent() {
   const baseRouteType = type || 'series';
   const baseRouteId = id || '';
   const location = useLocation();
+  const navigationType = useNavigationType();
   const queryClient = useQueryClient();
   // Playback preference writes must not re-render the whole page.
-  const spoilerProtection = useSpoilerProtection();
+  const { preferences: spoilerProtection, isHydrating: isHydratingSpoilerProtection } =
+    useAppUiPreferences((preferences) => preferences.spoilerProtection);
 
   const {
     data: item,
+    isFetched,
     isLoading,
     isFetching,
     isPaused,
@@ -195,15 +203,12 @@ function DetailsContent() {
     errorUpdatedAt,
     dataUpdatedAt,
   } = useQuery({
-    queryKey: detailsQueryKey(baseRouteType, baseRouteId),
-    queryFn: () => api.getMediaDetails(baseRouteType, baseRouteId),
+    ...api.detailsQueryOptions(baseRouteType, baseRouteId),
     enabled: !!baseRouteId,
     // Card-prefetch bridge: paint the hero from hover intent's metadata-only
     // payload while the full episode payload lands.
     placeholderData: () =>
       queryClient.getQueryData<MediaDetails>(detailsCardQueryKey(baseRouteType, baseRouteId)),
-    staleTime: DETAILS_STALE_TIME_MS,
-    gcTime: DETAILS_GC_TIME_MS,
   });
   // Keep the first offline notice mounted through manual and reconnect retries.
   const [hasPausedDetails, setHasPausedDetails] = useState(false);
@@ -213,20 +218,24 @@ function DetailsContent() {
   useDocumentTitle(item?.title);
 
   // The route id lets history load without waiting for addon metadata.
+  const titleProgressQuery = useTitleWatchProgress(baseRouteId, {
+    staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS,
+  });
   const {
     data: titleProgress,
     isLoading: isLoadingWatchHistory,
     isFetching: isFetchingWatchHistory,
-    isError: watchHistoryError,
     refetch: retryWatchHistory,
-  } = useTitleWatchProgress(baseRouteId, { staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS });
+  } = titleProgressQuery;
+  const watchHistoryError = queryNeedsRetry(titleProgressQuery);
   const hasWatchProgress = Boolean(titleProgress);
   const episodeProgress = titleProgress?.episodeProgress;
   // `latestSeriesEntry` is the backend's first series-like row of the
   // `last_watched` DESC history list.
   const latestSeriesProgress = titleProgress?.latestSeriesEntry ?? null;
 
-  const isLoadingWatchHistoryForItem = item?.type === 'series' && isLoadingWatchHistory;
+  const isLoadingWatchHistoryForItem =
+    item?.type === 'series' && isLoadingWatchHistory && !watchHistoryError;
 
   // The resumable row owns "Continue S/E" — the pane must hint the same season.
   // The latest history row only wins when nothing is resumable; Rust only
@@ -248,11 +257,22 @@ function DetailsContent() {
     watchStatus: detailsWatchStatus,
     watchStatusMutation,
     isInLibrary,
-  } = useDetailsWatchStatus(item);
+    isReady: isWatchStateReady,
+    hasError: watchStateError,
+    isFetching: isFetchingWatchState,
+    refetch: retryWatchState,
+  } = useDetailsWatchStatus(item, baseRouteId);
   const collectionActions = useMediaCollectionActions({ item, isInLibrary });
   const { toggleLibrary, addItemToNewList } = collectionActions;
-  const { data: listSummaries } = useListSummaries(item?.id, { enabled: Boolean(item?.id) });
+  const libraryStatusBusy = toggleLibrary.isPending || watchStatusMutation.isPending;
+  const collectionItemId = item?.id ?? baseRouteId;
+  const listSummariesQuery = useListSummaries(collectionItemId, {
+    enabled: Boolean(collectionItemId),
+  });
+  const { data: listSummaries } = listSummariesQuery;
   const isSaved = isInLibrary || (listSummaries?.some((list) => list.contains_item) ?? false);
+  const isSaveReady = isWatchStateReady && listSummariesQuery.isSuccess;
+  const collectionStateError = watchStateError || queryNeedsRetry(listSummariesQuery);
   const [saveOpen, setSaveOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
   const saveTriggerRef = useRef<HTMLButtonElement>(null);
@@ -280,15 +300,14 @@ function DetailsContent() {
     onTrailerOpenChange,
   } = useDetailsTrailer(item);
   // A corrected artwork URL from a refetch must retry without a route remount.
-  const backdropUrl = item?.backdrop || item?.poster;
   const logoUrl = item?.logo;
-  const [backdropSrc, onBackdropError] = useFailedSrc(backdropUrl);
+  const heroBackdropSrc = item?.backdrop || item?.poster;
   const [logoSrc, onLogoError] = useFailedSrc(logoUrl);
   const [loadedBackdrop, setLoadedBackdrop] = useState<string | null>(null);
   const [loadedLogo, setLoadedLogo] = useState<string | null>(null);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
-  const localDayMs = useLocalDay().getTime();
+  const localToday = format(useLocalDay(), 'yyyy-MM-dd');
   const descriptionRef = useRef<HTMLParagraphElement | null>(null);
 
   const {
@@ -315,7 +334,6 @@ function DetailsContent() {
     hasPreviousEpisodes,
     hasMoreEpisodes,
     changeEpisodePage,
-    shouldShowEpisodeProgressSkeleton,
   } = useDetailsEpisodePane({
     item,
     effectiveRouteId: baseRouteId,
@@ -325,10 +343,38 @@ function DetailsContent() {
     resumeSeason: resumeEpisodeCoords?.season ?? latestSeriesProgress?.absolute_season ?? undefined,
     resumeEpisode:
       resumeEpisodeCoords?.episode ?? latestSeriesProgress?.absolute_episode ?? undefined,
-    isLoadingWatchHistory: isLoadingWatchHistoryForItem,
   });
 
   const hasEpisodesSection = item?.type === 'series' && (item?.episodes?.length ?? 0) > 0;
+
+  // Rust owns the aired-by-local-day rule. Unknown or stale air states never
+  // label episodes unaired and never enable bulk completion.
+  const unairedScopeKey = [...detailsQueryKey(baseRouteType, baseRouteId), 'unaired-episodes'];
+  const unairedEpisodesQuery = useQuery({
+    queryKey: [...unairedScopeKey, localToday, dataUpdatedAt],
+    queryFn: async () => {
+      const episodes = item!.episodes!;
+      const indices = await api.getUnairedEpisodeIndices({
+        releaseDates: episodes.map((ep) => ep.releaseDate ?? null),
+        today: localToday,
+      });
+      return new Set(
+        indices.map((index) =>
+          episodeProgressKey(baseRouteId, episodes[index].season, episodes[index].episode),
+        ),
+      );
+    },
+    enabled: hasEpisodesSection && !isPlaceholderData,
+    placeholderData: (previous, previousQuery) =>
+      unairedScopeKey.every((part, index) => previousQuery?.queryKey[index] === part)
+        ? previous
+        : undefined,
+    staleTime: Infinity,
+    gcTime: DETAILS_GC_TIME_MS,
+  });
+  const { data: unairedEpisodeKeys, isPlaceholderData: isUnairedPlaceholder } =
+    unairedEpisodesQuery;
+  const airStatesReady = !!unairedEpisodeKeys && !isUnairedPlaceholder;
 
   // "Read more" only exists when the clamp actually bites; while expanded the
   // last verdict is kept so "Show less" stays.
@@ -374,15 +420,15 @@ function DetailsContent() {
     const targets: Episode[] = [];
     let watched = 0;
     for (const ep of seasonEpisodes) {
-      const storedRow = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-      if (optimisticEpisodeWatched(ep) ?? !!storedRow?.is_watched) {
+      const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
+      if (optimisticEpisodeWatched(ep) ?? !!episodeProgress?.[key]?.is_watched) {
         watched += 1;
         continue;
       }
-      if (isAiredByLocalDay(ep.releaseDate, localDayMs)) targets.push(ep);
+      if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) targets.push(ep);
     }
     return { seasonWatchedCount: watched, seasonWatchTargets: targets };
-  }, [seasonEpisodes, episodeProgress, localDayMs, baseRouteId, optimisticEpisodeWatched]);
+  }, [seasonEpisodes, episodeProgress, unairedEpisodeKeys, baseRouteId, optimisticEpisodeWatched]);
 
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
   const episodeSearchInputRef = useRef<HTMLInputElement>(null);
@@ -537,7 +583,18 @@ function DetailsContent() {
   // Center the resume episode once per landing — re-centering on each
   // `visibleEpisodes` re-creation would yank the page mid-typing.
   const centeredResumeLandingRef = useRef<string | null>(null);
+  const autoCenterNavigationRef = useRef({ key: location.key, type: navigationType });
   useEffect(() => {
+    const landing = autoCenterNavigationRef.current;
+    if (landing.key !== location.key) {
+      // The player's POP handoff clears route state with a same-page REPLACE.
+      if (navigationType !== 'REPLACE') {
+        landing.type = navigationType;
+        centeredResumeLandingRef.current = null;
+      }
+      landing.key = location.key;
+    }
+    if (landing.type === 'POP' && (locationSeason === null || locationEpisode === null)) return;
     if (!resumeEpisodeCoords || selectedSeason !== resumeEpisodeCoords.season) {
       centeredResumeLandingRef.current = null;
       return;
@@ -551,16 +608,32 @@ function DetailsContent() {
     );
     if (centeredResumeLandingRef.current === landingKey) return;
 
+    const intentListeners = new AbortController();
     const timer = window.setTimeout(() => {
-      // Latch only once the scroll runs — a cancelled timer must still get its landing.
+      intentListeners.abort();
       centeredResumeLandingRef.current = landingKey;
       resumeEpisodeRef.current?.scrollIntoView({
         block: 'center',
         behavior: scrollBehavior(),
       });
     }, 80);
+    const cancelCentering = () => {
+      centeredResumeLandingRef.current = landingKey;
+      window.clearTimeout(timer);
+      intentListeners.abort();
+    };
+    for (const eventName of ['wheel', 'touchstart', 'keydown', 'pointerdown'] as const) {
+      window.addEventListener(eventName, cancelCentering, {
+        capture: true,
+        passive: true,
+        signal: intentListeners.signal,
+      });
+    }
 
-    return () => window.clearTimeout(timer);
+    return () => {
+      window.clearTimeout(timer);
+      intentListeners.abort();
+    };
   }, [
     visibleEpisodes,
     resumeEpisodeCoords,
@@ -568,6 +641,10 @@ function DetailsContent() {
     isPlaceholderData,
     episodeSearch,
     baseRouteId,
+    location.key,
+    locationSeason,
+    locationEpisode,
+    navigationType,
   ]);
 
   const showOfflineDetails =
@@ -575,7 +652,7 @@ function DetailsContent() {
 
   if (isLoading && errorUpdatedAt === 0 && !showOfflineDetails) return <DetailsSkeleton />;
 
-  if ((showOfflineDetails || errorUpdatedAt > dataUpdatedAt) && !item) {
+  if ((showOfflineDetails || error || (isFetched && isLoading)) && !item) {
     return (
       <div
         role='alert'
@@ -624,27 +701,34 @@ function DetailsContent() {
 
   return (
     <div className='relative pb-20'>
-      <div className='relative flex min-h-[70vh] w-full items-end pb-24 pt-32 -mt-8'>
-        {backdropSrc && (
-          <div className='absolute inset-0 z-0'>
-            <div className='absolute inset-0 bg-linear-to-t from-background via-background/70 to-background/10 z-10' />
-            <div className='absolute inset-0 bg-linear-to-r from-background/80 via-background/20 to-transparent z-10' />
+      <div className={DETAILS_HERO_CLASS}>
+        <div
+          className='absolute inset-0 z-0'
+          aria-hidden='true'
+          style={{
+            background:
+              'radial-gradient(80% 90% at 65% 20%, rgb(var(--accent-art-rgb) / 0.14), transparent 75%)',
+          }}
+        >
+          <div className='absolute inset-0 bg-linear-to-t from-background via-background/70 to-background/10 z-10' />
+          <div className='absolute inset-0 bg-linear-to-r from-background/80 via-background/20 to-transparent z-10' />
+          {heroBackdropSrc && (
             <RemoteImage
-              key={backdropSrc}
-              src={backdropSrc}
+              key={heroBackdropSrc}
+              src={heroBackdropSrc}
+              fallbackSrc={item.poster}
               alt=''
               className={cn(
                 'w-full h-full object-cover transition-opacity duration-700 ease-out',
-                loadedBackdrop === backdropSrc ? 'opacity-100' : 'opacity-0',
+                loadedBackdrop === heroBackdropSrc ? 'opacity-100' : 'opacity-0',
               )}
               loading='eager'
               fetchPriority='high'
-              onLoad={() => setLoadedBackdrop(backdropSrc)}
-              onError={onBackdropError}
+              onLoad={() => setLoadedBackdrop(heroBackdropSrc)}
               style={{ objectPosition: 'center 20%' }}
             />
-          </div>
-        )}
+          )}
+        </div>
 
         <div className={`${DETAILS_COLUMN_CLASS} relative z-20 flex flex-col`}>
           <div className='flex flex-col gap-6 w-full max-w-4xl'>
@@ -657,86 +741,91 @@ function DetailsContent() {
             )}
             <div className='space-y-6 w-full'>
               <div>
-                {logoSrc ? (
-                  <>
-                    <h1 className='sr-only'>{item.title}</h1>
+                <div
+                  className={cn(
+                    'relative mb-5 flex items-center',
+                    logoUrl && 'min-h-24 md:min-h-32',
+                  )}
+                >
+                  <h1
+                    className={cn(
+                      'w-full wrap-break-word text-[32px] font-semibold leading-[1.1] tracking-[-0.035em] text-white drop-shadow-lg transition-opacity duration-500 ease-out sm:text-5xl lg:text-6xl',
+                      logoSrc && loadedLogo === logoSrc ? 'opacity-0' : 'opacity-100',
+                    )}
+                  >
+                    {item.title}
+                  </h1>
+                  {logoSrc && (
                     <RemoteImage
                       key={logoSrc}
                       src={logoSrc}
                       alt=''
                       className={cn(
-                        'h-24 max-w-full md:h-32 object-contain object-left mb-6 drop-shadow-2xl transition-opacity duration-500 ease-out',
+                        'absolute inset-0 h-full max-h-24 w-full object-contain object-left drop-shadow-2xl transition-opacity duration-500 ease-out md:max-h-32',
                         loadedLogo === logoSrc ? 'opacity-100' : 'opacity-0',
                       )}
                       onLoad={() => setLoadedLogo(logoSrc)}
                       onError={onLogoError}
                     />
-                  </>
-                ) : (
-                  <h1 className='mb-5 wrap-break-word text-[32px] font-semibold leading-[1.1] tracking-[-0.035em] text-white drop-shadow-lg sm:text-5xl lg:text-6xl'>
-                    {item.title}
-                  </h1>
-                )}
+                  )}
+                </div>
 
                 <div className='flex flex-wrap items-center gap-x-3 gap-y-2 text-sm font-medium text-white/85'>
                   {item.displayYear && (
-                    <>
-                      <span className='tabular-nums'>{item.displayYear}</span>
+                    <span className='whitespace-nowrap tabular-nums'>{item.displayYear}</span>
+                  )}
+                  <span className='inline-flex items-center gap-3 whitespace-nowrap'>
+                    {item.displayYear && (
                       <span aria-hidden='true' className='text-white/25'>
                         ·
                       </span>
-                    </>
-                  )}
-                  <span>
+                    )}
                     {isSeriesLikeMediaType(item.type) && hasEpisodesSection && seasonCount > 0
                       ? `${seasonCount} Season${seasonCount === 1 ? '' : 's'}`
                       : mediaTypeLabel(item.type)}
                   </span>
 
                   {item.runtime && (
-                    <>
+                    <span className='inline-flex items-center gap-3 whitespace-nowrap'>
                       <span aria-hidden='true' className='text-white/25'>
                         ·
                       </span>
                       <span className='tabular-nums'>{item.runtime}</span>
-                    </>
-                  )}
-
-                  {item.genres && item.genres.length > 0 && (
-                    <>
-                      <span aria-hidden='true' className='text-white/25'>
-                        ·
-                      </span>
-                      <div className='flex flex-wrap items-center gap-1.5'>
-                        {item.genres.slice(0, 3).map((genre) => (
-                          <Link
-                            key={genre}
-                            to={searchGenrePath(baseRouteType, genre)}
-                            title={`Browse ${genre}`}
-                            className='rounded-md border border-white/10 bg-white/[0.05] px-2.5 py-1.5 text-[12px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-                          >
-                            {genre}
-                          </Link>
-                        ))}
-                      </div>
-                    </>
+                    </span>
                   )}
 
                   {item.rating && (
-                    <>
+                    <span className='inline-flex items-center gap-3 whitespace-nowrap'>
                       <span aria-hidden='true' className='text-white/25'>
                         ·
                       </span>
-                      <div className='flex items-baseline gap-1.5'>
-                        <Star className='h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400' />
+                      <span className='inline-flex items-baseline gap-1.5'>
+                        <Star
+                          aria-hidden='true'
+                          className='h-4 w-4 translate-y-[2px] fill-amber-400 text-amber-400'
+                        />
                         <span className='text-[15px] font-semibold tabular-nums text-white'>
                           {item.rating}
                         </span>
                         <span className='text-xs font-medium tabular-nums text-white/35'>/10</span>
-                      </div>
-                    </>
+                      </span>
+                    </span>
                   )}
                 </div>
+                {item.genres && item.genres.length > 0 && (
+                  <div className='mt-3 flex flex-wrap items-center gap-1.5'>
+                    {item.genres.slice(0, 3).map((genre) => (
+                      <Link
+                        key={genre}
+                        to={searchGenrePath(baseRouteType, genre)}
+                        title={`Browse ${genre}`}
+                        className={GENRE_LINK_CLASS}
+                      >
+                        {genre}
+                      </Link>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div>
@@ -796,28 +885,52 @@ function DetailsContent() {
                   </span>
                 </button>
 
-                <div className='flex gap-2.5'>
-                  <Popover open={saveOpen} onOpenChange={setSaveOpen}>
+                <div className='flex flex-wrap gap-2.5'>
+                  <Popover
+                    open={saveOpen}
+                    onOpenChange={(open) => {
+                      if (!open || isSaveReady) setSaveOpen(open);
+                    }}
+                  >
                     <PopoverTrigger asChild>
                       <button
                         ref={saveTriggerRef}
                         type='button'
-                        aria-label='Save to library or list'
-                        aria-busy={toggleLibrary.isPending || undefined}
-                        title={isSaved ? 'Saved' : 'Save'}
+                        aria-label={
+                          !isSaveReady
+                            ? collectionStateError
+                              ? 'Saved state unavailable'
+                              : 'Loading saved state'
+                            : isSaved
+                              ? 'Saved — manage library and lists'
+                              : 'Save to library or list'
+                        }
+                        aria-disabled={!isSaveReady || undefined}
+                        aria-busy={
+                          libraryStatusBusy || (!isSaveReady && !collectionStateError) || undefined
+                        }
+                        title={
+                          !isSaveReady ? 'Saved state unavailable' : isSaved ? 'Saved' : 'Save'
+                        }
                         className={cn(
                           ICON_ACTION_CLASS,
-                          isSaved &&
+                          'w-auto min-w-24 gap-2 px-3',
+                          !isSaveReady && 'opacity-45',
+                          isSaveReady &&
+                            isSaved &&
                             'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                         )}
                       >
-                        {toggleLibrary.isPending ? (
+                        {libraryStatusBusy || (!isSaveReady && !collectionStateError) ? (
                           <Loader2 className='w-5 h-5 animate-spin' />
-                        ) : isSaved ? (
+                        ) : isSaveReady && isSaved ? (
                           <Check className='w-5 h-5' />
                         ) : (
                           <Plus className='w-5 h-5' />
                         )}
+                        <span className='text-[13px] font-medium'>
+                          {isSaveReady && isSaved ? 'Saved' : 'Save'}
+                        </span>
                       </button>
                     </PopoverTrigger>
                     <PopoverContent
@@ -833,6 +946,7 @@ function DetailsContent() {
                         item={item}
                         isInLibrary={isInLibrary}
                         showLibrary
+                        libraryBusy={libraryStatusBusy || !isWatchStateReady}
                         actions={collectionActions}
                         onCreateList={() => {
                           setSaveOpen(false);
@@ -853,10 +967,11 @@ function DetailsContent() {
                       type='button'
                       aria-label='Watch trailer'
                       title='Trailer'
-                      className={ICON_ACTION_CLASS}
+                      className={cn(ICON_ACTION_CLASS, 'w-auto gap-2 px-3')}
                       onClick={openTrailer}
                     >
                       <Clapperboard className='w-5 h-5' />
+                      <span className='text-[13px] font-medium'>Trailer</span>
                     </button>
                   )}
 
@@ -893,6 +1008,16 @@ function DetailsContent() {
                 )}
               </div>
 
+              {collectionStateError && (
+                <RetryBanner
+                  className='max-w-xl px-3 py-2'
+                  message="Couldn't load library, lists or status."
+                  isRetrying={isFetchingWatchState || listSummariesQuery.isFetching}
+                  onRetry={() =>
+                    void Promise.all([retryWatchState(), listSummariesQuery.refetch()])
+                  }
+                />
+              )}
               <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
                 <span
                   id='details-watch-status-label'
@@ -901,9 +1026,15 @@ function DetailsContent() {
                   My status
                 </span>
                 <div
-                  className='inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-1 scrollbar-hide'
+                  className={cn(
+                    DETAILS_STATUS_STRIP_CLASS,
+                    !isWatchStateReady && !watchStatusMutation.isPending && 'opacity-45',
+                  )}
                   role='group'
                   aria-labelledby='details-watch-status-label'
+                  aria-busy={
+                    libraryStatusBusy || (!isWatchStateReady && !watchStateError) || undefined
+                  }
                 >
                   {WATCH_STATUS_ORDER.map((status) => {
                     const isActive = detailsWatchStatus === status;
@@ -913,11 +1044,13 @@ function DetailsContent() {
                         key={status}
                         type='button'
                         // aria-disabled, not disabled: disabled drops keyboard focus to <body> mid-mutation.
-                        aria-disabled={watchStatusMutation.isPending || undefined}
-                        aria-pressed={isActive}
+                        aria-disabled={libraryStatusBusy || !isWatchStateReady || undefined}
+                        aria-pressed={
+                          isWatchStateReady || watchStatusMutation.isPending ? isActive : undefined
+                        }
                         title={isActive ? 'Clear status' : undefined}
                         onClick={() => {
-                          if (!watchStatusMutation.isPending) {
+                          if (!libraryStatusBusy && isWatchStateReady) {
                             watchStatusMutation.mutate(isActive ? null : status);
                           }
                         }}
@@ -926,7 +1059,7 @@ function DetailsContent() {
                           isActive
                             ? cn(colors.bg, colors.text, colors.border, 'hover:brightness-125')
                             : 'border-transparent text-white/70 hover:bg-white/[0.08] hover:text-white',
-                          watchStatusMutation.isPending && 'cursor-wait',
+                          (libraryStatusBusy || !isWatchStateReady) && 'cursor-wait',
                         )}
                       >
                         <span
@@ -948,7 +1081,7 @@ function DetailsContent() {
       </div>
 
       {hasEpisodesSection && (
-        <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} py-8`}>
+        <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} pt-5 pb-8`}>
           <div className='w-full flex flex-col gap-4 animate-in fade-in duration-300'>
             <h2
               id='details-episodes-heading'
@@ -983,6 +1116,14 @@ function DetailsContent() {
                   message="Couldn't load watch history. Retry to change episode completion."
                   onRetry={() => void retryWatchHistory()}
                   isRetrying={isFetchingWatchHistory}
+                />
+              )}
+              {queryNeedsRetry(unairedEpisodesQuery) && (
+                <RetryBanner
+                  className='px-3 py-2'
+                  message="Couldn't check episode air dates. Retry to mark the season watched."
+                  onRetry={() => void unairedEpisodesQuery.refetch()}
+                  isRetrying={unairedEpisodesQuery.isFetching}
                 />
               )}
               {shouldShowEpisodeSearch && (
@@ -1038,12 +1179,13 @@ function DetailsContent() {
                         Jump to S{resumeEpisodeCoords.season}E{resumeEpisodeCoords.episode}
                       </button>
                     )}
-                  {!shouldShowEpisodeProgressSkeleton &&
+                  {!isLoadingWatchHistoryForItem &&
                     (seasonWatchTargets.length > 1 || markSeasonWatched.isPending) && (
                       <button
                         type='button'
                         aria-disabled={
                           !hasWatchProgress ||
+                          !airStatesReady ||
                           markSeasonWatched.isPending ||
                           episodeWatchedPending ||
                           undefined
@@ -1051,6 +1193,7 @@ function DetailsContent() {
                         onClick={(event) => {
                           if (
                             hasWatchProgress &&
+                            airStatesReady &&
                             !markSeasonWatched.isPending &&
                             !episodeWatchedPending
                           ) {
@@ -1112,15 +1255,18 @@ function DetailsContent() {
                 )}
               </div>
 
+              {isLoadingWatchHistoryForItem && (
+                <span role='status' className='sr-only'>
+                  Loading episode watch history...
+                </span>
+              )}
               <div
-                aria-busy={!episodeSearchError && isEpisodeSearchPending}
+                aria-busy={
+                  isLoadingWatchHistoryForItem || (!episodeSearchError && isEpisodeSearchPending)
+                }
                 className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'
               >
-                {shouldShowEpisodeProgressSkeleton ? (
-                  EPISODE_SKELETON_TILES
-                ) : !episodeSearchError &&
-                  visibleEpisodes.length === 0 &&
-                  isEpisodeSearchPending ? (
+                {!episodeSearchError && visibleEpisodes.length === 0 && isEpisodeSearchPending ? (
                   <div
                     role='status'
                     className='col-span-full flex flex-col items-center gap-3 py-14 text-center'
@@ -1149,9 +1295,11 @@ function DetailsContent() {
                   </div>
                 ) : (
                   visibleEpisodes.map((ep) => {
-                    const epProgress =
-                      episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-                    const optimisticWatched = optimisticEpisodeWatched(ep);
+                    const episodeKey = episodeProgressKey(baseRouteId, ep.season, ep.episode);
+                    const epProgress = hasWatchProgress ? episodeProgress?.[episodeKey] : undefined;
+                    const optimisticWatched = hasWatchProgress
+                      ? optimisticEpisodeWatched(ep)
+                      : undefined;
                     const progressPercent =
                       optimisticWatched !== undefined
                         ? optimisticWatched
@@ -1162,6 +1310,7 @@ function DetailsContent() {
                             epProgress?.duration ?? 0,
                           );
                     const isResumeEp =
+                      hasWatchProgress &&
                       seriesCanResume &&
                       episodeMatchesCoordinates(ep, seriesResumeSeason, seriesResumeEpisode);
                     const isWatched = optimisticWatched ?? !!epProgress?.is_watched;
@@ -1177,19 +1326,19 @@ function DetailsContent() {
                         isResume={isResumeEp}
                         isSpoiler={isEpisodeSpoiler(
                           ep,
-                          spoilerProtection,
+                          isHydratingSpoilerProtection || spoilerProtection,
                           titleProgress?.watchedEpisodeCeiling,
                           epProgress,
                         )}
                         isWatched={isWatched}
-                        isAired={isAiredByLocalDay(ep.releaseDate, localDayMs)}
-                        isWatchedDisabled={!hasWatchProgress}
-                        isWatchedPending={episodeWatchedPending || markSeasonWatched.isPending}
+                        isAired={!unairedEpisodeKeys?.has(episodeKey)}
+                        isWatchedDisabled={episodeWatchedPending || markSeasonWatched.isPending}
+                        isWatchedPending={pendingEpisodeKeys.has(episodeKey)}
                         progressPercent={progressPercent}
                         remainingText={remainingText}
                         resumeRef={isResumeEp ? resumeEpisodeRef : undefined}
                         onPlay={handleWatchEpisode}
-                        onToggleWatched={handleToggleEpisodeWatched}
+                        onToggleWatched={hasWatchProgress ? handleToggleEpisodeWatched : undefined}
                       />
                     );
                   })
@@ -1197,6 +1346,28 @@ function DetailsContent() {
               </div>
             </div>
           </div>
+        </div>
+      )}
+
+      {!hasEpisodesSection && !isPlaceholderData && item.type === 'series' && (
+        <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} py-8`}>
+          <section
+            id='details-episodes-heading'
+            tabIndex={-1}
+            aria-label='Episode information unavailable'
+            className='rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+          >
+            <RetryBanner
+              message='Episode information unavailable.'
+              isRetrying={isFetching}
+              onRetry={() => {
+                const button = document.activeElement;
+                episodeActionFocusRef.current =
+                  button instanceof HTMLButtonElement ? { button, target: 'heading' } : null;
+                void handleRetryDetails();
+              }}
+            />
+          </section>
         </div>
       )}
 
@@ -1236,31 +1407,58 @@ function DetailsContent() {
 
 function DetailsSkeleton() {
   return (
-    <div className='min-h-screen bg-background' aria-busy='true'>
+    <div className='relative min-h-screen bg-background pb-20' aria-busy='true'>
       <span role='status' className='sr-only'>
         Loading…
       </span>
-      <div className='relative h-[70vh] w-full -mt-8 overflow-hidden' aria-hidden='true'>
+      <div className={DETAILS_HERO_CLASS} aria-hidden='true'>
         <div className='absolute inset-0 bg-zinc-950' />
         <div className='absolute inset-0 bg-linear-to-t from-background via-background/60 to-transparent' />
-        <div className='absolute bottom-0 left-0 right-0 h-64 bg-linear-to-t from-background to-transparent' />
-      </div>
-
-      <div className={`${DETAILS_COLUMN_CLASS} -mt-56 relative z-10`} aria-hidden='true'>
-        <div className='flex flex-col gap-6 w-full max-w-4xl animate-pulse'>
-          <Skeleton className='h-10 w-72 max-w-full bg-zinc-800/60' />
-          <div className='flex gap-3'>
-            <Skeleton className='h-5 w-14 bg-zinc-800/50' />
-            <Skeleton className='h-5 w-20 bg-zinc-800/50' />
-            <Skeleton className='h-5 w-16 bg-zinc-800/50' />
-          </div>
-          <div className='space-y-2.5'>
-            <Skeleton className='h-4 w-full max-w-lg bg-zinc-800/40' />
-            <Skeleton className='h-4 w-4/5 max-w-md bg-zinc-800/40' />
-          </div>
-          <div className='flex gap-3 pt-3'>
-            <Skeleton className='h-11 w-36 rounded-lg bg-zinc-800/50' />
-            <Skeleton className='h-11 w-11 rounded-lg bg-zinc-800/40' />
+        <div className={`${DETAILS_COLUMN_CLASS} relative z-20 flex flex-col`}>
+          <div className='flex w-full max-w-4xl flex-col gap-6'>
+            <div className='w-full space-y-6'>
+              <div>
+                <div className='mb-5 flex min-h-24 items-center md:min-h-32'>
+                  <Skeleton className='h-16 w-80 max-w-full bg-zinc-800/60 md:h-20' />
+                </div>
+                <div className='flex flex-wrap items-center gap-x-3 gap-y-2'>
+                  <Skeleton className='h-5 w-14 bg-zinc-800/50' />
+                  <Skeleton className='h-5 w-20 bg-zinc-800/50' />
+                  <Skeleton className='h-5 w-16 bg-zinc-800/50' />
+                </div>
+                <div className='mt-3 flex flex-wrap items-center gap-1.5'>
+                  <Skeleton className='h-7 w-20 rounded-md bg-zinc-800/50' />
+                  <Skeleton className='h-7 w-16 rounded-md bg-zinc-800/50' />
+                  <Skeleton className='h-7 w-20 rounded-md bg-zinc-800/50' />
+                </div>
+              </div>
+              <div className='max-w-2xl space-y-2.5'>
+                <Skeleton className='h-4 w-full bg-zinc-800/40' />
+                <Skeleton className='h-4 w-full bg-zinc-800/40' />
+                <Skeleton className='h-4 w-4/5 bg-zinc-800/40' />
+              </div>
+              <div className='flex flex-wrap items-center gap-2.5 pt-2'>
+                <Skeleton className='h-11 w-36 max-w-full rounded-lg bg-zinc-800/50' />
+                <div className='flex flex-wrap gap-2.5'>
+                  <Skeleton className='h-11 w-24 rounded-lg bg-zinc-800/40' />
+                  <Skeleton className='h-11 w-26 rounded-lg bg-zinc-800/40' />
+                </div>
+              </div>
+              <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
+                <Skeleton className='h-4 w-16 bg-zinc-800/40' />
+                <div className={DETAILS_STATUS_STRIP_CLASS}>
+                  {WATCH_STATUS_ORDER.map((status) => (
+                    <Skeleton
+                      key={status}
+                      className='flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-zinc-800/40 px-3 text-[13px] font-medium text-transparent'
+                    >
+                      <span className='h-1.5 w-1.5' />
+                      {WATCH_STATUS_LABELS[status]}
+                    </Skeleton>
+                  ))}
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       </div>

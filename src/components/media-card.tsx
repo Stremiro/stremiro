@@ -3,9 +3,12 @@ import { Bookmark, Check, ChevronLeft, Heart, Loader2, Play, Trash2 } from 'luci
 import {
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
+  lazy,
   memo,
   type MouseEvent as ReactMouseEvent,
+  type RefObject,
   type SetStateAction,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -15,18 +18,24 @@ import {
 import { currentPathWithSearch, navigateOnAnchorClick } from '@/lib/navigation';
 import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
-import { SaveToCollectionPanel } from '@/components/list/save-to-collection';
 import { RemoteImage } from '@/components/remote-image';
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+} from '@/components/ui/context-menu';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import {
   useIsItemInLibrary,
   useItemWatchStatus,
-  useLatestWatchHistoryEntry,
+  useMediaResumeEntry,
   useListSummaries,
   useMediaCollectionActions,
 } from '@/hooks/use-media-library';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import {
   api,
@@ -41,11 +50,6 @@ import {
   resolvePlayerRouteMediaType,
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import {
-  detailsCardQueryKey,
-  DETAILS_GC_TIME_MS,
-  DETAILS_STALE_TIME_MS,
-} from '@/lib/query-invalidation';
 import { routeChunks } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
@@ -57,6 +61,15 @@ import {
   prefersReducedMotion,
   primaryGenrePills,
 } from '@/lib/utils';
+
+const loadSaveToCollectionPanel = () => import('@/components/list/save-to-collection');
+const SaveToCollectionPanel = lazy(() =>
+  loadSaveToCollectionPanel().then((module) => ({ default: module.SaveToCollectionPanel })),
+);
+
+function warmSaveToCollectionPanel() {
+  void loadSaveToCollectionPanel().catch(() => undefined);
+}
 
 function getRatingStyle(score: number | null) {
   if (score === null) return null;
@@ -104,12 +117,13 @@ interface MediaCardProps {
   /** Below-title resume line ("S1:E2 · 24m left") — plain string so memo holds. */
   metaLine?: string;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
+  playbackIntent?: 'resume' | 'next-episode';
   isPlayPending?: boolean;
   onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   subtitle?: string;
   selectionMode?: boolean;
   isSelected?: boolean;
-  onToggleSelect?: (item: MediaItem) => void;
+  onToggleSelect?: (item: MediaItem, shiftKey?: boolean) => void;
 }
 
 function ResumeProgressBar({ progress }: { progress?: number }) {
@@ -120,25 +134,29 @@ function ResumeProgressBar({ progress }: { progress?: number }) {
 interface MediaCardPosterProps {
   currentStatus: WatchStatus | null;
   detailsRouteType: PlayerRouteMediaType;
+  expanded: boolean;
   isPlayPending?: boolean;
   item: MediaItem;
   metaLine?: string;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
+  playbackIntent: 'resume' | 'next-episode';
   onPrefetchDetails?: () => void;
   progress?: number;
   subtitle?: string;
   selectionMode?: boolean;
   isSelected?: boolean;
-  onToggleSelect?: (item: MediaItem) => void;
+  onToggleSelect?: (item: MediaItem, shiftKey?: boolean) => void;
 }
 
 function MediaCardPoster({
   currentStatus,
   detailsRouteType,
+  expanded,
   isPlayPending = false,
   item,
   metaLine,
   onPlay,
+  playbackIntent,
   onPrefetchDetails,
   progress,
   subtitle,
@@ -148,7 +166,13 @@ function MediaCardPoster({
 }: MediaCardPosterProps) {
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
   const anchorLabel = onPlay
-    ? [`Resume ${item.title}`, subtitle, metaLine].filter(Boolean).join(', ')
+    ? [
+        `${playbackIntent === 'next-episode' ? 'Play next episode of' : 'Resume'} ${item.title}`,
+        subtitle,
+        metaLine,
+      ]
+        .filter(Boolean)
+        .join(', ')
     : item.title;
 
   const poster = (
@@ -178,6 +202,7 @@ function MediaCardPoster({
             alt={item.title}
             className='relative object-cover w-full h-full bg-zinc-900'
             loading='lazy'
+            fadeIn
           />
         ) : null}
         {selectionMode && (
@@ -257,7 +282,7 @@ function MediaCardPoster({
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
-          onToggleSelect?.(item);
+          onToggleSelect?.(item, event.shiftKey);
         }}
       >
         {poster}
@@ -271,6 +296,8 @@ function MediaCardPoster({
       {/* Plain anchor avoids subscribing every resting card to navigation. */}
       <a
         href={detailsPath}
+        data-media-card-poster
+        tabIndex={expanded ? -1 : undefined}
         aria-label={anchorLabel}
         aria-busy={isPlayPending || undefined}
         className='block relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
@@ -281,7 +308,7 @@ function MediaCardPoster({
             state: { from: currentPathWithSearch() },
           });
         }}
-        onFocus={() => void routeChunks.details().catch(() => undefined)}
+        onFocus={onPlay ? undefined : () => void routeChunks.details().catch(() => undefined)}
         onPointerDown={onPrefetchDetails}
       >
         {poster}
@@ -306,6 +333,12 @@ function useSyncedBooleanState(initialState = false) {
 }
 
 interface MediaCardOverlayProps {
+  contextMenu?: {
+    onCloseAutoFocus: (event: Event) => void;
+    onInteractOutside: () => void;
+    onOpenChange: (open: boolean) => void;
+    onRemove: () => void;
+  };
   createListOpen: boolean;
   currentStatus: WatchStatus | null;
   detailsRouteType: PlayerRouteMediaType;
@@ -313,10 +346,11 @@ interface MediaCardOverlayProps {
   isInLibraryOverride?: boolean;
   isPlayPending?: boolean;
   item: MediaItem;
+  launchOwnerMountedRef: RefObject<boolean>;
   metaLine?: string;
-  onCollapse: () => void;
   onCreateListOpenChange: (open: boolean) => void;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
+  playbackIntent: 'resume' | 'next-episode';
   onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   onToggleListPicker: (event: ReactMouseEvent) => void;
   popoverAlign: PopoverAlign;
@@ -327,16 +361,18 @@ interface MediaCardOverlayProps {
 
 // Expanded-only surface — resting cards stay free of the details/lists/history observers and playback hook chain.
 function MediaCardOverlay({
+  contextMenu,
   createListOpen,
   currentStatus,
   detailsRouteType,
   isInLibraryOverride,
   isPlayPending = false,
   item,
+  launchOwnerMountedRef,
   metaLine,
-  onCollapse,
   onCreateListOpenChange,
   onPlay,
+  playbackIntent,
   onRemoveFromContinue,
   onToggleListPicker,
   popoverAlign,
@@ -350,23 +386,28 @@ function MediaCardOverlay({
 
   // The id guard avoids a doomed IPC (Rust rejects empty ids); card payload only — hover never needs episodes.
   const { data: details } = useQuery({
-    queryKey: detailsCardQueryKey(detailsRouteType, item.id),
-    queryFn: () => api.getMediaCardDetails(detailsRouteType, item.id),
-    enabled: !!item.id.trim(),
-    staleTime: DETAILS_STALE_TIME_MS,
-    gcTime: DETAILS_GC_TIME_MS,
+    ...api.cardDetailsQueryOptions(detailsRouteType, item.id),
+    enabled: !contextMenu && !!item.id.trim(),
   });
 
   const { data: lists } = useListSummaries(item.id);
-  const { data: historyEntry } = useLatestWatchHistoryEntry(item.id, {
+  const { data: historyEntry } = useMediaResumeEntry(item.id, item.type, {
     enabled: !onPlay,
   });
 
   // Membership resolves here, not on the resting card — browse grids carry no per-card library observer.
-  const { data: resolvedIsInLibrary = false } = useIsItemInLibrary(item.id, {
+  const libraryQuery = useIsItemInLibrary(item.id, {
     enabled: isInLibraryOverride === undefined,
   });
-  const isInLibrary = isInLibraryOverride ?? resolvedIsInLibrary;
+  const isInLibrary = isInLibraryOverride ?? libraryQuery.data ?? false;
+  const libraryReady = isInLibraryOverride !== undefined || libraryQuery.data !== undefined;
+  const libraryActionLabel = libraryReady
+    ? isInLibrary
+      ? 'Remove from Library'
+      : 'Add to Library'
+    : libraryQuery.isError
+      ? 'Library unavailable'
+      : 'Loading Library…';
 
   const collectionActions = useMediaCollectionActions({
     item,
@@ -377,6 +418,7 @@ function MediaCardOverlay({
     from,
     historyEntry,
     item,
+    launchOwnerMountedRef,
     surface: 'card',
   });
 
@@ -385,7 +427,7 @@ function MediaCardOverlay({
 
   const trailerVideoId = details?.trailers?.[0]?.id;
   // Reduced-motion CSS cannot stop playback inside an iframe.
-  const trailersEnabled = useTrailerPreviews() && !prefersReducedMotion();
+  const trailersEnabled = useTrailerPreviews() && !contextMenu && !prefersReducedMotion();
 
   // A second dwell avoids mounting expensive embeds during quick card hops.
   const [trailerArmed, setTrailerArmed] = useState(false);
@@ -400,8 +442,10 @@ function MediaCardOverlay({
   const isInAnyList = lists?.some((list) => list.contains_item) ?? false;
   const primaryActionLabel = onPlay
     ? subtitle
-      ? `Resume ${subtitle}`
-      : 'Resume'
+      ? `${playbackIntent === 'next-episode' ? 'Play' : 'Resume'} ${subtitle}`
+      : playbackIntent === 'next-episode'
+        ? 'Play next episode'
+        : 'Resume'
     : primaryPlayback.primaryActionLabel;
   const isPrimaryPending = isPlayPending || primaryPlayback.isResolvingPrimaryAction;
 
@@ -417,12 +461,69 @@ function MediaCardOverlay({
     void primaryPlayback.handlePrimaryAction();
   };
 
+  const handleToggleLibrary = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!libraryReady || toggleLibrary.isPending) return;
+    if (isInLibrary && isInLibraryOverride) contextMenu?.onRemove();
+    toggleLibrary.mutate();
+  };
+
+  if (contextMenu) {
+    return (
+      <ContextMenuContent
+        onCloseAutoFocus={contextMenu.onCloseAutoFocus}
+        onInteractOutside={contextMenu.onInteractOutside}
+      >
+        <ContextMenuItem asChild>
+          <a
+            href={detailsPath}
+            onClick={(event) => {
+              navigateOnAnchorClick(event, detailsPath, { state: { from } });
+              contextMenu.onOpenChange(false);
+            }}
+          >
+            Open details
+          </a>
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={isPrimaryPending}
+          onClick={(event) => {
+            handlePrimaryAction(event);
+            contextMenu.onOpenChange(false);
+          }}
+        >
+          {primaryActionLabel}
+        </ContextMenuItem>
+        <ContextMenuItem
+          disabled={!libraryReady || toggleLibrary.isPending}
+          onClick={(event) => {
+            handleToggleLibrary(event);
+            contextMenu.onOpenChange(false);
+          }}
+        >
+          {libraryActionLabel}
+        </ContextMenuItem>
+        {onRemoveFromContinue && (
+          <ContextMenuItem
+            onClick={(event) => {
+              onRemoveFromContinue(event);
+              contextMenu.onOpenChange(false);
+            }}
+          >
+            Remove from watch history
+          </ContextMenuItem>
+        )}
+      </ContextMenuContent>
+    );
+  }
+
   return (
     <>
       {/* Top-anchored popout — center uses a negative margin, not translate, so the enter zoom never fights it. */}
       <div
         className={cn(
-          'absolute top-0 z-20 flex h-fit max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 animate-in fade-in-0 zoom-in-95 duration-200',
+          'absolute top-0 z-20 flex h-fit max-h-full max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 animate-in fade-in-0 zoom-in-95 duration-200',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
           popoverAlign === 'center' && 'left-1/2',
@@ -436,6 +537,7 @@ function MediaCardOverlay({
           {isHttpUrl(backdropSrc) && (
             <RemoteImage
               src={backdropSrc}
+              fallbackSrc={isHttpUrl(item.poster) ? item.poster : undefined}
               alt=''
               className='absolute inset-0 object-cover w-full h-full'
               loading='lazy'
@@ -459,25 +561,23 @@ function MediaCardOverlay({
           {onRemoveFromContinue && (
             <button
               type='button'
-              aria-label={`Remove ${item.title} from history`}
-              title='Remove from history'
+              aria-label={`Remove ${item.title} from watch history`}
+              title='Remove from watch history'
               className='absolute right-2 top-2 z-10 flex h-9 w-9 items-center justify-center rounded-lg bg-black/55 text-zinc-300 backdrop-blur-xs transition-colors duration-150 hover:bg-black/75 hover:text-red-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-              onClick={(e) => {
-                e.preventDefault();
-                e.stopPropagation();
-                onRemoveFromContinue(e);
-                onCollapse();
-              }}
+              onClick={onRemoveFromContinue}
             >
               <Trash2 className='h-3.5 w-3.5' />
             </button>
           )}
         </div>
 
-        <div className='flex flex-1 flex-col overflow-hidden'>
+        <div className='flex min-h-0 flex-1 flex-col overflow-hidden'>
           {showListPicker ? (
-            <div data-media-card-picker className='relative z-10 flex flex-1 flex-col p-2.5'>
-              <div className='mb-1 flex items-center gap-1.5'>
+            <div
+              data-media-card-picker
+              className='relative z-10 flex min-h-0 flex-1 flex-col p-2.5'
+            >
+              <div className='mb-1 flex shrink-0 items-center gap-1.5'>
                 <button
                   type='button'
                   aria-label='Back to actions'
@@ -490,12 +590,14 @@ function MediaCardOverlay({
                 <span className='text-[12px] font-semibold text-white'>Add to List</span>
               </div>
 
-              <SaveToCollectionPanel
-                item={item}
-                isInLibrary={isInLibrary}
-                actions={collectionActions}
-                onCreateList={() => onCreateListOpenChange(true)}
-              />
+              <Suspense fallback={null}>
+                <SaveToCollectionPanel
+                  item={item}
+                  isInLibrary={isInLibrary}
+                  actions={collectionActions}
+                  onCreateList={() => onCreateListOpenChange(true)}
+                />
+              </Suspense>
             </div>
           ) : (
             <div className='relative z-10 flex flex-1 flex-col gap-2 p-3 pt-2.5'>
@@ -562,20 +664,16 @@ function MediaCardOverlay({
                       ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
                       : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
                     toggleLibrary.isPending && 'cursor-wait opacity-70',
+                    !libraryReady && 'opacity-50',
                   )}
-                  title={isInLibrary ? 'Remove from library' : 'Add to library'}
-                  aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
-                  aria-pressed={isInLibrary}
+                  title={libraryActionLabel}
+                  aria-label={libraryActionLabel}
+                  aria-pressed={libraryReady ? isInLibrary : undefined}
                   // Disabling a focused control would blur and collapse the card.
-                  aria-disabled={toggleLibrary.isPending || undefined}
-                  onClick={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (toggleLibrary.isPending) return;
-                    toggleLibrary.mutate();
-                  }}
+                  aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
+                  onClick={handleToggleLibrary}
                 >
-                  {toggleLibrary.isPending ? (
+                  {toggleLibrary.isPending || (!libraryReady && !libraryQuery.isError) ? (
                     <Loader2 className='h-3.5 w-3.5 animate-spin' />
                   ) : (
                     <Heart className={cn('h-3.5 w-3.5', isInLibrary && 'fill-current')} />
@@ -594,6 +692,8 @@ function MediaCardOverlay({
                   aria-label='Add to List'
                   aria-pressed={isInAnyList}
                   aria-expanded={showListPicker}
+                  onPointerEnter={warmSaveToCollectionPanel}
+                  onFocus={warmSaveToCollectionPanel}
                   onClick={onToggleListPicker}
                 >
                   <Bookmark className={cn('h-3.5 w-3.5', isInAnyList && 'fill-current')} />
@@ -660,6 +760,7 @@ export const MediaCard = memo(function MediaCard({
   progress,
   metaLine,
   onPlay,
+  playbackIntent = 'resume',
   onRemoveFromContinue,
   subtitle,
   isPlayPending = false,
@@ -674,7 +775,12 @@ export const MediaCard = memo(function MediaCard({
   const [popoverAlign, setPopoverAlign] = useState<PopoverAlign>('center');
   const [showListPicker, setShowListPickerState, showListPickerRef] = useSyncedBooleanState();
   const [createListOpen, setCreateListOpenState, createListOpenRef] = useSyncedBooleanState();
+  const [contextMenuOpen, setContextMenuOpenState, contextMenuOpenRef] = useSyncedBooleanState();
+  const restoreMenuFocusRef = useRef(true);
+  const menuFocusTargetRef = useRef<(() => HTMLElement | null) | null>(null);
+  const previousListPickerRef = useRef(showListPicker);
   const cardRef = useRef<HTMLElement>(null);
+  const launchOwnerMountedRef = useMountedRef();
   const expandTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const restoringFocusRef = useRef(false);
   const hoverFocusRef = useRef(false);
@@ -682,8 +788,8 @@ export const MediaCard = memo(function MediaCard({
   const clearExpandTimer = useCallback(() => clearTimer(expandTimer), []);
 
   const hasLockedCardInteraction = useCallback(
-    () => showListPickerRef.current || createListOpenRef.current,
-    [createListOpenRef, showListPickerRef],
+    () => showListPickerRef.current || createListOpenRef.current || contextMenuOpenRef.current,
+    [contextMenuOpenRef, createListOpenRef, showListPickerRef],
   );
 
   const collapseCard = useCallback(() => {
@@ -692,6 +798,80 @@ export const MediaCard = memo(function MediaCard({
     setExpanded(false);
     setShowListPickerState(false);
   }, [clearExpandTimer, setShowListPickerState]);
+
+  const handleContextMenuOpenChange = (open: boolean) => {
+    setContextMenuOpenState(open);
+    if (open) {
+      restoreMenuFocusRef.current = true;
+      menuFocusTargetRef.current = null;
+      collapseCard();
+    }
+  };
+
+  const handleContextMenuCloseAutoFocus = (event: Event) => {
+    event.preventDefault();
+    if (!restoreMenuFocusRef.current) return;
+    restoringFocusRef.current = true;
+    (
+      menuFocusTargetRef.current?.() ??
+      cardRef.current?.querySelector<HTMLElement>('[data-media-card-poster]')
+    )?.focus({ preventScroll: true });
+    restoringFocusRef.current = false;
+  };
+
+  const prepareRemovalFocus = () => {
+    const card = cardRef.current;
+    const collection = card?.closest<HTMLElement>(
+      '[data-media-scroller], [data-collection-selection]',
+    );
+    if (
+      card &&
+      collection &&
+      (contextMenuOpenRef.current || card.contains(document.activeElement))
+    ) {
+      const cards = Array.from(collection.querySelectorAll('article'));
+      const index = cards.indexOf(card);
+      const nextHref = cards[index + 1]
+        ?.querySelector('[data-media-card-poster]')
+        ?.getAttribute('href');
+      const previousHref = cards[index - 1]
+        ?.querySelector('[data-media-card-poster]')
+        ?.getAttribute('href');
+      const section =
+        collection.closest<HTMLElement>('[data-resume-section], [role="tabpanel"]') ?? collection;
+      let headingScope: HTMLElement | null = section;
+      while (headingScope && !headingScope.querySelector('h1, h2')) {
+        headingScope = headingScope.parentElement;
+      }
+      const heading = headingScope?.querySelector<HTMLElement>('h1, h2');
+      const resolveTarget = () => {
+        const posters = Array.from(
+          collection.querySelectorAll<HTMLElement>('[data-media-card-poster]'),
+        );
+        const target =
+          posters.find((poster) => poster.getAttribute('href') === nextHref) ??
+          posters.find((poster) => poster.getAttribute('href') === previousHref) ??
+          collection.querySelector<HTMLElement>('input') ??
+          (heading?.isConnected ? heading : section);
+        if (!target.isConnected) return null;
+        if (target.tabIndex < 0) target.tabIndex = -1;
+        return target;
+      };
+      if (contextMenuOpenRef.current) {
+        menuFocusTargetRef.current = resolveTarget;
+      } else {
+        resolveTarget()?.focus({ preventScroll: true });
+      }
+    }
+  };
+
+  const handleRemoveFromHistory = (event: ReactMouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    prepareRemovalFocus();
+    onRemoveFromContinue?.(event);
+    collapseCard();
+  };
 
   // Pin the popout toward the side with room, measured vs the rail scrollport or the window (grids).
   const resolvePopoverAlign = useCallback((): PopoverAlign => {
@@ -721,7 +901,8 @@ export const MediaCard = memo(function MediaCard({
 
   const scheduleExpand = useCallback(() => {
     // Escape restores poster focus without immediately reopening the card.
-    if (selectionMode || expanded || restoringFocusRef.current) return;
+    if (selectionMode || expanded || restoringFocusRef.current || contextMenuOpenRef.current)
+      return;
     // Hover focus can inherit an earlier keyboard ring; track its owner here.
     hoverFocusRef.current = !cardRef.current?.contains(document.activeElement);
     clearExpandTimer();
@@ -736,7 +917,7 @@ export const MediaCard = memo(function MediaCard({
       setExpanded(true);
       expandTimer.current = null;
     }, delay);
-  }, [clearExpandTimer, expanded, resolvePopoverAlign, selectionMode]);
+  }, [clearExpandTimer, contextMenuOpenRef, expanded, resolvePopoverAlign, selectionMode]);
 
   const handleMouseLeave = useCallback(() => {
     if (
@@ -769,6 +950,21 @@ export const MediaCard = memo(function MediaCard({
   useEffect(() => {
     if (selectionMode) collapseCard();
   }, [selectionMode, collapseCard]);
+
+  // The open picker locks hover/blur collapse, so interaction elsewhere must dismiss it.
+  useEffect(() => {
+    if (!showListPicker) return;
+    const dismissOutside = (event: Event) => {
+      if (createListOpenRef.current) return;
+      if (event.target instanceof Node && !cardRef.current?.contains(event.target)) collapseCard();
+    };
+    document.addEventListener('pointerdown', dismissOutside, true);
+    document.addEventListener('focusin', dismissOutside);
+    return () => {
+      document.removeEventListener('pointerdown', dismissOutside, true);
+      document.removeEventListener('focusin', dismissOutside);
+    };
+  }, [collapseCard, createListOpenRef, showListPicker]);
 
   const toggleListPicker = useCallback(
     (e: ReactMouseEvent) => {
@@ -815,14 +1011,10 @@ export const MediaCard = memo(function MediaCard({
     [expanded, collapseCard, createListOpenRef, setShowListPickerState, showListPickerRef],
   );
 
-  // Transfer focus before the hidden poster blurs and closes the overlay; a focus owner elsewhere stays untouched.
   useLayoutEffect(() => {
-    if (!expanded) return;
-    if (
-      document.activeElement !== document.body &&
-      !cardRef.current?.contains(document.activeElement)
-    )
-      return;
+    const pickerChanged = previousListPickerRef.current !== showListPicker;
+    previousListPickerRef.current = showListPicker;
+    if (!expanded || !pickerChanged) return;
     const target = cardRef.current?.querySelector<HTMLElement>(
       showListPicker ? '[data-media-card-picker] button' : '[data-media-card-primary]',
     );
@@ -839,57 +1031,75 @@ export const MediaCard = memo(function MediaCard({
     typeof progress === 'number' && Number.isFinite(progress) ? clamp(progress, 0, 100) : undefined;
 
   return (
-    // Ambient hover/focus listeners drive expand/collapse — the card itself stays non-interactive.
-    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
-    <article
-      ref={cardRef}
-      data-media-card-expanded={(!selectionMode && expanded) || undefined}
-      className={cn('relative', !selectionMode && expanded && 'z-30')}
-      aria-label={item.title}
-      onMouseEnter={scheduleExpand}
-      onMouseLeave={handleMouseLeave}
-      onFocus={scheduleExpand}
-      onBlur={handleBlur}
-      onKeyDown={handleKeyDown}
-    >
-      <div className={cn(!selectionMode && expanded && 'invisible')}>
-        <MediaCardPoster
-          currentStatus={currentStatus}
-          detailsRouteType={detailsRouteType}
-          isPlayPending={isPlayPending}
-          item={item}
-          metaLine={metaLine}
-          onPlay={onPlay}
-          onPrefetchDetails={prefetchDetails}
-          progress={safeProgress}
-          subtitle={subtitle}
-          selectionMode={selectionMode}
-          isSelected={isSelected}
-          onToggleSelect={onToggleSelect}
-        />
-      </div>
+    <ContextMenu open={contextMenuOpen} onOpenChange={handleContextMenuOpenChange}>
+      <ContextMenuTrigger asChild disabled={selectionMode}>
+        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
+        <article
+          ref={cardRef}
+          data-media-card-expanded={(!selectionMode && expanded) || undefined}
+          className={cn('group/card relative', !selectionMode && expanded && 'z-30')}
+          aria-label={item.title}
+          onMouseEnter={scheduleExpand}
+          onMouseLeave={handleMouseLeave}
+          onFocus={scheduleExpand}
+          onBlur={handleBlur}
+          onKeyDown={handleKeyDown}
+        >
+          <div className={cn(!selectionMode && expanded && 'pointer-events-none opacity-0')}>
+            <MediaCardPoster
+              currentStatus={currentStatus}
+              detailsRouteType={detailsRouteType}
+              expanded={!selectionMode && expanded}
+              isPlayPending={isPlayPending}
+              item={item}
+              metaLine={metaLine}
+              onPlay={onPlay}
+              playbackIntent={playbackIntent}
+              onPrefetchDetails={onPlay ? undefined : prefetchDetails}
+              progress={safeProgress}
+              subtitle={subtitle}
+              selectionMode={selectionMode}
+              isSelected={isSelected}
+              onToggleSelect={onToggleSelect}
+            />
+          </div>
 
-      {!selectionMode && expanded && (
-        <MediaCardOverlay
-          createListOpen={createListOpen}
-          currentStatus={currentStatus}
-          detailsRouteType={detailsRouteType}
-          isInLibraryOverride={isInLibraryOverride}
-          isPlayPending={isPlayPending}
-          item={item}
-          metaLine={metaLine}
-          onCollapse={collapseCard}
-          onCreateListOpenChange={handleCreateListOpenChange}
-          onPlay={onPlay}
-          onRemoveFromContinue={onRemoveFromContinue}
-          onToggleListPicker={toggleListPicker}
-          popoverAlign={popoverAlign}
-          progress={safeProgress}
-          showListPicker={showListPicker}
-          subtitle={subtitle}
-        />
-      )}
-    </article>
+          {!selectionMode && (expanded || contextMenuOpen) && (
+            <MediaCardOverlay
+              contextMenu={
+                contextMenuOpen
+                  ? {
+                      onCloseAutoFocus: handleContextMenuCloseAutoFocus,
+                      onInteractOutside: () => {
+                        restoreMenuFocusRef.current = false;
+                      },
+                      onOpenChange: handleContextMenuOpenChange,
+                      onRemove: prepareRemovalFocus,
+                    }
+                  : undefined
+              }
+              createListOpen={createListOpen}
+              currentStatus={currentStatus}
+              detailsRouteType={detailsRouteType}
+              isInLibraryOverride={isInLibraryOverride}
+              isPlayPending={isPlayPending}
+              item={item}
+              launchOwnerMountedRef={launchOwnerMountedRef}
+              metaLine={metaLine}
+              onCreateListOpenChange={handleCreateListOpenChange}
+              onPlay={onPlay}
+              playbackIntent={playbackIntent}
+              onRemoveFromContinue={onRemoveFromContinue ? handleRemoveFromHistory : undefined}
+              onToggleListPicker={toggleListPicker}
+              popoverAlign={popoverAlign}
+              progress={safeProgress}
+              showListPicker={showListPicker}
+              subtitle={subtitle}
+            />
+          )}
+        </article>
+      </ContextMenuTrigger>
+    </ContextMenu>
   );
 });
 

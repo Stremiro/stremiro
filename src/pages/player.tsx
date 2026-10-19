@@ -12,7 +12,6 @@ import {
   useSyncExternalStore,
   type WheelEvent,
 } from 'react';
-import { useNavigate } from 'react-router';
 import { DesktopTitlebar } from '@/components/desktop-titlebar';
 import { MiniPlayer } from '@/components/mini-player';
 import { PlayerActionOverlays } from '@/components/player-action-overlays';
@@ -87,12 +86,18 @@ import {
   getLatestEpisodeResumeStartTime,
   MIN_RESUME_POSITION_SECS,
 } from '@/lib/history-playback';
-import { currentPathWithSearch } from '@/lib/navigation';
+import { boundNavigate, currentPathWithSearch, navigateApp } from '@/lib/navigation';
 import { copyText } from '@/lib/notify';
-import { buildDetailsRoute, launchResolvedStream } from '@/lib/player-navigation';
+import {
+  buildDetailsRoute,
+  claimPlaybackLaunch,
+  isCurrentPlaybackLaunch,
+  launchResolvedStream,
+} from '@/lib/player-navigation';
 import { createPlaybackClock } from '@/lib/player-clock';
 import {
   blurActivePlayerControl,
+  createWheelSeekAccumulator,
   isPlayerInteractiveTarget,
   restorePlayerBackground,
   restorePlayerCursor,
@@ -105,7 +110,6 @@ import { type MiniPlayerPosition, usePlayerSession } from '@/lib/player-session'
 import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
-  DETAILS_STALE_TIME_MS,
   SKIP_TIMES_GC_TIME_MS,
   SKIP_TIMES_STALE_TIME_MS,
   skipTimesQueryKey,
@@ -180,7 +184,6 @@ export function Player() {
 }
 
 function InnerPlayer() {
-  const navigate = useNavigate();
   const { session, presentation, close, miniPositionRef, trayPause } = usePlayerSession();
   const pausedByTrayHide = useSyncExternalStore(trayPause.subscribe, trayPause.getSnapshot);
   const isExpanded = presentation === 'expanded';
@@ -437,7 +440,7 @@ function InnerPlayer() {
     const nextSpeed = appUiPreferences.playerSpeed;
     const speedChanged = appliedSpeedRef.current !== nextSpeed;
     appliedSpeedRef.current = nextSpeed;
-    setPlaybackSpeed((current) => (current === nextSpeed ? current : nextSpeed));
+    setPlaybackSpeed(nextSpeed);
 
     if (mpvInitializedRef.current && speedChanged) {
       void setMpvProperty('speed', nextSpeed).catch(() => undefined);
@@ -473,14 +476,12 @@ function InnerPlayer() {
     dataUpdatedAt: detailsDataUpdatedAt,
     isLoading: isLoadingDetails,
   } = useQuery({
-    queryKey: detailsQueryKey(effectiveResolveMediaType, id),
-    queryFn: () =>
-      id
-        ? api.getMediaDetails(effectiveResolveMediaType, id)
-        : Promise.reject(new Error('Media ID is required for player details lookup.')),
+    ...api.detailsQueryOptions(
+      effectiveResolveMediaType,
+      id,
+      'Media ID is required for player details lookup.',
+    ),
     enabled: !!type && !!id,
-    staleTime: DETAILS_STALE_TIME_MS,
-    gcTime: DETAILS_GC_TIME_MS,
   });
   const rankingTitle = nonBlank(details?.title) ?? resolveTitle;
   const episodes = details?.episodes;
@@ -700,6 +701,7 @@ function InnerPlayer() {
   );
   useDocumentTitle(
     title ? `${title}${currentEpisodeLabel ? ` · ${currentEpisodeLabel}` : ''}` : undefined,
+    isExpanded,
   );
 
   const {
@@ -814,6 +816,7 @@ function InnerPlayer() {
   );
   const { navigateBack } = usePlayerBackNavigation({
     currentTimeRef,
+    observedPositionRef,
     effectiveResolveMediaType,
     from,
     id,
@@ -1032,10 +1035,10 @@ function InnerPlayer() {
     // Re-apply launch state (no remount); `from` rewrites to the expand origin so Back returns here.
     const baseState =
       typeof session.state === 'object' && session.state !== null ? session.state : {};
-    navigate(session.playerPath, {
+    navigateApp(session.playerPath, {
       state: { ...baseState, from: currentPathWithSearch(), preserveTrayPause: true },
     });
-  }, [navigate, session]);
+  }, [session]);
 
   // Minimize keeps the player mounted — save progress on the expanded→mini transition, not unmount.
   // Overlays close too: any route change docks, and a stale flag would reopen them on expand.
@@ -1061,6 +1064,7 @@ function InnerPlayer() {
       if (playbackEndedRef.current === ended) return;
       playbackEndedRef.current = ended;
       setHasEnded(ended);
+      void saveProgressRef.current?.({ completed: ended });
       if (!ended) return;
       setIsPlaying(false);
       void flushPlaybackBeforeNavigation();
@@ -1068,7 +1072,7 @@ function InnerPlayer() {
       clearControlsAutoHide();
       setShowControls(true);
     },
-    [clearControlsAutoHide, flushPlaybackBeforeNavigation],
+    [clearControlsAutoHide, flushPlaybackBeforeNavigation, saveProgressRef],
   );
 
   const scheduleMpvSet = useMpvSetScheduler();
@@ -1090,9 +1094,9 @@ function InnerPlayer() {
 
   const {
     volume,
-    setVolume,
+    applyNativeVolume,
     isMuted,
-    setIsMuted,
+    applyNativeMute,
     isMutedRef,
     volumeRef,
     handleVolumeChange,
@@ -1136,8 +1140,8 @@ function InnerPlayer() {
     setStreamError,
     setDuration,
     setIsPlaying,
-    setVolume,
-    setIsMuted,
+    applyNativeVolume,
+    applyNativeMute,
     setPlaybackSpeed,
     setMpvSurfaceReady,
     requestSurfaceRefresh,
@@ -1364,6 +1368,7 @@ function InnerPlayer() {
       }
 
       const requestId = ++selectorOpenRequestIdRef.current;
+      const launchGeneration = claimPlaybackLaunch();
       trayPause.publish(false);
       nextEpisodeRequestRef.current = requestId;
       const { target, request, resolve } = resolveEpisodeStream(ep, id);
@@ -1380,14 +1385,18 @@ function InnerPlayer() {
         throw new Error('adjacent-episode resolve timed out');
       })
         .then(([resolved, resumeStartTime]) => {
-          if (isSelectorRequestStale(requestId) || trayPause.getSnapshot()) {
+          if (
+            isSelectorRequestStale(requestId) ||
+            trayPause.getSnapshot() ||
+            !isCurrentPlaybackLaunch(launchGeneration)
+          ) {
             clearNextEpisodeRequest(requestId);
             return;
           }
           if (!resolved?.url) throw new Error('No streams found for the adjacent episode.');
 
           prepareForPlayerNavigation();
-          launchResolvedStream(navigate, request, resolved, {
+          launchResolvedStream(boundNavigate, request, resolved, {
             backdrop,
             from,
             logo,
@@ -1396,7 +1405,11 @@ function InnerPlayer() {
           });
         })
         .catch(() => {
-          if (isSelectorRequestStale(requestId) || trayPause.getSnapshot()) {
+          if (
+            isSelectorRequestStale(requestId) ||
+            trayPause.getSnapshot() ||
+            !isCurrentPlaybackLaunch(launchGeneration)
+          ) {
             clearNextEpisodeRequest(requestId);
             return;
           }
@@ -1421,7 +1434,6 @@ function InnerPlayer() {
       id,
       isSelectorRequestStale,
       logo,
-      navigate,
       openStreamSelectorForEpisode,
       poster,
       prepareForPlayerNavigation,
@@ -1507,7 +1519,7 @@ function InnerPlayer() {
     }
     // Expanded navigation retains the session; the docking effect owns its progress flush.
     prepareForPlayerNavigation(!isExpanded);
-    navigate(buildDetailsRoute(type, id), {
+    navigateApp(buildDetailsRoute(type, id), {
       replace: true,
       state:
         resolvedAbsoluteSeason !== undefined
@@ -1518,7 +1530,6 @@ function InnerPlayer() {
     from,
     id,
     isExpanded,
-    navigate,
     navigateBack,
     prepareForPlayerNavigation,
     resolvedAbsoluteEpisode,
@@ -1587,19 +1598,18 @@ function InnerPlayer() {
   const skipAction = useMemo(() => {
     if (!activeSkipSegment) return null;
     // A tail segment offers the standard next-episode flow instead.
-    const runsToEnd = isNearMediaEnd(activeSkipSegment.end_time, duration);
-    if (runsToEnd && nextEpisode) {
+    if (tailSegmentActive && nextEpisode) {
       return { label: 'Next Episode', onSkip: playNextEpisode };
     }
     return {
       label: getSkipLabel(activeSkipSegment.type),
       onSkip: (source: 'user' | 'automatic' = 'user') => {
-        void seek(activeSkipSegment.end_time, source)
-          .then(() => announce(getSkippedLabel(activeSkipSegment.type), 'skip'))
-          .catch(() => undefined);
+        void seek(activeSkipSegment.end_time, source, () =>
+          announce(getSkippedLabel(activeSkipSegment.type), 'skip'),
+        ).catch(() => undefined);
       },
     };
-  }, [activeSkipSegment, announce, duration, nextEpisode, playNextEpisode, seek]);
+  }, [activeSkipSegment, announce, tailSegmentActive, nextEpisode, playNextEpisode, seek]);
 
   // EOF and open panels own the action lane, even if mpv's last clock tick is inside an outro.
   const activeSkipAction = !hasEnded && playbackIntact && !panelsOwnSurface ? skipAction : null;
@@ -1786,7 +1796,7 @@ function InnerPlayer() {
     showStreamSelector,
     stopLoading,
     streamLookupId,
-    title: rankingTitle,
+    title: resolveTitle,
     type,
   });
 
@@ -1808,18 +1818,27 @@ function InnerPlayer() {
     setShowControls(false);
   }, [clearControlsAutoHide, isPlaying, isPlayerChromeEngaged]);
 
+  const [accumulateWheelSeek] = useState(createWheelSeekAccumulator);
   const handlePlayerWheel = useCallback(
     (event: WheelEvent<HTMLElement>) => {
       if (showStreamSelector || showEpisodes || showShortcuts) return;
       if (isPlayerInteractiveTarget(event.target)) return;
       if (event.deltaY === 0) return;
       if (event.shiftKey) {
-        void seekRelative(event.deltaY < 0 ? 5 : -5).catch(() => undefined);
+        const seconds = accumulateWheelSeek(event);
+        if (seconds !== 0) void seekRelative(seconds).catch(() => undefined);
       } else {
         void handleVolumeWheel(event).catch(() => undefined);
       }
     },
-    [handleVolumeWheel, seekRelative, showEpisodes, showShortcuts, showStreamSelector],
+    [
+      accumulateWheelSeek,
+      handleVolumeWheel,
+      seekRelative,
+      showEpisodes,
+      showShortcuts,
+      showStreamSelector,
+    ],
   );
 
   // Paused pins the chrome — once the idle card owns the frame both dissolve; any input brings them back.
@@ -2031,6 +2050,7 @@ function InnerPlayer() {
     streamSelectorState.mounted && type && id ? (
       <PlayerStreamSelector
         clock={clock}
+        observedPositionRef={observedPositionRef}
         open={showStreamSelector}
         onClose={closeStreamSelector}
         onClosed={handleStreamSelectorClosed}

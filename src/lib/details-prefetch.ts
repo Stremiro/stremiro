@@ -7,8 +7,6 @@ import { routeChunks } from '@/lib/route-chunks';
 import {
   detailsCardQueryKey,
   detailsQueryKey,
-  DETAILS_GC_TIME_MS,
-  DETAILS_STALE_TIME_MS,
   getDiscoveryEpoch,
   titleWatchProgressQueryKey,
 } from '@/lib/query-invalidation';
@@ -22,24 +20,6 @@ interface PrefetchDetailsRouteDataOptions {
 // One bundle invoke per title at a time (in-flight leader pattern): the
 // resolved-data guard can't see an in-flight call, so followers share the leader.
 const detailsPrefetchInFlight = new Map<string, Promise<void>>();
-
-// Guard on cached data, not query state: a failed fetch also leaves a state
-// entry, and prefetching past it keeps a transient error retryable.
-function prefetchQueryOnce(
-  queryClient: QueryClient,
-  queryKey: readonly unknown[],
-  queryFn: () => Promise<unknown>,
-) {
-  if (queryClient.getQueryData(queryKey) !== undefined) {
-    return;
-  }
-  void queryClient.prefetchQuery({
-    queryKey,
-    queryFn,
-    staleTime: DETAILS_STALE_TIME_MS,
-    gcTime: DETAILS_GC_TIME_MS,
-  });
-}
 
 export function prefetchDetailsRouteData(
   queryClient: QueryClient,
@@ -62,9 +42,15 @@ export function prefetchDetailsRouteData(
   // the route fetches the full payload on commit) plus the resume snapshot.
   const detailsKey = detailsCardQueryKey(routeType, normalizedId);
   const progressKey = titleWatchProgressQueryKey(normalizedId);
+  const detailsState = queryClient.getQueryState(detailsKey);
+  const fullDetailsState = queryClient.getQueryState(detailsQueryKey(routeType, normalizedId));
+  const progressState = queryClient.getQueryState(progressKey);
   if (
-    queryClient.getQueryData(detailsKey) !== undefined &&
-    queryClient.getQueryData(progressKey) !== undefined
+    (detailsState?.data !== undefined ||
+      detailsState?.fetchStatus === 'fetching' ||
+      fullDetailsState?.data !== undefined ||
+      fullDetailsState?.fetchStatus === 'fetching') &&
+    (progressState?.data !== undefined || progressState?.fetchStatus === 'fetching')
   ) {
     return;
   }
@@ -74,7 +60,7 @@ export function prefetchDetailsRouteData(
     return;
   }
 
-  // Same guard as prefetchQueryOnce, re-checked at write time so a mount-time
+  // Cached-data guard re-checked at write time so a mount-time
   // fetch that landed first wins. A failed/absent details half leaves the
   // mounted query's own fetch; a failed bundle leaves no state entry, so the
   // next hover retries instead of blocking until GC.
@@ -129,7 +115,8 @@ export function prefetchFullDetailsData(
     ? 'anime'
     : resolvePlayerRouteMediaType(mediaType);
 
-  prefetchQueryOnce(queryClient, detailsQueryKey(routeType, normalizedId), () =>
-    api.getMediaDetails(routeType, normalizedId),
-  );
+  const options = api.detailsQueryOptions(routeType, normalizedId);
+  if (queryClient.getQueryData(options.queryKey) === undefined) {
+    void queryClient.prefetchQuery(options);
+  }
 }

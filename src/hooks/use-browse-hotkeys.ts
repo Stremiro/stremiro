@@ -65,7 +65,9 @@ export function useBrowseHotkeys() {
       }
       event.preventDefault();
       const path = QUICK_SECTION_PATHS[Number(key) - 1];
-      if (!event.repeat && window.location.pathname !== path) navigateApp(path);
+      if (event.repeat) return;
+      if (path === '/search') openSearch();
+      else if (window.location.pathname !== path) navigateApp(path);
       return;
     }
     if ((key === 'arrowleft' || key === 'arrowright') && event.altKey) {

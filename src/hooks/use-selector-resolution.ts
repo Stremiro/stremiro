@@ -4,7 +4,11 @@ import { toast } from 'sonner';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { getErrorKind, getErrorMessage, type AddonStream } from '@/lib/api';
 import type { NextEpisodeStreamCoordinates } from '@/lib/episode-stream-target';
-import { launchResolvedStream } from '@/lib/player-navigation';
+import {
+  claimPlaybackLaunch,
+  isCurrentPlaybackLaunch,
+  launchResolvedStream,
+} from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
@@ -25,6 +29,7 @@ interface SelectorResolveAttempt {
   feedback: ActiveResolveFeedback;
   stream: AddonStream;
   attemptId: number;
+  launchGeneration: number;
   sessionKey: string;
   episodeOverride?: SelectorEpisodeOverride;
 }
@@ -147,6 +152,8 @@ export function useSelectorResolution({
 
   const resolveStream = async (attempt: SelectorResolveAttempt) => {
     const { stream } = attempt;
+    const isCurrentLaunch = () =>
+      isCurrentResolve(attempt) && isCurrentPlaybackLaunch(attempt.launchGeneration);
     // A pack-episode pick overrides every coordinate with the episode's own.
     const override = attempt.episodeOverride;
     const coords = {
@@ -177,7 +184,7 @@ export function useSelectorResolution({
       });
 
       // A cancelled or superseded attempt must never navigate.
-      if (!isCurrentResolve(attempt)) {
+      if (!isCurrentLaunch()) {
         return;
       }
       const feedback = attempt.feedback;
@@ -212,15 +219,15 @@ export function useSelectorResolution({
         .catch(() => undefined);
       // The pre-navigation hook can be async — re-check so a cancel that landed
       // while awaiting can't navigate.
-      if (!isCurrentResolve(attempt)) {
+      if (!isCurrentLaunch()) {
         return;
       }
       // The pick supplies the replayed key plus identity fallback for a failover winner.
       launchResolvedStream(navigate, resolvedRequest, data, routeExtras, stream);
       closeSelector();
     } catch (error) {
-      if (isDev) console.error('[player] stream resolution failed:', error);
-      if (isCurrentResolve(attempt)) {
+      if (isCurrentLaunch()) {
+        if (isDev) console.error('[player] stream resolution failed:', error);
         const message = getErrorMessage(error);
         switch (getErrorKind(error)) {
           case 'no_direct_url':
@@ -276,6 +283,7 @@ export function useSelectorResolution({
         feedback,
         stream,
         attemptId: ++resolveAttemptIdRef.current,
+        launchGeneration: claimPlaybackLaunch(),
         sessionKey: selectorSessionKey,
         episodeOverride,
       };

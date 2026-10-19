@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
@@ -11,6 +11,8 @@ import { openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
   buildDetailsRoute,
+  claimPlaybackLaunch,
+  isCurrentPlaybackLaunch,
   launchResolvedStream,
   type PlayerRouteMediaType,
   resolvePlayerRouteMediaType,
@@ -24,6 +26,8 @@ interface UseMediaPrimaryPlaybackOptions {
   from: string;
   historyEntry?: WatchProgress | null;
   item?: MediaItem | null;
+  /** Keep a card's launch alive when only its hover overlay unmounts. */
+  launchOwnerMountedRef?: RefObject<boolean>;
   onPlayMovieWithoutHistory?: (() => void | Promise<void>) | null;
   onSelectEpisode?: ((reason: EpisodeSelectionReason) => void | Promise<void>) | null;
   surface: PrimaryPlaybackSurface;
@@ -75,6 +79,7 @@ export function useMediaPrimaryPlayback({
   from,
   historyEntry,
   item,
+  launchOwnerMountedRef,
   onPlayMovieWithoutHistory,
   onSelectEpisode,
   surface,
@@ -83,6 +88,12 @@ export function useMediaPrimaryPlayback({
   const queryClient = useQueryClient();
   const { session, presentation } = usePlayerSession();
   const playbackType: PlayerRouteMediaType = resolvePlayerRouteMediaType(item?.type);
+  const resumeEntry =
+    historyEntry?.id === item?.id &&
+    (historyEntry?.type_ === playbackType ||
+      (isSeriesLikeMediaType(historyEntry?.type_) && isSeriesLikeMediaType(playbackType)))
+      ? historyEntry
+      : null;
   const activeSession =
     presentation === 'mini' &&
     session?.id === item?.id &&
@@ -129,25 +140,32 @@ export function useMediaPrimaryPlayback({
     if (!item || primaryActionInFlightRef.current) {
       return;
     }
+    const launchGeneration = claimPlaybackLaunch();
     if (activeSession) {
-      navigate(activeSession.playerPath, { state: activeSession.state });
+      const baseState =
+        typeof activeSession.state === 'object' && activeSession.state !== null
+          ? activeSession.state
+          : {};
+      navigate(activeSession.playerPath, { state: { ...baseState, from } });
       return;
     }
 
     primaryActionInFlightRef.current = true;
     const generation = ++primaryActionGenerationRef.current;
     const isCurrentAction = () =>
-      isMountedRef.current && generation === primaryActionGenerationRef.current;
+      (launchOwnerMountedRef ?? isMountedRef).current &&
+      generation === primaryActionGenerationRef.current &&
+      isCurrentPlaybackLaunch(launchGeneration);
     try {
-      if (historyEntry) {
+      if (resumeEntry) {
         setIsResolvingPrimaryAction(true);
         await openHistoryPlaybackPlan(
           navigate,
-          historyEntry,
+          resumeEntry,
           from,
           getHistoryPlaybackErrorTitle(surface, item),
           queryClient,
-          { onSelectEpisode, isCancelled: () => !isCurrentAction() },
+          { onSelectEpisode, launchGeneration, isCancelled: () => !isCurrentAction() },
         );
         return;
       }
@@ -213,7 +231,7 @@ export function useMediaPrimaryPlayback({
         navigateToDetails();
       }
     } finally {
-      if (isCurrentAction()) {
+      if (isMountedRef.current && generation === primaryActionGenerationRef.current) {
         primaryActionInFlightRef.current = false;
         setIsResolvingPrimaryAction(false);
       }
@@ -221,9 +239,10 @@ export function useMediaPrimaryPlayback({
   }, [
     activeSession,
     from,
-    historyEntry,
+    resumeEntry,
     isMountedRef,
     item,
+    launchOwnerMountedRef,
     navigate,
     navigateToDetails,
     onPlayMovieWithoutHistory,
@@ -239,18 +258,18 @@ export function useMediaPrimaryPlayback({
         ? activeSession.season === undefined
           ? undefined
           : Number(activeSession.season)
-        : (historyEntry?.absolute_season ?? undefined),
+        : (resumeEntry?.absolute_season ?? undefined),
       activeSession
         ? activeSession.episode === undefined
           ? undefined
           : Number(activeSession.episode)
-        : (historyEntry?.absolute_episode ?? undefined),
+        : (resumeEntry?.absolute_episode ?? undefined),
     ) || undefined;
   const primaryActionLabel = getPrimaryPlaybackLabel(
     surface,
     showResolvingFeedback,
     item,
-    Boolean(activeSession || historyEntry),
+    Boolean(activeSession || resumeEntry),
     resumeDetail,
   );
 

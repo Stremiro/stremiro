@@ -3,6 +3,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
+import { getErrorMessage } from '@/lib/utils';
 
 export const APP_UPDATE_STATE_QUERY_KEY = ['app-update-state'] as const;
 export const APP_VERSION_QUERY_KEY = ['appVersion'] as const;
@@ -51,10 +52,12 @@ interface AppUpdateState {
   installProgress: AppUpdateProgress | null;
   errorMessage: string | null;
   errorOperation: 'check' | 'install' | null;
+  retryOnReconnect: boolean;
 }
 
 let activeInstallPromise: Promise<void> | null = null;
 let activeCheckPromise: Promise<AppUpdateHandle | null> | null = null;
+const notifiedVersions = new Set<string>();
 
 export function getInitialAppUpdateState(): AppUpdateState {
   const isSupported = isTauriDesktopRuntime();
@@ -67,6 +70,7 @@ export function getInitialAppUpdateState(): AppUpdateState {
     installProgress: null,
     errorMessage: null,
     errorOperation: null,
+    retryOnReconnect: false,
   };
 }
 
@@ -79,11 +83,21 @@ function readAppUpdateState(queryClient: QueryClient): AppUpdateState {
 
 function writeAppUpdateState(
   queryClient: QueryClient,
-  updater: (current: AppUpdateState) => AppUpdateState,
+  patch: Partial<AppUpdateState> | ((current: AppUpdateState) => Partial<AppUpdateState>),
+  protectInstall = false,
 ) {
-  queryClient.setQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY, (current) =>
-    updater(current ?? getInitialAppUpdateState()),
-  );
+  queryClient.setQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY, (cached) => {
+    const current = cached ?? getInitialAppUpdateState();
+    if (protectInstall && current.status === 'installing') return current;
+    return {
+      ...current,
+      installProgress: null,
+      errorMessage: null,
+      errorOperation: null,
+      retryOnReconnect: false,
+      ...(typeof patch === 'function' ? patch(current) : patch),
+    };
+  });
 }
 
 export function isUpdateReady(state?: Pick<AppUpdateState, 'status' | 'update'> | null): boolean {
@@ -117,18 +131,21 @@ export function formatAppUpdateProgress(progress: AppUpdateProgress | null): str
 }
 
 export async function saveLastNotifiedAppUpdateVersion(
-  version: string | null,
-): Promise<string | null> {
-  if (!isTauriDesktopRuntime()) return null;
-
-  // Let failures propagate — a swallowed one would masquerade as "never notified" and re-announce the same release.
-  return invoke<string | null>('save_last_notified_app_update_version', {
-    version,
-  });
+  queryClient: QueryClient,
+  version: string,
+): Promise<void> {
+  if (notifiedVersions.has(version)) return;
+  notifiedVersions.add(version);
+  // Mark the mounted announcement seen synchronously, even if persistence fails.
+  queryClient.setQueryData<AppUpdateState>(APP_UPDATE_STATE_QUERY_KEY, (current) =>
+    current?.update?.version === version
+      ? { ...current, update: { ...current.update, notificationEligible: false } }
+      : current,
+  );
+  await invoke('save_last_notified_app_update_version', { version });
 }
 
 export async function getCurrentAppVersion(): Promise<string | null> {
-  if (!isTauriDesktopRuntime()) return null;
   try {
     return await invoke<string>('get_current_app_version');
   } catch {
@@ -156,55 +173,48 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
     return currentState.update;
   }
 
-  writeAppUpdateState(queryClient, (current) => ({
-    ...current,
-    isSupported: true,
+  writeAppUpdateState(queryClient, {
     status: 'checking',
-    installProgress: null,
-    errorMessage: null,
-    errorOperation: null,
-  }));
+  });
 
   activeCheckPromise = (async () => {
     try {
       const update = await invoke<AppUpdateHandle | null>('check_for_app_update');
-      const checkedAt = Date.now();
+      if (update && notifiedVersions.has(update.version)) update.notificationEligible = false;
 
       // A late check must not stomp an in-progress install's status/progress/handle.
-      writeAppUpdateState(queryClient, (current) =>
-        current.status === 'installing'
-          ? current
-          : {
-              ...current,
-              isSupported: true,
-              status: update ? 'available' : 'up-to-date',
-              update,
-              lastCheckedAt: checkedAt,
-              installProgress: null,
-              errorMessage: null,
-              errorOperation: null,
-            },
+      writeAppUpdateState(
+        queryClient,
+        {
+          status: update ? 'available' : 'up-to-date',
+          update,
+          lastCheckedAt: Date.now(),
+        },
+        true,
       );
 
       return update;
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
 
-      writeAppUpdateState(queryClient, (current) =>
-        current.status === 'installing'
-          ? current
-          : {
-              ...current,
-              isSupported: true,
-              status: current.update ? 'available' : 'error',
-              lastCheckedAt: Date.now(),
-              installProgress: null,
-              errorMessage: message,
-              errorOperation: 'check',
-            },
+      writeAppUpdateState(
+        queryClient,
+        (current) => ({
+          status: current.update ? 'available' : 'error',
+          lastCheckedAt: Date.now(),
+          errorMessage: message,
+          errorOperation: 'check',
+          retryOnReconnect:
+            !navigator.onLine ||
+            (typeof error === 'object' &&
+              error !== null &&
+              'retryOnReconnect' in error &&
+              error.retryOnReconnect === true),
+        }),
+        true,
       );
 
-      throw error;
+      throw new Error(message, { cause: error });
     } finally {
       activeCheckPromise = null;
     }
@@ -231,18 +241,22 @@ async function installAppUpdate(
   version: string,
   onProgress: (progress: AppUpdateProgress) => void,
 ): Promise<void> {
-  const unlisten = await listen<AppUpdateProgress>(APP_UPDATE_PROGRESS_EVENT, (event) => {
-    if (typeof event.payload?.phase === 'string') {
-      onProgress(event.payload);
-    }
-  });
+  const operationId = crypto.randomUUID();
+  let listening = true;
+  const unlisten = await listen<AppUpdateProgress & { operationId: string }>(
+    APP_UPDATE_PROGRESS_EVENT,
+    (event) => {
+      if (listening && event.payload.operationId === operationId) onProgress(event.payload);
+    },
+  );
 
   try {
     // `version` pins the install to the presented handle — a newer release is rejected, not silently installed.
-    await invoke('download_app_update', { version });
+    await invoke('download_app_update', { version, operationId });
     await flushPendingAppWrites();
-    await invoke('install_app_update', { version });
+    await invoke('install_app_update', { version, operationId });
   } finally {
+    listening = false;
     unlisten();
   }
 }
@@ -262,15 +276,10 @@ export async function runAppUpdateInstall(
   }
 
   activeInstallPromise = (async () => {
-    writeAppUpdateState(queryClient, (current) => ({
-      ...current,
-      isSupported: true,
+    writeAppUpdateState(queryClient, {
       status: 'installing',
       update: targetUpdate,
-      installProgress: null,
-      errorMessage: null,
-      errorOperation: null,
-    }));
+    });
 
     try {
       // An in-flight check could swap the pending handle; its error is already rendered, so the rejection is swallowed.
@@ -283,64 +292,31 @@ export async function runAppUpdateInstall(
 
       // Windows exits the process once the installer launches — this await only resolves on failure.
       await installAppUpdate(targetUpdate.version, (progress) => {
-        writeAppUpdateState(queryClient, (current) => ({
-          ...current,
-          isSupported: true,
-          status: 'installing',
-          update: targetUpdate,
+        writeAppUpdateState(queryClient, {
           installProgress: progress,
-          errorMessage: null,
-          errorOperation: null,
-        }));
+        });
       });
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
+      const message = getErrorMessage(error);
       let recoveredUpdate: AppUpdateHandle | null = null;
-      let recoveredCheckSucceeded = false;
 
       try {
         recoveredUpdate = await invoke<AppUpdateHandle | null>('check_for_app_update');
-        recoveredCheckSucceeded = true;
+        if (recoveredUpdate && notifiedVersions.has(recoveredUpdate.version)) {
+          recoveredUpdate.notificationEligible = false;
+        }
       } catch {
         recoveredUpdate = null;
       }
 
       // A failed install consumes the backend handle — only a fresh recovery check can re-arm retry.
-      if (recoveredCheckSucceeded && recoveredUpdate) {
-        writeAppUpdateState(queryClient, (current) => ({
-          ...current,
-          isSupported: true,
-          status: 'available',
-          update: recoveredUpdate,
-          lastCheckedAt: Date.now(),
-          installProgress: null,
-          errorMessage: message,
-          errorOperation: 'install',
-        }));
-      } else if (recoveredCheckSucceeded) {
-        writeAppUpdateState(queryClient, (current) => ({
-          ...current,
-          isSupported: true,
-          status: 'up-to-date',
-          update: null,
-          lastCheckedAt: Date.now(),
-          installProgress: null,
-          errorMessage: null,
-          errorOperation: null,
-        }));
-      } else {
-        // Rust failures already carry the "run another check" hint — don't append it twice.
-        writeAppUpdateState(queryClient, (current) => ({
-          ...current,
-          isSupported: true,
-          status: 'error',
-          update: null,
-          lastCheckedAt: current.lastCheckedAt,
-          installProgress: null,
-          errorMessage: message,
-          errorOperation: 'install',
-        }));
-      }
+      writeAppUpdateState(queryClient, {
+        status: recoveredUpdate ? 'available' : 'error',
+        update: recoveredUpdate,
+        lastCheckedAt: Date.now(),
+        errorMessage: message,
+        errorOperation: 'install',
+      });
 
       throw error;
     }

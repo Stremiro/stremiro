@@ -9,6 +9,19 @@ import {
 
 export type PlayerRouteMediaType = 'movie' | 'series' | 'anime';
 
+// Positive but below the resume threshold: suppress saved history without seeking.
+export const PLAYER_RESTART_START_TIME = 1;
+
+let playbackLaunchGeneration = 0;
+
+export function claimPlaybackLaunch(): number {
+  return ++playbackLaunchGeneration;
+}
+
+export function isCurrentPlaybackLaunch(generation: number): boolean {
+  return generation === playbackLaunchGeneration;
+}
+
 // Route state persists for the session — cap `from` so an unbounded value can't linger in memory/history.
 const PLAYER_ROUTE_FROM_MAX_CHARS = 2048;
 
@@ -118,9 +131,9 @@ export function sanitizePlayerRouteState(
   if (
     typeof state.startTime === 'number' &&
     Number.isFinite(state.startTime) &&
-    state.startTime > 0
+    state.startTime >= 0
   ) {
-    sanitized.startTime = state.startTime;
+    sanitized.startTime = state.startTime || PLAYER_RESTART_START_TIME;
   }
   const absoluteSeason = normalizeRouteNumber(state.absoluteSeason);
   if (absoluteSeason !== undefined) sanitized.absoluteSeason = absoluteSeason;

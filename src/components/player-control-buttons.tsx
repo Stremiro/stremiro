@@ -15,20 +15,14 @@ import {
 import { cn } from '@/lib/utils';
 
 export const MINI_ICON_BUTTON_CLASS =
-  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-lg text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60';
+  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-white/85 transition-colors hover:bg-white/15 hover:text-white active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/60 disabled:opacity-35 disabled:pointer-events-none motion-reduce:transition-none motion-reduce:active:scale-100';
 
 type PlayerControlVariant = 'full' | 'pip' | 'mini';
-
-const BUTTON_CLASS = {
-  full: CHROME_ICON_BUTTON_CLASS,
-  pip: cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer'),
-  mini: MINI_ICON_BUTTON_CLASS,
-};
 
 const ICON_CLASS = {
   full: CHROME_ICON_CLASS,
   pip: 'h-4 w-4',
-  mini: 'h-[15px] w-[15px]',
+  mini: 'h-4 w-4',
 };
 
 interface PlayerButtonProps {
@@ -60,7 +54,10 @@ function PlayerControlButton({
       aria-label={label}
       aria-keyshortcuts={ariaKeyShortcuts(keymap, action)}
       title={title ?? withShortcutHint(label, keymap, action)}
-      className={cn(BUTTON_CLASS[variant], className)}
+      className={cn(
+        variant === 'mini' ? MINI_ICON_BUTTON_CLASS : CHROME_ICON_BUTTON_CLASS,
+        className,
+      )}
       {...props}
     />
   );
@@ -72,16 +69,6 @@ export function PlayerPlayButton({
   ...props
 }: PlayerButtonProps & { icon: 'play' | 'pause' | 'replay' }) {
   const Icon = icon === 'replay' ? RotateCcw : icon === 'pause' ? Pause : Play;
-  const iconClass =
-    icon === 'replay'
-      ? 'h-4 w-4'
-      : variant === 'full'
-        ? 'h-6 w-6 fill-current'
-        : variant === 'mini'
-          ? icon === 'play'
-            ? 'ml-px h-4 w-4 fill-white'
-            : 'h-4 w-4 fill-white'
-          : 'h-4 w-4 fill-current';
   return (
     <PlayerControlButton
       variant={variant}
@@ -96,8 +83,14 @@ export function PlayerPlayButton({
       {...props}
     >
       <Icon
-        className={iconClass}
-        strokeWidth={variant === 'full' ? CHROME_ICON_STROKE : undefined}
+        aria-hidden='true'
+        className={cn(
+          ICON_CLASS[variant],
+          icon !== 'replay' && 'fill-current',
+          variant === 'full' && icon !== 'replay' && 'h-6 w-6',
+          variant === 'mini' && icon === 'play' && 'ml-px',
+        )}
+        strokeWidth={CHROME_ICON_STROKE}
       />
     </PlayerControlButton>
   );
@@ -119,7 +112,7 @@ export function PlayerMuteButton({
         muted={muted}
         volume={volume}
         className={ICON_CLASS[variant]}
-        strokeWidth={variant === 'pip' ? undefined : CHROME_ICON_STROKE}
+        strokeWidth={CHROME_ICON_STROKE}
       />
     </PlayerControlButton>
   );
@@ -129,8 +122,9 @@ export function PlayerNextButton({ variant, ...props }: PlayerButtonProps) {
   return (
     <PlayerControlButton variant={variant} action='nextEpisode' {...props}>
       <SkipForward
+        aria-hidden='true'
         className={ICON_CLASS[variant]}
-        strokeWidth={variant === 'pip' ? undefined : CHROME_ICON_STROKE}
+        strokeWidth={CHROME_ICON_STROKE}
       />
     </PlayerControlButton>
   );

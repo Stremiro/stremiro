@@ -10,14 +10,16 @@ export function SettingsQueryError({
   query: {
     isError: boolean;
     isFetching: boolean;
-    errorUpdatedAt: number;
-    dataUpdatedAt: number;
+    isFetched: boolean;
+    isPending: boolean;
+    isPlaceholderData: boolean;
     refetch: () => Promise<unknown>;
   };
   message: string;
   className?: string;
 }) {
-  if (!query.isError && query.errorUpdatedAt <= query.dataUpdatedAt) return null;
+  if (!query.isError && !(query.isFetched && (query.isPending || query.isPlaceholderData)))
+    return null;
   return (
     <RetryBanner
       className={className}

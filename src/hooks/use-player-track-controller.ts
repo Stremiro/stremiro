@@ -3,6 +3,7 @@ import { toast } from 'sonner';
 
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
 import { api, type AddonSubtitle, type PlaybackLanguagePreferences } from '@/lib/api';
+import { notifyAction } from '@/lib/notify';
 import {
   addSubtitleTrack,
   cycleMpvTrack,
@@ -17,7 +18,6 @@ import {
   buildTrackLanguageCandidateFingerprint,
   doesTrackSelectionMatch,
   findExternalSubtitleTrack,
-  normalizeLanguageToken,
   toTrackLanguageCandidate,
   type Track,
 } from '@/lib/player-track-utils';
@@ -40,7 +40,7 @@ type TrackChangeHandler = (
   options?: TrackChangeOptions,
 ) => Promise<boolean>;
 
-// Stable stand-in while the effective query has no data — Rust emits canonical tokens, consumers normalize at use.
+// Stable stand-in while the effective query has no data.
 const EMPTY_PLAYBACK_LANGUAGE_PREFERENCES: PlaybackLanguagePreferences = {};
 
 interface TrackAutoApplyAttemptState {
@@ -393,11 +393,10 @@ export function usePlayerTrackController({
         pending: true,
       };
       manualTrackPreferencesRef.current[type] = manual;
-      const storedPreference = normalizeLanguageToken(
-        type === 'audio'
+      const storedPreference =
+        (type === 'audio'
           ? playbackLanguagePreferences.preferredAudioLanguage
-          : playbackLanguagePreferences.preferredSubtitleLanguage,
-      );
+          : playbackLanguagePreferences.preferredSubtitleLanguage) ?? '';
       markApplied(
         type,
         buildTrackAutoApplyFingerprint(
@@ -417,16 +416,18 @@ export function usePlayerTrackController({
           )
             return;
           // Use Rust's canonical token from the acknowledgement, including inferred/aliased track languages.
-          manual.language = normalizeLanguageToken(
-            type === 'audio' ? saved.preferredAudioLanguage : saved.preferredSubtitleLanguage,
-          );
+          manual.language =
+            (type === 'audio' ? saved.preferredAudioLanguage : saved.preferredSubtitleLanguage) ??
+            '';
         })
         .catch(() => {
           if (
             manual.generation === trackRefreshGenerationRef.current &&
             manualTrackPreferencesRef.current[type] === manual
-          )
+          ) {
             manualTrackPreferencesRef.current[type] = null;
+            notifyAction("Couldn't remember this track choice", { tone: 'error' });
+          }
         })
         .finally(() => {
           manual.pending = false;
@@ -662,8 +663,8 @@ export function usePlayerTrackController({
 
   useEffect(() => {
     const nextPreferences = {
-      audio: normalizeLanguageToken(playbackLanguagePreferences.preferredAudioLanguage),
-      sub: normalizeLanguageToken(playbackLanguagePreferences.preferredSubtitleLanguage),
+      audio: playbackLanguagePreferences.preferredAudioLanguage ?? '',
+      sub: playbackLanguagePreferences.preferredSubtitleLanguage ?? '',
     };
     const previous = previousPreferencesRef.current;
     if (previous === null) {
@@ -779,9 +780,7 @@ export function usePlayerTrackController({
   );
 
   useEffect(() => {
-    const preferredAudioLanguage = normalizeLanguageToken(
-      playbackLanguagePreferences.preferredAudioLanguage,
-    );
+    const preferredAudioLanguage = playbackLanguagePreferences.preferredAudioLanguage ?? '';
     if (isLoading || !hasPlaybackStarted || !preferredAudioLanguage) return;
     if (trackSwitching.audio || audioTracks.length === 0) return;
 
@@ -812,9 +811,7 @@ export function usePlayerTrackController({
   ]);
 
   useEffect(() => {
-    const preferredSubtitleLanguage = normalizeLanguageToken(
-      playbackLanguagePreferences.preferredSubtitleLanguage,
-    );
+    const preferredSubtitleLanguage = playbackLanguagePreferences.preferredSubtitleLanguage ?? '';
     if (isLoading || !hasPlaybackStarted || !preferredSubtitleLanguage) return;
     if (trackSwitching.sub) return;
 

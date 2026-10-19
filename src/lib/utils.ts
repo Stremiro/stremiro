@@ -1,10 +1,48 @@
 import { type ClassValue, clsx } from 'clsx';
-import { differenceInCalendarDays, format, isValid, parseISO } from 'date-fns';
 import { twMerge } from 'tailwind-merge';
 import type { AccentTargets } from '@/lib/api';
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
+}
+
+export function queryNeedsRetry(query: {
+  isError: boolean;
+  isFetched: boolean;
+  isPending: boolean;
+}): boolean {
+  return query.isError || (query.isFetched && query.isPending);
+}
+
+export function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message;
+  if (typeof error === 'string') return error;
+  if (typeof error === 'object' && error !== null) {
+    const anyErr = error as Record<string, unknown>;
+    if (typeof anyErr.message === 'string' && anyErr.message) return anyErr.message;
+    if (typeof anyErr.error === 'string' && anyErr.error) return anyErr.error;
+    if (typeof anyErr.err === 'string' && anyErr.err) return anyErr.err;
+    try {
+      return JSON.stringify(error);
+    } catch {
+      return String(error);
+    }
+  }
+
+  return String(error);
+}
+
+export function createObjectIdentity() {
+  const ids = new WeakMap<object, number>();
+  let nextId = 0;
+  return (value: object): number => {
+    let id = ids.get(value);
+    if (id === undefined) {
+      id = ++nextId;
+      ids.set(value, id);
+    }
+    return id;
+  };
 }
 
 /** Media types that carry episode structure: series plus anime routes. */
@@ -17,6 +55,9 @@ export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 
 /** Content-column insets clearing the fixed sidebar; never `cn()`-merge — `lg:px-*` would override `lg:pl-[92px]` under tailwind-merge. */
 export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
+
+export const GENRE_LINK_CLASS =
+  'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[12px] font-medium text-white/75 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
 function parseHexRgb(value: string): [number, number, number] | null {
   const match = HEX_COLOR_PATTERN.exec(value.trim());
@@ -97,9 +138,12 @@ export function boundedMapSet<K, V>(map: Map<K, V>, key: K, value: V, max: numbe
 export function createSerialTaskQueue() {
   let tail: Promise<void> = Promise.resolve();
   return {
-    enqueue(operation: () => Promise<void>): Promise<void> {
+    enqueue<T>(operation: () => Promise<T>): Promise<T> {
       const result = tail.then(operation);
-      tail = result.catch(() => undefined);
+      tail = result.then(
+        () => undefined,
+        () => undefined,
+      );
       return result;
     },
     pending: () => tail,
@@ -183,51 +227,10 @@ export function formatEpisodeHeading(
   return [formatSeasonEpisode(season, episode), title].filter(Boolean).join(' · ');
 }
 
-/** Leading `YYYY-MM-DD` of an air/release timestamp — addons send bare date or ISO datetime, both mean "this calendar day". */
-const ISO_DATE_PREFIX = /^(\d{4})-(\d{2})-(\d{2})/;
-
-/** Local-day parse for schedule/air dates — `parseISO` on a `Z` datetime lands on the previous day west of UTC. */
-export function parseLocalScheduleDate(value?: string | null): Date | null {
-  if (!value) return null;
-  const match = ISO_DATE_PREFIX.exec(value.trim());
-  if (match) {
-    const year = Number(match[1]);
-    const month = Number(match[2]) - 1;
-    const day = Number(match[3]);
-    const date = new Date(0);
-    date.setFullYear(year, month, day);
-    date.setHours(0, 0, 0, 0);
-    return date.getFullYear() === year && date.getMonth() === month && date.getDate() === day
-      ? date
-      : null;
-  }
-  const parsed = parseISO(value);
-  return isValid(parsed) ? parsed : null;
-}
-
-/** Aired by the given local day; undated episodes count as aired. */
-export function isAiredByLocalDay(releaseDate: string | null | undefined, localDayMs: number) {
-  const airDate = parseLocalScheduleDate(releaseDate)?.getTime();
-  return airDate === undefined || airDate <= localDayMs;
-}
-
-/** Air-date line: absolute for aired ("Apr 7, 2013"), compact countdown ("in 3d") for unaired. */
-export function formatAirDate(value?: string | null): string | null {
-  if (!value) return null;
-  const date = parseLocalScheduleDate(value);
-  if (!date) return null;
-  const daysAhead = differenceInCalendarDays(date, new Date());
-  if (daysAhead <= 0) return format(date, 'MMM d, yyyy');
-  if (daysAhead === 1) return 'Tomorrow';
-  if (daysAhead < 14) return `in ${daysAhead}d`;
-  if (daysAhead < 63) return `in ${Math.round(daysAhead / 7)}w`;
-  return format(date, 'MMM d');
-}
-
 /** Card/hero type pill — series/anime get their own labels, else Movie. */
 export function mediaTypeLabel(type?: string | null): string {
-  if (type === 'anime') return 'Anime';
-  return type === 'series' ? 'TV Series' : 'Movie';
+  if (type?.trim().toLowerCase() === 'anime') return 'Anime';
+  return isSeriesLikeMediaType(type) ? 'TV Series' : 'Movie';
 }
 
 /** Genre pills — catalog genres are already painted, so a late details payload must not swap the text. */

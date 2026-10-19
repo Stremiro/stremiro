@@ -55,6 +55,11 @@ export interface EpisodeNavigationRequest {
   today: string;
 }
 
+export interface UnairedEpisodesRequest {
+  releaseDates: (string | null)[];
+  today: string;
+}
+
 export interface EpisodeNavigation {
   previousIndex: number | null;
   nextIndex: number | null;
@@ -92,7 +97,7 @@ export interface CalendarScheduleEvent {
   id: string;
   mediaId: string;
   mediaType: 'movie' | 'series' | 'anime';
-  title?: string;
+  title: string;
   seriesTitle: string;
   season?: number;
   episode?: number;
@@ -111,13 +116,28 @@ export interface CalendarSchedule {
   upcoming: CalendarScheduleEvent[];
 }
 
+export interface SmartListRules {
+  media_type?: 'movie' | 'series' | null;
+  genres: string[];
+  statuses: WatchStatus[];
+  year_from?: number | null;
+  year_to?: number | null;
+}
+
 export interface UserList {
   id: string;
   name: string;
   icon: string;
   item_ids: string[];
+  rules?: SmartListRules | null;
   // Absent on `create_list` (metadata only); populated by list-with-items reads.
   items?: MediaItem[];
+}
+
+export interface RemovedListItem {
+  item: MediaItem;
+  index: number;
+  after?: string | null;
 }
 
 export interface UserListSummary {
@@ -126,6 +146,7 @@ export interface UserListSummary {
   icon: string;
   item_count: number;
   contains_item: boolean;
+  is_smart: boolean;
 }
 
 export type WatchStatus = 'watching' | 'watched' | 'plan_to_watch' | 'dropped';
@@ -281,6 +302,7 @@ export interface AddonSubtitle {
   lang?: string;
   /** Provider-supplied display hint (filename/release name/title) when present. */
   label?: string;
+  detail?: string;
   mpvTitle: string;
   sourceId: string;
   sourceName: string;
@@ -446,6 +468,7 @@ export interface AppUiPreferences {
    * `autoPlayNext`'s job).
    */
   autoSkipIntro: boolean;
+  automaticUpdateChecks: boolean;
   closeToTray: boolean;
   minimizeToTray: boolean;
   startMinimized: boolean;
@@ -476,6 +499,7 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   controlsHideDelayMs: 3000,
   trailerPreviews: true,
   autoSkipIntro: false,
+  automaticUpdateChecks: true,
   closeToTray: false,
   minimizeToTray: false,
   startMinimized: false,
@@ -498,6 +522,7 @@ export interface AppUiPreferencesPatch {
   controlsHideDelayMs?: number;
   trailerPreviews?: boolean;
   autoSkipIntro?: boolean;
+  automaticUpdateChecks?: boolean;
   closeToTray?: boolean;
   minimizeToTray?: boolean;
   startMinimized?: boolean;
@@ -551,6 +576,11 @@ export interface SearchCatalogContinuation {
     movie?: number;
     series?: number;
   };
+  searchCursors?: {
+    key: string;
+    skip: number;
+    retry?: boolean;
+  }[];
   seenKeys: string[];
 }
 
@@ -607,6 +637,7 @@ export interface DataStats {
   history_title_count: number;
   has_learned_playback_data: boolean;
   library_count: number;
+  library_status_counts: ProfileLibrary['statusCounts'];
   lists_count: number;
   watch_statuses_count: number;
 }
@@ -646,6 +677,10 @@ export interface WatchProgress {
   resume_start_time?: number;
   is_watched?: boolean;
   has_started_watching?: boolean;
+}
+
+export interface WatchProgressSave extends WatchProgress {
+  completed?: boolean;
 }
 
 /** Per-episode progress plus selected resume and latest-history rows. */

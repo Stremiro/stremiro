@@ -16,6 +16,7 @@ const DEFAULT_GRID_GAP_PX = 16;
 const DEFAULT_FALLBACK_ITEM_WIDTH_PX = 160;
 const DEFAULT_OVERSCAN_ROWS = 4;
 const DEFAULT_VIRTUALIZATION_THRESHOLD = 24;
+const getRowKey = (index: number) => `row-${index}`;
 
 function getDefaultWindowGridColumnCount(viewportWidth: number) {
   if (viewportWidth >= 1280) {
@@ -53,6 +54,8 @@ export function WindowVirtualizedGrid<T>({
   gap = DEFAULT_GRID_GAP_PX,
   rowGap = gap,
 }: WindowVirtualizedGridProps<T>) {
+  // See WindowVirtualizedStack: compiler memoization would freeze virtual rows.
+  'use no memo';
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const [metrics, setMetrics] = useState(() => ({
@@ -113,37 +116,22 @@ export function WindowVirtualizedGrid<T>({
     estimateSize: () => estimatedRowHeight,
     overscan: DEFAULT_OVERSCAN_ROWS,
     scrollMargin,
-    getItemKey: (index) => `row-${index}`,
+    getItemKey: getRowKey,
     rangeExtractor,
   });
 
   const gridTemplateColumns = `repeat(${columnCount}, minmax(0, 1fr))`;
-
-  if (!shouldVirtualize) {
-    return (
-      <div
-        ref={containerRef}
-        style={{
-          display: 'grid',
-          columnGap: `${gap}px`,
-          rowGap: `${rowGap}px`,
-          gridTemplateColumns,
-        }}
-      >
-        {items.map((item, index) => (
-          <Fragment key={getItemKey(item, index)}>{renderItem(item, index)}</Fragment>
-        ))}
-      </div>
-    );
-  }
+  const rows = shouldVirtualize
+    ? rowVirtualizer.getVirtualItems()
+    : Array.from({ length: rowCount }, (_, index) => ({ index, key: getRowKey(index), start: 0 }));
 
   return (
     <div
       ref={containerRef}
       className='relative w-full'
-      style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+      style={shouldVirtualize ? { height: `${rowVirtualizer.getTotalSize()}px` } : undefined}
     >
-      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+      {rows.map((virtualRow) => {
         const rowStartIndex = virtualRow.index * columnCount;
         const rowItems = items.slice(rowStartIndex, rowStartIndex + columnCount);
 
@@ -151,20 +139,21 @@ export function WindowVirtualizedGrid<T>({
           <div
             key={virtualRow.key}
             data-index={virtualRow.index}
-            ref={rowVirtualizer.measureElement}
+            ref={shouldVirtualize ? rowVirtualizer.measureElement : undefined}
             onFocusCapture={() => setFocusedIndex(virtualRow.index)}
             onBlurCapture={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
             }}
             style={{
-              position: 'absolute',
-              top: `${virtualRow.start - scrollMargin}px`,
-              left: 0,
+              position: shouldVirtualize ? 'absolute' : undefined,
+              top: shouldVirtualize ? `${virtualRow.start - scrollMargin}px` : undefined,
+              left: shouldVirtualize ? 0 : undefined,
               width: '100%',
               display: 'grid',
               gap: `${gap}px`,
               gridTemplateColumns,
-              paddingBottom: `${rowGap}px`,
+              paddingBottom:
+                shouldVirtualize || virtualRow.index < rowCount - 1 ? `${rowGap}px` : undefined,
             }}
           >
             {rowItems.map((item, itemOffset) => {

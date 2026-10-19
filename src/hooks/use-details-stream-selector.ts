@@ -8,7 +8,7 @@ import {
   type DetailsHistoryRouteState,
   episodeProgressKey,
   getHistoryPlaybackFallbackNotice,
-  MIN_RESUME_POSITION_SECS,
+  playableResumePosition,
 } from '@/lib/history-playback';
 import { currentPathWithSearch, navigateApp, takeDetailsReturnState } from '@/lib/navigation';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
@@ -182,11 +182,7 @@ export function useDetailsStreamSelector({
         return false;
       }
 
-      const startTime =
-        typeof state.reopenStartTime === 'number' &&
-        state.reopenStartTime >= MIN_RESUME_POSITION_SECS
-          ? state.reopenStartTime
-          : undefined;
+      const startTime = playableResumePosition(undefined, state.reopenStartTime);
 
       if (item.type === 'movie') {
         handleWatchMovie(startTime);

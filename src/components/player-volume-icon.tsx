@@ -13,5 +13,5 @@ interface PlayerVolumeIconProps {
     the OSD can't drift on which glyph muted/quiet/loud shows. */
 export function PlayerVolumeIcon({ muted, volume, className, strokeWidth }: PlayerVolumeIconProps) {
   const Icon = muted ? VolumeX : volume < 50 ? Volume1 : Volume2;
-  return <Icon className={className} strokeWidth={strokeWidth} />;
+  return <Icon aria-hidden='true' className={className} strokeWidth={strokeWidth} />;
 }

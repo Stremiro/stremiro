@@ -20,6 +20,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import {
   MINI_ICON_BUTTON_CLASS,
   PlayerMuteButton,
@@ -38,6 +39,7 @@ import {
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { isEditableTarget } from '@/lib/dom';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
+import { createWheelSeekAccumulator } from '@/lib/player-dom';
 import {
   ariaKeyShortcuts,
   formatBindingKey,
@@ -141,7 +143,7 @@ function MiniExpandButton({ keymap, onClick }: { keymap: PlayerKeymap; onClick: 
       onClick={onClick}
       className={MINI_ICON_BUTTON_CLASS}
     >
-      <Maximize2 className='h-3.5 w-3.5' strokeWidth={2.25} />
+      <Maximize2 aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
     </button>
   );
 }
@@ -156,7 +158,7 @@ function MiniSnapButton({ onClick }: { onClick: () => void }) {
       onClick={onClick}
       className={MINI_ICON_BUTTON_CLASS}
     >
-      <Move className='h-3.5 w-3.5' strokeWidth={2.25} />
+      <Move aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
     </button>
   );
 }
@@ -170,7 +172,7 @@ function MiniCloseButton({ onClick }: { onClick: () => void }) {
       onClick={onClick}
       className={cn(MINI_ICON_BUTTON_CLASS, 'hover:bg-red-500/25 hover:text-red-200')}
     >
-      <X className='h-3.5 w-3.5' strokeWidth={2.25} />
+      <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
     </button>
   );
 }
@@ -283,6 +285,7 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       disabled={duration <= 0}
       onPointerDown={(event) => {
         event.stopPropagation();
+        if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
         isDraggingRef.current = true;
       }}
       onValueChange={(value) => {
@@ -734,29 +737,11 @@ export const MiniPlayer = memo(function MiniPlayer({
     [cancelSnap],
   );
 
-  // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
-  const snapToNextAnchor = useCallback(() => {
-    const position = positionRef.current;
-    if (!position || anchors.length === 0) return;
-    // Nearest corner without the drag magnet's radius cap — the cycle must advance from a free-floating position.
-    let nearest = 0;
-    let bestDistance = Infinity;
-    anchors.forEach((anchor, index) => {
-      const distance = Math.hypot(anchor.x - position.x, anchor.y - position.y);
-      if (distance < bestDistance) {
-        bestDistance = distance;
-        nearest = index;
-      }
-    });
-    setIsMoving(true);
-    animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
-  }, [anchors, animateTo]);
-
   // Nearest snap anchor within the magnet radius — drives the release glide and the drag ghost outline.
   const findSnapAnchorIndex = useCallback(
-    (position: MiniPlayerPosition): number | null => {
+    (position: MiniPlayerPosition, radius = SNAP_RADIUS_PX): number | null => {
       let bestIndex: number | null = null;
-      let bestDistance = SNAP_RADIUS_PX;
+      let bestDistance = radius;
       anchors.forEach((anchor, index) => {
         const distance = Math.hypot(anchor.x - position.x, anchor.y - position.y);
         if (distance < bestDistance) {
@@ -768,6 +753,17 @@ export const MiniPlayer = memo(function MiniPlayer({
     },
     [anchors],
   );
+
+  // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
+  const snapToNextAnchor = useCallback(() => {
+    const position = positionRef.current;
+    if (!position) return;
+    // The cycle advances even from a free-floating position outside the drag magnet's radius.
+    const nearest = findSnapAnchorIndex(position, Infinity);
+    if (nearest === null) return;
+    setIsMoving(true);
+    animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
+  }, [anchors, animateTo, findSnapAnchorIndex]);
 
   const handlePointerMove = useCallback(
     (event: React.PointerEvent<HTMLDivElement>) => {
@@ -890,11 +886,13 @@ export const MiniPlayer = memo(function MiniPlayer({
   useEffect(() => {
     const surface = videoSurfaceRef.current;
     if (!surface) return;
+    const accumulateWheelSeek = createWheelSeekAccumulator();
     const handleWheel = (event: WheelEvent) => {
       if (event.deltaY === 0) return;
       event.preventDefault();
       if (event.shiftKey) {
-        onSeekRelative(event.deltaY < 0 ? 5 : -5);
+        const seconds = accumulateWheelSeek(event);
+        if (seconds !== 0) onSeekRelative(seconds);
         return;
       }
       void onVolumeWheel(event).catch(() => undefined);
@@ -926,8 +924,10 @@ export const MiniPlayer = memo(function MiniPlayer({
           return;
         }
       }
-      // Enter/Esc always expand the docked frame; everything else follows the player keymap.
-      const action = key === 'enter' || key === 'escape' ? 'expand' : keymap.byKey.get(key);
+      const action =
+        key === 'escape'
+          ? 'expand'
+          : (keymap.byKey.get(key) ?? (key === 'enter' ? 'expand' : undefined));
       if (!action) return;
       if (event.repeat && (action === 'expand' || !isRepeatablePlayerAction(action))) {
         event.preventDefault();
@@ -1123,9 +1123,14 @@ export const MiniPlayer = memo(function MiniPlayer({
                 skipAction.onSkip();
               }}
               aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
+              title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
               className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
             >
-              <FastForward className='h-3 w-3 shrink-0 text-white/90' strokeWidth={2.5} />
+              <FastForward
+                aria-hidden='true'
+                className='h-4 w-4 shrink-0 text-white/90'
+                strokeWidth={CHROME_ICON_STROKE}
+              />
               <span className='text-xs font-medium leading-tight text-white'>
                 {skipAction.label}
               </span>
@@ -1256,7 +1261,11 @@ export const MiniPlayer = memo(function MiniPlayer({
                         onClick={skipAction.onSkip}
                         className={MINI_ICON_BUTTON_CLASS}
                       >
-                        <FastForward className='h-[15px] w-[15px]' strokeWidth={2.25} />
+                        <FastForward
+                          aria-hidden='true'
+                          className='h-4 w-4'
+                          strokeWidth={CHROME_ICON_STROKE}
+                        />
                       </button>
                     )}
 
@@ -1331,14 +1340,20 @@ export const MiniPlayer = memo(function MiniPlayer({
                 {error ? (
                   <>
                     <TriangleAlert className='h-5 w-5 text-amber-400/90' strokeWidth={1.75} />
-                    <p className='line-clamp-2 text-[11px] font-medium leading-snug text-white/80'>
+                    <p
+                      role='alert'
+                      className='line-clamp-2 text-[11px] font-medium leading-snug text-white/80'
+                    >
                       {error}
                     </p>
                   </>
                 ) : (
                   <>
                     <Loader2 className='h-5 w-5 animate-spin text-white/70' />
-                    <p className='line-clamp-2 text-[11px] font-medium leading-snug text-white/70'>
+                    <p
+                      role='status'
+                      className='line-clamp-2 text-[11px] font-medium leading-snug text-white/70'
+                    >
                       {statusText || 'Preparing playback'}
                     </p>
                   </>

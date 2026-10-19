@@ -15,6 +15,7 @@ import {
   Fragment,
   type Dispatch,
   type ReactNode,
+  type RefObject,
   type SetStateAction,
   useCallback,
   useEffect,
@@ -24,6 +25,7 @@ import {
 } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
+import { CHROME_CLOSE_BUTTON_CLASS, CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
@@ -49,14 +51,8 @@ import { whenRowMounted } from '@/lib/dom';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
-import {
-  cn,
-  formatAirDate,
-  formatSeasonEpisode,
-  formatTime,
-  getEpisodeTitle,
-  isHttpUrl,
-} from '@/lib/utils';
+import { formatAirDate } from '@/lib/schedule-dates';
+import { cn, formatSeasonEpisode, formatTime, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
   'h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
@@ -97,12 +93,14 @@ function SegmentGroup<T extends string>({
   leading,
   onChange,
   options,
+  isResolving,
   value,
 }: {
   label: string;
   leading?: ReactNode;
   onChange: (value: T) => void;
   options: SegmentOption<T>[];
+  isResolving: boolean;
   value: T;
 }) {
   return (
@@ -117,7 +115,11 @@ function SegmentGroup<T extends string>({
           key={option.value}
           type='button'
           aria-pressed={value === option.value}
-          onClick={() => onChange(option.value)}
+          aria-disabled={isResolving || undefined}
+          onClick={() => {
+            if (isResolving) return;
+            onChange(option.value);
+          }}
           className={cn(
             SELECTOR_SEGMENT_BASE_CLASS,
             value === option.value
@@ -182,7 +184,7 @@ export function StreamSelectorHeader({
         : `Resume from ${formatTime(startTime)}`
       : 'Choose a stream to play';
   return (
-    <div className='relative h-56 shrink-0 overflow-hidden'>
+    <div className='relative h-56 shrink-0 overflow-hidden [@media(max-height:800px)]:h-36'>
       {backdrop ? (
         <div className='absolute inset-0 z-0'>
           <RemoteImage
@@ -204,18 +206,18 @@ export function StreamSelectorHeader({
         aria-label='Close stream selector'
         aria-keyshortcuts='Escape'
         title='Close (Esc)'
-        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-400 transition-colors hover:border-red-500/45 hover:bg-red-500/25 hover:text-red-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400/50'
+        className={cn('absolute right-4 top-4 z-20', CHROME_CLOSE_BUTTON_CLASS)}
       >
-        <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
+        <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
       </button>
 
-      <DialogHeader className='relative z-10 p-6 h-full flex flex-col justify-end text-left'>
+      <DialogHeader className='relative z-10 p-6 h-full flex flex-col justify-end text-left [@media(max-height:800px)]:p-4'>
         <div className='flex items-end gap-4'>
           {poster && (
             <RemoteImage
               src={poster}
               loading='lazy'
-              className='w-20 h-[120px] rounded-md shadow-2xl border border-white/10 object-cover hidden sm:block mb-0.5 shrink-0'
+              className='w-20 h-[120px] rounded-md shadow-2xl border border-white/10 object-cover hidden sm:block mb-0.5 shrink-0 [@media(max-height:800px)]:h-24 [@media(max-height:800px)]:w-16'
               alt=''
             />
           )}
@@ -226,14 +228,14 @@ export function StreamSelectorHeader({
                 <>
                   <RemoteImage
                     src={logoSrc}
-                    className='max-h-12 w-auto max-w-full object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)] sm:max-w-72'
+                    className='max-h-12 w-auto max-w-full object-contain object-left drop-shadow-[0_6px_24px_rgba(0,0,0,0.65)] sm:max-w-72 [@media(max-height:800px)]:max-h-10'
                     alt=''
                     onError={onLogoError}
                   />
                   <DialogTitle className='sr-only'>{title}</DialogTitle>
                 </>
               ) : (
-                <DialogTitle className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white'>
+                <DialogTitle className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white [@media(max-height:800px)]:line-clamp-1 [@media(max-height:800px)]:text-[22px]'>
                   {title}
                 </DialogTitle>
               )}
@@ -248,7 +250,7 @@ export function StreamSelectorHeader({
               {playbackLabel}
             </DialogDescription>
             {compactOverview && (
-              <p className='line-clamp-2 max-w-2xl text-xs leading-relaxed text-zinc-400 hidden sm:block'>
+              <p className='line-clamp-2 max-w-2xl text-xs leading-relaxed text-zinc-400 hidden sm:block [@media(max-height:800px)]:hidden'>
                 {compactOverview}
               </p>
             )}
@@ -277,6 +279,43 @@ function StreamRowSkeleton() {
   );
 }
 
+export function StreamResultsStatus({
+  resultCount,
+  pendingSourceCount,
+  searching,
+}: {
+  resultCount: number;
+  pendingSourceCount: number;
+  searching: boolean;
+}) {
+  const summary = `${resultCount} stream${resultCount === 1 ? '' : 's'} found. ${
+    searching
+      ? pendingSourceCount > 0
+        ? `${pendingSourceCount} source${pendingSourceCount === 1 ? '' : 's'} still searching.`
+        : 'Searching sources.'
+      : 'Source search complete.'
+  }`;
+  const [announcement, setAnnouncement] = useState('');
+  const lastAnnouncementAtRef = useRef(0);
+  useEffect(() => {
+    if (summary === announcement) return;
+    const timer = setTimeout(
+      () => {
+        lastAnnouncementAtRef.current = Date.now();
+        setAnnouncement(summary);
+      },
+      Math.max(0, 1000 - (Date.now() - lastAnnouncementAtRef.current)),
+    );
+    return () => clearTimeout(timer);
+  }, [announcement, summary]);
+
+  return (
+    <p role='status' aria-live='polite' aria-atomic='true' className='sr-only'>
+      {announcement}
+    </p>
+  );
+}
+
 export function StreamListLoadingState({
   sourceCount,
   chips,
@@ -290,7 +329,7 @@ export function StreamListLoadingState({
       {chips}
       <div className='mb-3 flex items-center gap-2 px-1 py-1'>
         <Loader2 className='h-3.5 w-3.5 animate-spin text-white/45' />
-        <p role='status' className='text-[12px] font-medium text-zinc-400'>
+        <p className='text-[12px] font-medium text-zinc-400'>
           {sourceCount > 0
             ? `Searching ${sourceCount} source${sourceCount === 1 ? '' : 's'}…`
             : 'Preparing sources…'}
@@ -307,11 +346,13 @@ export function StreamListLoadingState({
 
 export function StreamListErrorState({
   chips,
+  isRetrying = false,
   message,
   onRetry,
 }: {
   /** Per-source health chips — the roster often shows *which* addon failed. */
   chips?: ReactNode;
+  isRetrying?: boolean;
   message: string;
   onRetry: () => void;
 }) {
@@ -323,7 +364,19 @@ export function StreamListErrorState({
       title="Couldn't load streams."
       body={message}
       action={
-        <Button variant='outline' size='sm' onClick={onRetry}>
+        <Button
+          variant='outline'
+          size='sm'
+          onClick={() => {
+            if (!isRetrying) onRetry();
+          }}
+          aria-disabled={isRetrying || undefined}
+          aria-busy={isRetrying}
+          className='aria-disabled:cursor-wait aria-disabled:opacity-50'
+        >
+          <RotateCcw
+            className={cn('h-3.5 w-3.5', isRetrying && 'animate-spin motion-reduce:animate-none')}
+          />
           Retry
         </Button>
       }
@@ -346,7 +399,7 @@ function StreamListMessage({
   /** Health chips ride the message states so per-source failures stay visible on error/empty outcomes. */
   chips?: ReactNode;
   icon?: ReactNode;
-  role?: 'alert';
+  role?: 'alert' | 'status';
   title: string;
 }) {
   return (
@@ -369,33 +422,47 @@ export function StreamListOfflineState() {
   return <StreamListMessage title="You're offline." body='Reconnect to load stream sources.' />;
 }
 
-export function StreamListNoAddonsState() {
+export function StreamListNoAddonsState({ onManageAddons }: { onManageAddons: () => void }) {
   return (
     <StreamListMessage
       title='No enabled stream sources.'
       body='Enable at least one addon in Settings → Addons, then try again.'
+      action={
+        <Button variant='outline' size='sm' onClick={onManageAddons}>
+          Manage addons
+        </Button>
+      }
     />
   );
 }
 
-export function StreamListNoStreamAddonsState() {
+export function StreamListNoStreamAddonsState({ onManageAddons }: { onManageAddons: () => void }) {
   return (
     <StreamListMessage
       title='No stream-capable addons enabled.'
       body='Your enabled addons provide metadata only. Add a stream addon in Settings → Addons to get playable sources.'
+      action={
+        <Button variant='outline' size='sm' onClick={onManageAddons}>
+          Manage addons
+        </Button>
+      }
     />
   );
 }
 
 export function StreamListEmptyState({
   chips,
+  isRetrying = false,
   sourceCount,
   onRetry,
+  onManageAddons,
 }: {
   /** Per-source health chips — a zero-result roster explains the empty list. */
   chips?: ReactNode;
+  isRetrying?: boolean;
   sourceCount: number;
   onRetry: () => void;
+  onManageAddons: () => void;
 }) {
   return (
     <StreamListMessage
@@ -407,36 +474,78 @@ export function StreamListEmptyState({
           : 'Add a stream addon in Settings → Addons to get playable sources.'
       }
       action={
-        sourceCount > 0 ? (
-          <Button variant='outline' size='sm' onClick={onRetry}>
-            Retry
+        <div className='flex flex-wrap items-center justify-center gap-2'>
+          {sourceCount > 0 && (
+            <Button
+              variant='outline'
+              size='sm'
+              onClick={() => {
+                if (!isRetrying) onRetry();
+              }}
+              aria-disabled={isRetrying || undefined}
+              aria-busy={isRetrying}
+              className='aria-disabled:cursor-wait aria-disabled:opacity-50'
+            >
+              <RotateCcw
+                className={cn(
+                  'h-3.5 w-3.5',
+                  isRetrying && 'animate-spin motion-reduce:animate-none',
+                )}
+              />
+              Retry
+            </Button>
+          )}
+          <Button variant='outline' size='sm' onClick={onManageAddons}>
+            Manage addons
           </Button>
-        ) : undefined
+        </div>
       }
     />
   );
 }
 
 export function StreamListFilteredEmptyState({
+  isSearchPending = false,
+  isResolving,
   onClearFilters,
   searchQuery = '',
 }: {
+  isSearchPending?: boolean;
+  isResolving: boolean;
   onClearFilters: () => void;
   searchQuery?: string;
 }) {
   return (
     <StreamListMessage
       icon={<FileVideo className='w-8 h-8 opacity-15' />}
-      title={searchQuery.trim() ? 'No matching streams' : 'No streams match these filters'}
+      title={
+        isSearchPending
+          ? 'Searching streams…'
+          : searchQuery.trim()
+            ? 'No matching streams'
+            : 'No streams match these filters'
+      }
       body={
-        searchQuery.trim()
-          ? `No releases match “${searchQuery.trim()}” with the current filters.`
-          : 'Try another filter or show all streams.'
+        isSearchPending
+          ? 'Updating results for your search.'
+          : searchQuery.trim()
+            ? `No releases match “${searchQuery.trim()}” with the current filters.`
+            : 'Try another filter or show all streams.'
       }
       action={
-        <Button variant='outline' size='sm' onClick={onClearFilters}>
-          Show all streams
-        </Button>
+        !isSearchPending && (
+          <Button
+            variant='outline'
+            size='sm'
+            aria-disabled={isResolving || undefined}
+            onClick={() => {
+              if (isResolving) return;
+              onClearFilters();
+            }}
+          >
+            Show all streams
+          </Button>
+        )
       }
     />
   );
@@ -444,23 +553,31 @@ export function StreamListFilteredEmptyState({
 
 interface StreamAddonHealthChipsProps {
   effectiveAddonFilter: string;
+  hasStreams?: boolean;
   healthSummary: { degraded: number; offline: number; pending: number };
+  isRetrying?: boolean;
+  isResolving: boolean;
   metrics: StreamSourceSummary[];
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
+  onRetry?: () => void;
   sourcesStillLoading: boolean;
 }
 
 export function StreamAddonHealthChips({
   effectiveAddonFilter,
+  hasStreams: hasAnyStreams = false,
   healthSummary,
+  isRetrying = false,
+  isResolving,
   metrics,
   onFiltersChange,
+  onRetry,
   sourcesStillLoading,
 }: StreamAddonHealthChipsProps) {
   return (
     // The roster lands mid-fetch — fading in keeps the chip row from popping under the spinner.
-    <div className='bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3 animate-in fade-in duration-300'>
-      <div className='flex items-center gap-2 flex-wrap'>
+    <div className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3 animate-in fade-in duration-300'>
+      <div className='flex max-h-[4.25rem] items-center gap-2 flex-wrap overflow-y-auto overscroll-contain'>
         {metrics.map((metric) => {
           // Chips filter on the addon config id (stamped on each stream as `sourceId`) — a differing display
           // name can't select a source into a false empty list.
@@ -490,11 +607,11 @@ export function StreamAddonHealthChips({
               // Truncated chips hide the name — keep the full name (and any fetch error) reachable on hover.
               title={`${metric.name} — ${metric.errorMessage ?? sourceStatus}${latency ? ` · ${latency}` : ''}`}
               // A selected chip whose count drops to 0 must stay clickable — `disabled` would drop focus to <body> mid-fetch.
-              aria-disabled={(!hasStreams && !isSelected) || undefined}
+              aria-disabled={isResolving || (!hasStreams && !isSelected) || undefined}
               aria-pressed={isSelected}
               aria-label={`${metric.name}: ${sourceStatus}${metric.errorMessage ? `, ${metric.errorMessage}` : ''}`}
               onClick={() => {
-                if (!hasStreams && !isSelected) return;
+                if (isResolving || (!hasStreams && !isSelected)) return;
                 onFiltersChange((prev) => ({
                   ...prev,
                   addon: isSelected ? 'all' : metric.id,
@@ -534,6 +651,25 @@ export function StreamAddonHealthChips({
           );
         })}
 
+        {hasAnyStreams && (healthSummary.offline > 0 || isRetrying) && onRetry && (
+          <Button
+            variant='ghost'
+            size='sm'
+            onClick={() => {
+              if (isResolving || isRetrying || sourcesStillLoading) return;
+              onRetry();
+            }}
+            aria-disabled={isResolving || isRetrying || sourcesStillLoading || undefined}
+            aria-busy={isRetrying}
+            className='h-7 gap-1.5 px-2 text-[10px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-wait aria-disabled:opacity-50'
+          >
+            <RotateCcw
+              className={cn('h-3 w-3', isRetrying && 'animate-spin motion-reduce:animate-none')}
+            />
+            Retry failed sources
+          </Button>
+        )}
+
         <span className='ml-auto flex items-center gap-1.5 text-[10px] font-medium text-zinc-400 whitespace-nowrap tabular-nums'>
           {healthSummary.pending > 0 && sourcesStillLoading && (
             <span className='flex items-center gap-1'>
@@ -560,10 +696,12 @@ interface StreamFilterToolbarProps {
   batchFilter: StreamSelectorBatch;
   filteredCount: number;
   hasActiveFilter: boolean;
+  isResolving: boolean;
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onResetFilters: () => void;
   onSearchQueryChange: (value: string) => void;
   qualityFilter: StreamSelectorQuality;
+  searchInputRef?: RefObject<HTMLInputElement | null>;
   searchQuery: string;
   showBatchFilter: boolean;
   sortMode: StreamSelectorSort;
@@ -576,10 +714,12 @@ export function StreamFilterToolbar({
   batchFilter,
   filteredCount,
   hasActiveFilter,
+  isResolving,
   onFiltersChange,
   onResetFilters,
   onSearchQueryChange,
   qualityFilter,
+  searchInputRef,
   searchQuery,
   showBatchFilter,
   sortMode,
@@ -588,11 +728,20 @@ export function StreamFilterToolbar({
   totalCount,
 }: StreamFilterToolbarProps) {
   return (
-    <div className='bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'>
+    <div
+      role='group'
+      aria-label='Stream filters'
+      aria-disabled={isResolving || undefined}
+      className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'
+    >
       <div className='mb-2 flex items-center gap-2'>
         <SearchInput
+          inputRef={searchInputRef}
           value={searchQuery}
-          onValueChange={onSearchQueryChange}
+          onValueChange={(value) => {
+            if (isResolving) return;
+            onSearchQueryChange(value);
+          }}
           aria-label='Search streams by release, codec or keyword'
           placeholder='Find a release, codec or keyword…'
           className='h-8 text-xs bg-black/20 border-white/[0.07]'
@@ -608,9 +757,10 @@ export function StreamFilterToolbar({
         </span>
         <button
           type='button'
-          aria-disabled={!hasActiveFilter || undefined}
+          aria-disabled={isResolving || !hasActiveFilter || undefined}
           onClick={() => {
-            if (hasActiveFilter) onResetFilters();
+            if (isResolving || !hasActiveFilter) return;
+            onResetFilters();
           }}
           className={cn(
             'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[12px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
@@ -627,6 +777,7 @@ export function StreamFilterToolbar({
         <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
           <SegmentGroup
             label='Quality filter'
+            isResolving={isResolving}
             value={qualityFilter}
             onChange={(quality) => onFiltersChange((f) => ({ ...f, quality }))}
             options={QUALITY_OPTIONS.flatMap<SegmentOption<StreamSelectorQuality>>(
@@ -644,6 +795,7 @@ export function StreamFilterToolbar({
               <SegmentDivider />
               <SegmentGroup
                 label='Source filter'
+                isResolving={isResolving}
                 value={sourceFilter}
                 onChange={(source) => onFiltersChange((f) => ({ ...f, source }))}
                 options={[
@@ -660,6 +812,7 @@ export function StreamFilterToolbar({
                 <SegmentDivider />
                 <SegmentGroup
                   label='Episode or season-pack filter'
+                  isResolving={isResolving}
                   value={batchFilter}
                   onChange={(batch) => onFiltersChange((f) => ({ ...f, batch }))}
                   options={(
@@ -677,6 +830,7 @@ export function StreamFilterToolbar({
 
           <SegmentGroup
             label='Sort order'
+            isResolving={isResolving}
             value={sortMode}
             onChange={(sort) => onFiltersChange((f) => ({ ...f, sort }))}
             leading={
@@ -795,7 +949,7 @@ const PACK_LIST_VIRTUALIZE_THRESHOLD = 40;
 function packRowKey(row: PackListRow): string {
   return row.type === 'header'
     ? `season-${row.season}`
-    : `${row.episode.season}:${row.episode.episode}`;
+    : `${row.episode.id}:${row.episode.season}:${row.episode.episode}`;
 }
 
 // In-selector "inside the pack" view — same row vocabulary (thumb, E-tag, progress strip) as the player episodes panel.

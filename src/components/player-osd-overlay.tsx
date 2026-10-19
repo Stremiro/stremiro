@@ -1,14 +1,15 @@
 import {
+  AudioLines,
+  Captions,
   FastForward,
   Gauge,
   History,
   type LucideIcon,
-  Music,
   Rewind,
   SkipForward,
-  Subtitles,
 } from 'lucide-react';
 import { memo } from 'react';
+import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
@@ -16,9 +17,9 @@ export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' |
 
 const MESSAGE_ICONS: Record<PlayerOsdMessageIcon, LucideIcon> = {
   history: History,
-  subtitles: Subtitles,
+  subtitles: Captions,
   gauge: Gauge,
-  audio: Music,
+  audio: AudioLines,
   skip: SkipForward,
 };
 
@@ -68,10 +69,18 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       {action?.kind === 'seek' && (
         <div className={cn(OSD_CARD_CLASS, 'gap-2.5')}>
           {action.direction === 'forward' && (
-            <FastForward className='h-4 w-4 shrink-0 text-white/90' strokeWidth={2.5} />
+            <FastForward
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 text-white/90'
+              strokeWidth={CHROME_ICON_STROKE}
+            />
           )}
           {action.direction === 'backward' && (
-            <Rewind className='h-4 w-4 shrink-0 text-white/90' strokeWidth={2.5} />
+            <Rewind
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 text-white/90'
+              strokeWidth={CHROME_ICON_STROKE}
+            />
           )}
           <span
             className={cn(
@@ -94,7 +103,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
               muted={action.level === 0}
               volume={action.level}
               className='h-4 w-4 text-white/90'
-              strokeWidth={2.5}
+              strokeWidth={CHROME_ICON_STROKE}
             />
             <span
               className={cn(
@@ -117,7 +126,11 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
       {action?.kind === 'message' && (
         <div className={cn(OSD_CARD_CLASS, 'gap-2.5')}>
           {MessageIcon && (
-            <MessageIcon className='h-3.5 w-3.5 shrink-0 text-white/60' strokeWidth={2.25} />
+            <MessageIcon
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 text-white/60'
+              strokeWidth={CHROME_ICON_STROKE}
+            />
           )}
           <span
             className={cn(

@@ -10,6 +10,11 @@ import {
 } from '@/lib/api';
 import { prefetchFullDetailsData } from '@/lib/details-prefetch';
 import { warmPlayerChunk } from '@/lib/player-session';
+import {
+  claimPlaybackLaunch,
+  isCurrentPlaybackLaunch,
+  PLAYER_RESTART_START_TIME,
+} from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import { clamp, withTimeout } from '@/lib/utils';
 
@@ -44,23 +49,15 @@ export function getHistoryPlaybackFallbackNotice(mode: HistoryPlaybackFallbackNo
       };
 }
 
-/** Live clock wins over route `startTime`; below `MIN_RESUME_POSITION_SECS` counts as absent. */
+/** An observed beginning suppresses history; only an unavailable clock falls back. */
 export function playableResumePosition(
   livePosition: number | undefined,
   routeStartTime: number | undefined,
 ): number | undefined {
-  if (
-    livePosition !== undefined &&
-    Number.isFinite(livePosition) &&
-    livePosition >= MIN_RESUME_POSITION_SECS
-  ) {
-    return livePosition;
-  }
-  return routeStartTime !== undefined &&
-    Number.isFinite(routeStartTime) &&
-    routeStartTime >= MIN_RESUME_POSITION_SECS
-    ? routeStartTime
-    : undefined;
+  const position =
+    livePosition !== undefined && Number.isFinite(livePosition) ? livePosition : routeStartTime;
+  if (position === undefined || !Number.isFinite(position) || position < 0) return undefined;
+  return position >= MIN_RESUME_POSITION_SECS ? position : PLAYER_RESTART_START_TIME;
 }
 
 const RESUME_LOOKUP_TIMEOUT_MS = 6_000;
@@ -133,8 +130,9 @@ export function formatWatchRemaining(position: number, duration: number): string
   return rest === 0 ? `${hours}h left` : `${hours}h ${rest}m left`;
 }
 interface HistoryPlaybackOptions {
+  launchGeneration?: number;
   onSelectEpisode?: ((reason: HistoryPlaybackPlanReason) => void | Promise<void>) | null;
-  /** Ignore late completion after the initiating surface unmounts. */
+  /** Ignore late completion after the launch owner unmounts. */
   isCancelled?: () => boolean;
 }
 
@@ -180,6 +178,12 @@ export async function openHistoryPlaybackPlan(
   queryClient?: QueryClient,
   options?: HistoryPlaybackOptions,
 ): Promise<void> {
+  const launchGeneration = options?.launchGeneration ?? claimPlaybackLaunch();
+  const launchOptions = {
+    ...options,
+    isCancelled: () =>
+      !isCurrentPlaybackLaunch(launchGeneration) || options?.isCancelled?.() === true,
+  };
   try {
     // A resume click predicts a player mount — overlap the chunk fetch.
     warmPlayerChunk();
@@ -188,9 +192,9 @@ export async function openHistoryPlaybackPlan(
       prefetchFullDetailsData(queryClient, { mediaId: item.id, mediaType: item.type_ });
     }
     const plan = await api.buildHistoryPlaybackPlan(item, from);
-    await applyHistoryPlaybackPlan(navigate, plan, options);
+    await applyHistoryPlaybackPlan(navigate, plan, launchOptions);
   } catch (error) {
-    if (options?.isCancelled?.()) return;
+    if (launchOptions.isCancelled()) return;
     toast.error(errorTitle, {
       description: error instanceof Error ? error.message : 'Please try again.',
     });

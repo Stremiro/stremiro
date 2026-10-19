@@ -1,11 +1,13 @@
 import { type MouseEvent as ReactMouseEvent, useSyncExternalStore } from 'react';
 import type { NavigateFunction, NavigateOptions, NavigationType, To } from 'react-router';
+import { createSubscribableStore } from '@/lib/subscribable-store';
 
 // Root binding avoids per-card router subscriptions during search URL updates.
 let navigateFn: NavigateFunction | null = null;
 
 export function bindAppNavigate(navigate: NavigateFunction | null): void {
   navigateFn = navigate;
+  notifyHistoryListeners();
 }
 
 // Read at gesture time without subscribing to location.
@@ -25,14 +27,23 @@ function navigateTo(to: To | number, options?: NavigateOptions): boolean {
 
 export const navigateApp = navigateTo;
 
+export const boundNavigate: NavigateFunction = (to: To | number, options?: NavigateOptions) => {
+  navigateApp(to, options);
+};
+
+function canNavigateAppBack(): boolean {
+  const index = window.history.state?.idx;
+  return (
+    navigateFn !== null &&
+    typeof index === 'number' &&
+    (index !== 0 || window.location.pathname !== '/')
+  );
+}
+
 // Deep links fall back to home when there is no previous app entry.
 export function navigateAppBack(): boolean {
-  const index = window.history.state?.idx;
-  if (typeof index !== 'number') return false;
-  if (index === 0) {
-    return window.location.pathname !== '/' && navigateTo('/', { replace: true });
-  }
-  return navigateTo(-1);
+  if (!canNavigateAppBack()) return false;
+  return window.history.state?.idx === 0 ? navigateTo('/', { replace: true }) : navigateTo(-1);
 }
 
 export const navigateBack = navigateAppBack;
@@ -45,34 +56,26 @@ export function navigateForward(): boolean {
 const entryStack: { key: string; path: string }[] = [];
 const ENTRY_MEMORY_MAX = 128;
 let entryIndex = -1;
-const historyListeners = new Set<() => void>();
 const EMPTY_HISTORY_STATE = { canGoBack: false, canGoForward: false };
-let historyState = EMPTY_HISTORY_STATE;
+const historyStore = createSubscribableStore(EMPTY_HISTORY_STATE);
 
 function notifyHistoryListeners(): void {
-  const canGoBack = entryIndex > 0;
+  const canGoBack = canNavigateAppBack();
   const canGoForward = entryIndex >= 0 && entryIndex < entryStack.length - 1;
+  const historyState = historyStore.getSnapshot();
   if (historyState.canGoBack === canGoBack && historyState.canGoForward === canGoForward) return;
-  historyState = { canGoBack, canGoForward };
-  for (const listener of historyListeners) listener();
-}
-
-function subscribeToHistory(listener: () => void): () => void {
-  historyListeners.add(listener);
-  return () => {
-    historyListeners.delete(listener);
-  };
-}
-
-function getHistoryState() {
-  return historyState;
+  historyStore.publish({ canGoBack, canGoForward });
 }
 
 export function useNavigationHistoryState(): {
   canGoBack: boolean;
   canGoForward: boolean;
 } {
-  return useSyncExternalStore(subscribeToHistory, getHistoryState, () => EMPTY_HISTORY_STATE);
+  return useSyncExternalStore(
+    historyStore.subscribe,
+    historyStore.getSnapshot,
+    () => EMPTY_HISTORY_STATE,
+  );
 }
 
 export function recordLocationEntry(key: string, path: string, action: NavigationType): void {

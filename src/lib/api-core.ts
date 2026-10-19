@@ -1,5 +1,8 @@
 import { invoke, type InvokeArgs, type InvokeOptions } from '@tauri-apps/api/core';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
+import { getErrorMessage } from '@/lib/utils';
+
+export { getErrorMessage } from '@/lib/utils';
 
 const isDev = import.meta.env.DEV;
 
@@ -9,30 +12,14 @@ export type InvokeApi = <T>(
   options?: InvokeOptions,
 ) => Promise<T>;
 
-export function getErrorMessage(error: unknown): string {
-  if (error instanceof Error) return error.message;
-  if (typeof error === 'string') return error;
-  if (typeof error === 'object' && error !== null) {
-    const anyErr = error as Record<string, unknown>;
-    if (typeof anyErr.message === 'string' && anyErr.message) return anyErr.message;
-    if (typeof anyErr.error === 'string' && anyErr.error) return anyErr.error;
-    if (typeof anyErr.err === 'string' && anyErr.err) return anyErr.err;
-    try {
-      return JSON.stringify(error);
-    } catch {
-      return String(error);
-    }
-  }
-
-  return String(error);
-}
-
 export function getListErrorMessage(error: unknown): string | undefined {
   switch (getErrorKind(error)) {
     case 'list_name_required':
     case 'list_not_found':
     case 'too_many_lists':
     case 'list_full':
+    case 'invalid_rules':
+    case 'smart_list_read_only':
       return getErrorMessage(error);
     default:
       return undefined;

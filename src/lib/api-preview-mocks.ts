@@ -1,6 +1,7 @@
 import {
   type AddonConfig,
   type AddonConfigsOp,
+  type AddonSubtitle,
   type AppUiPreferences,
   DEFAULT_APP_UI_PREFERENCES,
   type HistoryPlaybackPlan,
@@ -10,6 +11,7 @@ import {
   type ProfileLibrary,
   type ProfilePreferences,
   type ProfilePreferencesPatch,
+  type SmartListRules,
   type StreamSelectorData,
   type StreamSelectorPreferences,
   type StreamSelectorPreferencesState,
@@ -86,6 +88,20 @@ let previewLibrary: MediaItem[] = [];
 let previewWatchStatuses: Record<string, WatchStatus> = {};
 let previewLists: UserList[] = [];
 let previewListSeq = 0;
+
+function getPreviewLibraryStatusCounts(): ProfileLibrary['statusCounts'] {
+  const counts: ProfileLibrary['statusCounts'] = {
+    watching: 0,
+    watched: 0,
+    plan_to_watch: 0,
+    dropped: 0,
+    none: 0,
+  };
+  for (const item of previewLibrary) {
+    counts[previewWatchStatuses[item.id] ?? 'none'] += 1;
+  }
+  return counts;
+}
 
 const EMPTY_SEARCH_CATALOG_PAGE = {
   items: [],
@@ -172,18 +188,6 @@ function readPreviewMediaItem(value: unknown): MediaItem {
   return toMediaItem(value as MediaItem);
 }
 
-function readPreviewItems(args: PreviewInvokeArgs): MediaItem[] {
-  if (!Array.isArray(args?.items)) throw new Error('Media items are required');
-  return [
-    ...new Map(
-      args.items.map((value: unknown) => {
-        const item = readPreviewMediaItem(value);
-        return [item.id, item] as const;
-      }),
-    ).values(),
-  ];
-}
-
 function readPreviewWatchStatus(args: PreviewInvokeArgs): WatchStatus | null {
   const status = args?.status;
   if (
@@ -215,6 +219,8 @@ function removePreviewLibraryItems(ids: ReadonlySet<string>): number {
 function addPreviewListItems(listId: string, items: MediaItem[]): number {
   const list = previewLists.find((entry) => entry.id === listId);
   if (!list) throw { kind: 'list_not_found', message: 'List not found' };
+  if (list.rules)
+    throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
   const existingIds = new Set(list.item_ids);
   const additions = items.filter((item) => {
     if (existingIds.has(item.id)) return false;
@@ -281,6 +287,10 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
       typeof patch.trailerPreviews === 'boolean' ? patch.trailerPreviews : current.trailerPreviews,
     autoSkipIntro:
       typeof patch.autoSkipIntro === 'boolean' ? patch.autoSkipIntro : current.autoSkipIntro,
+    automaticUpdateChecks:
+      typeof patch.automaticUpdateChecks === 'boolean'
+        ? patch.automaticUpdateChecks
+        : current.automaticUpdateChecks,
     closeToTray: typeof patch.closeToTray === 'boolean' ? patch.closeToTray : current.closeToTray,
     minimizeToTray:
       typeof patch.minimizeToTray === 'boolean' ? patch.minimizeToTray : current.minimizeToTray,
@@ -449,19 +459,25 @@ export async function handlePreviewInvoke<T>(
       return null as T;
     case 'get_library':
       return previewLibrary as T;
+    case 'get_library_genres': {
+      const genres = new Map<string, string>();
+      for (const item of previewLibrary.toSorted(
+        (a, b) =>
+          a.title.toLowerCase().localeCompare(b.title.toLowerCase()) || a.id.localeCompare(b.id),
+      )) {
+        for (const genre of item.genres ?? []) {
+          const normalized = genre.trim().toLowerCase();
+          if (!genres.has(normalized)) genres.set(normalized, genre);
+        }
+      }
+      return [...genres.entries()]
+        .toSorted(([a], [b]) => (a < b ? -1 : Number(a > b)))
+        .map(([, genre]) => genre) as T;
+    }
     case 'get_profile_library': {
       const filters = (args?.filters ?? {}) as LibraryFilters;
       const query = filters.query?.trim().toLowerCase() ?? '';
-      const statusCounts: ProfileLibrary['statusCounts'] = {
-        watching: 0,
-        watched: 0,
-        plan_to_watch: 0,
-        dropped: 0,
-        none: 0,
-      };
-      for (const item of previewLibrary) {
-        statusCounts[previewWatchStatuses[item.id] ?? 'none'] += 1;
-      }
+      const statusCounts = getPreviewLibraryStatusCounts();
       const items = previewLibrary.filter(
         (item) =>
           (!filters.type || filters.type === 'all' || item.type === filters.type) &&
@@ -514,7 +530,8 @@ export async function handlePreviewInvoke<T>(
       return (added ? item : null) as T;
     }
     case 'bulk_set_watch_status': {
-      const items = readPreviewItems(args);
+      const ids = new Set(Array.isArray(args?.ids) ? args.ids : []);
+      const items = previewLibrary.filter((item) => ids.has(item.id));
       const status = readPreviewWatchStatus(args);
       let count = 0;
       for (const item of items) {
@@ -540,6 +557,7 @@ export async function handlePreviewInvoke<T>(
         icon: list.icon,
         item_count: list.item_ids.length,
         contains_item: list.item_ids.includes(readStringArg(args, 'itemId', '').trim()),
+        is_smart: Boolean(list.rules),
       })) as T;
     case 'create_list': {
       previewListSeq += 1;
@@ -548,6 +566,7 @@ export async function handlePreviewInvoke<T>(
         name: readStringArg(args, 'name', 'Untitled list'),
         icon: readStringArg(args, 'icon', 'list'),
         item_ids: [],
+        rules: args?.rules as SmartListRules | undefined,
       };
       previewLists = [...previewLists, { ...list, items: [] }];
       return list as T;
@@ -562,6 +581,9 @@ export async function handlePreviewInvoke<T>(
               ...list,
               name: readStringArg(args, 'name', list.name),
               icon: readStringArg(args, 'icon', list.icon),
+              rules: list.rules
+                ? ((args?.rules as SmartListRules | undefined) ?? list.rules)
+                : undefined,
             }
           : list,
       );
@@ -577,13 +599,56 @@ export async function handlePreviewInvoke<T>(
         icon: list.icon,
         item_count: list.item_ids.length,
         contains_item: true,
+        is_smart: false,
       } as T;
     }
     case 'bulk_add_to_list':
-      return addPreviewListItems(readStringArg(args, 'listId', ''), readPreviewItems(args)) as T;
+      return addPreviewListItems(
+        readStringArg(args, 'listId', ''),
+        Array.isArray(args?.itemIds)
+          ? previewLibrary.filter((item) => (args.itemIds as string[]).includes(item.id))
+          : [],
+      ) as T;
+    case 'bulk_remove_from_list': {
+      const ids = new Set(Array.isArray(args?.itemIds) ? args.itemIds : []);
+      const list = previewLists.find((entry) => entry.id === args?.listId);
+      if (!list) throw { kind: 'list_not_found', message: 'List not found' };
+      if (list.rules)
+        throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
+      const entries = (list.items ?? []).flatMap((item) =>
+        ids.has(item.id) ? [{ item, index: list.item_ids.indexOf(item.id) }] : [],
+      );
+      previewLists = previewLists.map((entry) =>
+        entry.id === list.id
+          ? {
+              ...entry,
+              item_ids: entry.item_ids.filter((id) => !ids.has(id)),
+              items: entry.items?.filter((item) => !ids.has(item.id)),
+            }
+          : entry,
+      );
+      return entries as T;
+    }
+    case 'restore_list_items': {
+      const entries = args?.entries as { item: MediaItem; index: number }[];
+      previewLists = previewLists.map((list) => {
+        if (list.id !== args?.listId) return list;
+        if (list.rules)
+          throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
+        const items = [...(list.items ?? [])];
+        const itemIds = [...list.item_ids];
+        for (const entry of entries.toSorted((a, b) => a.index - b.index)) {
+          if (itemIds.includes(entry.item.id)) continue;
+          itemIds.splice(entry.index, 0, entry.item.id);
+          items.splice(entry.index, 0, entry.item);
+        }
+        return { ...list, item_ids: itemIds, items };
+      });
+      return undefined as T;
+    }
     case 'remove_from_list':
       previewLists = previewLists.map((list) =>
-        list.id === args?.listId
+        list.id === args?.listId && !list.rules
           ? {
               ...list,
               item_ids: list.item_ids.filter((id) => id !== args?.itemId),
@@ -620,8 +685,25 @@ export async function handlePreviewInvoke<T>(
       } as T;
     case 'get_stream_selector_data':
       return EMPTY_STREAM_SELECTOR_DATA as T;
+    case 'get_addon_subtitles':
+      return [
+        {
+          id: 'preview-subtitle',
+          selectionKey:
+            '["preview-addon","preview-subtitle","https://subtitles.invalid/preview.srt","eng"]',
+          url: 'https://subtitles.invalid/preview.srt',
+          lang: 'eng',
+          label: 'Browser.Preview_English.srt',
+          detail: 'Browser.Preview_English',
+          mpvTitle: 'Browser.Preview_English.srt',
+          sourceId: 'preview-addon',
+          sourceName: 'Browser Preview',
+        } satisfies AddonSubtitle,
+      ] as T;
     case 'get_episode_navigation':
       return { previousIndex: null, nextIndex: null } as T;
+    case 'get_unaired_episode_indices':
+      return [] as T;
     case 'get_media_details':
       return {
         id: readStringArg(args, 'id', 'mock-id'),
@@ -674,6 +756,7 @@ export async function handlePreviewInvoke<T>(
       return null as T;
     case 'cancel_playback_recovery':
       return undefined as T;
+    case 'bulk_remove_from_watch_history':
     case 'remove_all_from_watch_history':
       // The command returns the rows it deleted — preview holds no history.
       return [] as T;
@@ -772,6 +855,7 @@ export async function handlePreviewInvoke<T>(
         history_title_count: 0,
         has_learned_playback_data: false,
         library_count: previewLibrary.length,
+        library_status_counts: getPreviewLibraryStatusCounts(),
         lists_count: previewLists.length,
         watch_statuses_count: Object.keys(previewWatchStatuses).length,
       } as T;

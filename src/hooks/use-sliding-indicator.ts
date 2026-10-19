@@ -1,5 +1,10 @@
 import { type RefObject, useLayoutEffect, useState } from 'react';
 
+export const SLIDING_ACCENT_PILL_CLASS =
+  'nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md bg-(--accent-nav)';
+export const SLIDING_ACCENT_BAR_CLASS =
+  'nav-sliding-bar pointer-events-none absolute left-0 top-0 w-[3px] rounded-r-full bg-(--accent-nav)';
+
 interface IndicatorBounds {
   top: number;
   left: number;

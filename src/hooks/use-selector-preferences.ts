@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from 'react';
+import { toast } from 'sonner';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import {
@@ -18,9 +19,11 @@ import {
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { STREAM_SELECTOR_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
+import { createSerialTaskQueue } from '@/lib/utils';
 
 const STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS = 200;
-let streamSelectorPreferencesSaveQueue = Promise.resolve<void>(undefined);
+const STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID = 'stream-selector-preference-error';
+const streamSelectorPreferencesSaveQueue = createSerialTaskQueue();
 
 interface UseSelectorPreferencesStateArgs {
   episode?: number;
@@ -98,6 +101,7 @@ export function useSelectorPreferencesState({
   }, []);
   // Raw save op — the queue only stores the recovered tail, so lifecycle flushes observe failures here.
   const lastPersistOperationRef = useRef<Promise<void> | null>(null);
+  const retryPendingSaveRef = useRef<(() => Promise<void>) | null>(null);
   const debouncedFilters = useDebounce(filters, STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS);
 
   useEffect(() => {
@@ -119,7 +123,7 @@ export function useSelectorPreferencesState({
       }
 
       lastRequestedPreferenceKeyRef.current = nextPreferenceKey;
-      const operation = streamSelectorPreferencesSaveQueue.then(async () => {
+      const operation = streamSelectorPreferencesSaveQueue.enqueue(async () => {
         const baseline = persistedBaselineRef.current;
         const patch: StreamSelectorPreferencesPatch = { episodeContext: showBatchFilter };
         for (const field of STREAM_SELECTOR_PREFERENCE_FIELDS) {
@@ -133,14 +137,19 @@ export function useSelectorPreferencesState({
         if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
           lastRequestedPreferenceKeyRef.current =
             buildStreamSelectorPreferencesKey(savedPreferences);
-        }
-        // The server canonicalizes — adopt its value unless the user already moved past this request.
-        if (
-          mountedRef.current &&
-          areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters) &&
-          !areStreamSelectorPreferencesEqual(savedPreferences, nextFilters)
-        ) {
-          setFiltersState(savedPreferences);
+          if (areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters)) {
+            userEditedFiltersRef.current = false;
+            userEditedFilterFieldsRef.current.clear();
+            toast.dismiss(STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID);
+            // Adopt canonical values only while this is still the latest edit.
+            latestFiltersRef.current = savedPreferences;
+            if (
+              mountedRef.current &&
+              !areStreamSelectorPreferencesEqual(savedPreferences, nextFilters)
+            ) {
+              setFiltersState(savedPreferences);
+            }
+          }
         }
         queryClient.setQueryData<StreamSelectorPreferencesState>(
           STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
@@ -148,10 +157,21 @@ export function useSelectorPreferencesState({
         );
       });
       lastPersistOperationRef.current = operation;
-      // The queue keeps the recovered tail so later edits serialize; the raw op is what barriers await.
-      streamSelectorPreferencesSaveQueue = operation.catch(() => {
+      void operation.catch(() => {
         if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
           lastRequestedPreferenceKeyRef.current = null;
+          if (areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters)) {
+            toast.error("Couldn't save stream filters", {
+              id: STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID,
+              action: {
+                label: 'Retry',
+                onClick: () => {
+                  const retry = retryPendingSaveRef.current;
+                  if (retry) void trackPendingAppWrite(retry()).catch(() => undefined);
+                },
+              },
+            });
+          }
         }
       });
       return trackPendingAppWrite(operation);
@@ -162,8 +182,6 @@ export function useSelectorPreferencesState({
   const flushPendingSelectorPreferences = useEffectEvent(async (): Promise<void> => {
     if (userEditedFiltersRef.current) {
       const needsHydration = !hasHydratedFiltersRef.current;
-      // Closing resets the session refs while this read is pending.
-      const editedFields = new Set(userEditedFilterFieldsRef.current);
       // Hydrate before composing the write — never persist over unread stored state.
       const stored = await queryClient.ensureQueryData({
         queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
@@ -177,7 +195,7 @@ export function useSelectorPreferencesState({
             ? stored.episodeDefaultPreferences
             : stored.defaultPreferences;
         nextFilters = { ...storedFilters };
-        for (const field of editedFields) {
+        for (const field of userEditedFilterFieldsRef.current) {
           nextFilters[field] = latestFiltersRef.current[field] as never;
         }
         persistedBaselineRef.current = storedFilters;
@@ -201,7 +219,10 @@ export function useSelectorPreferencesState({
     // No pending edit: tracked raw operations already cover in-flight work.
   });
 
-  useEffect(() => registerPendingAppWriteFlusher(flushPendingSelectorPreferences), []);
+  useEffect(() => {
+    retryPendingSaveRef.current = flushPendingSelectorPreferences;
+    return registerPendingAppWriteFlusher(flushPendingSelectorPreferences);
+  }, []);
 
   const syncFiltersFromPersistedState = useEffectEvent((nextFilters: StreamSelectorPreferences) => {
     // Raw setter: a hydration sync is not a user edit.
@@ -243,19 +264,12 @@ export function useSelectorPreferencesState({
   ]);
 
   const flushOnClose = useEffectEvent(() => {
-    const latestFilters = latestFiltersRef.current;
-    if (
-      userEditedFiltersRef.current &&
-      (!hasHydratedFiltersRef.current ||
-        !areStreamSelectorPreferencesEqual(latestFilters, normalizedPersistedFilters))
-    ) {
+    if (userEditedFiltersRef.current) {
       void trackPendingAppWrite(flushPendingSelectorPreferences()).catch(() => undefined);
     }
 
     openSessionKeyRef.current = null;
     hasHydratedFiltersRef.current = false;
-    userEditedFiltersRef.current = false;
-    userEditedFilterFieldsRef.current.clear();
   });
 
   useEffect(() => {

@@ -104,7 +104,8 @@ export function useSearchPageState() {
     updateSearchParams((params) => params.delete('genre'));
   }, [updateSearchParams]);
 
-  const hasActiveFilters = activeType !== 'all' || activeFeed !== 'popular' || !!activeGenre;
+  const hasActiveFilters =
+    activeType !== 'all' || (!trimmedDebouncedQuery && activeFeed !== 'popular') || !!activeGenre;
 
   // Hard reset back to the default browse: all types, trending, no genre.
   const resetFilters = useCallback(() => {

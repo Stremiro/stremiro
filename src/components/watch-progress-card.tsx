@@ -11,6 +11,7 @@ import { MediaCard } from './media-card';
 
 interface WatchProgressCardProps {
   item: WatchProgress;
+  playbackIntent?: 'resume' | 'next-episode';
   /** Overrides the "time left" line (e.g. up-next cards have no progress). */
   metaLine?: string;
   /** Remove mutation differs per surface (history vs. continue watching) — callers own it. */
@@ -22,6 +23,7 @@ interface WatchProgressCardProps {
 // WatchProgress → MediaCard adapter for the resume rail and history grid.
 export const WatchProgressCard = memo(function WatchProgressCard({
   item,
+  playbackIntent = 'resume',
   metaLine: metaLineOverride,
   onRemove,
   playErrorTitle,
@@ -52,6 +54,7 @@ export const WatchProgressCard = memo(function WatchProgressCard({
       progress={progress}
       metaLine={metaLine}
       onPlay={play}
+      playbackIntent={playbackIntent}
       isPlayPending={isPending}
       onRemoveFromContinue={onRemove ? handleRemove : undefined}
       subtitle={

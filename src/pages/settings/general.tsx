@@ -24,7 +24,7 @@ import {
   SettingsSwitch,
 } from './chrome';
 
-const LAUNCH_AT_LOGIN_QUERY_KEY = ['launch-at-login'] as const;
+const launchAtLoginQueryOptions = api.launchAtLoginQueryOptions();
 export const START_PAGES = [
   { value: 'home', label: 'Home' },
   { value: 'library', label: 'Library' },
@@ -42,30 +42,30 @@ export function GeneralSettings() {
       startupPage,
     }),
   );
-  const launchQuery = useQuery({
-    queryKey: LAUNCH_AT_LOGIN_QUERY_KEY,
-    queryFn: api.getLaunchAtLogin,
-    staleTime: 30_000,
-    refetchOnWindowFocus: true,
-  });
+  const launchQuery = useQuery(launchAtLoginQueryOptions);
   const launchMutation = useMutation({
     mutationFn: async (enabled: boolean) => {
       await flushPendingAppWrites();
       return api.setLaunchAtLogin(enabled);
     },
-    onSuccess: (enabled) => {
-      queryClient.setQueryData(LAUNCH_AT_LOGIN_QUERY_KEY, enabled);
+    onSuccess: async (enabled) => {
+      await queryClient.cancelQueries({
+        queryKey: launchAtLoginQueryOptions.queryKey,
+        exact: true,
+      });
+      queryClient.setQueryData(launchAtLoginQueryOptions.queryKey, enabled);
     },
     onError: (error) =>
       toast.error('Could not change launch at login.', { description: getErrorMessage(error) }),
-    onSettled: () =>
+    onSettled: (_enabled, error) =>
       Promise.all([
-        queryClient.invalidateQueries({ queryKey: LAUNCH_AT_LOGIN_QUERY_KEY }),
+        error != null &&
+          queryClient.invalidateQueries({ queryKey: launchAtLoginQueryOptions.queryKey }),
         queryClient.invalidateQueries({ queryKey: APP_UI_PREFERENCES_QUERY_KEY }),
       ]),
   });
 
-  const launchPending = launchQuery.isFetching || launchMutation.isPending;
+  const launchPending = launchQuery.isLoading || launchMutation.isPending;
   const launchEnabled = launchQuery.data === true;
   const canStartMinimized = launchEnabled || preferences.closeToTray || preferences.minimizeToTray;
   const startPageLabel =
@@ -128,7 +128,8 @@ export function GeneralSettings() {
             <SettingsSwitch
               ariaLabel='Launch at login'
               checked={launchEnabled}
-              disabled={launchPending || launchQuery.data === undefined}
+              disabled={launchQuery.data === undefined}
+              pending={launchPending}
               onChange={() => launchMutation.mutate(!launchEnabled)}
             />
           </SettingsRow>
@@ -143,7 +144,8 @@ export function GeneralSettings() {
             <SettingsSwitch
               ariaLabel='Start minimized'
               checked={preferences.startMinimized}
-              disabled={isHydrating || !canStartMinimized || launchPending}
+              disabled={isHydrating || !canStartMinimized}
+              pending={launchMutation.isPending}
               onChange={() => updatePreferences({ startMinimized: !preferences.startMinimized })}
             />
           </SettingsRow>

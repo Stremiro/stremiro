@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { getAccentTextColor, nonBlank } from '@/lib/utils';
+import { getAccentTextColor, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
@@ -57,12 +57,13 @@ export function ProfileSettingsPopover({
   };
 
   const previewAccentColor = resolveAccentPreviewColor(draftAccentColor, profile.accentColor);
+  const isAccentHexInvalid = !HEX_COLOR_PATTERN.test(draftAccentColor);
   const previewIntensity = normalizeAccentPreviewIntensity(draftIntensity);
   const previewName = nonBlank(draftName) || profile.username;
 
   const handleSave = async () => {
     const trimmedName = draftName.trim();
-    if (!trimmedName || isSaving || isHydrating || isError) return;
+    if (!trimmedName || isAccentHexInvalid || isSaving || isHydrating || isError) return;
     const generation = openingGenerationRef.current;
 
     try {
@@ -193,9 +194,9 @@ export function ProfileSettingsPopover({
                 size='sm'
                 onClick={handleSave}
                 disabled={!draftName.trim() || isHydrating}
-                aria-disabled={isSaving || undefined}
+                aria-disabled={isSaving || isAccentHexInvalid || undefined}
                 aria-busy={isSaving || undefined}
-                className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5'
+                className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5 aria-disabled:cursor-not-allowed aria-disabled:opacity-50'
                 style={{
                   backgroundColor: active,
                   color: getAccentTextColor(active),

@@ -4,20 +4,17 @@ import { memo, useCallback, useEffect, useEffectEvent, useRef, useState } from '
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
 import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
 import {
   useIsItemInLibrary,
-  useLatestWatchHistoryEntry,
+  useMediaResumeEntry,
   useToggleLibraryItem,
 } from '@/hooks/use-media-library';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
+import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { api, type MediaItem } from '@/lib/api';
-import {
-  DETAILS_GC_TIME_MS,
-  DETAILS_STALE_TIME_MS,
-  detailsCardQueryKey,
-} from '@/lib/query-invalidation';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { currentPathWithSearch } from '@/lib/navigation';
 import { buildDetailsRoute, resolvePlayerRouteMediaType } from '@/lib/player-navigation';
@@ -25,6 +22,7 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clearTimer,
   cn,
+  GENRE_LINK_CLASS,
   isHttpUrl,
   mediaTypeLabel,
   pad2,
@@ -39,6 +37,8 @@ interface HeroCarouselStateOptions {
 
 const HERO_ROTATION_INTERVAL_MS = 10_000;
 const HERO_TRANSITION_DURATION_MS = 300;
+const HERO_CONTAINER_CLASS =
+  'relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden';
 
 interface HeroCarouselIndicatorsProps {
   activeIndex: number;
@@ -67,7 +67,7 @@ function HeroCarouselIndicators({
 
   return (
     <div
-      className='absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex w-max max-w-[calc(100vw-76px)] -translate-x-1/2 items-center gap-3 transition-opacity duration-300'
+      className='absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex w-max max-w-[calc(100vw-76px)] -translate-x-1/2 items-center gap-3 transition-opacity duration-300 focus-within:opacity-100! group-data-[indicators-hidden]:not-focus-within:pointer-events-none'
       style={{ opacity: 'calc(1 - var(--hero-scroll-opacity, 0) * 2)' }}
     >
       <button
@@ -113,12 +113,16 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
   const [currentIndex, setCurrentIndex] = useState(0);
   const [isTransitioning, setIsTransitioning] = useState(false);
   const transitionTimeoutRef = useRef<number | null>(null);
+  const automaticTransitionRef = useRef(false);
   const activeIndex = itemCount > 0 ? currentIndex % itemCount : 0;
 
-  const clearTransitionTimeout = useCallback(() => clearTimer(transitionTimeoutRef), []);
+  const clearTransitionTimeout = useCallback(() => {
+    clearTimer(transitionTimeoutRef);
+    automaticTransitionRef.current = false;
+  }, []);
 
   const queueTransition = useCallback(
-    (nextIndex: number) => {
+    (nextIndex: number, automatic = false) => {
       if (itemCount <= 0) {
         return;
       }
@@ -129,11 +133,13 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
         setIsTransitioning(false);
         return;
       }
+      automaticTransitionRef.current = automatic;
       setIsTransitioning(true);
       transitionTimeoutRef.current = window.setTimeout(() => {
         setCurrentIndex(nextIndex);
         setIsTransitioning(false);
         transitionTimeoutRef.current = null;
+        automaticTransitionRef.current = false;
       }, HERO_TRANSITION_DURATION_MS);
     },
     [clearTransitionTimeout, itemCount],
@@ -153,11 +159,17 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
   });
 
   const advanceSlide = useEffectEvent(() => {
-    if (isTransitioning || itemCount <= 1) {
+    if (isPaused || isTransitioning || itemCount <= 1) {
       return;
     }
 
-    queueTransition((activeIndex + 1) % itemCount);
+    queueTransition((activeIndex + 1) % itemCount, true);
+  });
+
+  const cancelAutomaticTransition = useEffectEvent(() => {
+    if (!automaticTransitionRef.current) return;
+    clearTransitionTimeout();
+    setIsTransitioning(false);
   });
 
   const handleSelect = useCallback(
@@ -182,7 +194,11 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
   }, [itemCount]);
 
   useEffect(() => {
-    if (itemCount <= 1 || isPaused) {
+    if (isPaused) {
+      cancelAutomaticTransition();
+      return;
+    }
+    if (itemCount <= 1) {
       return;
     }
 
@@ -215,6 +231,7 @@ interface HeroProps {
 
 export const Hero = memo(function Hero({ items }: HeroProps) {
   const queryClient = useQueryClient();
+  const isOnline = useOnlineStatus();
   const [isHovered, setIsHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
   const [isWindowFocused, setIsWindowFocused] = useState(() => document.hasFocus());
@@ -261,30 +278,25 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const item = items[activeIndex];
   const activeHeroItemId = item?.id;
   const activeHeroDetailsType = resolvePlayerRouteMediaType(item?.type);
-  const [logoUrl, onLogoError] = useFailedSrc(isHttpUrl(item?.logo) ? item?.logo : null);
-
   const { data: heroDetails, isFetched: isHeroDetailsFetched } = useQuery({
     // Card payload only (no episodes) — the hero never renders episode data and must not pay for it.
-    queryKey: detailsCardQueryKey(activeHeroDetailsType, activeHeroItemId),
-    queryFn: () =>
-      activeHeroItemId
-        ? api.getMediaCardDetails(activeHeroDetailsType, activeHeroItemId)
-        : Promise.reject(new Error('Media ID is required for hero details lookup.')),
-    enabled: !!activeHeroItemId,
-    staleTime: DETAILS_STALE_TIME_MS,
-    gcTime: DETAILS_GC_TIME_MS,
+    ...api.cardDetailsQueryOptions(
+      activeHeroDetailsType,
+      activeHeroItemId,
+      'Media ID is required for hero details lookup.',
+    ),
+    enabled: isOnline && !!activeHeroItemId,
   });
 
   useRafScrollListener(() => {
     // Direct style write — a setState here would re-render the whole hero on every scroll frame.
-    sectionRef.current?.style.setProperty(
-      '--hero-scroll-opacity',
-      String(Math.min(window.scrollY / 600, 0.9)),
-    );
+    const scrollOpacity = Math.min(window.scrollY / 600, 0.9);
+    sectionRef.current?.style.setProperty('--hero-scroll-opacity', String(scrollOpacity));
+    sectionRef.current?.toggleAttribute('data-indicators-hidden', scrollOpacity >= 0.5);
   });
 
   useEffect(() => {
-    if (items.length <= 1 || !isHeroDetailsFetched || isOffscreen || document.hidden) {
+    if (!isOnline || items.length <= 1 || !isHeroDetailsFetched || isOffscreen || document.hidden) {
       return;
     }
 
@@ -313,12 +325,23 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       }
     }, 750);
     return () => window.clearTimeout(timer);
-  }, [activeIndex, isHeroDetailsFetched, isOffscreen, items, queryClient]);
+  }, [activeIndex, isHeroDetailsFetched, isOffscreen, isOnline, items, queryClient]);
 
   const heroRating = heroDetails?.rating ?? null;
-  const { data: isInLibrary = false } = useIsItemInLibrary(item?.id);
+  const heroLogo = item?.logo || heroDetails?.logo;
+  const [logoUrl, onLogoError] = useFailedSrc(isHttpUrl(heroLogo) ? heroLogo : null);
+  const libraryQuery = useIsItemInLibrary(item?.id);
+  const libraryReady = libraryQuery.data !== undefined;
+  const isInLibrary = libraryQuery.data === true;
+  const libraryActionLabel = libraryReady
+    ? isInLibrary
+      ? 'Remove from Library'
+      : 'Add to Library'
+    : libraryQuery.isError
+      ? 'Library unavailable'
+      : 'Loading Library…';
   const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
-  const { data: historyEntry } = useLatestWatchHistoryEntry(activeHeroItemId, {
+  const { data: historyEntry } = useMediaResumeEntry(activeHeroItemId, item?.type, {
     staleTime: 1000 * 60 * 5,
   });
   // Same primary-action pipeline as MediaCard: resume, resolve+play a movie, or land on details for a series.
@@ -331,23 +354,42 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
 
   if (!item) {
     return (
-      <div className='relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden bg-zinc-950'>
+      <div className={cn(HERO_CONTAINER_CLASS, 'bg-zinc-950')} aria-busy='true'>
+        <span role='status' className='sr-only'>
+          Loading featured titles…
+        </span>
         <div className='absolute inset-0 bg-linear-to-t from-black via-black/50 to-transparent' />
+        <div
+          aria-hidden='true'
+          className='absolute inset-x-0 bottom-0 space-y-5 px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16'
+        >
+          <Skeleton className='h-12 w-80 max-w-full bg-white/[0.08] md:h-16 motion-reduce:animate-none' />
+          <Skeleton className='h-4 w-40 max-w-full bg-white/[0.06] motion-reduce:animate-none' />
+          <div className='max-w-md space-y-2.5'>
+            <Skeleton className='h-3.5 w-full bg-white/[0.05] motion-reduce:animate-none' />
+            <Skeleton className='h-3.5 w-4/5 bg-white/[0.05] motion-reduce:animate-none' />
+          </div>
+          <div className='flex gap-2'>
+            <Skeleton className='h-11 w-28 rounded-lg bg-white/[0.08] motion-reduce:animate-none' />
+            <Skeleton className='h-11 w-11 rounded-lg bg-white/[0.06] motion-reduce:animate-none' />
+          </div>
+        </div>
       </div>
     );
   }
 
-  const backdropUrl = item.backdrop || item.poster;
+  const backdropUrl = item.backdrop || heroDetails?.backdrop || item.poster;
+  const description = item.description || heroDetails?.description;
   const typeLabel = mediaTypeLabel(item.type);
   const genrePills = primaryGenrePills(item.genres, heroDetails?.genres);
   const detailsPath = buildDetailsRoute(item.type, item.id);
   const prefetchActiveDetails = () =>
-    prefetchDetailsRouteData(queryClient, { mediaId: item.id, mediaType: item.type });
+    isOnline && prefetchDetailsRouteData(queryClient, { mediaId: item.id, mediaType: item.type });
 
   return (
     <section
       ref={sectionRef}
-      className='relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden group'
+      className={cn(HERO_CONTAINER_CLASS, 'group')}
       aria-label='Featured titles'
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
@@ -383,6 +425,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
             <RemoteImage
               key={item.id}
               src={backdropUrl}
+              fallbackSrc={isHttpUrl(item.poster) ? item.poster : undefined}
+              fadeIn
               alt=''
               className='w-full h-full object-cover object-center'
               loading='eager'
@@ -439,12 +483,15 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   )}
                 >
                   {logoUrl ? (
-                    <RemoteImage
-                      src={logoUrl}
-                      alt={item.title}
-                      onError={onLogoError}
-                      className='block max-h-[150px] max-w-full object-contain object-left drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in duration-700 md:max-h-[185px]'
-                    />
+                    <>
+                      <h1 className='sr-only'>{item.title}</h1>
+                      <RemoteImage
+                        src={logoUrl}
+                        alt=''
+                        onError={onLogoError}
+                        className='block max-h-[150px] max-w-full object-contain object-left drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)] animate-in fade-in duration-700 md:max-h-[185px]'
+                      />
+                    </>
                   ) : (
                     <h1 className='text-4xl font-bold leading-[1.02] tracking-[-0.03em] text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.6)] animate-in fade-in duration-700 md:text-6xl'>
                       {item.title}
@@ -464,19 +511,24 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   )}
                 </div>
 
-                {item.description && (
+                {description && (
                   <p className='mt-4 max-w-xl text-[13.5px] leading-[1.65] text-zinc-200/85 line-clamp-2 animate-in fade-in duration-700 delay-150 lg:hidden'>
-                    {item.description}
+                    {description}
                   </p>
                 )}
 
                 <div className='mt-5 flex items-center gap-2 animate-in fade-in duration-700 delay-200'>
                   <Button
                     size='sm'
-                    onClick={() => void primaryPlayback.handlePrimaryAction()}
-                    aria-disabled={primaryPlayback.isResolvingPrimaryAction || undefined}
+                    onClick={() => {
+                      if (isOnline) void primaryPlayback.handlePrimaryAction();
+                    }}
+                    aria-disabled={
+                      !isOnline || primaryPlayback.isResolvingPrimaryAction || undefined
+                    }
                     aria-busy={primaryPlayback.isResolvingPrimaryAction || undefined}
-                    className='h-11 min-w-[108px] gap-2 rounded-lg bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-wait aria-disabled:opacity-80'
+                    title={isOnline ? undefined : 'Reconnect to find streams'}
+                    className='h-11 min-w-[108px] gap-2 rounded-lg bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80'
                   >
                     {primaryPlayback.showResolvingFeedback ? (
                       <Loader2 className='h-4 w-4 animate-spin' />
@@ -488,23 +540,28 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   <Button
                     size='icon'
                     variant='ghost'
-                    aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
-                    title={isInLibrary ? 'Remove from library' : 'Add to library'}
-                    aria-pressed={isInLibrary}
-                    aria-busy={toggleLibrary.isPending || undefined}
+                    aria-label={libraryActionLabel}
+                    title={libraryActionLabel}
+                    aria-pressed={libraryReady ? isInLibrary : undefined}
+                    aria-busy={
+                      (!libraryReady && !libraryQuery.isError) ||
+                      toggleLibrary.isPending ||
+                      undefined
+                    }
                     className={cn(
                       'h-11 w-11 shrink-0 rounded-lg border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-wait',
                       isInLibrary
                         ? 'border-white/30 bg-white/15 text-white hover:bg-white/20 hover:text-white'
                         : 'border-white/20 bg-black/25 text-white/80 hover:border-white/35 hover:bg-white/10 hover:text-white',
+                      !libraryReady && 'opacity-50',
                     )}
                     // Guard, not `disabled` — disabling the focused button blurs it, unpausing the carousel mid-click.
-                    aria-disabled={toggleLibrary.isPending || undefined}
+                    aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
                     onClick={() => {
-                      if (!toggleLibrary.isPending) toggleLibrary.mutate();
+                      if (libraryReady && !toggleLibrary.isPending) toggleLibrary.mutate();
                     }}
                   >
-                    {toggleLibrary.isPending ? (
+                    {toggleLibrary.isPending || (!libraryReady && !libraryQuery.isError) ? (
                       <Loader2 aria-hidden='true' className='h-4 w-4 animate-spin' />
                     ) : isInLibrary ? (
                       <Check className='h-4 w-4' />
@@ -516,9 +573,9 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
               </div>
 
               <div className='hidden w-[36%] max-w-md shrink-0 flex-col items-end text-right animate-in fade-in duration-700 delay-150 lg:flex'>
-                {item.description && (
+                {description && (
                   <p className='text-[13.5px] leading-[1.7] text-zinc-100/80 line-clamp-4 [text-shadow:0_2px_16px_rgba(0,0,0,0.8)]'>
-                    {item.description}
+                    {description}
                   </p>
                 )}
                 {genrePills.length > 0 && (
@@ -528,7 +585,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                         key={genre}
                         to={searchGenrePath(item.type, genre)}
                         title={`Browse ${genre}`}
-                        className='rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[12px] font-medium text-white/75 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+                        className={GENRE_LINK_CLASS}
                       >
                         {genre}
                       </Link>

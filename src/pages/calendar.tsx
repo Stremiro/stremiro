@@ -14,13 +14,14 @@ import {
   subMonths,
 } from 'date-fns';
 import { CalendarDays, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
-import { memo, useCallback, useEffect, useEffectEvent, useMemo } from 'react';
+import { Fragment, memo, useEffect, useEffectEvent, useMemo } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { api, type CalendarScheduleEvent } from '@/lib/api';
@@ -30,11 +31,12 @@ import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR }
 import { currentPathWithSearch } from '@/lib/navigation';
 import { buildDetailsRoute } from '@/lib/player-navigation';
 import { CALENDAR_EVENTS_STALE_TIME_MS, calendarEventsQueryKey } from '@/lib/query-invalidation';
+import { parseLocalScheduleDate } from '@/lib/schedule-dates';
 import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
-  parseLocalScheduleDate,
+  queryNeedsRetry,
   SIDEBAR_PAGE_COLUMN_INSETS,
 } from '@/lib/utils';
 
@@ -108,18 +110,16 @@ export function Calendar() {
   const visibleStartMs = days[0].getTime();
   const visibleEndMs = endOfDay(days[days.length - 1]).getTime();
 
-  const range = useMemo(
-    () => ({
-      visibleStart: format(new Date(visibleStartMs), 'yyyy-MM-dd'),
-      visibleEnd: format(new Date(visibleEndMs), 'yyyy-MM-dd'),
-      upcomingStart: format(new Date(todayStartMs), 'yyyy-MM-dd'),
-    }),
-    [visibleStartMs, visibleEndMs, todayStartMs],
-  );
+  const range = {
+    visibleStart: format(new Date(visibleStartMs), 'yyyy-MM-dd'),
+    visibleEnd: format(new Date(visibleEndMs), 'yyyy-MM-dd'),
+    upcomingStart: format(new Date(todayStartMs), 'yyyy-MM-dd'),
+  };
   const {
     data: schedule,
-    errorUpdatedAt,
-    dataUpdatedAt,
+    isError,
+    isFetched,
+    isPending,
     isLoading,
     isFetching: isFetchingSchedules,
     refetch: refetchSchedules,
@@ -128,27 +128,26 @@ export function Calendar() {
     queryFn: () => api.getCalendarEvents(range),
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
   });
-  const isScheduleError = errorUpdatedAt > dataUpdatedAt;
+  const isScheduleError = queryNeedsRetry({ isError, isFetched, isPending });
   const isLoadingSchedules = isLoading && !isScheduleError;
   const hasMissingSchedules = (schedule?.missingCount ?? 0) > 0;
   const upcomingEvents = useMemo(() => toCalendarEvents(schedule?.upcoming ?? []), [schedule]);
 
-  const eventsByDay = useMemo(
-    () => new Map((schedule?.days ?? []).map((day) => [day.date, toCalendarEvents(day.events)])),
-    [schedule],
+  const eventsByDay = new Map(
+    (schedule?.days ?? []).map((day) => [day.date, toCalendarEvents(day.events)]),
   );
 
   const airingTodayCount = eventsByDay.get(format(now, 'yyyy-MM-dd'))?.length ?? 0;
-
-  const prefetchEventDetails = useCallback(
-    (event: CalendarEvent) => {
-      prefetchDetailsRouteData(queryClient, {
-        mediaId: event.mediaId,
-        mediaType: event.mediaType,
-      });
-    },
-    [queryClient],
+  const hasMonthReleases = schedule?.days.some(
+    (day) => day.events.length > 0 && day.date.startsWith(format(currentMonth, 'yyyy-MM')),
   );
+
+  const prefetchEventDetails = (event: CalendarEvent) => {
+    prefetchDetailsRouteData(queryClient, {
+      mediaId: event.mediaId,
+      mediaType: event.mediaType,
+    });
+  };
 
   const setCurrentMonth = (month: Date) => {
     setSearchParams(
@@ -192,10 +191,12 @@ export function Calendar() {
   }, []);
 
   return (
-    <div className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-6 pb-16 page-enter`}>
+    <div className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-8 pb-16 page-enter`}>
       <div className='flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4'>
         <div>
-          <h1 className='text-[20px] font-medium tracking-[-0.03em] text-white'>Calendar</h1>
+          <h1 className='text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
+            Calendar
+          </h1>
           <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
         </div>
 
@@ -281,7 +282,7 @@ export function Calendar() {
           <div className='flex flex-wrap items-center justify-between mb-3 gap-2'>
             <div className='flex items-center gap-2.5'>
               <h2 className='text-[15px] font-semibold text-white tracking-tight'>Upcoming</h2>
-              <span className='text-[12px] text-zinc-500'>Next 14 days</span>
+              <span className='text-[12px] text-zinc-500'>Next 14 days · up to 8 releases</span>
               {isFetchingSchedules && !isLoadingSchedules && (
                 <Loader2
                   className='h-3 w-3 animate-spin text-zinc-500'
@@ -295,86 +296,140 @@ export function Calendar() {
               </span>
             )}
           </div>
-          {upcomingEvents.length === 0 ? (
+          {isLoadingSchedules ? (
+            <>
+              <span role='status' className='sr-only'>
+                Loading upcoming releases
+              </span>
+              <div aria-hidden='true' className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
+                {[0, 1, 2, 3].map((key) => (
+                  <div key={key} className='flex min-w-0 items-center gap-2.5 p-2'>
+                    <Skeleton className='h-[54px] w-9 shrink-0 rounded-sm bg-white/[0.06]' />
+                    <div className='min-w-0 flex-1 space-y-2'>
+                      <Skeleton className='h-3.5 w-3/4 bg-white/[0.06]' />
+                      <Skeleton className='h-3 w-1/2 bg-white/[0.06]' />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : upcomingEvents.length === 0 ? (
             <div className='flex items-center gap-2 text-[13px] text-zinc-500 py-3' role='status'>
-              {isLoadingSchedules && (
-                <Loader2 className='h-3.5 w-3.5 animate-spin' aria-hidden='true' />
-              )}
-              {isLoadingSchedules
-                ? 'Loading upcoming releases…'
-                : isScheduleError || hasMissingSchedules
-                  ? 'Release data is incomplete or unavailable.'
-                  : 'No upcoming releases in the next two weeks.'}
+              {isScheduleError || hasMissingSchedules
+                ? 'Release data is incomplete or unavailable.'
+                : 'No upcoming releases in the next two weeks.'}
             </div>
           ) : (
             <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
-              {upcomingEvents.map((event) => (
-                <UpcomingEventCard
-                  key={calendarEventKey(event)}
-                  event={event}
-                  from={from}
-                  now={now}
-                  onPrefetch={prefetchEventDetails}
-                />
+              {upcomingEvents.map((event, index) => (
+                <Fragment key={calendarEventKey(event)}>
+                  {(index === 0 || !isSameDay(event.date, upcomingEvents[index - 1].date)) && (
+                    <h3
+                      className={cn(
+                        'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
+                        isSameDay(event.date, now) ? 'text-(--accent-nav)' : 'text-zinc-400',
+                      )}
+                    >
+                      <time dateTime={format(event.date, 'yyyy-MM-dd')}>
+                        {formatEventDayLabel(event.date, now)}
+                      </time>
+                    </h3>
+                  )}
+                  <UpcomingEventCard event={event} from={from} onPrefetch={prefetchEventDetails} />
+                </Fragment>
               ))}
             </div>
           )}
         </div>
       )}
 
-      {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
-      <div
-        role='region'
-        aria-label={`${format(currentMonth, 'MMMM yyyy')} releases`}
-        aria-busy={isFetchingSchedules}
-        tabIndex={0}
-        onKeyDown={(event) => {
-          if (
-            event.target === event.currentTarget &&
-            (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-          ) {
-            event.stopPropagation();
-          }
-        }}
-        className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
-      >
-        <div className='min-w-[640px]'>
-          <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
-            {WEEKDAY_LABELS.map((day, dayIndex) => (
-              <div
-                key={day}
-                className={cn(
-                  'py-3 text-center text-[11px] font-medium',
-                  isCurrentMonthView && dayIndex === now.getDay()
-                    ? 'text-[var(--accent-nav)]'
-                    : 'text-zinc-500',
-                )}
-              >
-                {day}
-              </div>
-            ))}
+      {schedule &&
+        schedule.trackedCount > 0 &&
+        !isFetchingSchedules &&
+        !isScheduleError &&
+        !hasMissingSchedules &&
+        !hasMonthReleases && (
+          <div
+            role='status'
+            className='mb-3 flex items-center justify-between gap-3 text-[13px] text-zinc-400'
+          >
+            <p>No releases in {format(currentMonth, 'MMMM yyyy')}</p>
+            <Button
+              variant='ghost'
+              size='sm'
+              aria-disabled={isCurrentMonthView || undefined}
+              onClick={() => {
+                if (!isCurrentMonthView) handleToday();
+              }}
+              className='h-8 rounded-md px-3 text-[12px] aria-disabled:opacity-50'
+            >
+              Today
+            </Button>
           </div>
+        )}
 
-          <div className='grid grid-cols-7 auto-rows-fr'>
-            {days.map((day, dayIdx) => {
-              const dayKey = format(day, 'yyyy-MM-dd');
-              return (
-                <CalendarDayCell
-                  key={dayKey}
-                  day={day}
-                  dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
-                  isToday={isSameDay(day, now)}
-                  isCurrentMonth={isSameMonth(day, currentMonth)}
-                  isLastColumn={dayIdx % 7 === 6}
-                  from={from}
-                  onPrefetch={prefetchEventDetails}
-                />
-              );
-            })}
+      {(schedule?.trackedCount !== 0 || isScheduleError) && (
+        <>
+          {isLoadingSchedules && (
+            <span role='status' className='sr-only'>
+              Loading releases for {format(currentMonth, 'MMMM yyyy')}
+            </span>
+          )}
+          {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
+          <div
+            role='region'
+            aria-label={`${format(currentMonth, 'MMMM yyyy')} releases`}
+            aria-busy={isFetchingSchedules}
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (
+                event.target === event.currentTarget &&
+                (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+              ) {
+                event.stopPropagation();
+              }
+            }}
+            className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
+          >
+            <div className={cn('min-w-[640px]', isLoadingSchedules && 'opacity-50')}>
+              <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
+                {WEEKDAY_LABELS.map((day, dayIndex) => (
+                  <div
+                    key={day}
+                    className={cn(
+                      'py-3 text-center text-[11px] font-medium',
+                      isCurrentMonthView && dayIndex === now.getDay()
+                        ? 'text-[var(--accent-nav)]'
+                        : 'text-zinc-500',
+                    )}
+                  >
+                    {day}
+                  </div>
+                ))}
+              </div>
+
+              <div className='grid grid-cols-7 auto-rows-fr'>
+                {days.map((day, dayIdx) => {
+                  const dayKey = format(day, 'yyyy-MM-dd');
+                  return (
+                    <CalendarDayCell
+                      key={dayKey}
+                      day={day}
+                      dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
+                      isToday={isSameDay(day, now)}
+                      isCurrentMonth={isSameMonth(day, currentMonth)}
+                      isLastColumn={dayIdx % 7 === 6}
+                      from={from}
+                      onPrefetch={prefetchEventDetails}
+                    />
+                  );
+                })}
+              </div>
+            </div>
           </div>
-        </div>
-      </div>
-      {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
+          {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
+        </>
+      )}
     </div>
   );
 }
@@ -382,15 +437,12 @@ export function Calendar() {
 const UpcomingEventCard = memo(function UpcomingEventCard({
   event,
   from,
-  now,
   onPrefetch,
 }: {
   event: CalendarEvent;
   from: string;
-  now: Date;
   onPrefetch: (event: CalendarEvent) => void;
 }) {
-  const dayLabel = formatEventDayLabel(event.date, now);
   return (
     <Link
       {...calendarEventLinkProps(event, from, onPrefetch)}
@@ -403,19 +455,6 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
           className='w-9 h-[54px] rounded-sm bg-black/30 ring-0'
         />
         <div className='min-w-0 flex-1'>
-          <div className='flex items-center gap-1 text-[11px] leading-4'>
-            <span
-              className={cn(
-                'font-medium',
-                dayLabel === 'Today' ? 'text-[var(--accent-nav)]' : 'text-zinc-400',
-              )}
-            >
-              {dayLabel}
-            </span>
-            {differenceInCalendarDays(event.date, now) < 7 && (
-              <span className='text-zinc-500'>· {format(event.date, 'MMM d')}</span>
-            )}
-          </div>
           <div className='text-[13px] font-medium text-zinc-200 truncate'>{event.seriesTitle}</div>
           <div className='text-[11px] text-zinc-400 truncate'>
             {event.type === 'episode'

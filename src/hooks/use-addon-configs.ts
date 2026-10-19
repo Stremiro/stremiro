@@ -1,19 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
 
 import { api } from '@/lib/api';
-import {
-  ADDON_CONFIGS_QUERY_KEY,
-  ADDON_CONFIGS_STALE_TIME_MS,
-  BROWSE_GENRES_QUERY_KEY,
-} from '@/lib/query-invalidation';
+import { ADDON_CONFIGS_STALE_TIME_MS, BROWSE_GENRES_QUERY_KEY } from '@/lib/query-invalidation';
 
 /// Single addon-config registry read shared by stream-selector filter and settings — one key/queryFn so no forked cache entry.
 export function useAddonConfigs(options?: { enabled?: boolean }) {
   return useQuery({
-    queryKey: ADDON_CONFIGS_QUERY_KEY,
-    queryFn: api.getAddonConfigs,
+    ...api.addonConfigsQueryOptions(),
     enabled: options?.enabled ?? true,
-    staleTime: ADDON_CONFIGS_STALE_TIME_MS,
   });
 }
 

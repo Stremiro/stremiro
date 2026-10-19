@@ -1,6 +1,5 @@
 import {
   ArrowDownAZ,
-  ArrowUpAZ,
   CalendarArrowDown,
   CalendarArrowUp,
   Check,
@@ -15,8 +14,8 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { type RefObject, useId, useRef, useState } from 'react';
-import { CreateListDialog } from '@/components/list/list-editor-dialog';
+import { type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
+import { CreateListDialog, warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -39,12 +38,12 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { cn } from '@/lib/utils';
-type LibrarySort = NonNullable<LibraryFilters['sort']>;
+import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
+type LibrarySort = Exclude<NonNullable<LibraryFilters['sort']>, 'title-asc'>;
 type LibraryStatusFilter = WatchStatus | 'all' | 'none';
 
 const LIBRARY_SORT_OPTIONS: Record<LibrarySort, { label: string; icon: LucideIcon | null }> = {
   default: { label: 'Default', icon: null },
-  'title-asc': { label: 'A → Z', icon: ArrowUpAZ },
   'title-desc': { label: 'Z → A', icon: ArrowDownAZ },
   'year-desc': { label: 'Newest', icon: CalendarArrowDown },
   'year-asc': { label: 'Oldest', icon: CalendarArrowUp },
@@ -78,6 +77,7 @@ interface LibraryToolbarProps {
   libraryCount: number;
   filteredCount: number;
   search: string;
+  searchPending: boolean;
   onSearchChange: (value: string) => void;
   searchInputRef: RefObject<HTMLInputElement | null>;
   sort: LibrarySort;
@@ -86,6 +86,7 @@ interface LibraryToolbarProps {
   onViewModeChange: (mode: 'grid' | 'list') => void;
   onReset: () => void;
   selectionMode: boolean;
+  selectionTriggerRef: RefObject<HTMLButtonElement | null>;
   onToggleSelectionMode: () => void;
 }
 
@@ -99,6 +100,7 @@ export function LibraryToolbar({
   libraryCount,
   filteredCount,
   search,
+  searchPending,
   onSearchChange,
   searchInputRef,
   sort,
@@ -107,6 +109,7 @@ export function LibraryToolbar({
   onViewModeChange,
   onReset,
   selectionMode,
+  selectionTriggerRef,
   onToggleSelectionMode,
 }: LibraryToolbarProps) {
   const activeSortOption = LIBRARY_SORT_OPTIONS[sort];
@@ -127,6 +130,7 @@ export function LibraryToolbar({
           inputRef={searchInputRef}
           placeholder='Search library…'
           value={search}
+          pending={searchPending}
           onValueChange={onSearchChange}
           clearLabel='Clear library search'
           wrapperClassName='flex-1 min-w-0'
@@ -279,6 +283,7 @@ export function LibraryToolbar({
 
           <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
           <Button
+            ref={selectionTriggerRef}
             variant='outline'
             size='sm'
             aria-pressed={selectionMode}
@@ -367,6 +372,173 @@ export function ViewToggle({
   );
 }
 
+export function useCollectionSelection(
+  ids: string[],
+  visibleIds: string[],
+  active: boolean,
+  busy: boolean,
+  dialogOpen = false,
+  fallbackFocusRef?: RefObject<HTMLElement | null>,
+) {
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const anchorRef = useRef<string | null>(null);
+  const exit = useCallback(() => {
+    setSelectionMode(false);
+    setSelectedIds(new Set());
+    anchorRef.current = null;
+    requestAnimationFrame(() => {
+      const trigger = triggerRef.current;
+      (trigger && !trigger.disabled ? trigger : fallbackFocusRef?.current)?.focus({
+        preventScroll: true,
+      });
+    });
+  }, [fallbackFocusRef]);
+  useEffect(() => {
+    if (!selectionMode || busy) return;
+    if (!active) {
+      setSelectionMode(false);
+      setSelectedIds(new Set());
+      anchorRef.current = null;
+      return;
+    }
+    if (ids.length === 0) {
+      exit();
+      return;
+    }
+    const available = new Set(ids);
+    setSelectedIds((current) => {
+      const next = new Set([...current].filter((id) => available.has(id)));
+      return next.size === current.size ? current : next;
+    });
+  }, [ids, active, busy, selectionMode, exit]);
+  useEffect(() => {
+    if (!selectionMode || busy || dialogOpen) return;
+    const handleEscape = (event: KeyboardEvent) => {
+      const focusedCollection = document.activeElement?.closest('[data-collection-selection]');
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        (focusedCollection &&
+          triggerRef.current &&
+          !focusedCollection.contains(triggerRef.current)) ||
+        isEditableTarget(document.activeElement, RADIX_POPPER_CONTENT_SELECTOR) ||
+        document.querySelector(`${RADIX_POPPER_CONTENT_SELECTOR}, ${OPEN_DIALOG_SELECTOR}`)
+      )
+        return;
+      event.preventDefault();
+      exit();
+    };
+    window.addEventListener('keydown', handleEscape);
+    return () => window.removeEventListener('keydown', handleEscape);
+  }, [selectionMode, busy, dialogOpen, exit]);
+  const toggle = useCallback(
+    (id: string, shiftKey = false) => {
+      if (busy) return;
+      const anchor =
+        shiftKey && anchorRef.current !== null ? visibleIds.indexOf(anchorRef.current) : -1;
+      const target = anchor !== -1 ? visibleIds.indexOf(id) : -1;
+      if (anchor === -1 || target === -1) anchorRef.current = id;
+      setSelectedIds((current) => {
+        const next = new Set(current);
+        if (anchor !== -1 && target !== -1) {
+          for (let index = Math.min(anchor, target); index <= Math.max(anchor, target); index++)
+            next.add(visibleIds[index]);
+        } else if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
+      });
+    },
+    [busy, visibleIds],
+  );
+  return {
+    selectionMode,
+    selectedIds,
+    triggerRef,
+    exit,
+    toggle,
+    begin: () => setSelectionMode(true),
+    clear: () => {
+      setSelectedIds(new Set());
+      anchorRef.current = null;
+    },
+    selectAll: (selected: string[]) =>
+      setSelectedIds((current) => new Set([...current, ...selected])),
+  };
+}
+
+export function CollectionBulkActionBar({
+  selectedCount,
+  filteredCount,
+  allFilteredSelected,
+  selectAllDisabled,
+  isBusy,
+  onSelectAll,
+  onClear,
+  onDone,
+  onRemove,
+  removeLabel,
+}: {
+  selectedCount: number;
+  filteredCount: number;
+  allFilteredSelected: boolean;
+  selectAllDisabled: boolean;
+  isBusy: boolean;
+  onSelectAll: () => void;
+  onClear: () => void;
+  onDone: () => void;
+  onRemove: () => void;
+  removeLabel: string;
+}) {
+  return (
+    <div
+      aria-label='Selection actions'
+      aria-busy={isBusy}
+      className='sticky top-8 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
+    >
+      <div className='flex items-center gap-3'>
+        <span role='status' className='text-[13px] font-semibold text-white tabular-nums'>
+          {selectedCount} selected
+        </span>
+        <button
+          type='button'
+          disabled={filteredCount === 0 || isBusy || selectAllDisabled}
+          onClick={allFilteredSelected ? onClear : onSelectAll}
+          className={cn(
+            'rounded-md text-xs font-medium text-zinc-300 hover:text-white disabled:opacity-40',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          {allFilteredSelected ? 'Deselect all' : `Select all (${filteredCount})`}
+        </button>
+      </div>
+      <div className='flex flex-wrap items-center gap-1.5'>
+        <Button
+          size='sm'
+          variant='outline'
+          disabled={selectedCount === 0 || isBusy}
+          onClick={onRemove}
+          className='h-8 rounded-lg border-rose-500/25 bg-rose-500/10 text-xs text-rose-300 hover:bg-rose-500/20 hover:text-rose-200'
+        >
+          <Trash2 className='h-3.5 w-3.5' />
+          {removeLabel}
+        </Button>
+        <Button
+          size='sm'
+          variant='ghost'
+          disabled={isBusy}
+          onClick={onDone}
+          className='h-8 rounded-lg text-xs text-zinc-400 hover:text-white'
+        >
+          <X className='h-3.5 w-3.5' />
+          Done
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 interface LibraryBulkActionBarProps {
   selectedItems: MediaItem[];
   filteredCount: number;
@@ -415,12 +587,13 @@ export function LibraryBulkActionBar({
   const statusHeadingId = useId();
   const listsHeadingId = useId();
   const {
-    data: customLists = [],
+    data: allLists = [],
     isPending: listsLoading,
     isError: listsError,
     isFetching: listsFetching,
     refetch: refetchLists,
-  } = useListSummaries(undefined);
+  } = useListSummaries(undefined, { enabled: listsOpen });
+  const customLists = allLists.filter((list) => !list.is_smart);
   const selectedCount = selectedItems.length;
   const actionsDisabled = selectedCount === 0 || isBusy;
 
@@ -428,7 +601,7 @@ export function LibraryBulkActionBar({
     <div
       aria-label='Library selection actions'
       aria-busy={isBusy}
-      className='flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/90 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
+      className='sticky top-8 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
     >
       <div className='flex items-center gap-3'>
         <span role='status' className='text-[13px] font-semibold text-white tabular-nums'>
@@ -574,6 +747,8 @@ export function LibraryBulkActionBar({
               type='button'
               disabled={actionsDisabled}
               className={cn(BULK_MENU_ITEM_CLASS, 'mt-1 border-t border-white/[0.06]')}
+              onPointerEnter={warmListEditorDialog}
+              onFocus={warmListEditorDialog}
               onClick={() => {
                 setListsOpen(false);
                 setCreateListItems([...selectedItems]);

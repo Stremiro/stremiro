@@ -3,8 +3,9 @@ import { useEffect } from 'react';
 const APP_TITLE = 'Stremiro';
 
 /** Sets document.title (feeds OS taskbar/a11y despite the frameless window); restores the app title on unmount unless a later writer owns it. */
-export function useDocumentTitle(title?: string | null) {
+export function useDocumentTitle(title?: string | null, enabled = true) {
   useEffect(() => {
+    if (!enabled) return;
     const next = title ? `${title} — ${APP_TITLE}` : APP_TITLE;
     document.title = next;
     return () => {
@@ -13,5 +14,5 @@ export function useDocumentTitle(title?: string | null) {
         document.title = APP_TITLE;
       }
     };
-  }, [title]);
+  }, [title, enabled]);
 }

@@ -2,34 +2,35 @@ import * as SliderPrimitive from '@radix-ui/react-slider';
 import React from 'react';
 import { cn } from '@/lib/utils';
 
-interface PlayerSliderProps extends React.ComponentPropsWithoutRef<typeof SliderPrimitive.Root> {
+interface PlayerSliderProps extends React.ComponentPropsWithRef<typeof SliderPrimitive.Root> {
   /** 'bar' (volume): seek-bar style line that thickens on hover, no thumb. 'pill': hairline track, slim nub shown on hover/focus/scrub. 'track' (mini seek): the bar alone, no thumb or hover change. */
   variant?: 'pill' | 'bar' | 'track';
 }
 
-export const PlayerSlider = React.forwardRef<
-  React.ElementRef<typeof SliderPrimitive.Root>,
-  PlayerSliderProps
->(
-  (
-    {
-      className,
-      variant = 'pill',
-      'aria-label': ariaLabel,
-      'aria-valuetext': ariaValueText,
-      ...props
-    },
-    ref,
-  ) => (
+export function PlayerSlider({
+  className,
+  variant = 'pill',
+  'aria-label': ariaLabel,
+  'aria-valuetext': ariaValueText,
+  onPointerDown,
+  ...props
+}: PlayerSliderProps) {
+  return (
     <SliderPrimitive.Root
-      ref={ref}
       className={cn(
-        'relative flex w-full touch-none select-none items-center group/slider cursor-pointer',
+        'relative flex w-full touch-none select-none items-center group/slider cursor-pointer data-[disabled]:cursor-default data-[disabled]:opacity-35',
         variant === 'bar' ? 'h-9' : 'h-5',
         className,
       )}
       onClick={(e) => e.stopPropagation()}
-      onPointerDown={(e) => e.stopPropagation()}
+      onPointerDown={(event) => {
+        event.stopPropagation();
+        if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) {
+          event.preventDefault();
+          return;
+        }
+        onPointerDown?.(event);
+      }}
       {...props}
     >
       <SliderPrimitive.Track
@@ -52,7 +53,7 @@ export const PlayerSlider = React.forwardRef<
         aria-label={ariaLabel}
         aria-valuetext={ariaValueText}
         className={cn(
-          'block cursor-pointer focus-visible:outline-none',
+          'block cursor-pointer focus-visible:outline-none data-[disabled]:cursor-default',
           // Touch has no hover — active keeps the nub visible for the whole drag.
           variant === 'pill' &&
             'h-[10px] w-[3px] rounded-full bg-white shadow-[0_1px_3px_rgba(0,0,0,0.5)] opacity-0 transition-opacity duration-150 group-hover/slider:opacity-100 group-focus-within/slider:opacity-100 active:opacity-100 focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black motion-reduce:transition-none',
@@ -61,7 +62,5 @@ export const PlayerSlider = React.forwardRef<
         )}
       />
     </SliderPrimitive.Root>
-  ),
-);
-
-PlayerSlider.displayName = SliderPrimitive.Root.displayName;
+  );
+}

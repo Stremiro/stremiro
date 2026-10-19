@@ -1,3 +1,4 @@
+import { queryOptions } from '@tanstack/react-query';
 import type {
   BrowseGenres,
   CalendarRange,
@@ -10,9 +11,16 @@ import type {
   MediaItem,
   SearchCatalogPage,
   SearchCatalogQuery,
+  UnairedEpisodesRequest,
 } from '@/lib/api';
 import type { InvokeApi } from '@/lib/api-core';
-import { trendingRowQueryKey } from '@/lib/query-invalidation';
+import {
+  detailsCardQueryKey,
+  detailsQueryKey,
+  DETAILS_GC_TIME_MS,
+  DETAILS_STALE_TIME_MS,
+  trendingRowQueryKey,
+} from '@/lib/query-invalidation';
 
 interface DiscoveryApiContext {
   safeInvoke: InvokeApi;
@@ -45,6 +53,9 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
   const getEpisodeNavigation = (request: EpisodeNavigationRequest) =>
     safeInvoke<EpisodeNavigation>('get_episode_navigation', { request });
 
+  const getUnairedEpisodeIndices = (request: UnairedEpisodesRequest) =>
+    safeInvoke<number[]>('get_unaired_episode_indices', { request });
+
   const searchEpisodes = (episodes: Episode[], query: string) =>
     safeInvoke<number[]>('search_episodes', {
       query,
@@ -64,6 +75,32 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       mediaType: type,
       id,
       includeEpisodes: false,
+    });
+
+  const detailsQueryOptions = (type: string, id: string | undefined, missingIdMessage?: string) =>
+    queryOptions({
+      queryKey: detailsQueryKey(type, id),
+      queryFn: () =>
+        missingIdMessage && !id
+          ? Promise.reject(new Error(missingIdMessage))
+          : getMediaDetails(type, id!),
+      staleTime: DETAILS_STALE_TIME_MS,
+      gcTime: DETAILS_GC_TIME_MS,
+    });
+
+  const cardDetailsQueryOptions = (
+    type: string,
+    id: string | undefined,
+    missingIdMessage?: string,
+  ) =>
+    queryOptions({
+      queryKey: detailsCardQueryKey(type, id),
+      queryFn: () =>
+        missingIdMessage && !id
+          ? Promise.reject(new Error(missingIdMessage))
+          : getMediaCardDetails(type, id!),
+      staleTime: DETAILS_STALE_TIME_MS,
+      gcTime: DETAILS_GC_TIME_MS,
     });
 
   // One IPC for the details-route prefetch: card details + resume snapshot.
@@ -96,7 +133,10 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
   return {
     querySearchCatalogPage,
     getMediaDetails,
+    detailsQueryOptions,
+    cardDetailsQueryOptions,
     getEpisodeNavigation,
+    getUnairedEpisodeIndices,
     searchEpisodes,
     searchTitles,
     getMediaCardDetails,

@@ -1,19 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
 import { useDebounce } from '@/hooks/use-debounce';
 import { api } from '@/lib/api';
+import { createObjectIdentity } from '@/lib/utils';
 
 const ITEM_SEARCH_DEBOUNCE_MS = 180;
-const itemListIds = new WeakMap<object, number>();
-let nextItemListId = 0;
-
-function getItemListId(items: object): number {
-  let id = itemListIds.get(items);
-  if (id === undefined) {
-    id = ++nextItemListId;
-    itemListIds.set(items, id);
-  }
-  return id;
-}
+const getItemListId = createObjectIdentity();
 
 export function useItemSearch<T>(
   items: T[],
@@ -23,8 +14,9 @@ export function useItemSearch<T>(
   searchIndices: (items: T[], query: string) => Promise<number[]>,
   matchKey?: (item: T) => string,
 ) {
-  const debouncedQuery = useDebounce(query.trim(), ITEM_SEARCH_DEBOUNCE_MS);
-  const requestedSearch = enabled && query.trim() ? debouncedQuery : '';
+  const trimmedQuery = query.trim();
+  const debouncedQuery = useDebounce(trimmedQuery, ITEM_SEARCH_DEBOUNCE_MS);
+  const requestedSearch = enabled && trimmedQuery ? debouncedQuery : '';
   const listId = getItemListId(items);
   const { data, isError, isFetched, isFetching, isLoading, isPlaceholderData, refetch } = useQuery({
     queryKey: [searchKey, listId, requestedSearch],
@@ -58,9 +50,10 @@ export function useItemSearch<T>(
     isSearchFetching: Boolean(requestedSearch) && isFetching,
     retrySearch: () => void refetch(),
     isSearchPending:
-      Boolean(requestedSearch) &&
+      enabled &&
+      Boolean(trimmedQuery) &&
       !isError &&
-      (isPlaceholderData || effectiveSearch !== requestedSearch),
+      (isPlaceholderData || effectiveSearch !== trimmedQuery),
   };
 }
 

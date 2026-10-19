@@ -1,3 +1,4 @@
+import { queryOptions } from '@tanstack/react-query';
 import type {
   AddonConfig,
   AddonConfigsOp,
@@ -12,6 +13,8 @@ import type {
   ProfileLibrary,
   ProfilePreferences,
   ProfilePreferencesPatch,
+  RemovedListItem,
+  SmartListRules,
   StreamSelectorPreferencesPatch,
   StreamSelectorPreferencesState,
   TitleWatchProgress,
@@ -28,6 +31,12 @@ import {
 import type { InvokeApi } from '@/lib/api-core';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import type { PlayerActionId } from '@/lib/player-keybindings';
+import {
+  ADDON_CONFIGS_QUERY_KEY,
+  ADDON_CONFIGS_STALE_TIME_MS,
+  DATA_STATS_QUERY_KEY,
+  DATA_STATS_STALE_TIME_MS,
+} from '@/lib/query-invalidation';
 
 interface StoreApiContext {
   safeInvoke: InvokeApi;
@@ -65,10 +74,20 @@ export function toMediaItem({
 
 export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
   const getAddonConfigs = () => safeInvoke<AddonConfig[]>('get_addon_configs');
+  const getLaunchAtLogin = () => safeInvoke<boolean>('get_launch_at_login');
+  const getDataStats = () => safeInvoke<DataStats>('get_data_stats');
   const write: InvokeApi = (command, args) => trackPendingAppWrite(safeInvoke(command, args));
+  // Preference reads issued while the startup snapshot is in flight reuse it instead of a second IPC.
+  let pendingBootstrap: Promise<BootstrapSnapshot | undefined> | undefined;
 
   return {
     getAddonConfigs,
+    addonConfigsQueryOptions: () =>
+      queryOptions({
+        queryKey: ADDON_CONFIGS_QUERY_KEY,
+        queryFn: getAddonConfigs,
+        staleTime: ADDON_CONFIGS_STALE_TIME_MS,
+      }),
     getAddonUrl: (id: string) => safeInvoke<string>('get_addon_url', { id }),
     inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
     updateAddonConfigs: (op: AddonConfigsOp) =>
@@ -98,11 +117,29 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
         slot,
         key,
       }),
-    getBootstrapSnapshot: () => safeInvoke<BootstrapSnapshot>('get_bootstrap_snapshot'),
-    getLaunchAtLogin: () => safeInvoke<boolean>('get_launch_at_login'),
+    getBootstrapSnapshot: () => {
+      const request = safeInvoke<BootstrapSnapshot>('get_bootstrap_snapshot');
+      const pending = request
+        .catch(() => undefined)
+        .finally(() => {
+          if (pendingBootstrap === pending) pendingBootstrap = undefined;
+        });
+      pendingBootstrap = pending;
+      return request;
+    },
+    pendingBootstrapSnapshot: () => pendingBootstrap,
+    getLaunchAtLogin,
+    launchAtLoginQueryOptions: () =>
+      queryOptions({
+        queryKey: ['launch-at-login'] as const,
+        queryFn: getLaunchAtLogin,
+        staleTime: 30_000,
+        refetchOnWindowFocus: true,
+      }),
     setLaunchAtLogin: (enabled: boolean) => write<boolean>('set_launch_at_login', { enabled }),
     hideMainWindowToTray: () => safeInvoke<void>('hide_main_window_to_tray'),
     closeMainWindowToTray: () => safeInvoke<boolean>('close_main_window_to_tray'),
+    markFrontendQuitReady: () => safeInvoke<void>('mark_frontend_quit_ready'),
     saveAppUiPreferences: (patch: AppUiPreferencesPatch) =>
       safeInvoke<AppUiPreferences>('save_app_ui_preferences', {
         patch,
@@ -137,20 +174,24 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       return write<number>('bulk_remove_from_library', { ids });
     },
     getLibrary: () => safeInvoke<MediaItem[]>('get_library'),
+    getLibraryGenres: () => safeInvoke<string[]>('get_library_genres'),
     getProfileLibrary: (filters: LibraryFilters) =>
       safeInvoke<ProfileLibrary>('get_profile_library', { filters }),
-    createList: (name: string, icon?: string) => write<UserList>('create_list', { name, icon }),
+    createList: (name: string, icon?: string, rules?: SmartListRules) =>
+      write<UserList>('create_list', { name, icon, rules }),
     deleteList: (listId: string) => write<void>('delete_list', { listId }),
-    renameList: (listId: string, name: string, icon?: string) =>
-      write<void>('rename_list', { listId, name, icon }),
+    renameList: (listId: string, name: string, icon?: string, rules?: SmartListRules) =>
+      write<void>('rename_list', { listId, name, icon, rules }),
     addToList: (listId: string, item: MediaItem) =>
       write<UserListSummary>('add_to_list', { listId, item: toMediaItem(item) }),
-    bulkAddToList: async (listId: string, items: MediaItem[]): Promise<number> => {
-      if (items.length === 0) return 0;
-      return write<number>('bulk_add_to_list', { listId, items: items.map(toMediaItem) });
-    },
+    bulkAddToList: (listId: string, itemIds: string[]) =>
+      write<number>('bulk_add_to_list', { listId, itemIds }),
     removeFromList: (listId: string, itemId: string) =>
       write<void>('remove_from_list', { listId, itemId }),
+    bulkRemoveFromList: (listId: string, itemIds: string[]) =>
+      write<RemovedListItem[]>('bulk_remove_from_list', { listId, itemIds }),
+    restoreListItems: (listId: string, entries: RemovedListItem[]) =>
+      write<void>('restore_list_items', { listId, entries }),
     getLists: () => safeInvoke<UserList[]>('get_lists'),
     getListSummaries: (itemId?: string) =>
       safeInvoke<UserListSummary[]>('get_list_summaries', { itemId: itemId ?? null }),
@@ -159,10 +200,8 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     reorderLists: (listIds: string[]) => write<void>('reorder_lists', { listIds }),
     setWatchStatus: (item: MediaItem, status: WatchStatus | null) =>
       write<MediaItem | null>('set_watch_status', { item: toMediaItem(item), status }),
-    bulkSetWatchStatus: async (items: MediaItem[], status: WatchStatus | null): Promise<number> => {
-      if (items.length === 0) return 0;
-      return write<number>('bulk_set_watch_status', { items: items.map(toMediaItem), status });
-    },
+    bulkSetWatchStatus: (ids: string[], status: WatchStatus | null) =>
+      write<number>('bulk_set_watch_status', { ids, status }),
     setEpisodesWatched: (
       item: MediaItem,
       episodes: readonly { season: number; episode: number }[],
@@ -176,7 +215,13 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       });
     },
     getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
-    getDataStats: () => safeInvoke<DataStats>('get_data_stats'),
+    getDataStats,
+    dataStatsQueryOptions: () =>
+      queryOptions({
+        queryKey: DATA_STATS_QUERY_KEY,
+        queryFn: getDataStats,
+        staleTime: DATA_STATS_STALE_TIME_MS,
+      }),
     // Bump before the IPC lands — a queued progress save must not resurrect a wiped row.
     clearWatchHistory: () => {
       bumpWatchProgressEpoch();

@@ -20,6 +20,14 @@ import {
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { type AddonConfig, api, getErrorMessage } from '@/lib/api';
 import { copyText } from '@/lib/notify';
@@ -32,12 +40,13 @@ import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
-import { cn } from '@/lib/utils';
+import { cn, queryNeedsRetry } from '@/lib/utils';
 import {
   SETTINGS_HEADER_STATUS_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
+  SettingsQueryError,
   SettingsSwitch,
 } from './chrome';
 
@@ -66,6 +75,8 @@ function addonMonogram(name: string) {
 
 function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: AddonRowProps) {
   const [copied, setCopied] = useState(false);
+  const [removeOpen, setRemoveOpen] = useState(false);
+  const removeConfirmedRef = useRef(false);
   const mountedRef = useMountedRef();
   useEffect(() => {
     if (!copied) return;
@@ -145,7 +156,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
             title='Remove'
             aria-label={`Remove ${addon.name}`}
             onClick={() => {
-              if (!isWorking) onRemove(addon.id);
+              if (!isWorking) setRemoveOpen(true);
             }}
             aria-disabled={isWorking || undefined}
             className={cn(
@@ -166,6 +177,39 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
           onChange={() => onToggle(addon.id)}
         />
       </div>
+      <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>
+        <DialogContent
+          className='border-white/10 bg-zinc-950 sm:max-w-md'
+          onCloseAutoFocus={() => {
+            // Close first so the existing row-removal focus handoff still applies.
+            if (!removeConfirmedRef.current) return;
+            removeConfirmedRef.current = false;
+            onRemove?.(addon.id);
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle>Remove addon?</DialogTitle>
+            <DialogDescription>
+              Remove {addon.name} and its configuration? You can add it again using its addon URL.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant='outline' onClick={() => setRemoveOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              variant='destructive'
+              disabled={isWorking}
+              onClick={() => {
+                removeConfirmedRef.current = true;
+                setRemoveOpen(false);
+              }}
+            >
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
@@ -240,6 +284,7 @@ export function StreamingSources() {
     candidates: string[];
   } | null>(null);
 
+  const addonsQuery = useAddonConfigs();
   const {
     data: addons = [],
     isLoading,
@@ -247,7 +292,7 @@ export function StreamingSources() {
     isFetched,
     isFetching,
     refetch,
-  } = useAddonConfigs();
+  } = addonsQuery;
 
   const saveMutation = useMutation({
     mutationFn: api.updateAddonConfigs,
@@ -451,15 +496,17 @@ export function StreamingSources() {
           </Button>
         </div>
 
-        {trimmedNewUrl ? (
+        {inspectionCurrent && !inspection && queryNeedsRetry(inspectionQuery) ? (
+          <div id='addon-url-hint' className='mt-2.5'>
+            <SettingsQueryError query={inspectionQuery} message="Couldn't check this addon URL." />
+          </div>
+        ) : trimmedNewUrl ? (
           <p
             id='addon-url-hint'
             className={cn(
               'mt-2.5 text-[12px] leading-relaxed [overflow-wrap:anywhere]',
               !inspection
-                ? inspectionCurrent && inspectionQuery.isError
-                  ? 'text-red-400'
-                  : 'text-zinc-500'
+                ? 'text-zinc-500'
                 : isConfigureCandidate || duplicateAddonName
                   ? 'text-amber-400'
                   : !isValidNewUrl
@@ -468,9 +515,7 @@ export function StreamingSources() {
             )}
           >
             {!inspection
-              ? inspectionCurrent && inspectionQuery.isError
-                ? getErrorMessage(inspectionQuery.error)
-                : 'Checking…'
+              ? 'Checking…'
               : !isValidNewUrl
                 ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
                 : duplicateAddonName
@@ -512,6 +557,11 @@ export function StreamingSources() {
           className='divide-y divide-white/[0.05]'
           data-escape-capture={isDragging ? '' : undefined}
         >
+          <SettingsQueryError
+            query={addonsQuery}
+            className='mx-5 my-3'
+            message="Couldn't refresh your sources."
+          />
           {pinnedAddons.map((addon) => (
             <PinnedAddonRow
               key={addon.id}

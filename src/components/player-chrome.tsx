@@ -15,8 +15,10 @@ import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
+  CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_PILL_CLASS,
   CHROME_POPOVER_CLASS,
+  CHROME_VALUE_BUBBLE_CLASS,
 } from '@/components/player-chrome-styles';
 import {
   PlayerMuteButton,
@@ -339,22 +341,33 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             onClick={() => void onToggleMute().catch(() => undefined)}
           />
 
-          <PlayerSlider
-            variant='bar'
-            value={[isMuted ? 0 : volume]}
-            max={100}
-            step={1}
-            aria-label='Volume'
-            aria-valuetext={isMuted ? 'Muted' : `${displayedVolume}%`}
-            title={isMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
-            onValueChange={(val) => void onVolumeChange(val[0]).catch(() => undefined)}
-            onKeyDown={(event) => {
-              if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                event.stopPropagation();
-              }
-            }}
-            className='w-20 shrink-0'
-          />
+          <div className='relative group/volume w-20 shrink-0'>
+            <span
+              aria-hidden='true'
+              className={cn(
+                CHROME_VALUE_BUBBLE_CLASS,
+                'pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 opacity-0 transition-opacity group-hover/volume:opacity-100 group-focus-within/volume:opacity-100 group-has-[:active]/volume:opacity-100 motion-reduce:transition-none',
+              )}
+            >
+              {displayedVolume}%
+            </span>
+            <PlayerSlider
+              variant='bar'
+              value={[isMuted ? 0 : volume]}
+              max={100}
+              step={1}
+              aria-label='Volume'
+              aria-valuetext={isMuted ? 'Muted' : `${displayedVolume}%`}
+              title={isMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
+              onValueChange={(val) => void onVolumeChange(val[0]).catch(() => undefined)}
+              onKeyDown={(event) => {
+                if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
+                  event.stopPropagation();
+                }
+              }}
+              className='w-20 shrink-0'
+            />
+          </div>
         </div>
 
         <div className={CHROME_PILL_CLASS}>
@@ -433,7 +446,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
               }
               className={cn(
                 CHROME_ICON_BUTTON_CLASS,
-                'data-[state=open]:bg-white/15 data-[state=open]:text-white',
                 playbackSpeed !== 1 && 'w-auto gap-1.5 px-2.5',
               )}
               onClick={(event) => {
@@ -474,13 +486,21 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
                     setSpeedMenuOpen(false);
                   }}
                   className={cn(
-                    'flex h-9 items-center justify-between rounded-md px-2.5 text-left text-xs tabular-nums transition-colors hover:bg-white/[0.08] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30',
+                    CHROME_MENU_ROW_FOCUS_CLASS,
+                    'flex h-9 items-center justify-between rounded-md px-2.5 text-left text-xs tabular-nums transition-colors hover:bg-white/[0.08]',
                     s === playbackSpeed
                       ? 'bg-white/[0.08] text-white font-semibold'
                       : 'text-white/60 hover:text-white',
                   )}
                 >
-                  {s}x{s === playbackSpeed && <Check className='h-3 w-3' strokeWidth={3} />}
+                  {s}x
+                  {s === playbackSpeed && (
+                    <Check
+                      aria-hidden='true'
+                      className='h-3.5 w-3.5'
+                      strokeWidth={CHROME_ICON_STROKE}
+                    />
+                  )}
                 </button>
               ))}
             </div>
@@ -493,7 +513,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             aria-label='Choose stream or quality'
             aria-keyshortcuts={ariaKeyShortcuts(keymap, 'streamSelector')}
             aria-expanded={streamSelectorOpen}
-            className={cn(CHROME_ICON_BUTTON_CLASS, streamSelectorOpen && 'bg-white/15 text-white')}
+            className={CHROME_ICON_BUTTON_CLASS}
             title={withShortcutHint('Choose Stream / Quality', keymap, 'streamSelector')}
             onClick={(e) => {
               e.stopPropagation();

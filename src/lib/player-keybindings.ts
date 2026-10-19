@@ -1,7 +1,7 @@
 import type { ShortcutRow } from '@/lib/shortcuts';
 
 // Display order; ids mirror
-// `PLAYER_KEYBINDING_ACTIONS` in `src-tauri/src/commands/config_store.rs`.
+// `PLAYER_KEYBINDING_ACTIONS` in `src-tauri/src/commands/config_store/keybindings.rs`.
 export const PLAYER_ACTIONS = [
   { id: 'togglePlay', label: 'Play / Pause' },
   {
@@ -78,6 +78,7 @@ const KEY_LABELS: Record<string, string> = {
 
 const ARIA_KEY_NAMES: Record<string, string> = {
   ' ': 'Space',
+  '+': 'plus',
   arrowleft: 'ArrowLeft',
   arrowright: 'ArrowRight',
   arrowup: 'ArrowUp',

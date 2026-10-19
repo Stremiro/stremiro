@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback } from 'react';
+import { useCallback, useEffect } from 'react';
 
 import {
   APP_RELEASE_NOTES_QUERY_KEY,
@@ -29,16 +29,35 @@ export function useAppReleaseNotes(version: string | null) {
   });
 }
 
-export function useAppUpdater() {
+export function useMarkAppUpdateSeen(update: AppUpdateHandle | null) {
   const queryClient = useQueryClient();
+  useEffect(() => {
+    if (!update?.notificationEligible) return;
+    const markSeen = () => {
+      if (!document.hidden) {
+        void saveLastNotifiedAppUpdateVersion(queryClient, update.version).catch(() => undefined);
+      }
+    };
+    markSeen();
+    document.addEventListener('visibilitychange', markSeen);
+    return () => document.removeEventListener('visibilitychange', markSeen);
+  }, [queryClient, update]);
+}
+
+export function useAppUpdater({ includeCurrentVersion = false } = {}) {
+  const queryClient = useQueryClient();
+  const getUpdateState = useCallback(
+    () =>
+      queryClient.getQueryData<ReturnType<typeof getInitialAppUpdateState>>(
+        APP_UPDATE_STATE_QUERY_KEY,
+      ) ?? getInitialAppUpdateState(),
+    [queryClient],
+  );
 
   const { data: updateState } = useQuery({
     queryKey: APP_UPDATE_STATE_QUERY_KEY,
     // Cache-as-store: a refetch must preserve live state — an invalidate mid-install must not wipe progress.
-    queryFn: () =>
-      queryClient.getQueryData<ReturnType<typeof getInitialAppUpdateState>>(
-        APP_UPDATE_STATE_QUERY_KEY,
-      ) ?? getInitialAppUpdateState(),
+    queryFn: getUpdateState,
     initialData: getInitialAppUpdateState,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
@@ -47,7 +66,7 @@ export function useAppUpdater() {
   const { data: currentVersion = null } = useQuery({
     queryKey: APP_VERSION_QUERY_KEY,
     queryFn: getCurrentAppVersion,
-    enabled: updateState.isSupported,
+    enabled: includeCurrentVersion && updateState.isSupported,
     staleTime: 1000 * 60 * 60,
   });
 
@@ -59,12 +78,12 @@ export function useAppUpdater() {
   return {
     checkForUpdates,
     currentVersion,
+    getUpdateState,
     installUpdate,
     isChecking: updateState.status === 'checking',
     isInstalling: updateState.status === 'installing',
     isSupported: updateState.isSupported,
     isUpdateAvailable: isUpdateReady(updateState),
-    markUpdateNotified: saveLastNotifiedAppUpdateVersion,
     pendingUpdate: updateState.update,
     updateState,
   };

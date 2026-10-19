@@ -15,7 +15,7 @@ import { ACCENT_PRESET_LABELS } from '@/components/accent-controls';
 import { SearchInput } from '@/components/ui/search-input';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useDocumentTitle } from '@/hooks/use-document-title';
-import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { FIXED_PLAYER_SHORTCUTS, PLAYER_ACTIONS } from '@/lib/player-keybindings';
 import { BROWSE_SHORTCUTS, CALENDAR_SHORTCUTS } from '@/lib/shortcuts';
 import { cn } from '@/lib/utils';
@@ -136,7 +136,14 @@ const NAV_ITEMS = [
     label: 'Updates',
     icon: RefreshCw,
     description: 'Check for updates, download and install app releases.',
-    controls: ['Check for updates', 'Check again', 'Update & restart', 'View on GitHub'],
+    controls: [
+      'Check for updates',
+      'Check for updates automatically',
+      'Last checked',
+      'Check again',
+      'Update & restart',
+      'View on GitHub',
+    ],
   },
   {
     id: 'data',
@@ -172,7 +179,7 @@ function resolveSection(value: string | null) {
 
 export function Settings() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const { currentVersion, isUpdateAvailable } = useAppUpdater();
+  const { currentVersion, isUpdateAvailable } = useAppUpdater({ includeCurrentVersion: true });
   const activeSection = resolveSection(searchParams.get(SETTINGS_SECTION_QUERY_PARAM));
   const active = activeSection.id;
   const ActiveSection = activeSection.component;
@@ -296,7 +303,7 @@ export function Settings() {
                   />
                   <span
                     aria-hidden='true'
-                    className='nav-sliding-bar pointer-events-none absolute left-0 top-0 w-[3px] rounded-r-full bg-(--accent-nav)'
+                    className={SLIDING_ACCENT_BAR_CLASS}
                     style={{
                       height: indicator.height - 20,
                       transform: `translate3d(${indicator.left}px, ${indicator.top + 10}px, 0)`,

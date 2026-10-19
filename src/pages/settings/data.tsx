@@ -2,7 +2,6 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -17,8 +16,6 @@ import { api, getBackupImportErrorMessage, getErrorMessage, type ImportResult } 
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import {
   ADDON_CONFIGS_QUERY_KEY,
-  DATA_STATS_QUERY_KEY,
-  DATA_STATS_STALE_TIME_MS,
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueries,
@@ -35,6 +32,7 @@ import {
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
+  SettingsQueryError,
 } from './chrome';
 
 const CLEAR_CONFIRM_TIMEOUT_MS = 8_000;
@@ -206,16 +204,8 @@ function DataManager() {
   const [confirmKey, setConfirmKey] = useState<string | null>(null);
   const mountedRef = useMountedRef();
 
-  const {
-    data: stats,
-    isLoadingError,
-    isFetching,
-    refetch,
-  } = useQuery({
-    queryKey: DATA_STATS_QUERY_KEY,
-    queryFn: api.getDataStats,
-    staleTime: DATA_STATS_STALE_TIME_MS,
-  });
+  const statsQuery = useQuery(api.dataStatsQueryOptions());
+  const stats = statsQuery.data;
 
   const clearMutation = useMutation({
     mutationFn: async (cat: DataCategory) => {
@@ -270,7 +260,7 @@ function DataManager() {
         'Watched episodes and movies, resume progress, and per-title audio, subtitle and source picks.',
       count: stats?.history_count,
       isEmpty: stats?.history_count === 0 && stats.has_learned_playback_data === false,
-      unit: 'entries',
+      unit: stats?.history_count === 1 ? 'entry' : 'entries',
       clearFn: api.clearWatchHistory,
       // `clear_watch_history` also wipes per-title language picks and source health/affinity that feed stream ranking (Rust `PlaybackStateService::clear`).
       invalidateCaches: async () => {
@@ -285,7 +275,7 @@ function DataManager() {
       label: 'Library',
       description: 'Saved movies, shows, and their watch statuses.',
       count: stats?.library_count,
-      unit: 'items',
+      unit: stats?.library_count === 1 ? 'item' : 'items',
       clearFn: api.clearLibrary,
       // `clear_library` also wipes watch statuses — both surfaces refetch.
       invalidateCaches: () => invalidateLibraryQueries(queryClient),
@@ -295,7 +285,7 @@ function DataManager() {
       label: 'Custom lists',
       description: 'All custom lists and their contents.',
       count: stats?.lists_count,
-      unit: 'lists',
+      unit: stats?.lists_count === 1 ? 'list' : 'lists',
       clearFn: api.clearAllLists,
       invalidateCaches: () => invalidateListQueries(queryClient),
     },
@@ -304,7 +294,7 @@ function DataManager() {
       label: 'Watch statuses',
       description: 'Watching / Watched / Plan to Watch / Dropped labels.',
       count: stats?.watch_statuses_count,
-      unit: 'labels',
+      unit: stats?.watch_statuses_count === 1 ? 'label' : 'labels',
       clearFn: api.clearAllWatchStatuses,
       invalidateCaches: () => invalidateWatchStatusQueries(queryClient),
     },
@@ -319,14 +309,11 @@ function DataManager() {
         <p className='text-xs text-zinc-400'>Permanent — no undo</p>
       </div>
 
-      {isLoadingError && (
-        <RetryBanner
-          className='mx-5 my-3'
-          message="Couldn't load local record counts."
-          onRetry={() => void refetch()}
-          isRetrying={isFetching}
-        />
-      )}
+      <SettingsQueryError
+        query={statsQuery}
+        className='mx-5 my-3'
+        message="Couldn't load local record counts."
+      />
 
       <SettingsBody rows>
         {categories.map((cat) => {

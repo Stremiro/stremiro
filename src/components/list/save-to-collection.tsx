@@ -1,10 +1,11 @@
 import { Check, Library, Loader2, Plus } from 'lucide-react';
+import { warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useListSummaries, type useMediaCollectionActions } from '@/hooks/use-media-library';
 import type { MediaItem } from '@/lib/api';
-import { cn } from '@/lib/utils';
+import { cn, queryNeedsRetry } from '@/lib/utils';
 
 const ROW_CLASS =
   'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-white/[0.06] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-wait';
@@ -32,6 +33,7 @@ interface SaveToCollectionPanelProps {
   item: MediaItem;
   isInLibrary: boolean;
   showLibrary?: boolean;
+  libraryBusy?: boolean;
   actions: ReturnType<typeof useMediaCollectionActions>;
   onCreateList: () => void;
 }
@@ -40,26 +42,30 @@ export function SaveToCollectionPanel({
   item,
   isInLibrary,
   showLibrary = false,
+  libraryBusy = false,
   actions,
   onCreateList,
 }: SaveToCollectionPanelProps) {
   const listsQuery = useListSummaries(item.id);
-  const { data: lists = [] } = listsQuery;
+  const lists = (listsQuery.data ?? []).filter((list) => !list.is_smart);
+  const hasListsError = queryNeedsRetry(listsQuery);
   const { toggleLibrary, toggleListMembership, pendingListIds } = actions;
+  const isLibraryBusy = libraryBusy || toggleLibrary.isPending;
 
   return (
-    <div>
+    <div className='flex min-h-0 flex-1 flex-col'>
       {showLibrary && (
         <>
           <button
             type='button'
             className={ROW_CLASS}
             aria-pressed={isInLibrary}
-            aria-disabled={toggleLibrary.isPending || undefined}
+            aria-disabled={isLibraryBusy || undefined}
+            aria-busy={isLibraryBusy || undefined}
             onClick={(event) => {
               event.preventDefault();
               event.stopPropagation();
-              if (!toggleLibrary.isPending) toggleLibrary.mutate();
+              if (!isLibraryBusy) toggleLibrary.mutate();
             }}
           >
             <span className='grid size-7 shrink-0 place-items-center rounded-md bg-white/[0.06] text-zinc-300 ring-1 ring-inset ring-white/10'>
@@ -71,25 +77,26 @@ export function SaveToCollectionPanel({
                 {isInLibrary ? 'Saved to your profile' : 'Add to your profile'}
               </span>
             </span>
-            <SavedCheck saved={isInLibrary} pending={toggleLibrary.isPending} />
+            <SavedCheck saved={isInLibrary} pending={isLibraryBusy} />
           </button>
           <div className='my-1.5 h-px bg-white/[0.08]' />
         </>
       )}
 
-      <div className='flex items-center justify-between px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500'>
+      <div className='flex shrink-0 items-center justify-between px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500'>
         <span>Lists</span>
         {listsQuery.data && <span className='tabular-nums'>{lists.length}</span>}
       </div>
-      <div className='max-h-72 space-y-0.5 overflow-y-auto overscroll-contain'>
-        {listsQuery.isError ? (
+      <div className='min-h-0 max-h-72 space-y-0.5 overflow-y-auto overscroll-contain'>
+        {hasListsError && (
           <RetryBanner
             className='gap-2 px-2.5 py-3'
-            message="Couldn't load lists."
+            message={listsQuery.data ? "Couldn't refresh lists." : "Couldn't load lists."}
             isRetrying={listsQuery.isFetching}
             onRetry={() => void listsQuery.refetch()}
           />
-        ) : listsQuery.isPending ? (
+        )}
+        {listsQuery.isPending && !hasListsError ? (
           <div role='status' aria-label='Loading lists' className='space-y-1'>
             {[0, 1, 2].map((row) => (
               <div key={row} className='flex items-center gap-2.5 px-2.5 py-2'>
@@ -131,16 +138,18 @@ export function SaveToCollectionPanel({
               </button>
             );
           })
-        ) : (
+        ) : listsQuery.data !== undefined ? (
           <p className='px-2.5 py-3 text-[11px] leading-relaxed text-zinc-500'>
             No lists yet — create one to group titles
           </p>
-        )}
+        ) : null}
       </div>
-      <div className='mt-1.5 border-t border-white/[0.08] pt-1.5'>
+      <div className='mt-1.5 shrink-0 border-t border-white/[0.08] pt-1.5'>
         <button
           type='button'
           className={ROW_CLASS}
+          onPointerEnter={warmListEditorDialog}
+          onFocus={warmListEditorDialog}
           onClick={(event) => {
             event.preventDefault();
             event.stopPropagation();

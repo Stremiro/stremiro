@@ -112,35 +112,26 @@ export function useSubtitleAdjustments({
     [],
   );
 
-  const applySubtitlePos = useCallback(
-    (value: number) => applySubtitleSetting('pos', value),
-    [applySubtitleSetting],
-  );
+  const applySubtitlePos = (value: number) => applySubtitleSetting('pos', value);
 
-  const applySubtitleScale = useCallback(
-    (value: number) => applySubtitleSetting('scale', value),
-    [applySubtitleSetting],
-  );
+  const applySubtitleScale = (value: number) => applySubtitleSetting('scale', value);
 
-  const stepSubtitleDelay = useCallback(
-    (direction: 1 | -1) => {
-      const generation = delayNudgeGenerationRef.current;
-      delayNudgeChainRef.current = delayNudgeChainRef.current
-        .then(() => {
-          if (delayNudgeGenerationRef.current !== generation) return undefined;
-          return applySubtitleSetting('delay', canonicalDelayRef.current + direction * 0.1);
-        })
-        .catch(() => undefined);
-      return delayNudgeChainRef.current;
-    },
-    [applySubtitleSetting],
-  );
+  const stepSubtitleDelay = (direction: 1 | -1) => {
+    const generation = delayNudgeGenerationRef.current;
+    delayNudgeChainRef.current = delayNudgeChainRef.current
+      .then(() => {
+        if (delayNudgeGenerationRef.current !== generation) return undefined;
+        return applySubtitleSetting('delay', canonicalDelayRef.current + direction * 0.1);
+      })
+      .catch(() => undefined);
+    return delayNudgeChainRef.current;
+  };
 
-  const resetSubtitleSettings = useCallback(() => {
+  const resetSubtitleSettings = () => {
     void applySubtitleDelay(0);
     void applySubtitlePos(100);
     void applySubtitleScale(1.0);
-  }, [applySubtitleDelay, applySubtitlePos, applySubtitleScale]);
+  };
 
   return {
     subtitleDelay: settings.delay,

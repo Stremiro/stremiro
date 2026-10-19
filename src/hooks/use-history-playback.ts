@@ -1,15 +1,10 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { type MouseEvent, useCallback, useRef, useState } from 'react';
-import type { NavigateFunction, NavigateOptions, To } from 'react-router';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import type { WatchProgress } from '@/lib/api';
 import { openHistoryPlaybackPlan } from '@/lib/history-playback';
-import { currentPathWithSearch, navigateApp } from '@/lib/navigation';
-
-// Root-bound navigate: useNavigate() would re-subscribe every history card to location changes.
-const boundNavigate: NavigateFunction = (to: To | number, options?: NavigateOptions) => {
-  navigateApp(to, options);
-};
+import { boundNavigate, currentPathWithSearch } from '@/lib/navigation';
+import { claimPlaybackLaunch } from '@/lib/player-navigation';
 
 // Resume-from-history click: resolves the Rust playback plan before navigating. Ref guard blocks double-fires; late completion is dropped after unmount.
 export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
@@ -22,6 +17,7 @@ export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
     async (event: MouseEvent) => {
       event.preventDefault();
       if (pendingRef.current) return;
+      const launchGeneration = claimPlaybackLaunch();
       pendingRef.current = true;
       setIsPending(true);
       try {
@@ -31,7 +27,7 @@ export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
           currentPathWithSearch(),
           errorTitle,
           queryClient,
-          { isCancelled: () => !isMountedRef.current },
+          { launchGeneration, isCancelled: () => !isMountedRef.current },
         );
       } finally {
         pendingRef.current = false;

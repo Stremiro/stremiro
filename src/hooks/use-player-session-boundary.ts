@@ -72,7 +72,9 @@ export function usePlayerSessionBoundary({
   const { activeStreamUrl } = stream;
   const queryClient = useQueryClient();
   const playbackLanguagePreferencesRef = useRef<PlaybackLanguagePreferences>({});
-  const saveProgressRef = useRef<(() => Promise<void>) | undefined>(undefined);
+  const saveProgressRef = useRef<
+    ReturnType<typeof usePlaybackProgressPersistence>['saveProgress'] | undefined
+  >(undefined);
 
   const {
     audioTracks,

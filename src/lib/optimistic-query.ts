@@ -30,21 +30,39 @@ export function reinsertSnapshotRows<T>(
   indices: readonly number[],
   key: (row: T) => string,
 ): T[] {
-  const rows = [...current];
-  const cachedIndex = (neighbour: number) => {
-    const neighbourKey = key(snapshot[neighbour]);
-    return rows.findIndex((row) => key(row) === neighbourKey);
-  };
-  for (const index of indices) {
-    let at = -1;
-    for (let prior = index - 1; prior >= 0 && at === -1; prior--) {
-      const found = cachedIndex(prior);
-      if (found !== -1) at = found + 1;
+  const positions = new Map(current.map((row, index) => [key(row), index]));
+  const restoredIndices = new Set(indices);
+  const buckets = new Map<number, T[]>();
+  const leading: T[] = [];
+  let predecessor: number | undefined;
+  let successor: number | undefined;
+  for (let index = 0; index < snapshot.length; index++) {
+    const row = snapshot[index];
+    const position = positions.get(key(row));
+    if (position !== undefined) {
+      predecessor = position;
+      successor ??= position;
+      continue;
     }
-    for (let next = index + 1; next < snapshot.length && at === -1; next++) {
-      at = cachedIndex(next);
+    if (!restoredIndices.has(index)) continue;
+    if (predecessor === undefined) {
+      leading.push(row);
+      continue;
     }
-    rows.splice(at === -1 ? 0 : at, 0, snapshot[index]);
+    const at = predecessor + 1;
+    const bucket = buckets.get(at);
+    if (bucket) bucket.push(row);
+    else buckets.set(at, [row]);
+  }
+  if (leading.length > 0) {
+    const at = successor ?? 0;
+    buckets.set(at, [...leading, ...(buckets.get(at) ?? [])]);
+  }
+  const rows: T[] = [];
+  for (let index = 0; index <= current.length; index++) {
+    const bucket = buckets.get(index);
+    if (bucket) rows.push(...bucket);
+    if (index < current.length) rows.push(current[index]);
   }
   return rows;
 }

@@ -60,7 +60,7 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
     structuralSharing: (previous, next) => {
       const data = next as CachedSearchCatalogData | undefined;
       if (!Array.isArray(data?.pages)) return next;
-      // Seen keys accumulate; only the last continuation is read. Revisit for backward paging/maxPages.
+      // Only the last continuation's seen keys and source cursors are read.
       const compacted = {
         ...data,
         pages: data.pages.map((page, index) =>

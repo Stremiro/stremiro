@@ -1,6 +1,17 @@
+import { type Range, useVirtualizer } from '@tanstack/react-virtual';
 import { ChevronLeft, ChevronRight } from 'lucide-react';
-import { type Key, type ReactNode, useLayoutEffect, useMemo, useRef } from 'react';
+import {
+  type Key,
+  type ReactNode,
+  useCallback,
+  useId,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { Button } from '@/components/ui/button';
+import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import { boundedMapSet, cn, scrollBehavior } from '@/lib/utils';
 import { MediaCardSkeleton, MEDIA_CARD_SLOT_CLASS_NAME } from './media-card';
@@ -21,8 +32,7 @@ function rememberRailScrollPosition(railId: string, position: number): void {
   boundedMapSet(railScrollPositions, railId, position, RAIL_SCROLL_MEMORY_MAX);
 }
 
-// Cap mounted cards; full catalogs remain available through search.
-const RAIL_MAX_ITEMS = 48;
+const RAIL_VIRTUALIZATION_THRESHOLD = 48;
 
 interface HorizontalMediaRailProps<T> {
   /** Concatenated, never `cn()`-merged — tailwind-merge would collapse `lg:pl-*`+`lg:px-*` pairs. */
@@ -59,9 +69,51 @@ export function HorizontalMediaRail<T>({
   title,
   viewportClassName,
 }: HorizontalMediaRailProps<T>) {
+  // See WindowVirtualizedStack: compiler memoization would freeze virtual items.
+  'use no memo';
   const hasNotice = notice !== undefined;
+  const titleId = useId();
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const slotRef = useRef<HTMLDivElement>(null);
   const lastScrollLeftRef = useRef(0);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const [slotWidth, setSlotWidth] = useState(190);
+  const shouldVirtualize = !isLoading && !hasNotice && items.length > RAIL_VIRTUALIZATION_THRESHOLD;
+  const rangeExtractor = useCallback(
+    (range: Range) => focusedRowRange(range, focusedIndex),
+    [focusedIndex],
+  );
+  const getVirtualItemKey = useCallback(
+    (index: number) => getItemKey(items[index], index),
+    [getItemKey, items],
+  );
+  const virtualizer = useVirtualizer({
+    horizontal: true,
+    count: items.length,
+    enabled: shouldVirtualize,
+    getScrollElement: () => scrollContainerRef.current,
+    estimateSize: () => slotWidth,
+    gap: 16,
+    overscan: 3,
+    initialRect: { width: 1280, height: 0 },
+    initialOffset: () => (railId ? (railScrollPositions.get(railId) ?? 0) : 0),
+    getItemKey: getVirtualItemKey,
+    rangeExtractor,
+  });
+
+  useLayoutEffect(() => {
+    if (shouldVirtualize) virtualizer.measure();
+  }, [shouldVirtualize, slotWidth, virtualizer]);
+
+  useLayoutEffect(() => {
+    const slot = slotRef.current;
+    if (!slot || !shouldVirtualize) return;
+    const measure = () => setSlotWidth(slot.getBoundingClientRect().width);
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(slot);
+    return () => observer.disconnect();
+  }, [shouldVirtualize]);
   const {
     bind: bindScrollContainer,
     syncScrollState,
@@ -159,7 +211,9 @@ export function HorizontalMediaRail<T>({
     >
       <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
         <div className={cn('flex items-center justify-between mb-3', !hasNotice && 'min-h-9')}>
-          <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>{title}</h2>
+          <h2 id={titleId} className='text-[17px] font-semibold tracking-[-0.02em] text-white'>
+            {title}
+          </h2>
 
           {!hasNotice && scrollState.hasOverflow && (
             <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150'>
@@ -202,12 +256,55 @@ export function HorizontalMediaRail<T>({
           {notice}
         </div>
       ) : (
-        <div className={`${contentInsetsClassName} ${cn('overflow-hidden', viewportClassName)}`}>
+        <div
+          className={`${contentInsetsClassName} ${cn('relative overflow-hidden', viewportClassName)}`}
+        >
+          {shouldVirtualize && (
+            <div
+              ref={slotRef}
+              aria-hidden='true'
+              className={`absolute invisible pointer-events-none ${MEDIA_CARD_SLOT_CLASS_NAME}`}
+            />
+          )}
+          {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Scroll regions handle their own navigation keys. */}
           <div
             ref={bindScrollContainer}
             data-media-scroller
-            className={cn(DEFAULT_SCROLLER_CLASS_NAME, scrollerClassName)}
-            style={edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : undefined}
+            role='region'
+            aria-labelledby={titleId}
+            // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- Scroll regions must be keyboard reachable.
+            tabIndex={0}
+            onKeyDown={(event) => {
+              if (
+                event.target !== event.currentTarget ||
+                event.altKey ||
+                event.ctrlKey ||
+                event.metaKey
+              )
+                return;
+              if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+                event.preventDefault();
+                scroll(event.key === 'ArrowLeft' ? 'left' : 'right');
+              } else if (event.key === 'Home' || event.key === 'End') {
+                event.preventDefault();
+                event.currentTarget.scrollTo({
+                  left: event.key === 'Home' ? 0 : event.currentTarget.scrollWidth,
+                  behavior: scrollBehavior(),
+                });
+              }
+            }}
+            className={cn(
+              DEFAULT_SCROLLER_CLASS_NAME,
+              'focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/25',
+              scrollerClassName,
+              shouldVirtualize && 'grid',
+            )}
+            style={{
+              ...(edgeMask ? { maskImage: edgeMask, WebkitMaskImage: edgeMask } : {}),
+              ...(shouldVirtualize
+                ? { gridTemplateColumns: `repeat(${items.length}, ${slotWidth}px)` }
+                : {}),
+            }}
           >
             {isLoading
               ? Array.from({ length: skeletonCount }, (_, index) => (
@@ -215,11 +312,25 @@ export function HorizontalMediaRail<T>({
                     <MediaCardSkeleton />
                   </div>
                 ))
-              : items.slice(0, RAIL_MAX_ITEMS).map((item, index) => (
-                  <div key={getItemKey(item, index)} className={DEFAULT_ITEM_CLASS_NAME}>
-                    {renderItem(item, index)}
-                  </div>
-                ))}
+              : shouldVirtualize
+                ? virtualizer.getVirtualItems().map((virtualItem) => (
+                    <div
+                      key={virtualItem.key}
+                      className={DEFAULT_ITEM_CLASS_NAME}
+                      style={{ gridColumn: virtualItem.index + 1, gridRow: 1 }}
+                      onFocusCapture={() => setFocusedIndex(virtualItem.index)}
+                      onBlurCapture={(event) => {
+                        if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
+                      }}
+                    >
+                      {renderItem(items[virtualItem.index], virtualItem.index)}
+                    </div>
+                  ))
+                : items.map((item, index) => (
+                    <div key={getItemKey(item, index)} className={DEFAULT_ITEM_CLASS_NAME}>
+                      {renderItem(item, index)}
+                    </div>
+                  ))}
           </div>
         </div>
       )}

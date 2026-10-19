@@ -58,7 +58,8 @@ function useAppUiPreferencesQuery<T = AppUiPreferences>(
 ) {
   return useQuery({
     queryKey: APP_UI_PREFERENCES_QUERY_KEY,
-    queryFn: api.getAppUiPreferences,
+    queryFn: async () =>
+      (await api.pendingBootstrapSnapshot())?.appUiPreferences ?? api.getAppUiPreferences(),
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
     placeholderData: DEFAULT_APP_UI_PREFERENCES,

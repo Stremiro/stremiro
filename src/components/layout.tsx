@@ -11,7 +11,7 @@ import { Sidebar } from './sidebar';
 // A route render crash must not unmount PlayerHost and the docked mini player —
 // contain failure to the page; navigation resets the boundary via location key.
 class RouteErrorBoundary extends Component<
-  { resetKey: string; children: ReactNode },
+  { resetKey: string; children: ReactNode; onRetry: () => void },
   { hasError: boolean; resetKey: string }
 > {
   state = { hasError: false, resetKey: this.props.resetKey };
@@ -46,7 +46,14 @@ class RouteErrorBoundary extends Component<
             </p>
           </div>
           <div className='flex items-center gap-3'>
-            <Button onClick={() => this.setState({ hasError: false })}>Try again</Button>
+            <Button
+              onClick={() => {
+                this.props.onRetry();
+                this.setState({ hasError: false });
+              }}
+            >
+              Try again
+            </Button>
             <Button variant='outline' onClick={() => navigateApp('/')}>
               Go home
             </Button>
@@ -59,16 +66,16 @@ class RouteErrorBoundary extends Component<
   }
 }
 
-function RouteOutlet() {
+function RouteOutlet({ onRetry }: { onRetry: () => void }) {
   const { key } = useLocation();
   return (
-    <RouteErrorBoundary resetKey={key}>
+    <RouteErrorBoundary resetKey={key} onRetry={onRetry}>
       <Outlet />
     </RouteErrorBoundary>
   );
 }
 
-export function Layout() {
+export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
   const { accentColor: accent, accentIntensity, accentTargets } = useProfileAccent();
   // 0 hides the ambient tint entirely; 100 is the full premium-subtle glow.
   const glowScale = clamp(accentIntensity, 0, 100) / 100;
@@ -138,7 +145,7 @@ export function Layout() {
           {/* Route pushes land keyboard focus here (see RouteScrollManager). */}
           <main id='app-main' tabIndex={-1} className='flex-1'>
             <div className='min-h-full'>
-              <RouteOutlet />
+              <RouteOutlet onRetry={onRouteRetry} />
             </div>
           </main>
         </div>

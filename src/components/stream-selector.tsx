@@ -10,7 +10,16 @@ import {
   Waypoints,
   type LucideIcon,
 } from 'lucide-react';
-import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Fragment,
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { toast } from 'sonner';
 import {
   StreamAddonHealthChips,
@@ -25,6 +34,7 @@ import {
   StreamP2pNotice,
   StreamPackEpisodeList,
   StreamResolveFeedbackToast,
+  StreamResultsStatus,
   StreamSelectorHeader,
 } from '@/components/stream-selector-panel';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
@@ -50,6 +60,7 @@ import { isEditableTarget, whenRowMounted } from '@/lib/dom';
 import { buildEpisodeStreamTarget, episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { episodeProgressKey } from '@/lib/history-playback';
 import { copyText } from '@/lib/notify';
+import { navigateApp } from '@/lib/navigation';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import {
   buildStreamReasonChips,
@@ -139,7 +150,6 @@ function buildStreamRowModel(stream: AddonStream): StreamRowModel {
   const metaParts: StreamRowModel['metaParts'] = [];
   if (stream.sourceName) metaParts.push({ key: 'addon', text: stream.sourceName });
   metaParts.push({ key: 'delivery', text: presentation.deliveryLabel, className: deliveryClass });
-  if (presentation.sizeLabel) metaParts.push({ key: 'size', text: presentation.sizeLabel });
   if (presentation.codecLabel) metaParts.push({ key: 'codec', text: presentation.codecLabel });
   if (presentation.audioLabel) metaParts.push({ key: 'audio', text: presentation.audioLabel });
   if (presentation.multiAudioLabel)
@@ -308,35 +318,43 @@ const StreamItem = memo(function StreamItem({
             </p>
 
             <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
-              {metaParts.map((part, index) => (
-                <Fragment key={part.key}>
-                  {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
-                  <span
-                    className={cn(
-                      'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
-                      part.className,
+              <span className='w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums text-zinc-400'>
+                {stream.presentation.sizeLabel}
+              </span>
+              <span
+                className={cn(
+                  'w-[4.5rem] shrink-0 inline-flex items-center gap-0.5 truncate text-[10.5px] tabular-nums',
+                  stream.seeders === 0
+                    ? 'text-zinc-500 font-medium'
+                    : sortMode === 'seeds'
+                      ? 'text-white font-semibold'
+                      : 'text-zinc-300 font-medium',
+                )}
+              >
+                {typeof stream.seeders === 'number' && (
+                  <>
+                    {stream.seeders > 0 && (
+                      <ArrowUp className='w-[9px] h-[9px] shrink-0' strokeWidth={2.5} />
                     )}
-                  >
-                    {part.text}
-                  </span>
-                </Fragment>
-              ))}
-              {typeof stream.seeders === 'number' && stream.seeders > 0 && (
-                <>
-                  <span className='text-zinc-700 text-[10px]'>·</span>
-                  <span
-                    className={cn(
-                      'text-[10.5px] inline-flex items-center gap-0.5 shrink-0',
-                      sortMode === 'seeds'
-                        ? 'text-white font-semibold'
-                        : 'text-zinc-300 font-medium',
-                    )}
-                  >
-                    <ArrowUp className='w-[9px] h-[9px]' strokeWidth={2.5} />
-                    {stream.seeders}
-                  </span>
-                </>
-              )}
+                    {stream.seeders === 0 ? '0 seeds' : stream.seeders}
+                  </>
+                )}
+              </span>
+              <div className='flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden'>
+                {metaParts.map((part, index) => (
+                  <Fragment key={part.key}>
+                    {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
+                    <span
+                      className={cn(
+                        'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
+                        part.className,
+                      )}
+                    >
+                      {part.text}
+                    </span>
+                  </Fragment>
+                ))}
+              </div>
             </div>
 
             {(matchBadges.length > 0 || recommendationReasons.length > 0) && (
@@ -546,19 +564,22 @@ function StreamVirtualList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [onInitialFocusDone, initialFocusPending, scheduleRowFocus, virtualizer]);
 
-  // lastStreamKey can land after mount on a cold cache — retarget autofocus onto the last-used row, but only
-  // while the roving stop still sits where autofocus left it (resting focus is not a user claim).
   useEffect(() => {
     const from = autofocusKeyRef.current;
-    if (!lastStreamKey || from === null) return;
-    if (focusedStreamKey !== from || (currentStreamKey && streamIndexByKey.has(currentStreamKey))) {
+    if (from === null) return;
+    if (focusedStreamKey !== from) {
       autofocusKeyRef.current = null;
       return;
     }
-    const lastUsed = streamIndexByKey.get(lastStreamKey);
-    if (lastUsed === undefined) return;
-    autofocusKeyRef.current = null;
-    if (lastStreamKey === from) return;
+    const targetKey =
+      currentStreamKey && streamIndexByKey.has(currentStreamKey) ? currentStreamKey : lastStreamKey;
+    if (!targetKey) return;
+    const targetIndex = streamIndexByKey.get(targetKey);
+    if (targetIndex === undefined) return;
+    if (targetKey === from) {
+      if (targetKey === currentStreamKey) autofocusKeyRef.current = null;
+      return;
+    }
 
     // Tabbing to chrome doesn't move the roving stop — retarget only while focus rests on the auto-focused row or container.
     const listEl = scrollRef.current;
@@ -570,7 +591,8 @@ function StreamVirtualList({
       active === autoRow ||
       active === listEl ||
       (listEl !== null && active.contains(listEl));
-    if (focusIsResting) focusRow(lastUsed);
+    autofocusKeyRef.current = focusIsResting && targetKey !== currentStreamKey ? targetKey : null;
+    if (focusIsResting) focusRow(targetIndex);
   }, [currentStreamKey, focusRow, focusedStreamKey, lastStreamKey, streamIndexByKey]);
 
   const handleListKeyDown = useCallback(
@@ -698,6 +720,13 @@ export function StreamSelector({
   getStartTime,
 }: StreamSelectorProps) {
   const dialogContentRef = useRef<HTMLDivElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchFocusPendingRef = useRef(false);
+  useLayoutEffect(() => {
+    if (!searchFocusPendingRef.current) return;
+    searchFocusPendingRef.current = false;
+    searchInputRef.current?.focus({ preventScroll: true });
+  });
   const {
     absoluteEpisode,
     absoluteSeason,
@@ -733,6 +762,8 @@ export function StreamSelector({
     isLoading,
     isLoadingAddonConfigs,
     isOnline,
+    isRetrying,
+    isSearchPending,
     lastStreamKey,
     lastStreamFamily,
     lookupId,
@@ -905,15 +936,24 @@ export function StreamSelector({
 
   // Filter/sort changes drop the list to the top — remounting resets scroll offset and row measurements in one step.
   const listResetKey = `${qualityFilter}:${sourceFilter}:${batchFilter}:${sortMode}:${effectiveAddonFilter}:${effectiveSearchQuery}`;
+  const filtersResolving = isAnyResolving || pendingPackStreamKey !== null;
+  const handleManageAddons = () => {
+    handleRequestClose();
+    navigateApp('/settings?section=addons');
+  };
 
   // Per-source chips ride the loading state too — the roster lands before any stream, so "searching" shows real names.
   const healthChips =
     addonHealthMetrics.length > 0 ? (
       <StreamAddonHealthChips
         effectiveAddonFilter={effectiveAddonFilter}
+        hasStreams={streams.length > 0}
         healthSummary={healthSummary}
+        isRetrying={isRetrying}
+        isResolving={filtersResolving}
         metrics={addonHealthMetrics}
         onFiltersChange={setFilters}
+        onRetry={refetchStreams}
         sourcesStillLoading={sourcesStillLoading}
       />
     ) : null;
@@ -935,6 +975,11 @@ export function StreamSelector({
       />
 
       <div className='h-px bg-white/5 shrink-0' />
+      <StreamResultsStatus
+        resultCount={sortedStreams.length}
+        pendingSourceCount={healthSummary.pending}
+        searching={isLoading || sourcesStillLoading}
+      />
 
       {/* Stream list — or the in-selector pack episode picker. The tree stays mounted under the pack overlay
           (`inert` drops it from tab order/a11y) so scroll, roving tabindex, and virtualizer state survive. */}
@@ -944,6 +989,7 @@ export function StreamSelector({
             <StreamListLoadingState sourceCount={streamSourceCount} chips={healthChips} />
           ) : fatalAddonError ? (
             <StreamListErrorState
+              isRetrying={isRetrying}
               message={getErrorMessage(fatalAddonError)}
               onRetry={refetchStreams}
               chips={healthChips}
@@ -951,16 +997,16 @@ export function StreamSelector({
           ) : !isOnline ? (
             <StreamListOfflineState />
           ) : !isLoadingAddonConfigs && !hasEnabledAddons ? (
-            <StreamListNoAddonsState />
+            <StreamListNoAddonsState onManageAddons={handleManageAddons} />
           ) : !isLoadingAddonConfigs && streamSourceCount === 0 ? (
-            <StreamListNoStreamAddonsState />
+            <StreamListNoStreamAddonsState onManageAddons={handleManageAddons} />
           ) : streams.length > 0 ? (
             <div className='flex h-full min-h-0 flex-col'>
               {/* Must stay a bounded flex column — without min-h-0 the flex-1 list overflows instead of scrolling. */}
               <div
                 className={cn(
                   'flex min-h-0 flex-1 flex-col px-3 pt-3',
-                  isAnyResolving && 'pointer-events-none',
+                  filtersResolving && 'pointer-events-none',
                 )}
               >
                 {healthChips}
@@ -969,10 +1015,12 @@ export function StreamSelector({
                   batchFilter={batchFilter}
                   filteredCount={sortedStreams.length}
                   hasActiveFilter={hasActiveFilter}
+                  isResolving={filtersResolving}
                   onFiltersChange={setFilters}
                   onResetFilters={resetFilters}
                   onSearchQueryChange={setSearchQuery}
                   qualityFilter={qualityFilter}
+                  searchInputRef={searchInputRef}
                   searchQuery={searchQuery}
                   showBatchFilter={showBatchFilter}
                   sortMode={sortMode}
@@ -986,7 +1034,7 @@ export function StreamSelector({
                 )}
 
                 {sortedStreams.length > 0 ? (
-                  <div className='min-h-0 flex-1'>
+                  <div className='min-h-0 flex-1' aria-busy={isSearchPending || undefined}>
                     <StreamVirtualList
                       key={listResetKey}
                       streams={sortedStreams}
@@ -1004,9 +1052,12 @@ export function StreamSelector({
                   </div>
                 ) : (
                   <StreamListFilteredEmptyState
+                    isSearchPending={isSearchPending}
+                    isResolving={filtersResolving}
                     searchQuery={searchQuery}
                     // A true clear, not resetFilters — the session default (`batch: 'episodes'` for series) can itself be the emptying filter.
                     onClearFilters={() => {
+                      searchFocusPendingRef.current = true;
                       setSearchQuery('');
                       setFilters({ ...DEFAULT_FILTERS });
                     }}
@@ -1016,8 +1067,10 @@ export function StreamSelector({
             </div>
           ) : (
             <StreamListEmptyState
+              isRetrying={isRetrying}
               sourceCount={streamSourceCount}
               onRetry={refetchStreams}
+              onManageAddons={handleManageAddons}
               chips={healthChips}
             />
           )}

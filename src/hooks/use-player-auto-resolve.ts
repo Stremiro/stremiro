@@ -55,7 +55,7 @@ export function usePlayerAutoResolve({
   const [resolveAttemptNonce, setResolveAttemptNonce] = useState(0);
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
   // Ref, not state — `isResolving` as a dep made each attempt cancel itself (infinite resolve loop).
-  const resolveInFlightRef = useRef(false);
+  const resolveInFlightRef = useRef<number | null>(null);
   const getTitle = useEffectEvent(() => title);
 
   useEffect(() => {
@@ -73,11 +73,11 @@ export function usePlayerAutoResolve({
     // While the manual selector is open the user owns stream choice.
     if (stream.activeStreamUrl || error || !type || !id || !mountedRef.current) return;
     if (shouldWaitForResolvedLookupId || showStreamSelector) return;
-    if (resolveInFlightRef.current) return;
+    if (resolveInFlightRef.current !== null) return;
 
     let cancelled = false;
     const attemptGen = ++autoResolveGenRef.current;
-    resolveInFlightRef.current = true;
+    resolveInFlightRef.current = attemptGen;
 
     const isCurrent = () =>
       !cancelled && attemptGen === autoResolveGenRef.current && mountedRef.current;
@@ -134,13 +134,10 @@ export function usePlayerAutoResolve({
           return;
         }
       } finally {
-        // Release the latch and bump the nonce so the guards re-run once — a mid-attempt cleanup can't strand the next attempt.
-        resolveInFlightRef.current = false;
-        if (mountedRef.current) setResolveAttemptNonce((nonce) => nonce + 1);
-      }
-      // Late winners/timeouts must not clobber a newer pick, but the newest attempt still releases `isResolving`.
-      if (mountedRef.current && attemptGen === autoResolveGenRef.current) {
-        setResolveStatus(null);
+        if (resolveInFlightRef.current === attemptGen) {
+          resolveInFlightRef.current = null;
+          if (mountedRef.current) setResolveAttemptNonce((nonce) => nonce + 1);
+        }
       }
     };
 
@@ -148,6 +145,7 @@ export function usePlayerAutoResolve({
 
     return () => {
       cancelled = true;
+      if (resolveInFlightRef.current === attemptGen) resolveInFlightRef.current = null;
     };
   }, [
     stream,

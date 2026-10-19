@@ -3,6 +3,7 @@ import type { CalendarRange, LibraryFilters } from '@/lib/api';
 import { nonBlank } from '@/lib/utils';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
+export const LIBRARY_GENRES_QUERY_KEY = [...LIBRARY_QUERY_KEY, 'genres'] as const;
 export const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
 export function profileLibraryQueryKey(filters: LibraryFilters) {
   return [...PROFILE_LIBRARY_QUERY_KEY, filters] as const;
@@ -65,22 +66,17 @@ export function effectivePlaybackLanguagePreferencesQueryKey(mediaType?: string,
 async function invalidateQuery(
   queryClient: QueryClient,
   queryKey: readonly unknown[],
-  cancelInFlight: boolean | 'inactive' = false,
+  cancelType: 'all' | 'inactive' = 'all',
 ) {
   const filters = { queryKey, exact: false };
-  if (cancelInFlight) {
-    await queryClient.cancelQueries(
-      { ...filters, type: cancelInFlight === 'inactive' ? 'inactive' : 'all' },
-      { revert: true },
-    );
-  }
+  await queryClient.cancelQueries({ ...filters, type: cancelType }, { revert: true });
   await queryClient.invalidateQueries(filters);
 }
 
 function refreshScheduleQueries(queryClient: QueryClient) {
   // Nonblocking: write/exit barriers await local history, not remote providers.
-  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY, true);
-  void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY], true);
+  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
+  void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
 }
 
 // Trimmed id so details and card-hover share one cache entry.
@@ -152,15 +148,20 @@ export const WATCH_HISTORY_STALE_TIME_MS = 1000 * 30;
 // One merged rail cadence for the home snapshot.
 export const RESUME_SECTION_MIN_STALE_MS = 1000 * 30;
 
-export async function invalidateLibraryQueries(queryClient: QueryClient) {
-  // Watch status is a library attribute; refresh shared dependents once.
+export async function invalidateLibraryQueries(
+  queryClient: QueryClient,
+  { watchStatusChanged = true }: { watchStatusChanged?: boolean } = {},
+) {
+  // Watch status is a library attribute; refresh shared dependents once. Smart lists derive from both.
   refreshScheduleQueries(queryClient);
+  if (watchStatusChanged) void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, LISTS_QUERY_KEY),
+    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
-    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -169,15 +170,20 @@ async function invalidateHistoryCollections(
   itemId?: string,
   refetchTitleProgress = true,
 ) {
+  void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
-    invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY, true),
-    queryClient.invalidateQueries({
-      queryKey: itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
-      refetchType: refetchTitleProgress ? 'active' : 'none',
-    }),
+    invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
+    refetchTitleProgress
+      ? invalidateQuery(
+          queryClient,
+          itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
+        )
+      : queryClient.invalidateQueries({
+          queryKey: itemId ? titleWatchProgressQueryKey(itemId) : TITLE_WATCH_PROGRESS_QUERY_KEY,
+          refetchType: 'none',
+        }),
     invalidateQuery(queryClient, TOTAL_WATCH_TIME_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
-    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -197,12 +203,18 @@ export async function invalidatePlaybackHistoryQueriesForTitle(
   await invalidateHistoryCollections(queryClient, itemId, refetchTitleProgress);
 }
 
-export async function invalidateListQueries(queryClient: QueryClient) {
-  // Calendar tracks list members; lists_count lives inside the stats payload.
-  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY, true);
+export async function invalidateListMetadataQueries(queryClient: QueryClient) {
   await Promise.all([
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
+  ]);
+}
+
+export async function invalidateListQueries(queryClient: QueryClient) {
+  // Calendar tracks list members; lists_count lives inside the stats payload.
+  void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
+  await Promise.all([
+    invalidateListMetadataQueries(queryClient),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }
@@ -210,11 +222,13 @@ export async function invalidateListQueries(queryClient: QueryClient) {
 export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
   // watch_statuses_count lives inside the stats payload.
   refreshScheduleQueries(queryClient);
+  void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, LISTS_QUERY_KEY),
+    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
-    invalidateQuery(queryClient, trendingRowQueryKey('similar'), true),
   ]);
 }
 
@@ -255,11 +269,7 @@ export function addonSubtitlesQueryKey(
 }
 
 export async function invalidateStreamQueries(queryClient: QueryClient) {
-  // Addon subtitles are an addon resource; a changed addon set drops them too.
-  await Promise.all([
-    invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive'),
-    invalidateQuery(queryClient, ADDON_SUBTITLES_QUERY_KEY),
-  ]);
+  await invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive');
 }
 
 let discoveryEpoch = 0;
@@ -283,7 +293,17 @@ export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
       TRENDING_QUERY_KEY,
       BROWSE_GENRES_QUERY_KEY,
       RECENT_WATCH_SEED_QUERY_KEY,
-    ].map((queryKey) => invalidateQuery(queryClient, queryKey, true)),
+    ].map((queryKey) => invalidateQuery(queryClient, queryKey)),
+  ]);
+}
+
+// Background manifest refreshes can change catalog routing; active streams stay attached.
+export async function invalidateAddonCapabilityQueries(queryClient: QueryClient) {
+  await Promise.all([
+    invalidateQuery(queryClient, ADDON_CONFIGS_QUERY_KEY),
+    invalidateQuery(queryClient, BROWSE_GENRES_QUERY_KEY),
+    invalidateQuery(queryClient, SEARCH_CATALOG_QUERY_KEY),
+    invalidateQuery(queryClient, TRENDING_QUERY_KEY),
   ]);
 }
 

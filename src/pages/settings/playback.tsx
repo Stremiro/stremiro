@@ -12,11 +12,13 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
-import { api, type AppUiPreferences, getErrorMessage, type SupportedLanguage } from '@/lib/api';
+import {
+  supportedLanguagesQueryOptions,
+  usePlaybackLanguagePreferences,
+} from '@/hooks/use-playback-language-preferences';
+import { type AppUiPreferences, getErrorMessage, type SupportedLanguage } from '@/lib/api';
 import { normalizeLanguageToken } from '@/lib/player-track-utils';
-import { SUPPORTED_LANGUAGES_QUERY_KEY } from '@/lib/query-invalidation';
-import { clearTimer, cn } from '@/lib/utils';
+import { clearTimer, cn, queryNeedsRetry } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
@@ -106,11 +108,10 @@ function formatLanguageLabel(
   kind: 'audio' | 'subtitle',
   options: readonly SupportedLanguage[],
 ): string {
-  const normalized = normalizeLanguageToken(value);
-  if (!normalized) return 'Auto';
-  if (kind === 'subtitle' && normalized === 'off') return 'Off';
-  const option = options.find((lang) => lang.code === normalized);
-  return option ? `${option.label} (${option.code})` : normalized;
+  if (!value) return 'Auto';
+  if (kind === 'subtitle' && value === 'off') return 'Off';
+  const option = options.find((lang) => lang.code === value);
+  return option ? `${option.label} (${option.code})` : value;
 }
 
 interface LanguageSelectorProps {
@@ -130,7 +131,6 @@ function LanguageSelector({
   disabled,
   onChange,
 }: LanguageSelectorProps) {
-  const normalized = normalizeLanguageToken(value);
   const valueLabel = formatLanguageLabel(value, kind, options);
 
   return (
@@ -158,21 +158,21 @@ function LanguageSelector({
         >
           <DropdownMenuItem
             role='menuitemradio'
-            aria-checked={!normalized}
+            aria-checked={!value}
             onClick={() => onChange('')}
             className={PLAYBACK_MENU_ITEM_CLASS}
           >
-            <MenuCheck active={!normalized} />
+            <MenuCheck active={!value} />
             Auto
           </DropdownMenuItem>
           {kind === 'subtitle' && (
             <DropdownMenuItem
               role='menuitemradio'
-              aria-checked={normalized === 'off'}
+              aria-checked={value === 'off'}
               onClick={() => onChange('off')}
               className={PLAYBACK_MENU_ITEM_CLASS}
             >
-              <MenuCheck active={normalized === 'off'} />
+              <MenuCheck active={value === 'off'} />
               Off
             </DropdownMenuItem>
           )}
@@ -180,11 +180,11 @@ function LanguageSelector({
             <DropdownMenuItem
               key={option.code}
               role='menuitemradio'
-              aria-checked={normalized === option.code}
+              aria-checked={value === option.code}
               onClick={() => onChange(option.code)}
               className={PLAYBACK_MENU_ITEM_CLASS}
             >
-              <MenuCheck active={normalized === option.code} />
+              <MenuCheck active={value === option.code} />
               {option.label} ({option.code})
             </DropdownMenuItem>
           ))}
@@ -209,11 +209,7 @@ function PlaybackLanguageConfig() {
     saveGlobalPlaybackLanguagePreference,
   } = usePlaybackLanguagePreferences();
   // The closed set lives in Rust; the query is effectively static per run.
-  const languageOptionsQuery = useQuery({
-    queryKey: SUPPORTED_LANGUAGES_QUERY_KEY,
-    queryFn: api.getSupportedLanguages,
-    staleTime: Number.POSITIVE_INFINITY,
-  });
+  const languageOptionsQuery = useQuery(supportedLanguagesQueryOptions);
   const options = languageOptionsQuery.data ?? [];
 
   const handleLanguageChange = (kind: 'audio' | 'subtitle', value: string) => {
@@ -244,11 +240,8 @@ function PlaybackLanguageConfig() {
   };
 
   if (
-    globalPlaybackLanguagePreferencesQuery.isError ||
-    (globalPlaybackLanguagePreferencesQuery.isFetched &&
-      globalPlaybackLanguagePreferencesQuery.isLoading) ||
-    languageOptionsQuery.isError ||
-    (languageOptionsQuery.isFetched && languageOptionsQuery.isLoading)
+    queryNeedsRetry(globalPlaybackLanguagePreferencesQuery) ||
+    queryNeedsRetry(languageOptionsQuery)
   ) {
     return (
       <RetryBanner

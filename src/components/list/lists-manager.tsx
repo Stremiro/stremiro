@@ -18,20 +18,32 @@ import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-q
 import {
   ChevronDown,
   ChevronRight,
+  Check,
+  CheckSquare,
   GripVertical,
   ListPlus,
   Pencil,
   Plus,
+  Search,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
 import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { CreateListDialog, RenameListDialog } from '@/components/list/list-editor-dialog';
+import { useSearchParams } from 'react-router';
+import {
+  CreateListDialog,
+  RenameListDialog,
+  warmListEditorDialog,
+} from '@/components/list/list-editor-dialog';
 import { PosterThumb } from '@/components/poster-thumb';
-import { ViewToggle } from '@/components/profile-library-controls';
-import { RemoteImage } from '@/components/remote-image';
+import {
+  CollectionBulkActionBar,
+  useCollectionSelection,
+  ViewToggle,
+} from '@/components/profile-library-controls';
 import { RetryBanner } from '@/components/retry-banner';
-import { useLists } from '@/hooks/use-media-library';
+import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
 import { useTitleSearch } from '@/hooks/use-item-search';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
@@ -46,17 +58,47 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
-import { api, type MediaItem, type UserList } from '@/lib/api';
+import {
+  api,
+  type MediaItem,
+  type SmartListRules,
+  type UserList,
+  WATCH_STATUS_LABELS,
+} from '@/lib/api';
 import { navigateToDetails } from '@/lib/player-navigation';
 import { notifyAction } from '@/lib/notify';
 
-import { invalidateListQueries, LISTS_QUERY_KEY } from '@/lib/query-invalidation';
-import { cn, isHttpUrl } from '@/lib/utils';
+import {
+  invalidateListMetadataQueries,
+  invalidateListQueries,
+  LISTS_QUERY_KEY,
+} from '@/lib/query-invalidation';
+import { boundedMapSet, cn } from '@/lib/utils';
 import { AddTitlesDialog } from './add-titles-dialog';
 import { ListIconTile } from './list-icons';
 
 const LIST_ITEMS_PAGE_SIZE = 150;
+function smartRulesSummary(rules: SmartListRules) {
+  return [
+    rules.media_type === 'movie' ? 'Movies' : rules.media_type === 'series' ? 'Series' : null,
+    rules.genres.join(' / '),
+    rules.statuses.map((status) => WATCH_STATUS_LABELS[status]).join(' / '),
+    rules.year_from != null && rules.year_to != null
+      ? `${rules.year_from}–${rules.year_to}`
+      : rules.year_from != null
+        ? `From ${rules.year_from}`
+        : rules.year_to != null
+          ? `Until ${rules.year_to}`
+          : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+}
 const DELETE_LIST_MUTATION_KEY = ['delete-list'] as const;
+const listViewStates = new Map<
+  string,
+  { viewMode: 'grid' | 'list'; search: string; visibleLimit: number }
+>();
 
 const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-1',
@@ -104,6 +146,7 @@ function SortableListCard({
   onRename,
   onDelete,
 }: SortableListCardProps) {
+  const rulesSummary = list.rules ? smartRulesSummary(list.rules) : undefined;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: list.id,
   });
@@ -116,6 +159,7 @@ function SortableListCard({
   return (
     <div
       ref={setNodeRef}
+      data-list-row={list.id}
       style={style}
       className={cn(
         'rounded-xl border transition-[background-color,border-color,opacity] duration-200',
@@ -151,10 +195,22 @@ function SortableListCard({
               >
                 {list.name}
               </span>
+              {list.rules && (
+                <Sparkles
+                  className='size-3 shrink-0 text-(--accent-nav)'
+                  role='img'
+                  aria-label='Smart list'
+                />
+              )}
             </div>
             <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
               {list.item_ids.length} title{list.item_ids.length === 1 ? '' : 's'}
             </p>
+            {list.rules && (
+              <p className='mt-0.5 truncate text-[11px] text-zinc-500' title={rulesSummary}>
+                {rulesSummary}
+              </p>
+            )}
           </div>
           <ListPosterStack items={list.items} />
           <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
@@ -170,9 +226,11 @@ function SortableListCard({
           <Button
             size='icon'
             variant='ghost'
+            onPointerEnter={warmListEditorDialog}
+            onFocus={warmListEditorDialog}
             onClick={() => onRename(list)}
-            aria-label={`Rename ${list.name}`}
-            title='Rename list'
+            aria-label={list.rules ? `Edit rules and name for ${list.name}` : `Rename ${list.name}`}
+            title={list.rules ? 'Edit rules and name' : 'Rename list'}
             className='h-8 w-8 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/8'
           >
             <Pencil className='w-3.5 h-3.5' />
@@ -180,11 +238,14 @@ function SortableListCard({
           <Button
             size='icon'
             variant='ghost'
-            onClick={() => onDelete(list)}
-            disabled={isDeleting}
+            data-list-delete={list.id}
+            onClick={() => {
+              if (!isDeleting) onDelete(list);
+            }}
+            aria-disabled={isDeleting || undefined}
             aria-label={`Delete ${list.name}`}
             title='Delete list'
-            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10'
+            className='h-8 w-8 rounded-md text-zinc-500 not-aria-disabled:hover:text-red-400 not-aria-disabled:hover:bg-red-500/10 aria-disabled:opacity-50'
           >
             <Trash2 className='w-3.5 h-3.5' />
           </Button>
@@ -203,21 +264,29 @@ function SortableListCard({
 interface SortableItemRowProps {
   item: MediaItem;
   listId: string;
+  readOnly: boolean;
   viewMode: 'grid' | 'list';
   onRemoved: (button: HTMLButtonElement | null) => void;
+  selectionMode: boolean;
+  isSelected: boolean;
+  onToggleSelect: (id: string, shiftKey?: boolean) => void;
 }
 
 // memo: keystrokes re-render the view with the same item objects (structural sharing) — unaffected rows skip rendering.
 const SortableItemRow = memo(function SortableItemRow({
   item,
   listId,
+  readOnly,
   viewMode,
   onRemoved,
+  selectionMode,
+  isSelected,
+  onToggleSelect,
 }: SortableItemRowProps) {
-  const queryClient = useQueryClient();
   const removeButtonRef = useRef<HTMLButtonElement>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: `${listId}::${item.id}`,
+    disabled: readOnly || selectionMode,
   });
 
   const style = {
@@ -225,17 +294,66 @@ const SortableItemRow = memo(function SortableItemRow({
     transition,
   };
 
-  const removeItem = useMutation({
-    mutationFn: () => api.removeFromList(listId, item.id),
-    onSuccess: () => {
-      onRemoved(removeButtonRef.current);
-      notifyAction('Removed from list', { detail: item.title, thumb: item.poster });
-    },
-    onError: () => notifyAction('Failed to remove item', { tone: 'error' }),
-    onSettled: () => invalidateListQueries(queryClient),
-  });
+  const removeItem = useBulkRemoveFromList();
+  const handleRemove = () => {
+    if (readOnly || removeItem.isPending) return;
+    onRemoved(removeButtonRef.current);
+    removeItem.mutate({ listId, itemIds: [item.id] });
+  };
 
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
+
+  if (selectionMode) {
+    return (
+      <button
+        type='button'
+        aria-pressed={isSelected}
+        aria-label={`${isSelected ? 'Deselect' : 'Select'} ${item.title}`}
+        onClick={(event) => onToggleSelect(item.id, event.shiftKey)}
+        className={cn(
+          'relative group rounded-lg border text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
+          viewMode === 'grid' ? 'overflow-hidden' : 'flex w-full items-center gap-3 px-3 py-2',
+          isSelected
+            ? 'border-white/20 bg-white/[0.06]'
+            : 'border-white/5 bg-white/[0.02] hover:bg-white/5',
+        )}
+      >
+        <span
+          aria-hidden='true'
+          className={cn(
+            'flex h-5 w-5 shrink-0 items-center justify-center rounded-md border',
+            viewMode === 'grid' && 'absolute top-2 left-2 z-10',
+            isSelected
+              ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav)'
+              : 'border-white/25 bg-black/60 text-transparent',
+          )}
+        >
+          <Check className='h-3 w-3' strokeWidth={3} />
+        </span>
+        <PosterThumb
+          poster={item.poster}
+          title={item.title}
+          mediaType={item.type}
+          size={viewMode === 'list' ? 'sm' : undefined}
+          className={
+            viewMode === 'grid' ? 'aspect-2/3 h-auto w-full rounded-none ring-0' : undefined
+          }
+        />
+        <span
+          dir='auto'
+          title={item.title}
+          className={cn(
+            'block font-medium',
+            viewMode === 'grid'
+              ? 'line-clamp-2 min-h-[2.5em] p-2 text-[13px] leading-tight tracking-[-0.01em] text-zinc-100 [overflow-wrap:anywhere]'
+              : 'truncate text-sm text-zinc-200',
+          )}
+        >
+          {item.title}
+        </span>
+      </button>
+    );
+  }
 
   if (viewMode === 'grid') {
     return (
@@ -247,31 +365,35 @@ const SortableItemRow = memo(function SortableItemRow({
           isDragging ? 'opacity-40 scale-95' : 'hover:ring-1 hover:ring-white/20',
         )}
       >
-        <button
-          type='button'
-          {...attributes}
-          {...listeners}
-          aria-label={`Reorder ${item.title}`}
-          className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-        >
-          <GripVertical className='w-3 h-3 text-white' />
-        </button>
+        {!readOnly && (
+          <button
+            type='button'
+            {...attributes}
+            {...listeners}
+            aria-label={`Reorder ${item.title}`}
+            className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+          >
+            <GripVertical className='w-3 h-3 text-white' />
+          </button>
+        )}
 
-        <button
-          ref={removeButtonRef}
-          data-list-remove={item.id}
-          type='button'
-          onClick={(e) => {
-            e.stopPropagation();
-            if (!removeItem.isPending) removeItem.mutate();
-          }}
-          aria-disabled={removeItem.isPending || undefined}
-          aria-label={`Remove ${item.title} from list`}
-          title='Remove from list'
-          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md not-aria-disabled:hover:bg-red-500/80 text-white aria-disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-        >
-          <X className='w-3 h-3' />
-        </button>
+        {!readOnly && (
+          <button
+            ref={removeButtonRef}
+            data-list-remove={item.id}
+            type='button'
+            onClick={(e) => {
+              e.stopPropagation();
+              handleRemove();
+            }}
+            aria-disabled={removeItem.isPending || undefined}
+            aria-label={`Remove ${item.title} from list`}
+            title='Remove from list'
+            className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md not-aria-disabled:hover:bg-red-500/80 text-white aria-disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+          >
+            <X className='w-3 h-3' />
+          </button>
+        )}
 
         <button
           type='button'
@@ -293,12 +415,12 @@ const SortableItemRow = memo(function SortableItemRow({
           <p
             dir='auto'
             title={item.title}
-            className='text-[11px] font-medium text-zinc-300 truncate leading-tight'
+            className='line-clamp-2 min-h-[2.5em] text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100 [overflow-wrap:anywhere]'
           >
             {item.title}
           </p>
           {item.displayYear && (
-            <p className='text-[10px] text-zinc-600 capitalize mt-0.5'>{item.displayYear}</p>
+            <p className='mt-1 text-[11px] leading-none text-zinc-400'>{item.displayYear}</p>
           )}
         </div>
       </div>
@@ -314,15 +436,17 @@ const SortableItemRow = memo(function SortableItemRow({
         isDragging ? 'opacity-40 bg-zinc-800/80' : 'hover:bg-white/5',
       )}
     >
-      <button
-        type='button'
-        {...attributes}
-        {...listeners}
-        aria-label={`Reorder ${item.title}`}
-        className='-ml-1 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
-      >
-        <GripVertical className='w-3.5 h-3.5' />
-      </button>
+      {!readOnly && (
+        <button
+          type='button'
+          {...attributes}
+          {...listeners}
+          aria-label={`Reorder ${item.title}`}
+          className='-ml-1 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+        >
+          <GripVertical className='w-3.5 h-3.5' />
+        </button>
+      )}
 
       <button
         type='button'
@@ -358,39 +482,48 @@ const SortableItemRow = memo(function SortableItemRow({
         </span>
       </button>
 
-      <Button
-        ref={removeButtonRef}
-        data-list-remove={item.id}
-        size='icon'
-        variant='ghost'
-        onClick={() => {
-          if (!removeItem.isPending) removeItem.mutate();
-        }}
-        aria-disabled={removeItem.isPending || undefined}
-        aria-label={`Remove ${item.title} from list`}
-        title='Remove from list'
-        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-500'
-      >
-        <X className='w-3.5 h-3.5' />
-      </Button>
+      {!readOnly && (
+        <Button
+          ref={removeButtonRef}
+          data-list-remove={item.id}
+          size='icon'
+          variant='ghost'
+          onClick={handleRemove}
+          aria-disabled={removeItem.isPending || undefined}
+          aria-label={`Remove ${item.title} from list`}
+          title='Remove from list'
+          className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-500'
+        >
+          <X className='w-3.5 h-3.5' />
+        </Button>
+      )}
     </div>
   );
 });
 
 function ListItemsView({ list }: { list: UserList }) {
+  const readOnly = Boolean(list.rules);
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
 
   const [orderedIds, setOrderedIds] = useState<string[] | null>(null);
 
   const [activeId, setActiveId] = useState<UniqueIdentifier | null>(null);
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('list');
-  const [search, setSearch] = useState('');
-  const [visibleLimit, setVisibleLimit] = useState(LIST_ITEMS_PAGE_SIZE);
+  const [viewMode, setViewMode] = useState<'grid' | 'list'>(
+    () => listViewStates.get(list.id)?.viewMode ?? 'list',
+  );
+  const [search, setSearch] = useState(() => listViewStates.get(list.id)?.search ?? '');
+  const searchInputRef = useRef<HTMLInputElement>(null);
+  const [visibleLimit, setVisibleLimit] = useState(
+    () => listViewStates.get(list.id)?.visibleLimit ?? LIST_ITEMS_PAGE_SIZE,
+  );
+  useLayoutEffect(() => {
+    boundedMapSet(listViewStates, list.id, { viewMode, search, visibleLimit }, 64);
+  }, [list.id, viewMode, search, visibleLimit]);
   const [addTitlesOpen, setAddTitlesOpen] = useState(false);
   const itemsContainerRef = useRef<HTMLDivElement>(null);
   const addTitlesButtonRef = useRef<HTMLButtonElement>(null);
-  const removalFocusRef = useRef<{ button: HTMLButtonElement; candidates: string[] } | null>(null);
+  const removalFocusRef = useRef<{ button: HTMLButtonElement; index: number } | null>(null);
 
   const orderedItems = useMemo(() => {
     const sourceItems = list.items ?? [];
@@ -398,28 +531,17 @@ function ListItemsView({ list }: { list: UserList }) {
     const itemMap = new Map(sourceItems.map((i) => [i.id, i]));
     const ordered = orderedIds.flatMap((id) => {
       const orderedItem = itemMap.get(id);
+      itemMap.delete(id);
       return orderedItem ? [orderedItem] : [];
     });
-    const orderedSet = new Set(orderedIds);
-    const added = sourceItems.filter((i) => !orderedSet.has(i.id));
-    return [...ordered, ...added];
+    return [...ordered, ...itemMap.values()];
   }, [orderedIds, list.items]);
-
-  const orderedItemsRef = useRef(orderedItems);
-  useLayoutEffect(() => {
-    orderedItemsRef.current = orderedItems;
-  }, [orderedItems]);
 
   const handleRemoved = useCallback((button: HTMLButtonElement | null) => {
     if (!button || document.activeElement !== button) return;
-    const items = orderedItemsRef.current;
-    const index = items.findIndex((item) => item.id === button.dataset.listRemove);
-    removalFocusRef.current = {
-      button,
-      candidates: [...items.slice(index + 1), ...items.slice(0, index).toReversed()].map(
-        (item) => item.id,
-      ),
-    };
+    const buttons =
+      itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]');
+    if (buttons) removalFocusRef.current = { button, index: Array.from(buttons).indexOf(button) };
   }, []);
 
   const sensors = useSortableSensors();
@@ -457,13 +579,9 @@ function ListItemsView({ list }: { list: UserList }) {
       if (!over || active.id === over.id) return;
 
       // Composite drag IDs are `${listId}::${itemId}` — strip the prefix.
-      const prefix = `${list.id}::`;
-      const activeItemId = String(active.id).startsWith(prefix)
-        ? String(active.id).slice(prefix.length)
-        : String(active.id);
-      const overItemId = String(over.id).startsWith(prefix)
-        ? String(over.id).slice(prefix.length)
-        : String(over.id);
+      const prefixLength = list.id.length + 2;
+      const activeItemId = String(active.id).slice(prefixLength);
+      const overItemId = String(over.id).slice(prefixLength);
 
       // Compute outside the state updater — Strict Mode double-invokes updaters, which would double-fire the mutation.
       const current = orderedItems.map((item) => item.id);
@@ -490,6 +608,25 @@ function ListItemsView({ list }: { list: UserList }) {
   } = useTitleSearch(orderedItems, search);
 
   const visibleItems = useMemo(() => filtered.slice(0, visibleLimit), [filtered, visibleLimit]);
+  const visibleIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
+  const bulkRemove = useBulkRemoveFromList();
+  const selection = useCollectionSelection(
+    list.item_ids,
+    visibleIds,
+    !readOnly,
+    bulkRemove.isPending || reorderItems.isPending,
+    false,
+    addTitlesButtonRef,
+  );
+  const removeSelected = async () => {
+    if (bulkRemove.isPending || reorderItems.isPending || selection.selectedIds.size === 0) return;
+    try {
+      await bulkRemove.mutateAsync({ listId: list.id, itemIds: [...selection.selectedIds] });
+      if (mountedRef.current) selection.exit();
+    } catch {
+      // The mutation owns rollback and error feedback.
+    }
+  };
 
   useLayoutEffect(() => {
     const pending = removalFocusRef.current;
@@ -500,14 +637,9 @@ function ListItemsView({ list }: { list: UserList }) {
     }
     removalFocusRef.current = null;
     if (document.activeElement !== document.body) return;
-    const buttons = new Map(
-      Array.from(
-        itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]') ?? [],
-        (button) => [button.dataset.listRemove, button] as const,
-      ),
-    );
-    const nextId = pending.candidates.find((id) => buttons.has(id));
-    (buttons.get(nextId) ?? addTitlesButtonRef.current)?.focus();
+    const buttons =
+      itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]');
+    (buttons?.[Math.min(pending.index, buttons.length - 1)] ?? addTitlesButtonRef.current)?.focus();
   });
 
   // SortableContext diffs off this array's identity — keep it stable across membership-equal renders.
@@ -521,8 +653,8 @@ function ListItemsView({ list }: { list: UserList }) {
   return (
     <div
       className='p-3 space-y-3'
-      data-escape-capture={activeId !== null ? '' : undefined}
-      aria-busy={isSearchPending}
+      data-collection-selection=''
+      data-escape-capture={activeId !== null || selection.selectionMode ? '' : undefined}
     >
       {isSearchPending && (
         <span role='status' className='sr-only'>
@@ -533,6 +665,8 @@ function ListItemsView({ list }: { list: UserList }) {
         {orderedItems.length > 0 ? (
           <>
             <SearchInput
+              inputRef={searchInputRef}
+              pending={isSearchPending}
               value={search}
               onValueChange={(value) => {
                 setSearch(value);
@@ -544,21 +678,55 @@ function ListItemsView({ list }: { list: UserList }) {
               className='h-9 pl-8 rounded-lg bg-white/[0.03] border-white/[0.07] text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
             />
             <ViewToggle viewMode={viewMode} onChange={setViewMode} />
+            {!readOnly && (
+              <Button
+                ref={selection.triggerRef}
+                size='sm'
+                variant='outline'
+                aria-pressed={selection.selectionMode}
+                disabled={bulkRemove.isPending || reorderItems.isPending || activeId !== null}
+                onClick={selection.selectionMode ? selection.exit : selection.begin}
+                className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
+              >
+                <CheckSquare className='h-3.5 w-3.5' />
+                Select
+              </Button>
+            )}
           </>
         ) : (
           <p className='flex-1 pl-1 text-xs font-medium text-zinc-500'>Your titles</p>
         )}
-        <Button
-          ref={addTitlesButtonRef}
-          variant='outline'
-          size='sm'
-          onClick={() => setAddTitlesOpen(true)}
-          className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-white'
-        >
-          <Plus className='h-3.5 w-3.5' />
-          Add titles
-        </Button>
+        {!readOnly && (
+          <Button
+            ref={addTitlesButtonRef}
+            variant='outline'
+            size='sm'
+            onClick={() => setAddTitlesOpen(true)}
+            disabled={bulkRemove.isPending}
+            className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+          >
+            <Plus className='h-3.5 w-3.5' />
+            Add titles
+          </Button>
+        )}
       </div>
+
+      {!readOnly && selection.selectionMode && (
+        <CollectionBulkActionBar
+          selectedCount={selection.selectedIds.size}
+          filteredCount={filtered.length}
+          allFilteredSelected={
+            filtered.length > 0 && filtered.every((item) => selection.selectedIds.has(item.id))
+          }
+          selectAllDisabled={isSearchPending || searchError}
+          isBusy={bulkRemove.isPending || reorderItems.isPending}
+          onSelectAll={() => selection.selectAll(filtered.map((item) => item.id))}
+          onClear={selection.clear}
+          onDone={selection.exit}
+          onRemove={() => void removeSelected()}
+          removeLabel='Remove from list'
+        />
+      )}
 
       {searchError && (
         <RetryBanner message='Search failed.' isRetrying={isSearchFetching} onRetry={retrySearch} />
@@ -568,116 +736,145 @@ function ListItemsView({ list }: { list: UserList }) {
         <div className='flex flex-col items-center gap-3 px-4 py-7 text-center'>
           <ListIconTile iconId={list.icon} size='lg' />
           <div>
-            <p className='text-sm font-medium text-zinc-300'>Make this collection yours</p>
+            <p className='text-sm font-medium text-zinc-300'>
+              {readOnly ? 'No Library titles match yet' : 'Make this collection yours'}
+            </p>
             <p className='mt-1 max-w-sm text-xs leading-relaxed text-zinc-500'>
-              Use &ldquo;Add titles&rdquo; to choose from your library, or the save button on a
-              title's details page.
+              {readOnly
+                ? 'Save titles to your Library or edit the rules. This list updates automatically.'
+                : "Use “Add titles” to choose from your library, or the save button on a title's details page."}
             </p>
           </div>
-          <Button
-            size='sm'
-            onClick={() => setAddTitlesOpen(true)}
-            className='bg-white text-black hover:bg-zinc-200'
-          >
-            <Plus className='h-3.5 w-3.5' />
-            Add titles
-          </Button>
-        </div>
-      )}
-
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragStart={handleDragStart}
-        onDragEnd={handleDragEnd}
-        onDragCancel={() => setActiveId(null)}
-      >
-        <SortableContext
-          items={sortableItemIds}
-          strategy={viewMode === 'grid' ? rectSortingStrategy : verticalListSortingStrategy}
-        >
-          <div
-            ref={itemsContainerRef}
-            className={
-              viewMode === 'grid'
-                ? 'grid grid-cols-2 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 gap-2'
-                : 'space-y-0.5'
-            }
-          >
-            {visibleItems.map((item) => (
-              <SortableItemRow
-                key={item.id}
-                item={item}
-                listId={list.id}
-                viewMode={viewMode}
-                onRemoved={handleRemoved}
-              />
-            ))}
-          </div>
-        </SortableContext>
-
-        <DragOverlay>
-          {activeItem ? (
-            <div
-              className={cn(
-                'rounded-lg bg-zinc-800/90 border border-white/20 shadow-2xl shadow-black/60',
-                viewMode === 'grid' ? 'w-20 opacity-90' : 'w-64 opacity-90',
-              )}
+          {!readOnly && (
+            <Button
+              size='sm'
+              onClick={() => setAddTitlesOpen(true)}
+              className='bg-white text-black hover:bg-zinc-200'
             >
-              {viewMode === 'grid' ? (
-                <div className='aspect-2/3 overflow-hidden rounded-lg'>
-                  {isHttpUrl(activeItem.poster) && (
-                    <RemoteImage
-                      src={activeItem.poster}
-                      alt={activeItem.title}
-                      className='w-full h-full object-cover'
-                    />
-                  )}
-                </div>
-              ) : (
-                <div className='flex items-center gap-3 px-3 py-2.5'>
-                  <GripVertical className='w-3.5 h-3.5 text-zinc-400' />
-                  {isHttpUrl(activeItem.poster) && (
-                    <div className='h-10 w-7 rounded overflow-hidden shrink-0'>
-                      <RemoteImage
-                        src={activeItem.poster}
-                        alt={activeItem.title}
-                        className='w-full h-full object-cover'
-                      />
-                    </div>
-                  )}
-                  <span className='text-sm font-medium text-white truncate'>
-                    {activeItem.title}
-                  </span>
-                </div>
-              )}
-            </div>
-          ) : null}
-        </DragOverlay>
-      </DndContext>
-
-      {filtered.length > visibleItems.length && (
-        <div className='space-y-2 px-3 py-3 text-center'>
-          <p className='text-[11px] text-zinc-500'>
-            Showing {visibleItems.length} of {filtered.length}
-          </p>
-          <Button
-            variant='outline'
-            size='sm'
-            disabled={activeId !== null}
-            onClick={() => setVisibleLimit((limit) => limit + LIST_ITEMS_PAGE_SIZE)}
-          >
-            Show more
-          </Button>
+              <Plus className='h-3.5 w-3.5' />
+              Add titles
+            </Button>
+          )}
         </div>
       )}
 
-      {effectiveSearch && filtered.length === 0 && (
-        <p className='text-xs text-zinc-600 text-center py-4'>
-          No items match &ldquo;{effectiveSearch}&rdquo;
-        </p>
+      <div
+        aria-busy={isSearchPending}
+        className={cn('space-y-3 transition-opacity', isSearchPending && 'opacity-60')}
+      >
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragStart={handleDragStart}
+          onDragEnd={handleDragEnd}
+          onDragCancel={() => setActiveId(null)}
+        >
+          <SortableContext
+            items={sortableItemIds}
+            strategy={viewMode === 'grid' ? rectSortingStrategy : verticalListSortingStrategy}
+          >
+            <div
+              ref={itemsContainerRef}
+              className={
+                viewMode === 'grid'
+                  ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3'
+                  : 'space-y-0.5'
+              }
+            >
+              {visibleItems.map((item) => (
+                <SortableItemRow
+                  key={item.id}
+                  item={item}
+                  listId={list.id}
+                  readOnly={readOnly}
+                  viewMode={viewMode}
+                  onRemoved={handleRemoved}
+                  selectionMode={selection.selectionMode}
+                  isSelected={selection.selectedIds.has(item.id)}
+                  onToggleSelect={selection.toggle}
+                />
+              ))}
+            </div>
+          </SortableContext>
+
+          <DragOverlay>
+            {activeItem ? (
+              <div
+                className={cn(
+                  'rounded-lg bg-zinc-800/90 border border-white/20 shadow-2xl shadow-black/60',
+                  viewMode === 'grid' ? 'w-20 opacity-90' : 'w-64 opacity-90',
+                )}
+              >
+                {viewMode === 'grid' ? (
+                  <PosterThumb
+                    poster={activeItem.poster}
+                    title={activeItem.title}
+                    mediaType={activeItem.type}
+                    className='aspect-2/3 h-auto w-full rounded-lg ring-0'
+                  />
+                ) : (
+                  <div className='flex items-center gap-3 px-3 py-2.5'>
+                    <GripVertical className='w-3.5 h-3.5 text-zinc-400' />
+                    <PosterThumb
+                      poster={activeItem.poster}
+                      title={activeItem.title}
+                      mediaType={activeItem.type}
+                      size='sm'
+                      className='rounded ring-0'
+                    />
+                    <span className='text-sm font-medium text-white truncate'>
+                      {activeItem.title}
+                    </span>
+                  </div>
+                )}
+              </div>
+            ) : null}
+          </DragOverlay>
+        </DndContext>
+
+        {filtered.length > visibleItems.length && (
+          <div className='space-y-2 px-3 py-3 text-center'>
+            <p className='text-[11px] text-zinc-500'>
+              Showing {visibleItems.length} of {filtered.length}
+            </p>
+            <Button
+              variant='outline'
+              size='sm'
+              disabled={activeId !== null}
+              onClick={() => setVisibleLimit((limit) => limit + LIST_ITEMS_PAGE_SIZE)}
+            >
+              Show more
+            </Button>
+          </div>
+        )}
+
+        {effectiveSearch && filtered.length === 0 && (
+          <div className='flex flex-col items-center justify-center gap-3 rounded-lg border border-white/[0.06] bg-white/[0.015] px-6 py-12 text-center'>
+            <div className='flex h-10 w-10 items-center justify-center'>
+              <Search aria-hidden='true' className='h-6 w-6 text-zinc-600' />
+            </div>
+            <p className='text-[15px] font-semibold text-zinc-200'>No results</p>
+            <p className='w-full max-w-xs text-[13px] leading-relaxed text-zinc-500 [overflow-wrap:anywhere]'>
+              Nothing in this list matches &ldquo;{effectiveSearch}&rdquo;.
+            </p>
+            <Button
+              size='sm'
+              variant='ghost'
+              className='h-8 text-xs text-zinc-400'
+              onClick={() => {
+                setSearch('');
+                setVisibleLimit(LIST_ITEMS_PAGE_SIZE);
+                searchInputRef.current?.focus({ preventScroll: true });
+              }}
+            >
+              Clear search
+            </Button>
+          </div>
+        )}
+      </div>
+      {!readOnly && addTitlesOpen && (
+        <AddTitlesDialog list={list} onOpenChange={setAddTitlesOpen} />
       )}
-      {addTitlesOpen && <AddTitlesDialog list={list} onOpenChange={setAddTitlesOpen} />}
     </div>
   );
 }
@@ -696,22 +893,73 @@ function ListGhostCard({ list }: { list: UserList }) {
 export function ListsManager() {
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
-  const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  const [searchParams, setSearchParams] = useSearchParams();
+  const expanded = useMemo(() => new Set(searchParams.getAll('list')), [searchParams]);
+  const updateExpanded = useCallback(
+    (id: string, open?: boolean) => {
+      setSearchParams(
+        (current) => {
+          const next = new URLSearchParams(current);
+          const ids = new Set(next.getAll('list'));
+          if (open ?? !ids.has(id)) ids.add(id);
+          else ids.delete(id);
+          next.delete('list');
+          for (const expandedId of ids) next.append('list', expandedId);
+          return next;
+        },
+        { replace: true },
+      );
+    },
+    [setSearchParams],
+  );
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<UserList | null>(null);
   const [activeListId, setActiveListId] = useState<UniqueIdentifier | null>(null);
   const listOrderGenerationRef = useRef(0);
+  const listsContainerRef = useRef<HTMLDivElement>(null);
+  const newListButtonRef = useRef<HTMLButtonElement>(null);
+  const deleteDialogRef = useRef<HTMLDivElement>(null);
+  const listRemovalFocusRef = useRef<{
+    button: HTMLButtonElement;
+    row: HTMLElement;
+    dialog: HTMLDivElement | null;
+    index: number;
+  } | null>(null);
+
+  const restoreDeletedListFocus = (dialogClosed = false) => {
+    const pending = listRemovalFocusRef.current;
+    if (!pending || (pending.dialog?.isConnected && !dialogClosed)) return false;
+    const activeElement = document.activeElement;
+    if (
+      activeElement &&
+      activeElement !== document.body &&
+      !pending.row.contains(activeElement) &&
+      !pending.dialog?.contains(activeElement)
+    ) {
+      listRemovalFocusRef.current = null;
+      return true;
+    }
+    if (pending.row.isConnected) return false;
+    listRemovalFocusRef.current = null;
+    const buttons =
+      listsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-delete]');
+    (buttons?.[Math.min(pending.index, buttons.length - 1)] ?? newListButtonRef.current)?.focus();
+    return true;
+  };
+  useLayoutEffect(() => {
+    restoreDeletedListFocus();
+  });
 
   const sensors = useSortableSensors();
 
-  const {
-    data: lists = [],
-    isLoading,
-    isLoadingError,
-    isFetched,
-    isFetching,
-    refetch,
-  } = useLists();
+  const { data: lists = [], isLoading, isError, isFetched, isFetching, refetch } = useLists();
+  const retryBanner = (
+    <RetryBanner
+      message={lists.length > 0 ? "Couldn't refresh your lists." : "Couldn't load your lists."}
+      onRetry={() => void refetch()}
+      isRetrying={isFetching}
+    />
+  );
 
   const reorderLists = useMutation({
     mutationFn: (next: UserList[]) => api.reorderLists(next.map((list) => list.id)),
@@ -722,12 +970,22 @@ export function ListsManager() {
       if (generation === listOrderGenerationRef.current) {
         queryClient.setQueryData(LISTS_QUERY_KEY, next);
       }
-      return { previous, generation };
+      return { previousOrder: previous?.map((list) => list.id), generation };
     },
-    onSettled: () => invalidateListQueries(queryClient),
+    onSettled: () => invalidateListMetadataQueries(queryClient),
     onError: (_, _next, context) => {
-      if (context?.generation === listOrderGenerationRef.current && context.previous) {
-        queryClient.setQueryData(LISTS_QUERY_KEY, context.previous);
+      const previousOrder = context?.previousOrder;
+      if (context?.generation === listOrderGenerationRef.current && previousOrder) {
+        queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) => {
+          if (!current) return current;
+          const remaining = new Map(current.map((list) => [list.id, list]));
+          const ordered = previousOrder.flatMap((id) => {
+            const list = remaining.get(id);
+            remaining.delete(id);
+            return list ? [list] : [];
+          });
+          return [...ordered, ...remaining.values()];
+        });
       }
       notifyAction('Failed to save list order', { tone: 'error' });
     },
@@ -738,34 +996,38 @@ export function ListsManager() {
     mutationFn: (id: string) => api.deleteList(id),
     onSuccess: (_, id) => {
       if (mountedRef.current) {
-        setExpanded((prev) => {
-          const next = new Set(prev);
-          next.delete(id);
-          return next;
-        });
+        updateExpanded(id, false);
       }
+      listViewStates.delete(id);
       notifyAction('List deleted');
     },
-    onError: () => notifyAction('Failed to delete list', { tone: 'error' }),
+    onError: (_, id) => {
+      if (listRemovalFocusRef.current?.button.dataset.listDelete === id) {
+        listRemovalFocusRef.current = null;
+      }
+      notifyAction('Failed to delete list', { tone: 'error' });
+    },
     onSettled: () => invalidateListQueries(queryClient),
   });
+
+  const startDelete = (id: string) => {
+    const buttons =
+      listsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-delete]');
+    const index = buttons
+      ? Array.from(buttons).findIndex((button) => button.dataset.listDelete === id)
+      : -1;
+    const button = buttons?.[index];
+    const row = button?.closest<HTMLElement>('[data-list-row]');
+    if (button && row) {
+      listRemovalFocusRef.current = { button, row, dialog: deleteDialogRef.current, index };
+    }
+    deleteList.mutate(id);
+  };
 
   const pendingDeleteIds = useMutationState({
     filters: { mutationKey: DELETE_LIST_MUTATION_KEY, status: 'pending' },
     select: (mutation) => mutation.state.variables as string,
   });
-
-  const toggleExpand = (id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  };
 
   const handleDragStart = (event: DragStartEvent) => {
     setActiveListId(event.active.id);
@@ -796,7 +1058,7 @@ export function ListsManager() {
       setDeleteTarget(list);
       return;
     }
-    deleteList.mutate(list.id);
+    startDelete(list.id);
   };
 
   return (
@@ -811,6 +1073,9 @@ export function ListsManager() {
           </p>
         </div>
         <Button
+          ref={newListButtonRef}
+          onPointerEnter={warmListEditorDialog}
+          onFocus={warmListEditorDialog}
           onClick={() => setCreateOpen(true)}
           className='bg-white text-black hover:bg-zinc-200 font-medium gap-2 h-9 rounded-lg px-4 text-[13px]'
         >
@@ -819,6 +1084,7 @@ export function ListsManager() {
         </Button>
       </div>
 
+      {isError && lists.length > 0 && retryBanner}
       {isLoading && !isFetched ? (
         <div role='status' aria-busy='true'>
           <span className='sr-only'>Loading lists…</span>
@@ -831,12 +1097,8 @@ export function ListsManager() {
             ))}
           </div>
         </div>
-      ) : isLoadingError || (isFetched && isLoading) ? (
-        <RetryBanner
-          message="Couldn't load your lists."
-          onRetry={() => void refetch()}
-          isRetrying={isFetching}
-        />
+      ) : (isError && lists.length === 0) || (isFetched && isLoading) ? (
+        retryBanner
       ) : lists.length === 0 ? (
         <div className='flex flex-col items-center justify-center px-6 py-12 gap-3 border border-white/[0.06] rounded-lg bg-white/[0.015]'>
           <ListIconTile iconId='Film' size='lg' />
@@ -857,14 +1119,14 @@ export function ListsManager() {
           onDragCancel={() => setActiveListId(null)}
         >
           <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
-            <div className='space-y-2'>
+            <div ref={listsContainerRef} className='space-y-2'>
               {lists.map((list) => (
                 <SortableListCard
                   key={list.id}
                   list={list}
                   isExpanded={expanded.has(list.id)}
                   isDeleting={pendingDeleteIds.includes(list.id)}
-                  onToggleExpand={toggleExpand}
+                  onToggleExpand={updateExpanded}
                   onRename={setRenameTarget}
                   onDelete={handleDeleteConfirm}
                 />
@@ -894,7 +1156,13 @@ export function ListsManager() {
           if (!open) setDeleteTarget(null);
         }}
       >
-        <DialogContent className='sm:max-w-sm'>
+        <DialogContent
+          ref={deleteDialogRef}
+          className='sm:max-w-sm'
+          onCloseAutoFocus={(event) => {
+            if (restoreDeletedListFocus(true)) event.preventDefault();
+          }}
+        >
           <DialogHeader>
             <DialogTitle>Delete list</DialogTitle>
             <DialogDescription>
@@ -913,7 +1181,7 @@ export function ListsManager() {
               disabled={!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)}
               onClick={() => {
                 if (!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)) return;
-                deleteList.mutate(deleteTarget.id);
+                startDelete(deleteTarget.id);
                 setDeleteTarget(null);
               }}
             >

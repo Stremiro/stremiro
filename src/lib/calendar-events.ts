@@ -1,5 +1,5 @@
 import type { CalendarScheduleEvent } from '@/lib/api';
-import { getEpisodeTitle, parseLocalScheduleDate } from '@/lib/utils';
+import { parseLocalScheduleDate } from '@/lib/schedule-dates';
 
 export interface CalendarEvent {
   id: string;
@@ -29,7 +29,6 @@ export function toCalendarEvent(event: CalendarScheduleEvent): CalendarEvent | n
   if (!date) return null;
   return {
     ...event,
-    title: event.type === 'movie' ? event.seriesTitle : getEpisodeTitle(event.title, event.episode),
     date,
   };
 }

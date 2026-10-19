@@ -4,6 +4,8 @@ import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
+  CHROME_MENU_INDICATOR_CLASS,
+  CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_POPOVER_CLASS,
 } from '@/components/player-chrome-styles';
 import { PlayerSlider } from '@/components/player-slider';
@@ -15,20 +17,23 @@ import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import type { Track } from '@/lib/player-track-utils';
 import { clamp, cn } from '@/lib/utils';
 
-// Dropping the container extension keeps addon-provided release names readable for any provider.
-const SUBTITLE_FILE_EXTENSION_RE = /\.(srt|ass|ssa|vtt|sub|idx|smi|txt)$/i;
-
 // Stable default — a fresh `[]` literal would defeat this component's memo.
 const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
 
-const SUBTITLE_NUDGE_BUTTON_CLASS =
-  'flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30 aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300';
-const SUBTITLE_VIEW_TAB_CLASS =
-  'flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
+const SUBTITLE_NUDGE_BUTTON_CLASS = cn(
+  CHROME_MENU_ROW_FOCUS_CLASS,
+  'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
+);
+const SUBTITLE_VIEW_TAB_CLASS = cn(
+  CHROME_MENU_ROW_FOCUS_CLASS,
+  'flex h-8 flex-1 items-center justify-center gap-1.5 rounded-md text-xs font-medium transition-colors',
+);
 const SUBTITLE_VIEW_TAB_ACTIVE_CLASS = 'bg-white/[0.09] text-white';
 const SUBTITLE_VIEW_TAB_INACTIVE_CLASS = 'text-zinc-400 hover:text-white';
-const TRACK_ROW_CLASS =
-  'flex min-h-10 w-full items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-[13px] font-medium leading-snug transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30';
+const TRACK_ROW_CLASS = cn(
+  CHROME_MENU_ROW_FOCUS_CLASS,
+  'flex min-h-10 w-full cursor-pointer items-center justify-between gap-3 rounded-md px-2.5 py-2 text-left text-[13px] font-medium leading-snug transition-colors aria-disabled:cursor-wait',
+);
 
 interface TrackSelectRowProps {
   label: string;
@@ -57,12 +62,16 @@ function TrackSelectRow({ label, selected, busy, onSelect }: TrackSelectRowProps
         if (!busy) onSelect();
       }}
     >
-      <span className='min-w-0 flex-1 wrap-anywhere'>{label}</span>
-      {busy && selected ? (
-        <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin text-white/70' />
-      ) : selected ? (
-        <Check className='h-3.5 w-3.5 shrink-0 text-white' strokeWidth={3} />
-      ) : null}
+      <span className='min-w-0 flex-1 line-clamp-2 wrap-anywhere' title={label}>
+        {label}
+      </span>
+      <span aria-hidden='true' className={CHROME_MENU_INDICATOR_CLASS}>
+        {busy && selected ? (
+          <Loader2 className='h-3.5 w-3.5 animate-spin text-white/70 motion-reduce:animate-none' />
+        ) : selected ? (
+          <Check className='h-3.5 w-3.5 text-white' strokeWidth={CHROME_ICON_STROKE} />
+        ) : null}
+      </span>
     </button>
   );
 }
@@ -90,10 +99,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
       <PopoverTrigger asChild>
         <button
           type='button'
-          className={cn(
-            CHROME_ICON_BUTTON_CLASS,
-            'active:scale-100 data-[state=open]:bg-white/15 data-[state=open]:text-white',
-          )}
+          className={CHROME_ICON_BUTTON_CLASS}
           aria-label={selectedAudioLabel ? `Audio: ${selectedAudioLabel}` : 'Audio track'}
           aria-keyshortcuts={ariaKeyShortcuts(keymap, 'cycleAudio')}
           title={withShortcutHint('Audio Track', keymap, 'cycleAudio')}
@@ -109,7 +115,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
         aria-labelledby={headingId}
         className={cn(
           CHROME_POPOVER_CLASS,
-          'flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-72 max-w-[calc(100vw-1rem)] flex-col p-1.5 data-[state=closed]:animate-none!',
+          'flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-72 max-w-[calc(100vw-1rem)] flex-col p-1.5',
         )}
         onClick={(e) => e.stopPropagation()}
       >
@@ -207,10 +213,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
       <PopoverTrigger asChild>
         <button
           type='button'
-          className={cn(
-            CHROME_ICON_BUTTON_CLASS,
-            'relative data-[state=open]:bg-white/15 data-[state=open]:text-white',
-          )}
+          className={cn(CHROME_ICON_BUTTON_CLASS, 'relative')}
           aria-label={`Subtitles: ${subStateLabel}`}
           aria-keyshortcuts={ariaKeyShortcuts(keymap, 'cycleSubtitles')}
           title={withShortcutHint('Subtitles', keymap, 'cycleSubtitles')}
@@ -229,7 +232,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
         aria-labelledby={headingId}
         className={cn(
           CHROME_POPOVER_CLASS,
-          'flex max-h-[min(36rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-y-auto overscroll-contain p-1.5 data-[state=closed]:animate-none!',
+          'flex max-h-[min(36rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-y-auto overscroll-contain p-1.5',
         )}
         onClick={(e) => e.stopPropagation()}
       >
@@ -237,16 +240,20 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           <h4 id={headingId} className='text-xs font-semibold text-zinc-300'>
             Subtitles
           </h4>
-          {hasNonDefaultSettings && (
-            <button
-              type='button'
-              className='h-8 rounded-md px-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
-              aria-label='Reset subtitle delay, position and size'
-              onClick={onResetSubtitleSettings}
-            >
-              Reset
-            </button>
-          )}
+          <button
+            type='button'
+            className={cn(
+              CHROME_MENU_ROW_FOCUS_CLASS,
+              'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
+            )}
+            aria-label='Reset subtitle delay, position and size'
+            aria-disabled={!hasNonDefaultSettings || undefined}
+            onClick={() => {
+              if (hasNonDefaultSettings) onResetSubtitleSettings();
+            }}
+          >
+            Reset
+          </button>
         </div>
 
         {/* Off is shared by both views, including when an addon is active. */}
@@ -287,7 +294,10 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
             >
               Addons
               {addonSubtitlesLoading ? (
-                <Loader2 className='h-3 w-3 animate-spin' />
+                <Loader2
+                  aria-hidden='true'
+                  className='h-3 w-3 animate-spin motion-reduce:animate-none'
+                />
               ) : addonSubtitles.length > 0 ? (
                 <span className='px-0.5 text-[11px] tabular-nums text-zinc-400'>
                   {addonSubtitles.length}
@@ -302,16 +312,21 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
         <div className='min-h-20 max-h-[42vh] overflow-y-auto'>
           {view === 'addons' && onSelectAddonSubtitle ? (
             <div className='space-y-px'>
-              {addonSubtitlesError ? (
+              {addonSubtitlesError && (
                 <RetryBanner
                   className='mx-1 px-2.5 py-2 wrap-anywhere'
                   message={addonSubtitlesError}
                   isRetrying={addonSubtitlesFetching}
                   onRetry={onRetryAddonSubtitles}
                 />
-              ) : addonSubtitlesLoading && addonSubtitles.length === 0 ? (
+              )}
+              {addonSubtitlesError && addonSubtitles.length === 0 ? null : addonSubtitlesLoading &&
+                addonSubtitles.length === 0 ? (
                 <p className='flex items-center gap-2 px-2.5 py-3 text-xs text-zinc-400'>
-                  <Loader2 className='h-3 w-3 animate-spin' />
+                  <Loader2
+                    aria-hidden='true'
+                    className='h-3 w-3 animate-spin motion-reduce:animate-none'
+                  />
                   Loading addon subtitles…
                 </p>
               ) : !addonSubtitlesQueried ? (
@@ -325,10 +340,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
               ) : (
                 addonSubtitles.map((subtitle) => {
                   const langCode = subtitle.lang?.trim().toUpperCase();
-                  const detail = subtitle.label
-                    ?.trim()
-                    .replace(SUBTITLE_FILE_EXTENSION_RE, '')
-                    .trim();
+                  const detail = subtitle.detail;
                   const subtitleKey = subtitle.selectionKey;
                   const isActive = activeAddonSubtitleId === subtitleKey;
                   const isLoading = addonSubtitleLoadingId === subtitleKey;
@@ -356,7 +368,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                       }}
                     >
                       <span className='min-w-0 flex-1 text-left'>
-                        <span className='block wrap-anywhere'>
+                        <span className='line-clamp-2 wrap-anywhere' title={titleText}>
                           {langCode && (
                             <span className='font-semibold text-current'>
                               {langCode}
@@ -366,16 +378,24 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                           <span className='text-zinc-400'>{subtitle.sourceName}</span>
                         </span>
                         {detail && (
-                          <span className='mt-0.5 block wrap-anywhere text-xs font-normal leading-relaxed text-zinc-400'>
+                          <span
+                            className='mt-0.5 line-clamp-2 wrap-anywhere text-xs font-normal leading-relaxed text-zinc-400'
+                            title={detail}
+                          >
                             {detail}
                           </span>
                         )}
                       </span>
-                      {isLoading ? (
-                        <Loader2 className='h-3.5 w-3.5 shrink-0 animate-spin text-white/70' />
-                      ) : isActive ? (
-                        <Check className='h-3.5 w-3.5 shrink-0 text-white' strokeWidth={3} />
-                      ) : null}
+                      <span aria-hidden='true' className={CHROME_MENU_INDICATOR_CLASS}>
+                        {isLoading ? (
+                          <Loader2 className='h-3.5 w-3.5 animate-spin text-white/70 motion-reduce:animate-none' />
+                        ) : isActive ? (
+                          <Check
+                            className='h-3.5 w-3.5 text-white'
+                            strokeWidth={CHROME_ICON_STROKE}
+                          />
+                        ) : null}
+                      </span>
                     </button>
                   );
                 })
@@ -466,7 +486,11 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                         row.onApply(clamp(row.current - row.nudge, row.min, row.max));
                     }}
                   >
-                    <Minus className='h-3 w-3' strokeWidth={2.5} />
+                    <Minus
+                      aria-hidden='true'
+                      className='h-3 w-3'
+                      strokeWidth={CHROME_ICON_STROKE}
+                    />
                   </button>
                   <PlayerSlider
                     value={[row.current]}
@@ -489,7 +513,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                         row.onApply(clamp(row.current + row.nudge, row.min, row.max));
                     }}
                   >
-                    <Plus className='h-3 w-3' strokeWidth={2.5} />
+                    <Plus aria-hidden='true' className='h-3 w-3' strokeWidth={CHROME_ICON_STROKE} />
                   </button>
                   <span className='w-11 shrink-0 text-right text-xs font-medium tabular-nums text-zinc-300'>
                     {row.value}

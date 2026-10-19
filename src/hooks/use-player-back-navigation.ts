@@ -1,8 +1,7 @@
 import { type RefObject, useCallback } from 'react';
-import { useNavigate } from 'react-router';
 
 import { type DetailsHistoryRouteState, playableResumePosition } from '@/lib/history-playback';
-import { pathBelowTop, stashDetailsReturnState } from '@/lib/navigation';
+import { navigateApp, pathBelowTop, stashDetailsReturnState } from '@/lib/navigation';
 import {
   buildDetailsRoute,
   type PlayerRouteMediaType,
@@ -11,6 +10,7 @@ import {
 
 interface UsePlayerBackNavigationOptions {
   currentTimeRef: RefObject<number>;
+  observedPositionRef: RefObject<number | null>;
   effectiveResolveMediaType: PlayerRouteMediaType;
   from?: string;
   id?: string;
@@ -32,6 +32,7 @@ interface UsePlayerBackNavigationResult {
 
 export function usePlayerBackNavigation({
   currentTimeRef,
+  observedPositionRef,
   effectiveResolveMediaType,
   from,
   id,
@@ -44,7 +45,6 @@ export function usePlayerBackNavigation({
   shouldReopenStreamSelector,
   startTime,
 }: UsePlayerBackNavigationOptions): UsePlayerBackNavigationResult {
-  const navigate = useNavigate();
   // Replace the player in history so Back never re-launches it; Back drops
   // to the mini player and the dock transition flushes progress.
   const navigateBack = useCallback(async () => {
@@ -54,7 +54,10 @@ export function usePlayerBackNavigation({
     // The selector/Esc can swallow Back mid-pick, so only route coordinates can ride the back target.
     const backSeason = routeAbsoluteSeason;
     const backEpisode = routeAbsoluteEpisode;
-    const backStartTime = playableResumePosition(currentTimeRef.current, startTime);
+    const backStartTime = playableResumePosition(
+      observedPositionRef.current === null ? undefined : currentTimeRef.current,
+      startTime,
+    );
     // Reopen state: 0 stays valid, episode needs a season, start time positive.
     const safeFrom = resolveSafeInternalReturnPath(from);
     const safeOriginFrom = resolveSafeInternalReturnPath(originFrom);
@@ -89,21 +92,20 @@ export function usePlayerBackNavigation({
       if (safeFrom.startsWith('/details/')) {
         stashDetailsReturnState(safeFrom, reopenSelectorState);
       }
-      navigate(-1);
+      navigateApp(-1);
       return;
     }
 
     if (safeFrom) {
       if (safeFrom.startsWith('/details/')) {
-        navigate(safeFrom, { replace: true, state: reopenSelectorState });
+        navigateApp(safeFrom, { replace: true, state: reopenSelectorState });
       } else {
-        navigate(safeFrom, { replace: true });
+        navigateApp(safeFrom, { replace: true });
       }
     } else {
-      navigate(detailsTarget, { replace: true, state: reopenSelectorState });
+      navigateApp(detailsTarget, { replace: true, state: reopenSelectorState });
     }
   }, [
-    navigate,
     routeAbsoluteSeason,
     routeAbsoluteEpisode,
     from,
@@ -115,6 +117,7 @@ export function usePlayerBackNavigation({
     setShowEpisodes,
     setShowControls,
     currentTimeRef,
+    observedPositionRef,
     shouldReopenStreamSelector,
   ]);
 

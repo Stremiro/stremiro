@@ -1,5 +1,13 @@
-import { ArrowLeft, Loader2, Play, RotateCcw, X } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useState, useSyncExternalStore } from 'react';
+import { ArrowLeft, Loader2, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -49,23 +57,31 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
       role='alert'
       className='absolute inset-0 z-50 flex flex-col items-center justify-center bg-black/85 px-6 text-center animate-in fade-in duration-150 motion-reduce:animate-none'
     >
-      <X className='w-12 h-12 text-red-400/90 mb-4' strokeWidth={1.5} />
-      <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback Error</h2>
-      <p className='text-zinc-400 mb-6 max-w-sm text-sm leading-relaxed'>{message}</p>
-      <div className='flex items-center gap-3'>
-        <button
-          type='button'
-          onClick={onRetry}
-          className='rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
-        >
-          Try Again
-        </button>
-        <button type='button' onClick={onChooseStream} className={ERROR_SECONDARY_BUTTON_CLASS}>
-          Choose Stream
-        </button>
-        <button type='button' onClick={onBack} className={ERROR_SECONDARY_BUTTON_CLASS}>
-          Go Back
-        </button>
+      <div className='max-h-full w-full overflow-y-auto overscroll-contain px-1 py-6'>
+        <TriangleAlert
+          aria-hidden='true'
+          className='mx-auto w-12 h-12 text-red-400/90 mb-4'
+          strokeWidth={1.5}
+        />
+        <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback Error</h2>
+        <p className='mx-auto text-zinc-400 mb-6 max-w-sm wrap-anywhere text-sm leading-relaxed'>
+          {message}
+        </p>
+        <div className='flex flex-wrap items-center justify-center gap-3'>
+          <button
+            type='button'
+            onClick={onRetry}
+            className='rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
+          >
+            Try Again
+          </button>
+          <button type='button' onClick={onChooseStream} className={ERROR_SECONDARY_BUTTON_CLASS}>
+            Choose Stream
+          </button>
+          <button type='button' onClick={onBack} className={ERROR_SECONDARY_BUTTON_CLASS}>
+            Go Back
+          </button>
+        </div>
       </div>
     </div>
   );
@@ -96,6 +112,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   onChooseStream,
   onBack,
 }: PlayerLoadingOverlayProps) {
+  const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
   const [reveal, setReveal] = useState<'pending' | 'enter' | 'handoff'>(() =>
     visibleLoadingOverlays > 0 || performance.now() < loadingOverlayVisibleUntil
       ? 'handoff'
@@ -137,13 +154,14 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
             : reveal === 'enter' && 'animate-in fade-in duration-150',
         )}
       >
-        {(isHttpUrl(logo) || title || context) && (
+        {(logoSrc || title || context) && (
           <div className='mb-3 border-b border-white/[0.06] pb-3'>
-            {isHttpUrl(logo) ? (
+            {logoSrc ? (
               <RemoteImage
-                src={logo}
+                src={logoSrc}
                 alt={title ?? ''}
                 loading='lazy'
+                onError={onLogoError}
                 className='h-7 max-w-40 object-contain object-left opacity-90'
               />
             ) : (
@@ -310,7 +328,7 @@ export const PlayerPauseResumeButton = memo(function PlayerPauseResumeButton({
           void onResume().catch(() => undefined);
         }}
         className={cn(
-          'flex h-20 w-20 items-center justify-center bg-transparent text-white/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60',
+          'flex h-20 w-20 items-center justify-center rounded-full bg-transparent text-white/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60',
           'transition-opacity duration-150 ease-out motion-reduce:transition-none motion-reduce:animate-none',
           visible
             ? 'pointer-events-auto opacity-100 animate-in fade-in duration-150 fill-mode-backwards [animation-delay:150ms]'
@@ -349,6 +367,13 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   onCancelAutoPlay,
   onPlayNext,
 }: PlayerUpNextCardProps) {
+  const playNextButtonRef = useRef<HTMLButtonElement | null>(null);
+  const cancelButtonRef = useCallback((button: HTMLButtonElement | null) => {
+    if (!button) return;
+    return () => {
+      if (document.activeElement === button) playNextButtonRef.current?.focus();
+    };
+  }, []);
   const autoPlaySecondsLeft = useSyncExternalStore(
     autoPlayCountdown.subscribe,
     autoPlayCountdown.getSnapshot,
@@ -362,6 +387,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   return (
     <div data-player-interactive className={cn(EOF_CARD_SLOT_CLASS, 'gap-2')}>
       <button
+        ref={playNextButtonRef}
         type='button'
         aria-keyshortcuts={ariaKeyShortcuts(keymap, 'nextEpisode')}
         onClick={(e) => {
@@ -423,6 +449,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
       </button>
       {countingDown && (
         <button
+          ref={cancelButtonRef}
           type='button'
           aria-label='Cancel autoplay'
           title='Cancel autoplay'

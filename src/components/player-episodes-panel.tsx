@@ -1,10 +1,12 @@
 import { type Range, useVirtualizer } from '@tanstack/react-virtual';
-import { Check, ChevronDown, PanelRight, X } from 'lucide-react';
+import { Check, ChevronDown, ListVideo, X } from 'lucide-react';
 import { memo, type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import {
   CHROME_CLOSE_BUTTON_CLASS,
   CHROME_ICON_BUTTON_CLASS,
+  CHROME_ICON_CLASS,
+  CHROME_ICON_STROKE,
 } from '@/components/player-chrome-styles';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
@@ -24,7 +26,8 @@ import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
-import { cn, formatAirDate, getEpisodeTitle } from '@/lib/utils';
+import { formatAirDate } from '@/lib/schedule-dates';
+import { cn, getEpisodeTitle } from '@/lib/utils';
 
 interface PlayerEpisodesToggleButtonProps {
   open: boolean;
@@ -42,8 +45,7 @@ export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesTog
       aria-controls={open ? 'player-episodes-panel' : undefined}
       className={cn(
         CHROME_ICON_BUTTON_CLASS,
-        'rounded-md text-zinc-300 duration-150 hover:bg-white/[0.06] hover:text-white active:scale-100 motion-reduce:transition-none',
-        open && 'bg-white/[0.08] text-white',
+        'text-[13px] font-semibold tracking-[-0.01em] lg:w-auto lg:gap-2 lg:pl-3 lg:pr-4',
       )}
       title={withShortcutHint('Episodes', keymap, 'episodes')}
       onClick={(e) => {
@@ -51,7 +53,12 @@ export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesTog
         onToggle();
       }}
     >
-      <PanelRight className='h-5 w-5' strokeWidth={2} />
+      <ListVideo
+        aria-hidden='true'
+        className={CHROME_ICON_CLASS}
+        strokeWidth={CHROME_ICON_STROKE}
+      />
+      <span className='hidden lg:inline'>Episodes</span>
     </button>
   );
 }
@@ -201,6 +208,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       const airDate = formatAirDate(ep.releaseDate);
       // The Continue target gets Resume, never the already-marked Now playing row.
       const watchEntry = episodeProgressFor?.(ep);
+      const isWatched = watchEntry?.is_watched === true;
       const isSpoiler = isEpisodeSpoiler(
         ep,
         spoilerProtection,
@@ -253,7 +261,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             {progressPercent > 0 && (
               <div className='absolute inset-x-0 bottom-0 h-0.5 bg-black/40'>
                 <div
-                  className='h-full w-full origin-left bg-(--accent-act)'
+                  className='h-full w-full origin-left bg-(--accent-prog)'
                   style={{ transform: `scaleX(${progressPercent / 100})` }}
                 />
               </div>
@@ -278,9 +286,21 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 : ep.overview || 'No description available.'}
             </p>
             <div className='mt-auto flex min-w-0 items-center gap-2 text-[11px] leading-4'>
-              {(isCurrent || isResume) && (
-                <span className='shrink-0 font-medium text-(--accent-act)'>
-                  {isCurrent ? 'Playing' : 'Resume'}
+              {(isCurrent || isResume || isWatched) && (
+                <span
+                  className={cn(
+                    'flex shrink-0 items-center gap-1 font-medium',
+                    isCurrent || isResume ? 'text-(--accent-act)' : 'text-zinc-400',
+                  )}
+                >
+                  {!isCurrent && !isResume && (
+                    <Check
+                      aria-hidden='true'
+                      className='h-3 w-3'
+                      strokeWidth={CHROME_ICON_STROKE}
+                    />
+                  )}
+                  {isCurrent ? 'Playing' : isResume ? 'Resume' : 'Watched'}
                 </span>
               )}
               {airDate && <span className='truncate tabular-nums text-zinc-500'>{airDate}</span>}
@@ -323,7 +343,12 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     >
       <div className='shrink-0 border-b border-white/[0.06]'>
         <div className='flex items-center gap-2.5 px-4 pt-4 pb-3'>
-          <h2 className='text-[15px] leading-5 font-semibold tracking-tight text-white'>
+          <h2 className='flex items-center gap-2 text-[15px] leading-5 font-semibold tracking-tight text-white'>
+            <ListVideo
+              aria-hidden='true'
+              className='h-4 w-4 text-zinc-400'
+              strokeWidth={CHROME_ICON_STROKE}
+            />
             Episodes
           </h2>
           <p className='min-w-0 flex-1 truncate text-xs tabular-nums text-zinc-400'>
@@ -333,13 +358,11 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             type='button'
             onClick={onClose}
             aria-label='Close episodes panel'
+            aria-keyshortcuts='Escape'
             title='Close (Esc)'
-            className={cn(
-              CHROME_CLOSE_BUTTON_CLASS,
-              'rounded-md duration-120 hover:bg-white/[0.05] motion-reduce:transition-none',
-            )}
+            className={CHROME_CLOSE_BUTTON_CLASS}
           >
-            <X className='w-4 h-4' strokeWidth={2.25} />
+            <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
           </button>
         </div>
 
@@ -356,7 +379,11 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                     onPointerDown={(e) => e.stopPropagation()}
                   >
                     Season {selectedSeason}
-                    <ChevronDown className='h-3.5 w-3.5 text-zinc-500' strokeWidth={2} />
+                    <ChevronDown
+                      aria-hidden='true'
+                      className='h-3.5 w-3.5 text-zinc-400'
+                      strokeWidth={CHROME_ICON_STROKE}
+                    />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
@@ -379,8 +406,9 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                         )}
                       >
                         <Check
+                          aria-hidden='true'
                           className={cn('h-4 w-4 shrink-0', !isSelected && 'invisible')}
-                          strokeWidth={2.25}
+                          strokeWidth={CHROME_ICON_STROKE}
                         />
                         <span className='flex-1'>Season {season}</span>
                         <span className='text-xs tabular-nums text-zinc-500'>{count}</span>
@@ -414,8 +442,13 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
 
       <ScrollArea viewportRef={scrollViewportRef} className='min-h-0 flex-1'>
         {visibleEpisodes.length === 0 ? (
-          <p className='px-6 py-12 text-center text-xs text-zinc-400'>
-            {effectiveEpisodeSearch ? (
+          <p
+            role={isSearchPending ? 'status' : undefined}
+            className='px-6 py-12 text-center text-xs text-zinc-400'
+          >
+            {isSearchPending ? (
+              'Searching episodes…'
+            ) : effectiveEpisodeSearch ? (
               <>
                 No episodes match <span className='text-zinc-400'>{effectiveEpisodeSearch}</span>
               </>

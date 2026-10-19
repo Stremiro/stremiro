@@ -1,12 +1,11 @@
 import { memo } from 'react';
-import { format } from 'date-fns';
 import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useRemoveFromContinueWatching, useResumeRail } from '@/hooks/use-media-library';
 import { type ResumeRailEntry, type WatchProgress } from '@/lib/api';
 import { watchProgressItemKey } from '@/lib/history-playback';
-import { cn } from '@/lib/utils';
+import { cn, pad2, queryNeedsRetry } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
 
 // The "aired in the last week" decision arrives on the row; only labels live here.
@@ -25,6 +24,7 @@ const renderResumeEntry = (entry: ResumeRailEntry) =>
   ) : (
     <WatchProgressCard
       item={entry.row}
+      playbackIntent='next-episode'
       metaLine={entry.isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE}
       playErrorTitle='Failed to open the next episode'
     />
@@ -32,14 +32,15 @@ const renderResumeEntry = (entry: ResumeRailEntry) =>
 
 export function ResumeSection() {
   const localDay = useLocalDay();
+  const localToday = `${String(localDay.getFullYear()).padStart(4, '0')}-${pad2(localDay.getMonth() + 1)}-${pad2(localDay.getDate())}`;
+  const resumeRailQuery = useResumeRail(localToday, localDay.getTime());
   const {
     data: entries = EMPTY_ENTRIES,
     isLoading,
     isError,
-    isFetched,
     isFetching,
     refetch,
-  } = useResumeRail(format(localDay, 'yyyy-MM-dd'), localDay.getTime());
+  } = resumeRailQuery;
 
   const retryBanner = (
     <RetryBanner
@@ -54,30 +55,25 @@ export function ResumeSection() {
     />
   );
 
-  // A failed read must not collapse into "no items" (hides the section with no
-  // recovery); a failed refetch with cached rows keeps the playable stale rail.
-  if ((isError || (isFetched && isLoading)) && entries.length === 0) {
-    return <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>{retryBanner}</div>;
-  }
-
-  // Hidden until there is something to resume.
-  if (!isLoading && entries.length === 0) {
-    return null;
-  }
-
   return (
-    <HorizontalMediaRail
-      title='Continue Watching'
-      railId='continue-watching'
-      items={entries}
-      isLoading={isLoading}
-      getItemKey={resumeEntryKey}
-      renderItem={renderResumeEntry}
-      skeletonCount={5}
-      headerContent={isError && <div className='mt-3'>{retryBanner}</div>}
-      scrollerClassName='gap-4 pt-4 relative z-0'
-      viewportClassName='relative'
-    />
+    <section data-resume-section aria-label='Continue Watching' tabIndex={-1}>
+      {queryNeedsRetry(resumeRailQuery) && entries.length === 0 ? (
+        <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>{retryBanner}</div>
+      ) : !isLoading && entries.length === 0 ? null : (
+        <HorizontalMediaRail
+          title='Continue Watching'
+          railId='continue-watching'
+          items={entries}
+          isLoading={isLoading}
+          getItemKey={resumeEntryKey}
+          renderItem={renderResumeEntry}
+          skeletonCount={5}
+          headerContent={isError && <div className='mt-3'>{retryBanner}</div>}
+          scrollerClassName='gap-4 pt-4 relative z-0'
+          viewportClassName='relative'
+        />
+      )}
+    </section>
   );
 }
 

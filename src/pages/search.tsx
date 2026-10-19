@@ -12,16 +12,8 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-  type ReactNode,
-} from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { useNavigationType } from 'react-router';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -34,8 +26,8 @@ import {
   MediaCardSkeleton,
   mediaCardRailKey,
 } from '@/components/media-card';
-import { RetryBanner } from '@/components/retry-banner';
 import { Input } from '@/components/ui/input';
+import { Skeleton } from '@/components/ui/skeleton';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useAmbientActivity } from '@/hooks/use-ambient-activity';
@@ -44,7 +36,7 @@ import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
-import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import { SLIDING_ACCENT_PILL_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
 import { navigateAppBack } from '@/lib/navigation';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
@@ -54,7 +46,7 @@ import {
   type SearchFeed,
   type SearchMediaType,
 } from '@/lib/search-page-state';
-import { cn, scrollBehavior } from '@/lib/utils';
+import { cn, queryNeedsRetry, scrollBehavior, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
 // Results fill every row edge to edge: auto-fill columns grow from the 170px
 // home minimum so wide screens fit a full row with no trailing empty slot.
@@ -227,27 +219,51 @@ const SearchResults = memo(function SearchResults({
 
   if (results.length === 0 && hasNextPage && !isPlaceholderData) {
     return (
-      <RetryBanner
-        className='mx-auto mt-10 max-w-xl'
-        title='Failed to load content'
-        message={isError ? getErrorMessage(errorObj) : 'Try the request again.'}
-        isRetrying={isFetchingNextPage}
-        onRetry={() => {
-          if (!isFetchingNextPage) void fetchNextPage();
-        }}
+      <SearchPanel
+        title={isError ? 'Failed to load content' : 'No matching titles yet'}
+        description={
+          isError
+            ? getErrorMessage(errorObj)
+            : 'No matches in the pages searched so far. Load more to keep looking.'
+        }
+        titleRole={isError ? 'alert' : 'status'}
+        action={
+          <button
+            type='button'
+            aria-disabled={isFetching || undefined}
+            aria-busy={isFetchingNextPage || undefined}
+            onClick={() => {
+              if (!isFetching) void fetchNextPage();
+            }}
+            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
+          >
+            {isFetchingNextPage && (
+              <Loader2
+                aria-hidden='true'
+                className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
+              />
+            )}
+            {isError ? 'Retry' : 'Load more'}
+          </button>
+        }
       />
     );
   }
 
   if (showSkeleton) {
     return (
-      <div aria-hidden='true' className={SEARCH_RESULTS_CLASS_NAME}>
-        {SEARCH_SKELETON_KEYS.map((key) => (
-          <div key={key} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
-            <MediaCardSkeleton />
-          </div>
-        ))}
-      </div>
+      <>
+        <span role='status' className='sr-only'>
+          Loading results
+        </span>
+        <div aria-hidden='true' className={SEARCH_RESULTS_CLASS_NAME}>
+          {SEARCH_SKELETON_KEYS.map((key) => (
+            <div key={key} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
+              <MediaCardSkeleton />
+            </div>
+          ))}
+        </div>
+      </>
     );
   }
 
@@ -392,6 +408,7 @@ function includesGenre(options: readonly string[], genre: string) {
 export function Search() {
   const isOnline = useOnlineStatus();
   const queryClient = useQueryClient();
+  const navigationType = useNavigationType();
   useDocumentTitle('Search');
   const {
     activeFeed,
@@ -410,6 +427,7 @@ export function Search() {
     trimmedDebouncedQuery,
   } = useSearchPageState();
   const typeGroupRef = useRef<HTMLDivElement>(null);
+  const genreTriggerRef = useRef<HTMLButtonElement>(null);
   const typeButtons = useRef(new Map<SearchMediaType, HTMLButtonElement>());
   const typeIndicator = useSlidingIndicator(activeType, typeGroupRef, typeButtons);
   const {
@@ -429,20 +447,16 @@ export function Search() {
 
   // Manifest-driven union of `genre` extra options the enabled addons declare
   // for the active catalog type (Cinemeta first), computed in Rust.
-  const { data: browseGenres } = useBrowseGenres({ enabled: isOnline });
+  const browseGenresQuery = useBrowseGenres({ enabled: isOnline });
+  const { data: browseGenres } = browseGenresQuery;
+  const hasGenreError = queryNeedsRetry(browseGenresQuery);
   // `all` unions the movie and series genre sets.
-  const genreOptions = useMemo(
-    () => searchGenreOptions(browseGenres, activeType),
-    [browseGenres, activeType],
-  );
+  const genreOptions = searchGenreOptions(browseGenres, activeType);
   // A deep-linked genre the manifests don't enumerate still gets an entry.
-  const menuGenres = useMemo(
-    () =>
-      activeGenre && !includesGenre(genreOptions, activeGenre)
-        ? [activeGenre, ...genreOptions]
-        : genreOptions,
-    [activeGenre, genreOptions],
-  );
+  const menuGenres =
+    activeGenre && !includesGenre(genreOptions, activeGenre)
+      ? [activeGenre, ...genreOptions]
+      : genreOptions;
 
   // A genre the next type's catalogs don't offer would strand an empty grid.
   const isGenreCompatible = (nextType: SearchMediaType) =>
@@ -469,24 +483,25 @@ export function Search() {
   };
 
   const searchInputRef = useRef<HTMLInputElement>(null);
-  // Restored text is selected on land so typing replaces it.
+  const [autoFocusSearch] = useState(
+    () => navigationType !== 'POP' || (!query.trim() && results.length === 0),
+  );
   useEffect(() => {
     const input = searchInputRef.current;
-    if (input?.value) input.select();
-  }, []);
-  const handleClearSearch = useCallback(() => {
+    if (autoFocusSearch && input?.value) input.select();
+  }, [autoFocusSearch]);
+  const handleClearSearch = () => {
     setQuery('');
     searchInputRef.current?.focus({ preventScroll: true });
     resetScroll();
-  }, [setQuery]);
+  };
 
-  // Stable handler shared by the header Reset pill and the empty-state action.
-  const handleResetFilters = useCallback(() => {
+  const handleResetFilters = () => {
     if (!hasActiveFilters) return;
     resetFilters();
     searchInputRef.current?.focus({ preventScroll: true });
     resetScroll();
-  }, [hasActiveFilters, resetFilters]);
+  };
 
   const isRetryingInitialLoad = isFetched && isLoading;
   const showSkeleton =
@@ -530,8 +545,8 @@ export function Search() {
   useRafScrollListener(() => setShowBackToTop(window.scrollY > 700));
 
   return (
-    <div className='page-enter pl-[60px]'>
-      <div className='mx-auto w-full max-w-[1800px] px-4 pb-16 pt-8 sm:px-6 lg:px-8'>
+    <div className='page-enter'>
+      <div className={`mx-auto w-full max-w-[1800px] ${SIDEBAR_PAGE_COLUMN_INSETS} pb-16 pt-8`}>
         <div className='mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex items-end justify-between gap-3'>
             <div className='min-w-0'>
@@ -558,7 +573,7 @@ export function Search() {
                 page's purpose; focusing it on land is the intended UX. */}
             <Input
               type='text'
-              autoFocus
+              autoFocus={autoFocusSearch}
               autoComplete='off'
               autoCorrect='off'
               spellCheck={false}
@@ -617,10 +632,11 @@ export function Search() {
           </div>
 
           <div className='mt-3 flex flex-wrap items-center justify-center gap-2 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'>
-            <div className='min-w-0 justify-self-start'>
+            <div className='flex min-w-0 items-center gap-1.5 justify-self-start'>
               <DropdownMenu modal={false}>
                 <DropdownMenuTrigger asChild>
                   <button
+                    ref={genreTriggerRef}
                     type='button'
                     title={activeGenre ? `Filter by genre: ${activeGenre}` : 'Filter by genre'}
                     className={cn(
@@ -655,6 +671,34 @@ export function Search() {
                     ) : null}
                   </DropdownMenuItem>
                   <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
+                  {hasGenreError ? (
+                    <>
+                      <p role='alert' className='px-2.5 pt-1 text-[12px] text-zinc-400'>
+                        Couldn't load genres.
+                      </p>
+                      <DropdownMenuItem
+                        aria-disabled={browseGenresQuery.isFetching || !isOnline || undefined}
+                        onSelect={(event) => {
+                          event.preventDefault();
+                          if (!browseGenresQuery.isFetching && isOnline) {
+                            void browseGenresQuery.refetch();
+                          }
+                        }}
+                        className='h-8 px-2.5 text-[12.5px] aria-disabled:opacity-50'
+                      >
+                        {browseGenresQuery.isFetching ? 'Retrying…' : 'Retry'}
+                      </DropdownMenuItem>
+                    </>
+                  ) : browseGenresQuery.isPending && !browseGenres ? (
+                    <div role='status' className='space-y-3 px-2.5 py-2'>
+                      <span className='sr-only'>Loading genres</span>
+                      <div aria-hidden='true' className='space-y-3'>
+                        <Skeleton className='h-4 w-24 bg-white/[0.06]' />
+                        <Skeleton className='h-4 w-32 bg-white/[0.06]' />
+                        <Skeleton className='h-4 w-20 bg-white/[0.06]' />
+                      </div>
+                    </div>
+                  ) : null}
                   {menuGenres.map((genre) => {
                     const isActive = sameSearchGenre(genre, activeGenre);
                     return (
@@ -679,6 +723,25 @@ export function Search() {
                   })}
                 </DropdownMenuContent>
               </DropdownMenu>
+              {activeGenre && (
+                <button
+                  type='button'
+                  aria-label={`Clear ${activeGenre} genre filter`}
+                  title='Clear genre filter'
+                  onClick={() => {
+                    clearGenre();
+                    genreTriggerRef.current?.focus({ preventScroll: true });
+                    resetScroll();
+                  }}
+                  className={cn(
+                    SEARCH_FACET_BUTTON_CLASS,
+                    SEARCH_FACET_IDLE_CLASS,
+                    'w-[38px] justify-center px-0',
+                  )}
+                >
+                  <X aria-hidden='true' className='h-3.5 w-3.5' />
+                </button>
+              )}
             </div>
 
             <div
@@ -690,7 +753,7 @@ export function Search() {
               {typeIndicator && (
                 <span
                   aria-hidden='true'
-                  className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md bg-(--accent-nav)'
+                  className={SLIDING_ACCENT_PILL_CLASS}
                   style={{
                     width: typeIndicator.width,
                     height: typeIndicator.height,

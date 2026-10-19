@@ -1,4 +1,4 @@
-import { type QueryClient, useQuery, useQueryClient } from '@tanstack/react-query';
+import { type QueryClient, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
 import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
@@ -7,13 +7,30 @@ import {
   effectivePlaybackLanguagePreferencesQueryKey,
   invalidatePlaybackLanguageQueries,
   PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+  SUPPORTED_LANGUAGES_QUERY_KEY,
 } from '@/lib/query-invalidation';
+import { createSerialTaskQueue } from '@/lib/utils';
 
 const PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME = 1000 * 60 * 5;
 
 // Module-level save queue — the store is global, and reads await it so a refetch can't land over a pending save.
-let saveQueue = Promise.resolve<PlaybackLanguagePreferences | undefined>(undefined);
+const saveQueue = createSerialTaskQueue();
 const pendingLanguagePatches = new Set<PlaybackLanguagePreferences>();
+
+export const playbackLanguagePreferencesQueryOptions = queryOptions({
+  queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+  queryFn: async () => {
+    await saveQueue.pending();
+    return api.getPlaybackLanguagePreferences();
+  },
+  staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
+});
+
+export const supportedLanguagesQueryOptions = queryOptions({
+  queryKey: SUPPORTED_LANGUAGES_QUERY_KEY,
+  queryFn: api.getSupportedLanguages,
+  staleTime: Number.POSITIVE_INFINITY,
+});
 
 function enqueueSave(
   queryClient: QueryClient,
@@ -31,7 +48,7 @@ function enqueueSave(
       (current) => ({ ...current, ...patch }),
     );
   }
-  const queuedSave = saveQueue.then(async () => {
+  const queuedSave = saveQueue.enqueue(async () => {
     await queryClient.cancelQueries({
       queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
       exact: true,
@@ -56,8 +73,6 @@ function enqueueSave(
       await invalidatePlaybackLanguageQueries(queryClient);
     }
   });
-  saveQueue = queuedSave.catch(() => undefined);
-  // The queue swallows so later saves serialize; the raw op is what the app barrier tracks.
   return trackPendingAppWrite(queuedSave);
 }
 
@@ -73,13 +88,8 @@ export function usePlaybackLanguagePreferences({
   const queryClient = useQueryClient();
 
   const globalPlaybackLanguagePreferencesQuery = useQuery({
-    queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
-    queryFn: async () => {
-      await saveQueue;
-      return api.getPlaybackLanguagePreferences();
-    },
+    ...playbackLanguagePreferencesQueryOptions,
     enabled: !mediaId,
-    staleTime: PLAYBACK_LANGUAGE_PREFERENCES_STALE_TIME,
   });
 
   // Runs for 'local' too — the scoped merge falls back to global defaults, which local sessions should auto-apply.

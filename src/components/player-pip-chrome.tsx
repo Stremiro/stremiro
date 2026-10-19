@@ -1,7 +1,7 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDownRight, ArrowUpRight, Loader2, X } from 'lucide-react';
+import { ArrowDownRight, Loader2, Maximize2, X } from 'lucide-react';
 import { memo, useState, useSyncExternalStore } from 'react';
-import { CHROME_ICON_BUTTON_CLASS } from '@/components/player-chrome-styles';
+import { CHROME_ICON_BUTTON_CLASS, CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import {
   PlayerMuteButton,
   PlayerNextButton,
@@ -12,6 +12,7 @@ import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import type { SkipSegment } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
+import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { snapPlayerPip } from '@/lib/player-window';
 import type { SubscribableStore } from '@/lib/subscribable-store';
 import { cn } from '@/lib/utils';
@@ -79,7 +80,10 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         <div className='pointer-events-none absolute inset-0 z-30 bg-black/65'>
           <div className='absolute inset-x-4 top-11 bottom-24 flex min-h-0 items-center justify-center gap-2 text-center'>
             {status && !error && (
-              <Loader2 className='h-4 w-4 shrink-0 animate-spin text-white/65' />
+              <Loader2
+                aria-hidden='true'
+                className='h-4 w-4 shrink-0 animate-spin text-white/65 motion-reduce:animate-none'
+              />
             )}
             <p
               role={error ? 'alert' : 'status'}
@@ -120,8 +124,8 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         >
           <button
             type='button'
-            aria-label='Move picture in picture window'
-            title='Drag to move'
+            aria-label='Move picture in picture window. Enter snaps to corner.'
+            title='Drag to move. Enter snaps to corner.'
             className='min-w-0 flex-1 cursor-grab truncate rounded-md px-1 py-2 text-left text-xs font-medium text-white/75 transition-colors hover:bg-white/5 hover:text-white active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
             onPointerDown={(event) => {
               if (event.button === 0)
@@ -129,28 +133,31 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                   .startDragging()
                   .catch(() => undefined);
             }}
+            onClick={(event) => {
+              if (event.detail === 0) snapToCorner();
+            }}
           >
             {title}
             {episodeLabel ? ` · ${episodeLabel}` : ''}
           </button>
           <button
             type='button'
-            className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer')}
+            className={CHROME_ICON_BUTTON_CLASS}
             onClick={returnToApp}
             aria-label='Return to app'
             title='Return to app (Esc)'
             aria-keyshortcuts='Escape'
           >
-            <ArrowUpRight className='h-4 w-4' />
+            <Maximize2 aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
           </button>
           <button
             type='button'
-            className={cn(CHROME_ICON_BUTTON_CLASS, 'cursor-pointer hover:bg-red-500/20')}
+            className={cn(CHROME_ICON_BUTTON_CLASS, 'hover:bg-red-500/20 hover:text-red-200')}
             onClick={returnToApp}
             aria-label='Close picture in picture and return to app'
             title='Close picture in picture'
           >
-            <X className='h-4 w-4' />
+            <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
           </button>
         </div>
         <div
@@ -237,6 +244,9 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                 <button
                   type='button'
                   onClick={props.skipAction.onSkip}
+                  aria-label={props.skipAction.label}
+                  aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
+                  title={withShortcutHint(props.skipAction.label, keymap, 'skipSegment')}
                   className='min-w-0 cursor-pointer truncate rounded-md bg-white/15 px-2 py-1.5 text-xs text-white transition-colors hover:bg-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
                 >
                   {props.skipAction.label}
@@ -244,16 +254,17 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
               ) : null}
               <button
                 type='button'
-                className={cn(
-                  CHROME_ICON_BUTTON_CLASS,
-                  'cursor-pointer disabled:cursor-wait disabled:opacity-50',
-                )}
+                className={CHROME_ICON_BUTTON_CLASS}
                 aria-label='Snap picture in picture to bottom-right'
                 title='Snap to bottom-right of this screen'
                 disabled={snapping}
                 onClick={() => void snapToCorner()}
               >
-                <ArrowDownRight className='h-4 w-4' />
+                <ArrowDownRight
+                  aria-hidden='true'
+                  className='h-4 w-4'
+                  strokeWidth={CHROME_ICON_STROKE}
+                />
               </button>
             </div>
           </div>

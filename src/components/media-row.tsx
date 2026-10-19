@@ -1,7 +1,8 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { ChevronRight } from 'lucide-react';
-import type { ReactNode } from 'react';
+import { type ReactNode, useEffect, useRef } from 'react';
 import { Link } from 'react-router';
+import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import type { MediaItem } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
@@ -42,6 +43,18 @@ export function MediaRow({
   minItems = 1,
   genreFilter,
 }: MediaRowProps) {
+  const genreScrollRef = useRef<HTMLDivElement>(null);
+  const {
+    bind: bindGenreScrollRef,
+    canScrollLeft,
+    canScrollRight,
+    syncScrollState,
+  } = useScrollEdgeIndicators(genreScrollRef);
+  const genreOptions = genreFilter?.options;
+  useEffect(() => {
+    syncScrollState();
+  }, [genreOptions, syncScrollState]);
+
   const {
     data = EMPTY_ITEMS,
     isFetching,
@@ -60,36 +73,53 @@ export function MediaRow({
   });
 
   const genreTabs = genreFilter ? (
-    <div
-      role='group'
-      aria-label={`${title} genres`}
-      className='flex items-center gap-5 overflow-x-auto border-b border-white/[0.06] pr-2 scrollbar-hide'
-    >
-      {genreFilter.options.map((genre) => {
-        const isActive = genreFilter.active === genre;
-        return (
-          <button
-            key={genre}
-            type='button'
-            onClick={() => {
-              if (!isActive) genreFilter.onChange(genre);
-            }}
-            aria-pressed={isActive}
-            className={cn(
-              'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/60',
-              isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200',
-            )}
-          >
-            {genre}
-            <span
+    <div className='relative'>
+      <div
+        ref={bindGenreScrollRef}
+        role='group'
+        aria-label={`${title} genres`}
+        className='flex items-center gap-5 overflow-x-auto border-b border-white/[0.06] pr-2 scrollbar-hide'
+      >
+        {genreFilter.options.map((genre) => {
+          const isActive = genreFilter.active === genre;
+          return (
+            <button
+              key={genre}
+              type='button'
+              onClick={() => {
+                if (!isActive) genreFilter.onChange(genre);
+              }}
+              aria-pressed={isActive}
               className={cn(
-                'absolute inset-x-0 -bottom-px h-[2px] rounded-full bg-(--accent-nav) transition-opacity duration-200',
-                isActive ? 'opacity-100' : 'opacity-0',
+                'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/60',
+                isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200',
               )}
-            />
-          </button>
-        );
-      })}
+            >
+              {genre}
+              <span
+                className={cn(
+                  'absolute inset-x-0 -bottom-px h-[2px] rounded-full bg-(--accent-nav) transition-opacity duration-200',
+                  isActive ? 'opacity-100' : 'opacity-0',
+                )}
+              />
+            </button>
+          );
+        })}
+      </div>
+      <div
+        aria-hidden='true'
+        className={cn(
+          'pointer-events-none absolute inset-y-0 left-0 w-6 bg-linear-to-r from-black to-transparent transition-opacity duration-150',
+          canScrollLeft ? 'opacity-100' : 'opacity-0',
+        )}
+      />
+      <div
+        aria-hidden='true'
+        className={cn(
+          'pointer-events-none absolute inset-y-0 right-0 w-6 bg-linear-to-l from-black to-transparent transition-opacity duration-150',
+          canScrollRight ? 'opacity-100' : 'opacity-0',
+        )}
+      />
     </div>
   ) : null;
 

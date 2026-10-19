@@ -1,13 +1,18 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
-import { memo, type MouseEvent, type ReactNode, useRef } from 'react';
+import { memo, type MouseEvent, type ReactNode, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useProfileAvatar } from '@/hooks/use-local-profile';
-import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import {
+  playbackLanguagePreferencesQueryOptions,
+  supportedLanguagesQueryOptions,
+} from '@/hooks/use-playback-language-preferences';
+import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import { api } from '@/lib/api';
 import { focusSearchInput } from '@/lib/dom';
 import { routeChunks } from '@/lib/route-chunks';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
@@ -54,15 +59,21 @@ const ROUTE_CHUNK_WARMERS: Record<string, () => Promise<unknown>> = {
   [SETTINGS_HREF]: routeChunks.settings,
   [PROFILE_HREF]: routeChunks.profile,
 };
+let sidebarRoutesWarmed = false;
 
 function warmRouteChunk(href: string): void {
   void ROUTE_CHUNK_WARMERS[href]?.().catch(() => undefined);
 }
 
+function isNavItemActive(item: SidebarNavItem, pathname: string) {
+  const normalizedPathname = pathname.replace(/\/+$/, '') || '/';
+  return item.matches?.(normalizedPathname) ?? normalizedPathname === item.href;
+}
+
 function useNavIndicator(items: SidebarNavItem[], pathname: string) {
   const navRef = useRef<HTMLElement>(null);
   const itemRefs = useRef(new Map<string, HTMLDivElement>());
-  const activeHref = items.find((item) => item.matches?.(pathname) ?? pathname === item.href)?.href;
+  const activeHref = items.find((item) => isNavItemActive(item, pathname))?.href;
   const indicator = useSlidingIndicator(activeHref, navRef, itemRefs);
 
   return { navRef, itemRefs, activeHref, indicator };
@@ -84,7 +95,7 @@ function SidebarNavIndicator({ indicator, activeHref }: ReturnType<typeof useNav
       />
       <span
         aria-hidden='true'
-        className='nav-sliding-bar pointer-events-none absolute left-0 top-0 w-[3px] rounded-r-full bg-(--accent-nav)'
+        className={SLIDING_ACCENT_BAR_CLASS}
         style={{
           height: indicator.height - 20,
           transform: `translate3d(0, ${indicator.top + 10}px, 0)`,
@@ -108,10 +119,24 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
   const primaryNav = useNavIndicator(PRIMARY_NAV_ITEMS, pathname);
   const secondaryNav = useNavIndicator(SECONDARY_NAV_ITEMS, pathname);
 
+  useEffect(() => {
+    if (sidebarRoutesWarmed) return;
+    const warm = () => {
+      sidebarRoutesWarmed = true;
+      Object.keys(ROUTE_CHUNK_WARMERS).forEach(warmRouteChunk);
+    };
+    if (typeof window.requestIdleCallback === 'function') {
+      const idle = window.requestIdleCallback(warm, { timeout: 2_000 });
+      return () => window.cancelIdleCallback(idle);
+    }
+    const timer = window.setTimeout(warm, 1_000);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const renderItem = (item: SidebarNavItem, group: ReturnType<typeof useNavIndicator>) => {
     const showUpdate = item.href === SETTINGS_HREF && isUpdateAvailable;
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
-    const isActive = item.matches?.(pathname) ?? pathname === item.href;
+    const isActive = isNavItemActive(item, pathname);
     const isSearch = item.href === SEARCH_HREF;
     return (
       <SidebarNavButton
@@ -129,6 +154,12 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         tooltip={showUpdate ? updateTooltip : undefined}
         onIntent={() => {
           warmRouteChunk(item.href);
+          if (item.href === SETTINGS_HREF) {
+            void queryClient.prefetchQuery(api.launchAtLoginQueryOptions());
+            void queryClient.prefetchQuery(api.addonConfigsQueryOptions());
+            void queryClient.prefetchQuery(playbackLanguagePreferencesQueryOptions);
+            void queryClient.prefetchQuery(supportedLanguagesQueryOptions);
+          }
           if (isSearch && navigator.onLine) {
             prefetchSearchCatalog(queryClient, lastSearchFacets());
           }
@@ -157,7 +188,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
   };
 
   return (
-    <TooltipProvider delayDuration={0}>
+    <TooltipProvider delayDuration={200} skipDelayDuration={300}>
       <div
         className={cn(
           'w-[60px] h-screen shrink-0 cursor-auto flex flex-col items-center pt-8 pb-4 z-50 pointer-events-none',
@@ -173,7 +204,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
                 className='group flex h-11 w-full items-center justify-center rounded-lg transition-transform duration-200 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transform-none'
               >
                 <img
-                  src='/stremiro.ico'
+                  src='/stremiro.png'
                   alt=''
                   aria-hidden='true'
                   loading='eager'

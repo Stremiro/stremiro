@@ -3,10 +3,12 @@ import {
   memo,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
 } from 'react';
+import { CHROME_VALUE_BUBBLE_CLASS } from '@/components/player-chrome-styles';
 import type { SkipSegment } from '@/lib/api';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { getSkipLabel } from '@/lib/player-skip';
@@ -210,6 +212,9 @@ export function PlayerProgressBar({
   onSeek,
 }: PlayerProgressBarProps) {
   const progressBarRef = useRef<HTMLDivElement>(null);
+  const tooltipRef = useRef<HTMLDivElement>(null);
+  const [keyboardFocused, setKeyboardFocused] = useState(false);
+  const [tooltipSize, setTooltipSize] = useState({ rail: 0, tooltip: 0 });
   // The active pointer's id, not a boolean — a second pointer must never share or cancel a drag it didn't start.
   const dragPointerIdRef = useRef<number | null>(null);
   const dragRectRef = useRef<DOMRect | null>(null);
@@ -431,6 +436,40 @@ export function PlayerProgressBar({
   const canSeek = Number.isFinite(duration) && duration > 0;
   const displayTime = seekPreviewTime ?? currentTime;
   const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
+  const showTooltip = canSeek && (hoverPct !== null || keyboardFocused);
+  const tooltipTime = keyboardFocused ? displayTime : (hoverTime ?? displayTime);
+  const tooltipPct = keyboardFocused ? progressPct : (hoverPct ?? progressPct);
+  const tooltipSegment = keyboardFocused
+    ? (skipSegments.find((seg) => displayTime >= seg.start_time && displayTime <= seg.end_time) ??
+      null)
+    : hoverSegment;
+  const tooltipInset = Math.min(tooltipSize.tooltip / 2 + 4, tooltipSize.rail / 2);
+  const tooltipLeft = clamp(
+    (tooltipPct / 100) * tooltipSize.rail,
+    tooltipInset,
+    tooltipSize.rail - tooltipInset,
+  );
+
+  useLayoutEffect(() => {
+    if (!showTooltip) return;
+    const rail = progressBarRef.current;
+    const tooltip = tooltipRef.current;
+    if (!rail || !tooltip) return;
+    const measure = () => {
+      const railWidth = rail.getBoundingClientRect().width;
+      const tooltipWidth = tooltip.getBoundingClientRect().width;
+      setTooltipSize((previous) =>
+        previous.rail === railWidth && previous.tooltip === tooltipWidth
+          ? previous
+          : { rail: railWidth, tooltip: tooltipWidth },
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(rail);
+    observer.observe(tooltip);
+    return () => observer.disconnect();
+  }, [showTooltip]);
 
   // Buffered band spans playhead → buffered end, anchored to the real position (never the drag preview);
   // clamped — fully-cached local-style streams report cache windows overshooting duration.
@@ -459,36 +498,34 @@ export function PlayerProgressBar({
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
       onKeyDown={handleKeyDown}
+      onFocus={(event) => setKeyboardFocused(event.currentTarget.matches(':focus-visible'))}
+      onBlur={() => setKeyboardFocused(false)}
+      onKeyDownCapture={(event) =>
+        setKeyboardFocused(event.currentTarget.matches(':focus-visible'))
+      }
+      onPointerDownCapture={() => setKeyboardFocused(false)}
     >
-      {hoverPct !== null && duration > 0 && (
+      {showTooltip && (
         <div
-          className='absolute bottom-full mb-2 -translate-x-1/2 pointer-events-none z-10 flex flex-col items-center gap-1'
-          style={{ left: `${clamp(hoverPct, 5, 95)}%` }}
+          ref={tooltipRef}
+          className='absolute bottom-full mb-2 w-max max-w-[calc(100%-8px)] -translate-x-1/2 pointer-events-none z-10 flex flex-col items-center gap-1'
+          style={{ left: tooltipSize.rail > 0 ? tooltipLeft : '50%' }}
         >
-          {hoverSegment && (
+          {tooltipSegment && (
             <span
               className={cn(
-                'whitespace-nowrap text-[9px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
-                getSegmentStyle(hoverSegment.type).badge,
+                'max-w-full truncate text-[9px] font-bold uppercase tracking-widest px-2 py-[3px] rounded-sm leading-none shadow-lg',
+                getSegmentStyle(tooltipSegment.type).badge,
               )}
             >
-              {`${getSkipLabel(hoverSegment.type).replace(/^Skip\s+/, '')} · ${formatTime(hoverSegment.start_time)}–${formatTime(hoverSegment.end_time)}`}
+              {`${getSkipLabel(tooltipSegment.type).replace(/^Skip\s+/, '')} · ${formatTime(tooltipSegment.start_time)}–${formatTime(tooltipSegment.end_time)}`}
             </span>
           )}
-          <div className='whitespace-nowrap rounded-md bg-black/85 px-2 py-1 text-[12px] font-semibold leading-none tracking-tight tabular-nums text-white shadow-lg ring-1 ring-white/10'>
-            {formatTime((hoverPct / 100) * duration)}
-          </div>
+          <div className={CHROME_VALUE_BUBBLE_CLASS}>{formatTime(tooltipTime)}</div>
         </div>
       )}
 
       <div className='relative w-full h-2 group-hover/bar:h-[10px] group-focus-visible/bar:h-[10px] transition-[height] duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
-        {hoverPct !== null && duration > 0 && (
-          <div
-            className='absolute inset-0 origin-left bg-white/25 pointer-events-none'
-            style={{ transform: `scaleX(${hoverPct / 100})` }}
-          />
-        )}
-
         {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
             className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
@@ -505,8 +542,15 @@ export function PlayerProgressBar({
 
         <SkipNotches duration={duration} skipSegments={skipSegments} hoverSegment={hoverSegment} />
 
+        {hoverPct !== null && canSeek && (
+          <div
+            className='absolute inset-y-0 w-px -translate-x-1/2 bg-white/60 pointer-events-none z-20'
+            style={{ left: `${hoverPct}%` }}
+          />
+        )}
+
         {/* Playhead nub sits above slices so position stays readable inside a segment band. */}
-        {duration > 0 && displayTime > 0 && (
+        {canSeek && (
           <div
             className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'
             style={{ left: `${progressPct}%` }}

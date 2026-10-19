@@ -1,5 +1,6 @@
 import { Plus, RotateCcw } from 'lucide-react';
 import { type KeyboardEvent, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { ShortcutTable } from '@/components/shortcut-table';
 import { Button } from '@/components/ui/button';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -145,10 +146,24 @@ export function ShortcutsSection() {
               onClick={() => {
                 if (isSaving || !hasOverrides) return;
                 cancelCapture();
+                const previous = preferences.playerKeybindings;
                 void save({}).then((saved) => {
-                  if (saved && mountedRef.current) {
-                    setNotice('All player shortcuts restored to their defaults.');
-                  }
+                  if (!saved) return;
+                  let undoUsed = false;
+                  toast.success('All player shortcuts restored to their defaults.', {
+                    duration: 6000,
+                    action: {
+                      label: 'Undo',
+                      onClick: () => {
+                        if (undoUsed) return;
+                        undoUsed = true;
+                        cancelCapture();
+                        void save(previous).then((restored) => {
+                          if (restored) toast.success('Player shortcuts restored');
+                        });
+                      },
+                    },
+                  });
                 });
               }}
               className={cn(
@@ -244,6 +259,7 @@ function PlayerBindingRow({
   onCancelCapture: () => void;
   onReset: () => void;
 }) {
+  const primarySlotRef = useRef<HTMLButtonElement>(null);
   const keys = keymap.keys[action];
   const customized = keymap.overrides[action] !== undefined;
   const visibleSlots = SLOT_IDS.slice(0, Math.min(keys.length + 1, MAX_KEYS_PER_PLAYER_ACTION));
@@ -268,6 +284,7 @@ function PlayerBindingRow({
             <button
               // Stable per-slot identity: rebinding keeps focus on the same button.
               key={slotId}
+              ref={slot === 0 ? primarySlotRef : undefined}
               type='button'
               disabled={disabled}
               aria-disabled={isSaving || undefined}
@@ -312,7 +329,9 @@ function PlayerBindingRow({
           disabled={disabled || !customized}
           aria-disabled={isSaving || undefined}
           onClick={() => {
-            if (!isSaving) onReset();
+            if (isSaving) return;
+            primarySlotRef.current?.focus({ preventScroll: true });
+            onReset();
           }}
           className={cn(
             'flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 aria-disabled:pointer-events-none',

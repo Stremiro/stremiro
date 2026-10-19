@@ -1,5 +1,5 @@
 import { defaultRangeExtractor, type Range, useWindowVirtualizer } from '@tanstack/react-virtual';
-import { Fragment, type ReactNode, useCallback, useRef, useState } from 'react';
+import { type ReactNode, useCallback, useRef, useState } from 'react';
 
 import { useWindowScrollMargin } from '@/hooks/use-window-scroll-margin';
 
@@ -9,8 +9,13 @@ const OVERSCAN_ROWS = 6;
 
 export function focusedRowRange(range: Range, focusedIndex: number): number[] {
   const indices = defaultRangeExtractor(range);
-  if (focusedIndex >= 0 && focusedIndex < range.count && !indices.includes(focusedIndex)) {
-    indices.push(focusedIndex);
+  if (focusedIndex >= 0 && focusedIndex < range.count) {
+    const first = Math.max(0, focusedIndex - 1);
+    const last = Math.min(range.count - 1, focusedIndex + 1);
+    if (first >= indices[0] && last <= indices[indices.length - 1]) return indices;
+    for (let index = first; index <= last; index += 1) {
+      if (!indices.includes(index)) indices.push(index);
+    }
     indices.sort((left, right) => left - right);
   }
   return indices;
@@ -29,6 +34,8 @@ export function WindowVirtualizedStack<T>({
   renderItem,
   estimateSize,
 }: WindowVirtualizedStackProps<T>) {
+  // The compiler caches getVirtualItems() on the stable virtualizer instance, freezing rows on scroll.
+  'use no memo';
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const shouldVirtualize = items.length >= DEFAULT_VIRTUALIZATION_THRESHOLD;
@@ -36,6 +43,10 @@ export function WindowVirtualizedStack<T>({
   const rangeExtractor = useCallback(
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
+  );
+  const getRowKey = useCallback(
+    (index: number) => getItemKey(items[index] as T, index),
+    [getItemKey, items],
   );
 
   const rowVirtualizer = useWindowVirtualizer({
@@ -45,27 +56,25 @@ export function WindowVirtualizedStack<T>({
     gap: DEFAULT_STACK_GAP_PX,
     overscan: OVERSCAN_ROWS,
     scrollMargin,
-    getItemKey: (index) => getItemKey(items[index] as T, index),
+    getItemKey: getRowKey,
     rangeExtractor,
   });
 
-  if (!shouldVirtualize) {
-    return (
-      <div ref={containerRef} style={{ display: 'grid', gap: `${DEFAULT_STACK_GAP_PX}px` }}>
-        {items.map((item, index) => (
-          <Fragment key={getItemKey(item, index)}>{renderItem(item, index)}</Fragment>
-        ))}
-      </div>
-    );
-  }
+  const rows = shouldVirtualize
+    ? rowVirtualizer.getVirtualItems()
+    : items.map((item, index) => ({ index, key: getItemKey(item, index), start: 0 }));
 
   return (
     <div
       ref={containerRef}
       className='relative w-full'
-      style={{ height: `${rowVirtualizer.getTotalSize()}px` }}
+      style={
+        shouldVirtualize
+          ? { height: `${rowVirtualizer.getTotalSize()}px` }
+          : { display: 'grid', gap: `${DEFAULT_STACK_GAP_PX}px` }
+      }
     >
-      {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+      {rows.map((virtualRow) => {
         const item = items[virtualRow.index];
         if (!item) {
           return null;
@@ -75,18 +84,22 @@ export function WindowVirtualizedStack<T>({
           <div
             key={virtualRow.key}
             data-index={virtualRow.index}
-            ref={rowVirtualizer.measureElement}
+            ref={shouldVirtualize ? rowVirtualizer.measureElement : undefined}
             onFocusCapture={() => setFocusedIndex(virtualRow.index)}
             onBlurCapture={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
             }}
-            style={{
-              position: 'absolute',
-              top: 0,
-              left: 0,
-              width: '100%',
-              transform: `translateY(${virtualRow.start - scrollMargin}px)`,
-            }}
+            style={
+              shouldVirtualize
+                ? {
+                    position: 'absolute',
+                    top: 0,
+                    left: 0,
+                    width: '100%',
+                    transform: `translateY(${virtualRow.start - scrollMargin}px)`,
+                  }
+                : undefined
+            }
           >
             {renderItem(item, virtualRow.index)}
           </div>

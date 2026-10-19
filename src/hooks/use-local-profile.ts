@@ -40,7 +40,8 @@ function useProfilePreferencesQuery<T = ProfilePreferences>(
 ) {
   return useQuery({
     queryKey: PROFILE_PREFERENCES_QUERY_KEY,
-    queryFn: api.getProfilePreferences,
+    queryFn: async () =>
+      (await api.pendingBootstrapSnapshot())?.profilePreferences ?? api.getProfilePreferences(),
     staleTime: Infinity,
     gcTime: Infinity,
     placeholderData: DEFAULT_PROFILE_PREFERENCES,

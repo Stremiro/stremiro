@@ -27,9 +27,11 @@ import {
 import { bumpWatchProgressEpoch, getWatchProgressEpoch } from '@/lib/api-cache';
 import { notifyAction } from '@/lib/notify';
 import { reinsertSnapshotRows, restoreQueryArrayEntry } from '@/lib/optimistic-query';
+import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import {
   invalidateLibraryQueries,
   invalidateListQueries,
+  invalidatePlaybackHistoryQueries,
   invalidatePlaybackHistoryQueriesForTitle,
   invalidateWatchStatusQueries,
   LIBRARY_QUERY_KEY,
@@ -47,7 +49,7 @@ import {
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { formatEpisodeHeading } from '@/lib/utils';
+import { formatEpisodeHeading, isSeriesLikeMediaType } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
@@ -66,8 +68,9 @@ export function setCachedWatchStatus(
   status: WatchStatus | null,
 ): void {
   queryClient.setQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY, (old) => {
+    if (!old) return old;
     if (status === null) {
-      if (!old || !Object.hasOwn(old, itemId)) return old;
+      if (!Object.hasOwn(old, itemId)) return old;
       const next = { ...old };
       delete next[itemId];
       return next;
@@ -90,7 +93,13 @@ interface ToggleLibraryMutationContext {
   itemId?: string;
   previousLibraryItem?: MediaItem;
   previousStatus?: WatchStatus | null;
-  previousProfileEntries?: { queryKey: QueryKey; snapshot: MediaItem[]; index: number }[];
+  previousProfileEntries?: ProfileLibraryRemoval[];
+}
+
+interface ProfileLibraryRemoval {
+  queryKey: QueryKey;
+  snapshot: MediaItem[];
+  indices: number[];
 }
 
 interface UseToggleLibraryItemOptions {
@@ -153,10 +162,16 @@ export function useLibraryItems(options?: SharedCollectionQueryOptions) {
 }
 
 export function useProfileLibrary(filters: LibraryFilters) {
+  const isDefault =
+    !filters.query &&
+    (filters.type ?? 'all') === 'all' &&
+    (filters.status ?? 'all') === 'all' &&
+    (filters.sort ?? 'default') === 'default';
   return useQuery({
     queryKey: profileLibraryQueryKey(filters),
     queryFn: () => api.getProfileLibrary(filters),
     staleTime: LIBRARY_STALE_TIME,
+    gcTime: isDefault ? LIBRARY_STALE_TIME : 60_000,
     placeholderData: (previousData, previousQuery) => {
       const previousFilters = previousQuery?.queryKey[1] as LibraryFilters | undefined;
       // A previous status/type result must never masquerade as the newly selected filter.
@@ -216,7 +231,8 @@ export function useResumeRail(
         if (
           observedRef.current &&
           generation === fetchGenerationRef.current &&
-          progressEpoch === getWatchProgressEpoch()
+          progressEpoch === getWatchProgressEpoch() &&
+          queryClient.getQueryData(resumeRailQueryKey(localToday)) === undefined
         ) {
           queryClient.setQueryData(resumeRailQueryKey(localToday), snapshot);
         }
@@ -306,25 +322,69 @@ export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQu
   });
 }
 
-export function useLatestWatchHistoryEntry(
+export function useMediaResumeEntry(
   itemId?: string,
+  mediaType?: string,
   options?: SharedCollectionQueryOptions,
 ) {
-  // `latestEntry` is the backend's `history[0]` pick (`last_watched` DESC).
-  const selectLatestEntry = useCallback((progress: TitleWatchProgress) => progress.latestEntry, []);
+  const selectResumeEntry = useCallback(
+    (progress: TitleWatchProgress) =>
+      resolvePlayerRouteMediaType(mediaType) === 'movie'
+        ? progress.movieResumeEntry
+        : isSeriesLikeMediaType(mediaType)
+          ? progress.seriesResumeEntry
+          : null,
+    [mediaType],
+  );
 
   return useQuery({
     ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
     staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
-    select: selectLatestEntry,
+    select: selectResumeEntry,
   });
 }
 
-export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItemOptions) {
+function removeCachedProfileLibraryItems(queryClient: QueryClient, ids: ReadonlySet<string>) {
+  const queries = { queryKey: PROFILE_LIBRARY_QUERY_KEY };
+  const previous = queryClient
+    .getQueriesData<ProfileLibrary>(queries)
+    .flatMap(([queryKey, data]) => {
+      const indices =
+        data?.items.flatMap((entry, index) => (ids.has(entry.id) ? [index] : [])) ?? [];
+      return data && indices.length > 0 ? [{ queryKey, snapshot: data.items, indices }] : [];
+    });
+  queryClient.setQueriesData<ProfileLibrary>(queries, (current) =>
+    current ? { ...current, items: current.items.filter((entry) => !ids.has(entry.id)) } : current,
+  );
+  return previous;
+}
+
+function restoreCachedProfileLibraryItems(
+  queryClient: QueryClient,
+  previous: ProfileLibraryRemoval[],
+) {
+  for (const { queryKey, snapshot, indices } of previous) {
+    queryClient.setQueryData<ProfileLibrary>(queryKey, (current) =>
+      current
+        ? {
+            ...current,
+            items: reinsertSnapshotRows(current.items, snapshot, indices, (row) => row.id),
+          }
+        : current,
+    );
+  }
+}
+
+export function useToggleLibraryItem(options: UseToggleLibraryItemOptions) {
   const queryClient = useQueryClient();
 
-  return useMutation<'added' | 'removed', unknown, void, ToggleLibraryMutationContext>({
-    mutationFn: async () => {
+  const mutation = useMutation<
+    'added' | 'removed',
+    unknown,
+    UseToggleLibraryItemOptions,
+    ToggleLibraryMutationContext
+  >({
+    mutationFn: async ({ item, isInLibrary }) => {
       if (!item) {
         throw new Error('Media item unavailable');
       }
@@ -338,17 +398,16 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
       await api.addToLibrary(item);
       return 'added' as const;
     },
-    onMutate: async () => {
+    onMutate: async ({ item, isInLibrary }) => {
       if (!item) {
         return {};
       }
 
-      const profileQueries = { queryKey: PROFILE_LIBRARY_QUERY_KEY };
       await Promise.all([
         queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY }),
         ...(isInLibrary
           ? [
-              queryClient.cancelQueries(profileQueries),
+              queryClient.cancelQueries({ queryKey: PROFILE_LIBRARY_QUERY_KEY }),
               queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY }),
             ]
           : []),
@@ -357,25 +416,20 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         .getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY)
         ?.find((entry) => entry.id === item.id);
       const previousProfileEntries = isInLibrary
-        ? queryClient.getQueriesData<ProfileLibrary>(profileQueries).flatMap(([queryKey, data]) => {
-            const index = data?.items.findIndex((entry) => entry.id === item.id) ?? -1;
-            return data && index !== -1 ? [{ queryKey, snapshot: data.items, index }] : [];
-          })
+        ? removeCachedProfileLibraryItems(queryClient, new Set([item.id]))
         : [];
 
       queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) => {
+        if (!old) return old;
         if (isInLibrary) {
-          return old?.filter((libraryItem) => libraryItem.id !== item.id) ?? [];
+          return old.filter((libraryItem) => libraryItem.id !== item.id);
         }
 
-        return [...(old ?? []), toMediaItem(item)];
+        return [...old, toMediaItem(item)];
       });
 
       let previousStatus: WatchStatus | null | undefined;
       if (isInLibrary) {
-        queryClient.setQueriesData<ProfileLibrary>(profileQueries, (old) =>
-          old ? { ...old, items: old.items.filter((entry) => entry.id !== item.id) } : old,
-        );
         // Mirror the status clear so the details chip can't show a stale status.
         previousStatus =
           getOwnWatchStatus(
@@ -398,21 +452,12 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         if (context.previousStatus !== undefined) {
           setCachedWatchStatus(queryClient, context.itemId, context.previousStatus);
         }
-        for (const { queryKey, snapshot, index } of context.previousProfileEntries ?? []) {
-          queryClient.setQueryData<ProfileLibrary>(queryKey, (current) =>
-            !current || current.items.some((cached) => cached.id === context.itemId)
-              ? current
-              : {
-                  ...current,
-                  items: reinsertSnapshotRows(current.items, snapshot, [index], (row) => row.id),
-                },
-          );
-        }
+        restoreCachedProfileLibraryItems(queryClient, context.previousProfileEntries ?? []);
       }
 
       notifyAction('Failed to update library', { tone: 'error' });
     },
-    onSuccess: (action) => {
+    onSuccess: (action, { item }) => {
       if (!item) {
         return;
       }
@@ -422,10 +467,16 @@ export function useToggleLibraryItem({ item, isInLibrary }: UseToggleLibraryItem
         thumb: item.poster,
       });
     },
-    onSettled: () => {
-      void invalidateLibraryQueries(queryClient);
-    },
+    // Removal clears the title's watch status; adding leaves it untouched.
+    onSettled: (_action, _error, { isInLibrary }) =>
+      invalidateLibraryQueries(queryClient, { watchStatusChanged: isInLibrary }),
   });
+
+  return {
+    ...mutation,
+    mutate: () => mutation.mutate(options),
+    mutateAsync: () => mutation.mutateAsync(options),
+  };
 }
 
 function filterUnseenMediaItems(items: MediaItem[], ids: Set<string>): MediaItem[] {
@@ -497,12 +548,14 @@ export function useBulkRemoveFromLibrary() {
     onMutate: async (ids) => {
       await Promise.all([
         queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY }),
+        queryClient.cancelQueries({ queryKey: PROFILE_LIBRARY_QUERY_KEY }),
         queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY }),
       ]);
       const previousLibrary = queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY) ?? [];
       const previousStatuses =
         queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY) ?? {};
       const removedIds = new Set(ids);
+      const previousProfileEntries = removeCachedProfileLibraryItems(queryClient, removedIds);
       queryClient.setQueryData<MediaItem[]>(
         LIBRARY_QUERY_KEY,
         previousLibrary.filter((item) => !removedIds.has(item.id)),
@@ -511,11 +564,12 @@ export function useBulkRemoveFromLibrary() {
         WATCH_STATUSES_QUERY_KEY,
         Object.fromEntries(Object.entries(previousStatuses).filter(([id]) => !removedIds.has(id))),
       );
-      return { previousLibrary, previousStatuses };
+      return { previousLibrary, previousStatuses, previousProfileEntries };
     },
     onError: (_error, ids, context) => {
       if (!context) return;
       restoreSelectedLibraryItems(queryClient, ids, context.previousLibrary);
+      restoreCachedProfileLibraryItems(queryClient, context.previousProfileEntries);
       restoreSelectedWatchStatuses(queryClient, ids, context.previousStatuses);
     },
     onSettled: () => invalidateLibraryQueries(queryClient),
@@ -525,51 +579,38 @@ export function useBulkRemoveFromLibrary() {
 export function useBulkSetWatchStatus() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ items, status }: { items: MediaItem[]; status: WatchStatus | null }) =>
-      api.bulkSetWatchStatus(items, status),
-    onMutate: async ({ items, status }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY }),
-        ...(status !== null ? [queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY })] : []),
-      ]);
+    mutationFn: ({ ids, status }: { ids: string[]; status: WatchStatus | null }) =>
+      api.bulkSetWatchStatus(ids, status),
+    onMutate: async ({ ids, status }) => {
+      await queryClient.cancelQueries({ queryKey: WATCH_STATUSES_QUERY_KEY });
       const previousStatuses =
         queryClient.getQueryData<Record<string, WatchStatus>>(WATCH_STATUSES_QUERY_KEY) ?? {};
-      const previousLibrary = queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY) ?? [];
       const nextStatuses = { ...previousStatuses };
-      for (const item of items) {
-        if (status === null) delete nextStatuses[item.id];
-        else nextStatuses[item.id] = status;
+      for (const id of ids) {
+        if (status === null) delete nextStatuses[id];
+        else nextStatuses[id] = status;
       }
       queryClient.setQueryData(WATCH_STATUSES_QUERY_KEY, nextStatuses);
-      if (status !== null) {
-        queryClient.setQueryData(
-          LIBRARY_QUERY_KEY,
-          appendMissingMediaItems(previousLibrary, items),
-        );
-      }
-      return { previousStatuses, previousLibrary };
+      return { previousStatuses };
     },
-    onError: (_error, { items, status }, context) => {
+    onError: (_error, { ids }, context) => {
       if (!context) return;
-      const ids = items.map((item) => item.id);
-      if (status !== null) {
-        restoreSelectedLibraryItems(queryClient, ids, context.previousLibrary);
-      }
       restoreSelectedWatchStatuses(queryClient, ids, context.previousStatuses);
     },
-    onSettled: (_count, _error, { status }) =>
-      status !== null
-        ? invalidateLibraryQueries(queryClient)
-        : invalidateWatchStatusQueries(queryClient),
+    onSettled: () => invalidateWatchStatusQueries(queryClient),
   });
 }
 
 export function useBulkAddToList() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: ({ listId, items }: { listId: string; items: MediaItem[] }) =>
-      api.bulkAddToList(listId, items),
-    onMutate: async ({ listId, items }) => {
+    mutationFn: ({ listId, itemIds }: { listId: string; itemIds: string[] }) =>
+      api.bulkAddToList(listId, itemIds),
+    onMutate: async ({ listId, itemIds }) => {
+      const selectedIds = new Set(itemIds);
+      const items = (queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY) ?? []).filter(
+        (item) => selectedIds.has(item.id),
+      );
       await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
       const previousLists = queryClient.getQueryData<UserList[]>(LISTS_QUERY_KEY) ?? [];
       queryClient.setQueryData<UserList[]>(
@@ -584,13 +625,13 @@ export function useBulkAddToList() {
           };
         }),
       );
-      return { previousList: previousLists.find((list) => list.id === listId) };
+      return { previousList: previousLists.find((list) => list.id === listId), selectedIds };
     },
-    onError: (_error, { listId, items }, context) => {
+    onError: (_error, { listId }, context) => {
       const previousList = context?.previousList;
       if (!previousList) return;
       const previousIds = new Set(previousList.item_ids);
-      const addedIds = new Set(items.map((item) => item.id).filter((id) => !previousIds.has(id)));
+      const addedIds = new Set([...context.selectedIds].filter((id) => !previousIds.has(id)));
       queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) =>
         current?.map((list) =>
           list.id === listId
@@ -604,6 +645,159 @@ export function useBulkAddToList() {
       );
     },
     onSettled: () => invalidateListQueries(queryClient),
+  });
+}
+
+export function useBulkRemoveFromList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listId, itemIds }: { listId: string; itemIds: string[] }) =>
+      api.bulkRemoveFromList(listId, itemIds),
+    onMutate: async ({ listId, itemIds }) => {
+      await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
+      const previous = queryClient
+        .getQueryData<UserList[]>(LISTS_QUERY_KEY)
+        ?.find((list) => list.id === listId);
+      const ids = new Set(itemIds);
+      queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
+        lists?.map((list) =>
+          list.id === listId
+            ? {
+                ...list,
+                item_ids: list.item_ids.filter((id) => !ids.has(id)),
+                items: list.items?.filter((item) => !ids.has(item.id)),
+              }
+            : list,
+        ),
+      );
+      return { previous, ids };
+    },
+    onError: (error, { listId }, context) => {
+      const previous = context?.previous;
+      if (previous) {
+        const indices = previous.item_ids.flatMap((id, index) =>
+          context.ids.has(id) ? [index] : [],
+        );
+        const itemIndices =
+          previous.items?.flatMap((item, index) => (context.ids.has(item.id) ? [index] : [])) ?? [];
+        queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
+          lists?.map((list) =>
+            list.id === listId
+              ? {
+                  ...list,
+                  item_ids: reinsertSnapshotRows(
+                    list.item_ids,
+                    previous.item_ids,
+                    indices,
+                    (id) => id,
+                  ),
+                  items: reinsertSnapshotRows(
+                    list.items ?? [],
+                    previous.items ?? [],
+                    itemIndices,
+                    (item) => item.id,
+                  ),
+                }
+              : list,
+          ),
+        );
+      }
+      toast.error(getListErrorMessage(error) ?? 'Failed to remove titles from list');
+    },
+    onSuccess: (entries, { listId }) => {
+      toast.success(`Removed ${entries.length} title${entries.length === 1 ? '' : 's'} from list`, {
+        duration: WATCH_HISTORY_UNDO_DURATION_MS,
+        ...(entries.length > 0 && {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await api.restoreListItems(listId, entries);
+                } catch (error) {
+                  toast.error(getListErrorMessage(error) ?? 'Could not restore list titles');
+                } finally {
+                  await invalidateListQueries(queryClient);
+                }
+              })();
+            },
+          },
+        }),
+      });
+    },
+    onSettled: () => invalidateListQueries(queryClient),
+  });
+}
+
+export function useBulkRemoveFromWatchHistory() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (items: { id: string; type: string }[]) => api.bulkRemoveFromWatchHistory(items),
+    onMutate: async (items) => {
+      bumpWatchProgressEpoch();
+      await Promise.all([
+        queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
+        queryClient.cancelQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] }),
+      ]);
+      const ids = new Set(items.map((item) => `${item.type}:${item.id}`));
+      const matches = (row: WatchProgress) => ids.has(`${row.type_}:${row.id}`);
+      const history = queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
+      const historyIndices = history?.flatMap((row, index) => (matches(row) ? [index] : [])) ?? [];
+      const rail = queryClient
+        .getQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] })
+        .map(([queryKey, snapshot = []]) => ({
+          queryKey,
+          snapshot,
+          indices: snapshot.flatMap((entry, index) => (matches(entry.row) ? [index] : [])),
+        }));
+      queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
+        rows?.filter((row) => !matches(row)),
+      );
+      queryClient.setQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] }, (rows) =>
+        rows?.filter((entry) => !matches(entry.row)),
+      );
+      return { history, historyIndices, rail };
+    },
+    onError: (_error, _items, context) => {
+      if (context?.history) {
+        queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
+          reinsertSnapshotRows(
+            rows ?? [],
+            context.history!,
+            context.historyIndices,
+            (row) => `${row.type_}:${row.id}`,
+          ),
+        );
+      }
+      for (const { queryKey, snapshot, indices } of context?.rail ?? []) {
+        queryClient.setQueryData<ResumeRailEntry[]>(queryKey, (rows) =>
+          reinsertSnapshotRows(rows ?? [], snapshot, indices, resumeRailEntryKey),
+        );
+      }
+      toast.error('Failed to remove titles from history');
+    },
+    onSuccess: (rows, items) => {
+      toast.success(`Removed ${items.length} title${items.length === 1 ? '' : 's'} from history`, {
+        duration: WATCH_HISTORY_UNDO_DURATION_MS,
+        ...(rows.length > 0 && {
+          action: {
+            label: 'Undo',
+            onClick: () => {
+              void (async () => {
+                try {
+                  await api.saveWatchProgressBatch(rows);
+                } catch {
+                  toast.error('Could not restore watch history');
+                } finally {
+                  await invalidatePlaybackHistoryQueries(queryClient);
+                }
+              })();
+            },
+          },
+        }),
+      });
+    },
+    onSettled: () => invalidatePlaybackHistoryQueries(queryClient),
   });
 }
 
@@ -630,10 +824,6 @@ function useRemoveTitleWatchHistory({
   const matchesTitle = (entry: WatchProgress) =>
     entry.id === itemId && entry.type_ === normalizedMediaType;
   const withoutTitle = (rows?: WatchProgress[]) => rows?.filter((entry) => !matchesTitle(entry));
-  const restore = (current: WatchProgress[] | undefined, removed: WatchProgress[]) =>
-    current?.some(matchesTitle)
-      ? current
-      : [...(current ?? []), ...removed].toSorted((a, b) => b.last_watched - a.last_watched);
 
   return useMutation({
     mutationFn: async () => {
@@ -652,6 +842,8 @@ function useRemoveTitleWatchHistory({
       ]);
       const previousWatchHistory =
         queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
+      const historyIndices =
+        previousWatchHistory?.flatMap((row, index) => (matchesTitle(row) ? [index] : [])) ?? [];
       const removedResumeEntries = queryClient
         .getQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] })
         .map(([queryKey, rows = []]) => ({
@@ -666,7 +858,8 @@ function useRemoveTitleWatchHistory({
       );
       queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, withoutTitle);
       return {
-        removedWatchHistory: previousWatchHistory?.filter(matchesTitle),
+        previousWatchHistory,
+        historyIndices,
         removedResumeEntries,
       };
     },
@@ -683,10 +876,15 @@ function useRemoveTitleWatchHistory({
       });
     },
     onError: (error, _variables, context) => {
-      const removedWatchHistory = context?.removedWatchHistory;
-      if (removedWatchHistory !== undefined) {
+      const previousWatchHistory = context?.previousWatchHistory;
+      if (previousWatchHistory !== undefined) {
         queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (current) =>
-          restore(current, removedWatchHistory),
+          reinsertSnapshotRows(
+            current ?? [],
+            previousWatchHistory,
+            context?.historyIndices ?? [],
+            (row) => `${row.type_}:${row.id}`,
+          ),
         );
       }
       for (const { queryKey, snapshot, indices } of context?.removedResumeEntries ?? []) {
@@ -706,7 +904,7 @@ function useRemoveTitleWatchHistory({
 export function useRemoveFromContinueWatching(options: UseRemoveFromContinueWatchingOptions) {
   return useRemoveTitleWatchHistory({
     ...options,
-    toastTitle: 'Removed from Continue Watching',
+    toastTitle: 'Removed from watch history',
     errorTitle: 'Failed to remove from Continue Watching',
   });
 }
@@ -715,7 +913,7 @@ export function useRemoveFromContinueWatching(options: UseRemoveFromContinueWatc
 export function useRemoveFromWatchHistory(options: UseRemoveFromContinueWatchingOptions) {
   return useRemoveTitleWatchHistory({
     ...options,
-    toastTitle: 'Removed from history',
+    toastTitle: 'Removed from watch history',
     errorTitle: 'Failed to remove from history',
   });
 }
@@ -908,7 +1106,7 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
 
   const addItemToNewList = useCallback(
     async (list: UserList) => {
-      if (!item) return;
+      if (!item || list.rules) return;
       try {
         const summary = await api.addToList(list.id, item);
         queryClient.setQueryData<UserListSummary[]>(listSummariesQueryKey(item.id), (old) => {

@@ -1,7 +1,7 @@
-import { ArrowUpRight, CircleAlert, Download, Loader2, RefreshCw, Sparkles, X } from 'lucide-react';
+import { ArrowUpRight, CircleAlert, Download, RefreshCw, Sparkles, X } from 'lucide-react';
 import { useEffect } from 'react';
 import { toast } from 'sonner';
-import { useAppUpdater } from '@/hooks/use-app-updater';
+import { useAppUpdater, useMarkAppUpdateSeen } from '@/hooks/use-app-updater';
 import {
   type AppUpdateProgress,
   appUpdateProgressPercent,
@@ -84,16 +84,35 @@ function UpdateProgress({
   );
 }
 
-function UpdateError({ message, onCheckAgain }: { message: string; onCheckAgain: () => void }) {
+function UpdateError({
+  message,
+  isChecking,
+  onCheckAgain,
+}: {
+  message: string;
+  isChecking: boolean;
+  onCheckAgain: () => void;
+}) {
   return (
-    <div className={CARD_CHROME} role='alert'>
+    <div className={CARD_CHROME} role={isChecking ? 'status' : 'alert'}>
       <CloseButton onClose={dismissAppUpdateToast} />
       <div className='flex items-start gap-3 pr-8'>
-        <span className='flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-red-400/20 bg-red-500/[0.08]'>
-          <CircleAlert className='h-4 w-4 text-red-300/90' strokeWidth={2.25} />
+        <span
+          className={cn(
+            'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border',
+            isChecking ? 'border-white/10 bg-white/[0.04]' : 'border-red-400/20 bg-red-500/[0.08]',
+          )}
+        >
+          {isChecking ? (
+            <Sparkles className='h-4 w-4 text-zinc-400' strokeWidth={2.25} />
+          ) : (
+            <CircleAlert className='h-4 w-4 text-red-300/90' strokeWidth={2.25} />
+          )}
         </span>
         <div className='min-w-0 flex-1'>
-          <p className='text-[13.5px] font-semibold tracking-tight text-zinc-100'>Update failed</p>
+          <p className='text-[13.5px] font-semibold tracking-tight text-zinc-100'>
+            {isChecking ? 'Checking for updates' : 'Update failed'}
+          </p>
           <p
             title={message}
             className='mt-1 line-clamp-3 break-words text-[12.5px] leading-relaxed text-zinc-400'
@@ -102,10 +121,16 @@ function UpdateError({ message, onCheckAgain }: { message: string; onCheckAgain:
           </p>
           <button
             type='button'
-            onClick={onCheckAgain}
-            className='mt-2.5 inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-100 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+            onClick={() => {
+              if (!isChecking) onCheckAgain();
+            }}
+            aria-disabled={isChecking || undefined}
+            aria-busy={isChecking}
+            className='mt-2.5 inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-100 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-wait aria-disabled:opacity-50'
           >
-            <RefreshCw className='h-3.5 w-3.5' />
+            <RefreshCw
+              className={cn('h-3.5 w-3.5', isChecking && 'animate-spin motion-reduce:animate-none')}
+            />
             Check again
           </button>
         </div>
@@ -126,7 +151,9 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
     isInstalling,
     pendingUpdate,
     updateState,
-  } = useAppUpdater();
+  } = useAppUpdater({ includeCurrentVersion: true });
+
+  useMarkAppUpdateSeen(isInstalling ? null : pendingUpdate);
 
   // Self-close once nothing is actionable (e.g. a failed install whose
   // recovery check found the release already applied or withdrawn).
@@ -145,20 +172,14 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
     );
   }
   if (!pendingUpdate) {
-    if (updateState.status === 'error' && updateState.errorMessage) {
+    const isChecking = updateState.status === 'checking';
+    if (isChecking || (updateState.status === 'error' && updateState.errorMessage)) {
       return (
         <UpdateError
-          message={updateState.errorMessage}
+          message={updateState.errorMessage ?? 'Contacting the update server…'}
+          isChecking={isChecking}
           onCheckAgain={() => void checkForUpdates().catch(() => undefined)}
         />
-      );
-    }
-    if (updateState.status === 'checking') {
-      return (
-        <div className={cn(CARD_CHROME, 'flex items-center gap-3')}>
-          <Loader2 className='h-4 w-4 animate-spin text-zinc-400' />
-          <p className='text-[13px] text-zinc-400'>Checking for updates…</p>
-        </div>
       );
     }
     return null;

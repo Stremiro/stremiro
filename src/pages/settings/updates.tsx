@@ -6,7 +6,8 @@ import { toast } from 'sonner';
 import { ReleaseNotes } from '@/components/release-notes';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
-import { useAppReleaseNotes, useAppUpdater } from '@/hooks/use-app-updater';
+import { useAppReleaseNotes, useAppUpdater, useMarkAppUpdateSeen } from '@/hooks/use-app-updater';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { getErrorMessage } from '@/lib/api';
 import {
   appReleaseTagUrl,
@@ -15,13 +16,17 @@ import {
   formatAppUpdateProgress,
   isTauriDesktopRuntime,
 } from '@/lib/app-updater';
-import { cn, parseLocalScheduleDate } from '@/lib/utils';
+import { parseLocalScheduleDate } from '@/lib/schedule-dates';
+import { cn } from '@/lib/utils';
 import {
   SETTINGS_HEADER_STATUS_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
+  SettingsQueryError,
+  SettingsRow,
+  SettingsSwitch,
 } from './chrome';
 
 function formatReleaseDate(date: string | null | undefined): string | null {
@@ -186,10 +191,17 @@ export function UpdatesSection() {
     isInstalling,
     isSupported,
     isUpdateAvailable,
-    markUpdateNotified,
     pendingUpdate,
     updateState,
-  } = useAppUpdater();
+  } = useAppUpdater({ includeCurrentVersion: true });
+  const {
+    preferences: automaticUpdateChecks,
+    isHydrating,
+    preferencesQuery,
+    updatePreferences,
+  } = useAppUiPreferences((preferences) => preferences.automaticUpdateChecks);
+
+  useMarkAppUpdateSeen(isInstalling ? null : pendingUpdate);
 
   const installPercent = appUpdateProgressPercent(updateState.installProgress);
 
@@ -218,21 +230,20 @@ export function UpdatesSection() {
   ) : null;
 
   const handleCheck = () => {
+    if (!isSupported || isChecking || isInstalling) return;
     void checkForUpdates()
       .then((update) => {
         if (!update) {
           toast.success('Stremiro is up to date');
           return;
         }
-        // Mark seen so the scheduled announce card doesn't re-notify this release.
-        void markUpdateNotified(update.version).catch(() => undefined);
         toast.info(`Update v${update.version} is available`);
       })
       .catch((error) => toast.error(`Update check failed: ${getErrorMessage(error)}`));
   };
 
   const handleInstall = () => {
-    if (!pendingUpdate) return;
+    if (!pendingUpdate || isInstalling || isChecking) return;
     // Progress renders in the page; only the failure needs a toast.
     void installUpdate(pendingUpdate).catch((error) => {
       toast.error(`Update install failed: ${getErrorMessage(error)}`);
@@ -255,6 +266,18 @@ export function UpdatesSection() {
       />
 
       <SettingsBody className='space-y-4'>
+        <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
+        <SettingsRow
+          label='Check for updates automatically'
+          description='Check shortly after launch and every six hours. Updates are installed only when you choose.'
+        >
+          <SettingsSwitch
+            ariaLabel='Check for updates automatically'
+            checked={automaticUpdateChecks}
+            disabled={isHydrating || !isSupported}
+            onChange={() => updatePreferences({ automaticUpdateChecks: !automaticUpdateChecks })}
+          />
+        </SettingsRow>
         <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-400'>
           <span>
             Installed{' '}
@@ -275,7 +298,7 @@ export function UpdatesSection() {
               </span>
             </>
           ) : null}
-          <span className='text-zinc-400'>· checked {lastCheckedLabel}</span>
+          <span className='text-zinc-400'>· Last checked {lastCheckedLabel}</span>
         </div>
 
         {isInstalling ? (
@@ -326,11 +349,15 @@ export function UpdatesSection() {
             <Button
               size='sm'
               onClick={handleInstall}
-              disabled={isInstalling || isChecking}
-              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200'
+              aria-disabled={isInstalling || isChecking || undefined}
+              aria-busy={isInstalling || undefined}
+              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-wait aria-disabled:opacity-50'
             >
               {isInstalling ? (
-                <Loader2 className='h-3.5 w-3.5 animate-spin' />
+                <Loader2
+                  aria-hidden='true'
+                  className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
+                />
               ) : (
                 <Download className='h-3.5 w-3.5' />
               )}
@@ -341,11 +368,19 @@ export function UpdatesSection() {
             size='sm'
             variant='outline'
             onClick={handleCheck}
-            disabled={!isSupported || isChecking || isInstalling}
-            className={cn('h-9 gap-2 px-3.5 text-[13px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
+            disabled={!isSupported}
+            aria-disabled={isChecking || isInstalling || undefined}
+            aria-busy={isChecking || undefined}
+            className={cn(
+              'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-wait aria-disabled:opacity-50',
+              SETTINGS_OUTLINE_BUTTON_CLASS,
+            )}
           >
             {isChecking ? (
-              <Loader2 className='h-3.5 w-3.5 animate-spin' />
+              <Loader2
+                aria-hidden='true'
+                className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
+              />
             ) : (
               <RefreshCw className='h-3.5 w-3.5' />
             )}

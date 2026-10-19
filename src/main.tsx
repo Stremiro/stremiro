@@ -1,4 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { listen } from '@tauri-apps/api/event';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
@@ -8,10 +9,12 @@ import {
   APP_UI_PREFERENCES_QUERY_KEY,
   DETAILS_GC_TIME_MS,
   DETAILS_QUERY_KEY,
+  invalidateAddonCapabilityQueries,
   PROFILE_PREFERENCES_QUERY_KEY,
   STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 import { sleep } from '@/lib/utils';
+import { homeTrendingMoviesQueryOptions } from '@/pages/home';
 import App from './App';
 import './index.css';
 
@@ -71,6 +74,17 @@ const queryClient = new QueryClient({
 });
 queryClient.setQueryDefaults(DETAILS_QUERY_KEY, { gcTime: DETAILS_GC_TIME_MS });
 
+if (isTauriDesktopRuntime()) {
+  const listener = listen('app://addon-capabilities-changed', () => {
+    void invalidateAddonCapabilityQueries(queryClient);
+  }).catch(() => {
+    if (import.meta.env.DEV) console.warn('[app] addon-capabilities listener failed to register');
+  });
+  import.meta.hot?.dispose(() => {
+    void listener.then((unlisten) => unlisten?.());
+  });
+}
+
 // Prime the always-mounted preference reads so the first frame paints the
 // stored accent/profile instead of flipping from defaults; the cap keeps a
 // slow store from holding launch.
@@ -84,7 +98,7 @@ const seedQuery = (queryKey: readonly unknown[], data: unknown) => {
   if (queryClient.getQueryData(queryKey) === undefined) queryClient.setQueryData(queryKey, data);
 };
 
-const bootstrap = api.getBootstrapSnapshot().then(
+const bootstrapSnapshot = api.getBootstrapSnapshot().then(
   (snapshot) => {
     seedQuery(PROFILE_PREFERENCES_QUERY_KEY, snapshot.profilePreferences);
     seedQuery(APP_UI_PREFERENCES_QUERY_KEY, snapshot.appUiPreferences);
@@ -101,11 +115,16 @@ const bootstrap = api.getBootstrapSnapshot().then(
       if (rendered)
         window.dispatchEvent(new PopStateEvent('popstate', { state: window.history.state }));
     }
+    return snapshot;
   },
   () => undefined,
 );
 
-void Promise.race([bootstrap, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]).then(() => {
+if (window.location.pathname === '/' && navigator.onLine) {
+  void queryClient.prefetchQuery(homeTrendingMoviesQueryOptions);
+}
+
+void Promise.race([bootstrapSnapshot, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]).then(() => {
   rendered = true;
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>

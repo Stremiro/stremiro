@@ -103,6 +103,7 @@ export function useOptimisticSeek({
       command: (boundedTarget: number) => Promise<void>,
       osd: (boundedTarget: number) => PlayerOsdAction,
       source: 'user' | 'automatic' = 'user',
+      onComplete?: () => void,
     ) => {
       if (source !== 'automatic') onUserSeek();
       const previousTime = currentTimeRef.current;
@@ -124,13 +125,14 @@ export function useOptimisticSeek({
       // Announce only while this seek owns the epoch — an out-of-order ack must not flash a stale target.
       if (seekAnnounceEpochRef.current === announceEpoch) {
         triggerOsd(osd(boundedTarget));
+        onComplete?.();
       }
     },
     [clearOptimisticSeek, clock, currentTimeRef, onUserSeek, primeOptimisticSeek, triggerOsd],
   );
 
   const seek = useCallback(
-    (seconds: number, source: 'user' | 'automatic' = 'user') => {
+    (seconds: number, source: 'user' | 'automatic' = 'user', onComplete?: () => void) => {
       seekStreakRef.current = null;
       return runSeek(
         seconds,
@@ -138,6 +140,7 @@ export function useOptimisticSeek({
         // Absolute jumps (percent keys, bar release, skips) had no feedback — show the landing point.
         (boundedTarget) => ({ kind: 'seek', target: boundedTarget }),
         source,
+        onComplete,
       );
     },
     [runSeek],

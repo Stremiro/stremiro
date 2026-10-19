@@ -1,4 +1,4 @@
-import { Search, X } from 'lucide-react';
+import { Loader2, Search, X } from 'lucide-react';
 import { type RefObject, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
@@ -13,6 +13,7 @@ interface SearchInputProps {
   className?: string;
   wrapperClassName?: string;
   inputRef?: RefObject<HTMLInputElement | null>;
+  pending?: boolean;
   /** Enter in the field — e.g. jump to the first result. */
   onSubmit?: () => void;
 }
@@ -27,12 +28,23 @@ export function SearchInput({
   wrapperClassName,
   inputRef: suppliedInputRef,
   onSubmit,
+  pending = false,
 }: SearchInputProps) {
   const localInputRef = useRef<HTMLInputElement>(null);
   const inputRef = suppliedInputRef ?? localInputRef;
   return (
     <div className={cn('relative', wrapperClassName)}>
-      <Search className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none' />
+      {pending ? (
+        <Loader2
+          aria-hidden='true'
+          className='pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-zinc-400 motion-reduce:animate-none'
+        />
+      ) : (
+        <Search
+          aria-hidden='true'
+          className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none'
+        />
+      )}
       <Input
         ref={inputRef}
         value={value}

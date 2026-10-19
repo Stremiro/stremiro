@@ -10,6 +10,7 @@ import {
   useEffectEvent,
   useLayoutEffect,
   useRef,
+  useState,
 } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router';
 import { toast } from 'sonner';
@@ -39,15 +40,15 @@ import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/l
 import { boundedMapSet, clearTimer, withTimeout } from '@/lib/utils';
 import { Home } from '@/pages/home';
 
-const Search = lazy(() => routeChunks.search().then((module) => ({ default: module.Search })));
-const Details = lazy(() => routeChunks.details().then((module) => ({ default: module.Details })));
-const Settings = lazy(() =>
-  routeChunks.settings().then((module) => ({ default: module.Settings })),
-);
-const Profile = lazy(() => routeChunks.profile().then((module) => ({ default: module.Profile })));
-const Calendar = lazy(() =>
-  routeChunks.calendar().then((module) => ({ default: module.Calendar })),
-);
+function createRoutePages() {
+  return {
+    Search: lazy(() => routeChunks.search().then((module) => ({ default: module.Search }))),
+    Details: lazy(() => routeChunks.details().then((module) => ({ default: module.Details }))),
+    Settings: lazy(() => routeChunks.settings().then((module) => ({ default: module.Settings }))),
+    Profile: lazy(() => routeChunks.profile().then((module) => ({ default: module.Profile }))),
+    Calendar: lazy(() => routeChunks.calendar().then((module) => ({ default: module.Calendar }))),
+  };
+}
 
 function ContentRouteLoader() {
   return (
@@ -59,7 +60,12 @@ function ContentRouteLoader() {
 }
 
 function RouteSuspense({ children }: { children: ReactNode }) {
-  return <Suspense fallback={<ContentRouteLoader />}>{children}</Suspense>;
+  const { pathname } = useLocation();
+  return (
+    <Suspense key={pathname} fallback={<ContentRouteLoader />}>
+      {children}
+    </Suspense>
+  );
 }
 
 // One root router subscription feeds every per-item anchor via
@@ -189,6 +195,8 @@ function RouteScrollManager() {
     };
 
     if (navigationType === 'REPLACE' && lastEntry.pathname === location.pathname) {
+      rememberScrollPosition(positionsByKeyRef.current, location.key, window.scrollY);
+      rememberScrollPosition(positionsByPathRef.current, path, window.scrollY);
       restoreFrame = window.requestAnimationFrame(cancelRestoration);
       return cancelRestoration;
     }
@@ -234,39 +242,62 @@ function RouteScrollManager() {
   return null;
 }
 
-// First check waits for startup to settle; then a 6h interval keeps sessions aware.
-const UPDATE_STARTUP_DELAY_MS = 8_000;
+const UPDATE_STARTUP_DELAY_MS = 3_000;
 const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const UPDATE_SCHEDULE_TICK_MS = 60_000;
 
 function AppUpdateManager() {
   const queryClient = useQueryClient();
-  const { isSupported, markUpdateNotified } = useAppUpdater();
+  const { isSupported, getUpdateState } = useAppUpdater();
+  const { preferences: automaticUpdateChecks, isHydrating } = useAppUiPreferences(
+    (preferences) => preferences.automaticUpdateChecks,
+  );
   const { pathname } = useLocation();
-  const resumeDeferredCheckRef = useRef<(() => void) | null>(null);
+  const startupReadyAtRef = useRef<number | null>(null);
+  const retryOnReconnectRef = useRef(false);
+  const announcedVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (import.meta.env.DEV || !isSupported) return;
+    if (import.meta.env.DEV || !isSupported || isHydrating || !automaticUpdateChecks) return;
 
     let disposed = false;
-    let deferred = false;
+    let running = false;
+    startupReadyAtRef.current ??= Date.now() + UPDATE_STARTUP_DELAY_MS;
+    const isDeferred = () =>
+      document.hidden || window.location.pathname.startsWith('/player') || !navigator.onLine;
 
-    // Defer while hidden or in the expanded player — the card would sit on the video.
-    const deferCheck = () => {
-      if (!document.hidden && !window.location.pathname.startsWith('/player')) return false;
-      deferred = true;
-      return true;
-    };
-
-    const announceAvailableUpdate = async () => {
-      if (disposed || deferCheck()) return;
-      deferred = false;
-
+    const maybeCheck = async (event?: Event) => {
+      const state = getUpdateState();
+      if (event?.type === 'online' && state.retryOnReconnect) {
+        retryOnReconnectRef.current = true;
+      }
+      if (
+        disposed ||
+        running ||
+        isDeferred() ||
+        Date.now() < startupReadyAtRef.current! ||
+        state.status === 'installing'
+      )
+        return;
+      running = true;
       try {
-        const update = await runScheduledAppUpdateCheck(queryClient);
-        // Visibility and navigation may change while the check is in flight.
-        if (!update || disposed || deferCheck()) return;
-
-        // Persistent card morphs announce → progress → error under one toast id.
+        const isDue =
+          state.lastCheckedAt === null ||
+          Date.now() - state.lastCheckedAt >= UPDATE_RECHECK_INTERVAL_MS ||
+          (retryOnReconnectRef.current && state.retryOnReconnect);
+        retryOnReconnectRef.current = false;
+        const update = isDue ? await runScheduledAppUpdateCheck(queryClient) : state.update;
+        if (
+          !update?.notificationEligible ||
+          disposed ||
+          isDeferred() ||
+          getUpdateState().status === 'installing' ||
+          (window.location.pathname === '/settings' &&
+            new URLSearchParams(window.location.search).get('section') === 'updates') ||
+          announcedVersionRef.current === update.version
+        )
+          return;
+        announcedVersionRef.current = update.version;
         toast.custom(
           () => <AppUpdateCard onViewNotes={() => navigateApp('/settings?section=updates')} />,
           {
@@ -275,40 +306,31 @@ function AppUpdateManager() {
             unstyled: true,
           },
         );
-
-        await markUpdateNotified(update.version).catch(() => undefined);
       } catch {
-        // Automatic checks stay silent; the updates card surfaces the error.
+        // Automatic checks stay silent; Settings retains the failure.
+      } finally {
+        running = false;
       }
     };
-
-    const resumeDeferredCheck = () => {
-      if (deferred && !document.hidden) void announceAvailableUpdate();
-    };
-    resumeDeferredCheckRef.current = resumeDeferredCheck;
-    document.addEventListener('visibilitychange', resumeDeferredCheck);
-
+    document.addEventListener('visibilitychange', maybeCheck);
+    window.addEventListener('focus', maybeCheck);
+    window.addEventListener('online', maybeCheck);
+    void maybeCheck();
     const startupTimer = window.setTimeout(
-      () => void announceAvailableUpdate(),
-      UPDATE_STARTUP_DELAY_MS,
+      () => void maybeCheck(),
+      Math.max(0, startupReadyAtRef.current - Date.now()),
     );
-    const interval = window.setInterval(
-      () => void announceAvailableUpdate(),
-      UPDATE_RECHECK_INTERVAL_MS,
-    );
+    const interval = window.setInterval(() => void maybeCheck(), UPDATE_SCHEDULE_TICK_MS);
 
     return () => {
       disposed = true;
       window.clearTimeout(startupTimer);
       window.clearInterval(interval);
-      resumeDeferredCheckRef.current = null;
-      document.removeEventListener('visibilitychange', resumeDeferredCheck);
+      document.removeEventListener('visibilitychange', maybeCheck);
+      window.removeEventListener('focus', maybeCheck);
+      window.removeEventListener('online', maybeCheck);
     };
-  }, [isSupported, markUpdateNotified, queryClient]);
-
-  useEffect(() => {
-    resumeDeferredCheckRef.current?.();
-  }, [pathname]);
+  }, [isSupported, isHydrating, automaticUpdateChecks, pathname, queryClient, getUpdateState]);
 
   return null;
 }
@@ -430,12 +452,16 @@ function AppCloseManager() {
               });
           })
           .then((disposeQuit) => {
-            if (!isActive) disposeQuit();
-            else unlistenQuit = disposeQuit;
+            if (!isActive) {
+              disposeQuit();
+              return;
+            }
+            unlistenQuit = disposeQuit;
+            return api.markFrontendQuitReady();
           })
           .catch(() => {
             if (import.meta.env.DEV) {
-              console.warn('[app] quit-requested listener failed to register');
+              console.warn('[app] quit-requested listener setup failed');
             }
           });
       })
@@ -456,6 +482,10 @@ function AppCloseManager() {
 }
 
 function App() {
+  const [{ Search, Details, Settings, Profile, Calendar }, setRoutePages] =
+    useState(createRoutePages);
+  const retryRoute = useCallback(() => setRoutePages(createRoutePages()), []);
+
   useEffect(() => {
     // Native-app chrome: no context menu or ghost-drag outside editable text.
     const isEditable = (target: EventTarget | null) =>
@@ -477,7 +507,7 @@ function App() {
   return (
     <PlayerSessionProvider>
       <Routes>
-        <Route element={<Layout />}>
+        <Route element={<Layout onRouteRetry={retryRoute} />}>
           <Route path='/' element={<Home />} />
           <Route
             path='/search'

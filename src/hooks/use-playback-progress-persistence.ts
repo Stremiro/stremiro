@@ -1,7 +1,7 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
-import { api, type WatchProgress } from '@/lib/api';
+import { api, type WatchProgressSave } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
 import { TITLE_WATCH_PROGRESS_QUERY_KEY } from '@/lib/query-invalidation';
@@ -50,10 +50,21 @@ export function usePlaybackProgressPersistence({
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
   const pendingSaveRef = useRef<{ fingerprint: string; operation: Promise<void> } | null>(null);
   const lastSavedFingerprintRef = useRef<string | null>(null);
+  const completedRef = useRef(false);
 
-  const buildWatchProgressPayload = useCallback((): WatchProgress | null => {
+  useEffect(() => {
+    completedRef.current = false;
+  }, [stream.activeStreamUrl, stream.activeStreamKey, stream.activeStreamMpvHttpHeaderFields]);
+
+  useEffect(() => {
+    if (isPlaying) completedRef.current = false;
+  }, [isPlaying]);
+
+  const buildWatchProgressPayload = useCallback((): WatchProgressSave | null => {
     const position = observedPositionRef.current;
-    if (position === null || !mediaType || !mediaId || isLocalMediaId(mediaId)) return null;
+    const completed = completedRef.current;
+    if ((position === null && !completed) || !mediaType || !mediaId || isLocalMediaId(mediaId))
+      return null;
 
     return {
       id: mediaId,
@@ -64,8 +75,9 @@ export function usePlaybackProgressPersistence({
       absolute_episode: absoluteEpisode,
       stream_season: streamSeason,
       stream_episode: streamEpisode,
-      position,
+      position: position ?? 0,
       duration: durationRef.current,
+      completed: completed || undefined,
       last_watched: Date.now(),
       title,
       poster,
@@ -151,7 +163,13 @@ export function usePlaybackProgressPersistence({
 
   // Never rejects, so every fire-and-forget trigger keeps its old contract.
   const saveProgress = useCallback(
-    () => persistProgress().catch(() => undefined),
+    (intent?: Pick<WatchProgressSave, 'completed'>) => {
+      if (intent?.completed !== undefined) {
+        completedRef.current = intent.completed;
+        if (!intent.completed) return saveQueueRef.current;
+      }
+      return persistProgress().catch(() => undefined);
+    },
     [persistProgress],
   );
 

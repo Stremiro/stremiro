@@ -26,43 +26,98 @@ function serializeVideoMarginRatio(ratio: VideoMarginRatio): string {
   ].join('|');
 }
 
-const pendingMarginRequests = new WeakMap<
-  RefObject<string | null>,
-  { fingerprint: string; promise: Promise<boolean> }
->();
+interface MarginRequest {
+  fingerprint: string;
+  ratio: VideoMarginRatio;
+  promise: Promise<boolean>;
+  resolve: (applied: boolean) => void;
+  valid: boolean;
+}
 
-/** Fingerprint-deduped margin send: joins in-flight duplicates, skips settled ones,
- * and clears owned intent on failure. True means a verified fresh send. */
+interface MarginSender {
+  inFlight: MarginRequest;
+  pending: MarginRequest | null;
+}
+
+const pendingMarginRequests = new WeakMap<RefObject<string | null>, MarginSender>();
+
+function invalidateMarginRatio(fingerprintRef: RefObject<string | null>) {
+  fingerprintRef.current = null;
+  const sender = pendingMarginRequests.get(fingerprintRef);
+  if (!sender) return;
+  sender.inFlight.valid = false;
+  sender.pending?.resolve(false);
+  sender.pending = null;
+}
+
+async function flushMarginRequests(fingerprintRef: RefObject<string | null>, sender: MarginSender) {
+  const request = sender.inFlight;
+  let applied: boolean;
+  try {
+    await setVideoMarginRatio(request.ratio);
+    applied = true;
+  } catch {
+    applied = false;
+  }
+  const pending = sender.pending;
+  sender.pending = null;
+  request.resolve(applied && request.valid);
+
+  if (!pending) {
+    pendingMarginRequests.delete(fingerprintRef);
+    if (!applied && request.valid && fingerprintRef.current === request.fingerprint) {
+      fingerprintRef.current = null;
+    }
+    return;
+  }
+
+  if (fingerprintRef.current !== pending.fingerprint) {
+    pendingMarginRequests.delete(fingerprintRef);
+    pending.resolve(false);
+    return;
+  }
+
+  if (applied && request.valid && pending.fingerprint === request.fingerprint) {
+    pendingMarginRequests.delete(fingerprintRef);
+    pending.resolve(true);
+    return;
+  }
+
+  sender.inFlight = pending;
+  void flushMarginRequests(fingerprintRef, sender);
+}
+
 function sendMarginRatio(
   fingerprintRef: RefObject<string | null>,
   ratio: VideoMarginRatio,
   fingerprint = serializeVideoMarginRatio(ratio),
 ): Promise<boolean> {
-  const pending = pendingMarginRequests.get(fingerprintRef);
+  const sender = pendingMarginRequests.get(fingerprintRef);
+  const latest = sender?.pending ?? sender?.inFlight;
   if (fingerprintRef.current === fingerprint) {
-    return pending?.fingerprint === fingerprint ? pending.promise : Promise.resolve(false);
+    return latest?.valid && latest.fingerprint === fingerprint
+      ? latest.promise
+      : Promise.resolve(false);
   }
   fingerprintRef.current = fingerprint;
-  const promise = setVideoMarginRatio(ratio)
-    .then(
-      () => true,
-      () => {
-        // A late reject clears the fingerprint only while it still owns the slot.
-        if (
-          pendingMarginRequests.get(fingerprintRef)?.promise === promise &&
-          fingerprintRef.current === fingerprint
-        ) {
-          fingerprintRef.current = null;
-        }
-        return false;
-      },
-    )
-    .finally(() => {
-      if (pendingMarginRequests.get(fingerprintRef)?.promise === promise) {
-        pendingMarginRequests.delete(fingerprintRef);
-      }
-    });
-  pendingMarginRequests.set(fingerprintRef, { fingerprint, promise });
+  if (sender?.pending) {
+    sender.pending.fingerprint = fingerprint;
+    sender.pending.ratio = ratio;
+    return sender.pending.promise;
+  }
+
+  let resolve!: (applied: boolean) => void;
+  const promise = new Promise<boolean>((settle) => {
+    resolve = settle;
+  });
+  const request: MarginRequest = { fingerprint, ratio, promise, resolve, valid: true };
+  if (sender) {
+    sender.pending = request;
+  } else {
+    const nextSender: MarginSender = { inFlight: request, pending: null };
+    pendingMarginRequests.set(fingerprintRef, nextSender);
+    void flushMarginRequests(fingerprintRef, nextSender);
+  }
   return promise;
 }
 
@@ -143,7 +198,7 @@ export function usePlayerSurfaceLayout({
   }, [activeStreamUrl, isMini, mpvSurfaceReady]);
 
   useEffect(() => {
-    lastAppliedMarginFingerprintRef.current = null;
+    invalidateMarginRatio(lastAppliedMarginFingerprintRef);
   }, [activeStreamUrl, mpvSurfaceReady, presentation]);
 
   const applyMarginRatio = useCallback(
@@ -285,6 +340,7 @@ export function usePlayerSurfaceLayout({
     marginRequestRef.current();
     return () => {
       marginGenerationRef.current += 1;
+      invalidateMarginRatio(lastAppliedMarginFingerprintRef);
     };
   }, [activeStreamUrl, applyVideoMargins, isMini, mpvSurfaceReady]);
 
@@ -461,7 +517,7 @@ export function useMiniPlayerSurface({
     const rect = videoRectRef.current;
     if (!rect || !surfaceReady) {
       releaseMasks();
-      marginFingerprintRef.current = null;
+      invalidateMarginRatio(marginFingerprintRef);
       return Promise.resolve(false);
     }
 
@@ -539,7 +595,7 @@ export function useMiniPlayerSurface({
         frameId = null;
       }
       releaseMasks();
-      marginFingerprintRef.current = null;
+      invalidateMarginRatio(marginFingerprintRef);
     };
   }, [enabled, applyMiniSurface, releaseMasks]);
 

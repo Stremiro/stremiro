@@ -12,12 +12,14 @@ import type {
   SavedPlaybackLanguagePreference,
   SkipTimesResult,
   StreamSelectorData,
+  StreamSelectorPreferences,
   SupportedLanguage,
   TitleWatchProgress,
   TrackLanguageCandidate,
   TrackLanguageSelectionResolution,
   ResumeRailEntry,
   WatchProgress,
+  WatchProgressSave,
 } from '@/lib/api';
 import {
   type ApiCacheGroups,
@@ -67,8 +69,8 @@ function bestStreamCacheKey(
   episode?: number,
   absoluteEpisode?: number,
   options?: ResolveBestStreamOptions,
+  hints = normalizePreferredStreamHints(options ?? {}),
 ): string {
-  const hints = normalizePreferredStreamHints(options ?? {});
   return JSON.stringify([
     buildStreamCacheKey(type, id, season, episode, absoluteEpisode),
     buildStreamRankingCacheKey(options),
@@ -124,6 +126,35 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         ...options,
         onProgress,
       }),
+    getStreamSelectorIndices: (
+      streams: readonly AddonStream[],
+      filters: StreamSelectorPreferences,
+      searchQuery: string,
+    ) =>
+      safeInvoke<number[]>('get_stream_selector_indices', {
+        rows: streams.map((stream) => ({
+          sourceId: stream.sourceId,
+          resolution: stream.presentation.resolution,
+          deliveryKind: stream.presentation.deliveryKind,
+          isBatch: stream.presentation.isBatch,
+          isPlayable: stream.presentation.isInstantlyPlayable,
+          seeders: stream.seeders,
+          sizeBytes: stream.sizeBytes,
+          searchFields: [
+            stream.sourceName,
+            stream.presentation.streamTitle,
+            stream.presentation.sourceName,
+            stream.presentation.codecLabel,
+            stream.presentation.hdrLabel,
+            stream.presentation.audioLabel,
+            stream.presentation.multiAudioLabel,
+            stream.presentation.sizeLabel,
+            stream.presentation.resolution,
+          ],
+        })),
+        filters,
+        searchQuery,
+      }),
     getAddonSubtitles: (type: string, id: string, season?: number, episode?: number) =>
       safeInvoke<AddonSubtitle[]>('get_addon_subtitles', {
         mediaType: type,
@@ -139,16 +170,15 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       absoluteEpisode?: number,
       options?: ResolveBestStreamOptions,
     ) => {
-      const trimmedType = type.trim();
-      const trimmedId = id.trim();
       const preferredHints = normalizePreferredStreamHints(options ?? {});
       const cacheKey = bestStreamCacheKey(
-        trimmedType,
-        trimmedId,
+        type,
+        id,
         season,
         episode,
         absoluteEpisode,
         options,
+        preferredHints,
       );
       return runCachedRequest(caches.bestStream, cacheKey, () =>
         safeInvoke<BestResolvedStream>('resolve_best_stream', {
@@ -172,14 +202,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       options: ResolveBestStreamOptions | undefined,
       result: BestResolvedStream,
     ) => {
-      const cacheKey = bestStreamCacheKey(
-        type.trim(),
-        id.trim(),
-        season,
-        episode,
-        absoluteEpisode,
-        options,
-      );
+      const cacheKey = bestStreamCacheKey(type, id, season, episode, absoluteEpisode, options);
       primeCachedRequest(caches.bestStream, cacheKey, result);
     },
     recoverPlaybackStream: ({
@@ -293,7 +316,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
           safeInvoke<void>('report_playback_stream_outcome', { ...report }),
         ),
       ),
-    saveWatchProgress: (progress: WatchProgress) =>
+    saveWatchProgress: (progress: WatchProgressSave) =>
       trackPendingAppWrite(
         safeInvoke<void>('save_watch_progress', { progress }).then(
           bumpWatchProgressSnapshotRevision,
@@ -334,6 +357,12 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       bumpWatchProgressEpoch();
       return trackPendingAppWrite(
         safeInvoke<WatchProgress[]>('remove_all_from_watch_history', { id, type }),
+      );
+    },
+    bulkRemoveFromWatchHistory: (items: { id: string; type: string }[]) => {
+      bumpWatchProgressEpoch();
+      return trackPendingAppWrite(
+        safeInvoke<WatchProgress[]>('bulk_remove_from_watch_history', { items }),
       );
     },
     getSkipTimes: (

@@ -84,8 +84,8 @@ interface UsePlayerMpvLifecycleArgs {
   setStreamError: (value: string) => void;
   setDuration: Dispatch<SetStateAction<number>>;
   setIsPlaying: Dispatch<SetStateAction<boolean>>;
-  setVolume: Dispatch<SetStateAction<number>>;
-  setIsMuted: (muted: boolean) => void;
+  applyNativeVolume: (value: number) => void;
+  applyNativeMute: (muted: boolean) => void;
   setPlaybackSpeed: Dispatch<SetStateAction<number>>;
   setMpvSurfaceReady: Dispatch<SetStateAction<boolean>>;
   /** Imperative margin re-apply — a reconfig event must not re-render the player tree. */
@@ -151,8 +151,8 @@ export function usePlayerMpvLifecycle({
   setStreamError,
   setDuration,
   setIsPlaying,
-  setVolume,
-  setIsMuted,
+  applyNativeVolume,
+  applyNativeMute,
   setPlaybackSpeed,
   setMpvSurfaceReady,
   isResolvingRef,
@@ -322,7 +322,7 @@ export function usePlayerMpvLifecycle({
         return;
       }
 
-      if (hasProgressedMeaningfully) {
+      if (verifiedAt > 0 || hasProgressedMeaningfully) {
         reportStreamFailure(outcome, activeStreamUrl, activeStreamKey);
         // Nothing reloads a mid-playback idle — arm a verdict; recovery, a swap, or position movement cancels it.
         if (idleDeadTimer === null) {
@@ -405,7 +405,7 @@ export function usePlayerMpvLifecycle({
         void saveProgressRef.current?.();
       }
       // Resume needs at most one check per poll.
-      void applyResumeIfReady();
+      if (isResumePending()) void applyResumeIfReady();
     };
 
     // Seconds buffered ahead (seekbar adds live position, clamps on duration); skip publishing when the band hasn't visibly moved.
@@ -446,7 +446,7 @@ export function usePlayerMpvLifecycle({
     const schedulePositionPoll = (delay = nextPollDelay()) => {
       if (positionPollTimer !== null) clearTimeout(positionPollTimer);
       positionPollTimer = null;
-      if (streamGone() || !mpvInitializedRef.current) return;
+      if (streamGone() || !loadfileSent || !mpvInitializedRef.current) return;
       positionPollTimer = window.setTimeout(() => {
         positionPollTimer = null;
         void pollPlaybackPosition();
@@ -459,8 +459,7 @@ export function usePlayerMpvLifecycle({
         if (force) positionPollRequested = true;
         return;
       }
-      if (streamGone()) return;
-      if (!mpvInitializedRef.current) return;
+      if (streamGone() || !loadfileSent || !mpvInitializedRef.current) return;
       if (
         !pendingEof &&
         errorRef.current &&
@@ -492,6 +491,7 @@ export function usePlayerMpvLifecycle({
         );
         if (
           streamGone() ||
+          generation !== positionGeneration ||
           committedStreamUrlRef.current !== activeStreamUrl ||
           streamError !== recoverableStreamErrorRef.current
         )
@@ -652,17 +652,10 @@ export function usePlayerMpvLifecycle({
                 }
                 break;
               case 'volume':
-                if (typeof data === 'number') {
-                  // Muted chrome shows 0; the ref keeps the level to restore.
-                  if (!isMutedRef.current) setVolume(data);
-                  volumeRef.current = data;
-                }
+                if (typeof data === 'number') applyNativeVolume(data);
                 break;
               case 'mute':
-                if (typeof data === 'boolean') {
-                  setIsMuted(data);
-                  setVolume(data ? 0 : volumeRef.current);
-                }
+                if (typeof data === 'boolean') applyNativeMute(data);
                 break;
               case 'speed':
                 if (typeof data === 'number') setPlaybackSpeed(data);
@@ -745,9 +738,6 @@ export function usePlayerMpvLifecycle({
         await setMpvPropertiesBestEffort(liveProperties);
         if (cancelled) return;
 
-        // Start the probe once the instance is live so reads never hit a dead mpv.
-        schedulePositionPoll();
-
         // A tray hide during init may have paused an instance that did not exist yet.
         await setMpvProperties([['pause', resumeStartPaused || trayPause.getSnapshot()]]);
         if (cancelled) return;
@@ -756,6 +746,7 @@ export function usePlayerMpvLifecycle({
         if (cancelled) return;
         isPlayingRef.current = !(resumeStartPaused || trayPause.getSnapshot());
         setIsPlaying(isPlayingRef.current);
+        schedulePositionPoll();
         void applyResumeIfReady();
 
         clearUiTimers();

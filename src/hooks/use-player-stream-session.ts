@@ -128,13 +128,8 @@ export function usePlayerStreamSession({
   }, [activeStreamUrl, routeSourceId, routeSourceName, routeStreamFamily]);
 
   useEffect(() => {
-    if (!routeSelectedStreamKey) {
-      selectedStreamKeyRef.current = undefined;
-      return;
-    }
-
     // Selector choice survives resolving for failure reports.
-    selectedStreamKeyRef.current = nonBlank(routeSelectedStreamKey) || selectedStreamKeyRef.current;
+    selectedStreamKeyRef.current = routeSelectedStreamKey;
   }, [routeSelectedStreamKey]);
 
   // Memoized so `stream` stays dep-safe — identity changes only with a state-derived field.

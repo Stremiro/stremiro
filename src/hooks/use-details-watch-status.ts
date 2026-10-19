@@ -22,6 +22,7 @@ import {
   LIBRARY_QUERY_KEY,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
+import { queryNeedsRetry } from '@/lib/utils';
 
 interface WatchStatusMutationContext {
   itemId?: string;
@@ -32,11 +33,13 @@ interface WatchStatusMutationContext {
 // Watch-status read + optimistic setter for the details hero chip group.
 // Setting a status also writes the title into the library; clearing only
 // clears the label — membership stays the user's own.
-export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
+export function useDetailsWatchStatus(item: MediaItem | null | undefined, routeItemId: string) {
   const queryClient = useQueryClient();
-  const itemId = item?.id;
-  const { data: watchStatus = null } = useItemWatchStatus(itemId);
-  const { data: isInLibrary = false } = useIsItemInLibrary(itemId);
+  const itemId = item?.id ?? routeItemId;
+  const watchStatusQuery = useItemWatchStatus(itemId);
+  const libraryQuery = useIsItemInLibrary(itemId);
+  const watchStatus = watchStatusQuery.data;
+  const isInLibrary = libraryQuery.data === true;
 
   const watchStatusMutation = useMutation<
     MediaItem | null,
@@ -61,13 +64,13 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
       let previousLibraryItem: MediaItem | null | undefined;
       if (status !== null && item && !isInLibrary) {
         await queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY });
-        previousLibraryItem =
-          queryClient
-            .getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY)
-            ?.find((entry) => entry.id === itemId) ?? null;
-        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) =>
-          old?.some((entry) => entry.id === item.id) ? old : [...(old ?? []), toMediaItem(item)],
-        );
+        const previousLibrary = queryClient.getQueryData<MediaItem[]>(LIBRARY_QUERY_KEY);
+        if (previousLibrary) {
+          previousLibraryItem = previousLibrary.find((entry) => entry.id === itemId) ?? null;
+          queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) =>
+            !old || old.some((entry) => entry.id === item.id) ? old : [...old, toMediaItem(item)],
+          );
+        }
       }
       return { itemId, previousStatus, previousLibraryItem };
     },
@@ -90,10 +93,9 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
     },
     onSuccess: (savedItem, status) => {
       if (savedItem) {
-        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) => [
-          ...(old ?? []).filter((entry) => entry.id !== savedItem.id),
-          savedItem,
-        ]);
+        queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (old) =>
+          old ? [...old.filter((entry) => entry.id !== savedItem.id), savedItem] : old,
+        );
       }
       if (status === null) {
         notifyAction('Status cleared', { detail: item?.title, thumb: item?.poster });
@@ -105,11 +107,20 @@ export function useDetailsWatchStatus(item: MediaItem | null | undefined) {
         dot: WATCH_STATUS_COLORS[status].text,
       });
     },
-    onSettled: () => {
-      void invalidateLibraryQueries(queryClient);
-    },
+    onSettled: () => invalidateLibraryQueries(queryClient),
   });
 
   // Details also needs the membership read for its library toggle.
-  return { watchStatus, watchStatusMutation, isInLibrary };
+  return {
+    isReady: watchStatusQuery.isSuccess && libraryQuery.isSuccess,
+    hasError: queryNeedsRetry(watchStatusQuery) || queryNeedsRetry(libraryQuery),
+    isFetching: watchStatusQuery.isFetching || libraryQuery.isFetching,
+    refetch: () => Promise.all([watchStatusQuery.refetch(), libraryQuery.refetch()]),
+    watchStatus: watchStatusMutation.isPending
+      ? (watchStatusMutation.variables ?? null)
+      : watchStatus,
+    watchStatusMutation,
+    isInLibrary:
+      isInLibrary || (watchStatusMutation.isPending && watchStatusMutation.variables != null),
+  };
 }

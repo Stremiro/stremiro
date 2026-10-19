@@ -45,7 +45,7 @@ export function usePlayerIdleOverlay({ enabled, mountedRef }: UsePlayerIdleOverl
   );
 
   // Surface clicks wake through this so the first click dismisses the card, not toggles pause.
-  const wake = useCallback(() => noteActivity(false), [noteActivity]);
+  const wake = () => noteActivity(false);
 
   useEffect(() => {
     if (!enabled) {

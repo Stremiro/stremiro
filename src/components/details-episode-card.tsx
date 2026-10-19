@@ -1,17 +1,12 @@
 import { memo, type Ref } from 'react';
 import { format } from 'date-fns';
-import { Check, Play } from 'lucide-react';
+import { Check, Loader2, Play } from 'lucide-react';
 import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useFailedSrc } from '@/hooks/use-failed-src';
-import {
-  cn,
-  formatAirDate,
-  formatSeasonEpisode,
-  getEpisodeTitle,
-  parseLocalScheduleDate,
-} from '@/lib/utils';
+import { formatAirDate, parseLocalScheduleDate } from '@/lib/schedule-dates';
+import { cn, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
 
 export function isEpisodeSpoiler(
   episode: Episode,
@@ -62,10 +57,12 @@ function EpisodeCardInner({
   const title = getEpisodeTitle(isSpoiler ? undefined : episode.title, episode.episode);
   const airDate = formatAirDate(episode.releaseDate);
   const releaseDate = !isAired ? parseLocalScheduleDate(episode.releaseDate) : null;
-  const unairedLabel = releaseDate
-    ? `Not Yet Aired · ${format(releaseDate, 'MMM d')}`
-    : 'Not Yet Aired';
-  const watchButtonLabel = `${isResume ? 'Resume' : 'Play'} ${formatSeasonEpisode(episode.season, episode.episode)}: ${title}${remainingText && !isWatched ? ` (${remainingText})` : ''}`;
+  const releaseLabel = isAired
+    ? airDate
+    : releaseDate
+      ? `Not Yet Aired · ${format(releaseDate, 'MMM d')}`
+      : 'Not Yet Aired';
+  const watchButtonLabel = `${isResume ? 'Resume' : 'Play'} ${formatSeasonEpisode(episode.season, episode.episode)}: ${title}${releaseLabel ? `, ${releaseLabel}` : ''}${remainingText && !isWatched ? ` (${remainingText})` : ''}`;
 
   return (
     <div className='relative'>
@@ -126,7 +123,7 @@ function EpisodeCardInner({
           <div className='mt-1 flex flex-wrap items-center gap-1.5'>
             {!isAired ? (
               <span className='inline-flex rounded-md border border-white/10 bg-black/60 px-1.5 py-0.5 text-[11px] font-medium text-zinc-300'>
-                {unairedLabel}
+                {releaseLabel}
               </span>
             ) : (
               airDate && <p className='truncate text-[11px] text-white/65'>{airDate}</p>
@@ -142,6 +139,12 @@ function EpisodeCardInner({
         <WatchProgressStrip percent={progressPercent} className='z-20' />
       </button>
 
+      <p className='mt-2 h-[38px] line-clamp-2 text-[13px] leading-[19px] text-zinc-400'>
+        {isSpoiler
+          ? 'Description hidden to prevent spoilers.'
+          : episode.overview || 'No description available.'}
+      </p>
+
       {onToggleWatched && (
         <button
           type='button'
@@ -153,7 +156,7 @@ function EpisodeCardInner({
           onClick={() => {
             if (!isWatchedDisabled && !isWatchedPending) onToggleWatched(episode);
           }}
-          className='group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default aria-busy:cursor-wait aria-disabled:opacity-60'
+          className='group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default aria-busy:cursor-wait aria-busy:opacity-60'
         >
           <span
             className={cn(
@@ -163,7 +166,14 @@ function EpisodeCardInner({
                 : 'border-white/15 bg-black/65 text-white/65 group-hover/watch:border-white/30 group-hover/watch:text-white group-focus-visible/watch:text-white',
             )}
           >
-            <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
+            {isWatchedPending ? (
+              <Loader2
+                aria-hidden='true'
+                className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
+              />
+            ) : (
+              <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
+            )}
           </span>
         </button>
       )}
