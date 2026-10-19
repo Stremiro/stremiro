@@ -10,6 +10,41 @@ use crate::test_helpers::test_stream;
 use serde_json::json;
 
 #[test]
+fn ipc_stream_keys_require_prepared_digests_and_preserve_bounded_legacy_hints() {
+    use crate::commands::streaming_helpers::{normalize_stream_key, prepare_addon_streams};
+    let mut stream = test_stream();
+    stream.url = Some("https://cdn.example/file.mkv".to_string());
+    let prepared = prepare_addon_streams(vec![stream], "addon", "Addon");
+    let key = &prepared[0].stream_key;
+    assert_eq!(key.len(), 66);
+    assert_eq!(normalize_stream_key(key).as_ref(), Some(key));
+    assert_eq!(
+        normalize_stream_key(&format!(" {key} ")).as_ref(),
+        Some(key)
+    );
+    assert!(normalize_stream_key(&format!("s:{}", "A".repeat(64))).is_some());
+    for invalid in [
+        String::new(),
+        "s:".to_string(),
+        "s:short".to_string(),
+        format!("s:{}", "a".repeat(63)),
+        format!("s:{}", "a".repeat(65)),
+        format!("s:{}", "g".repeat(64)),
+        format!("s:{}", "界".repeat(64)),
+        format!(
+            "h:{}",
+            "a".repeat(crate::commands::history_helpers::STREAM_KEY_MAX_CHARS)
+        ),
+        "u:https://cdn.example/file".to_string(),
+    ] {
+        assert!(normalize_stream_key(&invalid).is_none(), "{invalid}");
+    }
+    for legacy in ["h:abc123:0", "uh:0123456789abcdef:0"] {
+        assert_eq!(normalize_stream_key(legacy).as_deref(), Some(legacy));
+    }
+}
+
+#[test]
 fn preferred_fallback_preserves_the_first_failure_unless_only_fallback_is_rate_limited() {
     use ResolveStreamErrorKind::{Failed, RateLimited};
     for (first, fallback, expected_kind, expected_message) in [
@@ -29,7 +64,7 @@ fn preferred_fallback_preserves_the_first_failure_unless_only_fallback_is_rate_l
 
 #[test]
 fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() {
-    let streams: Vec<_> = (0..12)
+    let streams: Vec<_> = (0..BEST_STREAM_MAX_CANDIDATES + 4)
         .map(|index| {
             let mut stream = test_stream();
             stream.stream_key = format!("s:{index}");
@@ -50,7 +85,11 @@ fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() 
             .iter()
             .map(|request| request.url.path())
             .collect::<Vec<_>>(),
-        ["/10.mkv", "/0.mkv", "/1.mkv", "/2.mkv", "/3.mkv", "/4.mkv", "/5.mkv", "/6.mkv"]
+        std::iter::once(10)
+            .chain((0..BEST_STREAM_MAX_CANDIDATES + 4).filter(|index| *index != 10))
+            .take(BEST_STREAM_MAX_CANDIDATES)
+            .map(|index| format!("/{index}.mkv"))
+            .collect::<Vec<_>>()
     );
     assert!(preferred_probe_requests(&partial, "s:missing").is_none());
 
@@ -75,7 +114,10 @@ fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() 
             .iter()
             .map(|stream| stream.stream_key.as_str())
             .collect::<Vec<_>>(),
-        ["s:7", "s:8", "s:9", "s:11", "s:authenticated"]
+        (BEST_STREAM_MAX_CANDIDATES..BEST_STREAM_MAX_CANDIDATES + 4)
+            .map(|index| format!("s:{index}"))
+            .chain(std::iter::once("s:authenticated".to_string()))
+            .collect::<Vec<_>>()
     );
 }
 

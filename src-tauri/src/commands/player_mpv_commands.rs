@@ -9,6 +9,7 @@ use super::config_store::{
 };
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
+use super::streaming_helpers::parse_playback_url;
 use serde::Serialize;
 use serde_json::Value;
 use std::sync::{Arc, LazyLock};
@@ -252,7 +253,9 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
     let first = args.first().and_then(Value::as_str);
     if args.len() > MPV_COMMAND_MAX_ARGS
         || args.iter().enumerate().any(|(index, arg)| {
-            if index == 1 && matches!(name, "set" | "cycle") {
+            if index == 0 && name == "loadfile" {
+                !arg.is_string()
+            } else if index == 1 && matches!(name, "set" | "cycle") {
                 !is_mpv_property_value(first.unwrap_or_default(), arg)
             } else {
                 !is_scalar_arg(arg)
@@ -272,11 +275,7 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
                 || args
                     .get(1)
                     .is_some_and(|mode| mode.as_str() != Some("replace"))
-                || !first
-                    .and_then(|url| reqwest::Url::parse(url).ok())
-                    .is_some_and(|url| {
-                        matches!(url.scheme(), "http" | "https") && url.has_host()
-                    }) =>
+                || first.and_then(parse_playback_url).is_none() =>
         {
             Err("mpv 'loadfile' requires an http(s) URL and optional 'replace' mode".to_string())
         }

@@ -1,8 +1,9 @@
+use super::media_type::normalize_watch_progress_type;
 use super::store_helpers::load_index;
 use super::DurableStore;
 use crate::providers::{bound_optional, trim_to_max, MediaItem};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -11,6 +12,8 @@ pub enum ListErrorKind {
     ListNotFound,
     TooManyLists,
     ListFull,
+    InvalidRules,
+    SmartListReadOnly,
     Failed,
 }
 
@@ -35,12 +38,167 @@ impl From<String> for ListError {
     }
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WatchStatus {
+    Watching,
+    Watched,
+    PlanToWatch,
+    Dropped,
+}
+
+impl WatchStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Watching => "watching",
+            Self::Watched => "watched",
+            Self::PlanToWatch => "plan_to_watch",
+            Self::Dropped => "dropped",
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq, Eq)]
+#[serde(default)]
+pub struct SmartListRules {
+    pub media_type: Option<String>,
+    pub genres: Vec<String>,
+    pub statuses: Vec<WatchStatus>,
+    pub year_from: Option<u32>,
+    pub year_to: Option<u32>,
+}
+
+pub(super) fn validate_smart_list_rules(
+    mut rules: SmartListRules,
+) -> Result<SmartListRules, ListError> {
+    let invalid = |message| ListError::new(ListErrorKind::InvalidRules, message);
+    if let Some(media_type) = rules.media_type {
+        rules.media_type = Some(
+            normalize_watch_progress_type(&media_type)
+                .ok_or_else(|| invalid("Choose Movies or Series."))?
+                .to_string(),
+        );
+    }
+    if rules.genres.len() > 12 {
+        return Err(invalid("Choose at most 12 genres."));
+    }
+    let mut seen = HashSet::new();
+    let mut genres = Vec::with_capacity(rules.genres.len());
+    for genre in rules.genres {
+        let genre = genre.trim();
+        if genre.is_empty()
+            || genre
+                .chars()
+                .nth(super::media_normalization::MEDIA_GENRE_MAX_CHARS)
+                .is_some()
+        {
+            return Err(invalid("Genres must contain between 1 and 64 characters."));
+        }
+        if seen.insert(normalize_smart_list_genre(genre)) {
+            genres.push(genre.to_string());
+        }
+    }
+    rules.genres = genres;
+    let mut statuses = Vec::with_capacity(4);
+    for status in rules.statuses {
+        if !statuses.contains(&status) {
+            statuses.push(status);
+        }
+    }
+    rules.statuses = statuses;
+    if rules
+        .year_from
+        .into_iter()
+        .chain(rules.year_to)
+        .any(|year| !(1889..=2100).contains(&year))
+        || matches!((rules.year_from, rules.year_to), (Some(from), Some(to)) if from > to)
+    {
+        return Err(invalid(
+            "Use years from 1889 to 2100, with From no later than To.",
+        ));
+    }
+    if rules.media_type.is_none()
+        && rules.genres.is_empty()
+        && rules.statuses.is_empty()
+        && rules.year_from.is_none()
+        && rules.year_to.is_none()
+    {
+        return Err(invalid("Choose at least one smart list rule."));
+    }
+    Ok(rules)
+}
+
+pub(super) fn normalize_smart_list_genre(genre: &str) -> String {
+    genre.trim().to_lowercase()
+}
+
+pub(super) fn normalize_smart_list_library(
+    library: &[MediaItem],
+) -> Vec<(&MediaItem, Vec<String>)> {
+    library
+        .iter()
+        .map(|item| {
+            let genres = item
+                .genres
+                .iter()
+                .flatten()
+                .map(|genre| normalize_smart_list_genre(genre))
+                .collect();
+            (item, genres)
+        })
+        .collect()
+}
+
+pub(super) fn smart_list_items<'a, 'b>(
+    rules: &'b SmartListRules,
+    library: &'b [(&'a MediaItem, Vec<String>)],
+    statuses: &'b HashMap<String, String>,
+) -> impl Iterator<Item = &'a MediaItem> + 'b {
+    let genres: HashSet<String> = rules
+        .genres
+        .iter()
+        .map(|genre| genre.to_lowercase())
+        .collect();
+    library
+        .iter()
+        .filter(move |(item, item_genres)| {
+            rules.media_type.as_deref().is_none_or(|media_type| {
+                normalize_watch_progress_type(&item.type_) == Some(media_type)
+            }) && (genres.is_empty() || item_genres.iter().any(|genre| genres.contains(genre)))
+                && (rules.statuses.is_empty()
+                    || statuses.get(&item.id).is_some_and(|status| {
+                        rules.statuses.iter().any(|rule| rule.as_str() == status)
+                    }))
+                && ((rules.year_from.is_none() && rules.year_to.is_none())
+                    || item.primary_year.is_some_and(|year| {
+                        rules.year_from.is_none_or(|from| year >= from)
+                            && rules.year_to.is_none_or(|to| year <= to)
+                    }))
+        })
+        .map(|(item, _)| *item)
+        .take(MAX_LIST_ITEMS)
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct UserList {
     pub id: String,
     pub name: String,
     pub icon: String,
     pub item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<SmartListRules>,
+}
+
+impl UserList {
+    pub(super) fn require_manual(&self) -> Result<(), ListError> {
+        if self.rules.is_some() {
+            return Err(ListError::new(
+                ListErrorKind::SmartListReadOnly,
+                "Smart lists update automatically.",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -50,6 +208,8 @@ pub struct UserListWithItems {
     pub icon: String,
     pub item_ids: Vec<String>,
     pub items: Vec<MediaItem>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<SmartListRules>,
 }
 
 #[derive(Debug, Serialize)]
@@ -59,6 +219,7 @@ pub struct UserListSummary {
     pub icon: String,
     pub item_count: usize,
     pub contains_item: bool,
+    pub is_smart: bool,
 }
 
 // Validate the snapshot's wire shape without allocating its artwork, description or genres.

@@ -30,6 +30,129 @@ use crate::test_helpers::{
 use std::collections::HashMap;
 
 #[test]
+fn live_progress_ipc_completion_defaults_off_and_is_not_persisted_as_a_field() {
+    use super::watch_history_commands::SaveWatchProgress;
+    let legacy = serde_json::to_value(test_progress()).unwrap();
+    let decoded: SaveWatchProgress = serde_json::from_value(legacy.clone()).unwrap();
+    assert!(!decoded.completed);
+    let mut explicit = legacy;
+    explicit["completed"] = serde_json::json!(true);
+    let decoded: SaveWatchProgress = serde_json::from_value(explicit).unwrap();
+    assert!(decoded.completed);
+    let stored = serde_json::to_value(decoded.progress).unwrap();
+    assert!(stored.get("completed").is_none());
+}
+
+#[test]
+fn history_write_cache_distinguishes_misses_from_required_writes() {
+    let service = playback_state::PlaybackStateService::new();
+    let key = "movie:tt123".to_string();
+    let progress = test_progress();
+    assert_eq!(service.cached_history_write_decision(&key, &progress), None);
+    assert!(service.should_skip_history_write(&key, &progress, Some(&progress)));
+    service.mark_history_persisted(
+        [(key.clone(), progress.clone())],
+        false,
+        service.history_generation(),
+    );
+    assert_eq!(
+        service.cached_history_write_decision(&key, &progress),
+        Some(true)
+    );
+    let mut incoming = progress.clone();
+    incoming.position += 30.0;
+    assert_eq!(
+        service.cached_history_write_decision(&key, &incoming),
+        Some(false)
+    );
+    assert!(!service.should_skip_history_write(&key, &incoming, Some(&incoming)));
+}
+
+#[test]
+fn bulk_history_removal_validates_every_target_and_bounds_duplicates() {
+    use super::watch_history_commands::{normalize_history_removals, HistoryRemovalItem};
+    let item = |id: &str, media_type: &str| HistoryRemovalItem {
+        id: id.into(),
+        type_: media_type.into(),
+    };
+    assert!(normalize_history_removals(Vec::new()).unwrap().is_empty());
+    let targets = normalize_history_removals(vec![
+        item(" a ", "anime"),
+        item("a", "series"),
+        item("a", "movie"),
+    ])
+    .unwrap();
+    assert_eq!(targets.len(), 1);
+    assert_eq!(targets["a"], 3);
+    assert!(normalize_history_removals(vec![item("a", "movie"), item("", "movie")]).is_err());
+    assert!(normalize_history_removals(vec![item("a", "series"), item("a", "bad")]).is_err());
+    let cap = super::resume_store::MAX_RESUME_TOTAL_ENTRIES as usize;
+    assert!(normalize_history_removals((0..cap).map(|_| item("a", "movie")).collect()).is_ok());
+    assert!(normalize_history_removals((0..=cap).map(|_| item("a", "movie")).collect()).is_err());
+}
+
+#[test]
+fn bulk_history_removal_returns_exact_rows_once_and_preserves_title_types() {
+    use super::watch_history_commands::{
+        normalize_history_removals, select_history_removals, HistoryRemovalItem,
+    };
+    let row = |id: &str, media_type: &str, season, episode| {
+        let progress = WatchProgress {
+            id: id.into(),
+            type_: media_type.into(),
+            season,
+            episode,
+            position: 123.0,
+            duration: 999.0,
+            last_watched: 42,
+            ..test_progress()
+        };
+        (
+            super::history_helpers::build_history_key(media_type, id, season, episode),
+            progress,
+        )
+    };
+    let rows = vec![
+        row("a", "movie", None, None),
+        row("a", "series", Some(0), Some(0)),
+        row("a", "series", Some(1), Some(1)),
+        row("b", "series", Some(1), Some(1)),
+        row("b", "series", Some(1), Some(2)),
+        row("b", "movie", None, None),
+        row("a:child", "movie", None, None),
+    ];
+    let targets = normalize_history_removals(vec![
+        HistoryRemovalItem {
+            id: "a".into(),
+            type_: "movie".into(),
+        },
+        HistoryRemovalItem {
+            id: "a".into(),
+            type_: "movie".into(),
+        },
+        HistoryRemovalItem {
+            id: "b".into(),
+            type_: "anime".into(),
+        },
+    ])
+    .unwrap();
+    let (keys, removed) = select_history_removals(rows.clone(), &targets);
+    let expected = [&rows[0], &rows[1], &rows[3], &rows[4]];
+    assert_eq!(
+        keys,
+        expected
+            .iter()
+            .map(|(key, _)| key.clone())
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        serde_json::to_value(removed).unwrap(),
+        serde_json::to_value(expected.iter().map(|(_, row)| row).collect::<Vec<_>>()).unwrap()
+    );
+    assert!(select_history_removals(rows, &HashMap::new()).0.is_empty());
+}
+
+#[test]
 fn skip_times_coordinates_preserve_composed_ipc_trimming() {
     for (media_type, expected) in [
         (
@@ -629,14 +752,14 @@ fn prepare_addon_streams_uses_generic_cached_label() {
         .iter()
         .find(|stream| stream.url.is_some())
         .expect("direct row");
-    assert_eq!(cached.presentation.delivery_label.as_str(), "Cached");
+    assert_eq!(cached.presentation.delivery_label, "Cached");
     assert!(cached.presentation.is_instantly_playable);
     // A cache hint without a direct URL is still P2P-only.
     let hash_only = prepared
         .iter()
         .find(|stream| stream.url.is_none())
         .expect("hash row");
-    assert_eq!(hash_only.presentation.delivery_label.as_str(), "P2P");
+    assert_eq!(hash_only.presentation.delivery_label, "P2P");
     assert!(!hash_only.presentation.is_instantly_playable);
 }
 
@@ -725,9 +848,9 @@ fn prepare_addon_streams_populates_stream_presentation() {
     let presentation = &prepared[0].presentation;
     assert_eq!(presentation.source_name, "Show Complete Season Pack");
     assert_eq!(presentation.resolution, StreamResolution::P2160);
-    assert_eq!(presentation.hdr_label.as_deref(), Some("HDR10+"));
-    assert_eq!(presentation.codec_label.as_deref(), Some("AV1"));
-    assert_eq!(presentation.multi_audio_label.as_deref(), Some("DUAL"));
+    assert_eq!(presentation.hdr_label, Some("HDR10+"));
+    assert_eq!(presentation.codec_label, Some("AV1"));
+    assert_eq!(presentation.multi_audio_label, Some("DUAL"));
     assert_eq!(presentation.size_label.as_deref(), Some("1.4GB"));
     assert!(presentation.is_batch);
 
@@ -779,7 +902,7 @@ fn stream_language_bonus_shares_marker_vocabulary_with_badge() {
         let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
         assert_eq!(prepared.len(), 1);
         let stream = &prepared[0];
-        assert_eq!(stream.presentation.multi_audio_label.as_deref(), badge);
+        assert_eq!(stream.presentation.multi_audio_label, badge);
         let priority = stream_resolution_priority(stream, stream.match_texts().flags);
         assert_eq!(priority.language_bonus, u8::from(badge.is_some()));
     }
@@ -796,10 +919,7 @@ fn stream_language_bonus_reuses_prepared_presentation_on_clones() {
     );
     let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
     let mut stream = prepared[0].clone();
-    assert_eq!(
-        stream.presentation.multi_audio_label.as_deref(),
-        Some("DUAL")
-    );
+    assert_eq!(stream.presentation.multi_audio_label, Some("DUAL"));
     assert_eq!(
         stream_resolution_priority(&stream, stream.match_texts().flags).language_bonus,
         1
@@ -1240,6 +1360,38 @@ fn title_watch_progress_keeps_episode_rows_and_selects_stable_resume_rows_per_ki
             .map(|row| row.type_.as_str()),
         Some("movie")
     );
+
+    for (movie_recency, series_recency) in [(1_000, 2_000), (2_000, 1_000)] {
+        let series = series_episode_progress(series_recency, 1, 3, 600.0, 2_400.0);
+        let mut movie = mk_watch_progress(&series.id, "movie", movie_recency);
+        movie.position = 600.0;
+        movie.duration = 2_400.0;
+        let progress =
+            build_title_watch_progress_with_priorities(vec![movie.clone(), series.clone()], None);
+        assert_eq!(
+            progress.latest_entry.as_ref().unwrap().type_,
+            if movie_recency > series_recency {
+                "movie"
+            } else {
+                "series"
+            }
+        );
+        assert_eq!(progress.movie_resume_entry.as_ref().unwrap().type_, "movie");
+        assert_eq!(
+            progress.series_resume_entry.as_ref().unwrap().type_,
+            "series"
+        );
+
+        movie.position = movie.duration;
+        movie.last_watched = 3_000;
+        let progress = build_title_watch_progress_with_priorities(vec![movie, series], None);
+        assert!(progress.movie_resume_entry.is_none());
+        assert!(progress.latest_movie_entry.as_ref().unwrap().is_watched);
+        assert_eq!(
+            progress.series_resume_entry.as_ref().unwrap().episode,
+            Some(3)
+        );
+    }
 }
 
 #[test]
@@ -2524,6 +2676,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
         name: "  My List  ".to_string(),
         icon: "🎬".to_string(),
         item_ids: vec!["tt999".to_string()],
+        rules: None,
         items: vec![
             test_media_item("tt1", "series"),
             test_media_item("tt1", "series"),
@@ -2546,6 +2699,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     let dup = || {
         serde_json::json!(UserListWithItems {
             id: "list_dup".to_string(),
+            rules: None,
             name: "Dup".to_string(),
             icon: "".to_string(),
             item_ids: vec![],
@@ -2561,6 +2715,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     store.set(LISTS_ORDER_KEY, serde_json::json!(existing));
     let incoming = vec![serde_json::json!(UserListWithItems {
         id: "  list_here ".to_string(),
+        rules: None,
         name: "Incoming".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2606,6 +2761,7 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     // Repeated invalid ids also fold into one list under a fresh safe id.
     let hostile = serde_json::json!(UserListWithItems {
         id: "bad id!!".to_string(),
+        rules: None,
         name: "Hostile".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2631,6 +2787,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
         .collect();
     let oversized = serde_json::json!(UserListWithItems {
         id: "list_big".to_string(),
+        rules: None,
         name: "Big".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2651,6 +2808,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     let full_order: Vec<String> = (0..MAX_LISTS).map(|i| format!("list_{i}")).collect();
     let same_id = vec![serde_json::json!(UserListWithItems {
         id: "list_0".to_string(),
+        rules: None,
         name: "Existing".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2668,6 +2826,7 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     // One new id past the cap rejects.
     let extra = vec![serde_json::json!(UserListWithItems {
         id: "list_new".to_string(),
+        rules: None,
         name: "New".to_string(),
         icon: "".to_string(),
         item_ids: vec![],

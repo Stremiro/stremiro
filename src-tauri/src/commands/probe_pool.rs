@@ -5,7 +5,7 @@ use super::stream_fetcher::{
 };
 use super::stream_resolver::{
     resolve_stream_inner, BestResolvedStream, ProbeError, ResolveStreamError,
-    ResolveStreamErrorKind, ResolveStreamParams, ResolvedStream,
+    ResolveStreamErrorKind, ResolvedStream,
 };
 use super::streaming_helpers::{
     canonicalize_header_identity, is_legacy_content_key, is_prepared_stream_key,
@@ -13,16 +13,20 @@ use super::streaming_helpers::{
 };
 use super::{js_trim, normalize_media_id, normalize_non_empty, normalize_stream_media_type};
 use crate::providers::addons::{remaining_stream_cache_ttl_ms, AddonStream, AddonTransport};
-use futures_util::stream::FuturesOrdered;
+use crate::providers::lock_or_recover;
+use futures_util::stream::{self, FuturesUnordered};
 use futures_util::StreamExt;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::future::Future;
+use std::sync::Mutex;
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::time::Instant;
 
 /// Per-probe timeout in the best-stream fan-out — bounded so bad candidates don't chain long failures.
 pub(crate) const BEST_STREAM_CANDIDATE_TIMEOUT_SECS: u64 = 10;
-pub(crate) const BEST_STREAM_MAX_CANDIDATES: usize = 8;
+pub(crate) const BEST_STREAM_MAX_CANDIDATES: usize = 24;
+const BEST_STREAM_PROBE_CONCURRENCY: usize = 8;
 const SAME_HOST_PROBE_SPACING: Duration = Duration::from_millis(150);
 
 /// Normalized stream-command inputs: validated media identity plus the resolved
@@ -192,7 +196,7 @@ type CandidateProbeResult = (
 );
 
 async fn probe_candidate(
-    mut candidate: StreamResolveCandidateInput,
+    candidate: StreamResolveCandidateInput,
     delay: Duration,
     deadline: tokio::time::Instant,
 ) -> CandidateProbeResult {
@@ -200,11 +204,7 @@ async fn probe_candidate(
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        resolve_stream_inner(ResolveStreamParams {
-            url: candidate.direct_url.as_str().to_owned(),
-            request_headers: std::mem::take(&mut candidate.request_headers),
-        })
-        .await
+        resolve_stream_inner(candidate.direct_url.as_str(), &candidate.request_headers).await
     })
     .await;
 
@@ -233,37 +233,70 @@ fn preferred_key_matches(stream: &AddonStream, key: &str) -> bool {
     is_legacy_content_key(key) && stream_dedup_key(stream).is_some_and(|dedup| dedup == key)
 }
 
-pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded_keys: &[String]) {
-    if excluded_keys.is_empty() {
-        return;
+pub(crate) struct StreamExclusions<'a> {
+    keys: HashSet<&'a str>,
+    has_legacy_keys: bool,
+    resolved_url: Option<reqwest::Url>,
+    requests: Mutex<Vec<ProbeRequestIdentity>>,
+}
+
+impl<'a> StreamExclusions<'a> {
+    pub(crate) fn new(
+        excluded_keys: &'a [String],
+        failed_key: Option<&'a str>,
+        resolved_url: Option<&str>,
+    ) -> Self {
+        let keys: HashSet<_> = excluded_keys
+            .iter()
+            .map(String::as_str)
+            .chain(failed_key)
+            .map(str::trim)
+            .filter(|key| !key.is_empty())
+            .collect();
+        Self {
+            has_legacy_keys: keys.iter().any(|key| is_legacy_content_key(key)),
+            keys,
+            resolved_url: resolved_url
+                .filter(|_| failed_key.is_none_or(|key| !is_prepared_stream_key(key.trim())))
+                .and_then(crate::providers::addon_resource::parse_fetchable_http_url),
+            requests: Mutex::new(Vec::new()),
+        }
     }
-    let excluded_keys: HashSet<&str> = excluded_keys
-        .iter()
-        .map(|key| key.trim())
-        .filter(|key| !key.is_empty())
-        .collect();
-    if excluded_keys.is_empty() {
-        return;
+
+    fn matches_key(&self, stream: &AddonStream) -> bool {
+        self.keys.contains(stream.stream_key.as_str())
+            || (self.has_legacy_keys
+                && stream_dedup_key(stream).is_some_and(|key| self.keys.contains(key.as_str())))
     }
-    // A legacy `h:`/`uh:` exclusion binds by recomputing the dedup key once per
-    // stream — skipped entirely when no legacy key is present.
-    let legacy_keys: HashSet<&str> = excluded_keys
-        .iter()
-        .copied()
-        .filter(|key| is_legacy_content_key(key))
-        .collect();
-    streams.retain(|stream| {
-        if excluded_keys.contains(stream.stream_key.as_str()) {
-            return false;
+
+    pub(crate) fn retain(&self, streams: &mut Vec<AddonStream>) {
+        let mut requests = lock_or_recover(&self.requests);
+        // Exact keys identify requests; legacy content keys retain their payload-only matching.
+        for stream in streams
+            .iter()
+            .filter(|stream| self.keys.contains(stream.stream_key.as_str()))
+        {
+            if let Some(request) = ProbeRequestIdentity::from_stream(stream) {
+                if !requests.contains(&request) {
+                    requests.push(request);
+                }
+            }
         }
-        if legacy_keys.is_empty() {
-            return true;
-        }
-        match stream_dedup_key(stream) {
-            Some(dedup) => !legacy_keys.contains(dedup.as_str()),
-            None => true,
-        }
-    });
+        streams.retain(|stream| {
+            if self.matches_key(stream) {
+                return false;
+            }
+            if requests.is_empty() && self.resolved_url.is_none() {
+                return true;
+            }
+            ProbeRequestIdentity::from_stream(stream).is_none_or(|request| {
+                !requests.contains(&request)
+                    && self.resolved_url.as_ref().is_none_or(|url| {
+                        probe_url_identity(url) != probe_url_identity(&request.url)
+                    })
+            })
+        });
+    }
 }
 
 /// Locate the preferred stream in the fetched pool: exact key, then release family,
@@ -274,7 +307,6 @@ pub(crate) fn retain_unexcluded_streams(streams: &mut Vec<AddonStream>, excluded
 fn find_preferred_position(
     streams: &[AddonStream],
     preferred: PreferredStreamHint<'_>,
-    excluded_stream_key: Option<&str>,
 ) -> Option<usize> {
     if preferred.stream_key.is_none()
         && preferred.stream_family.is_none()
@@ -286,18 +318,13 @@ fn find_preferred_position(
 
     // One probeability pass — tier scans would otherwise re-run `is_probeable_stream` per tier.
     let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
-    let eligible = |index: usize, stream: &AddonStream| {
-        probeable[index]
-            && excluded_stream_key.is_none_or(|key| !preferred_key_matches(stream, key))
-    };
-
     if let Some(key) = preferred.stream_key.and_then(normalize_non_empty) {
-        if excluded_stream_key != Some(key.as_str()) {
-            if let Some(position) = streams.iter().enumerate().position(|(index, stream)| {
-                eligible(index, stream) && preferred_key_matches(stream, &key)
-            }) {
-                return Some(position);
-            }
+        if let Some(position) = streams
+            .iter()
+            .enumerate()
+            .position(|(index, stream)| probeable[index] && preferred_key_matches(stream, &key))
+        {
+            return Some(position);
         }
     }
 
@@ -314,10 +341,10 @@ fn find_preferred_position(
     let best_priority = streams
         .iter()
         .enumerate()
-        .find(|(index, stream)| eligible(*index, stream))
+        .find(|(index, _)| probeable[*index])
         .and_then(|(_, stream)| stream.selection_priority);
     let soft_eligible = |index: usize, stream: &AddonStream| {
-        eligible(index, stream)
+        probeable[index]
             && best_priority.is_none_or(|best| {
                 stream
                     .selection_priority
@@ -369,14 +396,11 @@ fn find_preferred_position(
 
 async fn resolve_candidate_results<S>(
     mut candidates: S,
-    excluded_stream_key: Option<&str>,
     excluded_resolved_url: Option<&str>,
 ) -> Result<BestResolvedStream, ResolveStreamError>
 where
     S: futures_util::Stream<Item = CandidateProbeResult> + Unpin,
 {
-    let excluded_resolved_url = excluded_resolved_url
-        .filter(|_| excluded_stream_key.is_none_or(|key| !is_prepared_stream_key(key.trim())));
     let mut errors = Vec::new();
     let mut rate_limited = false;
     while let Some((candidate, result)) = candidates.next().await {
@@ -411,6 +435,53 @@ where
     Err(ResolveStreamError::new(kind, message))
 }
 
+async fn resolve_probe_candidates<P, F>(
+    inputs: Vec<(StreamResolveCandidateInput, Duration)>,
+    excluded_stream_key: Option<&str>,
+    excluded_resolved_url: Option<&str>,
+    deadline: Instant,
+    mut probe: P,
+) -> Result<BestResolvedStream, ResolveStreamError>
+where
+    P: FnMut(StreamResolveCandidateInput, Duration, Instant) -> F,
+    F: Future<Output = CandidateProbeResult>,
+{
+    let started = Instant::now();
+    let excluded_resolved_url = excluded_resolved_url
+        .filter(|_| excluded_stream_key.is_none_or(|key| !is_prepared_stream_key(key.trim())));
+    let mut inputs = inputs
+        .into_iter()
+        .enumerate()
+        .map(move |(rank, (candidate, delay))| {
+            let probe = probe(candidate, delay.saturating_sub(started.elapsed()), deadline);
+            async move { (rank, probe.await) }
+        });
+    let mut pending = FuturesUnordered::new();
+    pending.extend(inputs.by_ref().take(BEST_STREAM_PROBE_CONCURRENCY));
+    let candidates = stream::unfold(
+        (pending, inputs, BTreeMap::new(), 0, false),
+        move |(mut pending, mut inputs, mut completed, mut next_rank, mut has_winner)| async move {
+            loop {
+                if let Some(result) = completed.remove(&next_rank) {
+                    next_rank += 1;
+                    return Some((result, (pending, inputs, completed, next_rank, has_winner)));
+                }
+                let (rank, result) = pending.next().await?;
+                if matches!(&result.1, Ok(Ok(resolved)) if excluded_resolved_url != Some(resolved.url.trim()))
+                {
+                    has_winner = true;
+                } else if !has_winner && Instant::now() < deadline {
+                    if let Some(next) = inputs.next() {
+                        pending.push(next);
+                    }
+                }
+                completed.insert(rank, result);
+            }
+        },
+    );
+    resolve_candidate_results(Box::pin(candidates), excluded_resolved_url).await
+}
+
 fn build_probe_candidates(
     mut streams: Vec<AddonStream>,
     excluded_stream_key: Option<&str>,
@@ -418,19 +489,11 @@ fn build_probe_candidates(
     preferred: PreferredStreamHint<'_>,
 ) -> Vec<(StreamResolveCandidateInput, Duration)> {
     let excluded_stream_key = excluded_stream_key.and_then(normalize_non_empty);
-    let prepared_key = excluded_stream_key
-        .as_deref()
-        .filter(|key| is_prepared_stream_key(key));
-    let excluded_request = prepared_key
-        .and_then(|key| streams.iter().find(|stream| stream.stream_key == key))
-        .and_then(ProbeRequestIdentity::from_stream);
-    // Prepared keys distinguish authenticated requests even when the failed URL is unchanged.
-    let excluded_resolved_url = excluded_resolved_url
-        .filter(|_| prepared_key.is_none())
-        .and_then(normalize_non_empty);
-    if let Some(position) =
-        find_preferred_position(&streams, preferred, excluded_stream_key.as_deref())
-    {
+    if excluded_stream_key.is_some() || excluded_resolved_url.is_some() {
+        StreamExclusions::new(&[], excluded_stream_key.as_deref(), excluded_resolved_url)
+            .retain(&mut streams);
+    }
+    if let Some(position) = find_preferred_position(&streams, preferred) {
         streams[..=position].rotate_right(1);
     }
 
@@ -438,28 +501,9 @@ fn build_probe_candidates(
         Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
     let mut header_identities = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
     let mut host_counts = HashMap::<String, u32>::new();
-    for candidate in streams
-        .into_iter()
-        .filter(|stream| {
-            excluded_stream_key
-                .as_deref()
-                .is_none_or(|key| !preferred_key_matches(stream, key))
-        })
-        .filter_map(build_candidate_input)
-        .filter(|candidate| {
-            excluded_resolved_url
-                .as_deref()
-                .is_none_or(|url| url != candidate.direct_url.as_str())
-        })
-    {
+    for candidate in streams.into_iter().filter_map(build_candidate_input) {
         let mut headers = candidate.request_headers.clone();
         canonicalize_header_identity(&mut headers);
-        if excluded_request.as_ref().is_some_and(|request| {
-            probe_url_identity(&request.url) == probe_url_identity(&candidate.direct_url)
-                && request.headers == headers
-        }) {
-            continue;
-        }
         // Equivalent requests share a probe; different auth headers stay separate even on the same URL.
         if candidates
             .iter()
@@ -511,15 +555,13 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
         excluded_resolved_url,
         preferred,
     );
-    let candidates: FuturesOrdered<_> = inputs
-        .into_iter()
-        .map(|(candidate, delay)| probe_candidate(candidate, delay, deadline))
-        .collect();
     let excluded_resolved_url = excluded_resolved_url.and_then(normalize_non_empty);
-    resolve_candidate_results(
-        candidates,
+    resolve_probe_candidates(
+        inputs,
         excluded_stream_key,
         excluded_resolved_url.as_deref(),
+        deadline,
+        probe_candidate,
     )
     .await
 }

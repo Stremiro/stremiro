@@ -33,7 +33,8 @@ pub(crate) use profile::{
 pub(crate) use stream_selector::{
     apply_stream_selector_preferences_patch, default_stream_selector_preferences,
     load_stream_selector_preferences_state, parse_stream_selector_preferences,
-    save_stream_selector_preferences_to_store, StreamSelectorPreferencesPatch,
+    save_stream_selector_preferences_to_store, StreamSelectorBatch, StreamSelectorPreferencesPatch,
+    StreamSelectorQuality, StreamSelectorSort, StreamSelectorSource,
 };
 
 #[cfg(test)]
@@ -54,10 +55,6 @@ use profile::{normalize_stored_profile_preferences, StoredProfilePreferences};
 pub use profile::{AccentTargets, LocalProfile, ProfileViewMode};
 #[cfg(test)]
 pub(crate) use stream_selector::sanitize_stream_selector_preferences;
-#[cfg(test)]
-pub use stream_selector::{
-    StreamSelectorBatch, StreamSelectorQuality, StreamSelectorSort, StreamSelectorSource,
-};
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
 /// Default registry install URL, reused in user-facing "no catalog/meta addon" errors.

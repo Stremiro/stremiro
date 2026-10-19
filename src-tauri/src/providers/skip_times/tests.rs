@@ -69,43 +69,6 @@ fn skipdb_body_failures_distinguish_transient_reads_from_oversize_payloads() {
 }
 
 #[test]
-fn normalize_skip_segments_merges_adjacent_same_type_entries() {
-    let normalized = normalize_skip_segments(vec![
-        SkipSegment {
-            type_: "intro".to_string(),
-            start_time: -4.0,
-            end_time: 15.0,
-        },
-        SkipSegment {
-            type_: "intro".to_string(),
-            start_time: 14.9,
-            end_time: 26.0,
-        },
-        SkipSegment {
-            type_: "outro".to_string(),
-            start_time: 89.5,
-            end_time: 120.0,
-        },
-    ]);
-
-    assert_eq!(
-        normalized,
-        vec![
-            SkipSegment {
-                type_: "intro".to_string(),
-                start_time: 0.0,
-                end_time: 26.0,
-            },
-            SkipSegment {
-                type_: "outro".to_string(),
-                start_time: 89.5,
-                end_time: 120.0,
-            },
-        ],
-    );
-}
-
-#[test]
 fn normalize_skip_segments_sorts_and_trims_overlaps_between_types() {
     let normalized = normalize_skip_segments(vec![
         SkipSegment {
@@ -115,12 +78,7 @@ fn normalize_skip_segments_sorts_and_trims_overlaps_between_types() {
         },
         SkipSegment {
             type_: "intro".to_string(),
-            start_time: 0.0,
-            end_time: 25.0,
-        },
-        SkipSegment {
-            type_: "intro".to_string(),
-            start_time: 24.9,
+            start_time: -4.0004,
             end_time: 40.0,
         },
         SkipSegment {

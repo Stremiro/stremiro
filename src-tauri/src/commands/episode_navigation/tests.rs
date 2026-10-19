@@ -1,6 +1,7 @@
 use super::{
     additional_episode_video_id, build_source_episode_coordinates, get_episode_navigation,
-    EpisodeNavigation, EpisodeNavigationRequest, NavigationCoordinate,
+    get_unaired_episode_indices, EpisodeNavigation, EpisodeNavigationRequest, NavigationCoordinate,
+    UnairedEpisodesRequest,
 };
 use crate::providers::Episode;
 
@@ -213,4 +214,43 @@ fn player_episode_navigation_bounds_episode_input_and_validates_local_day() {
     let mut invalid = request(1, 1);
     invalid.today = "2026-02-30".to_string();
     assert!(get_episode_navigation(invalid).is_err());
+}
+
+fn unaired(dates: &[Option<&str>], today: &str) -> Result<Vec<usize>, String> {
+    get_unaired_episode_indices(UnairedEpisodesRequest {
+        release_dates: dates.iter().map(|date| date.map(str::to_string)).collect(),
+        today: today.to_string(),
+    })
+}
+
+#[test]
+fn unaired_episode_indices_match_player_gate_semantics() {
+    let dates = [
+        None,
+        Some(""),
+        Some("invalid"),
+        Some("2026-02-30"),
+        Some("2026-10-15"),
+        Some("2026-10-15T23:59:59-12:00"),
+        Some(" 2026-10-16 "),
+        Some("2026-10-16T00:00:00+14:00"),
+        Some("2099-01-01"),
+    ];
+    assert_eq!(unaired(&dates, "2026-10-15").unwrap(), vec![6, 7, 8]);
+    assert_eq!(unaired(&dates, "2026-10-16").unwrap(), vec![8]);
+}
+
+#[test]
+fn unaired_episode_indices_bound_input_validate_day_and_use_camel_case() {
+    for (count, valid) in [(2_000, true), (2_001, false)] {
+        assert_eq!(unaired(&vec![None; count], "2026-10-15").is_ok(), valid);
+    }
+    assert!(unaired(&[], "2026-02-30").is_err());
+    assert!(unaired(&[], "").is_err());
+    let request: UnairedEpisodesRequest = serde_json::from_value(serde_json::json!({
+        "releaseDates": [null, "2099-01-01"],
+        "today": "2026-10-15",
+    }))
+    .unwrap();
+    assert_eq!(get_unaired_episode_indices(request).unwrap(), vec![1]);
 }

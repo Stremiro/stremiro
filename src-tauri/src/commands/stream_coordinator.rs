@@ -217,48 +217,9 @@ fn canonicalize_language_prefs(
     CanonicalLanguagePrefs { audio, subtitle }
 }
 
-/// The fetch-constant half of `StreamRecommendationKey` — identical minus `family`,
-/// which `into_key` re-inserts at its rank position.
-#[derive(Clone, Copy)]
-struct StreamFixedSignals {
-    episode_match: StreamEpisodeMatch,
-    title_match: i8,
-    viability: u8,
-    language: u8,
-    health: u8,
-    title_source_affinity: u8,
-    quality: i32,
-    language_bonus: u8,
-    source_priority: u32,
-    oversize: bool,
-    seeders: u32,
-    size_bytes: u64,
-}
-
-impl StreamFixedSignals {
-    fn into_key(self, family: u8) -> StreamRecommendationKey {
-        StreamRecommendationKey {
-            episode_match: self.episode_match.kind,
-            season_claim_verified: self.episode_match.season_claim_verified,
-            title_match: self.title_match,
-            viability: self.viability,
-            language: self.language,
-            health: self.health,
-            family,
-            title_source_affinity: self.title_source_affinity,
-            quality: self.quality,
-            language_bonus: self.language_bonus,
-            source_priority: self.source_priority,
-            oversize: std::cmp::Reverse(self.oversize),
-            seeders: self.seeders,
-            size_bytes: self.size_bytes,
-        }
-    }
-}
-
 /// Memoized per-stream entry: rank fields plus the normalized family key.
 struct CachedStreamSignals {
-    fixed: StreamFixedSignals,
+    key: StreamRecommendationKey,
     normalized_family: Option<String>,
 }
 
@@ -325,14 +286,16 @@ fn compute_cached_signals(
     // Instance id is the identity for source ordering/health/affinity — display names are shared between instances.
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
     let resolution = stream_resolution_priority(stream, flags);
+    let episode_match = stream_episode_relevance_priority(stream, inputs.match_context);
 
     CachedStreamSignals {
         normalized_family: stream
             .stream_family
             .as_deref()
             .and_then(normalize_source_key),
-        fixed: StreamFixedSignals {
-            episode_match: stream_episode_relevance_priority(stream, inputs.match_context),
+        key: StreamRecommendationKey {
+            episode_match: episode_match.kind,
+            season_claim_verified: episode_match.season_claim_verified,
             title_match: stream_title_relevance_score(
                 stream,
                 inputs.match_context.media_type,
@@ -349,6 +312,7 @@ fn compute_cached_signals(
                 .as_deref()
                 .and_then(|id| inputs.source_health_priorities.get(id).copied())
                 .unwrap_or(DEFAULT_SOURCE_HEALTH_PRIORITY),
+            family: 0,
             title_source_affinity: stream_title_source_affinity_priority(
                 source_id.as_deref(),
                 inputs.preferred_title_source_id,
@@ -359,7 +323,7 @@ fn compute_cached_signals(
                 source_id.as_deref(),
                 inputs.addon_source_priorities,
             ),
-            oversize: resolution.oversize,
+            oversize: std::cmp::Reverse(resolution.oversize),
             seeders: resolution.seeders,
             size_bytes: resolution.size_bytes,
         },
@@ -377,7 +341,46 @@ fn stream_recommendation_key(
         cached.normalized_family.as_deref(),
         inputs.stream_family_priorities,
     );
-    cached.fixed.into_key(family)
+    StreamRecommendationKey {
+        family,
+        ..cached.key
+    }
+}
+
+fn language_label_is_in_title(
+    segment: &str,
+    token: &str,
+    role: &str,
+    reference: &ReferenceTitle,
+) -> bool {
+    if !reference.tokens.contains(role) {
+        return false;
+    }
+    let label_start = token.as_ptr().min(role.as_ptr()) as usize;
+    let label_end =
+        (token.as_ptr() as usize + token.len()).max(role.as_ptr() as usize + role.len());
+    let mut words = segment
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|word| !word.is_empty());
+    while let Some(first) = words.next() {
+        let mut title = reference.normalized.split_whitespace();
+        if title.next() != Some(first) {
+            continue;
+        }
+        let mut rest = words.clone();
+        let mut last = first;
+        if title.all(|expected| {
+            rest.next().is_some_and(|word| {
+                last = word;
+                word == expected
+            })
+        }) && first.as_ptr() as usize <= label_start
+            && label_end <= last.as_ptr() as usize + last.len()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn stream_language_preference_priority(
@@ -420,15 +423,6 @@ fn stream_language_preference_priority(
                 .peek()
                 .filter(|(range, _)| range.contains(&start))
                 .map(|(_, language)| *language);
-            if bracketed.is_none()
-                && reference.is_some_and(|reference| reference.tokens.contains(token))
-            {
-                continue;
-            }
-            // Exact-only codes are evidence inside brackets, never ordinary prose.
-            let Some(canonical) = bracketed.or_else(|| canonicalize_language_token(token)) else {
-                continue;
-            };
             let role = tokens
                 .peek()
                 .copied()
@@ -446,6 +440,34 @@ fn stream_language_preference_priority(
                     )
                 })
                 .or(preceding);
+            let explicit_role = matches!(
+                role,
+                Some(
+                    "audio"
+                        | "dub"
+                        | "dubbed"
+                        | "sub"
+                        | "subs"
+                        | "subbed"
+                        | "subtitle"
+                        | "subtitles"
+                )
+            );
+            if bracketed.is_none()
+                && reference.is_some_and(|reference| {
+                    reference.tokens.contains(token)
+                        && (!explicit_role
+                            || role.is_some_and(|role| {
+                                language_label_is_in_title(segment, token, role, reference)
+                            }))
+                })
+            {
+                continue;
+            }
+            // Exact-only codes are evidence inside brackets, never ordinary prose.
+            let Some(canonical) = bracketed.or_else(|| canonicalize_language_token(token)) else {
+                continue;
+            };
             let audio_only = matches!(role, Some("audio" | "dub" | "dubbed"));
             audio_matches |= language_mention_is_audio(role.unwrap_or(""))
                 && preferred_audio_language == Some(canonical);
@@ -668,11 +690,22 @@ fn stream_title_relevance_score(
             continue;
         }
 
-        let overlap_count = candidate_tokens
-            .iter()
-            .copied()
-            .filter(|token| reference_tokens.contains(*token))
-            .count();
+        let mut overlap_count = 0;
+        let mut has_spin_off_marker = false;
+        let mut significant_extra_count = 0;
+        for &token in &candidate_tokens {
+            if reference_tokens.contains(token) {
+                overlap_count += 1;
+            } else {
+                has_spin_off_marker =
+                    has_spin_off_marker || is_spin_off_title_extra(token, media_type);
+                if reference_initialism.as_deref() != Some(token)
+                    && !is_neutral_title_extra(token, media_type)
+                {
+                    significant_extra_count += 1;
+                }
+            }
+        }
         let initialism_match = reference_initialism
             .as_deref()
             .is_some_and(|initialism| candidate_tokens.contains(initialism));
@@ -688,17 +721,6 @@ fn stream_title_relevance_score(
         } else {
             2
         };
-
-        let has_spin_off_marker = candidate_tokens.iter().copied().any(|token| {
-            !reference_tokens.contains(token) && is_spin_off_title_extra(token, media_type)
-        });
-        let significant_extra_count = candidate_tokens
-            .iter()
-            .copied()
-            .filter(|token| !reference_tokens.contains(*token))
-            .filter(|token| reference_initialism.as_deref() != Some(*token))
-            .filter(|token| !is_neutral_title_extra(token, media_type))
-            .count();
 
         if has_spin_off_marker {
             score -= 5;
@@ -895,6 +917,29 @@ fn recommendation_reasons_from_key(
     }
 }
 
+pub(crate) fn rank_stream_by_recommendation(
+    stream: &mut AddonStream,
+    inputs: StreamRecommendationInputs<'_>,
+    signals: &mut StreamSignalCache,
+) -> StreamRecommendationKey {
+    let key = stream_recommendation_key(stream, &inputs, signals);
+    let selection_priority = Some(SelectionPriority {
+        episode_match: key.episode_match,
+        season_claim_verified: key.season_claim_verified,
+        title_match: key.title_match,
+        viability: key.viability,
+        language: key.language,
+    });
+    // Match facts are fetch-constant; retain their owned coverage and badge buffers.
+    if stream.selection_priority != selection_priority {
+        stream.match_summary = stream_match_summary(&key, stream);
+        set_stream_match_badges(stream);
+        stream.selection_priority = selection_priority;
+    }
+    recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
+    key
+}
+
 pub(crate) fn sort_streams_by_recommendation(
     streams: &mut Vec<AddonStream>,
     inputs: StreamRecommendationInputs<'_>,
@@ -904,29 +949,14 @@ pub(crate) fn sort_streams_by_recommendation(
     // repeated ranking passes of progressive fetches.
     let mut keyed = std::mem::take(&mut signals.sort_scratch);
     keyed.clear();
-    keyed.extend(streams.drain(..).map(|stream| {
-        let key = stream_recommendation_key(&stream, &inputs, signals);
+    keyed.extend(streams.drain(..).map(|mut stream| {
+        let key = rank_stream_by_recommendation(&mut stream, inputs, signals);
         (key, stream)
     }));
     // Stable sort keeps input order for tied keys.
     keyed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
 
-    for (key, mut stream) in keyed.drain(..) {
-        let selection_priority = Some(SelectionPriority {
-            episode_match: key.episode_match,
-            season_claim_verified: key.season_claim_verified,
-            title_match: key.title_match,
-            viability: key.viability,
-            language: key.language,
-        });
-        // These facts are fetch-constant. Preserve the row's owned pack coverage on
-        // progressive re-sorts; fresh rows in the final merge still initialize it.
-        if stream.selection_priority != selection_priority {
-            stream.match_summary = stream_match_summary(&key, &stream);
-            set_stream_match_badges(&mut stream);
-            stream.selection_priority = selection_priority;
-        }
-        recommendation_reasons_from_key(&key, &mut stream.recommendation_reasons);
+    for (_, stream) in keyed.drain(..) {
         streams.push(stream);
     }
     signals.sort_scratch = keyed;

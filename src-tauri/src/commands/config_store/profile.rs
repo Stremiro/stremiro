@@ -61,20 +61,11 @@ pub enum ProfileViewMode {
     List,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ProfilePreferences {
     pub profile: LocalProfile,
     pub view_mode: ProfileViewMode,
-}
-
-impl Default for ProfilePreferences {
-    fn default() -> Self {
-        Self {
-            profile: LocalProfile::default(),
-            view_mode: ProfileViewMode::Grid,
-        }
-    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -194,9 +185,8 @@ pub(crate) fn sanitize_local_profile(profile: LocalProfile) -> LocalProfile {
         username: normalize_profile_username(Some(profile.username)),
         accent_color: normalize_profile_accent_color(Some(profile.accent_color)),
         accent_intensity: normalize_profile_accent_intensity(Some(profile.accent_intensity)),
-        // Typed bools can't arrive malformed over IPC — nothing to normalize.
-        accent_targets: profile.accent_targets,
         avatar: normalize_profile_avatar(profile.avatar),
+        ..profile
     }
 }
 
@@ -215,7 +205,7 @@ fn normalize_stored_local_profile(profile: Option<StoredLocalProfile>) -> LocalP
 pub(crate) fn sanitize_profile_preferences(preferences: ProfilePreferences) -> ProfilePreferences {
     ProfilePreferences {
         profile: sanitize_local_profile(preferences.profile),
-        view_mode: preferences.view_mode,
+        ..preferences
     }
 }
 

@@ -218,7 +218,6 @@ impl FetchFailureCooldown {
     }
 
     /// True while `key` holds an unexpired mark, regardless of probe state. Expired entries drop on read.
-    #[cfg(test)]
     pub(crate) fn cooling_down(&self, key: &str) -> bool {
         let mut table = lock_or_recover(&self.table);
         match table.marks.get(key) {
@@ -443,6 +442,8 @@ impl FetchContract<'_> {
         Fetch: Fn() -> Fut,
         Fut: std::future::Future<Output = Result<T, FetchFailure>>,
     {
+        // A clear also revokes callers queued behind the single-flight leader.
+        let generation = self.generation.load(Ordering::SeqCst);
         if let Some(cached) = cache.get_fresh(key, not_before) {
             return Ok(cached);
         }
@@ -461,7 +462,11 @@ impl FetchContract<'_> {
         let result = {
             let _fetch_permit = key_lock.lock().await;
             // Re-read the leader's result (or its recorded failure) instead of re-running the fetch.
-            let early = if let Some(cached) = cache.get_fresh(key, not_before) {
+            let early = if self.generation.load(Ordering::SeqCst) != generation {
+                Some(Err(
+                    "Addon request was superseded. Please try again.".to_string()
+                ))
+            } else if let Some(cached) = cache.get_fresh(key, not_before) {
                 Some(Ok(cached))
             } else if let Some(error) = self.failure_cache.get(key) {
                 Some(Err(error))
@@ -484,8 +489,6 @@ impl FetchContract<'_> {
             match early {
                 Some(result) => result,
                 None => {
-                    // A `clear_cache` past here revokes write-back — all writes below are generation-checked.
-                    let generation = self.generation.load(Ordering::SeqCst);
                     let mut attempt = 0u8;
                     loop {
                         if attempt > 0 {
@@ -874,5 +877,97 @@ mod tests {
             .await;
         assert!(outcome.is_err());
         assert!(!cooldown.cooling_down("addon"));
+    }
+
+    #[tokio::test]
+    async fn queued_fetches_cannot_repopulate_caches_or_cooldowns_after_clear() {
+        for outcome in 0..3 {
+            let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
+            let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
+            let cooldown = FetchFailureCooldown::new(Duration::from_secs(60), 8);
+            let in_flight = InFlight::new(8);
+            let generation = AtomicU64::new(0);
+            let contract = FetchContract {
+                failure_cache: &failures,
+                fetch_failures: &cooldown,
+                in_flight: &in_flight,
+                generation: &generation,
+                request_timeout: Duration::ZERO,
+                cooldown_message: "cooling",
+            };
+            let finish_leader = tokio::sync::Notify::new();
+            let obsolete_loads = AtomicU64::new(0);
+            let fresh_loads = AtomicU64::new(0);
+            let mut leader = std::pin::pin!(contract.run(
+                &cache,
+                "k",
+                "addon",
+                |_| false,
+                || async {
+                    finish_leader.notified().await;
+                    match outcome {
+                        0 => Ok(1u32),
+                        1 => Err(FetchFailure::Fatal("invalid".into())),
+                        _ => Err(FetchFailure::Retryable("down".into())),
+                    }
+                },
+            ));
+            let mut follower = std::pin::pin!(contract.run(
+                &cache,
+                "k",
+                "addon",
+                |_| false,
+                || {
+                    obsolete_loads.fetch_add(1, Ordering::SeqCst);
+                    std::future::pending::<Result<u32, FetchFailure>>()
+                },
+            ));
+            assert!(futures_util::poll!(leader.as_mut()).is_pending());
+            assert!(futures_util::poll!(follower.as_mut()).is_pending());
+
+            generation.fetch_add(1, Ordering::SeqCst);
+            cache.clear();
+            failures.clear();
+            cooldown.clear();
+            let mut fresh = std::pin::pin!(contract.run(
+                &cache,
+                "k",
+                "addon",
+                |_| false,
+                || {
+                    fresh_loads.fetch_add(1, Ordering::SeqCst);
+                    async { Ok(3u32) }
+                },
+            ));
+            assert!(futures_util::poll!(fresh.as_mut()).is_pending());
+            finish_leader.notify_one();
+            let expected = match outcome {
+                0 => Ok(1),
+                1 => Err("invalid".to_string()),
+                _ => Err("down".to_string()),
+            };
+            assert_eq!(leader.await, expected);
+            assert_eq!(cache.get("k"), None);
+            assert_eq!(failures.get("k"), None);
+            assert!(!cooldown.cooling_down("addon"));
+            assert!(futures_util::poll!(fresh.as_mut()).is_pending());
+            assert_eq!(fresh_loads.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                futures_util::poll!(follower.as_mut()),
+                std::task::Poll::Ready(Err(
+                    "Addon request was superseded. Please try again.".to_string()
+                ))
+            );
+            assert_eq!(obsolete_loads.load(Ordering::SeqCst), 0);
+            assert_eq!(
+                futures_util::poll!(fresh.as_mut()),
+                std::task::Poll::Ready(Ok(3))
+            );
+            assert_eq!(fresh_loads.load(Ordering::SeqCst), 1);
+            assert_eq!(cache.get("k"), Some(3));
+            assert_eq!(failures.get("k"), None);
+            assert!(!cooldown.cooling_down("addon"));
+            assert!(!has_entry(&in_flight, "k"));
+        }
     }
 }

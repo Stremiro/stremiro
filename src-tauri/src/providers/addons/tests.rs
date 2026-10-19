@@ -988,7 +988,10 @@ fn stream_cache_put_enforces_hard_entry_bound_and_keeps_newest() {
 async fn stream_request_builder_failure_does_not_cool_the_addon() {
     let transport = AddonTransport::new();
     let url = "ftp://addon.example/manifest.json";
-    assert!(transport.get_streams("movie", "tt1", url).await.is_err());
+    assert!(transport
+        .get_streams_fresh("movie", "tt1", url, None)
+        .await
+        .is_err());
     assert!(!transport
         .fetch_failures
         .cooling_down(&config_cache_segment(url)));
@@ -1009,6 +1012,43 @@ fn fetch_failure_cooldown_blocks_and_clear_cache_releases() {
     // A config change (clear_cache) must give the host a fresh try.
     transport.clear_cache();
     assert!(!transport.fetch_failures.cooling_down(&addon_key));
+}
+
+#[tokio::test]
+async fn cancelled_stream_refresh_releases_allowance_but_completed_refresh_stays_throttled() {
+    let transport = AddonTransport::new();
+    {
+        let mut refresh = std::pin::pin!(async {
+            let claim = transport.claim_stream_refresh("movie|tt123").unwrap();
+            std::future::pending::<()>().await;
+            claim.complete();
+        });
+        assert!(futures_util::poll!(refresh.as_mut()).is_pending());
+        assert!(transport.claim_stream_refresh("movie|tt123").is_none());
+    }
+    transport
+        .claim_stream_refresh("movie|tt123")
+        .expect("cancelled refresh releases its allowance")
+        .complete();
+    assert!(transport.claim_stream_refresh("movie|tt123").is_none());
+}
+
+#[test]
+fn stale_stream_refresh_guards_cannot_release_or_complete_new_claims() {
+    let transport = AddonTransport::new();
+    for complete_stale in [false, true] {
+        let stale = transport.claim_stream_refresh("movie|tt123").unwrap();
+        transport.clear_cache();
+        let fresh = transport.claim_stream_refresh("movie|tt123").unwrap();
+        if complete_stale {
+            stale.complete();
+        } else {
+            drop(stale);
+        }
+        assert!(transport.claim_stream_refresh("movie|tt123").is_none());
+        drop(fresh);
+        assert!(transport.claim_stream_refresh("movie|tt123").is_some());
+    }
 }
 
 #[test]

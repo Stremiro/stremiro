@@ -1,4 +1,5 @@
 use super::*;
+use crate::commands::streaming_helpers::PLAYBACK_URL_MAX_BYTES;
 use serde_json::json;
 
 #[tokio::test]
@@ -266,10 +267,48 @@ fn mpv_command_rejects_non_scalar_or_oversized_args() {
     let too_many = vec![json!("0"); MPV_COMMAND_MAX_ARGS + 1];
     assert!(validate_mpv_command("seek", &too_many).is_err());
     let prefix = "https://example.com/";
-    let mut target = format!("{prefix}{}", "x".repeat(MPV_ARG_MAX_CHARS - prefix.len()));
+    let mut target = format!(
+        "{prefix}{}",
+        "x".repeat(PLAYBACK_URL_MAX_BYTES - prefix.len())
+    );
     assert!(validate_mpv_command("loadfile", &[json!(target), json!("replace")]).is_ok());
     target.push('x');
     assert!(validate_mpv_command("loadfile", &[json!(target)]).is_err());
+}
+
+#[test]
+fn loadfile_accepts_percent_encoded_ingress_urls_without_widening_other_args() {
+    let prefix = "https://example.com/";
+    let fragment = "#file=Episode%201.mkv&hint=%2f%2F+opaque";
+    for character in ["漢", "\u{10000}"] {
+        let raw = format!(
+            "{prefix}{}{fragment}",
+            character.repeat(2_048 - prefix.len() - fragment.len())
+        );
+        assert_eq!(raw.chars().count(), 2_048);
+        let canonical = reqwest::Url::parse(&raw).unwrap().to_string();
+        assert!(canonical.len() > MPV_ARG_MAX_CHARS);
+        assert!(canonical.len() <= PLAYBACK_URL_MAX_BYTES);
+        for target in [raw, canonical] {
+            assert!(validate_mpv_command("loadfile", &[json!(target), json!("replace")]).is_ok());
+            assert!(validate_mpv_command("seek", &[json!(target)]).is_err());
+            assert!(validate_mpv_command("sub-add", &[json!(target), json!("select")]).is_err());
+        }
+    }
+}
+
+#[test]
+fn loadfile_rejects_urls_whose_canonical_encoding_exceeds_the_playback_bound() {
+    let raw = format!(
+        "https://example.com/{}",
+        "\u{10000}".repeat(PLAYBACK_URL_MAX_BYTES / 12 + 1)
+    );
+    assert!(raw.len() <= PLAYBACK_URL_MAX_BYTES);
+    let canonical = reqwest::Url::parse(&raw).unwrap().to_string();
+    assert!(canonical.len() > PLAYBACK_URL_MAX_BYTES);
+    for target in [raw, canonical] {
+        assert!(validate_mpv_command("loadfile", &[json!(target)]).is_err());
+    }
 }
 
 #[test]

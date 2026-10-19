@@ -1,5 +1,5 @@
 use super::{
-    addon_registry::{catalog_dedup_key, CatalogFetchPage},
+    addon_registry::{catalog_dedup_key, CatalogFetchPage, SearchSourceCursor},
     normalize_non_empty, normalize_query, MEDIA_ID_MAX_CHARS,
 };
 use crate::providers::{
@@ -16,6 +16,8 @@ const MAX_GENRE_FILTERS: usize = 6;
 const CINEMETA_ANIME_GENRE: &str = "Animation";
 const MAX_BROWSE_SOURCE_FETCHES: usize = 8;
 const MAX_CATALOG_SEEN_KEYS: usize = 10_000;
+const MAX_SEARCH_SOURCE_CURSORS: usize =
+    MAX_GENRE_FILTERS * super::addon_registry::MAX_CATALOG_SOURCES;
 // Provider type strings are bounded to 2,048 characters; ids use the IPC id bound.
 const MAX_CATALOG_SEEN_KEY_CHARS: usize = 2_048 + 1 + MEDIA_ID_MAX_CHARS;
 
@@ -34,16 +36,23 @@ pub struct SearchCatalogContinuation {
     skip: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     all_cursors: Option<AllBrowseCursors>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    search_cursors: Option<Vec<SearchSourceCursor>>,
     seen_keys: Vec<String>,
 }
 
 impl SearchCatalogContinuation {
     fn is_exhausted(&self) -> bool {
-        self.seen_keys.len() >= MAX_CATALOG_SEEN_KEYS
-            || self.all_cursors.map_or_else(
-                || self.skip.is_none(),
-                |cursors| cursors.movie.is_none() && cursors.series.is_none(),
-            )
+        if self.seen_keys.len() >= MAX_CATALOG_SEEN_KEYS {
+            return true;
+        }
+        if let Some(cursors) = &self.search_cursors {
+            return cursors.is_empty();
+        }
+        self.all_cursors.map_or_else(
+            || self.skip.is_none(),
+            |cursors| cursors.movie.is_none() && cursors.series.is_none(),
+        )
     }
 }
 
@@ -172,6 +181,7 @@ struct SearchCatalogCriteria {
     genres: Vec<String>,
     year_range: SearchYearRange,
     continuation: SearchCatalogContinuation,
+    max_browse_fetches: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -184,6 +194,8 @@ pub struct SearchCatalogRequest {
     year_from: Option<u32>,
     year_to: Option<u32>,
     continuation: Option<SearchCatalogContinuation>,
+    #[serde(skip)]
+    single_page: bool,
 }
 
 impl SearchCatalogRequest {
@@ -196,6 +208,7 @@ impl SearchCatalogRequest {
             year_from: None,
             year_to: None,
             continuation: None,
+            single_page: true,
         }
     }
 }
@@ -253,6 +266,27 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     if !all_browse && normalized_query.is_none() && parsed_media_type.is_none() {
         return Err("Media type is required to browse the search catalog.".to_string());
     }
+    if let Some(cursors) = &continuation.search_cursors {
+        if normalized_query.is_none()
+            || continuation.skip.is_some()
+            || continuation.all_cursors.is_some()
+        {
+            return Err("Search cursors require a query without browse cursors or skip.".into());
+        }
+        let mut keys = HashSet::new();
+        if cursors.len() > MAX_SEARCH_SOURCE_CURSORS
+            || cursors.iter().any(|cursor| {
+                cursor.key.len() != 16
+                    || !cursor.key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                    || !keys.insert(&cursor.key)
+                    || (cursor.skip == 0 && !cursor.retry)
+            })
+        {
+            return Err("Invalid catalog continuation search cursors.".into());
+        }
+    } else if normalized_query.is_some() && continuation.skip.is_some_and(|skip| skip > 0) {
+        return Err("Search continuation requires source cursors.".into());
+    }
     if continuation.seen_keys.len() > MAX_CATALOG_SEEN_KEYS
         || continuation
             .seen_keys
@@ -269,6 +303,11 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         genres: normalize_genres(request.genres),
         year_range: SearchYearRange::resolve(request.year_from, request.year_to),
         continuation,
+        max_browse_fetches: if request.single_page {
+            1
+        } else {
+            MAX_BROWSE_SOURCE_FETCHES
+        },
     })
 }
 
@@ -436,31 +475,36 @@ fn apply_browse_filters(
 /// sparse intersections (e.g. anime + Crime) keep only a few titles per page.
 const MIN_BROWSE_FILL_ITEMS: usize = 24;
 
-fn should_continue_browse_fetch(item_count: usize, next_skip: Option<u32>, fetches: usize) -> bool {
-    item_count < MIN_BROWSE_FILL_ITEMS && next_skip.is_some() && fetches < MAX_BROWSE_SOURCE_FETCHES
+fn should_continue_browse_fetch(
+    item_count: usize,
+    next_skip: Option<u32>,
+    fetches: usize,
+    max_fetches: usize,
+) -> bool {
+    item_count < MIN_BROWSE_FILL_ITEMS && next_skip.is_some() && fetches < max_fetches
 }
 
 async fn fetch_query_results(
     app: &AppHandle,
     client: &AddonResourceClient,
-    query: &str,
-    media_type: Option<SearchMediaType>,
-    genres: &[String],
-    skip: u32,
-) -> Result<super::addon_registry::CatalogFetchPage, String> {
-    let media_types: &[&str] = match media_type {
+    criteria: SearchCatalogCriteria,
+) -> Result<SearchCatalogPage, String> {
+    let query = criteria.query.as_deref().expect("text search criteria");
+    let media_types: &[&str] = match criteria.media_type {
         Some(SearchMediaType::Movie) => &["movie"],
         Some(SearchMediaType::Series) => &["series"],
         // Anime films are only reachable through search: browse is series-only.
         Some(SearchMediaType::Anime) | None => &["movie", "series"],
     };
-    let fetch_genres = media_type
-        .map(|media_type| catalog_fetch_genres(media_type, genres))
-        .unwrap_or_else(|| genres.to_vec());
+    let fetch_genres = criteria
+        .media_type
+        .map(|media_type| catalog_fetch_genres(media_type, &criteria.genres))
+        .unwrap_or_else(|| criteria.genres.clone());
     // Anime requires the Animation marker on top of the requested genres.
-    let required_genres = media_type
-        .map(|media_type| browse_genres(media_type, genres))
-        .unwrap_or_else(|| genres.to_vec());
+    let required_genres = criteria
+        .media_type
+        .map(|media_type| browse_genres(media_type, &criteria.genres))
+        .unwrap_or_else(|| criteria.genres.clone());
 
     let genre_extras: Vec<Option<String>> = if fetch_genres.is_empty() {
         vec![None]
@@ -468,25 +512,42 @@ async fn fetch_query_results(
         fetch_genres.into_iter().map(Some).collect()
     };
 
-    // One shared pool for the (genre × source) fan-out: per-genre outcomes stay
-    // isolated while total concurrency stays at `ADDON_RESOURCE_CONCURRENCY`.
-    let outcomes = super::addon_registry::search_catalog_pages_for_genres(
-        app,
-        client,
-        query,
-        media_types,
-        &genre_extras,
-        skip,
-    )
-    .await?;
-    let mut page =
-        super::addon_registry::merge_catalog_pages(outcomes, "Failed to search catalog.")?;
-
-    page.items = retain_search_items_matching_genres(
-        retain_titled_catalog_items(page.items),
-        &required_genres,
-    );
-    Ok(page)
+    let mut continuation = criteria.continuation;
+    let mut items = Vec::new();
+    for _ in 0..MAX_BROWSE_SOURCE_FETCHES {
+        let page = match super::addon_registry::search_catalog_pages_for_genres(
+            app,
+            client,
+            query,
+            media_types,
+            &genre_extras,
+            continuation.search_cursors.as_deref(),
+        )
+        .await
+        {
+            Ok(page) => page,
+            Err(error) if items.is_empty() => return Err(error),
+            Err(_) => break,
+        };
+        let mut batch = retain_search_items_matching_genres(
+            retain_titled_catalog_items(page.items),
+            &required_genres,
+        );
+        if criteria.year_range.is_active() {
+            batch.retain(|item| criteria.year_range.contains(item.primary_year.unwrap_or(0)));
+        }
+        let page = finish_catalog_page(batch, continuation, None, None, Some(page.cursors));
+        continuation = page.continuation;
+        items.extend(page.items);
+        if page.exhausted || items.len() >= MIN_BROWSE_FILL_ITEMS {
+            break;
+        }
+    }
+    Ok(SearchCatalogPage {
+        items: rank_search_results(query, items, criteria.year_range),
+        exhausted: continuation.is_exhausted(),
+        continuation,
+    })
 }
 
 fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
@@ -676,7 +737,12 @@ async fn fetch_browse_page(
 
         match next_skip {
             Some(continue_skip)
-                if should_continue_browse_fetch(items.len(), next_skip, fetches) =>
+                if should_continue_browse_fetch(
+                    items.len(),
+                    next_skip,
+                    fetches,
+                    criteria.max_browse_fetches,
+                ) =>
             {
                 skip = continue_skip;
             }
@@ -735,7 +801,13 @@ fn merge_all_browse_pages(
         items.extend(pair.0);
         items.extend(pair.1);
     }
-    Ok(finish_catalog_page(items, continuation, None, Some(next)))
+    Ok(finish_catalog_page(
+        items,
+        continuation,
+        None,
+        Some(next),
+        None,
+    ))
 }
 
 fn finish_catalog_page(
@@ -743,6 +815,7 @@ fn finish_catalog_page(
     previous: SearchCatalogContinuation,
     next_skip: Option<u32>,
     all_cursors: Option<AllBrowseCursors>,
+    search_cursors: Option<Vec<SearchSourceCursor>>,
 ) -> SearchCatalogPage {
     let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
     let mut added_movie = false;
@@ -774,6 +847,7 @@ fn finish_catalog_page(
                     .filter(|skip| Some(*skip) == previous.series || added_series),
             }
         }),
+        search_cursors,
         seen_keys: seen.into_iter().collect(),
     };
     SearchCatalogPage {
@@ -822,29 +896,11 @@ pub(crate) async fn query_search_catalog_for_request(
         return merge_all_browse_pages(criteria.continuation, movie, series);
     }
 
-    let skip = criteria.continuation.skip.unwrap_or(0);
-    if let Some(query) = criteria.query.as_deref() {
-        // Items arrive normalized, so the scorer reads `primary_year` instead
-        // of re-parsing year strings per item.
-        let page = fetch_query_results(
-            app,
-            client,
-            query,
-            criteria.media_type,
-            &criteria.genres,
-            skip,
-        )
-        .await?;
-        let items = rank_search_results(query, page.items, criteria.year_range);
-
-        return Ok(finish_catalog_page(
-            items,
-            criteria.continuation,
-            page.next_skip,
-            None,
-        ));
+    if criteria.query.is_some() {
+        return fetch_query_results(app, client, criteria).await;
     }
 
+    let skip = criteria.continuation.skip.unwrap_or(0);
     let media_type = criteria
         .media_type
         .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
@@ -853,6 +909,7 @@ pub(crate) async fn query_search_catalog_for_request(
         page.items,
         criteria.continuation,
         page.next_skip,
+        None,
         None,
     ))
 }

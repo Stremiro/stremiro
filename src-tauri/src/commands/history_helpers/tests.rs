@@ -15,6 +15,72 @@ fn sample_progress() -> WatchProgress {
 }
 
 #[test]
+fn live_progress_requires_explicit_completion_for_unknown_runtime() {
+    let progress = WatchProgress {
+        type_: "series".to_string(),
+        season: Some(1),
+        episode: Some(2),
+        position: 120.0,
+        duration: 0.0,
+        ..sample_progress()
+    };
+    let ordinary = super::prepare_live_watch_progress(progress.clone(), false)
+        .unwrap()
+        .unwrap();
+    let annotated = with_progress_annotations(ordinary.clone());
+    assert!(!annotated.is_watched);
+    assert_eq!(annotated.resume_start_time, Some(120.0));
+    assert!(super::choose_up_next_source(vec![ordinary], &Default::default()).is_none());
+
+    let completed = super::prepare_live_watch_progress(progress, true)
+        .unwrap()
+        .unwrap();
+    let annotated = with_progress_annotations(completed.clone());
+    assert!(annotated.is_watched);
+    assert_eq!(annotated.resume_start_time, None);
+    assert!(super::choose_up_next_source(vec![completed], &Default::default()).is_some());
+
+    for position in [0.0, 2.0, 120.0] {
+        let completed = super::prepare_live_watch_progress(
+            WatchProgress {
+                position,
+                duration: 0.0,
+                ..sample_progress()
+            },
+            true,
+        )
+        .unwrap()
+        .unwrap();
+        assert!(with_progress_annotations(completed).is_watched);
+    }
+}
+
+#[test]
+fn live_progress_suppresses_startup_zeros_and_validates_completion() {
+    for position in [0.0, 1.0, 4.9] {
+        let progress = WatchProgress {
+            position,
+            ..sample_progress()
+        };
+        assert!(super::prepare_live_watch_progress(progress, false)
+            .unwrap()
+            .is_none());
+    }
+    let observed = super::prepare_live_watch_progress(sample_progress(), false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(observed.position, 60.0);
+    assert!(super::prepare_live_watch_progress(
+        WatchProgress {
+            id: String::new(),
+            ..sample_progress()
+        },
+        true
+    )
+    .is_err());
+}
+
+#[test]
 fn sanitize_drops_empty_media_id_and_defaults_empty_title() {
     let mut progress = sample_progress();
     progress.id = "   ".to_string();

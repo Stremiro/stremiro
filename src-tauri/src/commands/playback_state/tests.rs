@@ -31,6 +31,35 @@ fn health(
 }
 
 #[test]
+fn least_active_eviction_preserves_original_order_for_recency_ties() {
+    for (overflow, expected) in [
+        (0, vec!["b", "a", "c", "d"]),
+        (1, vec!["b", "a", "d"]),
+        (2, vec!["a", "d"]),
+        (4, vec![]),
+    ] {
+        let fixture = crate::test_helpers::test_store();
+        let mut index: Vec<String> = ["b", "a", "c", "d"]
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        for key in &index {
+            fixture.store.set(key.clone(), serde_json::json!(true));
+        }
+        let scored = index
+            .iter()
+            .enumerate()
+            .map(|(ordinal, key)| (key.clone(), if key == "c" { 5 } else { 10 }, ordinal))
+            .collect();
+        super::evict_least_active(&fixture.store, &mut index, scored, overflow, str::to_string);
+        assert_eq!(index, expected);
+        for key in ["b", "a", "c", "d"] {
+            assert_eq!(fixture.store.get(key).is_some(), expected.contains(&key));
+        }
+    }
+}
+
+#[test]
 fn source_health_priority_penalizes_active_cooldown() {
     let now_ms = 10_000;
     let snapshot = health(Some(5_000), Some(9_000), 3, Some(20_000));

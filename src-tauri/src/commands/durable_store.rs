@@ -144,6 +144,15 @@ impl DurableStore {
             .cloned()
     }
 
+    pub(crate) fn with_value<T>(
+        &self,
+        key: impl AsRef<str>,
+        read: impl FnOnce(Option<&Value>) -> T,
+    ) -> T {
+        let data = lock_or_recover(&self.data);
+        read(data.entries.get(key.as_ref()))
+    }
+
     /// Typed read sharing the drop-on-malformed policy every snapshot/item
     /// loader uses: a corrupt value reads as absent rather than erroring.
     pub(crate) fn get_typed<T: serde::de::DeserializeOwned>(

@@ -1,9 +1,9 @@
 use super::history_helpers::{
     build_history_key, choose_entry, choose_up_next_source, compare_continue_watching,
     continue_watching_candidates, hydrate_watch_progress_lookup_id, is_series_like_watch_progress,
-    merge_watch_progress_donors, normalize_episode_coordinate, sanitize_watch_progress,
-    watch_progress_absolute_episode, watch_progress_absolute_season, with_progress_annotations,
-    HistoryEntryQuery, WATCH_PROGRESS_MIN_RESUME_POSITION_SECS,
+    merge_watch_progress_donors, normalize_episode_coordinate, prepare_live_watch_progress,
+    sanitize_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
+    with_progress_annotations, HistoryEntryQuery,
 };
 use super::playback_state::PlaybackStateService;
 use super::resume_store::{HistoryMergeError, MAX_RESUME_TOTAL_ENTRIES};
@@ -153,20 +153,25 @@ const UP_NEXT_MAX_TITLES: usize = 12;
 const UP_NEXT_LOOKBACK_MS: u64 = 1000 * 60 * 60 * 24 * 90;
 
 pub(crate) fn build_up_next_sources(
-    items: Vec<WatchProgress>,
+    mut items: Vec<WatchProgress>,
     statuses: &HashMap<String, String>,
     source_health_priorities: &HashMap<String, u8>,
     now: u64,
 ) -> Vec<WatchProgress> {
+    items.retain(|row| {
+        is_series_like_watch_progress(row)
+            && statuses
+                .get(&row.id)
+                .is_none_or(|status| status != "dropped")
+    });
     let mut sources: Vec<_> = group_watch_progress_by_title(items)
         .into_iter()
-        .filter_map(|items| choose_up_next_source(items, source_health_priorities))
-        .filter(|source| {
-            now.saturating_sub(source.last_watched) <= UP_NEXT_LOOKBACK_MS
-                && statuses
-                    .get(&source.id)
-                    .is_none_or(|status| status != "dropped")
+        .filter(|items| {
+            items
+                .iter()
+                .any(|row| now.saturating_sub(row.last_watched) <= UP_NEXT_LOOKBACK_MS)
         })
+        .filter_map(|items| choose_up_next_source(items, source_health_priorities))
         .collect();
     sources.sort_by_key(|source| std::cmp::Reverse(source.last_watched));
     sources.truncate(UP_NEXT_MAX_TITLES);
@@ -190,20 +195,24 @@ fn require_episode_coordinates(
     Ok((season, episode))
 }
 
+#[derive(serde::Deserialize)]
+pub(crate) struct SaveWatchProgress {
+    #[serde(flatten)]
+    pub(crate) progress: WatchProgress,
+    #[serde(default)]
+    pub(crate) completed: bool,
+}
+
 #[command]
 pub async fn save_watch_progress(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
-    progress: WatchProgress,
+    progress: SaveWatchProgress,
 ) -> Result<(), String> {
-    // Sanitize owns validation: `Some` carries a bounded id, canonical type, non-empty title.
-    let mut progress = sanitize_watch_progress(progress)
-        .ok_or_else(|| "Invalid media id or type for watch progress.".to_string())?;
-    // Sub-minimum positions would regress Continue Watching to ~0; synthetic watched
-    // marks go through the batch commands, not this live-playback path.
-    if progress.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
+    let Some(mut progress) = prepare_live_watch_progress(progress.progress, progress.completed)?
+    else {
         return Ok(());
-    }
+    };
     if progress.last_watched == 0 {
         progress.last_watched = now_unix_millis();
     }
@@ -227,8 +236,14 @@ pub async fn save_watch_progress(
         if service.history_generation() != start_generation {
             return Ok(());
         }
-        let persisted = service.get_resume_entry(&app, &key)?;
-        if service.should_skip_history_write(&key, &progress, persisted.as_ref()) {
+        let skip = match service.cached_history_write_decision(&key, &progress) {
+            Some(skip) => skip,
+            None => {
+                let persisted = service.get_resume_entry(&app, &key)?;
+                service.should_skip_history_write(&key, &progress, persisted.as_ref())
+            }
+        };
+        if skip {
             return Ok(());
         }
         // Re-checks this generation under the resume lock and marks the coalescing cache there.
@@ -237,21 +252,14 @@ pub async fn save_watch_progress(
     .await
 }
 
-/// Undo restore writes a whole title at once: one bounded command + one blocking
-/// round-trip. Sanitize/build guards match `save_watch_progress`; the merge's single
-/// transaction + SQL recency guard mean a partial restore can't resurrect cleared rows.
-const MAX_WATCH_PROGRESS_BATCH_ROWS: usize = 500;
-
+/// Undo restore writes every removed row at once (one title or a bulk History
+/// selection): one bounded command + one blocking round-trip. Sanitize/build guards
+/// match `save_watch_progress`; the merge's single transaction + SQL recency guard
+/// mean a partial restore can't resurrect cleared rows.
 pub(super) fn validate_history_batch<'a>(
-    mut rows: impl ExactSizeIterator<Item = &'a WatchProgress>,
+    rows: impl ExactSizeIterator<Item = &'a WatchProgress>,
 ) -> Result<(), String> {
-    let count = rows.len();
-    let single_title = rows
-        .next()
-        .is_none_or(|first| rows.all(|row| row.id == first.id && row.type_ == first.type_));
-    if count > MAX_RESUME_TOTAL_ENTRIES as usize
-        || (count > MAX_WATCH_PROGRESS_BATCH_ROWS && !single_title)
-    {
+    if rows.len() > MAX_RESUME_TOTAL_ENTRIES as usize {
         return Err("Watch progress batch exceeds the maximum row count.".to_string());
     }
     Ok(())
@@ -264,9 +272,7 @@ pub async fn save_watch_progress_batch(
     rows: Vec<WatchProgress>,
 ) -> Result<(), String> {
     let start_epoch = playback_state.history_reset_epoch();
-    if rows.len() > MAX_RESUME_TOTAL_ENTRIES as usize {
-        return Err("Watch progress batch exceeds the maximum row count.".to_string());
-    }
+    validate_history_batch(rows.iter())?;
 
     let mut prepared: Vec<(String, WatchProgress)> = Vec::with_capacity(rows.len());
     for row in rows {
@@ -284,8 +290,6 @@ pub async fn save_watch_progress_batch(
         );
         prepared.push((key, progress));
     }
-
-    validate_history_batch(prepared.iter().map(|(_, row)| row))?;
 
     // Cheap in-memory coalescing first; only surviving rows pay the write.
     prepared
@@ -692,8 +696,79 @@ pub async fn get_total_watch_time_secs(
     super::run_blocking_store_op(move || service.total_watch_time_secs(&app)).await
 }
 
-/// Returns the deleted rows: the scan already loaded them, so the caller's Undo
-/// snapshot needs no second read (store keys are unique — removed rows can't repeat).
+#[derive(serde::Deserialize)]
+pub struct HistoryRemovalItem {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub type_: String,
+}
+
+pub(super) fn normalize_history_removals(
+    items: Vec<HistoryRemovalItem>,
+) -> Result<HashMap<String, u8>, String> {
+    if items.len() > MAX_RESUME_TOTAL_ENTRIES as usize {
+        return Err("Too many history titles.".to_string());
+    }
+    let mut targets = HashMap::with_capacity(items.len());
+    for item in items {
+        let id = normalize_media_id(&item.id)
+            .ok_or_else(|| "Invalid media id for watch history.".to_string())?;
+        let media_type = normalize_watch_progress_type(&item.type_)
+            .ok_or_else(|| "Invalid media type.".to_string())?;
+        *targets.entry(id).or_insert(0) |= if media_type == "movie" { 1 } else { 2 };
+    }
+    Ok(targets)
+}
+
+pub(super) fn select_history_removals(
+    rows: Vec<(String, WatchProgress)>,
+    targets: &HashMap<String, u8>,
+) -> (Vec<String>, Vec<WatchProgress>) {
+    rows.into_iter()
+        .filter(|(key, row)| {
+            let Some(kinds) = targets.get(&row.id) else {
+                return false;
+            };
+            (kinds & 1 != 0
+                && (*key == build_history_key("movie", &row.id, None, None)
+                    || *key == build_history_key("series", &row.id, Some(0), Some(0))))
+                || (kinds & 2 != 0 && key.starts_with(&format!("series:{}:", row.id)))
+        })
+        .unzip()
+}
+
+async fn remove_history_items(
+    app: AppHandle,
+    service: PlaybackStateService,
+    items: Vec<HistoryRemovalItem>,
+) -> Result<Vec<WatchProgress>, String> {
+    let targets = normalize_history_removals(items)?;
+    if targets.is_empty() {
+        return Ok(Vec::new());
+    }
+    super::run_blocking_store_op(move || {
+        let rows = if targets.len() == 1 {
+            service.load_resume_entries_for_media_id(&app, targets.keys().next().unwrap())?
+        } else {
+            service.load_resume_entries(&app)?
+        };
+        let (keys, removed) = select_history_removals(rows, &targets);
+        // remove_keys fences periodic saves without advancing the clear/import reset epoch.
+        service.remove_keys(&app, &keys)?;
+        Ok(removed)
+    })
+    .await
+}
+
+#[command]
+pub async fn bulk_remove_from_watch_history(
+    app: AppHandle,
+    playback_state: State<'_, PlaybackStateService>,
+    items: Vec<HistoryRemovalItem>,
+) -> Result<Vec<WatchProgress>, String> {
+    remove_history_items(app, playback_state.inner().clone(), items).await
+}
+
 #[command]
 pub async fn remove_all_from_watch_history(
     app: AppHandle,
@@ -701,46 +776,10 @@ pub async fn remove_all_from_watch_history(
     id: String,
     type_: String,
 ) -> Result<Vec<WatchProgress>, String> {
-    let id =
-        normalize_media_id(&id).ok_or_else(|| "Invalid media id for watch history.".to_string())?;
-    let Some(canonical_type) = normalize_watch_progress_type(&type_).map(str::to_string) else {
-        return Err("Invalid media type.".to_string());
-    };
-
-    let prefixes: Vec<String> = if canonical_type == "movie" {
-        vec![
-            build_history_key("movie", &id, None, None),
-            build_history_key("series", &id, Some(0), Some(0)),
-        ]
-    } else {
-        // `sanitize_watch_progress` folds anime onto `series:` keys — only one namespace exists.
-        vec![format!("series:{}:", id)]
-    };
-
-    // One blocking round-trip for scan + delete.
-    let app = app.clone();
-    let service = playback_state.inner().clone();
-    let media_id = id.clone();
-    super::run_blocking_store_op(move || {
-        let mut keys_to_remove: Vec<String> = Vec::new();
-        let mut removed_rows: Vec<WatchProgress> = Vec::new();
-        for (key, entry) in service.load_resume_entries_for_media_id(&app, &media_id)? {
-            let in_scope = if canonical_type == "movie" {
-                prefixes.contains(&key)
-            } else {
-                prefixes
-                    .iter()
-                    .any(|prefix| key.starts_with(prefix.as_str()))
-            };
-            if in_scope {
-                keys_to_remove.push(key);
-                removed_rows.push(entry);
-            }
-        }
-        if !keys_to_remove.is_empty() {
-            service.remove_keys(&app, &keys_to_remove)?;
-        }
-        Ok(removed_rows)
-    })
+    remove_history_items(
+        app,
+        playback_state.inner().clone(),
+        vec![HistoryRemovalItem { id, type_ }],
+    )
     .await
 }

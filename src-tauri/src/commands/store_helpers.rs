@@ -5,7 +5,24 @@ use super::{
 };
 use crate::providers::{extract_primary_year, MediaItem};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+
+pub(super) const MAX_BULK_ITEMS: usize = 5_000;
+
+pub(super) fn normalize_bulk_ids(ids: Vec<String>) -> Result<Vec<String>, String> {
+    if ids.len() > MAX_BULK_ITEMS {
+        return Err(format!("Too many titles. Maximum is {MAX_BULK_ITEMS}."));
+    }
+    let mut seen = HashSet::with_capacity(ids.len());
+    ids.into_iter()
+        .map(|id| normalize_media_id(&id).ok_or_else(|| "Invalid media id.".to_string()))
+        .filter_map(|result| match result {
+            Ok(id) if seen.insert(id.clone()) => Some(Ok(id)),
+            Ok(_) => None,
+            Err(error) => Some(Err(error)),
+        })
+        .collect()
+}
 
 pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     // The id is a store key: reject rather than truncate so two hostile ids
@@ -21,7 +38,11 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     (!item.title.is_empty()).then_some(item)
 }
 
+#[cfg(test)]
 pub(super) fn normalize_library_items(items: Vec<MediaItem>) -> Result<Vec<MediaItem>, String> {
+    if items.len() > MAX_BULK_ITEMS {
+        return Err(format!("Too many titles. Maximum is {MAX_BULK_ITEMS}."));
+    }
     items
         .into_iter()
         .map(|item| {
@@ -216,6 +237,23 @@ pub(super) fn load_library_map(store: &DurableStore) -> Result<HashMap<String, M
     load_snapshot(store, LIBRARY_LAYOUT, read_library_snapshot(store)?)
 }
 
+pub(super) fn load_library_item_identities(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
+    let index = load_library_index(store)?;
+    let mut seen = HashSet::with_capacity(index.len());
+    let mut items = Vec::with_capacity(index.len());
+    for id in index {
+        match store
+            .get_typed::<super::list_helpers::ListItemIdentity>(library_item_key(&id))
+            .and_then(|identity| identity.normalized_item())
+        {
+            Some(item) if item.id == id && seen.insert(item.id.clone()) => items.push(item),
+            // Keep full snapshots and donor metadata intact when the index needs repair.
+            _ => return load_library_map(store).map(|items| items.into_values().collect()),
+        }
+    }
+    Ok(items)
+}
+
 pub(super) fn read_library_snapshot(
     store: &DurableStore,
 ) -> Result<IndexStoreSnapshot<MediaItem>, String> {
@@ -284,8 +322,42 @@ pub(super) fn read_watch_status_snapshot(
 
 #[cfg(test)]
 mod tests {
+    use super::super::library_commands::resolve_library_items;
     use super::*;
-    use crate::test_helpers::test_media_item;
+    use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn bulk_library_resolution_is_bounded_deduplicated_and_read_only() {
+        let fixture = test_store();
+        let item = test_media_item("a", "movie");
+        fixture.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
+        fixture.store.set(library_item_key("a"), json!(item));
+        fixture.store.save().unwrap();
+        let before = std::fs::read(&fixture.path).unwrap();
+        let items = resolve_library_items(&fixture.store, vec![" a ".into(), "a".into()]).unwrap();
+        assert_eq!(serde_json::to_value(items).unwrap(), json!([item]));
+        assert!(resolve_library_items(&fixture.store, Vec::new())
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            serde_json::to_value(
+                resolve_library_items(&fixture.store, vec!["missing".into(), "a".into()]).unwrap()
+            )
+            .unwrap(),
+            json!([item])
+        );
+        assert!(resolve_library_items(&fixture.store, vec!["missing".into()]).is_err());
+        assert!(normalize_bulk_ids(vec!["a".into(), "".into()]).is_err());
+        assert!(normalize_bulk_ids(vec!["a".into(); MAX_BULK_ITEMS]).is_ok());
+        assert!(normalize_bulk_ids(vec!["a".into(); MAX_BULK_ITEMS + 1]).is_err());
+        assert!(
+            normalize_library_items(vec![test_media_item("a", "movie"); MAX_BULK_ITEMS + 1])
+                .is_err()
+        );
+        fixture.store.save().unwrap();
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+        assert_eq!(fixture.store.save_count(), 1);
+    }
 
     #[test]
     fn borrowed_library_merge_preserves_missing_metadata_without_mutating_existing() {

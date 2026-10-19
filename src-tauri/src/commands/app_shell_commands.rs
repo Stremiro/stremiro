@@ -17,6 +17,7 @@ pub(crate) struct AppShellState {
     start_hidden: AtomicBool,
     initial_reveal_pending: AtomicBool,
     quit_pending: AtomicBool,
+    frontend_quit_ready: AtomicBool,
 }
 
 impl AppShellState {
@@ -52,17 +53,14 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => reveal_main_window(app),
             "quit" => {
-                if app
-                    .state::<AppShellState>()
-                    .quit_pending
-                    .swap(true, Ordering::Relaxed)
+                let state = app.state::<AppShellState>();
+                if !state.frontend_quit_ready.load(Ordering::Relaxed)
+                    || state.quit_pending.swap(true, Ordering::Relaxed)
                 {
                     app.exit(0);
                 } else if let Some(window) = app.get_webview_window("main") {
                     if window.emit("app://quit-requested", ()).is_err() {
-                        app.state::<AppShellState>()
-                            .quit_pending
-                            .store(false, Ordering::Relaxed);
+                        state.quit_pending.store(false, Ordering::Relaxed);
                     }
                 }
             }
@@ -247,6 +245,13 @@ pub(crate) async fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result
 #[tauri::command]
 pub(crate) fn hide_main_window_to_tray(app: AppHandle) -> Result<(), String> {
     hide_main_window(&app)
+}
+
+#[tauri::command]
+pub(crate) fn mark_frontend_quit_ready(app: AppHandle) {
+    app.state::<AppShellState>()
+        .frontend_quit_ready
+        .store(true, Ordering::Relaxed);
 }
 
 #[tauri::command]

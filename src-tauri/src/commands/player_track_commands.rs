@@ -144,15 +144,13 @@ fn read_track_list(
 
     for index in 0..count {
         let prefix = format!("track-list/{index}");
-        let Some(id) = property_i64(mpv_property(
-            app,
-            window_label,
-            format!("{prefix}/id"),
-            "int64",
-        )) else {
+        let read = |name: &str, format: &str| {
+            mpv_property(app, window_label, format!("{prefix}/{name}"), format)
+        };
+        let Some(id) = property_i64(read("id", "int64")) else {
             continue;
         };
-        let track_type_value = mpv_property(app, window_label, format!("{prefix}/type"), "string");
+        let track_type_value = read("type", "string");
         let track_type = match track_type_value
             .as_ref()
             .and_then(serde_json::Value::as_str)
@@ -163,12 +161,7 @@ fn read_track_list(
             Some("video") => PlayerTrackType::Video,
             _ => continue,
         };
-        let external = property_flag(mpv_property(
-            app,
-            window_label,
-            format!("{prefix}/external"),
-            "flag",
-        ));
+        let external = property_flag(read("external", "flag"));
 
         let track = if track_type == PlayerTrackType::Video {
             // Video rows only carry identity — every consumer filters to
@@ -197,47 +190,17 @@ fn read_track_list(
                 id,
                 r#type: track_type,
                 display_label: String::new(),
-                lang: property_non_blank(mpv_property(
-                    app,
-                    window_label,
-                    format!("{prefix}/lang"),
-                    "string",
-                )),
-                title: property_non_blank(mpv_property(
-                    app,
-                    window_label,
-                    format!("{prefix}/title"),
-                    "string",
-                )),
+                lang: property_non_blank(read("lang", "string")),
+                title: property_non_blank(read("title", "string")),
                 selected: selected_id == Some(id),
-                default_track: property_flag(mpv_property(
-                    app,
-                    window_label,
-                    format!("{prefix}/default"),
-                    "flag",
-                )),
-                forced: property_flag(mpv_property(
-                    app,
-                    window_label,
-                    format!("{prefix}/forced"),
-                    "flag",
-                )),
-                hearing_impaired: property_flag(mpv_property(
-                    app,
-                    window_label,
-                    format!("{prefix}/hearing-impaired"),
-                    "flag",
-                )),
+                default_track: property_flag(read("default", "flag")),
+                forced: property_flag(read("forced", "flag")),
+                hearing_impaired: property_flag(read("hearing-impaired", "flag")),
                 external,
                 // `external-filename` only exists on external
                 // (`sub-add`-loaded) rows.
                 external_filename: if external {
-                    property_non_blank(mpv_property(
-                        app,
-                        window_label,
-                        format!("{prefix}/external-filename"),
-                        "string",
-                    ))
+                    property_non_blank(read("external-filename", "string"))
                 } else {
                     None
                 },

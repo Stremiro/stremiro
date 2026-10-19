@@ -163,6 +163,7 @@ fn search_catalog_cross_page_dedup_uses_trimmed_ascii_identity() {
         },
         Some(100),
         None,
+        None,
     );
     assert!(!first.exhausted);
     let second = super::finish_catalog_page(
@@ -177,6 +178,7 @@ fn search_catalog_cross_page_dedup_uses_trimmed_ascii_identity() {
         ],
         first.continuation,
         Some(200),
+        None,
         None,
     );
     assert_eq!(ids(&second.items), ["ä", "tt2"]);
@@ -229,7 +231,7 @@ fn search_catalog_duplicate_only_branch_stops_independently() {
 }
 
 #[test]
-fn search_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
+fn browse_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
     for (items, next_skip) in [
         (vec![test_media_item("TT1", "movie")], Some(200)),
         (vec![], Some(200)),
@@ -244,6 +246,7 @@ fn search_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
                 ..Default::default()
             },
             next_skip,
+            None,
             None,
         );
         assert!(page.exhausted);
@@ -284,6 +287,7 @@ fn search_catalog_seen_key_bound_validates_and_ends_paging() {
         },
         Some(200),
         None,
+        None,
     );
     assert_eq!(ids(&page.items), ["last"]);
     assert_eq!(
@@ -313,6 +317,98 @@ fn search_catalog_seen_key_bound_validates_and_ends_paging() {
         vec![String::new()],
     ] {
         assert!(super::build_search_criteria(request(&keys)).is_err());
+    }
+}
+
+#[test]
+fn text_search_duplicate_pages_keep_advancing_source_cursors() {
+    let page = super::finish_catalog_page(
+        vec![test_media_item("TT1", "movie")],
+        super::SearchCatalogContinuation {
+            seen_keys: vec!["movie:tt1".into()],
+            ..Default::default()
+        },
+        None,
+        None,
+        Some(vec![super::SearchSourceCursor {
+            key: "0123456789abcdef".into(),
+            skip: 200,
+            retry: false,
+        }]),
+    );
+    assert!(page.items.is_empty());
+    assert!(!page.exhausted);
+    assert_eq!(page.continuation.seen_keys, ["movie:tt1"]);
+    let wire = serde_json::to_value(&page).unwrap();
+    assert_eq!(wire["continuation"]["searchCursors"][0]["skip"], 200);
+    assert!(wire["continuation"].get("skip").is_none());
+    let page = super::finish_catalog_page(
+        vec![test_media_item("new", "movie")],
+        page.continuation,
+        None,
+        None,
+        Some(Vec::new()),
+    );
+    assert_eq!(ids(&page.items), ["new"]);
+    assert!(page.exhausted);
+}
+
+#[test]
+fn text_search_cursor_validation_bounds_keys_count_and_request_mode() {
+    let request = |cursors: &[serde_json::Value]| {
+        serde_json::json!({
+            "query": "dune",
+            "continuation": {"searchCursors": cursors, "seenKeys": []}
+        })
+    };
+    let valid: Vec<_> = (0..super::MAX_SEARCH_SOURCE_CURSORS)
+        .map(|index| serde_json::json!({"key": format!("{index:016x}"), "skip": 1}))
+        .collect();
+    let build = |value| super::build_search_criteria(serde_json::from_value(value).unwrap());
+    assert!(!build(request(&valid)).unwrap().continuation.is_exhausted());
+    assert!(build(request(&[])).unwrap().continuation.is_exhausted());
+    assert!(build(request(&[serde_json::json!(
+        {"key":"0123456789abcdef", "skip":0, "retry":true}
+    )]))
+    .is_ok());
+    let mut too_many = valid.clone();
+    too_many.push(serde_json::json!({"key": format!("{:016x}", valid.len()), "skip": 1}));
+    for invalid in [
+        too_many,
+        vec![valid[0].clone(), valid[0].clone()],
+        vec![serde_json::json!({"key": "", "skip": 1})],
+        vec![serde_json::json!({"key": "0".repeat(17), "skip": 1})],
+        vec![serde_json::json!({"key": "g".repeat(16), "skip": 1})],
+        vec![serde_json::json!({"key": "0123456789abcdef", "skip": 0})],
+    ] {
+        assert!(build(request(&invalid)).is_err());
+    }
+    for extra in [
+        serde_json::json!({"skip": 0}),
+        serde_json::json!({"allCursors": {"movie": 0}}),
+    ] {
+        let mut value = request(&valid);
+        value["continuation"]
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        assert!(build(value).is_err());
+    }
+    let mut browse = request(&valid);
+    browse.as_object_mut().unwrap().remove("query");
+    browse["mediaType"] = serde_json::json!("movie");
+    assert!(build(browse).is_err());
+    for skip in [
+        serde_json::json!(-1),
+        serde_json::json!(4_294_967_296_u64),
+        serde_json::json!("1"),
+    ] {
+        assert!(
+            serde_json::from_value::<super::SearchCatalogRequest>(request(&[
+                serde_json::json!({"key": "0123456789abcdef", "skip": skip})
+            ]))
+            .is_err()
+        );
     }
 }
 
@@ -691,12 +787,34 @@ fn apply_browse_filters_enforces_animation_for_genre_free_anime_browse() {
 
 #[test]
 fn should_continue_browse_fetch_fills_sparse_pages_until_bound() {
-    assert!(should_continue_browse_fetch(0, Some(50), 1));
+    let browse = super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({
+            "mediaType": "movie", "genres": ["Action"], "singlePage": true
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let max_fetches = browse.max_browse_fetches;
+    assert_eq!(max_fetches, 8);
+    assert!(should_continue_browse_fetch(0, Some(50), 1, max_fetches));
     // Sparse intersections fill until the page is a usable batch.
-    assert!(should_continue_browse_fetch(3, Some(50), 1));
-    assert!(!should_continue_browse_fetch(24, Some(50), 1));
-    assert!(!should_continue_browse_fetch(0, None, 1));
-    assert!(!should_continue_browse_fetch(0, Some(50), 8));
+    assert!(should_continue_browse_fetch(3, Some(50), 1, max_fetches));
+    assert!(!should_continue_browse_fetch(24, Some(50), 1, max_fetches));
+    assert!(!should_continue_browse_fetch(0, None, 1, max_fetches));
+    assert!(!should_continue_browse_fetch(0, Some(50), 8, max_fetches));
+
+    let recommendation = super::build_search_criteria(super::SearchCatalogRequest::for_genre(
+        "movie",
+        "Action".into(),
+    ))
+    .unwrap();
+    assert_eq!(recommendation.max_browse_fetches, 1);
+    assert!(!should_continue_browse_fetch(
+        0,
+        Some(50),
+        1,
+        recommendation.max_browse_fetches,
+    ));
 }
 
 #[test]

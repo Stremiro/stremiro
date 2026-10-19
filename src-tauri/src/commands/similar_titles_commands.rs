@@ -8,16 +8,20 @@ use super::search_commands::{
     query_search_catalog_for_request, SearchCatalogPage, SearchCatalogRequest,
 };
 use super::store_helpers::load_watch_statuses_map;
+use crate::operational_log::{field, log_warn};
 use crate::providers::{
     addon_resource::AddonResourceClient, first_ascii_year_run, MediaDetails, MediaItem,
 };
 use futures_util::future::join_all;
+use futures_util::stream::{FuturesOrdered, StreamExt};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tauri::{command, AppHandle, Manager, State};
 
 const MAX_SIMILAR_TITLES: usize = 20;
 const MAX_SEED_GENRES: usize = 3;
+const WATCHED_TITLES_TIMEOUT: Duration = Duration::from_secs(1);
 const YEAR_SPAN: f64 = 25.0;
 const RANK_SPAN: usize = 50;
 const STOPWORDS: &[&str] = &[
@@ -378,11 +382,14 @@ pub async fn get_recent_watch_seed(
         move || ResumeStore::load_recent_titles(&resume_path),
     )
     .await?;
-    for (media_type, id) in titles {
-        if let Ok(details) =
-            super::media_commands::fetch_media_details_inner(&app, &client, &media_type, &id, false)
-                .await
-        {
+    let mut candidates: FuturesOrdered<_> = titles
+        .iter()
+        .map(|(media_type, id)| {
+            super::media_commands::fetch_media_details_inner(&app, &client, media_type, id, false)
+        })
+        .collect();
+    while let Some(result) = candidates.next().await {
+        if let Ok(details) = result {
             if let Some(seed) = watch_seed(details) {
                 return Ok(Some(seed));
             }
@@ -429,19 +436,40 @@ pub async fn query_similar_titles(
     let resume_path = resume_store_path(&app);
     let source_type = source.type_.clone();
     let store_app = app.clone();
-    let watched = super::run_blocking_store_op(move || {
+    let mut watched = std::pin::pin!(super::run_blocking_store_op(move || {
         let status_store = super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)?;
         watched_title_ids(&resume_path?, &source_type, &status_store)
-    });
-    let pages = join_all(seed_genres.into_iter().map(|genre| {
+    }));
+    let mut pages = std::pin::pin!(join_all(seed_genres.into_iter().map(|genre| {
         query_search_catalog_for_request(
             &app,
             &client,
             SearchCatalogRequest::for_genre(media_type, genre),
         )
-    }));
-    let (pages, watched) = tokio::join!(pages, watched);
-    ranked_catalog_pages(&source, pages, &watched.unwrap_or_default())
+    })));
+    // Watched demotion is advisory: a busy store gate gets only a short window
+    // past the catalogs instead of its full budget.
+    let (pages, watched) = tokio::select! {
+        watched = &mut watched => (pages.await, watched),
+        pages = &mut pages => {
+            let watched = tokio::time::timeout(WATCHED_TITLES_TIMEOUT, watched)
+                .await
+                .unwrap_or_else(|_| Err("Watched titles read timed out.".to_string()));
+            (pages, watched)
+        }
+    };
+    let watched = watched.unwrap_or_else(|error| {
+        log_warn(
+            "similar-titles",
+            "query_similar_titles",
+            "watched-titles-fallback",
+            &[field("error", &error)],
+        );
+        HashSet::new()
+    });
+    tokio::task::spawn_blocking(move || ranked_catalog_pages(&source, pages, &watched))
+        .await
+        .map_err(|_| "Similar titles ranking task failed.".to_string())?
 }
 
 #[cfg(test)]

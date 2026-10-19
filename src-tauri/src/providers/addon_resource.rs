@@ -4,7 +4,7 @@ use super::ttl_cache::{
 use super::{
     addon_manifest::{snapshot_supports_request, AddonCatalogCapability, AddonManifest},
     bound_optional, build_provider_http_client, normalize_media_year, strip_manifest_suffix,
-    trim_to_max, BoundedBodyError, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
+    trim_to_max, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -31,6 +31,7 @@ const MAX_CAST: usize = 64;
 const MAX_CREDITS: usize = 8;
 const MAX_GENRES: usize = 32;
 const MAX_STRING_CHARS: usize = 2_048;
+const MAX_SERIALIZED_IMAGE_URL_CHARS: usize = MAX_STRING_CHARS * 4 * 3;
 const MAX_ID_CHARS: usize = 256;
 const MAX_LOOKUP_ID_CHARS: usize = MAX_ID_CHARS + 2 * (1 + 10);
 const MAX_EXTRA_NAME_CHARS: usize = 64;
@@ -176,6 +177,8 @@ pub(crate) struct AddonResourceClient {
     client: Client,
     // Shared parsed metadata; shape-specific clones happen outside the cache lock.
     meta_cache: TtlCache<Arc<MediaDetails>>,
+    // A title that exhausted the priority grace should not pay it again on every open.
+    meta_stragglers: TtlCache<()>,
     catalog_cache: TtlCache<Arc<CatalogPage>>,
     subtitle_cache: TtlCache<Arc<[AddonSubtitle]>>,
     /// Per-addon cooldown keyed by base-URL hash — same contract as the transport's `fetch_failures`.
@@ -229,6 +232,11 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_TTL,
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
+            meta_stragglers: TtlCache::new(
+                META_CACHE_MAX_ENTRIES,
+                RESOURCE_CACHE_EMPTY_TTL,
+                RESOURCE_CACHE_EMPTY_TTL,
+            ),
             catalog_cache: TtlCache::new(
                 CATALOG_CACHE_MAX_ENTRIES,
                 RESOURCE_CACHE_TTL,
@@ -259,6 +267,7 @@ impl AddonResourceClient {
     pub(crate) fn clear_cache(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.meta_cache.clear();
+        self.meta_stragglers.clear();
         self.catalog_cache.clear();
         self.subtitle_cache.clear();
         self.failure_cache.clear();
@@ -267,9 +276,40 @@ impl AddonResourceClient {
 
     pub(crate) fn purge_expired_caches(&self) {
         self.meta_cache.purge_expired();
+        self.meta_stragglers.purge_expired();
         self.catalog_cache.purge_expired();
         self.subtitle_cache.purge_expired();
         self.failure_cache.purge_expired();
+    }
+
+    pub(crate) fn cache_generation(&self) -> u64 {
+        self.generation.load(Ordering::SeqCst)
+    }
+
+    pub(crate) fn meta_is_recent_straggler(&self, base_url: &str, type_: &str, id: &str) -> bool {
+        self.fetch_failures.cooling_down(&hash_segment(base_url))
+            || build_resource_url(base_url, "meta", type_, id, &[])
+                .ok()
+                .is_some_and(|url| {
+                    self.meta_stragglers
+                        .get(&resource_cache_key("meta", &url))
+                        .is_some()
+                })
+    }
+
+    pub(crate) fn note_meta_straggler(
+        &self,
+        base_url: &str,
+        type_: &str,
+        id: &str,
+        generation: u64,
+    ) {
+        if let Ok(url) = build_resource_url(base_url, "meta", type_, id, &[]) {
+            self.meta_stragglers
+                .put(&resource_cache_key("meta", &url), (), false, || {
+                    self.cache_generation() == generation
+                });
+        }
     }
 
     /// Shared fetch contract wired with this client's caches and resource policy.
@@ -307,12 +347,17 @@ impl AddonResourceClient {
                     let what = format!("catalog {type_}/{catalog_id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, CATALOG_MAX_BYTES).await?;
-                    let response: CatalogResponse<'_> =
-                        serde_json::from_slice(&bytes).map_err(|_| {
-                            FetchFailure::Fatal("Invalid catalog response format.".to_string())
-                        })?;
-
-                    Ok(Arc::new(parse_catalog_page(response, normalize)))
+                    tokio::task::spawn_blocking(move || {
+                        let response: CatalogResponse<'_> = serde_json::from_slice(&bytes)
+                            .map_err(|_| {
+                                FetchFailure::Fatal("Invalid catalog response format.".to_string())
+                            })?;
+                        Ok(Arc::new(parse_catalog_page(response, normalize)))
+                    })
+                    .await
+                    .map_err(|_| {
+                        FetchFailure::Fatal("Catalog response processing task failed.".to_string())
+                    })?
                 },
             )
             .await?;
@@ -340,16 +385,23 @@ impl AddonResourceClient {
                     let what = format!("meta {type_}/{id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, META_MAX_BYTES).await?;
-                    let response: MetaResponse = serde_json::from_slice(&bytes).map_err(|_| {
-                        FetchFailure::Fatal("Invalid metadata response format.".to_string())
-                    })?;
-                    let meta = response
-                        .meta
-                        .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))?;
-                    parse_meta_item(meta)
-                        .map(normalize)
-                        .map(Arc::new)
-                        .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))
+                    tokio::task::spawn_blocking(move || {
+                        let response: MetaResponse =
+                            serde_json::from_slice(&bytes).map_err(|_| {
+                                FetchFailure::Fatal("Invalid metadata response format.".to_string())
+                            })?;
+                        let meta = response.meta.ok_or_else(|| {
+                            FetchFailure::Fatal("Metadata not found.".to_string())
+                        })?;
+                        parse_meta_item(meta)
+                            .map(normalize)
+                            .map(Arc::new)
+                            .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))
+                    })
+                    .await
+                    .map_err(|_| {
+                        FetchFailure::Fatal("Metadata response processing task failed.".to_string())
+                    })?
                 },
             )
             .await
@@ -375,12 +427,17 @@ impl AddonResourceClient {
                     let what = format!("subtitles {type_}/{id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, SUBTITLE_MAX_BYTES).await?;
-                    let response: SubtitleResponse<'_> =
-                        serde_json::from_slice(&bytes).map_err(|_| {
-                            FetchFailure::Fatal("Invalid subtitle response format.".to_string())
-                        })?;
-
-                    Ok(parse_subtitle_items(response))
+                    tokio::task::spawn_blocking(move || {
+                        let response: SubtitleResponse<'_> = serde_json::from_slice(&bytes)
+                            .map_err(|_| {
+                                FetchFailure::Fatal("Invalid subtitle response format.".to_string())
+                            })?;
+                        Ok(parse_subtitle_items(response))
+                    })
+                    .await
+                    .map_err(|_| {
+                        FetchFailure::Fatal("Subtitle response processing task failed.".to_string())
+                    })?
                 },
             )
             .await?;
@@ -409,17 +466,20 @@ fn catalog_required_extras(catalog: &AddonCatalogCapability) -> impl Iterator<It
         .map(|extra| extra.name.as_str())
 }
 
-pub(crate) fn catalog_supports_request(
-    catalog: &AddonCatalogCapability,
+pub(crate) fn snapshot_supports_catalog<'a>(
+    snapshot: &'a AddonManifest,
     type_: &str,
+    catalog_id: &str,
     extras: &[CatalogExtra],
-) -> Result<(), String> {
-    if !catalog.type_.eq_ignore_ascii_case(type_) {
+) -> Result<&'a AddonCatalogCapability, String> {
+    // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
+    let Some(catalog) = snapshot.catalogs.iter().find(|catalog| {
+        catalog.type_.eq_ignore_ascii_case(type_) && catalog.id.eq_ignore_ascii_case(catalog_id)
+    }) else {
         return Err(format!(
-            "Catalog {} does not declare type {}.",
-            catalog.id, type_
+            "Addon does not declare catalog {catalog_id} for type {type_}."
         ));
-    }
+    };
 
     // `search` is a hard capability gate (an undeclaring catalog echoes bogus
     // rows); other extras are advisory — callers re-filter locally.
@@ -446,43 +506,7 @@ pub(crate) fn catalog_supports_request(
         }
     }
 
-    Ok(())
-}
-
-pub(crate) fn snapshot_catalog<'a>(
-    snapshot: &'a AddonManifest,
-    type_: &str,
-    catalog_id: &str,
-) -> Option<&'a AddonCatalogCapability> {
-    snapshot.catalogs.iter().find(|catalog| {
-        catalog.type_.eq_ignore_ascii_case(type_) && catalog.id.eq_ignore_ascii_case(catalog_id)
-    })
-}
-
-/// Canonical catalog id for a case-insensitive match, so fetched URLs use the
-/// manifest's own casing (caller casing can 404 on case-sensitive upstreams).
-pub(crate) fn resolve_canonical_catalog_id(
-    snapshot: &AddonManifest,
-    type_: &str,
-    catalog_id: &str,
-) -> Option<String> {
-    snapshot_catalog(snapshot, type_, catalog_id).map(|catalog| catalog.id.clone())
-}
-
-pub(crate) fn snapshot_supports_catalog(
-    snapshot: &AddonManifest,
-    type_: &str,
-    catalog_id: &str,
-    extras: &[CatalogExtra],
-) -> Result<(), String> {
-    // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
-    let Some(catalog) = snapshot_catalog(snapshot, type_, catalog_id) else {
-        return Err(format!(
-            "Addon does not declare catalog {catalog_id} for type {type_}."
-        ));
-    };
-
-    catalog_supports_request(catalog, type_, extras)
+    Ok(catalog)
 }
 
 pub(crate) fn snapshot_supports_meta(snapshot: &AddonManifest, type_: &str, id: &str) -> bool {
@@ -670,12 +694,16 @@ fn is_youtube_video_token(source: &str) -> bool {
 /// Image fields reach the webview `<img>`, so they share the subtitle/stream
 /// ingress gate; a rejected URL degrades to no artwork, not a dropped row.
 fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
-    let url = value?.as_str()?;
-    if url.chars().nth(MAX_STRING_CHARS).is_some() {
+    normalize_image_url(value?.as_str()?)
+}
+
+pub(crate) fn normalize_image_url(url: &str) -> Option<String> {
+    let raw_chars = url.chars().take(MAX_SERIALIZED_IMAGE_URL_CHARS + 1).count();
+    if raw_chars > MAX_SERIALIZED_IMAGE_URL_CHARS {
         return None;
     }
-    let url = url.trim();
-    is_fetchable_http_url(url).then(|| url.to_string())
+    let parsed = parse_fetchable_http_url(url.trim())?;
+    (raw_chars <= MAX_STRING_CHARS || parsed.as_str() == url).then(|| parsed.to_string())
 }
 
 fn normalize_trailer_name(title: &str) -> Option<String> {
@@ -941,10 +969,7 @@ async fn fetch_bounded_json(
         None => format!("Addon {what} response exceeds the size limit (over {max_bytes} bytes)."),
     })
     .await
-    .map_err(|error| match error {
-        BoundedBodyError::TooLarge(message) => FetchFailure::Fatal(message),
-        BoundedBodyError::Read(message) => FetchFailure::Retryable(message),
-    })
+    .map_err(FetchFailure::from)
 }
 
 #[cfg(test)]

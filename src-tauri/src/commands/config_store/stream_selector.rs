@@ -188,11 +188,8 @@ pub(crate) fn sanitize_stream_selector_preferences(
     preferences: StreamSelectorPreferences,
 ) -> StreamSelectorPreferences {
     StreamSelectorPreferences {
-        quality: preferences.quality,
-        source: preferences.source,
         addon: normalize_stream_selector_addon(Some(preferences.addon)),
-        sort: preferences.sort,
-        batch: preferences.batch,
+        ..preferences
     }
 }
 

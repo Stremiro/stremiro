@@ -2,8 +2,8 @@ use super::config_store::addon_configs_generation;
 use super::media_commands::{fetch_media_schedules, MediaSchedule, MediaScheduleRequest};
 use super::media_normalization::days_in_month;
 use super::playback_state::PlaybackStateService;
-use super::store_helpers::{load_library_map, load_watch_statuses_map};
-use super::WatchProgress;
+use super::resume_store::ResumeTitleIdentity;
+use super::store_helpers::{load_library_item_identities, load_watch_statuses_map};
 use crate::providers::{addon_resource::AddonResourceClient, ttl_cache::TtlCache, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -195,7 +195,7 @@ pub struct CalendarSchedule {
 
 fn calendar_requests(
     library: impl IntoIterator<Item = MediaItem>,
-    history: Vec<WatchProgress>,
+    history: Vec<ResumeTitleIdentity>,
     statuses: &HashMap<String, String>,
 ) -> Vec<MediaScheduleRequest> {
     let mut requests = HashMap::new();
@@ -216,7 +216,7 @@ fn calendar_requests(
     }
     // Calendar needs only identity and recency, so skip donor hydration,
     // source-health reads and the full history wire payload.
-    let mut latest_by_id: HashMap<&str, &WatchProgress> = HashMap::new();
+    let mut latest_by_id: HashMap<&str, &ResumeTitleIdentity> = HashMap::new();
     for row in &history {
         latest_by_id
             .entry(row.id.as_str())
@@ -396,7 +396,10 @@ pub async fn get_calendar_events(
     let store_app = app.clone();
     let service = playback_state.inner().clone();
     let requests = super::run_blocking_store_op(move || {
-        let library = load_library_map(&super::open_store(&store_app, super::LIBRARY_STORE_FILE)?)?;
+        let library = load_library_item_identities(&super::open_store(
+            &store_app,
+            super::LIBRARY_STORE_FILE,
+        )?)?;
         let statuses = load_watch_statuses_map(&super::open_store(
             &store_app,
             super::WATCH_STATUS_STORE_FILE,
@@ -405,16 +408,12 @@ pub async fn get_calendar_events(
             &store_app,
             super::LISTS_STORE_FILE,
         )?)?;
-        let history = if statuses.values().any(|status| status == "watching") {
-            service
-                .load_resume_entries(&store_app)?
-                .into_iter()
-                .map(|(_, row)| row)
-                .collect()
-        } else {
-            Vec::new()
-        };
-        let tracked = library.into_values().chain(list_items);
+        let watching_ids: Vec<_> = statuses
+            .iter()
+            .filter_map(|(id, status)| (status == "watching").then_some(id.as_str()))
+            .collect();
+        let history = service.load_latest_resume_title_identities(&store_app, &watching_ids)?;
+        let tracked = library.into_iter().chain(list_items);
         Ok(calendar_requests(tracked, history, &statuses))
     })
     .await?;
@@ -432,7 +431,7 @@ pub async fn get_calendar_events(
 mod tests {
     use super::super::media_commands::MediaScheduleEpisode;
     use super::*;
-    use crate::test_helpers::{test_media_item, test_progress, test_store};
+    use crate::test_helpers::{test_media_item, test_store};
 
     fn range() -> CalendarRange {
         CalendarRange {
@@ -536,13 +535,13 @@ mod tests {
             json!({"id": "bad", "title": "Bad snapshot", "type": "series", "poster": 42}),
         );
         fixture.store.save().unwrap();
-        let library = load_library_map(&fixture.store).unwrap();
+        let library = load_library_item_identities(&fixture.store).unwrap();
         assert!(library.is_empty());
         let identities =
             super::super::list_commands::read_list_item_identities(&fixture.store).unwrap();
         assert!(identities.iter().all(|item| item.description.is_none()));
         let requests = calendar_requests(
-            library.into_values().chain(identities),
+            library.into_iter().chain(identities),
             Vec::new(),
             &HashMap::new(),
         );
@@ -595,25 +594,25 @@ mod tests {
             ("ttold".into(), "watched".into()),
         ]);
         let history = vec![
-            WatchProgress {
+            ResumeTitleIdentity {
+                id: "tt123".into(),
                 type_: "anime".into(),
                 last_watched: 10,
-                ..test_progress()
             },
-            WatchProgress {
+            ResumeTitleIdentity {
+                id: "tt123".into(),
                 type_: "series".into(),
                 last_watched: 9,
-                ..test_progress()
             },
-            WatchProgress {
+            ResumeTitleIdentity {
+                id: "tt123".into(),
                 type_: "series".into(),
                 last_watched: 10,
-                ..test_progress()
             },
-            WatchProgress {
+            ResumeTitleIdentity {
                 id: "ttold".into(),
                 type_: "series".into(),
-                ..test_progress()
+                last_watched: 0,
             },
         ];
         let requests = calendar_requests(

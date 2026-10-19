@@ -470,8 +470,8 @@ fn prune_by_recency(
     item_key: impl Fn(&str) -> String,
 ) {
     let now_ms = now_unix_millis();
-    let mut survivors =
-        (index.len() > max_entries).then(|| Vec::<(String, u64)>::with_capacity(index.len()));
+    let mut survivors = (index.len() > max_entries)
+        .then(|| Vec::<(String, u64, usize)>::with_capacity(index.len()));
     index.retain(|key| {
         let Some(activity) = load_activity(store, key) else {
             return false;
@@ -499,7 +499,7 @@ fn prune_by_recency(
             .flatten()
             .max()
             .unwrap_or(0);
-            survivors.push((key.clone(), last_activity));
+            survivors.push((key.clone(), last_activity, survivors.len()));
         }
 
         keep

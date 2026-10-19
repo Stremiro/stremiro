@@ -21,7 +21,7 @@ use self::stream_health::{
     PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
 };
 use super::history_helpers::should_skip_watch_progress_save;
-use super::resume_store::{HistoryMergeError, ProgressWrite, ResumeStore};
+use super::resume_store::{HistoryMergeError, ProgressWrite, ResumeStore, ResumeTitleIdentity};
 use super::store_helpers::{clear_index_domain, decode_string_list};
 use super::{normalize_media_id, normalize_watch_progress_type, DurableStore, WatchProgress};
 use crate::providers::lock_or_recover;
@@ -248,15 +248,22 @@ impl PlaybackStateService {
         incoming: &WatchProgress,
         persisted_history: Option<&WatchProgress>,
     ) -> bool {
-        let persisted = lock_or_recover(&self.persisted_history);
-
-        if let Some(existing) = persisted.get(key) {
-            return should_skip_watch_progress_save(existing, incoming);
-        }
-
-        persisted_history
-            .map(|existing| should_skip_watch_progress_save(existing, incoming))
+        self.cached_history_write_decision(key, incoming)
+            .or_else(|| {
+                persisted_history
+                    .map(|existing| should_skip_watch_progress_save(existing, incoming))
+            })
             .unwrap_or(false)
+    }
+
+    pub(crate) fn cached_history_write_decision(
+        &self,
+        key: &str,
+        incoming: &WatchProgress,
+    ) -> Option<bool> {
+        lock_or_recover(&self.persisted_history)
+            .get(key)
+            .map(|existing| should_skip_watch_progress_save(existing, incoming))
     }
 
     pub(crate) fn mark_history_persisted(
@@ -307,6 +314,19 @@ impl PlaybackStateService {
         app: &AppHandle,
     ) -> Result<Vec<(String, WatchProgress)>, String> {
         self.with_resume_store(app, |resume_store| resume_store.load_entries())
+    }
+
+    pub(crate) fn load_latest_resume_title_identities(
+        &self,
+        app: &AppHandle,
+        media_ids: &[&str],
+    ) -> Result<Vec<ResumeTitleIdentity>, String> {
+        if media_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_latest_title_identities(media_ids)
+        })
     }
 
     pub(crate) fn count_resume_entries(&self, app: &AppHandle) -> Result<usize, String> {
@@ -497,27 +517,38 @@ fn prune_index_to_cap(
     if overflow == 0 {
         return;
     }
-    let scored: Vec<(String, u64)> = index
+    let scored: Vec<(String, u64, usize)> = index
         .iter()
-        .map(|key| (key.clone(), updated_at(store, key)))
+        .enumerate()
+        .map(|(ordinal, key)| (key.clone(), updated_at(store, key), ordinal))
         .collect();
     evict_least_active(store, index, scored, overflow, item_key);
 }
 
 /// Drop the `overflow` lowest-scored keys from `index`, deleting their store
-/// items. `scored` is `(key, recency)` pairs over index members.
+/// items. `scored` is `(key, recency, ordinal)` tuples over index members.
 fn evict_least_active(
     store: &DurableStore,
     index: &mut Vec<String>,
-    mut scored: Vec<(String, u64)>,
+    mut scored: Vec<(String, u64, usize)>,
     overflow: usize,
     item_key: impl Fn(&str) -> String,
 ) {
-    scored.sort_by_key(|(_, score)| *score);
+    if overflow == 0 {
+        return;
+    }
+    if overflow < scored.len() {
+        scored.select_nth_unstable_by(
+            overflow,
+            |(_, left_score, left_ordinal), (_, right_score, right_ordinal)| {
+                (left_score, left_ordinal).cmp(&(right_score, right_ordinal))
+            },
+        );
+    }
     let evicted: HashSet<String> = scored
         .into_iter()
         .take(overflow)
-        .map(|(key, _)| key)
+        .map(|(key, _, _)| key)
         .collect();
     for key in &evicted {
         store.delete(item_key(key));

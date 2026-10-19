@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
-use tauri::{command, AppHandle, State};
+use std::time::Duration;
+use tauri::{command, AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 
 const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
@@ -33,6 +34,7 @@ const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
 static CLASSIFY_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_provider_http_client(Some(ADDON_CLASSIFY_CONCURRENCY)));
 static STARTUP_CAPABILITY_REFRESH: AtomicBool = AtomicBool::new(true);
+const STARTUP_CAPABILITY_REFRESH_DELAY: Duration = Duration::from_secs(8);
 /// Registry and reorder-payload bound, shared with backup import.
 const MAX_ADDON_CONFIGS: usize = 32;
 /// Bound client-supplied addon identity fields so an oversized IPC payload
@@ -427,16 +429,26 @@ fn merge_classified_capabilities(
 }
 
 pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Result<(), String> {
+    refresh_addon_capabilities(app.clone(), false).await?;
+    if STARTUP_CAPABILITY_REFRESH.swap(false, Ordering::SeqCst) {
+        tokio::time::sleep(STARTUP_CAPABILITY_REFRESH_DELAY).await;
+        refresh_addon_capabilities(app, true).await?;
+    }
+    Ok(())
+}
+
+async fn refresh_addon_capabilities(
+    app: AppHandle,
+    refresh_classified: bool,
+) -> Result<(), String> {
     let current = super::run_blocking_store_op({
         let app = app.clone();
         move || {
             let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-            store.save()?;
             Ok::<_, String>(load_addon_configs(&store))
         }
     })
     .await?;
-    let refresh_classified = STARTUP_CAPABILITY_REFRESH.swap(false, Ordering::SeqCst);
     let classified = refresh_installed_addon_capabilities(current, refresh_classified).await?;
     if classified.is_empty() {
         return Ok(());
@@ -445,10 +457,15 @@ pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Res
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut latest = load_addon_configs(&store);
-        if merge_classified_capabilities(&mut latest, classified, false) {
+        let changed = merge_classified_capabilities(&mut latest, classified, false);
+        if changed {
             save_addon_configs_to_store(&store, &latest);
         }
-        store.save()
+        store.save()?;
+        if changed {
+            let _ = app.emit("app://addon-capabilities-changed", ());
+        }
+        Ok(())
     })
     .await
 }
@@ -457,7 +474,7 @@ pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Res
 pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok(load_addon_configs(&store)
+        Ok(AddonConfig::load_identities(&store)
             .into_iter()
             .map(AddonConfigView::from_config)
             .collect())
@@ -466,7 +483,7 @@ pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, S
 }
 
 fn load_addon_url(store: &DurableStore, id: &str) -> Result<String, String> {
-    load_addon_configs(store)
+    AddonConfig::load_identities(store)
         .into_iter()
         .find(|addon| addon.id == id)
         .map(|addon| addon.url)
@@ -551,7 +568,10 @@ fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlIn
 pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlInspection, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok(inspect_addon_url_against(&url, &load_addon_configs(&store)))
+        Ok(inspect_addon_url_against(
+            &url,
+            &AddonConfig::load_identities(&store),
+        ))
     })
     .await
 }
@@ -566,13 +586,13 @@ pub enum AddonConfigsOp {
 }
 
 fn apply_addon_configs_op(
-    mut configs: Vec<AddonConfig>,
+    configs: &mut Vec<AddonConfig>,
     op: AddonConfigsOp,
     new_addon_id: &str,
-) -> Result<Vec<AddonConfig>, String> {
-    match op {
+) -> Result<bool, String> {
+    Ok(match op {
         AddonConfigsOp::Add { url } => {
-            let verdict = inspect_addon_url_against(&url, &configs);
+            let verdict = inspect_addon_url_against(&url, configs);
             if let Some(error) = verdict.error {
                 return Err(error);
             }
@@ -594,15 +614,19 @@ fn apply_addon_configs_op(
                 enabled: true,
                 capabilities: None,
             });
-            configs = resolve_addon_configs(Some(configs));
+            *configs = resolve_addon_configs(Some(std::mem::take(configs)));
+            true
         }
         AddonConfigsOp::Remove { id } => {
+            let before = configs.len();
             configs.retain(|config| config.id != id || is_pinned_default_addon_url(&config.url));
+            configs.len() != before
         }
         AddonConfigsOp::SetEnabled { id, enabled } => {
-            if let Some(config) = configs.iter_mut().find(|config| config.id == id) {
-                config.enabled = enabled;
-            }
+            let Some(config) = configs.iter_mut().find(|config| config.id == id) else {
+                return Ok(false);
+            };
+            std::mem::replace(&mut config.enabled, enabled) != enabled
         }
         AddonConfigsOp::Reorder { ids } => {
             if ids.len() > MAX_ADDON_CONFIGS {
@@ -610,34 +634,48 @@ fn apply_addon_configs_op(
                     "Too many addon ids. Maximum is {MAX_ADDON_CONFIGS}."
                 ));
             }
-            let (pinned, user): (Vec<_>, Vec<_>) = configs
-                .into_iter()
-                .partition(|config| is_pinned_default_addon_url(&config.url));
-            let current = user
+            let current = configs
                 .iter()
+                .filter(|config| !is_pinned_default_addon_url(&config.url))
                 .map(|config| config.id.clone())
                 .collect::<Vec<_>>();
+            let reordered = super::list_helpers::reorder_known_ids(&current, ids);
+            if reordered == current {
+                return Ok(false);
+            }
+            let (pinned, user): (Vec<_>, Vec<_>) = std::mem::take(configs)
+                .into_iter()
+                .partition(|config| is_pinned_default_addon_url(&config.url));
             let mut by_id: HashMap<_, _> = user
                 .into_iter()
                 .map(|config| (config.id.clone(), config))
                 .collect();
-            configs = pinned;
-            configs.extend(
-                super::list_helpers::reorder_known_ids(&current, ids)
-                    .into_iter()
-                    .filter_map(|id| by_id.remove(&id)),
-            );
+            *configs = pinned;
+            configs.extend(reordered.into_iter().filter_map(|id| by_id.remove(&id)));
+            true
         }
+    })
+}
+
+fn persist_addon_configs(
+    store: &DurableStore,
+    updated: &[AddonConfig],
+    changed: bool,
+    invalidate: impl FnOnce(),
+) -> Result<(), String> {
+    if changed {
+        save_addon_configs_to_store(store, updated);
     }
-    Ok(configs)
+    let result = store.save();
+    if changed {
+        invalidate();
+    }
+    result
 }
 
 #[command]
 pub async fn update_addon_configs(
     app: AppHandle,
-    provider: State<'_, AddonTransport>,
-    client: State<'_, AddonResourceClient>,
-    calendar_cache: State<'_, super::calendar_commands::CalendarScheduleCache>,
     op: AddonConfigsOp,
 ) -> Result<Vec<AddonConfigView>, String> {
     let new_addon_id = if matches!(op, AddonConfigsOp::Add { .. }) {
@@ -652,8 +690,8 @@ pub async fn update_addon_configs(
             let new_addon_id = new_addon_id.clone();
             move || {
                 let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-                let mut updated =
-                    apply_addon_configs_op(load_addon_configs(&store), op, &new_addon_id)?;
+                let mut updated = load_addon_configs(&store);
+                apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
                 Ok::<_, String>(updated.pop().into_iter().collect())
             }
         })
@@ -664,24 +702,21 @@ pub async fn update_addon_configs(
     };
 
     // Manifest IO stays off the store gate; only the delta is reapplied at commit.
-    let (updated, changed) = super::run_blocking_store_op(move || {
+    let updated = super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let latest = load_addon_configs(&store);
-        let mut updated = apply_addon_configs_op(latest.clone(), op, &new_addon_id)?;
-        merge_classified_capabilities(&mut updated, classified, true);
-        let changed = updated != latest;
-        if changed {
-            save_addon_configs_to_store(&store, &updated);
-        }
-        store.save()?;
-        Ok::<_, String>((updated, changed))
+        let mut updated = load_addon_configs(&store);
+        let mut changed = apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
+        changed |= merge_classified_capabilities(&mut updated, classified, true);
+        persist_addon_configs(&store, &updated, changed, || {
+            // The live registry changed even if saving fails or its caller timed out.
+            app.state::<AddonTransport>().clear_cache();
+            app.state::<AddonResourceClient>().clear_cache();
+            app.state::<super::calendar_commands::CalendarScheduleCache>()
+                .clear_cache();
+        })?;
+        Ok::<_, String>(updated)
     })
     .await?;
-    if changed {
-        provider.clear_cache();
-        client.clear_cache();
-        calendar_cache.clear_cache();
-    }
     Ok(updated
         .into_iter()
         .map(AddonConfigView::from_config)
@@ -734,7 +769,7 @@ mod tests {
             "",
         ] {
             assert!(apply_addon_configs_op(
-                installed(),
+                &mut installed(),
                 AddonConfigsOp::Add { url: url.into() },
                 "new"
             )
@@ -748,12 +783,12 @@ mod tests {
         let pinned_id = current[0].id.clone();
         let mut latest = current.clone();
         for id in [pinned_id.clone(), "b".into()] {
-            latest = apply_addon_configs_op(
-                latest,
+            assert!(apply_addon_configs_op(
+                &mut latest,
                 AddonConfigsOp::SetEnabled { id, enabled: false },
                 "",
             )
-            .unwrap();
+            .unwrap());
         }
         assert!(!latest[0].enabled);
         assert!(
@@ -763,11 +798,15 @@ mod tests {
                 .unwrap()
                 .enabled
         );
-        latest =
-            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: pinned_id }, "").unwrap();
+        assert!(
+            !apply_addon_configs_op(&mut latest, AddonConfigsOp::Remove { id: pinned_id }, "")
+                .unwrap()
+        );
         assert_eq!(latest.len(), current.len());
-        latest =
-            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: "b".into() }, "").unwrap();
+        assert!(
+            apply_addon_configs_op(&mut latest, AddonConfigsOp::Remove { id: "b".into() }, "")
+                .unwrap()
+        );
         assert!(!latest.iter().any(|config| config.id == "b"));
         assert!(!latest[0].enabled);
     }
@@ -777,8 +816,9 @@ mod tests {
         let current = installed();
         let mut expected: Vec<_> = current.iter().map(|config| config.id.clone()).collect();
         expected[2..].rotate_right(1);
-        let reordered = apply_addon_configs_op(
-            current.clone(),
+        let mut reordered = current.clone();
+        assert!(apply_addon_configs_op(
+            &mut reordered,
             AddonConfigsOp::Reorder {
                 ids: vec![
                     "unknown".into(),
@@ -789,7 +829,7 @@ mod tests {
             },
             "",
         )
-        .unwrap();
+        .unwrap());
         assert_eq!(
             reordered
                 .iter()
@@ -802,25 +842,29 @@ mod tests {
 
     #[test]
     fn addon_add_on_latest_preserves_concurrent_toggle_and_remove() {
-        let latest = apply_addon_configs_op(
-            installed(),
+        let mut latest = installed();
+        assert!(apply_addon_configs_op(
+            &mut latest,
             AddonConfigsOp::SetEnabled {
                 id: "a".into(),
                 enabled: false,
             },
             "",
         )
-        .unwrap();
-        let latest =
-            apply_addon_configs_op(latest, AddonConfigsOp::Remove { id: "b".into() }, "").unwrap();
-        let updated = apply_addon_configs_op(
-            latest.clone(),
+        .unwrap());
+        assert!(
+            apply_addon_configs_op(&mut latest, AddonConfigsOp::Remove { id: "b".into() }, "")
+                .unwrap()
+        );
+        let mut updated = latest.clone();
+        assert!(apply_addon_configs_op(
+            &mut updated,
             AddonConfigsOp::Add {
                 url: "stremio://new.example/manifest.json/".into(),
             },
             "new",
         )
-        .unwrap();
+        .unwrap());
         assert_eq!(&updated[..latest.len()], latest.as_slice());
         let added = updated.last().unwrap();
         assert_eq!(
@@ -850,10 +894,9 @@ mod tests {
                 ids: vec!["unknown".into()],
             },
         ] {
-            assert_eq!(
-                apply_addon_configs_op(current.clone(), op, "").unwrap(),
-                current
-            );
+            let mut updated = current.clone();
+            assert!(!apply_addon_configs_op(&mut updated, op, "").unwrap());
+            assert_eq!(updated, current);
         }
         let op: AddonConfigsOp =
             serde_json::from_str(r#"{"kind":"setEnabled","id":"a","enabled":false}"#).unwrap();
@@ -861,6 +904,66 @@ mod tests {
             op,
             AddonConfigsOp::SetEnabled { enabled: false, .. }
         ));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn addon_mutation_invalidates_after_failed_save_and_retries_unchanged_data() {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let fixture = crate::test_helpers::test_store();
+        let latest = installed();
+        save_addon_configs_to_store(&fixture.store, &latest);
+        fixture.store.save().unwrap();
+        let mut updated = latest.clone();
+        let changed = apply_addon_configs_op(
+            &mut updated,
+            AddonConfigsOp::SetEnabled {
+                id: "a".into(),
+                enabled: false,
+            },
+            "",
+        )
+        .unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&fixture.path)
+            .unwrap();
+        let invalidations = std::cell::Cell::new(0);
+        let invalidate = || invalidations.set(invalidations.get() + 1);
+
+        let error =
+            persist_addon_configs(&fixture.store, &updated, changed, invalidate).unwrap_err();
+        assert_eq!(load_addon_configs(&fixture.store), updated);
+        assert_eq!(invalidations.get(), 1);
+        assert_eq!(
+            persist_addon_configs(&fixture.store, &updated, false, invalidate).unwrap_err(),
+            error
+        );
+        assert_eq!(invalidations.get(), 1);
+
+        drop(held);
+        persist_addon_configs(&fixture.store, &updated, false, invalidate).unwrap();
+        assert_eq!(invalidations.get(), 1);
+        assert_eq!(fixture.store.save_count(), 2);
+        let reopened = super::super::DurableStoreRegistry::default()
+            .open_path(fixture.path.clone())
+            .unwrap();
+        assert_eq!(load_addon_configs(&reopened), updated);
+
+        let changed = apply_addon_configs_op(
+            &mut updated,
+            AddonConfigsOp::SetEnabled {
+                id: "a".into(),
+                enabled: true,
+            },
+            "",
+        )
+        .unwrap();
+        assert_eq!(updated, latest);
+        persist_addon_configs(&fixture.store, &updated, changed, invalidate).unwrap();
+        assert_eq!(invalidations.get(), 2);
     }
 
     #[test]
@@ -915,7 +1018,13 @@ mod tests {
         use std::io::{BufRead, BufReader, Write};
         use std::time::{Duration, Instant};
         let valid = r#"{"name":"Updated","resources":["meta","subtitles"],"types":["movie"],"idPrefixes":["kitsu:"],"catalogs":[{"type":"movie","id":"new"}],"behaviorHints":{"configurationRequired":true}}"#;
-        for (status, body) in [(200, valid), (200, "{}"), (200, "invalid"), (503, "{}")] {
+        for (status, body, refresh_classified) in [
+            (200, valid, true),
+            (200, "{}", true),
+            (200, "invalid", true),
+            (503, "{}", true),
+            (200, valid, false),
+        ] {
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             listener.set_nonblocking(true).unwrap();
             let addon = AddonConfig {
@@ -970,7 +1079,11 @@ mod tests {
                 }
                 write!(socket, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
             });
-            let fetched = refresh_installed_addon_capabilities(vec![addon.clone()], true)
+            let mut candidate = addon.clone();
+            if !refresh_classified {
+                candidate.capabilities = None;
+            }
+            let fetched = refresh_installed_addon_capabilities(vec![candidate], refresh_classified)
                 .await
                 .unwrap();
             server.join().unwrap();

@@ -1,4 +1,14 @@
+use super::{ttl_cache::FetchFailure, BoundedBodyError};
 use std::net::IpAddr;
+
+impl From<BoundedBodyError> for FetchFailure {
+    fn from(error: BoundedBodyError) -> Self {
+        match error {
+            BoundedBodyError::TooLarge(message) => Self::Fatal(message),
+            BoundedBodyError::Read(message) => Self::Retryable(message),
+        }
+    }
+}
 
 /// Max redirects per addon/stream fetch — shared with the direct-stream probe (`commands::stream_resolver`).
 pub(crate) const MAX_REDIRECT_HOPS: usize = 5;

@@ -324,6 +324,44 @@ fn runtime_and_rating_reject_invalid_display_values() {
 }
 
 #[test]
+fn artwork_normalization_is_idempotent_after_url_serialization() {
+    use crate::commands::normalize_media_image_url;
+    use crate::providers::addon_resource::normalize_image_url;
+
+    let base = "https://cdn.example/image?x=";
+    let ascii_url = format!("{base}{}'", "a".repeat(2_048 - base.len() - 1));
+    assert_eq!(ascii_url.chars().count(), 2_048);
+    assert_eq!(
+        normalize_media_image_url(&format!(" {ascii_url} ")),
+        normalize_media_image_url(&ascii_url)
+    );
+    for url in [
+        format!("https://cdn.example/{}", "界".repeat(300)),
+        format!("{base}{}", "\u{1f980}".repeat(2_048 - base.len())),
+        ascii_url,
+        " HTTPS://CDN.EXAMPLE/界 ".to_string(),
+    ] {
+        let normalized = normalize_image_url(&url).expect("valid legacy artwork");
+        assert_eq!(
+            normalized,
+            reqwest::Url::parse(url.trim()).unwrap().as_str()
+        );
+        assert_eq!(
+            normalize_media_image_url(&url).as_deref(),
+            Some(normalized.as_str())
+        );
+        assert_eq!(
+            normalize_image_url(&normalized).as_deref(),
+            Some(normalized.as_str())
+        );
+        assert_eq!(
+            normalize_media_image_url(&normalized).as_deref(),
+            Some(normalized.as_str())
+        );
+    }
+}
+
+#[test]
 fn normalize_media_item_bounds_text_and_gates_images() {
     let item = normalize_media_item(MediaItem {
         id: "tt1".to_string(),

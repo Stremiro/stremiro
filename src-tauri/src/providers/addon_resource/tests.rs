@@ -82,7 +82,7 @@ async fn request_errors_omit_urls_with_short_credentials() {
             .await
             .unwrap_err();
     let stream_error = transport
-        .get_streams("movie", "tt1", base)
+        .get_streams_fresh("movie", "tt1", base, None)
         .await
         .unwrap_err();
     for error in [resource_error, manifest_error, stream_error] {
@@ -212,6 +212,113 @@ async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic()
     assert!(Arc::ptr_eq(&hit, &again));
     assert_eq!(hit.imdb_id.as_deref(), Some("tt1"));
     assert_eq!(again.id, "tt1");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn uncached_resources_normalize_off_async_worker_and_join_failures_stay_request_local() {
+    use std::cell::Cell;
+    use std::io::{BufRead, BufReader, Write};
+
+    thread_local! {
+        static ON_ASYNC_WORKER: Cell<bool> = const { Cell::new(false) };
+    }
+    ON_ASYNC_WORKER.set(true);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let catalog = r#"{"metas":[{"id":"tt1","name":"Catalog title","type":"movie"}]}"#;
+        let meta = r#"{"meta":{"id":"tt1","name":"Metadata title","type":"series"}}"#;
+        for body in [catalog, meta, catalog, meta] {
+            let started = std::time::Instant::now();
+            let mut socket = loop {
+                match listener.accept() {
+                    Ok((socket, _)) => break socket,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(started.elapsed() < Duration::from_secs(10));
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut reader = BufReader::new(&mut socket);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        }
+    });
+    let mut client = AddonResourceClient::new();
+    client.client = Client::builder().no_proxy().build().unwrap();
+    let catalog = client
+        .fetch_catalog(&base, "movie", "top", &[], |mut item| {
+            assert!(!ON_ASYNC_WORKER.get());
+            item.title = "Normalized catalog".to_string();
+            item
+        })
+        .await
+        .unwrap();
+    assert_eq!(catalog.items[0].title, "Normalized catalog");
+    let meta = client
+        .fetch_meta(&base, "series", "tt1", |mut details| {
+            assert!(!ON_ASYNC_WORKER.get());
+            details.title = "Normalized metadata".to_string();
+            details
+        })
+        .await
+        .unwrap();
+    assert_eq!(meta.title, "Normalized metadata");
+    let catalog_error = client
+        .fetch_catalog(&base, "movie", "panic", &[], |_| {
+            panic!("private catalog processing detail")
+        })
+        .await
+        .unwrap_err();
+    let meta_error = client
+        .fetch_meta(&base, "series", "panic", |_| {
+            panic!("private metadata processing detail")
+        })
+        .await
+        .unwrap_err();
+    server.join().unwrap();
+    for (resource, type_, error, expected) in [
+        (
+            "catalog",
+            "movie",
+            catalog_error,
+            "Catalog response processing task failed.",
+        ),
+        (
+            "meta",
+            "series",
+            meta_error,
+            "Metadata response processing task failed.",
+        ),
+    ] {
+        assert_eq!(error, expected);
+        let url = build_resource_url(&base, resource, type_, "panic", &[]).unwrap();
+        assert_eq!(
+            client
+                .failure_cache
+                .get(&resource_cache_key(resource, &url)),
+            Some(error)
+        );
+    }
+    assert!(!client.fetch_failures.cooling_down(&hash_segment(&base)));
 }
 
 #[test]
@@ -732,11 +839,30 @@ fn meta_images_and_thumbnails_are_fetch_gated() {
 }
 
 #[test]
-fn artwork_urls_reject_oversized_values_without_truncation() {
+fn artwork_urls_bound_raw_and_canonical_values_without_truncation() {
     let base = "https://cdn.test/image?signature=";
     let prefix = format!("{base}{}", "a".repeat(MAX_STRING_CHARS - base.len()));
-    for url in [&prefix, &format!("{prefix}a")] {
-        let expected = (url == &prefix).then_some(prefix.as_str());
+    for (url, accepted) in [
+        (prefix.clone(), true),
+        (format!("{prefix}a"), true),
+        (format!("{prefix}'"), false),
+        (format!(" {prefix}"), false),
+        (
+            format!(
+                "{base}{}",
+                "a".repeat(MAX_SERIALIZED_IMAGE_URL_CHARS - base.len())
+            ),
+            true,
+        ),
+        (
+            format!(
+                "{base}{}",
+                "a".repeat(MAX_SERIALIZED_IMAGE_URL_CHARS - base.len() + 1)
+            ),
+            false,
+        ),
+    ] {
+        let expected = accepted.then_some(url.as_str());
         let item = catalog_item(serde_json::json!({
             "id": "tt1", "name": "Title", "type": "movie",
             "poster": url, "background": url, "logo": url
@@ -968,11 +1094,13 @@ fn transport_failures_cool_down_and_clear_recovers() {
         .fetch_failures
         .note(&addon_key, &client.generation, 0);
     assert!(client.fetch_failures.cooling_down(&addon_key));
+    assert!(client.meta_is_recent_straggler("https://dead-addon.test", "movie", "tt1"));
 
     // A record written under a superseded generation is dropped: a fetch
     // that outlived a clear_cache must not reinstall the wiped cooldown.
     client.clear_cache();
     assert!(!client.fetch_failures.cooling_down(&addon_key));
+    assert!(!client.meta_is_recent_straggler("https://dead-addon.test", "movie", "tt1"));
     client
         .fetch_failures
         .note(&addon_key, &client.generation, 0);
@@ -986,12 +1114,19 @@ fn transport_failures_cool_down_and_clear_recovers() {
 #[test]
 fn deterministic_failures_negative_cache_until_clear() {
     let client = AddonResourceClient::new();
+    let base = "https://slow-addon.test";
+    client.note_meta_straggler(base, "movie", "tt1", client.cache_generation());
+    assert!(client.meta_is_recent_straggler(base, "movie", "tt1"));
+    assert!(!client.meta_is_recent_straggler(base, "movie", "tt2"));
     client.fetch_contract().cache_failure("meta:x", "boom", 0);
     assert_eq!(client.failure_cache.get("meta:x").as_deref(), Some("boom"));
 
     // Same generation guard as the value caches: a clear_cache mid-fetch
     // revokes the negative-cache write too.
     client.clear_cache();
+    assert!(!client.meta_is_recent_straggler(base, "movie", "tt1"));
+    client.note_meta_straggler(base, "movie", "tt1", 0);
+    assert!(!client.meta_is_recent_straggler(base, "movie", "tt1"));
     assert_eq!(client.failure_cache.get("meta:x"), None);
     client.fetch_contract().cache_failure("meta:x", "boom", 0);
     assert_eq!(client.failure_cache.get("meta:x"), None);

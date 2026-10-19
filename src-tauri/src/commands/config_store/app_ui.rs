@@ -41,6 +41,8 @@ pub struct AppUiPreferences {
     pub trailer_previews: bool,
     /// Opt-in auto-skip of SkipDB intro/recap segments. Off by default — jumping content uninvited is a surprise.
     pub auto_skip_intro: bool,
+    #[serde(default = "automatic_update_checks_default")]
+    pub automatic_update_checks: bool,
     pub close_to_tray: bool,
     pub minimize_to_tray: bool,
     pub start_minimized: bool,
@@ -64,6 +66,7 @@ impl Default for AppUiPreferences {
             controls_hide_delay_ms: CONTROLS_HIDE_DELAY_MS_DEFAULT,
             trailer_previews: true,
             auto_skip_intro: false,
+            automatic_update_checks: true,
             close_to_tray: false,
             minimize_to_tray: false,
             start_minimized: false,
@@ -121,6 +124,7 @@ pub struct AppUiPreferencesPatch {
     pub controls_hide_delay_ms: Option<u32>,
     pub trailer_previews: Option<bool>,
     pub auto_skip_intro: Option<bool>,
+    pub automatic_update_checks: Option<bool>,
     pub close_to_tray: Option<bool>,
     pub minimize_to_tray: Option<bool>,
     pub start_minimized: Option<bool>,
@@ -157,6 +161,8 @@ pub(super) struct StoredAppUiPreferences {
     #[serde(default, deserialize_with = "lenient_option")]
     auto_skip_intro: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
+    automatic_update_checks: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
     close_to_tray: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     minimize_to_tray: Option<bool>,
@@ -168,6 +174,10 @@ pub(super) struct StoredAppUiPreferences {
     last_location: Option<String>,
     #[serde(default, deserialize_with = "lenient_option")]
     player_keybindings: Option<BTreeMap<String, Vec<String>>>,
+}
+
+fn automatic_update_checks_default() -> bool {
+    true
 }
 
 fn normalize_player_volume(value: Option<u32>) -> u32 {
@@ -273,25 +283,18 @@ pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppU
     AppUiPreferences {
         player_volume: normalize_player_volume(Some(preferences.player_volume)),
         player_speed: normalize_player_speed(Some(preferences.player_speed)),
-        spoiler_protection: preferences.spoiler_protection,
         subtitle_delay: normalize_subtitle_delay(Some(preferences.subtitle_delay)),
         subtitle_pos: normalize_subtitle_pos(Some(preferences.subtitle_pos)),
         subtitle_scale: normalize_subtitle_scale(Some(preferences.subtitle_scale)),
-        auto_play_next: preferences.auto_play_next,
         next_episode_countdown_secs: normalize_next_episode_countdown_secs(Some(
             preferences.next_episode_countdown_secs,
         )),
         controls_hide_delay_ms: normalize_controls_hide_delay_ms(Some(
             preferences.controls_hide_delay_ms,
         )),
-        trailer_previews: preferences.trailer_previews,
-        auto_skip_intro: preferences.auto_skip_intro,
-        close_to_tray: preferences.close_to_tray,
-        minimize_to_tray: preferences.minimize_to_tray,
-        start_minimized: preferences.start_minimized,
-        startup_page: preferences.startup_page,
         last_location: normalize_last_location(preferences.last_location),
         player_keybindings: normalize_player_keybindings(preferences.player_keybindings),
+        ..preferences
     }
 }
 
@@ -317,6 +320,9 @@ pub(crate) fn apply_app_ui_preferences_patch(
             .unwrap_or(current.controls_hide_delay_ms),
         trailer_previews: patch.trailer_previews.unwrap_or(current.trailer_previews),
         auto_skip_intro: patch.auto_skip_intro.unwrap_or(current.auto_skip_intro),
+        automatic_update_checks: patch
+            .automatic_update_checks
+            .unwrap_or(current.automatic_update_checks),
         close_to_tray: patch.close_to_tray.unwrap_or(current.close_to_tray),
         minimize_to_tray: patch.minimize_to_tray.unwrap_or(current.minimize_to_tray),
         start_minimized: patch.start_minimized.unwrap_or(current.start_minimized),
@@ -349,6 +355,7 @@ pub(super) fn normalize_stored_app_ui_preferences(
         trailer_previews: preferences.trailer_previews.unwrap_or(true),
         // Opt-in: missing keys on old stores keep auto-skip off.
         auto_skip_intro: preferences.auto_skip_intro.unwrap_or(false),
+        automatic_update_checks: preferences.automatic_update_checks.unwrap_or(true),
         close_to_tray: preferences.close_to_tray.unwrap_or(false),
         minimize_to_tray: preferences.minimize_to_tray.unwrap_or(false),
         start_minimized: preferences.start_minimized.unwrap_or(false),

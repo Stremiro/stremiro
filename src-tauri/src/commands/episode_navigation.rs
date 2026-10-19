@@ -24,6 +24,13 @@ pub(crate) struct NavigationCoordinate {
     release_date: Option<String>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnairedEpisodesRequest {
+    release_dates: Vec<Option<String>>,
+    today: String,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EpisodeNavigation {
@@ -51,6 +58,19 @@ pub(crate) fn coordinate_neighbours<T: Copy>(
     (previous, next)
 }
 
+/// Undated and unparseable release dates count as aired.
+fn is_aired_by(release_date: Option<&str>, today: u32) -> bool {
+    // Normalized release dates are local calendar days, never UTC instants.
+    release_date
+        .and_then(|date| date.trim().get(..10))
+        .and_then(date_ordinal)
+        .is_none_or(|date| date <= today)
+}
+
+fn local_today(today: &str) -> Result<u32, String> {
+    date_ordinal(today).ok_or_else(|| "Invalid local episode date.".to_string())
+}
+
 fn player_episode_navigation(
     episodes: &[NavigationCoordinate],
     current: (u32, u32),
@@ -60,15 +80,7 @@ fn player_episode_navigation(
         coordinate_neighbours(episodes.iter().enumerate(), current, |(_, episode)| {
             (episode.season, episode.episode)
         });
-    // Normalized release dates are local calendar days, never UTC instants.
-    let next = next.filter(|(_, episode)| {
-        episode
-            .release_date
-            .as_deref()
-            .and_then(|date| date.trim().get(..10))
-            .and_then(date_ordinal)
-            .is_none_or(|date| date <= today)
-    });
+    let next = next.filter(|(_, episode)| is_aired_by(episode.release_date.as_deref(), today));
     EpisodeNavigation {
         previous_index: previous.map(|(index, _)| index),
         next_index: next.map(|(index, _)| index),
@@ -82,13 +94,30 @@ pub(crate) fn get_episode_navigation(
     if request.episodes.len() > EPISODE_NAVIGATION_MAX_EPISODES {
         return Err("Too many episodes.".to_string());
     }
-    let today =
-        date_ordinal(&request.today).ok_or_else(|| "Invalid local episode date.".to_string())?;
+    let today = local_today(&request.today)?;
     Ok(player_episode_navigation(
         &request.episodes,
         (request.season, request.episode),
         today,
     ))
+}
+
+/// Indices of episodes that have not aired by the caller's local day.
+#[command]
+pub(crate) fn get_unaired_episode_indices(
+    request: UnairedEpisodesRequest,
+) -> Result<Vec<usize>, String> {
+    if request.release_dates.len() > EPISODE_NAVIGATION_MAX_EPISODES {
+        return Err("Too many episodes.".to_string());
+    }
+    let today = local_today(&request.today)?;
+    Ok(request
+        .release_dates
+        .iter()
+        .enumerate()
+        .filter(|(_, date)| !is_aired_by(date.as_deref(), today))
+        .map(|(index, _)| index)
+        .collect())
 }
 
 // In-process only: never serialized to IPC or persisted, so no serde derives.

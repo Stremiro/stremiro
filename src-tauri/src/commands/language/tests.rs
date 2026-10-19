@@ -1,27 +1,44 @@
 use super::{
     build_mpv_language_selection_options, canonicalize_language_token, canonicalize_language_value,
-    classify_language_token, infer_track_preferred_language, normalize_language_token,
-    resolve_preferred_track_selection, supported_language_options,
-    track_matches_preferred_language, LanguageMatchConfidence, TrackLanguageCandidate,
+    infer_track_preferred_language, normalize_language_token, resolve_preferred_track_selection,
+    supported_language_options, track_matches_preferred_language, TrackLanguageCandidate,
     SUPPORTED_LANGUAGES,
 };
 
 #[test]
-fn classify_language_token_marks_exact_vs_inferred() {
-    let exact = classify_language_token(Some("eng"), false);
-    assert_eq!(exact.normalized.as_deref(), Some("en"));
-    assert_eq!(exact.confidence, Some(LanguageMatchConfidence::Exact));
+fn preferred_language_inputs_are_bounded_before_normalization() {
+    let at_limit = format!("{}en", " ".repeat(super::TRACK_LANG_MAX_CHARS - 2));
+    assert_eq!(
+        normalize_language_token(Some(&at_limit), false).as_deref(),
+        Some("en")
+    );
+    let oversized = format!(" {at_limit}");
+    assert_eq!(normalize_language_token(Some(&oversized), false), None);
+    assert!(super::language_candidates(&oversized).is_empty());
+    assert_eq!(
+        normalize_language_token(Some(&"界".repeat(65)), false),
+        None
+    );
+}
 
-    let inferred = classify_language_token(Some("English Commentary"), false);
-    assert_eq!(inferred.normalized.as_deref(), Some("en"));
-    assert_eq!(inferred.confidence, Some(LanguageMatchConfidence::Inferred));
-
-    let off = classify_language_token(Some("off"), true);
-    assert_eq!(off.confidence, Some(LanguageMatchConfidence::Exact));
-
-    let unknown = classify_language_token(Some("commentary"), true);
-    assert_eq!(unknown.normalized, None);
-    assert_eq!(unknown.confidence, None);
+#[test]
+fn normalize_language_token_handles_whole_values_fallback_and_off() {
+    for (value, allow_off, expected) in [
+        (Some("eng"), false, Some("en")),
+        (Some("pt-BR"), false, Some("pt")),
+        (Some("English Commentary"), false, Some("en")),
+        (Some("Japanese English"), false, Some("ja")),
+        (Some(" OFF "), true, Some("off")),
+        (Some("off"), false, None),
+        (Some("commentary"), true, None),
+        (Some(" "), false, None),
+        (None, false, None),
+    ] {
+        assert_eq!(
+            normalize_language_token(value, allow_off).as_deref(),
+            expected
+        );
+    }
 }
 
 #[test]

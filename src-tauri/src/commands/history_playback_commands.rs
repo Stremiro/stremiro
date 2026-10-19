@@ -169,31 +169,27 @@ fn has_explicit_stream_episode_context(item: &WatchProgress) -> bool {
     item.stream_season.is_some() && item.stream_episode.is_some()
 }
 
-/// Anime items whose media id is outside the tt lookup space can map to different
-/// stream coordinates (legacy kitsu: rows resolve to tt seasons/episodes), so a
-/// saved item with no lookup id cannot treat absolute coords as stream coords.
-fn is_mapped_anime_history_item(item: &WatchProgress) -> bool {
-    normalize_history_media_type(item) == HistoryPlaybackMediaType::Anime
-        && !item.id.trim().starts_with("tt")
+/// Aliased series/anime can map to a different lookup id and source coordinates.
+fn is_mapped_history_item(item: &WatchProgress) -> bool {
+    is_series_like(item) && !item.id.trim().starts_with("tt")
 }
 
 /// WatchProgress-side twin of `episode_navigation::build_source_episode_coordinates`:
-/// the same stream→absolute fold plus anime-mapping deferral (`stream_*` may hold
-/// absolute coords on legacy kitsu rows — such items wait for the episode mapping).
+/// aliases without saved source coordinates wait for their episode mapping.
 fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
     let absolute_season = watch_progress_absolute_season(item);
     let absolute_episode = watch_progress_absolute_episode(item);
-    let should_defer_mapped_anime_coordinates =
-        !has_explicit_stream_episode_context(item) && is_mapped_anime_history_item(item);
+    let should_defer_mapped_coordinates =
+        !has_explicit_stream_episode_context(item) && is_mapped_history_item(item);
     let stream_season = item.stream_season.or({
-        if should_defer_mapped_anime_coordinates {
+        if should_defer_mapped_coordinates {
             None
         } else {
             absolute_season
         }
     });
     let stream_episode = item.stream_episode.or({
-        if should_defer_mapped_anime_coordinates {
+        if should_defer_mapped_coordinates {
             None
         } else {
             absolute_episode
@@ -655,60 +651,98 @@ mod tests {
     }
 
     #[test]
-    fn episode_context_defers_unmapped_anime_stream_coordinates() {
-        let mut item = progress_item("kitsu:42", "anime");
-        item.season = Some(1);
-        item.episode = Some(12);
-        item.absolute_season = Some(1);
-        item.absolute_episode = Some(12);
+    fn episode_context_defers_aliased_series_and_anime_stream_coordinates() {
+        for (id, media_type, encoded_id) in [
+            ("kitsu:42/part%?#", "anime", "kitsu%3A42%2Fpart%25%3F%23"),
+            (
+                "catalog:42/part%?#",
+                "series",
+                "catalog%3A42%2Fpart%25%3F%23",
+            ),
+        ] {
+            let mut item = progress_item(id, media_type);
+            item.season = Some(1);
+            item.episode = Some(12);
+            item.absolute_season = Some(1);
+            item.absolute_episode = Some(12);
 
-        let context = get_episode_context(&item);
+            let context = get_episode_context(&item);
 
-        assert_eq!(context.absolute_season, Some(1));
-        assert_eq!(context.absolute_episode, Some(12));
-        assert_eq!(context.stream_season, None);
-        assert_eq!(context.stream_episode, None);
-        let plan = build_player_plan(&item, None, context_for(&item));
-        assert!(serde_json::to_value(&plan)
-            .unwrap()
-            .get("warmResolveRequest")
-            .is_none());
+            assert_eq!(context.absolute_season, Some(1));
+            assert_eq!(context.absolute_episode, Some(12));
+            assert_eq!(context.stream_season, None);
+            assert_eq!(context.stream_episode, None);
+            assert!(has_episode_context(&item));
+            let plan = build_player_plan(&item, None, context_for(&item));
+            assert!(serde_json::to_value(&plan)
+                .unwrap()
+                .get("warmResolveRequest")
+                .is_none());
 
-        item.id = "kitsu:42/part%?#".to_string();
-        let plan = build_player_plan(
-            &item,
-            None,
-            ResolvedHistoryEpisodeContext {
-                absolute_season: Some(1),
-                absolute_episode: Some(12),
-                stream_season: Some(2),
-                stream_episode: Some(3),
-                stream_lookup_id: "tt7654321".to_string(),
-            },
-        );
-        assert_eq!(plan.target, "/player/anime/kitsu%3A42%2Fpart%25%3F%23/1/12");
-        assert_eq!(
-            serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
-            serde_json::json!({
-                "mediaType": "anime", "mediaId": "kitsu:42/part%?#",
-                "streamLookupId": "tt7654321", "streamSeason": 2, "streamEpisode": 3,
-                "absoluteSeason": 1, "absoluteEpisode": 12,
-                "title": "Example", "preferred": {},
-            })
-        );
+            let plan = build_player_plan(
+                &item,
+                None,
+                ResolvedHistoryEpisodeContext {
+                    absolute_season: Some(1),
+                    absolute_episode: Some(12),
+                    stream_season: Some(2),
+                    stream_episode: Some(3),
+                    stream_lookup_id: "tt7654321".to_string(),
+                },
+            );
+            assert_eq!(
+                plan.target,
+                format!("/player/{media_type}/{encoded_id}/1/12")
+            );
+            assert_eq!(plan.state.stream_lookup_id.as_deref(), Some("tt7654321"));
+            assert_eq!(plan.state.stream_season, Some(2));
+            assert_eq!(plan.state.stream_episode, Some(3));
+            assert_eq!(plan.state.selected_stream_key, None);
+            assert_eq!(plan.state.stream_source_id, None);
+            assert_eq!(plan.state.start_time, None);
+            assert_eq!(
+                serde_json::to_value(&plan).unwrap()["warmResolveRequest"],
+                serde_json::json!({
+                    "mediaType": media_type, "mediaId": id,
+                    "streamLookupId": "tt7654321", "streamSeason": 2, "streamEpisode": 3,
+                    "absoluteSeason": 1, "absoluteEpisode": 12,
+                    "title": "Example", "preferred": {},
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn episode_context_preserves_saved_alias_source_coordinates() {
+        for (id, media_type) in [("catalog:42", "series"), ("kitsu:42", "anime")] {
+            let mut item = progress_item(id, media_type);
+            item.absolute_season = Some(1);
+            item.absolute_episode = Some(12);
+            item.stream_season = Some(2);
+            item.stream_episode = Some(3);
+            item.last_stream_lookup_id = Some("tt7654321".to_string());
+
+            let plan = build_player_plan(&item, None, context_for(&item));
+            assert_eq!(plan.state.stream_lookup_id.as_deref(), Some("tt7654321"));
+            assert_eq!(plan.state.stream_season, Some(2));
+            assert_eq!(plan.state.stream_episode, Some(3));
+        }
     }
 
     #[test]
     fn episode_context_resolves_tt_coordinates_directly() {
-        let mut item = progress_item("tt9", "series");
-        item.season = Some(1);
-        item.episode = Some(5);
+        for media_type in ["series", "anime"] {
+            let mut item = progress_item("tt9", media_type);
+            item.season = Some(1);
+            item.episode = Some(5);
 
-        let context = get_episode_context(&item);
+            let context = get_episode_context(&item);
 
-        assert_eq!(context.absolute_season, Some(1));
-        assert_eq!(context.absolute_episode, Some(5));
-        assert_eq!(context.stream_season, Some(1));
-        assert_eq!(context.stream_episode, Some(5));
+            assert_eq!(context.absolute_season, Some(1));
+            assert_eq!(context.absolute_episode, Some(5));
+            assert_eq!(context.stream_season, Some(1));
+            assert_eq!(context.stream_episode, Some(5));
+            assert_eq!(context_for(&item).stream_lookup_id, "tt9");
+        }
     }
 }

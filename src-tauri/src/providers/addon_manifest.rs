@@ -435,7 +435,9 @@ pub(crate) async fn fetch_addon_manifest_snapshot(
     .await
     .map_err(|error| error.into_message())?;
 
-    parse_addon_manifest_checked(&bytes, require_configured)
+    tokio::task::spawn_blocking(move || parse_addon_manifest_checked(&bytes, require_configured))
+        .await
+        .map_err(|_| "Addon manifest response processing task failed.".to_string())?
 }
 
 #[cfg(test)]

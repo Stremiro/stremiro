@@ -31,6 +31,41 @@ pub struct AddonConfig {
     pub capabilities: Option<AddonManifest>,
 }
 
+#[derive(Deserialize)]
+struct AddonConfigIdentity {
+    id: String,
+    url: String,
+    name: String,
+    enabled: bool,
+}
+
+impl From<AddonConfigIdentity> for AddonConfig {
+    fn from(identity: AddonConfigIdentity) -> Self {
+        Self {
+            id: identity.id,
+            url: identity.url,
+            name: identity.name,
+            enabled: identity.enabled,
+            capabilities: None,
+        }
+    }
+}
+
+impl AddonConfig {
+    pub(crate) fn load_identities(store: &DurableStore) -> Vec<Self> {
+        let configs = store.with_value(ADDON_CONFIGS_KEY, |value| {
+            value
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|value| AddonConfigIdentity::deserialize(value).ok())
+                .map(Self::from)
+                .collect()
+        });
+        resolve_addon_configs(Some(configs))
+    }
+}
+
 /// IPC view of an [`AddonConfig`]: `display_url` is the credential-masked URL computed
 /// by the same `sanitize_addon_log` pipeline that guards logs — one redaction
 /// implementation so a renderer-side masker can't drift and leak a user key.
@@ -174,14 +209,22 @@ fn normalize_loaded_addon_config(mut config: AddonConfig) -> Option<AddonConfig>
     Some(config)
 }
 
-pub(crate) fn parse_stored_addon_configs(value: Value) -> Vec<AddonConfig> {
-    match value {
-        Value::Array(items) => items
-            .into_iter()
-            .filter_map(|item| serde_json::from_value::<AddonConfig>(item).ok())
-            .collect(),
-        _ => Vec::new(),
-    }
+pub(crate) fn parse_stored_addon_configs(value: &Value) -> Vec<AddonConfig> {
+    value
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            if !item.is_object() {
+                return AddonConfig::deserialize(item).ok();
+            }
+            let mut config = AddonConfig::from(AddonConfigIdentity::deserialize(item).ok()?);
+            config.capabilities = item
+                .get("capabilities")
+                .and_then(|value| AddonManifest::deserialize(value).ok());
+            Some(config)
+        })
+        .collect()
 }
 
 fn normalize_loaded_addon_configs(configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
@@ -261,12 +304,10 @@ pub(crate) fn resolve_addon_configs(stored_configs: Option<Vec<AddonConfig>>) ->
 }
 
 pub(crate) fn load_addon_configs(store: &DurableStore) -> Vec<AddonConfig> {
-    if let Some(value) = store.get(ADDON_CONFIGS_KEY) {
-        let stored_configs = parse_stored_addon_configs(value);
-        return resolve_addon_configs(Some(stored_configs));
-    }
-
-    resolve_addon_configs(None)
+    let stored_configs = store.with_value(ADDON_CONFIGS_KEY, |value| {
+        value.map(parse_stored_addon_configs)
+    });
+    resolve_addon_configs(stored_configs)
 }
 
 pub(crate) fn save_addon_configs_to_store(store: &DurableStore, configs: &[AddonConfig]) {

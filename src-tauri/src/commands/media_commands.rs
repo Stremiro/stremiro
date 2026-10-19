@@ -10,6 +10,7 @@ use super::{
         build_title_watch_progress_with_priorities, load_entries_with_source_health,
         TitleWatchProgress,
     },
+    JS_WHITESPACE,
 };
 use crate::providers::{
     addon_resource::{meta_for_shape, AddonResourceClient},
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
-use tauri::{command, AppHandle, State};
+use tauri::{command, AppHandle, Manager, State};
 
 const MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT: usize = 6;
 // Per-burst bound on schedule fetches — every item fans out to a full meta fetch.
@@ -33,13 +34,10 @@ const MEDIA_SCHEDULE_FETCH_DEADLINE: Duration = Duration::from_secs(90);
 
 const EPISODE_SEARCH_MAX_EPISODES: usize = 2_000;
 const EPISODE_SEARCH_MAX_CHARS: usize = 4_096;
-// ECMAScript trim/\s excludes U+0085 and includes U+FEFF, unlike Rust whitespace.
-const EPISODE_SEARCH_WHITESPACE: &str =
-    "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d} \u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
 static EPISODE_SEARCH_COORDINATES: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!(
         r"^(?:s([0-9]+)[{space}]*e([0-9]+)|([0-9]+)[{space}]*x[{space}]*([0-9]+)|(?:e|ep|episode)[{space}]*([0-9]+))\z",
-        space = EPISODE_SEARCH_WHITESPACE,
+        space = JS_WHITESPACE,
     ))
     .expect("valid episode search regex")
 });
@@ -54,9 +52,7 @@ pub(crate) struct EpisodeSearchFields {
 }
 
 fn episode_search_indices(query: &str, episodes: &[EpisodeSearchFields]) -> Vec<u32> {
-    let query = query
-        .trim_matches(|character| EPISODE_SEARCH_WHITESPACE.contains(character))
-        .to_lowercase();
+    let query = js_trim(query).to_lowercase();
     if query.is_empty() {
         return (0..episodes.len() as u32).collect();
     }
@@ -84,13 +80,14 @@ fn episode_search_indices(query: &str, episodes: &[EpisodeSearchFields]) -> Vec<
                 .ok()?;
             Some((Some(season), episode))
         });
+    let numeric_query = query.bytes().all(|byte| byte.is_ascii_digit());
     episodes
         .iter()
         .enumerate()
         .filter_map(|(index, episode)| {
             (coordinates.is_some_and(|(season, number)| {
                 episode.episode == number && season.is_none_or(|season| episode.season == season)
-            }) || episode.episode.to_string().contains(&query)
+            }) || (numeric_query && episode.episode.to_string().contains(&query))
                 || episode
                     .title
                     .as_ref()
@@ -427,6 +424,15 @@ pub(crate) async fn fetch_media_schedules(
     client: &AddonResourceClient,
     items: Vec<MediaScheduleRequest>,
 ) -> Result<Vec<MediaSchedule>, String> {
+    fetch_media_schedules_with_response_timeout(app, client, items, None).await
+}
+
+pub(crate) async fn fetch_media_schedules_with_response_timeout(
+    app: &AppHandle,
+    client: &AddonResourceClient,
+    items: Vec<MediaScheduleRequest>,
+    response_timeout: Option<Duration>,
+) -> Result<Vec<MediaSchedule>, String> {
     // Dedupe fetches on the canonical key, but remember every caller's raw type —
     // the frontend indexes by its own request pair and a `series`+kitsu request
     // normalizes to `anime`, so one fetch must echo a schedule per raw requester.
@@ -463,7 +469,8 @@ pub(crate) async fn fetch_media_schedules(
 
     let mut schedules = Vec::new();
     let mut errors = Vec::new();
-    let deadline_at = tokio::time::Instant::now() + MEDIA_SCHEDULE_FETCH_DEADLINE;
+    let deadline_at =
+        tokio::time::Instant::now() + response_timeout.unwrap_or(MEDIA_SCHEDULE_FETCH_DEADLINE);
     let deadline = tokio::time::sleep_until(deadline_at);
     tokio::pin!(deadline);
 
@@ -474,7 +481,24 @@ pub(crate) async fn fetch_media_schedules(
         }
         let mut pending = stream::iter(chunk.iter_mut().map(std::mem::take).enumerate().map(
             |(index, (request_types, media_type, id))| async move {
-                let outcome = fetch_media_schedule_inner(app, client, &media_type, &id).await;
+                let outcome = if response_timeout.is_some() {
+                    // Dropping the join handle at the response cutoff keeps only started
+                    // fetches alive to warm the generation-checked metadata cache.
+                    let app = app.clone();
+                    tauri::async_runtime::spawn(async move {
+                        let client = app.state::<AddonResourceClient>();
+                        tokio::time::timeout(
+                            MEDIA_SCHEDULE_FETCH_DEADLINE,
+                            fetch_media_schedule_inner(&app, client.inner(), &media_type, &id),
+                        )
+                        .await
+                        .unwrap_or_else(|_| Err("Schedule metadata request timed out.".to_string()))
+                    })
+                    .await
+                    .unwrap_or_else(|_| Err("Schedule metadata task failed.".to_string()))
+                } else {
+                    fetch_media_schedule_inner(app, client, &media_type, &id).await
+                };
 
                 (index, request_types, outcome)
             },

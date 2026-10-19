@@ -3,7 +3,9 @@ use super::episode_navigation::coordinate_neighbours;
 use super::history_helpers::{
     is_series_like_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
 };
-use super::media_commands::{fetch_media_schedules, MediaSchedule, MediaScheduleRequest};
+use super::media_commands::{
+    fetch_media_schedules_with_response_timeout, MediaSchedule, MediaScheduleRequest,
+};
 use super::playback_state::PlaybackStateService;
 use super::store_helpers::load_watch_statuses_map;
 use super::watch_history_commands::{
@@ -13,6 +15,7 @@ use super::{now_unix_millis, WatchProgress};
 use crate::providers::addon_resource::AddonResourceClient;
 use serde::Serialize;
 use std::collections::{HashMap, HashSet};
+use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{command, AppHandle, State};
 
@@ -38,6 +41,7 @@ pub struct ResumeRailEntry<T = WatchProgress> {
 /// A successor episode badges "New episode" for a week past its air date.
 const NEW_EPISODE_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 7;
 const MS_PER_DAY: u64 = 86_400_000;
+const UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(crate) fn build_up_next_entries(
     sources: Vec<WatchProgress>,
@@ -47,16 +51,16 @@ pub(crate) fn build_up_next_entries(
     now_ms: u64,
 ) -> Vec<UpNextCandidate> {
     let today_ordinal = date_ordinal(local_today);
-    let schedules_by_id: HashMap<&str, &MediaSchedule> = schedules
+    let schedules_by_title: HashMap<(&str, &str), &MediaSchedule> = schedules
         .iter()
-        .map(|schedule| (schedule.id.as_str(), schedule))
+        .map(|schedule| ((schedule.type_.as_str(), schedule.id.as_str()), schedule))
         .collect();
     sources
         .into_iter()
         .filter_map(|mut source| {
             let season = watch_progress_absolute_season(&source)?;
             let episode = watch_progress_absolute_episode(&source)?;
-            let schedule = schedules_by_id.get(source.id.as_str())?;
+            let schedule = schedules_by_title.get(&(source.type_.as_str(), source.id.as_str()))?;
             let (_, next) = coordinate_neighbours(
                 schedule
                     .episodes
@@ -107,11 +111,13 @@ pub(crate) fn build_resume_rail(
     continue_watching: Vec<WatchProgress>,
     mut up_next: Vec<UpNextCandidate>,
 ) -> Vec<ResumeRailEntry> {
-    let resumable: HashSet<&str> = continue_watching
+    let resumable: HashSet<(&str, &str)> = continue_watching
         .iter()
-        .map(|row| row.id.as_str())
+        .map(|row| (row.type_.as_str(), row.id.as_str()))
         .collect();
-    up_next.retain(|candidate| !resumable.contains(candidate.row.id.as_str()));
+    up_next.retain(|candidate| {
+        !resumable.contains(&(candidate.row.type_.as_str(), candidate.row.id.as_str()))
+    });
     up_next.sort_by_key(|candidate| std::cmp::Reverse(candidate.row.last_watched));
     let capacity = continue_watching.len() + up_next.len();
     let mut up_next = up_next.into_iter().peekable();
@@ -152,7 +158,13 @@ async fn build_up_next_for_sources(
             id: source.id.clone(),
         })
         .collect();
-    let schedules = fetch_media_schedules(app, client, requests).await?;
+    let schedules = fetch_media_schedules_with_response_timeout(
+        app,
+        client,
+        requests,
+        Some(UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT),
+    )
+    .await?;
     Ok(build_up_next_entries(
         sources,
         schedules,

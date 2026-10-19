@@ -96,7 +96,12 @@ fn normalize_stream_family_component(value: &str) -> Option<String> {
 #[cfg(test)]
 pub(crate) fn derive_stream_family(stream: &AddonStream, source_id: &str) -> Option<String> {
     let source_key = stream_family_source_key(source_id)?;
-    Some(derive_stream_family_normalized(stream, &source_key))
+    let has_http_url = stream.url.as_deref().and_then(parse_http_url).is_some();
+    Some(derive_stream_family_normalized(
+        stream,
+        &source_key,
+        stream_delivery_kind(stream, has_http_url),
+    ))
 }
 
 fn stream_family_source_key(source_id: &str) -> Option<String> {
@@ -123,7 +128,11 @@ pub(crate) fn is_current_stream_family(value: &str) -> bool {
 }
 
 /// Source digest is constant across the batch and never exposes credential-bearing addon ids.
-fn derive_stream_family_normalized(stream: &AddonStream, source_key: &str) -> String {
+fn derive_stream_family_normalized(
+    stream: &AddonStream,
+    source_key: &str,
+    delivery_kind: StreamDeliveryKind,
+) -> String {
     if let Some(binge_group) = stream
         .behavior_hints
         .as_ref()
@@ -143,7 +152,7 @@ fn derive_stream_family_normalized(stream: &AddonStream, source_key: &str) -> St
 
     hint.map_or_else(
         || {
-            let delivery = match stream_delivery_kind(stream) {
+            let delivery = match delivery_kind {
                 StreamDeliveryKind::Cached => "cached",
                 StreamDeliveryKind::Http => "http",
                 StreamDeliveryKind::PeerToPeer => "p2p",
@@ -166,9 +175,9 @@ fn stream_family(source_key: &str, kind: &str, component: &str) -> String {
     }
 }
 
-fn stream_delivery_kind(stream: &AddonStream) -> StreamDeliveryKind {
+fn stream_delivery_kind(stream: &AddonStream, has_http_url: bool) -> StreamDeliveryKind {
     // Without a direct HTTP URL the row resolves as P2P whatever the `cached` hint claims.
-    if !stream.url.as_deref().is_some_and(is_http_url) {
+    if !has_http_url {
         StreamDeliveryKind::PeerToPeer
     } else if stream.cached {
         StreamDeliveryKind::Cached
@@ -177,7 +186,21 @@ fn stream_delivery_kind(stream: &AddonStream) -> StreamDeliveryKind {
     }
 }
 
-pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
+/// Covers percent-encoding of every accepted 2,048-character ingress URL.
+pub(crate) const PLAYBACK_URL_MAX_BYTES: usize = 32 * 1024;
+
+pub(crate) fn parse_playback_url(input: &str) -> Option<reqwest::Url> {
+    if input.len() > PLAYBACK_URL_MAX_BYTES {
+        return None;
+    }
+    let parsed = reqwest::Url::parse(input).ok()?;
+    (parsed.as_str().len() <= PLAYBACK_URL_MAX_BYTES
+        && matches!(parsed.scheme(), "http" | "https")
+        && parsed.has_host())
+    .then_some(parsed)
+}
+
+fn parse_http_url(input: &str) -> Option<reqwest::Url> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return None;
@@ -185,21 +208,23 @@ pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
 
     let parsed = reqwest::Url::parse(trimmed).ok()?;
     match parsed.scheme() {
-        "http" | "https" => Some(parsed.to_string()),
+        "http" | "https" => Some(parsed),
         _ => None,
     }
 }
 
-pub(crate) fn is_http_url(input: &str) -> bool {
-    // Scheme probe only — `normalize_http_url` would allocate a String per call just to drop it.
-    let trimmed = input.trim();
-    !trimmed.is_empty()
-        && reqwest::Url::parse(trimmed)
-            .ok()
-            .is_some_and(|parsed| matches!(parsed.scheme(), "http" | "https"))
+#[cfg(test)]
+pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
+    parse_http_url(input).map(|parsed| parsed.to_string())
 }
 
+#[cfg(test)]
 pub(crate) fn has_playable_stream_source(stream: &AddonStream) -> bool {
+    let has_http_url = stream.url.as_deref().and_then(parse_http_url).is_some();
+    has_playable_stream_source_with_http(stream, has_http_url)
+}
+
+fn has_playable_stream_source_with_http(stream: &AddonStream, has_http_url: bool) -> bool {
     if stream.info_hash.as_deref().is_some_and(non_blank) {
         return true;
     }
@@ -212,7 +237,7 @@ pub(crate) fn has_playable_stream_source(stream: &AddonStream) -> bool {
     if is_magnet_url(url) {
         return true;
     }
-    is_http_url(url)
+    has_http_url
 }
 
 pub(crate) fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
@@ -244,6 +269,13 @@ fn stream_hash_dedup_key(hash: String, file_idx: Option<u32>) -> String {
 }
 
 pub(crate) fn stream_dedup_key(stream: &AddonStream) -> Option<String> {
+    stream_content_hash_key(stream).or_else(|| {
+        let parsed = stream.url.as_deref().and_then(parse_http_url)?;
+        Some(stream_http_dedup_key(parsed, stream.file_idx))
+    })
+}
+
+fn stream_content_hash_key(stream: &AddonStream) -> Option<String> {
     if let Some(hash) = stream
         .info_hash
         .as_deref()
@@ -256,23 +288,22 @@ pub(crate) fn stream_dedup_key(stream: &AddonStream) -> Option<String> {
 
     // Magnet-only streams (URL but no `info_hash` — allowed by the addon spec) reuse the
     // `xt` hash as the `h:` identity so they dedupe against field-carrying duplicates.
-    if let Some(hash) = stream.url.as_deref().and_then(magnet_xt_hash) {
-        return Some(stream_hash_dedup_key(hash, stream.file_idx));
-    }
-
-    // URL variants of one file dedupe together; distinct file_idx stay separate. The URL is
-    // hashed — `stream_key` is webview-facing/persisted and may carry signed-query credentials.
     stream
         .url
         .as_deref()
-        .and_then(normalize_stream_dedup_url)
-        .map(|url| {
-            format!(
-                "uh:{:016x}:{}",
-                stream_url_key_digest(&url),
-                stream.file_idx.unwrap_or(0)
-            )
-        })
+        .and_then(magnet_xt_hash)
+        .map(|hash| stream_hash_dedup_key(hash, stream.file_idx))
+}
+
+fn stream_http_dedup_key(parsed: reqwest::Url, file_idx: Option<u32>) -> String {
+    // URL variants of one file dedupe together; distinct file_idx stay separate. The URL is
+    // hashed — `stream_key` is webview-facing/persisted and may carry signed-query credentials.
+    let url = normalize_stream_dedup_url(parsed);
+    format!(
+        "uh:{:016x}:{}",
+        stream_url_key_digest(&url),
+        file_idx.unwrap_or(0)
+    )
 }
 
 /// `xt` content hash from a `magnet:` URL (`urn:btih:`/`urn:btmh:`), lowercased.
@@ -307,16 +338,8 @@ fn stream_url_key_digest(normalized_url: &str) -> u64 {
 }
 
 /// Canonical stream-URL form for dedup: lowercase host, sorted query (tracking keys dropped),
-/// credentials/fragment cleared. `None` for unparseable URLs — never key on raw attacker bytes.
-fn normalize_stream_dedup_url(raw: &str) -> Option<String> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let mut parsed = reqwest::Url::parse(trimmed).ok()?;
-    if !matches!(parsed.scheme(), "http" | "https") {
-        return None;
-    }
+/// credentials/fragment cleared. The caller supplies a validated HTTP URL.
+fn normalize_stream_dedup_url(mut parsed: reqwest::Url) -> String {
     parsed.set_username("").ok();
     parsed.set_password(None).ok();
     parsed.set_fragment(None);
@@ -346,7 +369,7 @@ fn normalize_stream_dedup_url(raw: &str) -> Option<String> {
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
-    Some(parsed.to_string())
+    parsed.to_string()
 }
 
 /// Resolution points for the composite quality score (`StreamMatchText::flags` classifier).
@@ -525,7 +548,11 @@ fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, boo
     )
 }
 
-fn build_stream_presentation(stream: &AddonStream, raw_text: &mut String) -> StreamPresentation {
+fn build_stream_presentation(
+    stream: &AddonStream,
+    raw_text: &mut String,
+    delivery_kind: StreamDeliveryKind,
+) -> StreamPresentation {
     let (raw_source_name, raw_stream_title) = get_display_lines(stream);
     let source_name = strip_display_pictographs(raw_source_name);
     let stream_title = match strip_display_pictographs(&raw_stream_title) {
@@ -543,7 +570,6 @@ fn build_stream_presentation(stream: &AddonStream, raw_text: &mut String) -> Str
 
     let is_dts = !flags.dts_hd && flags.dts;
     let (is_dual_audio, is_multi_audio) = stream_audio_evidence(stream, flags);
-    let delivery_kind = stream_delivery_kind(stream);
 
     StreamPresentation {
         source_name: if source_name.is_empty() {
@@ -556,44 +582,44 @@ fn build_stream_presentation(stream: &AddonStream, raw_text: &mut String) -> Str
         delivery_kind,
         delivery_label: match delivery_kind {
             // Wire `cached` flag carries no resolver-service identity — never a branded badge.
-            StreamDeliveryKind::Cached => "Cached".to_string(),
-            StreamDeliveryKind::Http => "HTTP".to_string(),
-            StreamDeliveryKind::PeerToPeer => "P2P".to_string(),
+            StreamDeliveryKind::Cached => "Cached",
+            StreamDeliveryKind::Http => "HTTP",
+            StreamDeliveryKind::PeerToPeer => "P2P",
         },
         is_instantly_playable: !matches!(delivery_kind, StreamDeliveryKind::PeerToPeer),
         hdr_label: if flags.dolby_vision {
-            Some("DV".to_string())
+            Some("DV")
         } else if flags.hdr10_plus {
-            Some("HDR10+".to_string())
+            Some("HDR10+")
         } else if flags.hdr {
-            Some("HDR".to_string())
+            Some("HDR")
         } else {
             None
         },
         audio_label: if flags.atmos {
-            Some("Atmos".to_string())
+            Some("Atmos")
         } else if flags.dts_hd {
-            Some("DTS-HD".to_string())
+            Some("DTS-HD")
         } else if is_dts {
-            Some("DTS".to_string())
+            Some("DTS")
         } else if flags.eac3 {
-            Some("DD+".to_string())
+            Some("DD+")
         } else if flags.aac {
-            Some("AAC".to_string())
+            Some("AAC")
         } else {
             None
         },
         codec_label: if flags.av1 {
-            Some("AV1".to_string())
+            Some("AV1")
         } else if flags.hevc {
-            Some("HEVC".to_string())
+            Some("HEVC")
         } else {
             None
         },
         multi_audio_label: if is_multi_audio {
-            Some("MULTI".to_string())
+            Some("MULTI")
         } else if is_dual_audio {
-            Some("DUAL".to_string())
+            Some("DUAL")
         } else {
             None
         },
@@ -603,37 +629,40 @@ fn build_stream_presentation(stream: &AddonStream, raw_text: &mut String) -> Str
 }
 
 pub(crate) fn prepare_addon_streams(
-    streams: Vec<AddonStream>,
+    mut streams: Vec<AddonStream>,
     source_name: &str,
     source_id: &str,
 ) -> Vec<AddonStream> {
     let source_key = stream_family_source_key(source_id);
-    let mut prepared = Vec::with_capacity(streams.len());
     let mut raw_text = String::new();
 
-    for mut stream in streams {
+    streams.retain_mut(|stream| {
+        let http_url = stream.url.as_deref().and_then(parse_http_url);
         // Playable-source probe first — the placeholder test allocates lowered match texts.
-        if !has_playable_stream_source(&stream) || is_placeholder_no_stream(&stream) {
-            continue;
+        if !has_playable_stream_source_with_http(stream, http_url.is_some())
+            || is_placeholder_no_stream(stream)
+        {
+            return false;
         }
+        let delivery_kind = stream_delivery_kind(stream, http_url.is_some());
 
         // The prepared key doubles as the opaque `stream_key` used by selector picks,
         // saved-stream resume, and recovery exclusion.
-        let Some(dedup_key) = prepared_stream_key(&stream, source_id) else {
-            continue;
+        let Some(dedup_key) = prepared_stream_key(stream, source_id, http_url) else {
+            return false;
         };
 
         stream.source_name = Some(source_name.to_string());
         stream.source_id = Some(source_id.to_string());
         stream.stream_family = source_key
             .as_deref()
-            .map(|source| derive_stream_family_normalized(&stream, source));
+            .map(|source| derive_stream_family_normalized(stream, source, delivery_kind));
         stream.stream_key = dedup_key;
-        stream.presentation = build_stream_presentation(&stream, &mut raw_text);
-        prepared.push(stream);
-    }
+        stream.presentation = build_stream_presentation(stream, &mut raw_text, delivery_kind);
+        true
+    });
 
-    prepared
+    streams
 }
 
 pub(crate) fn canonicalize_header_identity(headers: &mut [(String, String)]) {
@@ -646,9 +675,14 @@ pub(crate) fn canonicalize_header_identity(headers: &mut [(String, String)]) {
 /// Prepared identity key: content identity + source + transport shape (direct URL, request
 /// headers), hashed so `stream_key` stays opaque — URLs may carry signed credentials and
 /// header values are secrets. Same addon + same transport dedupes; anything else does not.
-fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> {
-    let content_key = stream_dedup_key(stream)?;
-    let direct_url = stream.url.as_deref().and_then(normalize_http_url);
+fn prepared_stream_key(
+    stream: &AddonStream,
+    source_id: &str,
+    http_url: Option<reqwest::Url>,
+) -> Option<String> {
+    let direct_url = http_url.as_ref().map(|parsed| parsed.as_str().to_string());
+    let content_key = stream_content_hash_key(stream)
+        .or_else(|| http_url.map(|parsed| stream_http_dedup_key(parsed, stream.file_idx)))?;
     let mut headers = stream.request_headers();
     canonicalize_header_identity(&mut headers);
     let mut hasher = Sha256::new();
@@ -659,6 +693,23 @@ fn prepared_stream_key(stream: &AddonStream, source_id: &str) -> Option<String> 
 /// Prepared selector key (`s:{sha256}`) — the form fresh resume rows persist.
 pub(crate) fn is_prepared_stream_key(key: &str) -> bool {
     key.starts_with("s:")
+}
+
+/// Validate IPC identities without changing legacy resume-key matching.
+pub(crate) fn normalize_stream_key(input: &str) -> Option<String> {
+    if input.chars().nth(STREAM_KEY_MAX_CHARS).is_some() {
+        return None;
+    }
+    let key = input.trim();
+    if is_prepared_stream_key(key) {
+        let digest = &key[2..];
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+    } else if !is_legacy_content_key(key) {
+        return None;
+    }
+    Some(key.to_string())
 }
 
 /// Legacy `h:`/`uh:` dedup-key forms persisted before prepared keys existed.
@@ -684,23 +735,17 @@ pub(crate) fn push_bounded_error(errors: &mut Vec<String>, error: impl Into<Stri
     }
 }
 
-impl From<&AddonStream> for AddonStream {
-    fn from(stream: &AddonStream) -> Self {
-        stream.clone()
-    }
-}
-
-pub(crate) fn merge_unique_streams<S: std::borrow::Borrow<AddonStream> + Into<AddonStream>>(
+pub(crate) fn merge_unique_streams(
     merged: &mut Vec<AddonStream>,
     seen: &mut std::collections::HashSet<String>,
-    streams: impl IntoIterator<Item = S>,
+    streams: impl IntoIterator<Item = AddonStream>,
 ) {
     for stream in streams {
         // `prepare_addon_streams` already keyed the stream; recompute nothing.
-        let key = &stream.borrow().stream_key;
+        let key = &stream.stream_key;
         if !key.is_empty() && !seen.contains(key) {
             seen.insert(key.clone());
-            merged.push(stream.into());
+            merged.push(stream);
         }
     }
 }

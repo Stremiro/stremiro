@@ -168,7 +168,43 @@ pub(crate) struct AddonTransport {
     /// Short-TTL negative cache for deterministic per-request failures
     /// (status, size-limit, decode) — a content 404 must not mark the addon dead.
     failure_cache: TtlCache<String>,
-    refresh_claims: Mutex<HashMap<String, Instant>>,
+    refresh_claims: Mutex<HashMap<String, StreamRefreshState>>,
+    refresh_claim_seq: AtomicU64,
+}
+
+struct StreamRefreshState {
+    claim_id: u64,
+    completed_at: Option<Instant>,
+}
+
+pub(crate) struct StreamRefreshClaim<'a> {
+    transport: &'a AddonTransport,
+    key: String,
+    claim_id: u64,
+}
+
+impl StreamRefreshClaim<'_> {
+    pub(crate) fn complete(self) {
+        let mut claims = lock_or_recover(&self.transport.refresh_claims);
+        if let Some(claim) = claims
+            .get_mut(&self.key)
+            .filter(|claim| claim.claim_id == self.claim_id)
+        {
+            claim.completed_at = Some(Instant::now());
+        }
+    }
+}
+
+impl Drop for StreamRefreshClaim<'_> {
+    fn drop(&mut self) {
+        let mut claims = lock_or_recover(&self.transport.refresh_claims);
+        if claims
+            .get(&self.key)
+            .is_some_and(|claim| claim.claim_id == self.claim_id && claim.completed_at.is_none())
+        {
+            claims.remove(&self.key);
+        }
+    }
 }
 
 impl AddonTransport {
@@ -259,6 +295,7 @@ impl AddonTransport {
                 STREAM_CACHE_EMPTY_TTL,
             ),
             refresh_claims: Mutex::new(HashMap::new()),
+            refresh_claim_seq: AtomicU64::new(0),
         }
     }
 
@@ -290,24 +327,38 @@ impl AddonTransport {
         self.failure_cache.purge_expired();
     }
 
-    pub(crate) fn claim_stream_refresh(&self, key: &str) -> bool {
+    pub(crate) fn claim_stream_refresh(&self, key: &str) -> Option<StreamRefreshClaim<'_>> {
         let mut claims = lock_or_recover(&self.refresh_claims);
         let now = Instant::now();
-        claims.retain(|_, claimed_at| now.duration_since(*claimed_at) < STREAM_CACHE_TTL);
+        claims.retain(|_, claim| {
+            claim
+                .completed_at
+                .is_none_or(|completed_at| now.duration_since(completed_at) < STREAM_CACHE_TTL)
+        });
         if claims.contains_key(key) {
-            return false;
+            return None;
         }
         if claims.len() >= STREAM_REFRESH_CLAIMS_MAX {
-            if let Some(oldest) = claims
+            let oldest = claims
                 .iter()
-                .min_by_key(|(_, claimed_at)| **claimed_at)
-                .map(|(key, _)| key.clone())
-            {
-                claims.remove(&oldest);
-            }
+                .filter_map(|(key, claim)| claim.completed_at.map(|at| (key, at)))
+                .min_by_key(|(_, completed_at)| *completed_at)
+                .map(|(key, _)| key.clone())?;
+            claims.remove(&oldest);
         }
-        claims.insert(key.to_string(), now);
-        true
+        let claim_id = self.refresh_claim_seq.fetch_add(1, Ordering::Relaxed);
+        claims.insert(
+            key.to_string(),
+            StreamRefreshState {
+                claim_id,
+                completed_at: None,
+            },
+        );
+        Some(StreamRefreshClaim {
+            transport: self,
+            key: key.to_string(),
+            claim_id,
+        })
     }
 
     /// Generation snapshot for operations whose late write-back must not survive a clear.
@@ -315,7 +366,7 @@ impl AddonTransport {
         self.generation.load(Ordering::SeqCst)
     }
 
-    /// Record a fetch failure for outside callers — a timed-out `get_streams`
+    /// Record a fetch failure for outside callers — a timed-out `get_streams_fresh`
     /// future never reaches its own generation-checked record.
     pub(crate) fn note_fetch_failure_for_url(&self, addon_url: &str, generation: u64) {
         self.fetch_failures.note(
@@ -335,15 +386,6 @@ impl AddonTransport {
             request_timeout: Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS),
             cooldown_message: STREAM_COOLDOWN_MESSAGE,
         }
-    }
-
-    pub(crate) async fn get_streams(
-        &self,
-        type_: &str,
-        id: &str,
-        addon_url: &str,
-    ) -> Result<Vec<AddonStream>, String> {
-        self.get_streams_fresh(type_, id, addon_url, None).await
     }
 
     pub(crate) async fn get_streams_fresh(
@@ -426,34 +468,32 @@ impl AddonTransport {
             {
                 Ok(bytes) => bytes,
                 Err(error) => {
-                    let fatal = matches!(error, crate::providers::BoundedBodyError::TooLarge(_));
-                    let message = error.into_message();
+                    let failure = FetchFailure::from(error);
                     #[cfg(debug_assertions)]
-                    eprintln!("Addon stream body error: {}", message);
-                    // Size-limit rejections are deterministic; truncations stay retryable.
-                    return Err(if fatal {
-                        FetchFailure::Fatal(message)
-                    } else {
-                        FetchFailure::Retryable(message)
-                    });
+                    {
+                        let (FetchFailure::Fatal(message) | FetchFailure::Retryable(message)) =
+                            &failure;
+                        eprintln!("Addon stream body error: {}", message);
+                    }
+                    return Err(failure);
                 }
             };
 
-        let mut streams = match decode_stream_items(&bytes) {
-            Ok(streams) => streams,
-            Err(e) => {
+        tokio::task::spawn_blocking(move || {
+            let mut streams = decode_stream_items(&bytes).map_err(|error| {
                 #[cfg(debug_assertions)]
-                eprintln!("Addon stream JSON parse error: {}", e);
-                // Deterministic over the bytes just read — don't retry.
-                return Err(FetchFailure::Fatal(e));
+                eprintln!("Addon stream JSON parse error: {}", error);
+                FetchFailure::Fatal(error)
+            })?;
+            Self::hydrate_streams(&mut streams);
+            let fetched_at = Instant::now();
+            for stream in &mut streams {
+                stream.pool_fetched_at = Some(fetched_at);
             }
-        };
-        Self::hydrate_streams(&mut streams);
-        let fetched_at = Instant::now();
-        for stream in &mut streams {
-            stream.pool_fetched_at = Some(fetched_at);
-        }
-        Ok(streams)
+            Ok(streams)
+        })
+        .await
+        .map_err(|_| FetchFailure::Fatal("Stream response processing task failed.".to_string()))?
     }
 
     fn hydrate_streams(streams: &mut [AddonStream]) {
@@ -603,7 +643,7 @@ async fn fresh_stream_fetch_bypasses_seeded_values_but_keeps_negative_cache() {
             provider.cache_generation(),
         );
         assert!(provider
-            .get_streams("movie", "tt123", addon_url)
+            .get_streams_fresh("movie", "tt123", addon_url, None)
             .await
             .is_ok());
         assert_eq!(
@@ -636,28 +676,53 @@ async fn fresh_stream_fetch_bypasses_seeded_values_but_keeps_negative_cache() {
 #[test]
 fn stream_refresh_claims_are_scoped_expiring_bounded_and_clearable() {
     let provider = AddonTransport::new();
-    assert!(provider.claim_stream_refresh("movie|tt123|None|None|None"));
-    assert!(!provider.claim_stream_refresh("movie|tt123|None|None|None"));
-    assert!(provider.claim_stream_refresh("series|tt123|Some(1)|Some(2)|None"));
+    provider
+        .claim_stream_refresh("movie|tt123|None|None|None")
+        .unwrap()
+        .complete();
+    assert!(provider
+        .claim_stream_refresh("movie|tt123|None|None|None")
+        .is_none());
+    provider
+        .claim_stream_refresh("series|tt123|Some(1)|Some(2)|None")
+        .unwrap()
+        .complete();
 
-    lock_or_recover(&provider.refresh_claims).insert(
-        "movie|tt123|None|None|None".to_string(),
-        Instant::now() - STREAM_CACHE_TTL,
-    );
-    assert!(provider.claim_stream_refresh("movie|tt123|None|None|None"));
-    lock_or_recover(&provider.refresh_claims).insert(
-        "oldest".to_string(),
-        Instant::now() - Duration::from_secs(1),
-    );
+    lock_or_recover(&provider.refresh_claims)
+        .get_mut("movie|tt123|None|None|None")
+        .unwrap()
+        .completed_at = Some(Instant::now() - STREAM_CACHE_TTL);
+    provider
+        .claim_stream_refresh("movie|tt123|None|None|None")
+        .unwrap()
+        .complete();
+    provider.claim_stream_refresh("oldest").unwrap().complete();
+    lock_or_recover(&provider.refresh_claims)
+        .get_mut("oldest")
+        .unwrap()
+        .completed_at = Some(Instant::now() - Duration::from_secs(1));
     for index in 0..STREAM_REFRESH_CLAIMS_MAX {
-        assert!(provider.claim_stream_refresh(&format!("key-{index}")));
+        provider
+            .claim_stream_refresh(&format!("key-{index}"))
+            .unwrap()
+            .complete();
         assert!(lock_or_recover(&provider.refresh_claims).len() <= STREAM_REFRESH_CLAIMS_MAX);
     }
     assert!(!lock_or_recover(&provider.refresh_claims).contains_key("oldest"));
 
     provider.clear_cache();
     assert!(lock_or_recover(&provider.refresh_claims).is_empty());
-    assert!(provider.claim_stream_refresh("key-0"));
+    assert!(provider.claim_stream_refresh("key-0").is_some());
+    let pending: Vec<_> = (0..STREAM_REFRESH_CLAIMS_MAX)
+        .map(|index| {
+            provider
+                .claim_stream_refresh(&format!("pending-{index}"))
+                .unwrap()
+        })
+        .collect();
+    assert!(provider.claim_stream_refresh("overflow").is_none());
+    drop(pending);
+    assert!(provider.claim_stream_refresh("overflow").is_some());
 }
 
 #[cfg(test)]

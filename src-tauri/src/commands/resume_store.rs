@@ -53,6 +53,13 @@ pub(crate) struct ResumeStore {
     connection: Connection,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct ResumeTitleIdentity {
+    pub id: String,
+    pub type_: String,
+    pub last_watched: u64,
+}
+
 impl ResumeStore {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         Self::reject_unsupported_schema_file(path)?;
@@ -166,21 +173,26 @@ impl ResumeStore {
 
     /// Renames the unreadable database aside (`<stem>.corrupt-<millis>`, same convention
     /// as `startup_validation`) and moves its WAL sidecar; SHM is disposable.
-    /// Only the main rename is fatal — stale sidecars may not exist.
+    /// A missing WAL is harmless; other WAL failures must prevent recreation.
     fn quarantine(path: &Path) -> Result<(), String> {
         let quarantined = path.with_extension(format!("corrupt-{}", super::now_unix_millis()));
         std::fs::rename(path, &quarantined).map_err(|error| {
             format!("Failed to quarantine unreadable playback resume database: {error}")
         })?;
-        crate::operational_log::log_warn("resume-store", "open", "quarantined", &[]);
-
         let mut wal = path.as_os_str().to_owned();
         wal.push("-wal");
-        if Path::new(&wal).exists() {
-            let mut wal_target = quarantined.as_os_str().to_owned();
-            wal_target.push("-wal");
-            let _ = std::fs::rename(&wal, &wal_target);
+        let mut wal_target = quarantined.as_os_str().to_owned();
+        wal_target.push("-wal");
+        if let Err(error) = std::fs::rename(&wal, &wal_target) {
+            if error.kind() != std::io::ErrorKind::NotFound {
+                let _ = std::fs::rename(&quarantined, path);
+                return Err(format!(
+                    "Failed to quarantine unreadable playback resume database WAL: {error}"
+                ));
+            }
         }
+        crate::operational_log::log_warn("resume-store", "open", "quarantined", &[]);
+
         let mut shm = path.as_os_str().to_owned();
         shm.push("-shm");
         let _ = std::fs::remove_file(&shm);
@@ -306,6 +318,39 @@ impl ResumeStore {
             [],
             "",
         )
+    }
+
+    pub(crate) fn load_latest_title_identities(
+        &mut self,
+        media_ids: &[&str],
+    ) -> Result<Vec<ResumeTitleIdentity>, String> {
+        let mut statement = self
+            .connection
+            .prepare_cached(
+                "SELECT media_id, media_type, last_watched FROM watch_progress
+                 WHERE media_id = ?1
+                   AND typeof(media_type) = 'text'
+                   AND typeof(last_watched) = 'integer'
+                 ORDER BY last_watched DESC, history_key DESC LIMIT 1",
+            )
+            .map_err(|error| format!("Failed to prepare playback resume title read: {error}"))?;
+        let mut titles = Vec::with_capacity(media_ids.len());
+        for media_id in media_ids {
+            let title = statement
+                .query_row(params![media_id], |row| {
+                    Ok(ResumeTitleIdentity {
+                        id: row.get(0)?,
+                        type_: row.get(1)?,
+                        last_watched: from_sql_u64(row.get(2)?),
+                    })
+                })
+                .optional()
+                .map_err(|error| format!("Failed to read playback resume title: {error}"))?;
+            if let Some(title) = title {
+                titles.push(title);
+            }
+        }
+        Ok(titles)
     }
 
     fn open_read_only(path: &Path) -> Result<Option<Connection>, String> {
@@ -447,7 +492,7 @@ impl ResumeStore {
 
     /// Returns the rows the recency guard admitted, plus whether cap pruning
     /// then deleted any rows (possibly some of those just admitted).
-    /// `reject_growth_past_cap` makes imports fail instead of evicting local rows.
+    /// Imports and restores reject growth rather than evicting durable history.
     pub(crate) fn merge_entries(
         &mut self,
         entries: Vec<(String, WatchProgress)>,
@@ -463,7 +508,7 @@ impl ResumeStore {
                 error
             )
         })?;
-        if reject_growth_past_cap {
+        {
             let mut statement = transaction
                 .prepare("SELECT history_key FROM watch_progress")
                 .map_err(|error| format!("Failed to read playback resume keys: {error}"))?;
@@ -479,8 +524,13 @@ impl ResumeStore {
             if !new_keys.is_empty()
                 && existing.len().saturating_add(new_keys.len()) > MAX_RESUME_TOTAL_ENTRIES as usize
             {
+                let action = if reject_growth_past_cap {
+                    "This backup"
+                } else {
+                    "Restoring this history"
+                };
                 return Err(HistoryMergeError::CapacityExceeded(format!(
-                    "This backup would exceed the {MAX_RESUME_TOTAL_ENTRIES}-entry watch history limit."
+                    "{action} would exceed the {MAX_RESUME_TOTAL_ENTRIES}-entry watch history limit."
                 )));
             }
         }

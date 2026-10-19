@@ -20,7 +20,6 @@ pub(crate) struct SkipTimesResult {
 }
 
 const MIN_SKIP_SEGMENT_DURATION_SECS: f64 = 1.0;
-const SKIP_SEGMENT_OVERLAP_EPSILON_SECS: f64 = 0.25;
 
 fn normalize_skip_time(value: f64) -> Option<f64> {
     if !value.is_finite() {
@@ -34,7 +33,6 @@ fn normalize_skip_segments(segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
     let mut normalized_segments = segments
         .into_iter()
         .filter_map(|segment| {
-            let type_ = crate::commands::normalize_opaque_field(&segment.type_)?;
             let start_time = normalize_skip_time(segment.start_time)?;
             let end_time = normalize_skip_time(segment.end_time)?;
 
@@ -43,7 +41,7 @@ fn normalize_skip_segments(segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
             }
 
             Some(SkipSegment {
-                type_,
+                type_: segment.type_,
                 start_time,
                 end_time,
             })
@@ -61,14 +59,6 @@ fn normalize_skip_segments(segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
 
     for mut segment in normalized_segments {
         if let Some(previous_segment) = merged_segments.last_mut() {
-            if segment.type_ == previous_segment.type_
-                && segment.start_time
-                    <= previous_segment.end_time + SKIP_SEGMENT_OVERLAP_EPSILON_SECS
-            {
-                previous_segment.end_time = previous_segment.end_time.max(segment.end_time);
-                continue;
-            }
-
             segment.start_time = segment.start_time.max(previous_segment.end_time);
             if segment.end_time - segment.start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
                 continue;

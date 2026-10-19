@@ -113,6 +113,84 @@ fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
 }
 
 #[test]
+fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corrupt_rows() {
+    let path = TempDbPath::new("title-identities");
+    let mut store = ResumeStore::open(&path).unwrap();
+    for (key, type_, id, last_watched) in [
+        ("z-old", "series", "newer", 100),
+        ("a-new", "anime", "newer", 200),
+        ("a-tie", "series", "tie", 300),
+        ("z-tie", "anime", "tie", 300),
+        ("z-other", "movie", "other", 400),
+        ("a-valid", "series", "corrupt", 100),
+        ("zz-invalid", "anime", "corrupt", 300),
+        ("a-supported", "series", "unsupported", 100),
+        ("z-unsupported", "channel", "unsupported", 200),
+        ("a-negative", "series", "negative", 100),
+        ("z-negative", "anime", "negative", 200),
+    ] {
+        store
+            .upsert_progress(
+                key,
+                &WatchProgress {
+                    id: id.into(),
+                    type_: type_.into(),
+                    ..sample_progress(last_watched, 120.0)
+                },
+            )
+            .unwrap();
+    }
+    store
+        .connection
+        .execute_batch(
+            "UPDATE watch_progress SET last_watched = 'bogus' WHERE history_key = 'zz-invalid';
+             UPDATE watch_progress SET last_watched = -2 WHERE history_key = 'a-negative';
+             UPDATE watch_progress SET last_watched = -1 WHERE history_key = 'z-negative';",
+        )
+        .unwrap();
+    let ids = [
+        "tie",
+        "newer",
+        "missing",
+        "corrupt",
+        "unsupported",
+        "negative",
+    ];
+    let mut expected = Vec::new();
+    let entries = store.load_entries().unwrap();
+    for id in ids {
+        if let Some((_, progress)) = entries.iter().find(|(_, progress)| progress.id == id) {
+            expected.push(super::ResumeTitleIdentity {
+                id: progress.id.clone(),
+                type_: progress.type_.clone(),
+                last_watched: progress.last_watched,
+            });
+        }
+    }
+    let identities = store.load_latest_title_identities(&ids).unwrap();
+    assert_eq!(identities, expected);
+    assert_eq!(
+        identities
+            .iter()
+            .map(|identity| (
+                identity.id.as_str(),
+                identity.type_.as_str(),
+                identity.last_watched
+            ))
+            .collect::<Vec<_>>(),
+        [
+            ("tie", "anime", 300),
+            ("newer", "anime", 200),
+            ("corrupt", "series", 100),
+            ("unsupported", "channel", 200),
+            ("negative", "anime", 0),
+        ]
+    );
+    assert!(store.load_latest_title_identities(&[]).unwrap().is_empty());
+    assert_eq!(store.count_entries().unwrap(), 11);
+}
+
+#[test]
 fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
     let path = TempDbPath::new("recent-titles");
     assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
@@ -343,7 +421,7 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
 }
 
 #[test]
-fn undo_restores_more_than_500_rows_for_one_title_in_one_merge() {
+fn undo_restores_more_than_500_rows_in_one_merge() {
     let path = TempDbPath::new("large-undo");
     let mut store = ResumeStore::open(&path).expect("open db");
     let rows: Vec<_> = (1..=501)
@@ -367,9 +445,12 @@ fn undo_restores_more_than_500_rows_for_one_title_in_one_merge() {
         .merge_entries(rows.clone(), false)
         .expect("restore title");
     assert_eq!(store.count_entries().expect("restored history"), 501);
+    // Bulk History Undo restores several titles in one batch.
     let mut mixed = rows;
     mixed[0].1.id = "another-title".to_string();
-    assert!(validate_history_batch(mixed.iter().map(|(_, row)| row)).is_err());
+    validate_history_batch(mixed.iter().map(|(_, row)| row)).expect("multi-title restore accepted");
+    let oversized = vec![mixed[0].1.clone(); super::MAX_RESUME_TOTAL_ENTRIES as usize + 1];
+    assert!(validate_history_batch(oversized.iter()).is_err());
 }
 
 #[test]
@@ -499,6 +580,49 @@ fn stale_progress_write_does_not_regress_resume() {
 }
 
 #[test]
+fn explicit_live_completion_survives_reopening_without_a_schema_change() {
+    use crate::commands::history_helpers::{
+        prepare_live_watch_progress, with_progress_annotations,
+    };
+    let path = TempDbPath::new("live-completion");
+    let key = "movie:tt1234567";
+    let mut store = ResumeStore::open(&path).unwrap();
+    store
+        .upsert_progress(key, &sample_progress(1000, 900.0))
+        .unwrap();
+    assert!(
+        prepare_live_watch_progress(sample_progress(2000, 0.0), false)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(read_entry(&mut store, key).position, 900.0);
+
+    let completed = prepare_live_watch_progress(
+        WatchProgress {
+            duration: 0.0,
+            ..sample_progress(3000, 120.0)
+        },
+        true,
+    )
+    .unwrap()
+    .unwrap();
+    store.upsert_progress(key, &completed).unwrap();
+    drop(store);
+    let mut store = ResumeStore::open(&path).unwrap();
+    let ended = with_progress_annotations(read_entry(&mut store, key));
+    assert!(ended.is_watched);
+    assert_eq!(ended.duration, ended.position);
+    assert_eq!(ended.resume_start_time, None);
+    assert_eq!(
+        store
+            .upsert_progress(key, &sample_progress(1500, 800.0))
+            .unwrap(),
+        ProgressWrite::Skipped
+    );
+    assert_eq!(user_version(&path), 3);
+}
+
+#[test]
 fn upsert_drops_url_shaped_stream_keys() {
     let path = TempDbPath::new("keyshape");
     let mut store = ResumeStore::open(&path).expect("fresh db opens");
@@ -591,6 +715,50 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
     );
     assert_eq!(read_entry(&mut store, "movie:tt0").last_watched, 3);
     assert!(store.get_entry("series:tt1234567:1:1").unwrap().is_none());
+}
+
+#[test]
+fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
+    let path = TempDbPath::new("undocap");
+    let mut store = ResumeStore::open(&path).unwrap();
+    let removed = (
+        "movie:removed".to_string(),
+        WatchProgress {
+            id: "removed".into(),
+            type_: "movie".into(),
+            ..sample_progress(1, 10.0)
+        },
+    );
+    store.merge_entries(vec![removed.clone()], false).unwrap();
+    store.remove_keys(std::slice::from_ref(&removed.0)).unwrap();
+    let rows = (0..super::MAX_RESUME_TOTAL_ENTRIES)
+        .map(|index| {
+            (
+                format!("movie:tt{index}"),
+                WatchProgress {
+                    id: format!("tt{index}"),
+                    type_: "movie".into(),
+                    ..sample_progress(2, 20.0)
+                },
+            )
+        })
+        .collect();
+    store.merge_entries(rows, false).unwrap();
+    let before = store.load_entries().unwrap();
+    let error = store.merge_entries(vec![removed], false).unwrap_err();
+    assert!(matches!(
+        error,
+        super::HistoryMergeError::CapacityExceeded(_)
+    ));
+    assert_eq!(
+        String::from(error),
+        "Restoring this history would exceed the 10000-entry watch history limit."
+    );
+    assert_eq!(
+        serde_json::to_value(store.load_entries().unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    assert!(store.get_entry("movie:removed").unwrap().is_none());
 }
 
 #[test]

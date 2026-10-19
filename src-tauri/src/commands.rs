@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, State};
 
@@ -123,7 +124,7 @@ pub(crate) use durable_store::{
 };
 pub(crate) use media_type::{normalize_stream_media_type, normalize_watch_progress_type};
 pub(crate) use startup_validation::validate_startup_stores;
-use store_helpers::{load_library_index, load_watch_status_index};
+use store_helpers::{load_library_index, read_watch_status_snapshot};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct WatchProgress {
@@ -181,18 +182,17 @@ const MAX_SEARCH_QUERY_CHARS: usize = 120;
 /// Char bounds for media identity fields crossing IPC into durable state.
 pub(crate) const MEDIA_ID_MAX_CHARS: usize = 256;
 pub(crate) const MEDIA_TITLE_MAX_CHARS: usize = 512;
-/// Bounded so `data:`/`file:` payloads and unbounded strings never persist into the webview.
-const MEDIA_IMAGE_URL_MAX_CHARS: usize = 2_048;
 const SETTINGS_STORE_FILE: &str = "settings.json";
 const LIBRARY_STORE_FILE: &str = "library.json";
 const LISTS_STORE_FILE: &str = "lists.json";
 const WATCH_STATUS_STORE_FILE: &str = "watch_status.json";
 
+const JS_WHITESPACE: &str =
+    "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d} \u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
+
 /// JavaScript `trim()`: includes BOM and excludes NEXT LINE from Unicode whitespace.
 pub(crate) fn js_trim(value: &str) -> &str {
-    value.trim_matches(|character: char| {
-        character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
-    })
+    value.trim_matches(|character| JS_WHITESPACE.contains(character))
 }
 
 fn normalize_non_empty(input: &str) -> Option<String> {
@@ -213,12 +213,7 @@ pub(crate) fn normalize_media_id(input: &str) -> Option<String> {
 /// addon-ingress artwork policy — http(s) only, no credentials, no non-routable
 /// host. Anything else degrades to "no artwork" instead of persisting.
 pub(crate) fn normalize_media_image_url(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() || trimmed.chars().nth(MEDIA_IMAGE_URL_MAX_CHARS).is_some() {
-        return None;
-    }
-    crate::providers::addon_resource::parse_fetchable_http_url(trimmed)
-        .map(|parsed| parsed.to_string())
+    crate::providers::addon_resource::normalize_image_url(input.trim())
 }
 
 /// Opaque free-text fields crossing IPC (source names, stream metadata, skip-segment
@@ -337,6 +332,7 @@ pub struct DataStats {
     pub history_title_count: usize,
     pub has_learned_playback_data: bool,
     pub library_count: usize,
+    pub library_status_counts: HashMap<String, usize>,
     pub lists_count: usize,
     pub watch_statuses_count: usize,
 }
@@ -358,19 +354,26 @@ pub async fn get_data_stats(
             // Index headers alone answer the count — `load_*_map` parses every record
             // and can repair-write inside a read-only endpoint.
             let library_store = open_store(&app, LIBRARY_STORE_FILE)?;
-            let library_count = load_library_index(&library_store)?.len();
+            let library_index = load_library_index(&library_store)?;
+            let library_count = library_index.len();
 
             let lists_store = open_store(&app, LISTS_STORE_FILE)?;
             let lists_count = load_lists_order(&lists_store)?.len();
 
             let status_store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
-            let watch_statuses_count = load_watch_status_index(&status_store)?.len();
+            let statuses = read_watch_status_snapshot(&status_store)?;
+            let watch_statuses_count = statuses.index.len();
+            let library_status_counts = library_commands::library_status_counts(
+                library_index.iter().map(String::as_str),
+                &statuses.items,
+            );
 
             Ok(DataStats {
                 history_count,
                 history_title_count,
                 has_learned_playback_data,
                 library_count,
+                library_status_counts,
                 lists_count,
                 watch_statuses_count,
             })

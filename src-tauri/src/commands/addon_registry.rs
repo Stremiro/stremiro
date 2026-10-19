@@ -11,15 +11,16 @@ use crate::providers::addon_resource::{
 };
 use crate::providers::{lock_or_recover, MediaDetails, MediaItem};
 use futures_util::stream::{self, StreamExt};
-use serde::Serialize;
-use std::collections::HashSet;
+use serde::{Deserialize, Serialize};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::AppHandle;
 
 const ADDON_RESOURCE_CONCURRENCY: usize = 4;
-const MAX_CATALOG_SOURCES: usize = 8;
+pub(crate) const MAX_CATALOG_SOURCES: usize = 8;
 const MAX_SUBTITLE_SOURCES: usize = 8;
 const MAX_SUBTITLES_TOTAL: usize = 200;
 /// First-capable-source hedge for meta fetches: a routine details open is
@@ -31,9 +32,9 @@ const META_HEDGE_DELAY: Duration = Duration::from_millis(400);
 /// primary holds a live fallback for at most this window instead of its full
 /// request timeout.
 const META_FALLBACK_GRACE: Duration = Duration::from_millis(2_500);
-/// Grant stragglers this grace once each catalog group has a successful
-/// answer or exhausts its sources; subtitles need one successful answer.
-const RESOURCE_STRAGGLER_GRACE: Duration = Duration::from_secs(10);
+/// Arm only after each catalog group has usable items or exhausts its sources.
+const CATALOG_STRAGGLER_GRACE: Duration = Duration::from_millis(1_500);
+const SUBTITLE_STRAGGLER_GRACE: Duration = Duration::from_secs(10);
 /// Failed install-time manifest fetches leave an addon unclassified; the
 /// background retry is throttled so a permanently down addon costs one
 /// bounded manifest request per cooldown window, not one per resource call.
@@ -191,17 +192,15 @@ fn addon_allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
         .is_none_or(|snapshot| snapshot_supports_subtitles(snapshot, type_, id))
 }
 
-fn searchable_catalog_ids(addon: &AddonConfig, type_: &str, skip: u32) -> Vec<(String, bool)> {
+fn searchable_catalog_ids(addon: &AddonConfig, type_: &str) -> Vec<(String, bool)> {
     match addon.capabilities.as_ref() {
-        None if skip == 0 => vec![("top".to_string(), false)],
-        None => Vec::new(),
+        None => vec![("top".to_string(), false)],
         Some(snapshot) => snapshot
             .catalogs
             .iter()
             .filter(|catalog| {
                 catalog.type_.eq_ignore_ascii_case(type_)
                     && catalog_declares_extra(catalog, "search")
-                    && (skip == 0 || catalog_declares_extra(catalog, "skip"))
             })
             .map(|catalog| (catalog.id.clone(), catalog_declares_extra(catalog, "skip")))
             .collect(),
@@ -212,6 +211,21 @@ fn searchable_catalog_ids(addon: &AddonConfig, type_: &str, skip: u32) -> Vec<(S
 pub struct CatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub next_skip: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SearchSourceCursor {
+    pub key: String,
+    pub skip: u32,
+    #[serde(default)]
+    pub retry: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct SearchCatalogFetchPage {
+    pub items: Vec<MediaItem>,
+    pub cursors: Vec<SearchSourceCursor>,
 }
 
 /// Stable identity shared by source merging and cross-page catalog deduplication.
@@ -235,8 +249,7 @@ fn extra_skip_value(extras: &[CatalogExtra]) -> u32 {
 /// with `hasMore: false` while deeper `skip` pages still hold titles, and
 /// `hasMore: true` is set on later pages of the same catalog. The only
 /// reliable end signal is an empty page, so any non-empty page offers the
-/// next cursor. Search paging additionally stops when a page contributes zero
-/// new titles, so a misbehaving provider cannot spin Load More forever.
+/// next cursor.
 fn catalog_page_next_skip(skip: u32, item_count: usize) -> Option<u32> {
     if item_count > 0 {
         let count = u32::try_from(item_count).unwrap_or(u32::MAX);
@@ -321,21 +334,23 @@ pub(crate) fn select_catalog_targets(
 ) -> Result<Vec<CatalogTarget>, String> {
     let targets: Vec<CatalogTarget> = snapshot
         .iter()
-        .filter(|addon| addon_allows_catalog(addon, type_, catalog_id, extras))
+        .filter_map(|addon| {
+            let catalog_id = match addon.capabilities.as_ref() {
+                Some(snapshot) => {
+                    &snapshot_supports_catalog(snapshot, type_, catalog_id, extras)
+                        .ok()?
+                        .id
+                }
+                None => catalog_id,
+            };
+            Some((addon, catalog_id))
+        })
         .take(MAX_CATALOG_SOURCES)
-        .map(|addon| CatalogTarget {
+        .map(|(addon, catalog_id)| CatalogTarget {
             url: addon.url.clone(),
             // Fetch with the manifest's canonical catalog id so a
             // case-insensitive routing match never emits a miscased URL path.
-            catalog_id: addon
-                .capabilities
-                .as_ref()
-                .and_then(|snapshot| {
-                    crate::providers::addon_resource::resolve_canonical_catalog_id(
-                        snapshot, type_, catalog_id,
-                    )
-                })
-                .unwrap_or_else(|| catalog_id.to_string()),
+            catalog_id: catalog_id.to_string(),
         })
         .collect();
 
@@ -407,7 +422,7 @@ where
     let mut succeeded = vec![false; remaining.len()];
     collect_with_deadline(outcomes, grace, |(group, _, result)| {
         remaining[*group] -= 1;
-        succeeded[*group] |= result.is_ok();
+        succeeded[*group] |= result.as_ref().is_ok_and(|page| !page.items.is_empty());
         remaining
             .iter()
             .zip(&succeeded)
@@ -447,7 +462,7 @@ async fn run_catalog_work_pool(
         }))
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
         remaining,
-        RESOURCE_STRAGGLER_GRACE,
+        CATALOG_STRAGGLER_GRACE,
     )
     .await;
 
@@ -515,79 +530,108 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
         .collect()
 }
 
-/// Multi-genre catalog search: every (genre × addon × catalog) fetch runs
-/// through one `ADDON_RESOURCE_CONCURRENCY` pool, then merges per genre so
-/// one failed or unsupported genre never discards another's results.
-/// Returns one outcome per input genre, in order.
-pub async fn search_catalog_pages_for_genres(
+struct SearchCatalogSource {
+    cursor: SearchSourceCursor,
+    supports_skip: bool,
+}
+
+fn search_source_key(
+    genre: Option<&str>,
+    addon_url: &str,
+    media_type: &str,
+    catalog_id: &str,
+) -> String {
+    let mut hasher = DefaultHasher::new();
+    (genre, addon_url, media_type, catalog_id).hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+fn select_search_catalog_work(
+    snapshot: &[AddonConfig],
+    query: &str,
+    media_types: &[&str],
+    genres: &[Option<String>],
+    cursors: Option<&[SearchSourceCursor]>,
+) -> (Vec<CatalogWorkItem>, Vec<Vec<SearchCatalogSource>>) {
+    let cursors = cursors.map(|cursors| {
+        cursors
+            .iter()
+            .map(|cursor| (cursor.key.as_str(), cursor))
+            .collect::<HashMap<_, _>>()
+    });
+    let mut work = Vec::new();
+    let mut sources = Vec::with_capacity(genres.len());
+    let mut selected_keys = HashSet::new();
+
+    for (group, genre) in genres.iter().enumerate() {
+        let mut group_sources = Vec::new();
+        'addons: for addon in snapshot {
+            for media_type in media_types {
+                for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type) {
+                    let key =
+                        search_source_key(genre.as_deref(), &addon.url, media_type, &catalog_id);
+                    let cursor = if let Some(cursors) = &cursors {
+                        let Some(cursor) = cursors.get(key.as_str()).filter(|_| supports_skip)
+                        else {
+                            continue;
+                        };
+                        (*cursor).clone()
+                    } else {
+                        SearchSourceCursor {
+                            key,
+                            skip: 0,
+                            retry: false,
+                        }
+                    };
+                    let extras = catalog_search_extras(query, genre.as_deref(), cursor.skip);
+                    if !addon_allows_catalog(addon, media_type, &catalog_id, &extras)
+                        || !selected_keys.insert(cursor.key.clone())
+                    {
+                        continue;
+                    }
+                    work.push(CatalogWorkItem {
+                        group,
+                        order: group_sources.len(),
+                        addon_url: addon.url.clone(),
+                        media_type: (*media_type).to_string(),
+                        catalog_id,
+                        extras,
+                    });
+                    group_sources.push(SearchCatalogSource {
+                        cursor,
+                        supports_skip,
+                    });
+                    if group_sources.len() == MAX_CATALOG_SOURCES {
+                        break 'addons;
+                    }
+                }
+            }
+        }
+        sources.push(group_sources);
+    }
+    (work, sources)
+}
+
+/// One shared pool for every genre/source, with independent provider offsets.
+pub(crate) async fn search_catalog_pages_for_genres(
     app: &AppHandle,
     client: &AddonResourceClient,
     query: &str,
     media_types: &[&str],
     genres: &[Option<String>],
-    skip: u32,
-) -> Result<Vec<Result<CatalogFetchPage, String>>, String> {
+    cursors: Option<&[SearchSourceCursor]>,
+) -> Result<SearchCatalogFetchPage, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
-    let mut work = Vec::new();
-    let mut group_errors: Vec<Option<String>> = Vec::with_capacity(genres.len());
-    let mut group_paging = Vec::with_capacity(genres.len());
-
-    for (group, genre) in genres.iter().enumerate() {
-        let extras = catalog_search_extras(query, genre.as_deref(), skip);
-
-        let mut order = 0;
-        let mut paging = Vec::new();
-        'addons: for addon in snapshot.iter() {
-            for media_type in media_types {
-                for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type, skip) {
-                    if addon_allows_catalog(addon, media_type, &catalog_id, &extras) {
-                        paging.push(supports_skip);
-                        work.push(CatalogWorkItem {
-                            group,
-                            order,
-                            addon_url: addon.url.clone(),
-                            media_type: (*media_type).to_string(),
-                            catalog_id,
-                            extras: extras.clone(),
-                        });
-                        order += 1;
-                        if order == MAX_CATALOG_SOURCES {
-                            break 'addons;
-                        }
-                    }
-                }
-            }
-        }
-        group_paging.push(paging);
-        group_errors.push((order == 0 && skip == 0).then(|| {
-            format!("No enabled addon declares a searchable catalog for the requested type. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another catalog addon is enabled in Settings → Streaming.")
-        }));
+    let (work, sources) =
+        select_search_catalog_work(&snapshot, query, media_types, genres, cursors);
+    if work.is_empty() && cursors.is_none() {
+        return Err(format!("No enabled addon declares a searchable catalog for the requested type. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another catalog addon is enabled in Settings → Streaming."));
     }
-
-    Ok(run_catalog_work_pool(client, work, genres.len())
-        .await
-        .into_iter()
-        .zip(group_errors)
-        .zip(group_paging)
-        .map(|((bucket, error), paging)| match error {
-            Some(error) => Err(error),
-            None => merge_search_catalog_pages(
-                bucket.into_iter().map(|(order, result)| {
-                    result.map(|page| {
-                        if paging[order] {
-                            catalog_fetch_page_from_source(page, skip)
-                        } else {
-                            CatalogFetchPage {
-                                items: page.items,
-                                next_skip: None,
-                            }
-                        }
-                    })
-                }),
-                skip,
-            ),
-        })
-        .collect())
+    merge_search_catalog_pages(
+        sources,
+        run_catalog_work_pool(client, work, genres.len()).await,
+        cursors.is_none(),
+    )
 }
 
 fn catalog_search_extras(query: &str, genre: Option<&str>, skip: u32) -> Vec<CatalogExtra> {
@@ -611,17 +655,54 @@ fn catalog_search_extras(query: &str, genre: Option<&str>, skip: u32) -> Vec<Cat
 }
 
 fn merge_search_catalog_pages(
-    pages: impl IntoIterator<Item = Result<CatalogFetchPage, String>>,
-    skip: u32,
-) -> Result<CatalogFetchPage, String> {
-    let mut pages = pages.into_iter().peekable();
-    if pages.peek().is_none() && skip > 0 {
-        return Ok(CatalogFetchPage {
-            items: Vec::new(),
-            next_skip: None,
-        });
+    sources: Vec<Vec<SearchCatalogSource>>,
+    outcomes: Vec<Vec<(usize, Result<CatalogPage, String>)>>,
+    first_page: bool,
+) -> Result<SearchCatalogFetchPage, String> {
+    let mut items = Vec::new();
+    let mut seen = HashSet::new();
+    let mut cursors = Vec::new();
+    let mut succeeded = false;
+    let mut first_error = None;
+    for (sources, bucket) in sources.into_iter().zip(outcomes) {
+        let mut bucket = bucket.into_iter().peekable();
+        for (order, source) in sources.into_iter().enumerate() {
+            let outcome = if bucket.peek().is_some_and(|(index, _)| *index == order) {
+                bucket.next().expect("peeked source outcome").1
+            } else {
+                Err("Search catalog source timed out.".into())
+            };
+            let mut cursor = source.cursor;
+            match outcome {
+                Ok(page) => {
+                    succeeded = true;
+                    if let Some(skip) = catalog_page_next_skip(cursor.skip, page.source_item_count)
+                        .filter(|skip| source.supports_skip && *skip > cursor.skip)
+                    {
+                        cursor.skip = skip;
+                        cursor.retry = false;
+                        cursors.push(cursor);
+                    }
+                    for item in page.items {
+                        if seen.insert(catalog_dedup_key(&item.type_, &item.id)) {
+                            items.push(item);
+                        }
+                    }
+                }
+                Err(error) => {
+                    first_error.get_or_insert(error);
+                    if source.supports_skip && !cursor.retry {
+                        cursor.retry = true;
+                        cursors.push(cursor);
+                    }
+                }
+            }
+        }
     }
-    merge_catalog_pages(pages, "Failed to search catalog.")
+    if first_page && (!succeeded || (items.is_empty() && first_error.is_some())) {
+        return Err(first_error.unwrap_or_else(|| "Failed to search catalog.".into()));
+    }
+    Ok(SearchCatalogFetchPage { items, cursors })
 }
 
 pub async fn fetch_meta_details(
@@ -631,37 +712,62 @@ pub async fn fetch_meta_details(
     id: &str,
 ) -> Result<Arc<MediaDetails>, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
-    let mut targets = snapshot
+    fetch_meta_details_from_addons(client, &snapshot, type_, id).await
+}
+
+async fn fetch_ranked_meta(
+    client: &AddonResourceClient,
+    url: &str,
+    type_: &str,
+    id: &str,
+    rank: usize,
+) -> (usize, Result<Arc<MediaDetails>, String>) {
+    let result = client
+        .fetch_meta(url, type_, id, |details| {
+            // Keep the addon's identity in the shared payload; request aliases are applied after it.
+            let addon_id = details.id.clone();
+            normalize_media_details(details, &addon_id)
+        })
+        .await;
+    (rank, result)
+}
+
+async fn fetch_meta_details_from_addons(
+    client: &AddonResourceClient,
+    snapshot: &[AddonConfig],
+    type_: &str,
+    id: &str,
+) -> Result<Arc<MediaDetails>, String> {
+    let targets: Vec<_> = snapshot
         .iter()
         .filter(|addon| addon_allows_meta(addon, type_, id))
-        .take(MAX_CATALOG_SOURCES);
+        .take(MAX_CATALOG_SOURCES)
+        .collect();
 
-    let Some(first) = targets.next() else {
+    let Some(first) = targets.first() else {
         return Err(format!(
             "No enabled addon declares meta support for {type_}/{id}. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another metadata addon is enabled in Settings → Streaming."
         ));
     };
 
-    type MetaFetch<'a> = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Arc<MediaDetails>, String>> + Send + 'a>,
-    >;
-    let make_fetch = |url| -> MetaFetch<'_> {
-        Box::pin(client.fetch_meta(url, type_, id, |details| {
-            // Keep the addon's identity in the shared payload; request aliases are applied after it.
-            let addon_id = details.id.clone();
-            normalize_media_details(details, &addon_id)
-        }))
-    };
-
-    let mut first_fetch = make_fetch(first.url.as_str());
-    let hedge = tokio::time::sleep(META_HEDGE_DELAY);
+    let generation = client.cache_generation();
+    let mut recent_stragglers = [false; MAX_CATALOG_SOURCES];
+    recent_stragglers[0] = client.meta_is_recent_straggler(&first.url, type_, id);
+    let mut first_fetch = Box::pin(fetch_ranked_meta(client, &first.url, type_, id, 0));
+    let hedge = tokio::time::sleep(if recent_stragglers[0] {
+        Duration::ZERO
+    } else {
+        META_HEDGE_DELAY
+    });
     tokio::pin!(hedge);
 
     // Hedged start: the first capable source runs alone until it settles or
-    // the hedge window expires, then the rest of the registry joins.
+    // the hedge window expires, then the rest of the registry joins. A recently
+    // stalled source still gets polled first, but cannot hold a ready fallback.
     let mut first_error: Option<String> = None;
     let hedged = tokio::select! {
-        result = &mut first_fetch => match result {
+        biased;
+        (_, result) = &mut first_fetch => match result {
             Ok(details) => return Ok(details),
             Err(error) => {
                 first_error = Some(error);
@@ -676,30 +782,20 @@ pub async fn fetch_meta_details(
     // better-ranked source is pending, a ready result waits out one
     // META_FALLBACK_GRACE window — a dead primary holds a live fallback for
     // the grace, not its full request timeout.
-    type RankedMetaFetch<'a> = std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = (usize, Result<Arc<MediaDetails>, String>)>
-                + Send
-                + 'a,
-        >,
-    >;
-    let mut outcomes = futures_util::stream::FuturesUnordered::<RankedMetaFetch<'_>>::new();
+    let mut outcomes = futures_util::stream::FuturesUnordered::new();
     let mut pending = HashSet::new();
     if hedged {
         // Still in flight: it keeps its rank-0 slot so a slow-but-valid
         // primary is preferred over a faster secondary inside the grace.
         pending.insert(0);
-        outcomes.push(Box::pin(async move { (0usize, first_fetch.await) }));
+        outcomes.push(first_fetch);
     }
-    for (offset, addon) in targets.enumerate() {
-        let index = offset + 1;
-        // Capture the closure by reference: each moved future needs it, and
-        // it only borrows `client` for the function's own scope.
-        let make_fetch = &make_fetch;
+    for (index, addon) in targets.iter().enumerate().skip(1) {
+        recent_stragglers[index] = client.meta_is_recent_straggler(&addon.url, type_, id);
         pending.insert(index);
-        outcomes.push(Box::pin(async move {
-            (index, make_fetch(addon.url.as_str()).await)
-        }));
+        outcomes.push(Box::pin(fetch_ranked_meta(
+            client, &addon.url, type_, id, index,
+        )));
     }
 
     let mut best_ok: Option<(usize, Arc<MediaDetails>)> = None;
@@ -708,6 +804,7 @@ pub async fn fetch_meta_details(
         errors.push((0, error));
     }
     let mut grace_deadline: Option<tokio::time::Instant> = None;
+    let mut grace_expired = false;
 
     while !pending.is_empty() {
         // Copy for the async-move branch so the select handler can re-arm.
@@ -735,7 +832,9 @@ pub async fn fetch_meta_details(
                     Err(error) => errors.push((index, error)),
                 }
                 if best_ok.as_ref().is_some_and(|(best_index, _)| {
-                    !pending.iter().any(|pending_index| *pending_index < *best_index)
+                    !pending.iter().any(|pending_index| {
+                        *pending_index < *best_index && !recent_stragglers[*pending_index]
+                    })
                 }) {
                     break;
                 }
@@ -745,11 +844,21 @@ pub async fn fetch_meta_details(
                     Some(instant) => tokio::time::sleep_until(instant).await,
                     None => std::future::pending().await,
                 }
-            } => break,
+            } => {
+                grace_expired = true;
+                break;
+            },
         }
     }
 
-    if let Some((_, details)) = best_ok {
+    if let Some((best_index, details)) = best_ok {
+        if grace_expired {
+            for index in pending {
+                if index < best_index && !recent_stragglers[index] {
+                    client.note_meta_straggler(&targets[index].url, type_, id, generation);
+                }
+            }
+        }
         return Ok(details);
     }
 
@@ -770,6 +879,8 @@ pub struct SourcedAddonSubtitle {
     pub lang: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     pub mpv_title: String,
     pub source_id: String,
     pub source_name: String,
@@ -809,7 +920,7 @@ pub async fn fetch_addon_subtitles(
 
     let mut outcomes = collect_with_deadline(
         stream::iter(requests).buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
-        RESOURCE_STRAGGLER_GRACE,
+        SUBTITLE_STRAGGLER_GRACE,
         |(_, _, result)| result.is_ok(),
     )
     .await;
@@ -889,6 +1000,23 @@ fn add_subtitle_if_unique(
     }
 
     subtitles.push(SourcedAddonSubtitle {
+        detail: item
+            .label
+            .as_deref()
+            .map(js_trim)
+            .map(|label| {
+                let detail = label
+                    .rsplit_once('.')
+                    .filter(|(_, extension)| {
+                        ["srt", "ass", "ssa", "vtt", "sub", "idx", "smi", "txt"]
+                            .iter()
+                            .any(|candidate| extension.eq_ignore_ascii_case(candidate))
+                    })
+                    .map_or(label, |(name, _)| name);
+                js_trim(detail)
+            })
+            .filter(|detail| !detail.is_empty())
+            .map(str::to_string),
         mpv_title: item
             .label
             .as_deref()

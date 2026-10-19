@@ -48,6 +48,9 @@ pub(crate) fn normalize_player_binding_key(key: &str) -> Result<String, String> 
     if key == " " {
         return Ok(key.to_string());
     }
+    if key.chars().nth(PLAYER_KEYBINDING_KEY_MAX_CHARS).is_some() {
+        return Err("This key can’t be assigned.".to_string());
+    }
     let key = key.to_lowercase();
     let length = key.chars().count();
     if length == 1 && key.chars().all(|ch| ch.is_ascii_digit()) {
@@ -126,6 +129,23 @@ pub(crate) fn bind_player_key(
         .ok_or_else(|| "Unknown player action.".to_string())?;
     if slot >= PLAYER_KEYBINDING_MAX_KEYS {
         return Err("Invalid shortcut slot.".to_string());
+    }
+    if overrides.len() > PLAYER_KEYBINDING_ACTIONS.len() {
+        return Err("Too many player shortcuts.".to_string());
+    }
+    for (action, keys) in &mut overrides {
+        if !PLAYER_KEYBINDING_ACTIONS
+            .iter()
+            .any(|(id, _)| *id == action)
+        {
+            return Err("Unknown player action.".to_string());
+        }
+        if keys.len() > PLAYER_KEYBINDING_MAX_KEYS {
+            return Err("Too many keys for player action.".to_string());
+        }
+        for key in keys {
+            *key = normalize_player_binding_key(key)?;
+        }
     }
     let key = key.map(normalize_player_binding_key).transpose()?;
     let mut updated = resolve_player_keybindings(&overrides)

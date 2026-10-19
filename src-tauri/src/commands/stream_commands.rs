@@ -1,10 +1,14 @@
 use super::{
+    config_store::{
+        StreamSelectorBatch, StreamSelectorPreferences, StreamSelectorQuality, StreamSelectorSort,
+        StreamSelectorSource,
+    },
     js_trim, normalize_media_id, normalize_opaque_field, normalize_watch_progress_type,
     now_unix_millis,
     playback_state::{PlaybackStateService, PlaybackStreamOutcomeKind, StreamOutcomeReport},
     probe_pool::{
-        is_probeable_stream, resolve_ranked_best_stream_candidate, retain_unexcluded_streams,
-        PreferredStreamHint, ProbeRequestIdentity, StreamPoolQuery, BEST_STREAM_MAX_CANDIDATES,
+        is_probeable_stream, resolve_ranked_best_stream_candidate, PreferredStreamHint,
+        ProbeRequestIdentity, StreamExclusions, StreamPoolQuery, BEST_STREAM_MAX_CANDIDATES,
     },
     stream_fetcher::{
         fetch_stream_for_link, fetch_stream_selector_data, ResolveFetch, StreamRankingOverrides,
@@ -13,12 +17,14 @@ use super::{
     stream_resolver::{
         BestResolvedStream, ResolveStreamError, ResolveStreamErrorKind, MISSING_DIRECT_URL_MESSAGE,
     },
+    streaming_helpers::{is_prepared_stream_key, normalize_stream_key},
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_resource::{
     is_fetchable_http_url, is_magnet_url, parse_fetchable_http_url,
 };
 use crate::providers::addons::{AddonStream, AddonTransport, StreamPackCoverage};
+use crate::providers::lock_or_recover;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -74,10 +80,7 @@ impl PlaybackRecoveryRegistry {
         request_id: String,
     ) -> Result<(PlaybackRecoveryGuard<'_>, watch::Receiver<bool>), String> {
         validate_recovery_request_id(&request_id)?;
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut requests = lock_or_recover(&self.requests);
         if requests.live.len() >= RECOVERY_REQUESTS_MAX || requests.live.contains_key(&request_id) {
             return Err("Playback recovery request limit reached or duplicate ID.".to_string());
         }
@@ -100,10 +103,7 @@ impl PlaybackRecoveryRegistry {
 
     fn cancel(&self, request_id: String) -> Result<(), String> {
         validate_recovery_request_id(&request_id)?;
-        let mut requests = self
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
+        let mut requests = lock_or_recover(&self.requests);
         if let Some(sender) = requests.live.get(&request_id) {
             sender.send_replace(true);
         } else if !requests.early_cancels.contains(&request_id) {
@@ -118,10 +118,7 @@ impl PlaybackRecoveryRegistry {
 
 impl Drop for PlaybackRecoveryGuard<'_> {
     fn drop(&mut self) {
-        self.registry
-            .requests
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
+        lock_or_recover(&self.registry.requests)
             .live
             .remove(&self.request_id);
     }
@@ -292,9 +289,9 @@ pub async fn get_stream_link(
         },
         "stream lookup",
     )?;
-    if !super::streaming_helpers::is_prepared_stream_key(&stream_key) {
-        return Err(STREAM_LINK_CHANGED_MESSAGE.to_string());
-    }
+    let stream_key = normalize_stream_key(&stream_key)
+        .filter(|key| is_prepared_stream_key(key))
+        .ok_or_else(|| STREAM_LINK_CHANGED_MESSAGE.to_string())?;
     let stream = fetch_stream_for_link(
         &app,
         &provider,
@@ -369,7 +366,95 @@ pub async fn get_stream_selector_data(
         None,
     )
     .await
-    .map(|(data, _is_final_season)| data)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StreamSelectorRow {
+    source_id: Option<String>,
+    resolution: StreamSelectorQuality,
+    delivery_kind: String,
+    is_batch: bool,
+    is_playable: bool,
+    seeders: Option<u32>,
+    size_bytes: Option<f64>,
+    search_fields: [Option<String>; 9],
+}
+
+#[command]
+pub async fn get_stream_selector_indices(
+    rows: Vec<StreamSelectorRow>,
+    filters: StreamSelectorPreferences,
+    search_query: String,
+) -> Vec<usize> {
+    let query = search_query.to_lowercase();
+    let terms: Vec<&str> = query
+        .split(|character: char| {
+            character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')
+        })
+        .filter(|term| !term.is_empty())
+        .collect();
+    let mut search_text = String::new();
+    let (mut playable, mut p2p): (Vec<usize>, Vec<usize>) = rows
+        .iter()
+        .enumerate()
+        .filter_map(|(index, row)| {
+            if (filters.quality != StreamSelectorQuality::All && row.resolution != filters.quality)
+                || (filters.source == StreamSelectorSource::Cached && row.delivery_kind != "cached")
+                || (filters.addon != "all" && row.source_id.as_deref() != Some(&filters.addon))
+                || (filters.batch == StreamSelectorBatch::Episodes && row.is_batch)
+                || (filters.batch == StreamSelectorBatch::Packs && !row.is_batch)
+            {
+                return None;
+            }
+            if !terms.is_empty() {
+                search_text.clear();
+                for field in &row.search_fields {
+                    if let Some(field) = field {
+                        search_text.push_str(field);
+                    }
+                    search_text.push(' ');
+                }
+                let lowered = search_text.to_lowercase();
+                if !terms.iter().all(|term| lowered.contains(term)) {
+                    return None;
+                }
+            }
+            Some(index)
+        })
+        .partition(|&index| rows[index].is_playable);
+    let resolution_rank = |resolution| match resolution {
+        StreamSelectorQuality::P2160 => 4,
+        StreamSelectorQuality::P1080 => 3,
+        StreamSelectorQuality::P720 => 2,
+        StreamSelectorQuality::Sd => 1,
+        StreamSelectorQuality::All => 0,
+    };
+    if filters.sort != StreamSelectorSort::Smart {
+        let compare = |&left: &usize, &right: &usize| {
+            let left = &rows[left];
+            let right = &rows[right];
+            match filters.sort {
+                StreamSelectorSort::Smart => std::cmp::Ordering::Equal,
+                StreamSelectorSort::Quality => resolution_rank(right.resolution)
+                    .cmp(&resolution_rank(left.resolution))
+                    .then_with(|| {
+                        right
+                            .size_bytes
+                            .unwrap_or(0.0)
+                            .total_cmp(&left.size_bytes.unwrap_or(0.0))
+                    }),
+                StreamSelectorSort::Seeds => {
+                    right.seeders.unwrap_or(0).cmp(&left.seeders.unwrap_or(0))
+                }
+            }
+        };
+        // Stable ties retain the submitted backend order within each partition.
+        playable.sort_by(compare);
+        p2p.sort_by(compare);
+    }
+    playable.extend(p2p);
+    playable
 }
 
 fn preferred_probe_requests(
@@ -396,15 +481,13 @@ fn preferred_probe_requests(
 }
 
 fn retain_unprobed_streams(streams: &mut Vec<AddonStream>, requests: &[ProbeRequestIdentity]) {
-    let excluded_keys: Vec<String> = streams
-        .iter()
-        .filter(|stream| {
-            ProbeRequestIdentity::from_stream(stream)
-                .is_some_and(|request| requests.contains(&request))
-        })
-        .map(|stream| stream.stream_key.clone())
-        .collect();
-    retain_unexcluded_streams(streams, &excluded_keys);
+    if requests.is_empty() {
+        return;
+    }
+    streams.retain(|stream| {
+        !ProbeRequestIdentity::from_stream(stream)
+            .is_some_and(|request| requests.contains(&request))
+    });
 }
 
 fn preferred_probe_error(
@@ -458,7 +541,7 @@ pub async fn resolve_best_stream(
         "stream lookup",
     )?;
 
-    let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_opaque_field(&key));
+    let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_stream_key(&key));
     let settled_early = AtomicBool::new(false);
     let mut streams = query
         .fetch_pool(
@@ -640,12 +723,12 @@ async fn recover_playback_stream_work(
     let failed_stream_url = normalize_recovery_url(failed_stream_url);
     let failed_source_id = normalize_recovery_text(failed_source_id);
     let failed_stream_family = normalize_recovery_text(failed_stream_family);
-    let failed_stream_key = normalize_recovery_text(failed_stream_key);
+    let failed_stream_key = failed_stream_key.and_then(|key| normalize_stream_key(&key));
     let excluded_stream_keys: Vec<String> = excluded_stream_keys
         .unwrap_or_default()
         .iter()
         .take(RECOVERY_EXCLUDED_STREAM_KEYS_MAX)
-        .filter_map(|key| normalize_opaque_field(key))
+        .filter_map(|key| normalize_stream_key(key))
         .collect();
     // Recovery must query the same ID space the initial resolve used: on mapped
     // titles (kitsu: → tt…) the media id is not what addons index streams under.
@@ -690,17 +773,37 @@ async fn recover_playback_stream_work(
         });
     }
 
-    let mut recovery_fetch = if matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified) {
-        ResolveFetch::default()
-    } else {
-        ResolveFetch {
-            failed_source_id: failed_source_id.as_deref(),
-            failed_stream_family: failed_stream_family.as_deref(),
-            ..ResolveFetch::default()
-        }
+    let exclusions = StreamExclusions::new(
+        &excluded_stream_keys,
+        failed_stream_key.as_deref(),
+        failed_stream_url.as_deref(),
+    );
+    let mut recovery_fetch = ResolveFetch {
+        exclusions: Some(&exclusions),
+        ..ResolveFetch::default()
     };
+    if !matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified) {
+        recovery_fetch.failed_source_id = failed_source_id.as_deref();
+        recovery_fetch.failed_stream_family = failed_stream_family.as_deref();
+    }
     loop {
-        let mut streams = match query
+        let refresh_claim = if recovery_fetch.not_before.is_some() {
+            let refresh_key = format!(
+                "{}|{}|{:?}|{:?}|{:?}",
+                normalized_media_type,
+                fetch_id,
+                query.season,
+                query.episode,
+                query.absolute_episode
+            );
+            let Some(claim) = addon_transport.claim_stream_refresh(&refresh_key) else {
+                return Ok(None);
+            };
+            Some(claim)
+        } else {
+            None
+        };
+        let fetched = query
             .fetch_pool(
                 &app,
                 &playback_state,
@@ -709,8 +812,11 @@ async fn recover_playback_stream_work(
                 recovery_fetch,
                 deadline,
             )
-            .await
-        {
+            .await;
+        if let Some(claim) = refresh_claim {
+            claim.complete();
+        }
+        let mut streams = match fetched {
             Ok(streams) => streams,
             Err(error) => {
                 // Contract stays Ok(None) for compat; observability only.
@@ -731,9 +837,7 @@ async fn recover_playback_stream_work(
             }
         };
 
-        // Streams arrive pre-filtered by `prepare_addon_streams`; only earlier
-        // recovery-chain failures leave before the candidate fan-out.
-        retain_unexcluded_streams(&mut streams, &excluded_stream_keys);
+        exclusions.retain(&mut streams);
         if streams.is_empty() {
             log_warn(
                 "stream-recovery",
@@ -777,13 +881,6 @@ async fn recover_playback_stream_work(
             || matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified)
             || Instant::now() >= deadline
         {
-            return Ok(None);
-        }
-        let refresh_key = format!(
-            "{}|{}|{:?}|{:?}|{:?}",
-            normalized_media_type, fetch_id, query.season, query.episode, query.absolute_episode
-        );
-        if !addon_transport.claim_stream_refresh(&refresh_key) {
             return Ok(None);
         }
         recovery_fetch.not_before = Some(recovery_started.into_std());

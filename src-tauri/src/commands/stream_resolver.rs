@@ -1,3 +1,4 @@
+use super::streaming_helpers::parse_playback_url;
 use crate::providers::fetch_policy::MAX_REDIRECT_HOPS;
 use serde::Serialize;
 use std::sync::LazyLock;
@@ -108,8 +109,8 @@ fn is_advisory_probe_status(status: u16) -> bool {
     matches!(status, 401 | 403 | 407 | 405 | 501 | 416)
 }
 
-fn validate_probe_content_type(response: &reqwest::Response) -> Result<(), String> {
-    let Some(content_type) = response.headers().get(reqwest::header::CONTENT_TYPE) else {
+fn validate_probe_content_type(headers: &reqwest::header::HeaderMap) -> Result<(), String> {
+    let Some(content_type) = headers.get(reqwest::header::CONTENT_TYPE) else {
         return Ok(());
     };
     let media_type = content_type
@@ -121,6 +122,7 @@ fn validate_probe_content_type(response: &reqwest::Response) -> Result<(), Strin
     if media_type.eq_ignore_ascii_case(b"text/html")
         || media_type.eq_ignore_ascii_case(b"application/xhtml+xml")
         || media_type.eq_ignore_ascii_case(b"application/json")
+        || media_type.eq_ignore_ascii_case(b"application/x-bittorrent")
     {
         return Err("Direct stream probe returned HTML or JSON instead of media.".to_string());
     }
@@ -152,6 +154,16 @@ enum ProbeLanding {
     DeadEnd,
 }
 
+fn resolve_redirect_url(base: &reqwest::Url, location: &str) -> Result<reqwest::Url, String> {
+    let mut target = base
+        .join(location)
+        .map_err(|_| "Direct stream resolved to an invalid URL.".to_string())?;
+    if !location.contains('#') {
+        target.set_fragment(base.fragment());
+    }
+    Ok(target)
+}
+
 /// Walk a redirect chain hop-by-hop, re-attaching proxy secrets only on the first
 /// hop's origin (a `302` elsewhere must not exfiltrate bearer tokens). Every hop
 /// passes `redirect_target_allowed`; violations fail closed.
@@ -162,15 +174,15 @@ async fn follow_redirect_hop(
 ) -> Result<ProbeLanding, String> {
     let client = &*REDIRECT_CLIENT;
     // Resolve `Location` manually so each hop is gated before request; `base` tracks the issuing hop.
-    let mut base = response.url().clone();
+    let mut base = initial.clone();
     let mut current = response;
     let mut hops = 0;
     loop {
         if !current.status().is_redirection() {
             let status = current.status();
             if status.is_success() {
-                validate_probe_content_type(&current)?;
-                return Ok(ProbeLanding::Landed(current.url().to_string()));
+                validate_probe_content_type(current.headers())?;
+                return Ok(ProbeLanding::Landed(base.to_string()));
             }
             return Ok(ProbeLanding::TerminalStatus(status.as_u16()));
         }
@@ -182,13 +194,12 @@ async fn follow_redirect_hop(
             .headers()
             .get(reqwest::header::LOCATION)
             .and_then(|value| value.to_str().ok())
-            .map(|location| base.join(location));
+            .map(|location| resolve_redirect_url(&base, location));
         drop(current);
         let Some(next_url) = next_url else {
             return Ok(ProbeLanding::DeadEnd);
         };
-        let next_url =
-            next_url.map_err(|_| "Direct stream resolved to an invalid URL.".to_string())?;
+        let next_url = next_url?;
         if !crate::providers::fetch_policy::redirect_target_allowed(initial, &next_url) {
             return Err("Direct stream resolved to a blocked redirect target.".to_string());
         }
@@ -245,7 +256,8 @@ async fn resolve_final_direct_url(
             };
         }
         // Some servers report a default type on HEAD only; the range GET decides.
-        Ok(resp) if resp.status().is_success() => match validate_probe_content_type(&resp) {
+        Ok(resp) if resp.status().is_success() => match validate_probe_content_type(resp.headers())
+        {
             Ok(()) => return Ok(initial.to_string()),
             Err(message) => message.into(),
         },
@@ -285,7 +297,7 @@ async fn resolve_final_direct_url(
             }
         }
         Ok(resp) if resp.status().is_success() => {
-            validate_probe_content_type(&resp)?;
+            validate_probe_content_type(resp.headers())?;
             Ok(initial.to_string())
         }
         // Only the GET's own advisory statuses pass — a HEAD-only advisory never overrides a hard GET failure.
@@ -324,46 +336,39 @@ fn format_mpv_http_header_fields(headers: &[(String, String)]) -> String {
 fn build_resolved_direct_stream(
     direct_url: &str,
     final_url: String,
-    request_headers: Vec<(String, String)>,
+    request_headers: &[(String, String)],
 ) -> Result<ResolvedStream, String> {
     let initial =
         reqwest::Url::parse(direct_url).map_err(|_| "Invalid direct stream URL.".to_string())?;
-    let landed =
-        reqwest::Url::parse(&final_url).map_err(|_| "Invalid resolved stream URL.".to_string())?;
+    let landed = parse_playback_url(&final_url)
+        .ok_or_else(|| "Invalid or oversized resolved stream URL.".to_string())?;
     let request_headers =
         if crate::providers::fetch_policy::same_origin_for_proxy_headers(&initial, &landed) {
             request_headers
         } else {
-            Vec::new()
+            &[]
         };
     Ok(ResolvedStream {
         url: final_url,
-        mpv_http_header_fields: format_mpv_http_header_fields(&request_headers),
+        mpv_http_header_fields: format_mpv_http_header_fields(request_headers),
     })
 }
 
 pub(crate) const MISSING_DIRECT_URL_MESSAGE: &str = "This stream has no direct playback URL. Use a source addon that returns direct-link streams for this content.";
 
-pub(crate) struct ResolveStreamParams {
-    /// Canonical `http(s)` URL that already passed the fetchable-URL gate; re-checked before any request.
-    pub(crate) url: String,
-    /// Bounded `proxyHeaders.request` entries. Secrets: never log or persist.
-    pub(crate) request_headers: Vec<(String, String)>,
-}
-
 /// Resolve an addon direct stream URL to its playable landing URL, following redirects under the fetch policy.
 pub(crate) async fn resolve_stream_inner(
-    params: ResolveStreamParams,
+    url: &str,
+    request_headers: &[(String, String)],
 ) -> Result<ResolvedStream, ProbeError> {
-    let final_url = resolve_final_direct_url(&params.url, &params.request_headers)
+    let final_url = resolve_final_direct_url(url, request_headers)
         .await
         .map_err(|error| ProbeError {
             message: format!("Direct stream validation failed: {}", error.message),
             rate_limited: error.rate_limited,
         })?;
 
-    build_resolved_direct_stream(&params.url, final_url, params.request_headers)
-        .map_err(ProbeError::from)
+    build_resolved_direct_stream(url, final_url, request_headers).map_err(ProbeError::from)
 }
 
 #[cfg(test)]

@@ -299,7 +299,11 @@ fn is_exact_only_language_alias(value: &str) -> bool {
 }
 
 fn normalize_lower(value: Option<&str>) -> Option<String> {
-    let normalized = value?.trim().to_ascii_lowercase();
+    let value = value?;
+    if value.chars().nth(TRACK_LANG_MAX_CHARS).is_some() {
+        return None;
+    }
+    let normalized = value.trim().to_ascii_lowercase();
     if normalized.is_empty() {
         None
     } else {
@@ -307,66 +311,21 @@ fn normalize_lower(value: Option<&str>) -> Option<String> {
     }
 }
 
-/// How a token reached a canonical code: `Exact` = the whole value canonicalized
-/// (incl. the `off` sentinel); `Inferred` = a per-token scan of a longer string —
-/// advisory for consumers that persist or auto-apply on the result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum LanguageMatchConfidence {
-    Exact,
-    Inferred,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LanguageTokenNormalization {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub normalized: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub confidence: Option<LanguageMatchConfidence>,
-}
-
-pub(crate) fn classify_language_token(
-    value: Option<&str>,
-    allow_off: bool,
-) -> LanguageTokenNormalization {
-    let Some(normalized) = normalize_lower(value) else {
-        return LanguageTokenNormalization {
-            normalized: None,
-            confidence: None,
-        };
-    };
+pub(crate) fn normalize_language_token(value: Option<&str>, allow_off: bool) -> Option<String> {
+    let normalized = normalize_lower(value)?;
 
     if allow_off && normalized == "off" {
-        return LanguageTokenNormalization {
-            normalized: Some(normalized),
-            confidence: Some(LanguageMatchConfidence::Exact),
-        };
+        return Some(normalized);
     }
 
     if let Some(canonical) = canonicalize_language_value(&normalized) {
-        return LanguageTokenNormalization {
-            normalized: Some(canonical.to_string()),
-            confidence: Some(LanguageMatchConfidence::Exact),
-        };
+        return Some(canonical.to_string());
     }
 
     let token_text = super::normalize_token_text(&normalized);
-    let inferred = token_text
+    token_text
         .split_whitespace()
-        .find_map(|token| canonicalize_language_token(token).map(str::to_string));
-    let confidence = inferred
-        .is_some()
-        .then_some(LanguageMatchConfidence::Inferred);
-
-    LanguageTokenNormalization {
-        normalized: inferred,
-        confidence,
-    }
-}
-
-pub(crate) fn normalize_language_token(value: Option<&str>, allow_off: bool) -> Option<String> {
-    classify_language_token(value, allow_off).normalized
+        .find_map(|token| canonicalize_language_token(token).map(str::to_string))
 }
 
 /// Track metadata is untrusted IPC input feeding a per-char tokenizer: bound
@@ -426,10 +385,9 @@ pub(crate) fn build_mpv_language_selection_options(
 }
 
 pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
-    let normalized = preferred.trim().to_ascii_lowercase();
-    if normalized.is_empty() {
+    let Some(normalized) = normalize_lower(Some(preferred)) else {
         return Vec::new();
-    }
+    };
 
     let canonical =
         normalize_language_token(Some(&normalized), false).unwrap_or_else(|| normalized.clone());

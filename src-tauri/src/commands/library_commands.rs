@@ -1,8 +1,9 @@
+use super::list_helpers::normalize_smart_list_genre;
 use super::store_helpers::{
     library_item_key, load_library_index, load_library_map, load_watch_status_index,
-    merge_library_item, normalize_library_item, normalize_watch_status, persist_index_map,
-    read_library_snapshot, read_watch_status_snapshot, watch_status_item_key, LIBRARY_LAYOUT,
-    WATCH_STATUS_LAYOUT,
+    merge_library_item, normalize_bulk_ids, normalize_library_item, normalize_watch_status,
+    persist_index_map, read_library_snapshot, read_watch_status_snapshot, watch_status_item_key,
+    LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
     js_trim, normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY,
@@ -11,7 +12,7 @@ use super::{
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use tauri::{command, AppHandle};
 
 /// Bound on the library index: every add rewrites the index key, so an
@@ -41,6 +42,27 @@ impl From<LibraryWriteError> for String {
             | LibraryWriteError::Failed(message) => message,
         }
     }
+}
+
+pub(super) fn resolve_library_items(
+    store: &DurableStore,
+    ids: Vec<String>,
+) -> Result<Vec<MediaItem>, LibraryWriteError> {
+    let ids =
+        super::store_helpers::normalize_bulk_ids(ids).map_err(LibraryWriteError::InvalidItem)?;
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut library = read_library_snapshot(store)?.items;
+    // Titles removed elsewhere since selection are skipped; only an all-stale
+    // selection fails, so callers never report success for zero matches.
+    let items: Vec<MediaItem> = ids.iter().filter_map(|id| library.remove(id)).collect();
+    if items.is_empty() {
+        return Err(LibraryWriteError::InvalidItem(
+            "Selected titles are no longer in your library.".to_string(),
+        ));
+    }
+    Ok(items)
 }
 
 /// Prepare without mutating either domain: status-set uses this preflight
@@ -125,12 +147,6 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
     .await
 }
 
-fn normalize_bulk_library_ids(ids: &[String]) -> Result<Vec<String>, String> {
-    ids.iter()
-        .map(|id| normalize_media_id(id).ok_or_else(|| "Invalid media id for library.".to_string()))
-        .collect()
-}
-
 fn remove_library_items(
     store: &DurableStore,
     status_store: &DurableStore,
@@ -169,7 +185,7 @@ pub async fn bulk_remove_from_library(app: AppHandle, ids: Vec<String>) -> Resul
         if ids.is_empty() {
             return Ok(0);
         }
-        let ids = normalize_bulk_library_ids(&ids)?;
+        let ids = normalize_bulk_ids(ids)?;
         let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
         let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
         remove_library_items(&store, &status_store, &ids)
@@ -181,13 +197,36 @@ pub async fn bulk_remove_from_library(app: AppHandle, ids: Vec<String>) -> Resul
 pub async fn get_library(app: AppHandle) -> Result<Vec<MediaItem>, String> {
     run_blocking_store_op(move || {
         let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        let cleaned = load_library_map(&store)?;
+        read_library_items(&store)
+    })
+    .await
+}
 
-        let mut items: Vec<MediaItem> = cleaned.into_values().collect();
-        // Cached key: one lowercase allocation per item instead of O(n log n) inside the comparator.
-        items.sort_by_cached_key(|item| (item.title.to_lowercase(), item.id.clone()));
+fn read_library_items(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
+    let mut items: Vec<MediaItem> = load_library_map(store)?.into_values().collect();
+    items.sort_by_cached_key(|item| (item.title.to_lowercase(), item.id.clone()));
+    Ok(items)
+}
 
-        Ok(items)
+fn read_library_genres(store: &DurableStore) -> Result<Vec<String>, String> {
+    let mut items: Vec<_> = read_library_snapshot(store)?.items.into_values().collect();
+    items.sort_by_cached_key(|item| (item.title.to_lowercase(), item.id.clone()));
+    let mut genres = BTreeMap::new();
+    for item in items {
+        for genre in item.genres.into_iter().flatten() {
+            genres
+                .entry(normalize_smart_list_genre(&genre))
+                .or_insert(genre);
+        }
+    }
+    Ok(genres.into_values().collect())
+}
+
+#[command]
+pub async fn get_library_genres(app: AppHandle) -> Result<Vec<String>, String> {
+    run_blocking_store_op(move || {
+        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        read_library_genres(&store)
     })
     .await
 }
@@ -229,6 +268,23 @@ pub(crate) struct ProfileLibrary {
     status_counts: HashMap<String, usize>,
 }
 
+pub(super) fn library_status_counts<'a>(
+    ids: impl IntoIterator<Item = &'a str>,
+    statuses: &HashMap<String, String>,
+) -> HashMap<String, usize> {
+    let mut counts = ["watching", "watched", "plan_to_watch", "dropped", "none"]
+        .into_iter()
+        .map(|status| (status.to_string(), 0))
+        .collect::<HashMap<_, _>>();
+    for id in ids {
+        let status = statuses.get(id).map_or("none", String::as_str);
+        if let Some(count) = counts.get_mut(status) {
+            *count += 1;
+        }
+    }
+    counts
+}
+
 fn matching_title_key(title: &str, query: &str) -> Option<String> {
     let title = title.to_lowercase();
     title.contains(query).then_some(title)
@@ -266,17 +322,12 @@ fn filter_profile_library(
         }
     };
     // Keep literal Unicode/punctuation matching; remote search normalization is ASCII-only.
-    let query = js_trim(filters.query.as_deref().unwrap_or("")).to_lowercase();
-    let mut status_counts = ["watching", "watched", "plan_to_watch", "dropped", "none"]
-        .into_iter()
-        .map(|status| (status.to_string(), 0))
-        .collect::<HashMap<_, _>>();
-    for item in &items {
-        let status = statuses.get(&item.id).map_or("none", String::as_str);
-        if let Some(count) = status_counts.get_mut(status) {
-            *count += 1;
-        }
-    }
+    let query: String = js_trim(filters.query.as_deref().unwrap_or(""))
+        .chars()
+        .take(super::MAX_SEARCH_QUERY_CHARS)
+        .collect();
+    let query = query.to_lowercase();
+    let status_counts = library_status_counts(items.iter().map(|item| item.id.as_str()), statuses);
     items.retain(|item| {
         let type_matches = match filters.type_ {
             LibraryType::All => true,
@@ -341,6 +392,34 @@ fn read_profile_library(
 mod tests {
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn library_genres_are_sorted_deduplicated_and_keep_first_library_casing() {
+        let fixture = test_store();
+        assert!(read_library_genres(&fixture.store).unwrap().is_empty());
+        let index = json!(["z", "missing", "a"]);
+        fixture.store.set(LIBRARY_INDEX_KEY, index.clone());
+        for (id, title, genres) in [
+            ("z", "Zulu", vec!["DRAMA", "Comedy", "äpfel"]),
+            ("a", "Alpha", vec![" Drama ", "ÄPFEL", "Action"]),
+        ] {
+            let mut item = test_media_item(id, "movie");
+            item.title = title.into();
+            item.genres = Some(genres.into_iter().map(str::to_string).collect());
+            fixture.store.set(library_item_key(id), json!(item));
+        }
+        assert_eq!(
+            read_library_genres(&fixture.store).unwrap(),
+            ["Action", "Comedy", "Drama", "ÄPFEL"]
+        );
+        assert_eq!(fixture.store.get(LIBRARY_INDEX_KEY), Some(index));
+        assert_eq!(fixture.store.save_count(), 0);
+        fixture
+            .store
+            .set(LIBRARY_INDEX_KEY, json!({"corrupt": true}));
+        assert!(read_library_genres(&fixture.store).is_err());
+        assert_eq!(fixture.store.save_count(), 0);
+    }
 
     #[test]
     fn title_search_preserves_order_unicode_and_javascript_trim() {
@@ -514,6 +593,9 @@ mod tests {
         assert_eq!(result.status_counts["dropped"], 1);
         assert_eq!(result.status_counts["plan_to_watch"], 0);
         assert_eq!(result.status_counts["none"], 2);
+        assert!(library_status_counts([], &profile_statuses())
+            .values()
+            .all(|count| *count == 0));
     }
 
     #[test]
@@ -567,9 +649,8 @@ mod tests {
         library.store.save().unwrap();
         statuses.store.save().unwrap();
 
-        let ids =
-            normalize_bulk_library_ids(&[" a ".into(), "b".into(), "a".into(), "missing".into()])
-                .unwrap();
+        let ids = normalize_bulk_ids(vec![" a ".into(), "b".into(), "a".into(), "missing".into()])
+            .unwrap();
         assert_eq!(
             remove_library_items(&library.store, &statuses.store, &ids).unwrap(),
             2
@@ -606,7 +687,7 @@ mod tests {
         library.store.save().unwrap();
         let before = std::fs::read(&library.path).unwrap();
         for invalid in ["".to_string(), "undefined".to_string(), "x".repeat(257)] {
-            let result = normalize_bulk_library_ids(&["a".into(), invalid])
+            let result = normalize_bulk_ids(vec!["a".into(), invalid])
                 .and_then(|ids| remove_library_items(&library.store, &statuses.store, &ids));
             assert!(result.is_err());
             library.store.save().unwrap();

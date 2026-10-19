@@ -1,22 +1,152 @@
 use super::{
     addon_declares_stream, fetch_addon_stream_outcome, fetch_prepared_streams_for_addon,
-    fetch_stream_for_link_from_addons, resolve_fetch_deadline, source_health_priority_for_addon,
+    fetch_stream_for_link_from_addons, recovery_addons_needing_fallback, resolve_fetch_deadline,
+    resolve_ranking_deadline, retain_rankable_streams, source_health_priority_for_addon,
     stream_match_context, summarize_addon_outcome, summarize_cooldown_skipped_addon,
     AddonStreamFetchOutcome, EpisodeEligibility, ResolveFetch, StreamQueryRequest,
     StreamRankingScope, StreamSelectorData, StreamSelectorSnapshot, StreamSelectorStats,
     StreamSourceStatus, StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
+use crate::commands::probe_pool::{is_probeable_stream, StreamExclusions};
 use crate::commands::stream_coordinator::{
     sort_streams_by_recommendation, StreamRecommendationInputs, StreamSignalCache,
 };
-use crate::commands::streaming_helpers::build_stream_query_ids;
+use crate::commands::streaming_helpers::{build_stream_query_ids, prepare_addon_streams};
 use crate::providers::addon_manifest::{AddonManifest, AddonResourceCapability};
 use crate::providers::addons::{
     stream_conflicts_with_episode_targets, AddonStream, AddonTransport, BehaviorHints,
     StreamDeliveryKind, StreamEpisodeMatchKind, StreamRecommendationReason, StreamResolution,
 };
 use crate::test_helpers::{test_addon, test_stream};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
+
+#[test]
+fn resolve_prefilter_preserves_selector_rows_and_all_p2p_vs_empty() {
+    for urls in [
+        vec![],
+        vec![None, Some("magnet:?xt=urn:btih:ABC123")],
+        vec![None, Some("http://127.0.0.1/file.mkv")],
+        vec![None, Some("https://cdn.example/file.mkv")],
+    ] {
+        let streams: Vec<_> = urls
+            .iter()
+            .enumerate()
+            .map(|(index, url)| AddonStream {
+                stream_key: format!("s:{index}"),
+                url: url.map(str::to_string),
+                info_hash: Some("abc123".to_string()),
+                ..test_stream()
+            })
+            .collect();
+        let original_keys: Vec<_> = streams
+            .iter()
+            .map(|stream| stream.stream_key.clone())
+            .collect();
+        let mut selector = streams.clone();
+        retain_rankable_streams(&mut selector, false);
+        assert_eq!(selector.len(), urls.len());
+        assert_eq!(
+            selector
+                .iter()
+                .map(|stream| stream.stream_key.clone())
+                .collect::<Vec<_>>(),
+            original_keys,
+        );
+        let has_direct = streams.iter().any(is_probeable_stream);
+        let mut resolve = streams;
+        retain_rankable_streams(&mut resolve, true);
+        if has_direct {
+            assert_eq!(resolve.len(), 1);
+            assert!(resolve.iter().all(is_probeable_stream));
+        } else {
+            assert_eq!(resolve.len(), urls.len());
+            assert_eq!(
+                resolve
+                    .iter()
+                    .map(|stream| stream.stream_key.clone())
+                    .collect::<Vec<_>>(),
+                original_keys,
+            );
+        }
+    }
+}
+
+#[test]
+fn mixed_pool_http_ranking_matches_full_pool_then_filtering() {
+    let streams: Vec<_> = (0..36)
+        .map(|index| {
+            let source = if index % 2 == 0 { "alpha" } else { "beta" };
+            AddonStream {
+                stream_key: format!("s:{index}"),
+                name: Some(if index % 4 == 0 {
+                    "Show S01E03 1080p English".to_string()
+                } else {
+                    "Show S01 720p".to_string()
+                }),
+                url: (index % 3 == 0).then(|| format!("https://{source}.example/{index}.mkv")),
+                info_hash: (index % 3 != 0).then(|| format!("{index:040x}")),
+                source_id: Some(source.to_string()),
+                stream_family: Some(format!("{source}|release:group")),
+                cached: index % 6 == 0,
+                size_bytes: Some(if index % 4 == 0 {
+                    2_000_000_000
+                } else {
+                    1_000_000_000
+                }),
+                ..test_stream()
+            }
+        })
+        .collect();
+    let ranking = StreamRankingScope {
+        media_type: "series".to_string(),
+        media_id: "tt123".to_string(),
+        title: Some("Show".to_string()),
+        season: Some(1),
+        episode: Some(3),
+    };
+    let addon_priorities = HashMap::from([("alpha".to_string(), 1), ("beta".to_string(), 2)]);
+    let health = HashMap::from([("alpha".to_string(), 2), ("beta".to_string(), 3)]);
+    let families = HashMap::from([
+        ("alpha|release:group".to_string(), 4),
+        ("beta|release:group".to_string(), 0),
+    ]);
+    let targets = [(1, 3)];
+    for preferred_audio_language in [None, Some("en")] {
+        let inputs = StreamRecommendationInputs {
+            addon_source_priorities: &addon_priorities,
+            source_health_priorities: &health,
+            stream_family_priorities: &families,
+            preferred_title_source_id: Some("beta"),
+            match_context: stream_match_context(&targets, &ranking, false),
+            preferred_audio_language,
+            preferred_subtitle_language: None,
+        };
+        let mut expected = streams.clone();
+        sort_streams_by_recommendation(&mut expected, inputs, &mut StreamSignalCache::default());
+        expected.retain(is_probeable_stream);
+        let mut actual = streams.clone();
+        retain_rankable_streams(&mut actual, true);
+        assert_eq!(actual.len(), 12);
+        sort_streams_by_recommendation(&mut actual, inputs, &mut StreamSignalCache::default());
+        assert_eq!(
+            actual
+                .iter()
+                .map(|stream| &stream.stream_key)
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|stream| &stream.stream_key)
+                .collect::<Vec<_>>(),
+        );
+        for (actual, expected) in actual.iter().zip(&expected) {
+            assert_eq!(actual.selection_priority, expected.selection_priority);
+            assert_eq!(
+                actual.recommendation_reasons,
+                expected.recommendation_reasons
+            );
+        }
+    }
+}
 
 #[tokio::test]
 async fn stream_link_lookup_keeps_searching_after_errors_and_distinguishes_missing_rows() {
@@ -113,6 +243,70 @@ fn resolve_fetch_cutoff_preserves_initial_budget_and_reserves_late_probe_time() 
 }
 
 #[tokio::test]
+async fn stream_audit_family_reads_outlive_fetch_cutoff_and_reserve_probe_time() {
+    use std::time::Duration;
+    let start = tokio::time::Instant::now() - Duration::from_secs(14);
+    let request_deadline = start + Duration::from_secs(30);
+    let fetch_deadline = resolve_fetch_deadline(start, Some(request_deadline));
+    assert!(
+        tokio::time::timeout_at(fetch_deadline, std::future::pending::<()>())
+            .await
+            .is_err()
+    );
+    let after_fetch = tokio::time::Instant::now();
+    let ranking_deadline = resolve_ranking_deadline(after_fetch, Some(request_deadline));
+    let families = tokio::time::timeout_at(ranking_deadline, async {
+        tokio::task::yield_now().await;
+        HashMap::from([("failed".to_string(), 0), ("healthy".to_string(), 4)])
+    })
+    .await
+    .expect("family reads still have a live budget after the fetch cutoff");
+    let ranking = StreamRankingScope {
+        media_type: "movie".to_string(),
+        media_id: "tt123".to_string(),
+        title: None,
+        season: None,
+        episode: None,
+    };
+    let addon_priorities = HashMap::new();
+    let empty = HashMap::new();
+    let mut inputs = StreamRecommendationInputs {
+        addon_source_priorities: &addon_priorities,
+        source_health_priorities: &empty,
+        stream_family_priorities: &empty,
+        preferred_title_source_id: None,
+        match_context: stream_match_context(&[], &ranking, false),
+        preferred_audio_language: None,
+        preferred_subtitle_language: None,
+    };
+    let mut streams: Vec<_> = ["failed", "healthy"]
+        .into_iter()
+        .map(|family| AddonStream {
+            stream_key: format!("s:{family}"),
+            stream_family: Some(family.to_string()),
+            ..test_stream()
+        })
+        .collect();
+    let mut cache = StreamSignalCache::default();
+    sort_streams_by_recommendation(&mut streams, inputs, &mut cache);
+    assert_eq!(streams[0].stream_key, "s:failed");
+    inputs.stream_family_priorities = &families;
+    sort_streams_by_recommendation(&mut streams, inputs, &mut cache);
+    assert_eq!(streams[0].stream_key, "s:healthy");
+    for remaining_ms in [30_000, 24_000, 20_000, 12_000, 2_000, 0] {
+        let now = tokio::time::Instant::now();
+        let deadline = now + Duration::from_millis(remaining_ms);
+        let cutoff = resolve_fetch_deadline(now, Some(deadline));
+        let ranking_cutoff = resolve_ranking_deadline(cutoff, Some(deadline));
+        let probe_reserve =
+            Duration::from_secs(10).min(deadline.saturating_duration_since(cutoff) / 2);
+        assert_eq!(deadline - ranking_cutoff, probe_reserve);
+        assert!(ranking_cutoff >= cutoff);
+        assert_eq!(ranking_cutoff > cutoff, remaining_ms > 0);
+    }
+}
+
+#[tokio::test]
 async fn borrowed_addon_outcomes_preserve_identity_on_empty_and_failed_fetches() {
     let provider = AddonTransport::new();
     let mut addon = test_addon("addon-1", "Example Addon");
@@ -190,6 +384,7 @@ async fn video_id_queries_preserve_primary_fallbacks_and_source_episode_eligibil
             Some(EpisodeEligibility {
                 targets: &targets,
                 final_season: None,
+                exclusions: None,
             }),
             None,
         )
@@ -244,6 +439,7 @@ async fn stream_capabilities_route_query_ids_and_gate_each_attempt() {
             Some(EpisodeEligibility {
                 targets: &[(2, 3), (2, 27), (1, 27)],
                 final_season: None,
+                exclusions: None,
             }),
         ] {
             let outcome = fetch_addon_stream_outcome(
@@ -387,6 +583,7 @@ async fn resolve_uses_fallback_when_primary_only_has_conflicting_episodes() {
         Some(EpisodeEligibility {
             targets: &targets,
             final_season: None,
+            exclusions: None,
         }),
         None,
     )
@@ -395,6 +592,110 @@ async fn resolve_uses_fallback_when_primary_only_has_conflicting_episodes() {
     assert!(outcome.error_message.is_none());
     assert_eq!(outcome.streams.len(), 1);
     assert_eq!(outcome.streams[0].name.as_deref(), Some("Show.S01E27"));
+}
+
+#[tokio::test]
+async fn stream_audit_recovery_uses_supported_fallback_after_excluded_primary() {
+    let provider = AddonTransport::new();
+    let mut addon = test_addon("https://addon.example", "Example Addon");
+    addon.capabilities = Some(AddonManifest {
+        name: addon.name.clone(),
+        resources: vec![AddonResourceCapability {
+            name: "stream".to_string(),
+            types: vec!["series".to_string()],
+            id_prefixes: vec!["tt123:2:3".to_string(), "tt123:1:27".to_string()],
+        }],
+        catalogs: Vec::new(),
+    });
+    let query_ids = [
+        "tt123:2:3".to_string(),
+        "tt123:2:27".to_string(),
+        "tt123:1:27".to_string(),
+    ];
+    let primary = episode_stream("Show.S02E03");
+    let fallback = AddonStream {
+        url: Some("https://cdn.example/fallback.mkv".to_string()),
+        ..episode_stream("Show.S01E27")
+    };
+    let excluded_keys = prepare_addon_streams(vec![primary.clone()], &addon.name, &addon.id)
+        .into_iter()
+        .map(|stream| stream.stream_key)
+        .collect::<Vec<_>>();
+    provider.seed_stream_cache("series", &query_ids[0], &addon.url, vec![primary]);
+    provider.seed_stream_cache("series", &query_ids[2], &addon.url, vec![fallback]);
+    let exclusions = StreamExclusions::new(&excluded_keys, None, None);
+    let streams = fetch_prepared_streams_for_addon(
+        &provider,
+        "series",
+        &query_ids,
+        &addon,
+        Some(EpisodeEligibility {
+            targets: &[(2, 3), (1, 27)],
+            final_season: None,
+            exclusions: Some(&exclusions),
+        }),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(streams.len(), 1);
+    assert_eq!(streams[0].name.as_deref(), Some("Show.S01E27"));
+}
+
+#[tokio::test]
+async fn stream_audit_late_request_alias_reopens_only_its_addon_fallback() {
+    let provider = AddonTransport::new();
+    let failed_addon = test_addon("https://failed.example", "Failed");
+    let alias_addon = test_addon("https://alias.example", "Alias");
+    let ids = ["tt123:2:3".to_string(), "tt123:1:27".to_string()];
+    let failed = episode_stream("Show.S02E03");
+    let failed_key =
+        prepare_addon_streams(vec![failed.clone()], &failed_addon.name, &failed_addon.id)
+            .remove(0)
+            .stream_key;
+    let alias = AddonStream {
+        url: Some(format!("{}#alias", failed.url.as_deref().unwrap())),
+        ..failed.clone()
+    };
+    let fallback = AddonStream {
+        url: Some("https://cdn.example/fallback.mkv".to_string()),
+        ..episode_stream("Show.S01E27")
+    };
+    for (addon, primary, secondary) in [
+        (&failed_addon, failed, Vec::new()),
+        (&alias_addon, alias, vec![fallback]),
+    ] {
+        provider.seed_stream_cache("series", &ids[0], &addon.url, vec![primary]);
+        provider.seed_stream_cache("series", &ids[1], &addon.url, secondary);
+    }
+    let exclusions = StreamExclusions::new(&[], Some(&failed_key), None);
+    let eligibility = Some(EpisodeEligibility {
+        targets: &[(2, 3), (1, 27)],
+        final_season: None,
+        exclusions: Some(&exclusions),
+    });
+    let early =
+        fetch_addon_stream_outcome(&provider, "series", &ids, &alias_addon, eligibility, None)
+            .await;
+    assert_eq!(early.streams.len(), 1);
+    let late =
+        fetch_addon_stream_outcome(&provider, "series", &ids, &failed_addon, eligibility, None)
+            .await;
+    assert!(late.streams.is_empty());
+    let mut outcomes = BTreeMap::from([(0, late), (1, early)]);
+    let addons = [(0, &failed_addon), (1, &alias_addon)];
+    let retries = recovery_addons_needing_fallback(&mut outcomes, &addons, &exclusions);
+    assert_eq!(
+        retries.iter().map(|(index, _)| *index).collect::<Vec<_>>(),
+        [1]
+    );
+    for (index, addon) in retries {
+        let outcome =
+            fetch_addon_stream_outcome(&provider, "series", &ids, addon, eligibility, None).await;
+        outcomes.insert(index, outcome);
+    }
+    assert_eq!(outcomes[&1].streams[0].name.as_deref(), Some("Show.S01E27"));
+    assert!(recovery_addons_needing_fallback(&mut outcomes, &addons, &exclusions).is_empty());
 }
 
 #[tokio::test]
@@ -423,6 +724,7 @@ async fn resolve_stops_at_primary_when_any_episode_candidate_survives() {
         Some(EpisodeEligibility {
             targets: &[(2, 3), (2, 27), (1, 27)],
             final_season: None,
+            exclusions: None,
         }),
         None,
     )
@@ -491,6 +793,7 @@ async fn movie_fetches_bypass_episode_eligibility_with_no_targets() {
         Some(EpisodeEligibility {
             targets: &[],
             final_season: Some(2),
+            exclusions: None,
         }),
         None,
     )
@@ -774,7 +1077,7 @@ fn selector_snapshot_serializes_like_selector_data() {
             fatal_error_message,
         };
         let snapshot = StreamSelectorSnapshot {
-            streams: &owned.streams,
+            streams: owned.streams.iter().collect(),
             stats: StreamSelectorStats::from_snapshot(&owned.streams, &owned.source_summaries),
             source_summaries: owned.source_summaries.iter().collect(),
             fatal_error_message: owned.fatal_error_message.as_deref(),

@@ -1,9 +1,10 @@
 use super::{
     build_reference_title, canonicalize_language_prefs, is_neutral_title_extra,
-    is_title_boundary_token, normalize_token_text, recommendation_reasons_from_key,
-    set_stream_match_badges, sort_streams_by_recommendation, stream_episode_relevance_priority,
-    stream_language_preference_priority, stream_recommendation_key, tokenize_title_words,
-    StreamMatchContext, StreamRecommendationInputs, StreamRecommendationKey, StreamSignalCache,
+    is_title_boundary_token, normalize_token_text, rank_stream_by_recommendation,
+    recommendation_reasons_from_key, set_stream_match_badges, sort_streams_by_recommendation,
+    stream_episode_relevance_priority, stream_language_preference_priority,
+    stream_recommendation_key, tokenize_title_words, StreamMatchContext,
+    StreamRecommendationInputs, StreamRecommendationKey, StreamSignalCache,
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
 use crate::providers::addons::{
@@ -546,6 +547,51 @@ fn ranking_language_evidence_excludes_reference_title_words() {
 }
 
 #[test]
+fn stream_audit_labelled_language_overrides_reference_title_suppression() {
+    let reference = build_reference_title(Some("English Teacher")).unwrap();
+    for (text, expected) in [
+        ("english teacher 1080p", 0),
+        ("english teacher 1080p english audio", 4),
+        ("english teacher 1080p audio: english", 4),
+        ("english teacher 1080p english dub", 4),
+        ("english teacher 1080p english subtitles", 3),
+        ("english teacher 1080p subtitles: english", 3),
+        ("english teacher 1080p [en]", 6),
+        ("english teacher 1080p [en] subtitles", 3),
+    ] {
+        assert_eq!(
+            stream_language_preference_priority(
+                text,
+                canonicalize_language_prefs(Some("en"), Some("en")),
+                detect_stream_flags(text),
+                Some(&reference),
+            ),
+            expected,
+            "{text}"
+        );
+    }
+    let reference = build_reference_title(Some("English Dub")).unwrap();
+    for (text, expected) in [
+        ("english dub 1080p", 0),
+        ("english.dub.1080p", 0),
+        ("english dub 1080p english audio", 4),
+        ("english dub 1080p subtitles: english", 3),
+        ("english dub 1080p [en]", 6),
+    ] {
+        assert_eq!(
+            stream_language_preference_priority(
+                text,
+                canonicalize_language_prefs(Some("en"), Some("en")),
+                detect_stream_flags(text),
+                Some(&reference),
+            ),
+            expected,
+            "{text}"
+        );
+    }
+}
+
+#[test]
 fn title_initialism_keeps_partial_relevance_without_overlap() {
     let reference = build_reference_title(Some("Full Metal Alchemist"));
     let mut stream = sort_stream("alpha");
@@ -866,7 +912,7 @@ fn resort_reuses_fetch_context_and_owned_pack_coverage() {
     let original = pack.clone();
     let mut streams = vec![pack];
     let mut signals = StreamSignalCache::default();
-    sort_streams_by_recommendation(&mut streams, inputs, &mut signals);
+    rank_stream_by_recommendation(&mut streams[0], inputs, &mut signals);
     let coverage_pointer = streams[0]
         .match_summary
         .as_ref()
@@ -928,6 +974,56 @@ fn resort_reuses_fetch_context_and_owned_pack_coverage() {
         .as_ref()
         .and_then(|summary| summary.pack_coverage.as_ref())
         .is_some());
+}
+
+#[test]
+fn borrowed_preview_ranking_keeps_final_declaration_ties_and_row_allocations() {
+    let (addon_priorities, source_health, family_priorities) = tied_priorities();
+    let inputs = recommendation_inputs(
+        &addon_priorities,
+        &source_health,
+        &family_priorities,
+        None,
+        no_match_context(),
+        None,
+        None,
+    );
+    let mut streams = vec![sort_stream("alpha"), sort_stream("beta")];
+    for stream in &mut streams {
+        stream.stream_key = format!("s:{}", stream.source_id.as_deref().unwrap());
+    }
+    let pointers: Vec<_> = streams
+        .iter()
+        .map(|stream| {
+            (
+                stream.name.as_ref().unwrap().as_ptr(),
+                stream.url.as_ref().unwrap().as_ptr(),
+            )
+        })
+        .collect();
+    let mut signals = StreamSignalCache::default();
+    let mut preview = [1, 0].map(|index| {
+        (
+            rank_stream_by_recommendation(&mut streams[index], inputs, &mut signals),
+            index,
+        )
+    });
+    preview.sort_by_key(|(key, _)| std::cmp::Reverse(*key));
+    assert_eq!(preview.map(|(_, index)| index), [1, 0]);
+
+    sort_streams_by_recommendation(&mut streams, inputs, &mut signals);
+    assert_eq!(
+        streams
+            .iter()
+            .map(|stream| stream.source_id.as_deref())
+            .collect::<Vec<_>>(),
+        [Some("alpha"), Some("beta")]
+    );
+    for (stream, (name, url)) in streams.iter().zip(pointers) {
+        assert_eq!(stream.name.as_ref().unwrap().as_ptr(), name);
+        assert_eq!(stream.url.as_ref().unwrap().as_ptr(), url);
+        assert!(stream.selection_priority.is_some());
+    }
 }
 
 #[test]

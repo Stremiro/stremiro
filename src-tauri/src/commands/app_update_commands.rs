@@ -21,6 +21,7 @@ pub(crate) struct PendingAppUpdate {
 struct PendingUpdateState {
     update: Option<tauri_plugin_updater::Update>,
     downloaded_bytes: Option<Vec<u8>>,
+    download_operation_id: Option<String>,
     last_error: Option<String>,
     /// Prevents parallel downloads or installs, including after a webview reload.
     install_in_progress: bool,
@@ -53,6 +54,7 @@ impl PendingAppUpdate {
     fn fail_install(&self, message: String) -> String {
         let mut state = self.lock();
         state.install_in_progress = false;
+        state.download_operation_id = None;
         state.last_error = Some(message.clone());
         format!(
             "{} Run another update check before retrying installation.",
@@ -81,6 +83,7 @@ static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> =
 /// instead a watchdog aborts when no chunk has arrived for this long.
 const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
 const UPDATE_DOWNLOAD_WATCHDOG_TICK: Duration = Duration::from_secs(15);
+const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 pub(crate) const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 
@@ -245,8 +248,8 @@ fn strip_markdown_links(text: String, images: bool) -> String {
             cursor = label_end + 2 + url_end + 1;
             continue;
         }
-        result.push_str(marker);
-        cursor = label_start;
+        result.push_str(&text[start..=label_end]);
+        cursor = label_end + 1;
     }
     result.push_str(&text[cursor..]);
     result
@@ -290,6 +293,34 @@ pub struct AppUpdateMetadata {
     pub notes: Vec<ReleaseNoteBlock>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub date: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppUpdateCheckError {
+    message: String,
+    retry_on_reconnect: bool,
+}
+
+impl From<tauri_plugin_updater::Error> for AppUpdateCheckError {
+    fn from(error: tauri_plugin_updater::Error) -> Self {
+        let retry_on_reconnect = match &error {
+            tauri_plugin_updater::Error::Reqwest(error) => {
+                !error.is_builder() && !error.is_redirect() && !error.is_decode()
+            }
+            tauri_plugin_updater::Error::Network(_) => true,
+            _ => false,
+        };
+        Self {
+            message: if retry_on_reconnect {
+                "Could not reach the update server. Check your connection and try again."
+                    .to_string()
+            } else {
+                error.to_string()
+            },
+            retry_on_reconnect,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -428,8 +459,22 @@ enum AppUpdateProgress {
     Installing,
 }
 
-fn emit_progress(app: &AppHandle, progress: AppUpdateProgress) {
-    let _ = app.emit(APP_UPDATE_PROGRESS_EVENT, progress);
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateProgressEvent<'a> {
+    operation_id: &'a str,
+    #[serde(flatten)]
+    progress: AppUpdateProgress,
+}
+
+fn emit_progress(app: &AppHandle, operation_id: &str, progress: AppUpdateProgress) {
+    let _ = app.emit(
+        APP_UPDATE_PROGRESS_EVENT,
+        AppUpdateProgressEvent {
+            operation_id,
+            progress,
+        },
+    );
 }
 
 #[command]
@@ -483,49 +528,52 @@ pub async fn get_app_release_notes(version: String) -> Result<Option<AppUpdateMe
 pub async fn check_for_app_update(
     app: AppHandle,
     pending_update: State<'_, PendingAppUpdate>,
-) -> Result<Option<AppUpdateMetadata>, String> {
+) -> Result<Option<AppUpdateMetadata>, AppUpdateCheckError> {
     let _check_guard = pending_update.check_lock.lock().await;
 
     // Replacing the pending handle mid-install would race the take.
-    if pending_update.lock().install_in_progress {
-        return Err("An update install is already in progress.".to_string());
+    {
+        let mut state = pending_update.lock();
+        if state.install_in_progress {
+            return Err(AppUpdateCheckError {
+                message: "An update install is already in progress.".to_string(),
+                retry_on_reconnect: false,
+            });
+        }
+        state.downloaded_bytes = None;
+        state.download_operation_id = None;
     }
 
     let update = tokio::time::timeout(
         UPDATE_CHECK_TIMEOUT,
-        app.updater().map_err(|error| error.to_string())?.check(),
+        app.updater().map_err(AppUpdateCheckError::from)?.check(),
     )
     .await
-    .map_err(|_| "Update check timed out.".to_string())?
-    .map_err(|error| error.to_string())?;
+    .map_err(|_| AppUpdateCheckError {
+        message: "Update check timed out. Check your connection and try again.".to_string(),
+        retry_on_reconnect: true,
+    })?
+    .map_err(AppUpdateCheckError::from)?;
 
-    let last_notified_version = if update.is_some() {
+    let notification_eligible = if let Some(update) = update.as_ref() {
         super::config_commands::get_last_notified_app_update_version(app.clone())
             .await
-            .unwrap_or(None)
+            .is_ok_and(|last| last.as_deref() != Some(update.version.as_str()))
     } else {
-        None
+        false
     };
     let metadata = update.as_ref().map(|update| AppUpdateMetadata {
         version: update.version.clone(),
-        notification_eligible: last_notified_version.as_deref() != Some(update.version.as_str()),
+        notification_eligible,
         notes: parse_release_notes(update.body.as_deref()),
         // ISO date only ("2026-09-15"): parseable by `new Date()` in the UI.
         date: update.date.map(|date| date.date().to_string()),
     });
 
-    // A successful no-update check retires the previous notification;
-    // clearing is best-effort.
-    if update.is_none() {
-        let _ =
-            super::config_commands::save_last_notified_app_update_version(app.clone(), None).await;
-    }
-
     // A fresh check replaces the pending handle and clears the last install
     // failure: retry always requires this fresh handle, never a stale one.
     let mut state = pending_update.lock();
     state.update = update;
-    state.downloaded_bytes = None;
     state.last_error = None;
 
     Ok(metadata)
@@ -546,6 +594,7 @@ pub async fn download_app_update(
     app: AppHandle,
     pending_update: State<'_, PendingAppUpdate>,
     version: String,
+    operation_id: String,
 ) -> Result<(), String> {
     // Take the handle under check_lock so a remote check can't swap it.
     let update = {
@@ -553,10 +602,12 @@ pub async fn download_app_update(
         let mut state = pending_update.lock();
         let update = state.take_update(&version)?;
         state.downloaded_bytes = None;
+        state.download_operation_id = None;
         update
     };
 
     let progress_app = app.clone();
+    let progress_operation_id = operation_id.clone();
     let mut downloaded_bytes = 0_u64;
     let mut last_reported_percent = None::<u64>;
     let last_activity_at = Arc::new(Mutex::new(Instant::now()));
@@ -585,6 +636,7 @@ pub async fn download_app_update(
                     last_reported_percent = Some(percent);
                     emit_progress(
                         &progress_app,
+                        &progress_operation_id,
                         AppUpdateProgress::Downloading {
                             downloaded_bytes: clamped_downloaded,
                             total_bytes,
@@ -595,10 +647,15 @@ pub async fn download_app_update(
             || {},
         );
         tokio::pin!(download);
+        let deadline = tokio::time::sleep(UPDATE_DOWNLOAD_TIMEOUT);
+        tokio::pin!(deadline);
 
         loop {
             tokio::select! {
                 outcome = &mut download => break outcome.map_err(|error| error.to_string()),
+                _ = &mut deadline => {
+                    break Err("Update download timed out after 30 minutes. Try again on a faster connection.".to_string());
+                }
                 _ = tokio::time::sleep(UPDATE_DOWNLOAD_WATCHDOG_TICK) => {
                     let stalled_for = lock_or_recover(&last_activity_at).elapsed();
                     if stalled_for >= UPDATE_DOWNLOAD_STALL_LIMIT {
@@ -615,6 +672,7 @@ pub async fn download_app_update(
     let mut state = pending_update.lock();
     state.update = Some(update);
     state.downloaded_bytes = Some(bytes);
+    state.download_operation_id = Some(operation_id);
     state.install_in_progress = false;
     Ok(())
 }
@@ -624,6 +682,7 @@ pub async fn install_app_update(
     app: AppHandle,
     pending_update: State<'_, PendingAppUpdate>,
     version: String,
+    operation_id: String,
 ) -> Result<(), String> {
     let (update, bytes) = {
         let _check_guard = pending_update.check_lock.lock().await;
@@ -631,11 +690,18 @@ pub async fn install_app_update(
         if state.downloaded_bytes.is_none() {
             return Err(no_pending_update_message(state.last_error.as_deref()));
         }
+        if state.download_operation_id.as_deref() != Some(operation_id.as_str()) {
+            return Err(
+                "The update download changed. Run another update check before installing."
+                    .to_string(),
+            );
+        }
         let update = state.take_update(&version)?;
         let bytes = state
             .downloaded_bytes
             .take()
             .expect("download checked above");
+        state.download_operation_id = None;
         (update, bytes)
     };
 
@@ -647,7 +713,7 @@ pub async fn install_app_update(
     .map_err(|message| pending_update.fail_install(message))?;
     // Keep install outside the timed flush task: a timed-out flush must never launch the installer later.
     tauri::async_runtime::spawn_blocking(move || {
-        emit_progress(&app, AppUpdateProgress::Installing);
+        emit_progress(&app, &operation_id, AppUpdateProgress::Installing);
         update.install(bytes).map_err(|error| error.to_string())
     })
     .await
@@ -659,6 +725,35 @@ pub async fn install_app_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn app_update_progress_and_check_errors_match_frontend_contract() {
+        assert_eq!(
+            serde_json::to_value(AppUpdateProgressEvent {
+                operation_id: "attempt-1",
+                progress: AppUpdateProgress::Downloading {
+                    downloaded_bytes: 25,
+                    total_bytes: Some(100),
+                },
+            })
+            .unwrap(),
+            serde_json::json!({
+                "operationId": "attempt-1",
+                "phase": "downloading",
+                "downloadedBytes": 25,
+                "totalBytes": 100,
+            })
+        );
+        let network_error =
+            AppUpdateCheckError::from(tauri_plugin_updater::Error::Network("offline".into()));
+        assert_eq!(
+            serde_json::to_value(network_error).unwrap()["retryOnReconnect"],
+            true
+        );
+        let config_error = AppUpdateCheckError::from(tauri_plugin_updater::Error::EmptyEndpoints);
+        assert!(!config_error.retry_on_reconnect);
+        assert!(!config_error.message.is_empty());
+    }
 
     #[test]
     fn release_notes_shape_headings_bullets_and_numbered_lists() {
@@ -715,6 +810,12 @@ mod tests {
         );
         assert_eq!(strip_inline_markup("[<b>**Docs**</b>](url)"), "Docs");
         assert_eq!(strip_inline_markup("[![badge](image)](url)"), "");
+        let brackets = format!("{}]", "[".repeat(4096));
+        assert_eq!(strip_inline_markup(&brackets), brackets);
+        assert_eq!(
+            strip_inline_markup("[a [b](c)] ![a ![b] plain"),
+            "a [b] ![a ![b] plain"
+        );
         assert_eq!(strip_inline_markup("  a\t \n b  "), "a b");
         assert_eq!(strip_inline_markup("a\tb"), "a\tb");
         assert_eq!(

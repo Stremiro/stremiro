@@ -123,6 +123,21 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
     Some(progress)
 }
 
+pub(crate) fn prepare_live_watch_progress(
+    progress: WatchProgress,
+    completed: bool,
+) -> Result<Option<WatchProgress>, String> {
+    let mut progress = sanitize_watch_progress(progress)
+        .ok_or_else(|| "Invalid media id or type for watch progress.".to_string())?;
+    if completed {
+        progress.duration = progress.duration.max(progress.position).max(1.0);
+        progress.position = progress.duration;
+    } else if progress.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
+        return Ok(None);
+    }
+    Ok(Some(progress))
+}
+
 pub(crate) fn should_skip_watch_progress_save(
     existing: &WatchProgress,
     incoming: &WatchProgress,

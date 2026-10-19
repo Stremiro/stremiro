@@ -491,9 +491,20 @@ pub(super) fn episode_matches_lowered(
     episode: u32,
     season_context: Option<bool>,
 ) -> bool {
+    episode_matches_lowered_with_scratch(t, season, episode, season_context, &mut String::new())
+}
+
+fn episode_matches_lowered_with_scratch(
+    t: &str,
+    season: u32,
+    episode: u32,
+    season_context: Option<bool>,
+    buf: &mut String,
+) -> bool {
     use std::fmt::Write;
 
-    let mut buf = String::with_capacity(20);
+    buf.clear();
+    buf.reserve(20);
 
     // `SxE` probes: groups pad season and episode independently (`S1E05`, `S01E5`).
     let _ = write!(buf, "s{:02}e{:02}", season, episode);
@@ -1111,14 +1122,38 @@ pub(crate) fn stream_episode_match_texts(
 
     // Keep scanning matching fields until one carries a verified season claim.
     let mut matched_exact = false;
-    for (text, season_context, _) in fields.iter().flatten() {
-        // Range endpoints aren't standalone tokens — strip ranges, then re-probe.
-        if !episode_matches_lowered(text, season, episode, *season_context) {
+    let mut episode_token = String::new();
+    for (field, has_range) in fields.iter().zip([
+        texts.episode_range.name,
+        texts.episode_range.title,
+        texts.episode_range.filename,
+    ]) {
+        let Some((text, season_context, _)) = field else {
+            continue;
+        };
+        // Probe raw text first: stripping can join loose tokens ("ep S01E01-E02 5").
+        if !episode_matches_lowered_with_scratch(
+            text,
+            season,
+            episode,
+            *season_context,
+            &mut episode_token,
+        ) {
             continue;
         }
-        let standalone = strip_episode_ranges(text);
+        let standalone = if has_range {
+            strip_episode_ranges(text)
+        } else {
+            Cow::Borrowed(text.as_str())
+        };
         if matches!(standalone, Cow::Borrowed(_))
-            || episode_matches_lowered(&standalone, season, episode, *season_context)
+            || episode_matches_lowered_with_scratch(
+                &standalone,
+                season,
+                episode,
+                *season_context,
+                &mut episode_token,
+            )
         {
             if matches!(*season_context, Some(true)) {
                 return StreamEpisodeMatch {

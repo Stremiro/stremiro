@@ -130,7 +130,7 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
 
 #[test]
 fn parse_stored_addon_configs_keeps_valid_siblings() {
-    let stored = parse_stored_addon_configs(serde_json::json!([
+    let stored = parse_stored_addon_configs(&serde_json::json!([
         {
             "id": "https://v3-cinemeta.strem.io",
             "url": "https://v3-cinemeta.strem.io",
@@ -146,6 +146,124 @@ fn parse_stored_addon_configs_keeps_valid_siblings() {
 
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].url, "https://v3-cinemeta.strem.io");
+}
+
+#[test]
+fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_siblings() {
+    let fixture = crate::test_helpers::test_store();
+    let capabilities = serde_json::to_value(crate::test_helpers::cinemeta_manifest()).unwrap();
+    let stored = serde_json::json!([
+        {
+            "id": " duplicate-id ", "url": "stremio://disabled.example/manifest.json",
+            "name": " Disabled ", "enabled": false, "capabilities": capabilities
+        },
+        null,
+        {"id": "missing-name", "url": "https://broken.example", "enabled": true},
+        {"id": "bad-toggle", "url": "https://broken.example", "name": "Bad", "enabled": "false"},
+        {
+            "id": "duplicate-url", "url": "https://disabled.example/",
+            "name": "Duplicate", "enabled": true, "capabilities": capabilities
+        },
+        {
+            "id": "duplicate-id", "url": "https://other.example/manifest.json",
+            "name": " ", "enabled": true, "capabilities": capabilities
+        },
+        {
+            "id": "", "url": "https://malformed-capabilities.example/manifest.json",
+            "name": "Malformed snapshot", "enabled": false, "capabilities": {"catalogs": false}
+        },
+        {
+            "id": "stored-cinemeta", "url": super::DEFAULT_CINEMETA_INSTALL_URL,
+            "name": " My Cinemeta ", "enabled": false, "capabilities": capabilities
+        },
+        {"id": "invalid-url", "url": "not a URL", "name": "Bad URL", "enabled": true}
+    ]);
+    fixture.store.set(super::ADDON_CONFIGS_KEY, stored.clone());
+    let expected_configs: Vec<_> = stored
+        .as_array()
+        .unwrap()
+        .iter()
+        .cloned()
+        .filter_map(|value| serde_json::from_value::<AddonConfig>(value).ok())
+        .collect();
+    assert_eq!(parse_stored_addon_configs(&stored), expected_configs);
+    for record in [
+        serde_json::json!([
+            "array",
+            "https://array.example",
+            "Array",
+            true,
+            capabilities
+        ]),
+        serde_json::json!(["short", "https://array.example", "Short", false]),
+        serde_json::json!(["broken", "https://array.example", "Broken", true, 42]),
+        serde_json::json!(["invalid"]),
+    ] {
+        let expected: Vec<_> = serde_json::from_value::<AddonConfig>(record.clone())
+            .into_iter()
+            .collect();
+        assert_eq!(
+            parse_stored_addon_configs(&serde_json::json!([record])),
+            expected
+        );
+    }
+    let full = super::load_addon_configs(&fixture.store);
+    assert!(full[0].capabilities.is_some());
+    let full_views: Vec<_> = full
+        .iter()
+        .cloned()
+        .map(AddonConfigView::from_config)
+        .collect();
+    let expected: Vec<_> = full
+        .into_iter()
+        .map(|mut config| {
+            config.capabilities = None;
+            config
+        })
+        .collect();
+    let projected = AddonConfig::load_identities(&fixture.store);
+    assert_eq!(projected, expected);
+    assert_eq!(projected[0].id, "stored-cinemeta");
+    assert!(!projected[0].enabled);
+    assert_eq!(projected[0].name, "My Cinemeta");
+    assert_eq!(projected[1].name, "OpenSubtitles");
+    assert!(projected[1].enabled);
+    assert_eq!(projected[2].id, "duplicate-id");
+    assert!(!projected[2].enabled);
+    assert_eq!(projected[3].id, "https://other.example");
+    assert_eq!(projected[3].name, "other.example");
+    assert_eq!(projected.len(), 5);
+    let projected_views: Vec<_> = projected
+        .into_iter()
+        .map(AddonConfigView::from_config)
+        .collect();
+    assert_eq!(
+        serde_json::to_value(projected_views).unwrap(),
+        serde_json::to_value(full_views).unwrap()
+    );
+    assert_eq!(fixture.store.get(super::ADDON_CONFIGS_KEY), Some(stored));
+}
+
+#[test]
+fn addon_identity_projection_matches_full_load_for_missing_or_invalid_registries() {
+    let fixture = crate::test_helpers::test_store();
+    for stored in [
+        None,
+        Some(serde_json::json!(null)),
+        Some(serde_json::json!({"not": "an array"})),
+        Some(serde_json::json!([])),
+    ] {
+        match stored {
+            Some(value) => fixture.store.set(super::ADDON_CONFIGS_KEY, value),
+            None => {
+                fixture.store.delete(super::ADDON_CONFIGS_KEY);
+            }
+        }
+        assert_eq!(
+            AddonConfig::load_identities(&fixture.store),
+            super::load_addon_configs(&fixture.store)
+        );
+    }
 }
 
 #[test]
@@ -265,6 +383,53 @@ fn stored_profile_accent_targets_default_per_flag() {
     assert!(parsed.profile.accent_targets.actions);
     assert!(parsed.profile.accent_targets.progress);
     assert!(parsed.profile.accent_targets.artwork);
+}
+
+#[test]
+fn app_ui_automatic_update_checks_default_and_preserve_partial_patches() {
+    for value in [
+        serde_json::json!({}),
+        serde_json::json!({"automaticUpdateChecks": "false"}),
+        serde_json::json!({"automaticUpdateChecks": null}),
+    ] {
+        assert!(
+            super::parse_app_ui_preferences(value)
+                .unwrap()
+                .automatic_update_checks
+        );
+    }
+    let current = super::parse_app_ui_preferences(serde_json::json!({
+        "automaticUpdateChecks": false, "playerVolume": 42
+    }))
+    .unwrap();
+    assert!(!current.automatic_update_checks);
+    let saved = super::apply_app_ui_preferences_patch(
+        current,
+        serde_json::from_value(serde_json::json!({"spoilerProtection": true})).unwrap(),
+    );
+    assert!(!saved.automatic_update_checks);
+    assert_eq!(saved.player_volume, 42);
+    let enabled = super::apply_app_ui_preferences_patch(
+        saved,
+        serde_json::from_value(serde_json::json!({"automaticUpdateChecks": true})).unwrap(),
+    );
+    assert!(enabled.automatic_update_checks);
+    assert!(enabled.spoiler_protection);
+    assert_eq!(enabled.player_volume, 42);
+    assert!(serde_json::from_value::<super::AppUiPreferencesPatch>(
+        serde_json::json!({"automaticUpdateChecks": "false"})
+    )
+    .is_err());
+    let mut legacy = serde_json::to_value(AppUiPreferences::default()).unwrap();
+    legacy
+        .as_object_mut()
+        .unwrap()
+        .remove("automaticUpdateChecks");
+    assert!(
+        serde_json::from_value::<AppUiPreferences>(legacy)
+            .unwrap()
+            .automatic_update_checks
+    );
 }
 
 #[test]
@@ -644,6 +809,31 @@ fn player_keybindings_resolution_claims_overrides_before_defaults() {
     let effective = super::resolve_player_keybindings(&conflicting);
     assert_eq!(effective["togglePlay"], vec!["p"]);
     assert_eq!(effective["toggleMute"], vec!["m"]);
+}
+
+#[test]
+fn player_keybindings_bind_validates_the_entire_override_map() {
+    for overrides in [
+        BTreeMap::from([("unknown".to_string(), vec![])]),
+        BTreeMap::from([("toggleMute".to_string(), vec!["p".to_string(); 3])]),
+        BTreeMap::from([("toggleMute".to_string(), vec!["x".repeat(17)])]),
+        BTreeMap::from([("toggleMute".to_string(), vec!["escape".to_string()])]),
+        (0..23).map(|index| (index.to_string(), vec![])).collect(),
+    ] {
+        assert!(super::bind_player_key(overrides, "togglePlay", 0, None).is_err());
+    }
+    let overrides = super::keybindings::PLAYER_KEYBINDING_ACTIONS
+        .iter()
+        .map(|(action, _)| (action.to_string(), vec![]))
+        .collect();
+    assert!(super::bind_player_key(overrides, "togglePlay", 0, None).is_ok());
+    let overrides = BTreeMap::from([("toggleMute".to_string(), vec!["P".to_string()])]);
+    let moved = super::bind_player_key(overrides, "togglePlay", 0, Some("p")).unwrap();
+    assert!(moved["toggleMute"].is_empty());
+    assert_eq!(moved["togglePlay"][0], "p");
+    assert!(
+        super::bind_player_key(BTreeMap::new(), "togglePlay", 0, Some(&"x".repeat(17))).is_err()
+    );
 }
 
 #[test]

@@ -1,8 +1,8 @@
 use super::library_commands::LibraryWriteError;
 use super::store_helpers::{
-    library_item_key, load_watch_status_index, load_watch_statuses_map, normalize_library_items,
+    library_item_key, load_watch_status_index, load_watch_statuses_map, normalize_bulk_ids,
     normalize_watch_status, persist_index_map, read_library_snapshot, read_watch_status_snapshot,
-    watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
+    watch_status_item_key, WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_typed_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
@@ -143,24 +143,32 @@ fn normalize_bulk_status(status: Option<String>) -> Result<Option<String>, Watch
         .transpose()
 }
 
-fn normalize_bulk_status_items(
-    items: Vec<MediaItem>,
-) -> Result<HashMap<String, MediaItem>, WatchStatusError> {
-    // Validate every payload, including overwritten duplicates, before opening stores.
-    Ok(normalize_library_items(items)
-        .map_err(|message| WatchStatusError::new(WatchStatusErrorKind::InvalidItem, message))?
+fn resolve_bulk_status_ids(
+    store: &DurableStore,
+    ids: Vec<String>,
+) -> Result<Vec<String>, WatchStatusError> {
+    let ids = normalize_bulk_ids(ids).map_err(LibraryWriteError::InvalidItem)?;
+    let library = read_library_snapshot(store)?;
+    let ids: Vec<_> = ids
         .into_iter()
-        .map(|item| (item.id.clone(), item))
-        .collect())
+        .filter(|id| library.items.contains_key(id))
+        .collect();
+    if ids.is_empty() {
+        return Err(WatchStatusError::new(
+            WatchStatusErrorKind::InvalidItem,
+            "Selected titles are no longer in your library.",
+        ));
+    }
+    Ok(ids)
 }
 
 fn clear_watch_status_items(
     store: &DurableStore,
-    items: &HashMap<String, MediaItem>,
+    ids: &[String],
 ) -> Result<usize, WatchStatusError> {
     let mut statuses = read_watch_status_snapshot(store)?;
-    let changed = items
-        .keys()
+    let changed = ids
+        .iter()
         .filter(|id| statuses.items.remove(*id).is_some())
         .count();
     if changed > 0 {
@@ -174,28 +182,12 @@ fn clear_watch_status_items(
 fn set_watch_status_items(
     store: &DurableStore,
     library_store: &DurableStore,
-    items: HashMap<String, MediaItem>,
+    ids: Vec<String>,
     status: String,
 ) -> Result<usize, WatchStatusError> {
     let mut statuses = read_watch_status_snapshot(store)?;
-    let mut library = read_library_snapshot(library_store)?;
-    let new_library_count = items
-        .keys()
-        .filter(|id| !library.items.contains_key(*id))
-        .count();
-    if new_library_count > 0
-        && library.items.len() + new_library_count > super::library_commands::MAX_LIBRARY_ITEMS
-    {
-        return Err(WatchStatusError::new(
-            WatchStatusErrorKind::LibraryCapacity,
-            format!(
-                "Library cannot exceed {} items",
-                super::library_commands::MAX_LIBRARY_ITEMS
-            ),
-        ));
-    }
-    let new_status_count = items
-        .keys()
+    let new_status_count = ids
+        .iter()
         .filter(|id| !statuses.items.contains_key(*id))
         .count();
     if new_status_count > 0 && statuses.items.len() + new_status_count > MAX_WATCH_STATUS_ITEMS {
@@ -204,31 +196,15 @@ fn set_watch_status_items(
             "Watch status list is full.",
         ));
     }
-    let processed = items.len();
+    let processed = ids.len();
     let mut status_changed = false;
-    let mut library_changed = false;
-    for (id, item) in items {
+    for id in ids {
         if statuses.items.get(&id) != Some(&status) {
-            statuses.items.insert(id.clone(), status.clone());
+            statuses.items.insert(id, status.clone());
             status_changed = true;
         }
-        if let std::collections::hash_map::Entry::Vacant(entry) = library.items.entry(id) {
-            entry.insert(item);
-            library_changed = true;
-        }
     }
-    // Library first, as in single status-set: a durable status must not outlive
-    // a failed library insertion. Both snapshots/capacities were validated above.
-    if library_changed {
-        persist_index_map(
-            library_store,
-            LIBRARY_LAYOUT,
-            &library.index,
-            &library.items,
-        )?;
-    } else {
-        library_store.save()?;
-    }
+    library_store.save()?;
     if status_changed {
         persist_index_map(store, WATCH_STATUS_LAYOUT, &statuses.index, &statuses.items)?;
     } else {
@@ -240,22 +216,20 @@ fn set_watch_status_items(
 #[command]
 pub async fn bulk_set_watch_status(
     app: AppHandle,
-    items: Vec<MediaItem>,
+    ids: Vec<String>,
     status: Option<String>,
 ) -> Result<usize, WatchStatusError> {
     run_typed_store_op(move || {
         let status = normalize_bulk_status(status)?;
-        if items.is_empty() {
+        if ids.is_empty() {
             return Ok(0);
         }
-        let items = normalize_bulk_status_items(items)?;
+        let library_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        let ids = resolve_bulk_status_ids(&library_store, ids)?;
         let store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
         match status {
-            None => clear_watch_status_items(&store, &items),
-            Some(status) => {
-                let library_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-                set_watch_status_items(&store, &library_store, items, status)
-            }
+            None => clear_watch_status_items(&store, &ids),
+            Some(status) => set_watch_status_items(&store, &library_store, ids, status),
         }
     })
     .await
@@ -276,6 +250,34 @@ pub async fn get_all_watch_statuses(
 mod tests {
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn bulk_library_id_resolution_preserves_validation_and_store_error_kinds() {
+        let library = test_store();
+        let resolve = |ids| resolve_bulk_status_ids(&library.store, ids).map(|_| ());
+        for ids in [
+            vec!["".into()],
+            vec!["missing".into()],
+            vec!["a".into(); super::super::store_helpers::MAX_BULK_ITEMS + 1],
+        ] {
+            assert_eq!(
+                resolve(ids).unwrap_err().kind,
+                WatchStatusErrorKind::InvalidItem
+            );
+        }
+        library
+            .store
+            .set(LIBRARY_INDEX_KEY, json!({"corrupt": true}));
+        assert_eq!(
+            resolve(vec!["".into()]).unwrap_err().kind,
+            WatchStatusErrorKind::InvalidItem
+        );
+        assert_eq!(
+            resolve(vec!["a".into()]).unwrap_err().kind,
+            WatchStatusErrorKind::Failed
+        );
+        assert_eq!(library.store.save_count(), 0);
+    }
 
     #[test]
     fn library_preflight_errors_preserve_watch_status_kinds_and_library_messages() {
@@ -333,32 +335,25 @@ mod tests {
     }
 
     #[test]
-    fn bulk_status_set_deduplicates_and_auto_inserts_library_once() {
+    fn bulk_status_set_deduplicates_and_saves_pending_library_changes_once() {
         let statuses = test_store();
         let library = test_store();
         let existing = test_media_item("a", "movie");
         library.store.set(LIBRARY_INDEX_KEY, json!(["a"]));
         library.store.set(library_item_key("a"), json!(existing));
         library.store.save().unwrap();
-        let mut last = test_media_item(" b ", "series");
-        last.title = "Last occurrence".into();
-        let items = normalize_bulk_status_items(vec![
-            test_media_item("a", "movie"),
-            test_media_item("b", "series"),
-            last,
-        ])
-        .unwrap();
+        let item = test_media_item("b", "series");
+        library.store.set(library_item_key("b"), json!(item));
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b"]));
+        let ids =
+            resolve_bulk_status_ids(&library.store, vec!["a".into(), "b".into(), " b ".into()])
+                .unwrap();
         let status = normalize_bulk_status(Some(" WATCHED ".into()))
             .unwrap()
             .unwrap();
         assert_eq!(
-            set_watch_status_items(
-                &statuses.store,
-                &library.store,
-                items.clone(),
-                status.clone()
-            )
-            .unwrap(),
+            set_watch_status_items(&statuses.store, &library.store, ids.clone(), status.clone())
+                .unwrap(),
             2
         );
         assert_eq!(
@@ -377,18 +372,20 @@ mod tests {
             library.store.get(library_item_key("a")),
             Some(json!(existing))
         );
-        assert_eq!(
-            library
-                .store
-                .get_typed::<MediaItem>(library_item_key("b"))
-                .unwrap()
-                .title,
-            "Last occurrence"
-        );
+        assert_eq!(library.store.get(library_item_key("b")), Some(json!(item)));
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&library.path).unwrap()).unwrap();
+        assert_eq!(saved[library_item_key("b")], json!(item));
         assert_eq!(statuses.store.save_count(), 1);
         assert_eq!(library.store.save_count(), 2);
         assert_eq!(
-            set_watch_status_items(&statuses.store, &library.store, items, status).unwrap(),
+            set_watch_status_items(
+                &statuses.store,
+                &library.store,
+                resolve_bulk_status_ids(&library.store, ids).unwrap(),
+                status
+            )
+            .unwrap(),
             2
         );
         assert_eq!(statuses.store.save_count(), 1);
@@ -399,32 +396,28 @@ mod tests {
     fn bulk_status_clear_keeps_library_intact_and_counts_removed_entries() {
         let statuses = test_store();
         let library = test_store();
-        let items = normalize_bulk_status_items(vec![
-            test_media_item("a", "movie"),
-            test_media_item("b", "movie"),
-        ])
-        .unwrap();
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b"]));
+        for id in ["a", "b"] {
+            library
+                .store
+                .set(library_item_key(id), json!(test_media_item(id, "movie")));
+        }
+        let ids = resolve_bulk_status_ids(&library.store, vec!["a".into(), "b".into()]).unwrap();
         set_watch_status_items(
             &statuses.store,
             &library.store,
-            items.clone(),
+            ids.clone(),
             "watching".into(),
         )
         .unwrap();
         let before = std::fs::read(&library.path).unwrap();
         assert_eq!(normalize_bulk_status(None).unwrap(), None);
-        assert_eq!(
-            clear_watch_status_items(&statuses.store, &items).unwrap(),
-            2
-        );
+        assert_eq!(clear_watch_status_items(&statuses.store, &ids).unwrap(), 2);
         assert_eq!(statuses.store.get(WATCH_STATUS_INDEX_KEY), Some(json!([])));
         assert_eq!(std::fs::read(&library.path).unwrap(), before);
         assert_eq!(library.store.save_count(), 1);
         assert_eq!(statuses.store.save_count(), 2);
-        assert_eq!(
-            clear_watch_status_items(&statuses.store, &items).unwrap(),
-            0
-        );
+        assert_eq!(clear_watch_status_items(&statuses.store, &ids).unwrap(), 0);
         assert_eq!(statuses.store.save_count(), 2);
     }
 
@@ -432,34 +425,21 @@ mod tests {
     fn bulk_status_invalid_input_fails_without_partial_writes() {
         let statuses = test_store();
         let library = test_store();
-        for (status, items) in [
-            ("invalid", vec![test_media_item("a", "movie")]),
-            (
-                "watched",
-                vec![test_media_item("a", "movie"), test_media_item("", "movie")],
-            ),
-            (
-                "watched",
-                vec![test_media_item("a", "movie"), test_media_item("b", "bad")],
-            ),
-            (
-                "watched",
-                vec![test_media_item("a", "movie"), test_media_item("a", "bad")],
-            ),
+        for (status, ids) in [
+            ("invalid", vec!["a".into()]),
+            ("watched", vec!["a".into(), "".into()]),
+            ("invalid", vec!["".into()]),
             ("invalid", Vec::new()),
         ] {
             let result = normalize_bulk_status(Some(status.into())).and_then(|status| {
-                let items = normalize_bulk_status_items(items)?;
-                set_watch_status_items(&statuses.store, &library.store, items, status.unwrap())
+                let ids = resolve_bulk_status_ids(&library.store, ids)?;
+                set_watch_status_items(&statuses.store, &library.store, ids, status.unwrap())
             });
             let error = result.unwrap_err();
             let (kind, message) = if status == "invalid" {
                 (WatchStatusErrorKind::InvalidStatus, "Invalid watch status.")
             } else {
-                (
-                    WatchStatusErrorKind::InvalidItem,
-                    "Invalid media item. Missing required id, title, or type.",
-                )
+                (WatchStatusErrorKind::InvalidItem, "Invalid media id.")
             };
             assert_eq!(error.kind, kind);
             assert_eq!(error.message, message);
@@ -471,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_status_capacity_failure_does_not_read_repair_or_write_either_store() {
+    fn bulk_status_duplicate_ids_count_once_at_library_capacity() {
         let statuses = test_store();
         let library = test_store();
         let ids: Vec<String> = (0..super::super::library_commands::MAX_LIBRARY_ITEMS)
@@ -483,21 +463,47 @@ mod tests {
                 .set(library_item_key(id), json!(test_media_item(id, "movie")));
         }
         library.store.set(LIBRARY_INDEX_KEY, json!(ids));
-        // A read-repairing loader would delete this missing row even though the batch fails.
-        statuses
+        let ids =
+            resolve_bulk_status_ids(&library.store, vec!["id0".into(), "id0".into()]).unwrap();
+        assert_eq!(
+            set_watch_status_items(&statuses.store, &library.store, ids, "watched".into()).unwrap(),
+            1
+        );
+        assert_eq!(library.store.save_count(), 1);
+        assert_eq!(statuses.store.save_count(), 1);
+    }
+
+    #[test]
+    fn bulk_status_capacity_failure_does_not_read_repair_or_write_either_store() {
+        let statuses = test_store();
+        let library = test_store();
+        let mut ids: Vec<String> = (0..MAX_WATCH_STATUS_ITEMS)
+            .map(|index| format!("id{index}"))
+            .collect();
+        for id in &ids {
+            statuses
+                .store
+                .set(watch_status_item_key(id), json!("watched"));
+        }
+        ids.push("missing".into());
+        statuses.store.set(WATCH_STATUS_INDEX_KEY, json!(ids));
+        library
             .store
-            .set(WATCH_STATUS_INDEX_KEY, json!(["missing"]));
+            .set(LIBRARY_INDEX_KEY, json!(["new", "missing"]));
+        library.store.set(
+            library_item_key("new"),
+            json!(test_media_item("new", "movie")),
+        );
         statuses.store.save().unwrap();
         library.store.save().unwrap();
         let status_before = std::fs::read(&statuses.path).unwrap();
         let library_before = std::fs::read(&library.path).unwrap();
-        let items = normalize_bulk_status_items(vec![test_media_item("new", "movie")]).unwrap();
-        let error =
-            set_watch_status_items(&statuses.store, &library.store, items, "watched".into())
-                .unwrap_err();
+        let ids = resolve_bulk_status_ids(&library.store, vec!["new".into()]).unwrap();
+        let error = set_watch_status_items(&statuses.store, &library.store, ids, "watched".into())
+            .unwrap_err();
         assert_eq!(
             serde_json::to_value(error).unwrap(),
-            json!({"kind": "library_capacity", "message": "Library cannot exceed 5000 items"})
+            json!({"kind": "status_capacity", "message": "Watch status list is full."})
         );
         statuses.store.save().unwrap();
         library.store.save().unwrap();
@@ -508,59 +514,40 @@ mod tests {
     }
 
     #[test]
-    fn bulk_status_duplicate_ids_count_once_at_library_capacity() {
+    fn bulk_status_resolves_normalized_ids_and_skips_stale_selection_without_repairs() {
         let statuses = test_store();
         let library = test_store();
-        let ids: Vec<String> = (0..super::super::library_commands::MAX_LIBRARY_ITEMS - 1)
-            .map(|index| format!("id{index}"))
-            .collect();
-        for id in &ids {
-            library
-                .store
-                .set(library_item_key(id), json!(test_media_item(id, "movie")));
-        }
-        library.store.set(LIBRARY_INDEX_KEY, json!(ids));
-        let items = normalize_bulk_status_items(vec![
-            test_media_item("new", "movie"),
-            test_media_item("new", "movie"),
-        ])
-        .unwrap();
+        let mut item = test_media_item(" a ", "Series");
+        item.title = " Normalized title ".into();
+        library
+            .store
+            .set(LIBRARY_INDEX_KEY, json!([" a ", "missing"]));
+        library.store.set(library_item_key(" a "), json!(item));
+        library.store.save().unwrap();
+        let before = std::fs::read(&library.path).unwrap();
+        let ids =
+            resolve_bulk_status_ids(&library.store, vec!["a".into(), "a".into(), "stale".into()])
+                .unwrap();
+        assert_eq!(ids, vec!["a"]);
         assert_eq!(
-            set_watch_status_items(&statuses.store, &library.store, items, "watched".into())
+            set_watch_status_items(&statuses.store, &library.store, ids, "watching".into())
                 .unwrap(),
             1
         );
-        assert_eq!(library.store.save_count(), 1);
-        assert_eq!(statuses.store.save_count(), 1);
-    }
-
-    #[test]
-    fn bulk_status_preserves_status_capacity_before_inserting_library_items() {
-        let statuses = test_store();
-        let library = test_store();
-        let ids: Vec<String> = (0..MAX_WATCH_STATUS_ITEMS)
-            .map(|index| format!("id{index}"))
-            .collect();
-        for id in &ids {
-            statuses
-                .store
-                .set(watch_status_item_key(id), json!("watched"));
-        }
-        statuses.store.set(WATCH_STATUS_INDEX_KEY, json!(ids));
-        statuses.store.save().unwrap();
-        let before = std::fs::read(&statuses.path).unwrap();
-        let items = normalize_bulk_status_items(vec![test_media_item("new", "movie")]).unwrap();
-        let error =
-            set_watch_status_items(&statuses.store, &library.store, items, "watched".into())
-                .unwrap_err();
         assert_eq!(
-            serde_json::to_value(error).unwrap(),
-            json!({"kind": "status_capacity", "message": "Watch status list is full."})
+            statuses.store.get(watch_status_item_key("a")),
+            Some(json!("watching"))
         );
-        statuses.store.save().unwrap();
+        let error = resolve_bulk_status_ids(&library.store, vec!["stale".into()])
+            .err()
+            .unwrap();
+        assert_eq!(error.kind, WatchStatusErrorKind::InvalidItem);
+        assert_eq!(
+            error.message,
+            "Selected titles are no longer in your library."
+        );
         library.store.save().unwrap();
-        assert_eq!(std::fs::read(&statuses.path).unwrap(), before);
-        assert!(!library.path.exists());
-        assert_eq!(statuses.store.save_count(), 1);
+        assert_eq!(std::fs::read(&library.path).unwrap(), before);
+        assert_eq!(library.store.save_count(), 1);
     }
 }

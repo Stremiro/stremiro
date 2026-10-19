@@ -156,15 +156,12 @@ pub async fn get_playback_language_preferences(
     .await
 }
 
-#[command]
-pub async fn get_effective_playback_language_preferences(
-    app: AppHandle,
-    playback_state: State<'_, PlaybackStateService>,
-    media_id: Option<String>,
-    media_type: Option<String>,
-) -> Result<PlaybackLanguagePreferences, String> {
-    let media_id = media_id.as_deref().and_then(normalize_media_id);
-    let media_type = match media_type.as_deref() {
+fn normalize_playback_preference_scope(
+    media_id: Option<&str>,
+    media_type: Option<&str>,
+) -> Result<(Option<String>, Option<String>), String> {
+    let media_id = media_id.and_then(normalize_media_id);
+    let media_type = match media_type {
         Some(value) => Some(
             normalize_stream_media_type(value, media_id.as_deref())
                 .ok_or_else(|| "Invalid media type for playback language preferences.".to_string())?
@@ -172,6 +169,18 @@ pub async fn get_effective_playback_language_preferences(
         ),
         None => None,
     };
+    Ok((media_id, media_type))
+}
+
+#[command]
+pub async fn get_effective_playback_language_preferences(
+    app: AppHandle,
+    playback_state: State<'_, PlaybackStateService>,
+    media_id: Option<String>,
+    media_type: Option<String>,
+) -> Result<PlaybackLanguagePreferences, String> {
+    let (media_id, media_type) =
+        normalize_playback_preference_scope(media_id.as_deref(), media_type.as_deref())?;
 
     // One blocking round-trip for defaults plus the scoped merge — a two-hop
     // form could mix defaults from one instant with a snapshot from another.
@@ -234,17 +243,8 @@ pub async fn save_selected_playback_language_preference(
     media_type: Option<String>,
     media_id: Option<String>,
 ) -> Result<SavedPlaybackLanguagePreference, String> {
-    // Scope validation mirrors get_effective_playback_language_preferences:
-    // only a valid media_type + media_id pair reaches the scoped merge.
-    let media_id = media_id.as_deref().and_then(normalize_media_id);
-    let media_type = match media_type.as_deref() {
-        Some(value) => Some(
-            normalize_stream_media_type(value, media_id.as_deref())
-                .ok_or_else(|| "Invalid media type for playback language preferences.".to_string())?
-                .to_string(),
-        ),
-        None => None,
-    };
+    let (media_id, media_type) =
+        normalize_playback_preference_scope(media_id.as_deref(), media_type.as_deref())?;
 
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {

@@ -51,16 +51,16 @@ pub(crate) struct StreamPresentation {
     pub stream_title: String,
     pub resolution: StreamResolution,
     pub delivery_kind: StreamDeliveryKind,
-    pub delivery_label: String,
+    pub delivery_label: &'static str,
     pub is_instantly_playable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub hdr_label: Option<String>,
+    pub hdr_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audio_label: Option<String>,
+    pub audio_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub codec_label: Option<String>,
+    pub codec_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub multi_audio_label: Option<String>,
+    pub multi_audio_label: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_label: Option<String>,
     pub is_batch: bool,
@@ -73,7 +73,7 @@ impl Default for StreamPresentation {
             stream_title: String::new(),
             resolution: StreamResolution::Sd,
             delivery_kind: StreamDeliveryKind::PeerToPeer,
-            delivery_label: String::new(),
+            delivery_label: "",
             is_instantly_playable: false,
             hdr_label: None,
             audio_label: None,

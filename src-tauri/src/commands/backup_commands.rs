@@ -11,8 +11,8 @@ use super::history_helpers::{build_history_key, sanitize_watch_progress};
 use super::library_commands::MAX_LIBRARY_ITEMS;
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
-    normalize_list_id, normalize_list_name, UserList, UserListWithItems, LISTS_ORDER_KEY,
-    MAX_LISTS, MAX_LIST_ITEMS,
+    normalize_list_id, normalize_list_name, validate_smart_list_rules, UserList, UserListWithItems,
+    LISTS_ORDER_KEY, MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::playback_preferences_commands::{
     read_playback_language_preferences_from_store, sanitize_language_pref,
@@ -21,8 +21,8 @@ use super::playback_preferences_commands::{
 use super::playback_state::{PlaybackLanguagePreferencesSnapshot, PlaybackStateService};
 use super::resume_store::HistoryMergeError;
 use super::store_helpers::{
-    load_library_index, load_library_map, load_watch_status_index, load_watch_statuses_map,
-    normalize_library_item, normalize_watch_status, persist_index_map, LIBRARY_LAYOUT,
+    load_library_map, load_watch_statuses_map, normalize_library_item, normalize_watch_status,
+    persist_index_map, read_library_snapshot, read_watch_status_snapshot, LIBRARY_LAYOUT,
     WATCH_STATUS_LAYOUT,
 };
 use super::watch_status_commands::MAX_WATCH_STATUS_ITEMS;
@@ -303,7 +303,12 @@ pub(super) fn prepare_import_lists(
         .cloned()
         .collect();
     let mut prepared = Vec::with_capacity(raw_lists.len());
-    for list in raw_lists {
+    for mut list in raw_lists {
+        let rules = list
+            .as_object_mut()
+            .and_then(|list| list.remove("rules"))
+            .and_then(|rules| serde_json::from_value(rules).ok())
+            .and_then(|rules| validate_smart_list_rules(rules).ok());
         let Ok(list) = serde_json::from_value::<UserListWithItems>(list) else {
             continue;
         };
@@ -343,6 +348,10 @@ pub(super) fn prepare_import_lists(
                 ),
             ));
         }
+        if rules.is_some() {
+            valid_ids.clear();
+            valid_items.clear();
+        }
         let new_id = normalized_id
             .as_deref()
             .and_then(normalize_list_id)
@@ -358,6 +367,7 @@ pub(super) fn prepare_import_lists(
             icon: import_icon,
             item_ids: valid_ids,
             items: valid_items,
+            rules,
         });
     }
     validate_import_capacity(
@@ -443,7 +453,7 @@ fn import_settings(
     }
     let addons_imported = settings
         .addon_configs
-        .map(|value| merge_imported_addon_configs(&store, parse_stored_addon_configs(value)))
+        .map(|value| merge_imported_addon_configs(&store, parse_stored_addon_configs(&value)))
         .unwrap_or(0);
     if restored || addons_imported > 0 {
         if let Err(error) =
@@ -613,9 +623,9 @@ fn import_app_data_entries(
 ) -> Result<ImportResult, BackupError> {
     // Preflight before the first mutation: every touched store file must parse and capacities must hold.
     let lib_store = super::open_store(app, LIBRARY_STORE_FILE)?;
-    let existing_library_index = load_library_index(&lib_store)?;
+    let library_snapshot = read_library_snapshot(&lib_store)?;
     let status_store = super::open_store(app, WATCH_STATUS_STORE_FILE)?;
-    let existing_status_index = load_watch_status_index(&status_store)?;
+    let status_snapshot = read_watch_status_snapshot(&status_store)?;
     let lists_store = super::open_store(app, LISTS_STORE_FILE)?;
     let existing_order = load_lists_order(&lists_store)?;
     // `import_settings` reopens these via the registry cache; opening now validates the files first.
@@ -633,7 +643,7 @@ fn import_app_data_entries(
         })
         .collect();
     validate_import_capacity(
-        &existing_library_index,
+        &library_snapshot.index,
         incoming_library.iter().map(|item| item.id.as_str()),
         MAX_LIBRARY_ITEMS,
         "library",
@@ -641,7 +651,7 @@ fn import_app_data_entries(
 
     let incoming_statuses = prepare_import_watch_statuses(export.watch_statuses);
     validate_import_capacity(
-        &existing_status_index,
+        &status_snapshot.index,
         incoming_statuses.keys().map(String::as_str),
         MAX_WATCH_STATUS_ITEMS,
         "watch status",
@@ -667,7 +677,7 @@ fn import_app_data_entries(
     }
     let history_imported = service.import_history_entries(app, history_entries)?;
 
-    let mut lib_map = load_library_map(&lib_store)?;
+    let mut lib_map = library_snapshot.items;
     let mut library_imported = 0usize;
     for normalized in incoming_library {
         if let std::collections::hash_map::Entry::Vacant(entry) =
@@ -681,7 +691,7 @@ fn import_app_data_entries(
     persist_index_map(
         &lib_store,
         LIBRARY_LAYOUT,
-        &existing_library_index,
+        &library_snapshot.index,
         &lib_map,
     )?;
 
@@ -697,6 +707,7 @@ fn import_app_data_entries(
                 name: list.name,
                 icon: list.icon,
                 item_ids: list.item_ids,
+                rules: list.rules,
             }),
         );
         for item in &list.items {
@@ -710,7 +721,7 @@ fn import_app_data_entries(
     lists_store.set(LISTS_ORDER_KEY, json!(new_order));
     lists_store.save()?;
 
-    let mut statuses = load_watch_statuses_map(&status_store)?;
+    let mut statuses = status_snapshot.items;
     let mut statuses_imported = 0usize;
     for (clean_id, clean_status) in incoming_statuses {
         if let std::collections::hash_map::Entry::Vacant(entry) = statuses.entry(clean_id) {
@@ -722,7 +733,7 @@ fn import_app_data_entries(
     persist_index_map(
         &status_store,
         WATCH_STATUS_LAYOUT,
-        &existing_status_index,
+        &status_snapshot.index,
         &statuses,
     )?;
 

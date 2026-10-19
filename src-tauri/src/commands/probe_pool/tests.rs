@@ -1,8 +1,9 @@
 use super::{
     build_candidate_input, build_probe_candidates, find_preferred_position, probe_candidate,
-    resolve_candidate_results, resolve_ranked_best_stream_candidate, CandidateProbeResult,
-    PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream, StreamPoolQuery,
-    StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES, SAME_HOST_PROBE_SPACING,
+    resolve_candidate_results, resolve_probe_candidates, resolve_ranked_best_stream_candidate,
+    CandidateProbeResult, PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream,
+    StreamExclusions, StreamPoolQuery, StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES,
+    BEST_STREAM_PROBE_CONCURRENCY, SAME_HOST_PROBE_SPACING,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
 use crate::providers::addons::{
@@ -12,7 +13,7 @@ use crate::test_helpers::test_stream;
 use futures_util::stream::FuturesOrdered;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -79,7 +80,7 @@ fn candidate_input_moves_identity_and_preserves_probe_fields() {
 
 #[test]
 fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
-    let streams = (0..12)
+    let streams = (0..BEST_STREAM_MAX_CANDIDATES + 4)
         .map(|index| {
             let mut stream = probeable_stream(&format!("s:{index}"), None);
             let host = if index == 1 {
@@ -97,11 +98,19 @@ fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
         plan.iter()
             .map(|(candidate, _)| candidate.stream_key.as_str())
             .collect::<Vec<_>>(),
-        ["s:10", "s:0", "s:1", "s:2", "s:3", "s:4", "s:5", "s:6"]
+        std::iter::once(10)
+            .chain((0..BEST_STREAM_MAX_CANDIDATES + 4).filter(|index| *index != 10))
+            .take(BEST_STREAM_MAX_CANDIDATES)
+            .map(|index| format!("s:{index}"))
+            .collect::<Vec<_>>()
     );
     assert_eq!(
         plan.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
-        [0, 1, 0, 2, 3, 4, 5, 6].map(|slot| SAME_HOST_PROBE_SPACING * slot)
+        [0, 1, 0]
+            .into_iter()
+            .chain(2..BEST_STREAM_MAX_CANDIDATES as u32 - 1)
+            .map(|slot| SAME_HOST_PROBE_SPACING * slot)
+            .collect::<Vec<_>>()
     );
 }
 
@@ -326,6 +335,81 @@ fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants
     }
 }
 
+#[test]
+fn recovery_exclusions_cover_the_chain_and_request_aliases_but_keep_distinct_auth() {
+    let stream = |key: &str, path: &str, headers: serde_json::Value| AddonStream {
+        url: Some(format!("https://cdn.example/{path}")),
+        behavior_hints: Some(
+            serde_json::from_value(serde_json::json!({"proxyHeaders": {"request": headers}}))
+                .unwrap(),
+        ),
+        ..probeable_stream(key, None)
+    };
+    let first = stream(
+        "s:older",
+        "old.mkv#first",
+        serde_json::json!({
+            "Authorization": "Bearer first", "X-Custom": "one"
+        }),
+    );
+    let latest = stream("s:latest", "latest.mkv", serde_json::json!({}));
+    let keys = vec![" s:older ".to_string(), "s:missing".to_string()];
+    let exclusions = StreamExclusions::new(
+        &keys,
+        Some("s:latest"),
+        Some("https://cdn.example/latest.mkv"),
+    );
+    let mut known = vec![first, latest];
+    exclusions.retain(&mut known);
+    assert!(known.is_empty());
+    let mut aliases = vec![
+        stream(
+            "s:older-alias",
+            "old.mkv#second",
+            serde_json::json!({
+                "x-custom": "one", "authorization": "Bearer first"
+            }),
+        ),
+        stream("s:latest-alias", "latest.mkv#second", serde_json::json!({})),
+        stream(
+            "s:auth",
+            "old.mkv#third",
+            serde_json::json!({
+                "Authorization": "Bearer second", "X-Custom": "one"
+            }),
+        ),
+        stream(
+            "s:duplicate-header",
+            "old.mkv",
+            serde_json::json!({
+                "Authorization": "Bearer first", "authorization": "Bearer first", "X-Custom": "one"
+            }),
+        ),
+        stream(
+            "s:value-case",
+            "old.mkv",
+            serde_json::json!({
+                "Authorization": "bearer first", "X-Custom": "one"
+            }),
+        ),
+    ];
+    exclusions.retain(&mut aliases);
+    assert_eq!(
+        aliases
+            .iter()
+            .map(|stream| stream.stream_key.as_str())
+            .collect::<Vec<_>>(),
+        ["s:auth", "s:duplicate-header", "s:value-case"]
+    );
+    let mut legacy = vec![probeable_stream("s:legacy", Some("ABC123"))];
+    StreamExclusions::new(&[], Some("h:abc123:0"), None).retain(&mut legacy);
+    assert!(legacy.is_empty());
+    let mut url_only = vec![stream("s:url", "old.mkv#player", serde_json::json!({}))];
+    StreamExclusions::new(&[], None, Some("https://cdn.example/old.mkv#failed"))
+        .retain(&mut url_only);
+    assert!(url_only.is_empty());
+}
+
 fn hint(stream_key: &'static str) -> PreferredStreamHint<'static> {
     PreferredStreamHint {
         stream_key: Some(stream_key),
@@ -362,8 +446,9 @@ macro_rules! preferred_position_tests {
         $(
             #[test]
             fn $name() {
-                let streams = $streams;
-                assert_eq!(find_preferred_position(&streams, $preferred, $excluded), $expected);
+                let mut streams = $streams;
+                StreamExclusions::new(&[], $excluded, None).retain(&mut streams);
+                assert_eq!(find_preferred_position(&streams, $preferred), $expected);
             }
         )*
     };
@@ -381,7 +466,7 @@ preferred_position_tests! {
     preferred_position_skips_excluded_key:
         (pair(), hint("s:aaaa"), Some("s:aaaa")) => None;
     preferred_position_ignores_key_hits_without_direct_url:
-        ([AddonStream {
+        (vec![AddonStream {
             url: None,
             info_hash: Some("abc123".to_string()),
             stream_key: "s:prepared".to_string(),
@@ -433,7 +518,7 @@ preferred_position_tests! {
             ..hint("s:rotted")
         }, None) => Some(1);
     preferred_position_source_id_miss_does_not_fall_through_to_name:
-        ([AddonStream {
+        (vec![AddonStream {
             source_id: Some("addon-a".to_string()),
             source_name: Some("shared".to_string()),
             ..probeable_stream("s:aaaa", None)
@@ -480,7 +565,7 @@ fn preferred_position_legacy_resume_family_falls_back_to_source_id() {
         source_name: row.source_name.as_deref(),
         stream_family: row.stream_family.as_deref(),
     };
-    assert_eq!(find_preferred_position(&streams, preferred, None), Some(1));
+    assert_eq!(find_preferred_position(&streams, preferred), Some(1));
     assert_eq!(
         resume_store
             .get_entry("movie:tt123")
@@ -729,6 +814,204 @@ fn resolved(url: &str) -> ResolvedStream {
 
 type FakeProbeInner = Pin<Box<dyn Future<Output = Result<ResolvedStream, ProbeError>>>>;
 
+#[derive(Default)]
+struct ProbeActivity {
+    started: AtomicUsize,
+    active: AtomicUsize,
+    peak: AtomicUsize,
+}
+
+impl ProbeActivity {
+    fn enter(self: &Arc<Self>) -> ActiveProbe {
+        self.started.fetch_add(1, Ordering::SeqCst);
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        ActiveProbe(self.clone())
+    }
+}
+
+struct ActiveProbe(Arc<ProbeActivity>);
+
+impl Drop for ActiveProbe {
+    fn drop(&mut self) {
+        self.0.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+fn refill_probe_plan(count: usize) -> Vec<(StreamResolveCandidateInput, Duration)> {
+    let mut streams: Vec<_> = (0..count)
+        .map(|index| {
+            let mut stream = probeable_stream(&format!("s:{index}"), None);
+            stream.url = Some(format!("https://cdn{index}.example/{index}.mkv"));
+            stream
+        })
+        .collect();
+    let mut alias = streams[0].clone();
+    alias.stream_key = "s:alias".to_string();
+    alias.url.as_mut().unwrap().push_str("#filename.mkv");
+    streams.insert(1, alias);
+    build_probe_candidates(streams, None, None, PreferredStreamHint::default())
+}
+
+#[tokio::test]
+async fn probe_pool_refills_eight_failed_slots_and_resolves_ninth_request() {
+    let activity = Arc::new(ProbeActivity::default());
+    let probes = activity.clone();
+    let barrier = Arc::new(tokio::sync::Barrier::new(BEST_STREAM_PROBE_CONCURRENCY));
+    let plan = refill_probe_plan(9);
+    assert_eq!(plan.len(), 9);
+    let winner = resolve_probe_candidates(
+        plan,
+        None,
+        None,
+        tokio::time::Instant::now() + Duration::from_secs(1),
+        move |candidate, _, deadline| {
+            let activity = probes.clone();
+            let barrier = barrier.clone();
+            async move {
+                let _active = activity.enter();
+                let result = tokio::time::timeout_at(deadline, async {
+                    if candidate.stream_key == "s:8" {
+                        Ok(resolved("https://cdn.example/healthy.mkv"))
+                    } else {
+                        barrier.wait().await;
+                        Err("fast failure".to_string().into())
+                    }
+                })
+                .await;
+                (candidate, result)
+            }
+        },
+    )
+    .await
+    .expect("the ninth distinct request remains eligible");
+    assert_eq!(winner.stream_key.as_deref(), Some("s:8"));
+    assert_eq!(activity.started.load(Ordering::SeqCst), 9);
+    assert_eq!(
+        activity.peak.load(Ordering::SeqCst),
+        BEST_STREAM_PROBE_CONCURRENCY
+    );
+    assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn probe_pool_refills_behind_pending_higher_rank_without_changing_the_winner() {
+    for first_succeeds in [false, true] {
+        let ninth_started = Arc::new(tokio::sync::Notify::new());
+        let winner = resolve_probe_candidates(
+            refill_probe_plan(9),
+            None,
+            Some("https://cdn.example/excluded.mkv"),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            move |candidate, _, deadline| {
+                let ninth_started = ninth_started.clone();
+                async move {
+                    let result = tokio::time::timeout_at(deadline, async {
+                        match candidate.stream_key.as_str() {
+                            "s:0" => {
+                                ninth_started.notified().await;
+                                if first_succeeds {
+                                    Ok(resolved("https://cdn.example/first.mkv"))
+                                } else {
+                                    Err("first failed".to_string().into())
+                                }
+                            }
+                            "s:1" => Ok(resolved("https://cdn.example/excluded.mkv")),
+                            "s:8" => {
+                                ninth_started.notify_one();
+                                Ok(resolved("https://cdn.example/ninth.mkv"))
+                            }
+                            _ => Err("failed".to_string().into()),
+                        }
+                    })
+                    .await;
+                    (candidate, result)
+                }
+            },
+        )
+        .await
+        .expect("a lower-ranked completion does not settle ahead of pending higher ranks");
+        assert_eq!(
+            winner.stream_key.as_deref(),
+            Some(if first_succeeds { "s:0" } else { "s:8" })
+        );
+    }
+}
+
+#[tokio::test]
+async fn probe_pool_refill_keeps_the_original_deadline_and_drops_timed_out_probes() {
+    let activity = Arc::new(ProbeActivity::default());
+    let probes = activity.clone();
+    let started = tokio::time::Instant::now();
+    let original_deadline = started + Duration::from_millis(100);
+    let error = resolve_probe_candidates(
+        refill_probe_plan(BEST_STREAM_MAX_CANDIDATES),
+        None,
+        None,
+        original_deadline,
+        move |candidate, _, deadline| {
+            assert_eq!(deadline, original_deadline);
+            let activity = probes.clone();
+            async move {
+                let _active = activity.enter();
+                let result = tokio::time::timeout_at(deadline, async {
+                    if candidate.stream_key == "s:0" {
+                        Err("failed".to_string().into())
+                    } else {
+                        std::future::pending::<Result<ResolvedStream, ProbeError>>().await
+                    }
+                })
+                .await;
+                (candidate, result)
+            }
+        },
+    )
+    .await
+    .expect_err("refilled probes cannot extend the original deadline");
+    assert_eq!(error.kind, ResolveStreamErrorKind::Failed);
+    assert!(error.message.contains("timed out"));
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert_eq!(activity.started.load(Ordering::SeqCst), 9);
+    assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn probe_pool_cancellation_drops_all_in_flight_probes_without_starting_the_tail() {
+    let activity = Arc::new(ProbeActivity::default());
+    let probes = activity.clone();
+    let all_started = Arc::new(tokio::sync::Notify::new());
+    let signal = all_started.clone();
+    tokio::select! {
+        result = resolve_probe_candidates(
+            refill_probe_plan(BEST_STREAM_MAX_CANDIDATES),
+            None,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            move |candidate, _, deadline| {
+                let activity = probes.clone();
+                let signal = signal.clone();
+                async move {
+                    let _active = activity.enter();
+                    if activity.active.load(Ordering::SeqCst) == BEST_STREAM_PROBE_CONCURRENCY {
+                        signal.notify_one();
+                    }
+                    let result = tokio::time::timeout_at(
+                        deadline,
+                        std::future::pending::<Result<ResolvedStream, ProbeError>>(),
+                    ).await;
+                    (candidate, result)
+                }
+            },
+        ) => panic!("pending probes unexpectedly settled: {result:?}"),
+        _ = all_started.notified() => {},
+    }
+    assert_eq!(
+        activity.started.load(Ordering::SeqCst),
+        BEST_STREAM_PROBE_CONCURRENCY
+    );
+    assert_eq!(activity.active.load(Ordering::SeqCst), 0);
+}
+
 #[tokio::test]
 async fn probe_stagger_wait_obeys_the_shared_deadline() {
     let candidate = candidate_input("delayed", "s:delayed");
@@ -772,7 +1055,7 @@ async fn candidate_results_consume_in_rank_order() {
         Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
     ));
 
-    let winner = resolve_candidate_results(candidates, None, None)
+    let winner = resolve_candidate_results(candidates, None)
         .await
         .expect("first-ranked probe wins");
 
@@ -814,7 +1097,7 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
             Box::pin(async { Ok(resolved("https://cdn.example/b.mkv")) }),
         ));
 
-        let winner = resolve_candidate_results(candidates, None, excluded_url)
+        let winner = resolve_candidate_results(candidates, excluded_url)
             .await
             .expect("next-ranked probe wins");
 
@@ -830,27 +1113,25 @@ async fn recovery_candidate_results_accept_same_url_for_a_different_prepared_req
         (None, "s:fallback"),
         (Some("h:legacy:0"), "s:fallback"),
     ] {
-        let mut candidates = FuturesOrdered::new();
-        candidates.push_back(fake_probe(
-            candidate_input("alternate", "s:alternate"),
-            Duration::from_secs(1),
-            Box::pin(async {
-                Ok(ResolvedStream {
-                    url: "https://cdn.example/failed.mkv".to_string(),
-                    mpv_http_header_fields: "Authorization: Bearer second".to_string(),
-                })
-            }),
-        ));
-        candidates.push_back(fake_probe(
-            candidate_input("fallback", "s:fallback"),
-            Duration::from_secs(1),
-            Box::pin(async { Ok(resolved("https://cdn.example/fallback.mkv")) }),
-        ));
-
-        let winner = resolve_candidate_results(
-            candidates,
+        let winner = resolve_probe_candidates(
+            vec![
+                (candidate_input("alternate", "s:alternate"), Duration::ZERO),
+                (candidate_input("fallback", "s:fallback"), Duration::ZERO),
+            ],
             failed_key,
             Some("https://cdn.example/failed.mkv"),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+            |candidate, _, _| async move {
+                let resolved = if candidate.stream_key == "s:alternate" {
+                    ResolvedStream {
+                        url: "https://cdn.example/failed.mkv".to_string(),
+                        mpv_http_header_fields: "Authorization: Bearer second".to_string(),
+                    }
+                } else {
+                    resolved("https://cdn.example/fallback.mkv")
+                };
+                (candidate, Ok(Ok(resolved)))
+            },
         )
         .await
         .expect("a distinct request resolves");
@@ -879,7 +1160,7 @@ async fn candidate_results_all_failures_error() {
         Box::pin(async { Err("gone".to_string().into()) }),
     ));
 
-    let error = resolve_candidate_results(candidates, None, None)
+    let error = resolve_candidate_results(candidates, None)
         .await
         .expect_err("all probes failed");
 
@@ -902,7 +1183,7 @@ async fn candidate_results_rate_limited_probe_marks_error_kind() {
         }),
     ));
 
-    let error = resolve_candidate_results(candidates, None, None)
+    let error = resolve_candidate_results(candidates, None)
         .await
         .expect_err("the only probe failed");
 
@@ -935,7 +1216,7 @@ async fn candidate_results_drops_queued_probe_futures_after_winner() {
         }),
     ));
 
-    let winner = resolve_candidate_results(candidates, None, None)
+    let winner = resolve_candidate_results(candidates, None)
         .await
         .expect("first-ranked probe wins");
 
