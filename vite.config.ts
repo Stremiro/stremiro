@@ -36,7 +36,7 @@ export default defineConfig(async () => ({
     },
   },
 
-  // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
+  // Vite options tailored for Tauri development
   //
   // 1. prevent Vite from obscuring rust errors
   clearScreen: false,
