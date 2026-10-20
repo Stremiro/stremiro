@@ -15,6 +15,7 @@ export interface StreamSelectorTarget {
   title?: string;
   /** The target episode's own name — rendered under the title in the header. */
   episodeTitle?: string;
+  targetMasked?: boolean;
   overview?: string;
   poster?: string;
   backdrop?: string;

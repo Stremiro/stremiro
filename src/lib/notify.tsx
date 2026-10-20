@@ -45,9 +45,9 @@ function ActionToast({
   return (
     <div
       className={cn(
-        'animate-action-pill mx-auto flex w-fit min-w-[240px] max-w-[min(440px,calc(100vw_-_48px))] items-center gap-3.5 rounded-[14px] border p-2 pr-5 backdrop-blur-xl backdrop-saturate-150',
-        'shadow-[0_20px_50px_-12px_rgba(0,0,0,0.8),0_2px_8px_rgba(0,0,0,0.35),inset_0_1px_0_rgba(255,255,255,0.06)]',
-        isError ? 'border-red-400/[0.14] bg-[#1a0e10]/90' : 'border-white/[0.08] bg-[#111115]/90',
+        'animate-action-pill mx-auto flex w-fit min-w-[220px] max-w-[min(420px,calc(100vw_-_48px))] items-center gap-3 rounded-xl border p-1.5 pr-4 backdrop-blur-xl backdrop-saturate-150',
+        'shadow-[0_18px_44px_-14px_rgba(0,0,0,0.85),0_2px_6px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)]',
+        isError ? 'border-red-400/[0.16] bg-[#190f11]/92' : 'border-white/[0.08] bg-[#111114]/92',
       )}
     >
       {thumb ? (
@@ -58,17 +58,17 @@ function ActionToast({
           draggable={false}
           referrerPolicy='no-referrer'
           onError={hideBrokenImage}
-          className='h-12 w-8 shrink-0 rounded-[7px] object-cover shadow-[0_4px_12px_rgba(0,0,0,0.5)] ring-1 ring-white/10'
+          className='h-11 w-[30px] shrink-0 rounded-[4px] object-cover ring-1 ring-white/10'
         />
       ) : isError ? (
-        <span className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-red-500/[0.12] ring-1 ring-red-400/15'>
-          <CircleAlert className='h-[18px] w-[18px] text-red-300' strokeWidth={2.25} />
+        <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-500/[0.12] ring-1 ring-red-400/15'>
+          <CircleAlert aria-hidden='true' className='h-4 w-4 text-red-300' strokeWidth={2.25} />
         </span>
       ) : null}
-      <div className={cn('min-w-0 py-0.5', !thumb && !isError && 'pl-2')}>
+      <div className={cn('min-w-0 py-1', !thumb && !isError && 'pl-2.5')}>
         <span
           className={cn(
-            'flex items-center gap-2 text-[14px] font-semibold leading-5 tracking-[-0.01em]',
+            'flex items-center gap-2 text-[13.5px] font-semibold leading-5 tracking-[-0.01em]',
             isError ? 'text-red-100' : 'text-white',
           )}
         >
@@ -76,7 +76,7 @@ function ActionToast({
             <span
               aria-hidden='true'
               className={cn(
-                'h-2 w-2 shrink-0 rounded-full bg-current shadow-[0_0_10px_1px_currentColor]',
+                'h-1.5 w-1.5 shrink-0 rounded-full bg-current shadow-[0_0_6px_currentColor]',
                 dot,
               )}
             />
@@ -84,7 +84,7 @@ function ActionToast({
           <span className='truncate'>{label}</span>
         </span>
         {detail ? (
-          <span className='mt-0.5 block truncate text-[12.5px] leading-4 text-white/50'>
+          <span className='mt-0.5 block truncate text-[12px] leading-4 text-white/55'>
             {detail}
           </span>
         ) : null}
@@ -97,7 +97,8 @@ export function notifyAction(label: ReactNode, options?: ActionToastOptions) {
   return toast.custom(() => <ActionToast label={label} {...options} />, {
     id: ACTION_TOAST_ID,
     position: 'top-center',
-    duration: 2600,
+    // Failures carry a reason worth reading; confirmations should clear quickly.
+    duration: options?.tone === 'error' ? 4500 : 2600,
     // `unstyled` drops chrome the li would paint as bars; left/right 0 gives the card the full column to center in.
     unstyled: true,
     style: { left: 0, right: 0 },

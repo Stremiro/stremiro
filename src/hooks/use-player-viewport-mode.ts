@@ -1,5 +1,5 @@
 import { getCurrentWindow, type Window as TauriWindow } from '@tauri-apps/api/window';
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { toast } from 'sonner';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
 import {
@@ -64,12 +64,10 @@ interface UsePlayerViewportModeResult {
 export function usePlayerViewportMode(
   options: UsePlayerViewportModeOptions = {},
 ): UsePlayerViewportModeResult {
-  const { onBeforeEnterFullscreen, expanded = true } = options;
+  const { onBeforeEnterFullscreen } = options;
+  const expanded = options.expanded === undefined ? true : options.expanded;
   const isDesktopRuntime = isTauriDesktopRuntime();
-  const appWindow = useMemo(
-    () => (isDesktopRuntime ? getCurrentWindow() : null),
-    [isDesktopRuntime],
-  );
+  const appWindow = isDesktopRuntime ? getCurrentWindow() : null;
   const [isFullscreen, setIsFullscreen] = useState(
     () => !!document.fullscreenElement || desktopFullscreen,
   );
@@ -123,9 +121,9 @@ export function usePlayerViewportMode(
     }
   }, [exitFullscreenIfNeeded]);
 
-  const prepareForInternalPlayerNavigation = useCallback(() => {
+  const prepareForInternalPlayerNavigation = () => {
     preserveViewportOnUnmountRef.current = true;
-  }, []);
+  };
 
   useEffect(() => {
     // Strict Mode replays setup after cleanup on the same hook instance.
@@ -133,111 +131,102 @@ export function usePlayerViewportMode(
     return cleanupViewportOnUnmount;
   }, [cleanupViewportOnUnmount]);
 
-  const withViewportMask = useCallback(async (operation: () => Promise<void>) => {
+  const withViewportMask = async (operation: () => Promise<void>) => {
     const animate = !prefersReducedMotion();
     if (animate) {
       setIsViewportTransitioning(true);
       await sleep(VIEWPORT_CURTAIN_FADE_IN_MS);
     }
-    try {
+    await (async () => {
       await operation();
-    } finally {
-      try {
+    })().finally(async () => {
+      await (async () => {
         if (animate) await withTimeout(nextFrames(2), VIEWPORT_SETTLE_TIMEOUT_MS, () => undefined);
-      } finally {
+      })().finally(() => {
         if (!viewportCleanupHandledRef.current) setIsViewportTransitioning(false);
-      }
-    }
-  }, []);
+      });
+    });
+  };
 
-  const toggleFullscreen = useCallback(async () => {
+  const toggleFullscreen = async () => {
     if (transitionInFlightRef.current || pipReturnRef.current) return;
     transitionInFlightRef.current = true;
-    try {
+    await (async () => {
       await enqueueViewportTransition(async () => {
         if (viewportCleanupHandledRef.current) return;
         ++syncGenerationRef.current;
         await withViewportMask(async () => {
-          try {
+          await (async () => {
             if (isPlayerPip()) await setPlayerPip(false);
-            const nativeFullscreen = appWindow ? await appWindow.isFullscreen() : false;
+            let nativeFullscreen = false;
+            if (appWindow) nativeFullscreen = await appWindow.isFullscreen();
             if (!expandedRef.current || nativeFullscreen || document.fullscreenElement) {
               await exitFullscreenIfNeeded();
             } else {
               preserveViewportOnUnmountRef.current = false;
-              await onBeforeEnterFullscreen?.();
+              if (onBeforeEnterFullscreen) await onBeforeEnterFullscreen();
               setIsFullscreen(true);
               if (appWindow) {
-                restoreMaximized ||= await appWindow.isMaximized();
-                try {
+                if (!restoreMaximized) restoreMaximized = await appWindow.isMaximized();
+                await (async () => {
                   if (restoreMaximized) await appWindow.unmaximize();
                   // Native fullscreen drops the Windows frame so video covers the taskbar.
                   await appWindow.setFullscreen(true);
                   await waitForFullscreenState(appWindow, true);
                   desktopFullscreen = true;
-                } catch (error) {
+                })().catch(async (error) => {
                   await exitFullscreenIfNeeded();
                   throw error;
-                }
+                });
               } else {
                 await document.documentElement.requestFullscreen();
               }
             }
-          } catch (error) {
-            toast.error('Could not change fullscreen. Please try again.');
-            throw error;
-          } finally {
-            await syncFullscreenState(true);
-          }
+          })()
+            .catch((error) => {
+              toast.error('Could not change fullscreen. Please try again.');
+              throw error;
+            })
+            .finally(async () => {
+              await syncFullscreenState(true);
+            });
         });
       });
-    } finally {
+    })().finally(() => {
       transitionInFlightRef.current = false;
-    }
-  }, [
-    appWindow,
-    exitFullscreenIfNeeded,
-    onBeforeEnterFullscreen,
-    syncFullscreenState,
-    withViewportMask,
-  ]);
+    });
+  };
 
-  const togglePip = useCallback(async () => {
+  const togglePip = async () => {
     if (!appWindow || transitionInFlightRef.current || pipReturnRef.current) return;
     transitionInFlightRef.current = true;
-    try {
+    await (async () => {
       await enqueueViewportTransition(async () => {
         if (viewportCleanupHandledRef.current || !expandedRef.current) return;
         await withViewportMask(async () => {
-          try {
+          return (async () => {
             if (isPlayerPip()) {
               await setPlayerPip(false);
             } else {
-              await onBeforeEnterFullscreen?.();
+              if (onBeforeEnterFullscreen) await onBeforeEnterFullscreen();
               await exitFullscreenIfNeeded();
               await syncFullscreenState(true);
               await setPlayerPip(true);
             }
-          } catch (error) {
+          })().catch(async (error) => {
             // Retrying return also recovers a partially applied native entry.
             await setPlayerPip(false).catch(() => undefined);
             toast.error('Could not change picture in picture. Please try again.');
             throw error;
-          }
+          });
         });
       });
-    } finally {
+    })().finally(() => {
       transitionInFlightRef.current = false;
-    }
-  }, [
-    appWindow,
-    exitFullscreenIfNeeded,
-    onBeforeEnterFullscreen,
-    syncFullscreenState,
-    withViewportMask,
-  ]);
+    });
+  };
 
-  const returnFromPip = useCallback(() => {
+  const returnFromPip = () => {
     if (!appWindow) return Promise.resolve();
     if (pipReturnRef.current) return pipReturnRef.current;
     // Panel restoration must wait for PiP entry rather than being dropped by its guard.
@@ -249,7 +238,7 @@ export function usePlayerViewportMode(
     });
     pipReturnRef.current = pending;
     return pending;
-  }, [appWindow, withViewportMask]);
+  };
 
   useEffect(() => {
     const sync = () => {

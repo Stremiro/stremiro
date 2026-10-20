@@ -1,5 +1,5 @@
 import { Check, Loader2, Plus } from 'lucide-react';
-import { useMemo, useRef, useState } from 'react';
+import { type RefObject, useRef, useState } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ import {
 } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import { useDebounce } from '@/hooks/use-debounce';
-import { useBulkAddToList, useLibraryItems, useProfileLibrary } from '@/hooks/use-media-library';
+import { useBulkAddToList, useProfileLibrary } from '@/hooks/use-media-library';
 import { getListErrorMessage, type UserList } from '@/lib/api';
 import { navigateApp } from '@/lib/navigation';
 import { notifyAction } from '@/lib/notify';
@@ -23,46 +23,41 @@ import { ListIconTile } from './list-icons';
 export function AddTitlesDialog({
   list,
   onOpenChange,
+  returnFocusRef,
 }: {
   list: UserList;
   onOpenChange: (open: boolean) => void;
+  returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(150);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const libraryQuery = useLibraryItems();
-  const { data: library = [] } = libraryQuery;
   const debouncedSearch = useDebounce(search, 180);
   const matchingLibraryQuery = useProfileLibrary({
     query: debouncedSearch,
     sort: 'title-asc',
   });
   const hasLibraryError =
-    libraryQuery.isError ||
     matchingLibraryQuery.isError ||
-    (libraryQuery.isFetched && libraryQuery.isPending) ||
     (matchingLibraryQuery.isFetched &&
       (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
   const isSearchPending = search !== debouncedSearch || matchingLibraryQuery.isPlaceholderData;
   const matchingItems = matchingLibraryQuery.data?.items ?? [];
-  const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
-  const selectedItems = useMemo(
-    () =>
-      selectedIds.size === 0
-        ? []
-        : library.filter((item) => selectedIds.has(item.id) && !existingIds.has(item.id)),
-    [existingIds, library, selectedIds],
-  );
+  const existingIds = new Set(list.item_ids);
+  const selectedItemIds =
+    selectedIds.size === 0
+      ? []
+      : (matchingLibraryQuery.data?.allIds ?? []).filter(
+          (id) => selectedIds.has(id) && !existingIds.has(id),
+        );
 
   const addTitles = useBulkAddToList();
   const selectionDisabled =
     addTitles.isPending ||
     hasLibraryError ||
     isSearchPending ||
-    libraryQuery.isPending ||
     matchingLibraryQuery.isPending ||
-    libraryQuery.isFetching ||
     matchingLibraryQuery.isFetching;
 
   const toggleSelection = (id: string) => {
@@ -86,6 +81,13 @@ export function AddTitlesDialog({
         onOpenAutoFocus={(event) => {
           event.preventDefault();
           searchInputRef.current?.focus();
+        }}
+        onCloseAutoFocus={(event) => {
+          const target = returnFocusRef.current;
+          if (target?.isConnected) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
         }}
       >
         <DialogHeader className='shrink-0 pr-6'>
@@ -117,7 +119,7 @@ export function AddTitlesDialog({
           {isSearchPending ? 'Searching library…' : ''}
         </span>
         <div
-          aria-busy={isSearchPending || libraryQuery.isPending || matchingLibraryQuery.isPending}
+          aria-busy={isSearchPending || matchingLibraryQuery.isPending}
           className={cn(
             'min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5 transition-opacity duration-200',
             matchingLibraryQuery.isPlaceholderData && 'opacity-60',
@@ -127,12 +129,11 @@ export function AddTitlesDialog({
             <RetryBanner
               message="Couldn't load your library."
               onRetry={() => {
-                void libraryQuery.refetch();
                 void matchingLibraryQuery.refetch();
               }}
-              isRetrying={libraryQuery.isFetching || matchingLibraryQuery.isFetching}
+              isRetrying={matchingLibraryQuery.isFetching}
             />
-          ) : libraryQuery.isPending || matchingLibraryQuery.isPending ? (
+          ) : matchingLibraryQuery.isPending ? (
             <div
               role='status'
               className='flex items-center justify-center gap-2 py-12 text-sm text-zinc-500'
@@ -140,7 +141,7 @@ export function AddTitlesDialog({
               <Loader2 className='h-4 w-4 animate-spin' />
               Loading your library…
             </div>
-          ) : library.length === 0 ? (
+          ) : matchingLibraryQuery.data?.allIds.length === 0 ? (
             <div className='space-y-3 px-4 py-10 text-center'>
               <p className='text-sm font-medium text-zinc-300'>Your library is empty</p>
               <p className='text-xs leading-relaxed text-zinc-500'>
@@ -239,7 +240,7 @@ export function AddTitlesDialog({
         <DialogFooter className='shrink-0 items-center gap-3 sm:justify-between'>
           <div className='flex flex-wrap items-center gap-3'>
             <span role='status' className='text-xs tabular-nums text-zinc-500'>
-              {selectedItems.length} selected
+              {selectedItemIds.length} selected
             </span>
             <button
               type='button'
@@ -278,10 +279,10 @@ export function AddTitlesDialog({
               Cancel
             </Button>
             <Button
-              disabled={selectedItems.length === 0 || addTitles.isPending}
+              disabled={selectedItemIds.length === 0 || addTitles.isPending}
               onClick={() =>
                 addTitles.mutate(
-                  { listId: list.id, itemIds: selectedItems.map((item) => item.id) },
+                  { listId: list.id, itemIds: selectedItemIds },
                   {
                     onSuccess: (count) => {
                       notifyAction(`Added ${count} title${count === 1 ? '' : 's'}`, {
@@ -299,7 +300,7 @@ export function AddTitlesDialog({
               className='bg-white font-semibold text-black hover:bg-zinc-200'
             >
               {addTitles.isPending && <Loader2 className='h-4 w-4 animate-spin' />}
-              Add {selectedItems.length}
+              Add {selectedItemIds.length}
             </Button>
           </div>
         </DialogFooter>

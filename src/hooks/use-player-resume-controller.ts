@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useRef } from 'react';
+import { useCallback, type RefObject, useEffect, useRef } from 'react';
 import { api } from '@/lib/api';
 import { MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { seekAbsoluteSeconds, setMpvProperty } from '@/lib/player-mpv';
@@ -118,11 +118,11 @@ export function usePlayerResumeController({
   }, [isDestroyedRef, mountedRef, trayPause]);
 
   // Hands a resume-owned pause to another owner so finalization cannot unpause underneath it.
-  const takeResumePause = useCallback(() => {
+  const takeResumePause = () => {
     const owned = resumePausePendingRef.current;
     resumePausePendingRef.current = false;
     return owned;
-  }, []);
+  };
 
   const finalizeResume = useCallback(
     async (resumeTime: number, didSeek: boolean) => {
@@ -142,12 +142,12 @@ export function usePlayerResumeController({
     [clearResumeRetryTimer, onResumeMessage, releaseResumePause],
   );
 
-  const cancelAutomaticResume = useCallback(() => {
+  const cancelAutomaticResume = () => {
     automaticResumeCancelledRef.current = true;
     resumeSessionEpochRef.current += 1;
     resumeTimeRef.current = 0;
     void finalizeResume(0, false);
-  }, [finalizeResume]);
+  };
 
   const scheduleResumeRetry = useCallback(
     (delayMs = RESUME_SEEK_RETRY_DELAY_MS) => {
@@ -216,17 +216,19 @@ export function usePlayerResumeController({
     resumeSeekAttemptsRef.current += 1;
     const seekEpoch = resumeSessionEpochRef.current;
 
-    try {
-      await seekAbsoluteSeconds(resumeTime);
-    } catch {
-      // MPV may reject early seeks before metadata is ready.
-      if (import.meta.env.DEV) console.warn('[player] resume seek deferred');
-    } finally {
+    await (async () => {
+      try {
+        await seekAbsoluteSeconds(resumeTime);
+      } catch {
+        // MPV may reject early seeks before metadata is ready.
+        if (import.meta.env.DEV) console.warn('[player] resume seek deferred');
+      }
+    })().finally(() => {
       // Only the issuing session may release the flag — a stale completion must not clear a newer seek.
       if (resumeSessionEpochRef.current === seekEpoch) {
         resumeSeekInFlightRef.current = false;
       }
-    }
+    });
 
     // Cancellation or a session change invalidates the seek continuation.
     if (
@@ -255,13 +257,13 @@ export function usePlayerResumeController({
     scheduleResumeRetry,
   ]);
 
-  const prepareForStreamLoad = useCallback(() => {
+  const prepareForStreamLoad = () => {
     resumeAppliedRef.current = false;
     const initialResumeTime = resumeTimeRef.current;
     const shouldStartPaused = initialResumeTime >= MIN_RESUME_POSITION_SECS;
     resumePausePendingRef.current = shouldStartPaused;
     return shouldStartPaused;
-  }, []);
+  };
 
   useEffect(() => {
     applyResumeIfReadyRef.current = applyResumeIfReady;

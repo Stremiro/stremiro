@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
@@ -44,14 +44,7 @@ export function useDetailsStreamSelector({
   const [streamTarget, setStreamTarget] = useState<DetailsStreamSelectorTarget | null>(null);
   // One-shot latch, not render state — it's only read inside the effect.
   const reopenSelectorConsumedRef = useRef(false);
-  // Mirrors `streamTarget` so `getStreamTargetStartTime` stays stable — the
-  // selector calls it lazily at pick time.
-  const streamTargetRef = useRef<DetailsStreamSelectorTarget | null>(null);
-  const setTarget = useCallback((target: DetailsStreamSelectorTarget) => {
-    streamTargetRef.current = target;
-    setStreamTarget(target);
-  }, []);
-  const getStreamTargetStartTime = useCallback(() => streamTargetRef.current?.startTime, []);
+  const getStreamTargetStartTime = () => streamTarget?.startTime;
 
   const preferredStreamId = item?.imdbId || item?.id;
   const itemId = item?.id;
@@ -71,107 +64,82 @@ export function useDetailsStreamSelector({
     item?.type === 'movie' ? 'movie' : baseRouteType === 'anime' ? 'anime' : 'series';
 
   // One builder for the fields every details-launched target shares.
-  const buildBaseTarget = useCallback(
-    (): DetailsStreamSelectorTarget => ({
-      type: streamSelectorType,
-      id: itemId ?? '',
-      originFrom: detailsOriginFrom,
-      poster: itemPoster,
-      backdrop: itemBackdrop,
-      logo: itemLogo,
-      episodes: itemEpisodes,
-      from: currentPathWithSearch(),
-      title: '',
-    }),
-    [
-      streamSelectorType,
-      itemId,
-      detailsOriginFrom,
-      itemPoster,
-      itemBackdrop,
-      itemLogo,
-      itemEpisodes,
-    ],
-  );
+  const buildBaseTarget = (): DetailsStreamSelectorTarget => ({
+    type: streamSelectorType,
+    id: itemId ?? '',
+    originFrom: detailsOriginFrom,
+    poster: itemPoster,
+    backdrop: itemBackdrop,
+    logo: itemLogo,
+    episodes: itemEpisodes,
+    from: currentPathWithSearch(),
+    title: '',
+  });
 
-  const handleWatchMovie = useCallback(
-    (startTime?: number) => {
-      if (!itemId || !preferredStreamId) return;
-      setTarget({
-        ...buildBaseTarget(),
-        streamId: preferredStreamId,
-        title: itemTitle ?? '',
-        overview: itemDescription,
-        startTime,
-      });
-      setStreamSelectorOpen(true);
+  const handleWatchMovie = (startTime?: number) => {
+    if (!itemId || !preferredStreamId) return;
+    setStreamTarget({
+      ...buildBaseTarget(),
+      streamId: preferredStreamId,
+      title: itemTitle ?? '',
+      overview: itemDescription,
+      startTime,
+    });
+    setStreamSelectorOpen(true);
+  };
+
+  const openEpisodeStreamSelector = (
+    episodeInput: Episode,
+    options?: {
+      startTime?: number;
     },
-    [itemId, itemTitle, itemDescription, preferredStreamId, buildBaseTarget, setTarget],
-  );
+  ): boolean => {
+    if (!itemId || !preferredStreamId) return false;
 
-  const openEpisodeStreamSelector = useCallback(
-    (
-      episodeInput: Episode,
-      options?: {
-        startTime?: number;
-      },
-    ): boolean => {
-      if (!itemId || !preferredStreamId) return false;
-
-      const target = buildEpisodeStreamTarget(preferredStreamId, episodeInput);
-      const epProgress =
-        titleProgress?.episodeProgress[
-          episodeProgressKey(baseRouteId, episodeInput.season, episodeInput.episode)
-        ];
-      const hideSpoiler = isEpisodeSpoiler(
-        episodeInput,
-        spoilerProtection,
-        titleProgress?.watchedEpisodeCeiling,
-        epProgress,
-      );
-
-      setTarget({
-        ...buildBaseTarget(),
-        streamId: target.streamLookupId,
-        season: target.streamSeason,
-        episode: target.streamEpisode,
-        absoluteSeason: target.absoluteSeason,
-        absoluteEpisode: target.absoluteEpisode,
-        // Bare title — the header owns the S/E label and player chrome re-adds it.
-        title: itemTitle ?? '',
-        episodeTitle: getEpisodeTitle(
-          hideSpoiler ? undefined : episodeInput.title,
-          episodeInput.episode,
-        ),
-        overview: hideSpoiler ? itemDescription : episodeInput.overview || itemDescription,
-        startTime: options?.startTime,
-      });
-      setStreamSelectorOpen(true);
-      return true;
-    },
-    [
-      itemId,
-      itemTitle,
-      itemDescription,
-      preferredStreamId,
-      buildBaseTarget,
-      setTarget,
-      titleProgress,
-      baseRouteId,
+    const target = buildEpisodeStreamTarget(preferredStreamId, episodeInput);
+    const epProgress =
+      titleProgress?.episodeProgress[
+        episodeProgressKey(baseRouteId, episodeInput.season, episodeInput.episode)
+      ];
+    const hideSpoiler = isEpisodeSpoiler(
+      episodeInput,
       spoilerProtection,
-    ],
-  );
+      titleProgress?.watchedEpisodeCeiling,
+      epProgress,
+    );
+
+    setStreamTarget({
+      ...buildBaseTarget(),
+      streamId: target.streamLookupId,
+      season: target.streamSeason,
+      episode: target.streamEpisode,
+      absoluteSeason: target.absoluteSeason,
+      absoluteEpisode: target.absoluteEpisode,
+      // Bare title — the header owns the S/E label and player chrome re-adds it.
+      title: itemTitle ?? '',
+      episodeTitle: getEpisodeTitle(
+        hideSpoiler ? undefined : episodeInput.title,
+        episodeInput.episode,
+      ),
+      targetMasked: hideSpoiler,
+      overview: hideSpoiler ? itemDescription : episodeInput.overview || itemDescription,
+      startTime: options?.startTime,
+    });
+    setStreamSelectorOpen(true);
+    return true;
+  };
 
   // One owner for "open the selector at S/E": episode lookup plus the target payload.
-  const openEpisodeSelectorForCoordinates = useCallback(
-    (season: number, episode: number, startTime?: number): boolean => {
-      const targetEpisode = findEpisodeByCoordinates(itemEpisodes, season, episode);
-      return openEpisodeStreamSelector(targetEpisode ?? { id: '', season, episode }, { startTime });
-    },
-    [itemEpisodes, openEpisodeStreamSelector],
-  );
+  const openEpisodeSelectorForCoordinates = (
+    season: number,
+    episode: number,
+    startTime?: number,
+  ): boolean => {
+    const targetEpisode = findEpisodeByCoordinates(itemEpisodes, season, episode);
+    return openEpisodeStreamSelector(targetEpisode ?? { id: '', season, episode }, { startTime });
+  };
 
-  const openDetailsReopenSelector = useCallback(
+  const openDetailsReopenSelector = useEffectEvent(
     (
       state?: Pick<
         DetailsHistoryRouteState,
@@ -200,7 +168,6 @@ export function useDetailsStreamSelector({
 
       return openEpisodeSelectorForCoordinates(reopenSeason, reopenEpisode, startTime);
     },
-    [handleWatchMovie, item, openEpisodeSelectorForCoordinates, preferredStreamId],
   );
 
   useEffect(() => {
@@ -231,25 +198,16 @@ export function useDetailsStreamSelector({
       const notice = getHistoryPlaybackFallbackNotice('select-episode');
       toast.error(notice.title, { description: notice.description });
     }
-  }, [
-    item,
-    isPlaceholderData,
-    locationState,
-    openDetailsReopenSelector,
-    preferredStreamId,
-    streamTarget,
-    streamSelectorOpen,
-  ]);
+  }, [item, isPlaceholderData, locationState, preferredStreamId, streamTarget, streamSelectorOpen]);
 
-  const handleSelectorClose = useCallback(() => {
+  const handleSelectorClose = () => {
     setStreamSelectorOpen(false);
     reopenSelectorConsumedRef.current = true;
-  }, []);
+  };
 
-  const handleSelectorClosed = useCallback(() => {
-    streamTargetRef.current = null;
+  const handleSelectorClosed = () => {
     setStreamTarget(null);
-  }, []);
+  };
 
   return {
     streamSelectorOpen,

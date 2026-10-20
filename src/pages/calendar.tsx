@@ -1,9 +1,9 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { Channel } from '@tauri-apps/api/core';
 import {
   addMonths,
   differenceInCalendarDays,
   eachDayOfInterval,
-  endOfDay,
   endOfMonth,
   endOfWeek,
   format,
@@ -14,7 +14,7 @@ import {
   subMonths,
 } from 'date-fns';
 import { CalendarDays, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
-import { Fragment, memo, useEffect, useEffectEvent, useMemo } from 'react';
+import { Fragment, memo, useEffect, useEffectEvent } from 'react';
 import { Link, useSearchParams } from 'react-router';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
@@ -24,7 +24,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
-import { api, type CalendarScheduleEvent } from '@/lib/api';
+import { api, type CalendarSchedule, type CalendarScheduleEvent } from '@/lib/api';
 import { toCalendarEvent, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
@@ -88,32 +88,21 @@ export function Calendar() {
   const [searchParams, setSearchParams] = useSearchParams();
   const now = useLocalDay();
   const monthParam = searchParams.get('month');
-  const defaultMonthMs = startOfMonth(now).getTime();
-  const currentMonth = useMemo(
-    () =>
-      (monthParam && /^\d{4}-\d{2}$/.test(monthParam)
-        ? parseLocalScheduleDate(`${monthParam}-01`)
-        : null) ?? new Date(defaultMonthMs),
-    [monthParam, defaultMonthMs],
-  );
+  const currentMonth =
+    (monthParam && /^\d{4}-\d{2}$/.test(monthParam)
+      ? parseLocalScheduleDate(`${monthParam}-01`)
+      : null) ?? startOfMonth(now);
   const from = currentPathWithSearch();
   useDocumentTitle('Calendar');
 
-  const todayStartMs = now.getTime();
-
-  const days = useMemo(() => {
-    const start = startOfWeek(startOfMonth(currentMonth));
-    const end = endOfWeek(endOfMonth(currentMonth));
-    return eachDayOfInterval({ start, end });
-  }, [currentMonth]);
-
-  const visibleStartMs = days[0].getTime();
-  const visibleEndMs = endOfDay(days[days.length - 1]).getTime();
-
+  const days = eachDayOfInterval({
+    start: startOfWeek(startOfMonth(currentMonth)),
+    end: endOfWeek(endOfMonth(currentMonth)),
+  });
   const range = {
-    visibleStart: format(new Date(visibleStartMs), 'yyyy-MM-dd'),
-    visibleEnd: format(new Date(visibleEndMs), 'yyyy-MM-dd'),
-    upcomingStart: format(new Date(todayStartMs), 'yyyy-MM-dd'),
+    visibleStart: format(days[0], 'yyyy-MM-dd'),
+    visibleEnd: format(days[days.length - 1], 'yyyy-MM-dd'),
+    upcomingStart: format(now, 'yyyy-MM-dd'),
   };
   const {
     data: schedule,
@@ -125,21 +114,31 @@ export function Calendar() {
     refetch: refetchSchedules,
   } = useQuery({
     queryKey: calendarEventsQueryKey(range),
-    queryFn: () => api.getCalendarEvents(range),
+    queryFn: ({ queryKey, signal }) => {
+      const channel = new Channel<CalendarSchedule>();
+      // eslint-disable-next-line unicorn/prefer-add-event-listener
+      channel.onmessage = (cached) => {
+        if (!signal.aborted && queryClient.getQueryData(queryKey) === undefined) {
+          queryClient.setQueryData(queryKey, cached);
+        }
+      };
+      return api.getCalendarEvents(range, channel);
+    },
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
   });
   const isScheduleError = queryNeedsRetry({ isError, isFetched, isPending });
   const isLoadingSchedules = isLoading && !isScheduleError;
   const hasMissingSchedules = (schedule?.missingCount ?? 0) > 0;
-  const upcomingEvents = useMemo(() => toCalendarEvents(schedule?.upcoming ?? []), [schedule]);
+  const upcomingEvents = toCalendarEvents(schedule?.upcoming ?? []);
 
   const eventsByDay = new Map(
     (schedule?.days ?? []).map((day) => [day.date, toCalendarEvents(day.events)]),
   );
 
-  const airingTodayCount = eventsByDay.get(format(now, 'yyyy-MM-dd'))?.length ?? 0;
+  const airingTodayCount = eventsByDay.get(range.upcomingStart)?.length ?? 0;
+  const monthKey = format(currentMonth, 'yyyy-MM');
   const hasMonthReleases = schedule?.days.some(
-    (day) => day.events.length > 0 && day.date.startsWith(format(currentMonth, 'yyyy-MM')),
+    (day) => day.events.length > 0 && day.date.startsWith(monthKey),
   );
 
   const prefetchEventDetails = (event: CalendarEvent) => {
@@ -252,7 +251,7 @@ export function Calendar() {
         </div>
       </div>
 
-      {isScheduleError || hasMissingSchedules ? (
+      {isScheduleError || (hasMissingSchedules && !isFetchingSchedules) ? (
         <RetryBanner
           className='mb-4'
           title="Couldn't load all release schedules"
@@ -315,9 +314,11 @@ export function Calendar() {
             </>
           ) : upcomingEvents.length === 0 ? (
             <div className='flex items-center gap-2 text-[13px] text-zinc-500 py-3' role='status'>
-              {isScheduleError || hasMissingSchedules
-                ? 'Release data is incomplete or unavailable.'
-                : 'No upcoming releases in the next two weeks.'}
+              {isFetchingSchedules
+                ? 'Loading release schedules…'
+                : isScheduleError || hasMissingSchedules
+                  ? 'Release data is incomplete or unavailable.'
+                  : 'No upcoming releases in the next two weeks.'}
             </div>
           ) : (
             <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>

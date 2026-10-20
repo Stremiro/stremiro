@@ -66,11 +66,8 @@ function AppChangelog({
       aria-label='Changelog'
       className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'
     >
-      <div className='flex flex-wrap items-center justify-between gap-3 px-4 pt-3'>
-        <p className='text-[11px] font-semibold uppercase tracking-[0.12em] text-zinc-500'>
-          Changelog
-        </p>
-        {pendingUpdate && currentVersion ? (
+      {pendingUpdate && currentVersion ? (
+        <div className='flex justify-end px-4 pt-3'>
           <div
             className='relative isolate grid grid-cols-2 rounded-md border border-white/[0.07] bg-white/[0.03] p-0.5'
             role='group'
@@ -104,8 +101,8 @@ function AppChangelog({
               </button>
             ))}
           </div>
-        ) : null}
-      </div>
+        </div>
+      ) : null}
       <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>
         <p className='text-[13px] font-semibold text-white'>
           What's new{version ? ' in' : ''}
@@ -142,7 +139,7 @@ function AppChangelog({
         {!version ? (
           <p className='text-[13px] leading-relaxed text-zinc-400'>
             {isTauriDesktopRuntime()
-              ? 'Release notes will appear when the installed version is available.'
+              ? 'Release notes appear once the installed version is known.'
               : 'Release notes are available in the desktop app.'}
           </p>
         ) : showReleaseError ? (
@@ -210,14 +207,10 @@ export function UpdatesSection() {
     : 'not checked yet';
 
   const statusNote = !isSupported
-    ? 'Updater controls are only active inside the packaged desktop app.'
+    ? 'Updates are only available in the packaged desktop app.'
     : isInstalling
-      ? 'Installing replaces the app in place and relaunches it. Your library, addons, and settings carry over.'
-      : isUpdateAvailable
-        ? 'A signed update is ready. Installing will replace the current app in place and keep your existing app data.'
-        : updateState.status === 'up-to-date'
-          ? 'The installed build matches the latest signed GitHub release.'
-          : 'Updates download a signed installer from GitHub Releases and apply it in place.';
+      ? 'Stremiro relaunches when the install finishes. Your data carries over.'
+      : null;
 
   const headerStatus = isInstalling ? null : updateState.status === 'up-to-date' ? (
     <span className={SETTINGS_HEADER_STATUS_CLASS}>Up to date</span>
@@ -259,17 +252,13 @@ export function UpdatesSection() {
           className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/50 to-transparent'
         />
       ) : null}
-      <SettingsGroupHeader
-        title='Updates'
-        description='Signed desktop releases from GitHub, applied in place — your data carries over.'
-        action={headerStatus}
-      />
+      <SettingsGroupHeader title='Updates' action={headerStatus} />
 
       <SettingsBody className='space-y-4'>
         <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
         <SettingsRow
           label='Check for updates automatically'
-          description='Check shortly after launch and every six hours. Updates are installed only when you choose.'
+          description='After launch and every six hours. You choose when to install.'
         >
           <SettingsSwitch
             ariaLabel='Check for updates automatically'
@@ -298,7 +287,7 @@ export function UpdatesSection() {
               </span>
             </>
           ) : null}
-          <span className='text-zinc-400'>· Last checked {lastCheckedLabel}</span>
+          <span>· Last checked {lastCheckedLabel}</span>
         </div>
 
         {isInstalling ? (
@@ -351,7 +340,7 @@ export function UpdatesSection() {
               onClick={handleInstall}
               aria-disabled={isInstalling || isChecking || undefined}
               aria-busy={isInstalling || undefined}
-              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-wait aria-disabled:opacity-50'
+              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-default aria-disabled:opacity-50'
             >
               {isInstalling ? (
                 <Loader2
@@ -372,7 +361,7 @@ export function UpdatesSection() {
             aria-disabled={isChecking || isInstalling || undefined}
             aria-busy={isChecking || undefined}
             className={cn(
-              'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-wait aria-disabled:opacity-50',
+              'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-default aria-disabled:opacity-50',
               SETTINGS_OUTLINE_BUTTON_CLASS,
             )}
           >
@@ -388,7 +377,7 @@ export function UpdatesSection() {
           </Button>
         </div>
 
-        <p className='text-[13px] leading-relaxed text-zinc-400'>{statusNote}</p>
+        {statusNote ? <p className='text-[13px] text-zinc-400'>{statusNote}</p> : null}
       </SettingsBody>
     </SettingsGroup>
   );

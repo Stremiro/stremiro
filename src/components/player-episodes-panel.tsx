@@ -1,6 +1,23 @@
 import { type Range, useVirtualizer } from '@tanstack/react-virtual';
-import { Check, ChevronDown, ListVideo, X } from 'lucide-react';
-import { memo, type Ref, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  Check,
+  ChevronDown,
+  ChevronLeft,
+  ChevronRight,
+  CornerDownRight,
+  ListVideo,
+  X,
+} from 'lucide-react';
+import {
+  type KeyboardEvent,
+  memo,
+  type Ref,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from 'react';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import {
   CHROME_CLOSE_BUTTON_CLASS,
@@ -85,8 +102,10 @@ interface PlayerEpisodesPanelProps {
 }
 
 // Fixed row heights keep long seasons cheap to scroll; virtual wrappers include the gap.
-const EPISODE_ROW_ESTIMATE_PX = 112;
-const EPISODE_ROW_GAP_PX = 4;
+const EPISODE_ROW_ESTIMATE_PX = 84;
+const EPISODE_ROW_GAP_PX = 2;
+const SEASON_STEP_CLASS =
+  'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 disabled:cursor-default disabled:text-zinc-700 motion-reduce:transition-none';
 const EPISODE_LIST_VIRTUALIZE_THRESHOLD = 40;
 
 // Memoized so playback ticks never re-render the episode list while the panel sits closed off-screen.
@@ -202,6 +221,26 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     onSeasonChange,
   ]);
 
+  const seasonIndex = seasons.findIndex((season) => season.number === selectedSeason);
+  const showJumpToCurrent =
+    currentSeason !== undefined &&
+    selectedSeason !== currentSeason &&
+    seasons.some((season) => season.number === currentSeason);
+
+  const handleListKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+    const rows = Array.from(
+      scrollViewportRef.current?.querySelectorAll<HTMLElement>('[data-episode-row]') ?? [],
+    );
+    const index = rows.indexOf(document.activeElement as HTMLElement);
+    if (index < 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const next = rows[index + (event.key === 'ArrowDown' ? 1 : -1)];
+    next?.focus({ preventScroll: true });
+    next?.scrollIntoView({ block: 'nearest' });
+  };
+
   const renderEpisode = useCallback(
     (ep: Episode) => {
       const isCurrent = episodeMatchesCoordinates(ep, currentSeason, currentEpisode);
@@ -228,23 +267,23 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         <button
           type='button'
           key={`${ep.season}-${ep.episode}`}
+          data-episode-row
           data-current-episode={isCurrent ? '' : undefined}
           aria-current={isCurrent ? 'true' : undefined}
           className={cn(
-            'relative flex h-28 w-full cursor-pointer items-center gap-3 rounded-md p-2 text-left outline-hidden transition-colors duration-120 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-white/40 motion-reduce:transition-none',
-            isCurrent ? 'bg-white/[0.04]' : 'hover:bg-white/[0.025] focus-visible:bg-white/[0.025]',
+            'relative flex h-[84px] w-full cursor-pointer items-center gap-3 rounded-md px-2 text-left outline-hidden transition-colors duration-120 focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-white/40 motion-reduce:transition-none',
+            isCurrent ? 'bg-white/[0.05]' : 'hover:bg-white/[0.03] focus-visible:bg-white/[0.03]',
           )}
           onClick={() => onEpisodeSelect(ep)}
         >
           {isCurrent && (
             <span
               aria-hidden='true'
-              className='absolute left-0 top-4 bottom-4 w-0.5 rounded-r-full bg-(--accent-act)'
+              className='absolute left-0 top-3 bottom-3 w-0.5 rounded-r-full bg-(--accent-act)'
             />
           )}
-          <div className='relative aspect-video w-[clamp(7rem,38%,10rem)] shrink-0 overflow-hidden rounded-md bg-zinc-900 ring-1 ring-white/[0.06]'>
-            {/* Placeholder sits under the thumb — hiding the broken image reveals it without sibling-DOM poking. */}
-            <div className='absolute inset-0 flex items-center justify-center text-sm font-semibold tracking-wide text-zinc-700'>
+          <div className='relative aspect-video w-[120px] shrink-0 overflow-hidden rounded-[5px] bg-zinc-900 ring-1 ring-white/[0.06]'>
+            <div className='absolute inset-0 flex items-center justify-center text-[13px] font-semibold tabular-nums text-zinc-700'>
               E{ep.episode}
             </div>
             {thumbnail && (
@@ -254,12 +293,13 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 className={cn(
                   'relative h-full w-full object-cover',
                   isSpoiler && 'scale-110 blur-md',
+                  isWatched && !isCurrent && 'opacity-60',
                 )}
                 alt=''
               />
             )}
             {progressPercent > 0 && (
-              <div className='absolute inset-x-0 bottom-0 h-0.5 bg-black/40'>
+              <div className='absolute inset-x-0 bottom-0 h-[3px] bg-black/50'>
                 <div
                   className='h-full w-full origin-left bg-(--accent-prog)'
                   style={{ transform: `scaleX(${progressPercent / 100})` }}
@@ -268,43 +308,46 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             )}
           </div>
 
-          <div className='flex h-full min-w-0 flex-1 flex-col py-0.5'>
-            <h3
-              className='truncate text-sm font-medium leading-5 tracking-tight text-zinc-100'
-              title={episodeTitle}
-            >
-              <span className='tabular-nums text-zinc-500'>{ep.episode}</span>
-              <span className='mx-1.5 text-zinc-700'>·</span>
-              {episodeTitle}
-            </h3>
-            <p
-              className='mt-1 line-clamp-2 text-[13px] leading-[19px] text-zinc-400'
-              title={isSpoiler ? undefined : ep.overview || undefined}
-            >
-              {isSpoiler
-                ? 'Description hidden to prevent spoilers.'
-                : ep.overview || 'No description available.'}
-            </p>
-            <div className='mt-auto flex min-w-0 items-center gap-2 text-[11px] leading-4'>
+          <div className='min-w-0 flex-1'>
+            <p className='flex min-w-0 items-center gap-1.5 text-[11.5px] leading-4 tabular-nums text-zinc-500'>
+              <span className='shrink-0 font-medium text-zinc-400'>E{ep.episode}</span>
+              {airDate && (
+                <>
+                  <span aria-hidden='true'>·</span>
+                  <span className='truncate'>{airDate}</span>
+                </>
+              )}
               {(isCurrent || isResume || isWatched) && (
                 <span
                   className={cn(
-                    'flex shrink-0 items-center gap-1 font-medium',
-                    isCurrent || isResume ? 'text-(--accent-act)' : 'text-zinc-400',
+                    'ml-auto flex shrink-0 items-center gap-1 font-medium',
+                    isCurrent || isResume ? 'text-(--accent-act)' : 'text-zinc-500',
                   )}
                 >
                   {!isCurrent && !isResume && (
-                    <Check
-                      aria-hidden='true'
-                      className='h-3 w-3'
-                      strokeWidth={CHROME_ICON_STROKE}
-                    />
+                    <Check aria-hidden='true' className='h-3 w-3' strokeWidth={2.5} />
                   )}
                   {isCurrent ? 'Playing' : isResume ? 'Resume' : 'Watched'}
                 </span>
               )}
-              {airDate && <span className='truncate tabular-nums text-zinc-500'>{airDate}</span>}
-            </div>
+            </p>
+            <h3
+              className={cn(
+                'mt-0.5 truncate text-[13.5px] font-medium leading-5 tracking-[-0.005em]',
+                isCurrent ? 'text-white' : 'text-zinc-100',
+              )}
+              title={episodeTitle}
+            >
+              {episodeTitle}
+            </h3>
+            {(isSpoiler || ep.overview) && (
+              <p
+                className='mt-0.5 truncate text-[12px] leading-[17px] text-zinc-500'
+                title={isSpoiler ? undefined : ep.overview}
+              >
+                {isSpoiler ? 'Description hidden to prevent spoilers.' : ep.overview}
+              </p>
+            )}
           </div>
         </button>
       );
@@ -331,7 +374,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       aria-hidden={!open}
       aria-label='Episodes'
       className={cn(
-        'absolute right-3 bottom-3 z-60 flex w-[460px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden',
+        'absolute right-3 bottom-3 z-60 flex w-[400px] max-w-[calc(100%-1.5rem)] flex-col overflow-hidden',
         // Opaque: any translucency lets the native video bleed through and muddies the rows.
         'rounded-lg border border-white/[0.07] bg-zinc-950',
         'shadow-[inset_0_1px_0_rgba(255,255,255,0.03),0_16px_48px_-16px_rgba(0,0,0,0.7)]',
@@ -341,98 +384,132 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         open ? 'translate-x-0 opacity-100' : 'pointer-events-none translate-x-2 opacity-0',
       )}
     >
-      <div className='shrink-0 border-b border-white/[0.06]'>
-        <div className='flex items-center gap-2.5 px-4 pt-4 pb-3'>
-          <h2 className='flex items-center gap-2 text-[15px] leading-5 font-semibold tracking-tight text-white'>
-            <ListVideo
-              aria-hidden='true'
-              className='h-4 w-4 text-zinc-400'
-              strokeWidth={CHROME_ICON_STROKE}
-            />
+      <div className='shrink-0 border-b border-white/[0.06] px-3 pt-3 pb-2.5'>
+        <div className='flex items-center gap-2 pl-1'>
+          <h2 className='text-[14px] font-semibold leading-5 tracking-tight text-white'>
             Episodes
           </h2>
-          <p className='min-w-0 flex-1 truncate text-xs tabular-nums text-zinc-400'>
+          <span className='min-w-0 flex-1 truncate text-[12px] tabular-nums text-zinc-500'>
             {seasonEpisodes.length} {seasonEpisodes.length === 1 ? 'episode' : 'episodes'}
-          </p>
+          </span>
+          {showJumpToCurrent && (
+            <button
+              type='button'
+              onClick={() => {
+                didScrollToCurrentRef.current = false;
+                onSeasonChange(currentSeason);
+              }}
+              className='flex h-7 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-(--accent-act) outline-hidden transition-colors duration-120 hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transition-none'
+            >
+              <CornerDownRight aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />
+              Now playing
+            </button>
+          )}
           <button
             type='button'
             onClick={onClose}
             aria-label='Close episodes panel'
             aria-keyshortcuts='Escape'
             title='Close (Esc)'
-            className={CHROME_CLOSE_BUTTON_CLASS}
+            className={cn(CHROME_CLOSE_BUTTON_CLASS, 'h-7 w-7 rounded-md')}
           >
             <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
           </button>
         </div>
 
         {(seasons.length > 1 || searchVisible) && (
-          <div className='flex items-center gap-2 px-4 pb-3'>
+          <div className='mt-2.5 flex items-center gap-2'>
             {seasons.length > 1 && (
-              <DropdownMenu modal={false}>
-                <DropdownMenuTrigger asChild>
-                  <button
-                    type='button'
-                    aria-label={`Season ${selectedSeason}, change season`}
-                    className='flex h-9 shrink-0 cursor-pointer items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.03] pr-2.5 pl-3 text-xs font-medium text-zinc-200 outline-hidden transition-colors duration-120 hover:bg-white/[0.05] focus-visible:ring-2 focus-visible:ring-white/30 data-[state=open]:bg-white/[0.05] motion-reduce:transition-none'
-                    onClick={(e) => e.stopPropagation()}
-                    onPointerDown={(e) => e.stopPropagation()}
-                  >
-                    Season {selectedSeason}
-                    <ChevronDown
-                      aria-hidden='true'
-                      className='h-3.5 w-3.5 text-zinc-400'
-                      strokeWidth={CHROME_ICON_STROKE}
-                    />
-                  </button>
-                </DropdownMenuTrigger>
-                <DropdownMenuContent
-                  align='start'
-                  side='bottom'
-                  className='z-80 max-h-[min(320px,var(--radix-dropdown-menu-content-available-height))] min-w-44 overflow-y-auto rounded-lg border-white/10 bg-zinc-950 backdrop-blur-none'
-                  onClick={(e) => e.stopPropagation()}
+              <div className='flex h-8 shrink-0 items-center rounded-md border border-white/[0.07] bg-white/[0.03]'>
+                <button
+                  type='button'
+                  aria-label='Previous season'
+                  disabled={seasonIndex <= 0}
+                  onClick={() => onSeasonChange(seasons[seasonIndex - 1].number)}
+                  className={SEASON_STEP_CLASS}
                 >
-                  {seasons.map(({ number: season, episodeCount: count }) => {
-                    const isSelected = selectedSeason === season;
-                    return (
-                      <DropdownMenuItem
-                        key={season}
-                        role='menuitemradio'
-                        aria-checked={isSelected}
-                        onSelect={() => onSeasonChange(season)}
-                        className={cn(
-                          'cursor-pointer gap-2 rounded-md py-2 pr-3 pl-2 text-[13px]',
-                          isSelected ? 'font-medium text-white' : 'text-zinc-300',
-                        )}
-                      >
-                        <Check
-                          aria-hidden='true'
-                          className={cn('h-4 w-4 shrink-0', !isSelected && 'invisible')}
-                          strokeWidth={CHROME_ICON_STROKE}
-                        />
-                        <span className='flex-1'>Season {season}</span>
-                        <span className='text-xs tabular-nums text-zinc-500'>{count}</span>
-                      </DropdownMenuItem>
-                    );
-                  })}
-                </DropdownMenuContent>
-              </DropdownMenu>
+                  <ChevronLeft aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />
+                </button>
+                <DropdownMenu modal={false}>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type='button'
+                      aria-label={`Season ${selectedSeason}, change season`}
+                      className='flex h-full cursor-pointer items-center gap-1.5 border-x border-white/[0.07] px-2.5 text-[12px] font-medium text-zinc-200 outline-hidden transition-colors duration-120 hover:bg-white/[0.04] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 data-[state=open]:bg-white/[0.05] motion-reduce:transition-none'
+                      onClick={(e) => e.stopPropagation()}
+                      onPointerDown={(e) => e.stopPropagation()}
+                    >
+                      Season {selectedSeason}
+                      <ChevronDown
+                        aria-hidden='true'
+                        className='h-3.5 w-3.5 text-zinc-500'
+                        strokeWidth={CHROME_ICON_STROKE}
+                      />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent
+                    align='start'
+                    side='bottom'
+                    className='z-80 max-h-[min(320px,var(--radix-dropdown-menu-content-available-height))] min-w-44 overflow-y-auto rounded-lg border-white/10 bg-zinc-950 backdrop-blur-none'
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {seasons.map(({ number: season, episodeCount: count }) => {
+                      const isSelected = selectedSeason === season;
+                      return (
+                        <DropdownMenuItem
+                          key={season}
+                          role='menuitemradio'
+                          aria-checked={isSelected}
+                          onSelect={() => onSeasonChange(season)}
+                          className={cn(
+                            'cursor-pointer gap-2 rounded-md py-1.5 pr-3 pl-2 text-[13px]',
+                            isSelected ? 'font-medium text-white' : 'text-zinc-300',
+                          )}
+                        >
+                          <Check
+                            aria-hidden='true'
+                            className={cn('h-4 w-4 shrink-0', !isSelected && 'invisible')}
+                            strokeWidth={CHROME_ICON_STROKE}
+                          />
+                          <span className='flex-1'>Season {season}</span>
+                          {season === currentSeason && (
+                            <span
+                              aria-label='Now playing'
+                              className='h-1.5 w-1.5 rounded-full bg-(--accent-act)'
+                            />
+                          )}
+                          <span className='text-xs tabular-nums text-zinc-500'>{count}</span>
+                        </DropdownMenuItem>
+                      );
+                    })}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <button
+                  type='button'
+                  aria-label='Next season'
+                  disabled={seasonIndex < 0 || seasonIndex >= seasons.length - 1}
+                  onClick={() => onSeasonChange(seasons[seasonIndex + 1].number)}
+                  className={SEASON_STEP_CLASS}
+                >
+                  <ChevronRight aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />
+                </button>
+              </div>
             )}
             {searchVisible && (
               <SearchInput
-                placeholder='Search episodes…'
+                placeholder='Search episodes'
                 value={episodeSearch}
                 onValueChange={setEpisodeSearch}
                 clearLabel='Clear episode search'
                 wrapperClassName='min-w-0 flex-1'
-                className='h-9 rounded-md border-white/[0.06] bg-white/[0.03] text-xs text-white placeholder:text-zinc-500 focus-visible:border-white/20 focus-visible:ring-white/20'
+                className='h-8 rounded-md border-white/[0.07] bg-white/[0.03] text-xs text-white placeholder:text-zinc-500 focus-visible:border-white/20 focus-visible:ring-white/20'
               />
             )}
           </div>
         )}
         {searchError && (
           <RetryBanner
-            className='mx-4 mb-3 px-3 py-2'
+            className='mt-2.5 px-3 py-2'
             message='Search failed.'
             isRetrying={isSearchFetching}
             onRetry={retrySearch}
@@ -440,7 +517,12 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         )}
       </div>
 
-      <ScrollArea viewportRef={scrollViewportRef} className='min-h-0 flex-1'>
+      <ScrollArea
+        viewportRef={scrollViewportRef}
+        className='min-h-0 flex-1'
+        onKeyDown={handleListKeyDown}
+      >
+        {' '}
         {visibleEpisodes.length === 0 ? (
           <p
             role={isSearchPending ? 'status' : undefined}
@@ -459,7 +541,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         ) : shouldVirtualize ? (
           <div
             className='relative w-full'
-            style={{ height: `${episodeVirtualizer.getTotalSize() + 16}px` }}
+            style={{ height: `${episodeVirtualizer.getTotalSize() + 12}px` }}
           >
             {episodeVirtualizer.getVirtualItems().map((virtualRow) => {
               const ep = visibleEpisodes[virtualRow.index];
@@ -473,7 +555,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                   onBlurCapture={(event) => {
                     if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
                   }}
-                  className='absolute left-2 right-2 top-2'
+                  className='absolute left-1.5 right-1.5 top-1.5'
                   style={{
                     transform: `translateY(${virtualRow.start}px)`,
                     paddingBottom: `${EPISODE_ROW_GAP_PX}px`,
@@ -485,7 +567,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             })}
           </div>
         ) : (
-          <div className='space-y-1 p-2'>{visibleEpisodes.map(renderEpisode)}</div>
+          <div className='space-y-0.5 p-1.5'>{visibleEpisodes.map(renderEpisode)}</div>
         )}
       </ScrollArea>
     </aside>

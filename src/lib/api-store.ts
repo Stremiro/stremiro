@@ -128,7 +128,6 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       return request;
     },
     pendingBootstrapSnapshot: () => pendingBootstrap,
-    getLaunchAtLogin,
     launchAtLoginQueryOptions: () =>
       queryOptions({
         queryKey: ['launch-at-login'] as const,
@@ -167,7 +166,8 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       safeInvoke<StreamSelectorPreferencesState>('patch_stream_selector_preferences', {
         patch,
       }),
-    addToLibrary: (item: MediaItem) => write<void>('add_to_library', { item: toMediaItem(item) }),
+    addToLibrary: (item: MediaItem) =>
+      write<MediaItem>('add_to_library', { item: toMediaItem(item) }),
     removeFromLibrary: (id: string) => write<void>('remove_from_library', { id }),
     bulkRemoveFromLibrary: async (ids: string[]): Promise<number> => {
       if (ids.length === 0) return 0;
@@ -215,7 +215,6 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       });
     },
     getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
-    getDataStats,
     dataStatsQueryOptions: () =>
       queryOptions({
         queryKey: DATA_STATS_QUERY_KEY,

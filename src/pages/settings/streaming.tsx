@@ -8,15 +8,7 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, GripVertical, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
-import {
-  type ReactNode,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -87,11 +79,9 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
   const handleCopyLink = async () => {
     try {
       const url = await api.getAddonUrl(addon.id);
-      if (
-        (await copyText(url, 'Addon link copied', 'Could not copy addon link')) &&
-        mountedRef.current
-      ) {
-        setCopied(true);
+      const didCopy = await copyText(url, 'Addon link copied', 'Could not copy addon link');
+      if (didCopy) {
+        if (mountedRef.current) setCopied(true);
       }
     } catch {
       toast.error('Could not copy addon link');
@@ -296,6 +286,19 @@ export function StreamingSources() {
 
   const saveMutation = useMutation({
     mutationFn: api.updateAddonConfigs,
+    onMutate: async (action) => {
+      await queryClient.cancelQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY, exact: true });
+      const previous = queryClient.getQueryData<AddonConfig[]>(ADDON_CONFIGS_QUERY_KEY);
+      if (action.kind === 'setEnabled') {
+        queryClient.setQueryData(
+          ADDON_CONFIGS_QUERY_KEY,
+          previous?.map((addon) =>
+            addon.id === action.id ? { ...addon, enabled: action.enabled } : addon,
+          ),
+        );
+      }
+      return previous;
+    },
     onSuccess: (savedConfigs, action) => {
       if (action.kind === 'remove' && document.activeElement instanceof HTMLButtonElement) {
         const button = document.activeElement;
@@ -324,11 +327,11 @@ export function StreamingSources() {
       queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, savedConfigs);
       void invalidateDiscoveryQueries(queryClient);
     },
-    onError: (err: unknown) => {
+    onError: (err: unknown, _action, previous) => {
       toast.error(getErrorMessage(err));
+      if (previous) queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, previous);
       // A failed disk save can still leave the registry applied in memory.
-      const previous = queryClient.getQueryData<AddonConfig[]>(ADDON_CONFIGS_QUERY_KEY);
-      void queryClient
+      return queryClient
         .fetchQuery({
           queryKey: ADDON_CONFIGS_QUERY_KEY,
           queryFn: api.getAddonConfigs,
@@ -372,7 +375,7 @@ export function StreamingSources() {
   // Rust judges the add box with the save path's normalizer, so verdicts can't drift.
   const trimmedNewUrl = newUrl.trim();
   const debouncedNewUrl = useDebounce(trimmedNewUrl, ADDON_URL_INSPECT_DEBOUNCE_MS);
-  const installedAddonIds = useMemo(() => addons.map((addon) => addon.id), [addons]);
+  const installedAddonIds = addons.map((addon) => addon.id);
   const inspectionQuery = useQuery({
     queryKey: addonUrlInspectionQueryKey(debouncedNewUrl, installedAddonIds),
     queryFn: () => api.inspectAddonUrl(debouncedNewUrl),
@@ -395,25 +398,22 @@ export function StreamingSources() {
     if (addon) saveMutation.mutate({ kind: 'setEnabled', id, enabled: !addon.enabled });
   };
 
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      setIsDragging(false);
-      const { active, over } = event;
-      if (!over || active.id === over.id || isWorking) return;
+  const handleDragEnd = (event: DragEndEvent) => {
+    setIsDragging(false);
+    const { active, over } = event;
+    if (!over || active.id === over.id || isWorking) return;
 
-      // Backend-pinned defaults stay on top; only user addons below them reorder.
-      const rest = addons.filter((addon) => !addon.pinned);
-      const oldIndex = rest.findIndex((addon) => addon.id === String(active.id));
-      const newIndex = rest.findIndex((addon) => addon.id === String(over.id));
-      if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
+    // Backend-pinned defaults stay on top; only user addons below them reorder.
+    const rest = addons.filter((addon) => !addon.pinned);
+    const oldIndex = rest.findIndex((addon) => addon.id === String(active.id));
+    const newIndex = rest.findIndex((addon) => addon.id === String(over.id));
+    if (oldIndex < 0 || newIndex < 0 || oldIndex === newIndex) return;
 
-      saveMutation.mutate({
-        kind: 'reorder',
-        ids: arrayMove(rest, oldIndex, newIndex).map((addon) => addon.id),
-      });
-    },
-    [addons, isWorking, saveMutation],
-  );
+    saveMutation.mutate({
+      kind: 'reorder',
+      ids: arrayMove(rest, oldIndex, newIndex).map((addon) => addon.id),
+    });
+  };
 
   const handleRemove = (id: string) => {
     if (isWorking) return;
@@ -442,14 +442,14 @@ export function StreamingSources() {
   };
 
   const activeCount = addons.filter((a) => a.enabled).length;
-  const pinnedAddons = useMemo(() => addons.filter((addon) => addon.pinned), [addons]);
-  const userAddons = useMemo(() => addons.filter((addon) => !addon.pinned), [addons]);
+  const pinnedAddons = addons.filter((addon) => addon.pinned);
+  const userAddons = addons.filter((addon) => !addon.pinned);
 
   return (
     <SettingsGroup>
       <SettingsGroupHeader
         title='Addons'
-        description='Cinemeta (metadata) and OpenSubtitles (subtitles) are pinned defaults. Drag other addons to set stream priority.'
+        description='Cinemeta and OpenSubtitles are pinned defaults. Drag other addons to set stream priority.'
         action={
           addons.length > 0 ? (
             <span className={SETTINGS_HEADER_STATUS_CLASS}>
@@ -487,8 +487,8 @@ export function StreamingSources() {
             disabled={!canSubmitNewAddon}
             className='h-10 shrink-0 gap-2 rounded-lg bg-white px-4 text-[13px] font-medium text-black hover:bg-zinc-200'
           >
-            {saveMutation.isPending ? (
-              <Loader2 className='h-4 w-4 animate-spin' />
+            {saveMutation.isPending && saveMutation.variables?.kind === 'add' ? (
+              <Loader2 className='h-4 w-4 animate-spin motion-reduce:animate-none' />
             ) : (
               <Plus className='h-4 w-4' />
             )}
@@ -532,7 +532,7 @@ export function StreamingSources() {
             <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
               stremio://
             </code>{' '}
-            URL to add streams, catalogs, and subtitles.
+            URL to add an addon.
           </p>
         )}
       </SettingsBody>

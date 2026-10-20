@@ -1,4 +1,4 @@
-import { Check, ChevronRight, Loader2, Settings2, SlidersHorizontal } from 'lucide-react';
+import { Check, ChevronRight, Settings2, SlidersHorizontal } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
@@ -14,7 +14,7 @@ import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { type LocalProfile, type LocalProfileUpdate } from '@/hooks/use-local-profile';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { getAccentTextColor, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
+import { cn, getAccentTextColor, HEX_COLOR_PATTERN, nonBlank } from '@/lib/utils';
 
 export function ProfileSettingsPopover({
   profile,
@@ -73,7 +73,9 @@ export function ProfileSettingsPopover({
         accentIntensity: previewIntensity,
       });
       toast.success('Profile saved');
-      if (mountedRef.current && generation === openingGenerationRef.current) setOpen(false);
+      if (mountedRef.current) {
+        if (generation === openingGenerationRef.current) setOpen(false);
+      }
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to save profile');
     }
@@ -104,9 +106,9 @@ export function ProfileSettingsPopover({
         align='start'
         sideOffset={8}
         aria-label='Customize profile'
-        className='w-72 p-0 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl shadow-black/60 overflow-hidden'
+        className='flex max-h-[min(85dvh,var(--radix-popover-content-available-height))] w-72 flex-col p-0 bg-zinc-950 border border-white/10 rounded-xl shadow-2xl shadow-black/60 overflow-hidden'
       >
-        <div className='px-3.5 pt-3 pb-2.5 border-b border-white/[0.06]'>
+        <div className='shrink-0 px-3.5 pt-3 pb-2.5 border-b border-white/[0.06]'>
           <h2 className='text-[13px] font-semibold text-white'>Customize profile</h2>
         </div>
 
@@ -125,7 +127,7 @@ export function ProfileSettingsPopover({
             <fieldset
               disabled={isSaving}
               inert={isSaving}
-              className='min-w-0 px-3.5 py-3 space-y-4 disabled:opacity-50'
+              className='min-h-0 min-w-0 overflow-y-auto overscroll-contain px-3.5 py-3 space-y-4'
             >
               <div className='flex items-center gap-2.5 rounded-md border border-white/[0.06] bg-white/[0.02] px-2.5 py-2'>
                 <ProfileAvatar
@@ -189,25 +191,24 @@ export function ProfileSettingsPopover({
               />
             </fieldset>
 
-            <div className='px-3.5 pb-3.5 space-y-1.5'>
+            <div className='shrink-0 px-3.5 pb-3.5 space-y-1.5'>
               <Button
                 size='sm'
                 onClick={handleSave}
                 disabled={!draftName.trim() || isHydrating}
                 aria-disabled={isSaving || isAccentHexInvalid || undefined}
                 aria-busy={isSaving || undefined}
-                className='w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5 aria-disabled:cursor-not-allowed aria-disabled:opacity-50'
+                className={cn(
+                  'w-full text-xs font-semibold rounded-md h-8 flex items-center gap-1.5 aria-disabled:cursor-default',
+                  isAccentHexInvalid && 'opacity-50',
+                )}
                 style={{
                   backgroundColor: active,
                   color: getAccentTextColor(active),
                 }}
               >
-                {isSaving ? (
-                  <Loader2 aria-hidden='true' className='w-3 h-3 animate-spin' />
-                ) : (
-                  <Check aria-hidden='true' className='w-3 h-3' />
-                )}
-                {isSaving ? 'Saving…' : 'Save'}
+                <Check aria-hidden='true' className='w-3 h-3' />
+                Save
               </Button>
               <button
                 type='button'

@@ -9,6 +9,7 @@ import { RetryBanner } from './retry-banner';
 
 /** Fewer matches than this reads as filler — the rail hides instead. */
 const MIN_SIMILAR_TITLES = 4;
+const EMPTY_TITLES: MediaItem[] = [];
 
 interface DetailsSimilarTitlesProps {
   item: MediaItem;
@@ -52,7 +53,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
           contentInsetsClassName={contentInsetsClassName}
           sectionClassName='pt-10 animate-in fade-in duration-500 motion-reduce:animate-none'
           railId={`similar:${item.type}:${item.id}`}
-          items={titles ?? []}
+          items={titles ?? EMPTY_TITLES}
           isLoading={showSkeleton}
           skeletonCount={6}
           getItemKey={mediaCardRailKey}

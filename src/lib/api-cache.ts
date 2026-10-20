@@ -99,42 +99,113 @@ function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): 
   return cached.value;
 }
 
+export interface CachedRequestAbort {
+  signal: AbortSignal;
+  /** Stops the backend work started under `requestId`. */
+  cancel: (requestId: string) => void;
+}
+
+interface AbortableInFlight {
+  requestId: string;
+  /** Signalled callers still waiting on the shared request. */
+  waiting: number;
+  /** A caller without a signal joined — the request must run to completion. */
+  pinned: boolean;
+  /** Settled or cancelled — nothing left to cancel. */
+  done: boolean;
+}
+
+const abortableInFlight = new WeakMap<Promise<unknown>, AbortableInFlight>();
+
+/**
+ * Shares one in-flight load per key. With `abort`, the backend work is cancelled
+ * once every caller that joined has aborted; any caller without a signal pins it.
+ */
 export function runCachedRequest<T extends CacheLifetime>(
   cache: RequestCache<T>,
   cacheKey: string,
-  load: () => Promise<T>,
+  load: (requestId?: string) => Promise<T>,
+  abort?: CachedRequestAbort,
 ): Promise<T> {
+  if (abort?.signal.aborted) return Promise.reject(abort.signal.reason);
   const cached = getTimedCache(cache.values, cacheKey);
   if (cached !== undefined) {
     return Promise.resolve(cached);
   }
 
-  const inFlight = cache.inFlight.get(cacheKey);
-  if (inFlight) {
-    return inFlight;
+  let request = cache.inFlight.get(cacheKey);
+  if (!request) {
+    const abortable: AbortableInFlight | undefined = abort && {
+      requestId: crypto.randomUUID(),
+      waiting: 0,
+      pinned: false,
+      done: false,
+    };
+    // Rust measures the TTL before the response crosses IPC; anchor it at request start, never later.
+    const requestedAt = performance.now();
+    const started = load(abortable?.requestId)
+      .then((result) => {
+        if (!resultExpirations.has(result)) {
+          resultExpirations.set(result, requestedAt + result.cacheTtlMs);
+        }
+        // Only the key's current owner publishes — a clear/prime since request start revokes it.
+        if (cache.inFlight.get(cacheKey) === started) {
+          setTimedCache(cache.values, cacheKey, result);
+        }
+        return result;
+      })
+      .finally(() => {
+        if (abortable) abortable.done = true;
+        if (cache.inFlight.get(cacheKey) === started) {
+          cache.inFlight.delete(cacheKey);
+        }
+      });
+    cache.inFlight.set(cacheKey, started);
+    if (abortable) abortableInFlight.set(started, abortable);
+    request = started;
   }
 
-  // Rust measures the TTL before the response crosses IPC; anchor it at request start, never later.
-  const requestedAt = performance.now();
-  const request = load()
-    .then((result) => {
-      if (!resultExpirations.has(result)) {
-        resultExpirations.set(result, requestedAt + result.cacheTtlMs);
-      }
-      // Only the key's current owner publishes — a clear/prime since request start revokes it.
-      if (cache.inFlight.get(cacheKey) === request) {
-        setTimedCache(cache.values, cacheKey, result);
-      }
-      return result;
-    })
-    .finally(() => {
-      if (cache.inFlight.get(cacheKey) === request) {
-        cache.inFlight.delete(cacheKey);
-      }
-    });
+  const abortable = abortableInFlight.get(request);
+  if (!abort) {
+    if (abortable) abortable.pinned = true;
+    return request;
+  }
+  return joinAbortable(cache, cacheKey, request, abortable, abort);
+}
 
-  cache.inFlight.set(cacheKey, request);
-  return request;
+function joinAbortable<T>(
+  cache: RequestCache<T>,
+  cacheKey: string,
+  request: Promise<T>,
+  abortable: AbortableInFlight | undefined,
+  { signal, cancel }: CachedRequestAbort,
+): Promise<T> {
+  if (abortable) abortable.waiting += 1;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      reject(signal.reason);
+      if (!abortable) return;
+      abortable.waiting -= 1;
+      // Deferred so a same-commit effect re-run can rejoin instead of restarting the work.
+      queueMicrotask(() => {
+        if (abortable.waiting > 0 || abortable.pinned || abortable.done) return;
+        abortable.done = true;
+        if (cache.inFlight.get(cacheKey) === request) cache.inFlight.delete(cacheKey);
+        cancel(abortable.requestId);
+      });
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+    request.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }
 
 /** Seeds a known result and revokes any older in-flight publisher for the key. */

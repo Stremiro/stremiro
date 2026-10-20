@@ -36,7 +36,6 @@ interface UsePlayerHotkeysOptions {
   cycleAudioTrack: () => Promise<void>;
   cycleSubtitles: () => Promise<void>;
   durationRef: RefObject<number>;
-  frameStep: (direction: 1 | -1) => Promise<void>;
   /** Volume steps — reads the live volume ref internally. */
   stepVolume: (delta: number) => Promise<void>;
   hasEpisodes: boolean;
@@ -72,7 +71,6 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     cycleAudioTrack,
     cycleSubtitles,
     durationRef,
-    frameStep,
     stepVolume,
     hasEpisodes,
     isExpanded,
@@ -219,10 +217,6 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       case 'dock':
         // Dock to the mini player — same destination as Back on a healthy session.
         return run(() => void navigateBack().catch(() => undefined));
-      case 'frameForward':
-        return run(() => void frameStep(1).catch(() => undefined));
-      case 'frameBackward':
-        return run(() => void frameStep(-1).catch(() => undefined));
       case 'speedDown':
         return run(() => stepSpeed(-1));
       case 'speedUp':

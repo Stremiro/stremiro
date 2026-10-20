@@ -45,8 +45,6 @@ const PREVIEW_PLAYER_KEYBINDINGS: Record<string, string[]> = {
   volumeDown: ['arrowdown'],
   toggleMute: ['m'],
   toggleFullscreen: ['f'],
-  frameBackward: [','],
-  frameForward: ['.'],
   speedDown: ['['],
   speedUp: [']'],
   speedReset: ['\\'],
@@ -86,6 +84,7 @@ const previewAddonUrls = new Map<string, string>();
 let previewAddonConfigSeq = 0;
 let previewLibrary: MediaItem[] = [];
 let previewWatchStatuses: Record<string, WatchStatus> = {};
+const previewStatusAdded = new Set<string>();
 let previewLists: UserList[] = [];
 let previewListSeq = 0;
 
@@ -210,6 +209,7 @@ function addPreviewLibraryItem(item: MediaItem): boolean {
 function removePreviewLibraryItems(ids: ReadonlySet<string>): number {
   const previousCount = previewLibrary.length;
   previewLibrary = previewLibrary.filter((item) => !ids.has(item.id));
+  for (const id of ids) previewStatusAdded.delete(id);
   previewWatchStatuses = Object.fromEntries(
     Object.entries(previewWatchStatuses).filter(([id]) => !ids.has(id)),
   );
@@ -501,11 +501,14 @@ export async function handlePreviewInvoke<T>(
         );
       });
       if (filters.sort === 'title-desc') items.reverse();
-      return { items, statusCounts } as T;
+      return { items, allIds: previewLibrary.map((item) => item.id).toSorted(), statusCounts } as T;
     }
-    case 'add_to_library':
-      addPreviewLibraryItem(readPreviewMediaItem(args?.item));
-      return undefined as T;
+    case 'add_to_library': {
+      const item = readPreviewMediaItem(args?.item);
+      addPreviewLibraryItem(item);
+      previewStatusAdded.delete(item.id);
+      return previewLibrary.find((entry) => entry.id === item.id) as T;
+    }
     case 'remove_from_library':
       removePreviewLibraryItems(new Set([readStringArg(args, 'id', '')]));
       return undefined as T;
@@ -523,11 +526,12 @@ export async function handlePreviewInvoke<T>(
       const status = readPreviewWatchStatus(args);
       if (status === null) {
         delete previewWatchStatuses[item.id];
-        return null as T;
+        if (previewStatusAdded.has(item.id)) removePreviewLibraryItems(new Set([item.id]));
+        return (previewLibrary.find((entry) => entry.id === item.id) ?? null) as T;
       }
-      const added = addPreviewLibraryItem(item);
+      if (addPreviewLibraryItem(item)) previewStatusAdded.add(item.id);
       previewWatchStatuses[item.id] = status;
-      return (added ? item : null) as T;
+      return previewLibrary.find((entry) => entry.id === item.id) as T;
     }
     case 'bulk_set_watch_status': {
       const ids = new Set(Array.isArray(args?.ids) ? args.ids : []);
@@ -536,6 +540,7 @@ export async function handlePreviewInvoke<T>(
       let count = 0;
       for (const item of items) {
         if (status === null) {
+          previewStatusAdded.delete(item.id);
           if (Object.hasOwn(previewWatchStatuses, item.id)) {
             delete previewWatchStatuses[item.id];
             count += 1;
@@ -660,9 +665,11 @@ export async function handlePreviewInvoke<T>(
     case 'clear_library':
       previewLibrary = [];
       previewWatchStatuses = {};
+      previewStatusAdded.clear();
       return undefined as T;
     case 'clear_all_watch_statuses':
       previewWatchStatuses = {};
+      previewStatusAdded.clear();
       return undefined as T;
     case 'clear_all_lists':
       previewLists = [];
@@ -754,7 +761,7 @@ export async function handlePreviewInvoke<T>(
     case 'get_watch_progress':
     case 'recover_playback_stream':
       return null as T;
-    case 'cancel_playback_recovery':
+    case 'cancel_stream_request':
       return undefined as T;
     case 'bulk_remove_from_watch_history':
     case 'remove_all_from_watch_history':

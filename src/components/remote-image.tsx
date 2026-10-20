@@ -44,7 +44,7 @@ export function RemoteImage({
         fadeIn
           ? cn(
               className,
-              'opacity-0 transition-opacity duration-300 data-[loaded=true]:opacity-100 data-[loaded=cached]:opacity-100 data-[loaded=cached]:transition-none',
+              'opacity-0 transition-opacity duration-300 data-[loaded=true]:opacity-100 data-[loaded=cached]:opacity-100 data-[loaded=cached]:transition-none motion-reduce:transition-none',
             )
           : className
       }
@@ -68,7 +68,7 @@ export function RemoteImage({
                     image.currentSrc === loadedSrc &&
                     image.naturalWidth > 0
                   ) {
-                    image.dataset.loaded ??= 'true';
+                    if (image.dataset.loaded === undefined) image.dataset.loaded = 'true';
                   }
                 });
               onLoad?.(event);

@@ -9,10 +9,21 @@ import {
   SlidersHorizontal,
   Zap,
 } from 'lucide-react';
-import { type ComponentType, useCallback, useEffect, useRef, useState } from 'react';
+import {
+  type ComponentType,
+  type KeyboardEvent as ReactKeyboardEvent,
+  lazy,
+  Suspense,
+  useCallback,
+  useDeferredValue,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
 import { useSearchParams } from 'react-router';
 import { ACCENT_PRESET_LABELS } from '@/components/accent-controls';
 import { SearchInput } from '@/components/ui/search-input';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
@@ -25,8 +36,11 @@ import { DataSection } from './data';
 import { GeneralSettings, START_PAGES } from './general';
 import { PlaybackSettings } from './playback';
 import { ShortcutsSection } from './shortcuts';
-import { StreamingSources } from './streaming';
 import { UpdatesSection } from './updates';
+
+const StreamingSources = lazy(() =>
+  import('./streaming').then((module) => ({ default: module.StreamingSources })),
+);
 
 interface NavItem {
   id: string;
@@ -43,8 +57,7 @@ const NAV_ITEMS = [
     component: GeneralSettings,
     label: 'General',
     icon: SlidersHorizontal,
-    description:
-      'Start page, launch at login, start minimized, and close or minimize to the system tray.',
+    description: 'Start page, launch at login and tray behavior.',
     controls: [
       'Start page',
       ...START_PAGES.map((page) => page.label),
@@ -63,7 +76,7 @@ const NAV_ITEMS = [
     component: StreamingSources,
     label: 'Addons',
     icon: Zap,
-    description: 'Install, enable and reorder addons for streaming sources.',
+    description: 'Install, enable and reorder addons.',
     controls: [
       'Addon manifest URL',
       'Add addon',
@@ -78,8 +91,7 @@ const NAV_ITEMS = [
     component: PlaybackSettings,
     label: 'Playback',
     icon: Settings2,
-    description:
-      'Audio languages and subtitles, spoiler protection, trailer previews, auto-play next episode countdown, player controls delay and auto-skip intros & recaps.',
+    description: 'Languages, spoilers, trailers, auto-play and auto-skip.',
     controls: [
       'Audio',
       'Subtitles',
@@ -98,8 +110,7 @@ const NAV_ITEMS = [
     component: AppearanceSettings,
     label: 'Appearance',
     icon: Palette,
-    description:
-      'Accent color, glow intensity and tint targets for navigation, buttons, progress bars and artwork.',
+    description: 'Accent color, glow and tint targets.',
     controls: [
       'Accent',
       'Reset',
@@ -119,7 +130,7 @@ const NAV_ITEMS = [
     component: ShortcutsSection,
     label: 'Shortcuts',
     icon: Keyboard,
-    description: 'Customize player keys, and see the keys for browsing and Calendar.',
+    description: 'Player, browse and Calendar keys.',
     controls: [
       'Customize keybindings',
       'Rebind key',
@@ -135,7 +146,7 @@ const NAV_ITEMS = [
     component: UpdatesSection,
     label: 'Updates',
     icon: RefreshCw,
-    description: 'Check for updates, download and install app releases.',
+    description: 'Check for and install app updates.',
     controls: [
       'Check for updates',
       'Check for updates automatically',
@@ -150,8 +161,7 @@ const NAV_ITEMS = [
     component: DataSection,
     label: 'Data',
     icon: Database,
-    description:
-      'Export and import backups, storage, and clear library, lists, watch statuses and history.',
+    description: 'Backups, storage and clearing local records.',
     controls: [
       'Backup & restore',
       'Export',
@@ -171,6 +181,7 @@ const NAV_ITEMS = [
 type SectionId = (typeof NAV_ITEMS)[number]['id'];
 const DEFAULT_SECTION: SectionId = NAV_ITEMS[0].id;
 const SETTINGS_SECTION_QUERY_PARAM = 'section';
+const ARROW_STEPS = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 };
 
 function resolveSection(value: string | null) {
   const id = value === 'streaming' ? 'addons' : value;
@@ -182,7 +193,9 @@ export function Settings() {
   const { currentVersion, isUpdateAvailable } = useAppUpdater({ includeCurrentVersion: true });
   const activeSection = resolveSection(searchParams.get(SETTINGS_SECTION_QUERY_PARAM));
   const active = activeSection.id;
-  const ActiveSection = activeSection.component;
+  // The nav and its indicator update first; the heavier section renders behind them.
+  const shownSection = useDeferredValue(activeSection);
+  const ActiveSection = shownSection.component;
   const [query, setQuery] = useState('');
   const searchInputRef = useRef<HTMLInputElement>(null);
   const sectionRef = useRef<HTMLDivElement>(null);
@@ -238,6 +251,15 @@ export function Settings() {
     },
     [setSearchParams],
   );
+
+  const handleNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
+    const step = (ARROW_STEPS as Record<string, number | undefined>)[event.key];
+    const index = NAV_ITEMS.findIndex((item) => navButtons.current.get(item.id) === event.target);
+    if (!step || index < 0) return;
+    event.preventDefault();
+    const next = NAV_ITEMS[(index + step + NAV_ITEMS.length) % NAV_ITEMS.length];
+    if (next) navButtons.current.get(next.id)?.focus();
+  };
 
   const openSearchResult = (sectionId: SectionId) => {
     handleSectionChange(sectionId);
@@ -322,6 +344,7 @@ export function Settings() {
                     }}
                     type='button'
                     onClick={() => handleSectionChange(item.id)}
+                    onKeyDown={handleNavKeyDown}
                     aria-current={isActive ? 'page' : undefined}
                     aria-label={
                       item.id === 'updates' && isUpdateAvailable
@@ -329,26 +352,17 @@ export function Settings() {
                         : undefined
                     }
                     className={cn(
-                      'nav-switch-item group relative flex min-h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35 lg:w-full',
-                      isActive && !indicator && 'bg-white/[0.07]',
-                      isActive
-                        ? 'text-white'
-                        : 'text-zinc-400 hover:bg-white/[0.05] hover:text-zinc-200 focus-visible:bg-white/[0.05] focus-visible:text-zinc-200',
+                      'nav-switch-item group relative flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35 lg:w-full',
+                      isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-100',
                     )}
                   >
-                    {isActive && !indicator && (
-                      <span
-                        aria-hidden='true'
-                        className='pointer-events-none absolute left-0 top-[10px] bottom-[10px] w-[3px] rounded-r-full bg-(--accent-nav)'
-                      />
-                    )}
                     <item.icon
                       aria-hidden='true'
                       className={cn(
-                        'h-[17px] w-[17px] shrink-0 transition-[color,transform] duration-150 ease-out group-hover:scale-[1.04] motion-reduce:transition-none motion-reduce:transform-none',
+                        'h-[17px] w-[17px] shrink-0 transition-colors duration-150 motion-reduce:transition-none',
                         isActive
                           ? 'text-(--accent-nav)'
-                          : 'text-zinc-400 group-hover:text-zinc-300 group-focus-visible:text-zinc-300',
+                          : 'text-zinc-500 group-hover:text-zinc-300',
                       )}
                       strokeWidth={1.75}
                     />
@@ -443,7 +457,17 @@ export function Settings() {
                 )}
               </div>
             ) : (
-              <ActiveSection key={active} />
+              <Suspense
+                fallback={
+                  <Skeleton
+                    role='status'
+                    aria-label='Loading settings'
+                    className='h-72 rounded-xl'
+                  />
+                }
+              >
+                <ActiveSection key={shownSection.id} />
+              </Suspense>
             )}
           </div>
         </div>

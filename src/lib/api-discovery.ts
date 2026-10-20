@@ -1,4 +1,5 @@
 import { queryOptions } from '@tanstack/react-query';
+import type { Channel } from '@tauri-apps/api/core';
 import type {
   BrowseGenres,
   CalendarRange,
@@ -43,15 +44,24 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
   const querySearchCatalogPage = (request: SearchCatalogQuery) =>
     safeInvoke<SearchCatalogPage>('query_search_catalog', { request });
 
-  const getMediaDetails = (type: string, id: string) =>
+  const getMediaDetails = (type: string, id: string, includeEpisodes = true) =>
     safeInvoke<MediaDetails>('get_media_details', {
       mediaType: type,
       id,
-      includeEpisodes: true,
+      includeEpisodes,
     });
 
   const getEpisodeNavigation = (request: EpisodeNavigationRequest) =>
-    safeInvoke<EpisodeNavigation>('get_episode_navigation', { request });
+    safeInvoke<EpisodeNavigation>('get_episode_navigation', {
+      request: {
+        ...request,
+        episodes: request.episodes.map(({ season, episode, releaseDate }) => ({
+          season,
+          episode,
+          releaseDate,
+        })),
+      },
+    });
 
   const getUnairedEpisodeIndices = (request: UnairedEpisodesRequest) =>
     safeInvoke<number[]>('get_unaired_episode_indices', { request });
@@ -69,13 +79,6 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
 
   const searchTitles = (titles: string[], query: string) =>
     safeInvoke<number[]>('search_titles', { titles, query });
-
-  const getMediaCardDetails = (type: string, id: string) =>
-    safeInvoke<MediaDetails>('get_media_details', {
-      mediaType: type,
-      id,
-      includeEpisodes: false,
-    });
 
   const detailsQueryOptions = (type: string, id: string | undefined, missingIdMessage?: string) =>
     queryOptions({
@@ -98,7 +101,7 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       queryFn: () =>
         missingIdMessage && !id
           ? Promise.reject(new Error(missingIdMessage))
-          : getMediaCardDetails(type, id!),
+          : getMediaDetails(type, id!, false),
       staleTime: DETAILS_STALE_TIME_MS,
       gcTime: DETAILS_GC_TIME_MS,
     });
@@ -110,8 +113,8 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       id,
     });
 
-  const getCalendarEvents = (range: CalendarRange) =>
-    safeInvoke<CalendarSchedule>('get_calendar_events', { range });
+  const getCalendarEvents = (range: CalendarRange, onCached: Channel<CalendarSchedule>) =>
+    safeInvoke<CalendarSchedule>('get_calendar_events', { range, onCached });
 
   const getBrowseGenres = () => safeInvoke<BrowseGenres>('get_browse_genres');
 
@@ -132,14 +135,12 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
 
   return {
     querySearchCatalogPage,
-    getMediaDetails,
     detailsQueryOptions,
     cardDetailsQueryOptions,
     getEpisodeNavigation,
     getUnairedEpisodeIndices,
     searchEpisodes,
     searchTitles,
-    getMediaCardDetails,
     getDetailsPrefetchBundle,
     getCalendarEvents,
     getBrowseGenres,

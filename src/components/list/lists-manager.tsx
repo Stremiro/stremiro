@@ -29,7 +29,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import {
   CreateListDialog,
@@ -266,7 +266,7 @@ interface SortableItemRowProps {
   listId: string;
   readOnly: boolean;
   viewMode: 'grid' | 'list';
-  onRemoved: (button: HTMLButtonElement | null) => void;
+  onRemove: (itemId: string, button: HTMLButtonElement | null) => void;
   selectionMode: boolean;
   isSelected: boolean;
   onToggleSelect: (id: string, shiftKey?: boolean) => void;
@@ -278,7 +278,7 @@ const SortableItemRow = memo(function SortableItemRow({
   listId,
   readOnly,
   viewMode,
-  onRemoved,
+  onRemove,
   selectionMode,
   isSelected,
   onToggleSelect,
@@ -292,13 +292,6 @@ const SortableItemRow = memo(function SortableItemRow({
   const style = {
     transform: CSS.Transform.toString(transform),
     transition,
-  };
-
-  const removeItem = useBulkRemoveFromList();
-  const handleRemove = () => {
-    if (readOnly || removeItem.isPending) return;
-    onRemoved(removeButtonRef.current);
-    removeItem.mutate({ listId, itemIds: [item.id] });
   };
 
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
@@ -384,12 +377,11 @@ const SortableItemRow = memo(function SortableItemRow({
             type='button'
             onClick={(e) => {
               e.stopPropagation();
-              handleRemove();
+              onRemove(item.id, removeButtonRef.current);
             }}
-            aria-disabled={removeItem.isPending || undefined}
             aria-label={`Remove ${item.title} from list`}
             title='Remove from list'
-            className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md not-aria-disabled:hover:bg-red-500/80 text-white aria-disabled:opacity-50 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+            className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
           >
             <X className='w-3 h-3' />
           </button>
@@ -488,11 +480,10 @@ const SortableItemRow = memo(function SortableItemRow({
           data-list-remove={item.id}
           size='icon'
           variant='ghost'
-          onClick={handleRemove}
-          aria-disabled={removeItem.isPending || undefined}
+          onClick={() => onRemove(item.id, removeButtonRef.current)}
           aria-label={`Remove ${item.title} from list`}
           title='Remove from list'
-          className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0 aria-disabled:opacity-50 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-500'
+          className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
         >
           <X className='w-3.5 h-3.5' />
         </Button>
@@ -537,12 +528,16 @@ function ListItemsView({ list }: { list: UserList }) {
     return [...ordered, ...itemMap.values()];
   }, [orderedIds, list.items]);
 
-  const handleRemoved = useCallback((button: HTMLButtonElement | null) => {
-    if (!button || document.activeElement !== button) return;
-    const buttons =
-      itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]');
-    if (buttons) removalFocusRef.current = { button, index: Array.from(buttons).indexOf(button) };
-  }, []);
+  const bulkRemove = useBulkRemoveFromList();
+  const removeMutate = bulkRemove.mutate;
+  const handleRemove = (itemId: string, button: HTMLButtonElement | null) => {
+    if (button && document.activeElement === button) {
+      const buttons =
+        itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]');
+      if (buttons) removalFocusRef.current = { button, index: Array.from(buttons).indexOf(button) };
+    }
+    removeMutate({ listId: list.id, itemIds: [itemId] });
+  };
 
   const sensors = useSortableSensors();
 
@@ -572,31 +567,28 @@ function ListItemsView({ list }: { list: UserList }) {
     setActiveId(event.active.id);
   };
 
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      setActiveId(null);
-      const { active, over } = event;
-      if (!over || active.id === over.id) return;
+  const handleDragEnd = (event: DragEndEvent) => {
+    setActiveId(null);
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
 
-      // Composite drag IDs are `${listId}::${itemId}` — strip the prefix.
-      const prefixLength = list.id.length + 2;
-      const activeItemId = String(active.id).slice(prefixLength);
-      const overItemId = String(over.id).slice(prefixLength);
+    // Composite drag IDs are `${listId}::${itemId}` — strip the prefix.
+    const prefixLength = list.id.length + 2;
+    const activeItemId = String(active.id).slice(prefixLength);
+    const overItemId = String(over.id).slice(prefixLength);
 
-      // Compute outside the state updater — Strict Mode double-invokes updaters, which would double-fire the mutation.
-      const current = orderedItems.map((item) => item.id);
+    // Compute outside the state updater — Strict Mode double-invokes updaters, which would double-fire the mutation.
+    const current = orderedItems.map((item) => item.id);
 
-      const oldIndex = current.indexOf(activeItemId);
-      const newIndex = current.indexOf(overItemId);
-      if (oldIndex === -1 || newIndex === -1) return;
+    const oldIndex = current.indexOf(activeItemId);
+    const newIndex = current.indexOf(overItemId);
+    if (oldIndex === -1 || newIndex === -1) return;
 
-      const next = arrayMove(current, oldIndex, newIndex);
-      setOrderedIds(next);
-      latestReorderIdsRef.current = next;
-      reorderItems.mutate(next);
-    },
-    [list.id, orderedItems, reorderItems],
-  );
+    const next = arrayMove(current, oldIndex, newIndex);
+    setOrderedIds(next);
+    latestReorderIdsRef.current = next;
+    reorderItems.mutate(next);
+  };
 
   const {
     effectiveSearch,
@@ -607,10 +599,9 @@ function ListItemsView({ list }: { list: UserList }) {
     retrySearch,
   } = useTitleSearch(orderedItems, search);
 
-  const visibleItems = useMemo(() => filtered.slice(0, visibleLimit), [filtered, visibleLimit]);
-  const visibleIds = useMemo(() => visibleItems.map((item) => item.id), [visibleItems]);
-  const bulkRemove = useBulkRemoveFromList();
-  const selection = useCollectionSelection(
+  const visibleItems = filtered.slice(0, visibleLimit);
+  const visibleIds = visibleItems.map((item) => item.id);
+  const { triggerRef: selectionTriggerRef, ...selection } = useCollectionSelection(
     list.item_ids,
     visibleIds,
     !readOnly,
@@ -680,7 +671,7 @@ function ListItemsView({ list }: { list: UserList }) {
             <ViewToggle viewMode={viewMode} onChange={setViewMode} />
             {!readOnly && (
               <Button
-                ref={selection.triggerRef}
+                ref={selectionTriggerRef}
                 size='sm'
                 variant='outline'
                 aria-pressed={selection.selectionMode}
@@ -788,7 +779,7 @@ function ListItemsView({ list }: { list: UserList }) {
                   listId={list.id}
                   readOnly={readOnly}
                   viewMode={viewMode}
-                  onRemoved={handleRemoved}
+                  onRemove={handleRemove}
                   selectionMode={selection.selectionMode}
                   isSelected={selection.selectedIds.has(item.id)}
                   onToggleSelect={selection.toggle}
@@ -873,7 +864,11 @@ function ListItemsView({ list }: { list: UserList }) {
         )}
       </div>
       {!readOnly && addTitlesOpen && (
-        <AddTitlesDialog list={list} onOpenChange={setAddTitlesOpen} />
+        <AddTitlesDialog
+          list={list}
+          onOpenChange={setAddTitlesOpen}
+          returnFocusRef={addTitlesButtonRef}
+        />
       )}
     </div>
   );
@@ -894,24 +889,21 @@ export function ListsManager() {
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
   const [searchParams, setSearchParams] = useSearchParams();
-  const expanded = useMemo(() => new Set(searchParams.getAll('list')), [searchParams]);
-  const updateExpanded = useCallback(
-    (id: string, open?: boolean) => {
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          const ids = new Set(next.getAll('list'));
-          if (open ?? !ids.has(id)) ids.add(id);
-          else ids.delete(id);
-          next.delete('list');
-          for (const expandedId of ids) next.append('list', expandedId);
-          return next;
-        },
-        { replace: true },
-      );
-    },
-    [setSearchParams],
-  );
+  const expanded = new Set(searchParams.getAll('list'));
+  const updateExpanded = (id: string, open?: boolean) => {
+    setSearchParams(
+      (current) => {
+        const next = new URLSearchParams(current);
+        const ids = new Set(next.getAll('list'));
+        if (open ?? !ids.has(id)) ids.add(id);
+        else ids.delete(id);
+        next.delete('list');
+        for (const expandedId of ids) next.append('list', expandedId);
+        return next;
+      },
+      { replace: true },
+    );
+  };
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<UserList | null>(null);
   const [activeListId, setActiveListId] = useState<UniqueIdentifier | null>(null);
@@ -1033,20 +1025,17 @@ export function ListsManager() {
     setActiveListId(event.active.id);
   };
 
-  const handleDragEnd = useCallback(
-    (event: DragEndEvent) => {
-      setActiveListId(null);
-      const { active, over } = event;
-      if (!over || active.id === over.id) return;
+  const handleDragEnd = (event: DragEndEvent) => {
+    setActiveListId(null);
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
 
-      const oldIdx = lists.findIndex((l) => l.id === active.id);
-      const newIdx = lists.findIndex((l) => l.id === over.id);
-      if (oldIdx === -1 || newIdx === -1) return;
+    const oldIdx = lists.findIndex((l) => l.id === active.id);
+    const newIdx = lists.findIndex((l) => l.id === over.id);
+    if (oldIdx === -1 || newIdx === -1) return;
 
-      reorderLists.mutate(arrayMove(lists, oldIdx, newIdx));
-    },
-    [lists, reorderLists],
-  );
+    reorderLists.mutate(arrayMove(lists, oldIdx, newIdx));
+  };
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
 

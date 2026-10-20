@@ -1,5 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { type RefObject, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useCallback, type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type PlaybackStreamOutcome } from '@/lib/api';
 import { getErrorKind } from '@/lib/api-core';
@@ -98,17 +98,17 @@ export function useStreamRecovery({
   const cancelPendingRecovery = useCallback(() => {
     const requestId = recoveryRequestIdRef.current;
     recoveryRequestIdRef.current = null;
-    if (requestId) void api.cancelPlaybackRecovery(requestId).catch(() => {});
+    if (requestId) void api.cancelStreamRequest(requestId).catch(() => {});
   }, []);
 
-  const clearRecoveryTimers = useCallback(() => {
+  const clearRecoveryTimers = () => {
     // Cancelled so in-flight recovery cannot swap streams after unmount.
     startupWatchdogCancelledRef.current = true;
     clearTimer(startupWatchdogTimerRef);
     cancelPendingRecovery();
-  }, [cancelPendingRecovery]);
+  };
 
-  const cancelRecovery = useCallback(() => {
+  const cancelRecovery = () => {
     const generation = ++recoveryEpochRef.current;
     manualSelectionOwnsStreamRef.current = {
       generation,
@@ -118,30 +118,27 @@ export function useStreamRecovery({
     recoveryInFlightRef.current = false;
     clearRecoveryTimers();
     return generation;
-  }, [clearRecoveryTimers, selectedStreamKeyRef, stream.committedStreamUrlRef]);
+  };
 
-  const releaseManualSelection = useCallback(
-    (generation: number) => {
-      const owner = manualSelectionOwnsStreamRef.current;
-      if (
-        !mountedRef.current ||
-        owner?.generation !== generation ||
-        owner.url !== stream.committedStreamUrlRef.current ||
-        owner.streamKey !== selectedStreamKeyRef.current
-      ) {
-        return;
-      }
-      manualSelectionOwnsStreamRef.current = null;
-      recoveryEpochRef.current += 1;
-      if (!playbackStartedRef.current) {
-        startupWatchdogCancelledRef.current = false;
-        setStartupWatchdogRevision((revision) => revision + 1);
-      }
-    },
-    [mountedRef, selectedStreamKeyRef, stream.committedStreamUrlRef],
-  );
+  const releaseManualSelection = (generation: number) => {
+    const owner = manualSelectionOwnsStreamRef.current;
+    if (
+      !mountedRef.current ||
+      owner?.generation !== generation ||
+      owner.url !== stream.committedStreamUrlRef.current ||
+      owner.streamKey !== selectedStreamKeyRef.current
+    ) {
+      return;
+    }
+    manualSelectionOwnsStreamRef.current = null;
+    recoveryEpochRef.current += 1;
+    if (!playbackStartedRef.current) {
+      startupWatchdogCancelledRef.current = false;
+      setStartupWatchdogRevision((revision) => revision + 1);
+    }
+  };
 
-  const markPlaybackStarted = useCallback(() => {
+  const markPlaybackStarted = () => {
     playbackStartedRef.current = true;
     recoveryEpochRef.current += 1;
     if (recoveryInFlightRef.current) {
@@ -149,7 +146,7 @@ export function useStreamRecovery({
       setResolveStatus(null);
     }
     clearRecoveryTimers();
-  }, [clearRecoveryTimers, setResolveStatus]);
+  };
 
   useEffect(() => {
     recoveryEpochRef.current += 1;
@@ -214,14 +211,15 @@ export function useStreamRecovery({
       recoveryInFlightRef.current = true;
       setError(null);
       setResolveStatus('Trying another stream');
+      const lookupId = streamLookupId || mediaId;
 
-      try {
+      const recovered = await (async () => {
         const resolved = await withTimeout(
           recoverPlayerStream({
             requestId,
             mediaType: effectiveMediaType,
             mediaId,
-            streamLookupId: streamLookupId || mediaId,
+            streamLookupId: lookupId,
             streamSeason: resolveSeason,
             streamEpisode: resolveEpisode,
             absoluteSeason,
@@ -265,18 +263,20 @@ export function useStreamRecovery({
           failoverResumePositionRef.current = currentTimeRef.current;
           return true;
         }
-      } catch (error) {
-        if (getErrorKind(error) === 'cancelled') return true;
-        // Best-effort only.
-      } finally {
-        if (recoveryRequestIdRef.current === requestId) recoveryRequestIdRef.current = null;
-        if (isCurrent()) {
-          recoveryInFlightRef.current = false;
-          setResolveStatus(null);
-        }
-      }
+      })()
+        .catch((error) => {
+          if (getErrorKind(error) === 'cancelled') return true;
+          // Best-effort only.
+        })
+        .finally(() => {
+          if (recoveryRequestIdRef.current === requestId) recoveryRequestIdRef.current = null;
+          if (isCurrent()) {
+            recoveryInFlightRef.current = false;
+            setResolveStatus(null);
+          }
+        });
 
-      return !isCurrent();
+      return recovered ?? !isCurrent();
     },
     [
       stream,

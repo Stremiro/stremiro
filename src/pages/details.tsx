@@ -5,13 +5,14 @@ import {
   ChevronLeft,
   ChevronRight,
   Clapperboard,
+  ListVideo,
   Loader2,
   Play,
   Plus,
   RotateCcw,
   Star,
 } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigationType, useParams } from 'react-router';
 import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card';
 import { SeasonSwitcher } from '@/components/details-season-switcher';
@@ -25,7 +26,7 @@ import { StreamSelector } from '@/components/stream-selector';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SearchInput } from '@/components/ui/search-input';
-import { Skeleton } from '@/components/ui/skeleton';
+import { DetailsSkeleton, Skeleton } from '@/components/ui/skeleton';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
@@ -58,7 +59,6 @@ import {
 } from '@/lib/history-playback';
 import { currentPathWithSearch } from '@/lib/navigation';
 import {
-  detailsCardQueryKey,
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
   WATCH_HISTORY_VIEW_STALE_TIME_MS,
@@ -66,6 +66,8 @@ import {
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
+  createObjectIdentity,
+  formatSeasonEpisode,
   GENRE_LINK_CLASS,
   isSeriesLikeMediaType,
   mediaTypeLabel,
@@ -74,15 +76,15 @@ import {
   SIDEBAR_PAGE_COLUMN_INSETS,
 } from '@/lib/utils';
 
-const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8].map((index) => (
+const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((index) => (
   <div
     key={`episode-skeleton-${index}`}
-    className='aspect-video w-full rounded-lg border border-white/[0.06] bg-zinc-900/60 animate-pulse'
+    className='aspect-video w-full rounded-lg border border-white/[0.06] bg-zinc-900/60 animate-pulse motion-reduce:animate-none'
   />
 ));
 
 const ICON_ACTION_CLASS =
-  'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.06] text-white/70 transition-colors duration-150 hover:border-white/[0.2] hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-wait';
+  'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.06] text-white/70 transition-colors duration-150 hover:border-white/[0.2] hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-default';
 
 const EPISODE_PAGE_BUTTON_CLASS =
   'flex h-9 w-9 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35';
@@ -91,11 +93,17 @@ const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-6xl ${SIDEBAR_PAGE_COLUMN_INS
 const DETAILS_HERO_CLASS =
   'relative -mt-8 flex min-h-[70vh] w-full items-end pb-12 pt-24 lg:pb-16 lg:pt-28';
 const DETAILS_STATUS_STRIP_CLASS =
-  'inline-flex max-w-full items-center gap-0.5 overflow-x-auto rounded-lg border border-white/10 bg-black/40 p-1 scrollbar-hide';
+  'inline-grid max-w-full grid-cols-2 gap-1 rounded-xl border border-white/15 bg-zinc-950 p-1 sm:inline-flex sm:flex-wrap';
 
 const WATCH_STATUS_ORDER: WatchStatus[] = ['plan_to_watch', 'watching', 'watched', 'dropped'];
 
+function locationCoordinate(state: unknown, key: 'season' | 'episode'): number | null {
+  const value = (state as Record<string, unknown> | null)?.[key];
+  return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null;
+}
+
 const EMPTY_CREDIT_NAMES: string[] = [];
+const getEpisodeListId = createObjectIdentity();
 
 function DetailsCredits({
   cast = EMPTY_CREDIT_NAMES,
@@ -175,10 +183,15 @@ export function Details() {
   const { type, id } = useParams<{ type: string; id: string }>();
 
   return (
-    <div className='min-h-screen page-enter bg-background'>
+    <div className='min-h-screen bg-background'>
       <DetailsContent key={`${type}-${id}`} />
     </div>
   );
+}
+
+function scrollToEpisodes() {
+  document.getElementById('details-episodes-heading')?.focus({ preventScroll: true });
+  document.getElementById('episodes-section')?.scrollIntoView({ behavior: scrollBehavior() });
 }
 
 function DetailsContent() {
@@ -192,6 +205,11 @@ function DetailsContent() {
   const { preferences: spoilerProtection, isHydrating: isHydratingSpoilerProtection } =
     useAppUiPreferences((preferences) => preferences.spoilerProtection);
 
+  // Observe late prefetch results without issuing a second metadata request.
+  const { data: cardDetails } = useQuery({
+    ...api.cardDetailsQueryOptions(baseRouteType, baseRouteId),
+    enabled: false,
+  });
   const {
     data: item,
     isFetched,
@@ -207,8 +225,7 @@ function DetailsContent() {
     enabled: !!baseRouteId,
     // Card-prefetch bridge: paint the hero from hover intent's metadata-only
     // payload while the full episode payload lands.
-    placeholderData: () =>
-      queryClient.getQueryData<MediaDetails>(detailsCardQueryKey(baseRouteType, baseRouteId)),
+    placeholderData: cardDetails,
   });
   // Keep the first offline notice mounted through manual and reconnect retries.
   const [hasPausedDetails, setHasPausedDetails] = useState(false);
@@ -245,13 +262,10 @@ function DetailsContent() {
   const seriesCanResume = seriesProgress !== null;
   const seriesResumeSeason = seriesProgress?.absolute_season;
   const seriesResumeEpisode = seriesProgress?.absolute_episode;
-  const resumeEpisodeCoords = useMemo(
-    () =>
-      seriesCanResume && seriesResumeSeason != null && seriesResumeEpisode != null
-        ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
-        : null,
-    [seriesCanResume, seriesResumeSeason, seriesResumeEpisode],
-  );
+  const resumeEpisodeCoords =
+    seriesCanResume && seriesResumeSeason != null && seriesResumeEpisode != null
+      ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
+      : null;
 
   const {
     watchStatus: detailsWatchStatus,
@@ -276,19 +290,12 @@ function DetailsContent() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
   const saveTriggerRef = useRef<HTMLButtonElement>(null);
+  const trailerTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Season 0 (specials) is valid; only accept real numbers — `Number(null)`
   // would read a missing season as Specials.
-  const rawLocationSeason = (location.state as { season?: unknown } | null)?.season;
-  const locationSeason =
-    typeof rawLocationSeason === 'number' && Number.isFinite(rawLocationSeason)
-      ? Math.trunc(rawLocationSeason)
-      : null;
-  const rawLocationEpisode = (location.state as { episode?: unknown } | null)?.episode;
-  const locationEpisode =
-    typeof rawLocationEpisode === 'number' && Number.isFinite(rawLocationEpisode)
-      ? Math.trunc(rawLocationEpisode)
-      : null;
+  const locationSeason = locationCoordinate(location.state, 'season');
+  const locationEpisode = locationCoordinate(location.state, 'episode');
 
   const {
     trailerOpen,
@@ -299,12 +306,13 @@ function DetailsContent() {
     openTrailer,
     onTrailerOpenChange,
   } = useDetailsTrailer(item);
-  // A corrected artwork URL from a refetch must retry without a route remount.
-  const logoUrl = item?.logo;
   const heroBackdropSrc = item?.backdrop || item?.poster;
-  const [logoSrc, onLogoError] = useFailedSrc(logoUrl);
-  const [loadedBackdrop, setLoadedBackdrop] = useState<string | null>(null);
+  // A painted logo stays put; an unpainted or failed one follows refetched metadata.
   const [loadedLogo, setLoadedLogo] = useState<string | null>(null);
+  const [logoSrc, onLogoError] = useFailedSrc(loadedLogo ?? item?.logo);
+  // Card placeholders often lack the logo; hold the title slot until full metadata decides.
+  const titlePending = !logoSrc && isPlaceholderData && isFetching;
+  const showTitleSkeleton = titlePending || (!!logoSrc && loadedLogo !== logoSrc);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
   const localToday = format(useLocalDay(), 'yyyy-MM-dd');
@@ -351,7 +359,7 @@ function DetailsContent() {
   // label episodes unaired and never enable bulk completion.
   const unairedScopeKey = [...detailsQueryKey(baseRouteType, baseRouteId), 'unaired-episodes'];
   const unairedEpisodesQuery = useQuery({
-    queryKey: [...unairedScopeKey, localToday, dataUpdatedAt],
+    queryKey: [...unairedScopeKey, localToday, item?.episodes && getEpisodeListId(item.episodes)],
     queryFn: async () => {
       const episodes = item!.episodes!;
       const indices = await api.getUnairedEpisodeIndices({
@@ -376,9 +384,43 @@ function DetailsContent() {
     unairedEpisodesQuery;
   const airStatesReady = !!unairedEpisodeKeys && !isUnairedPlaceholder;
 
+  // Home's Up Next rule: the aired successor of the furthest watched episode,
+  // offered only while nothing is resumable. Rust picks both ends.
+  const upNextSeason = titleProgress?.upNextSource?.absolute_season;
+  const upNextEpisodeNumber = titleProgress?.upNextSource?.absolute_episode;
+  const upNextQuery = useQuery({
+    queryKey: [
+      ...detailsQueryKey(baseRouteType, baseRouteId),
+      'up-next',
+      localToday,
+      item?.episodes && getEpisodeListId(item.episodes),
+      upNextSeason,
+      upNextEpisodeNumber,
+    ],
+    queryFn: async () => {
+      const episodes = item!.episodes!;
+      const { nextIndex } = await api.getEpisodeNavigation({
+        episodes,
+        season: upNextSeason!,
+        episode: upNextEpisodeNumber!,
+        today: localToday,
+      });
+      return nextIndex === null ? null : episodes[nextIndex];
+    },
+    enabled:
+      hasEpisodesSection &&
+      !seriesCanResume &&
+      !isPlaceholderData &&
+      upNextSeason != null &&
+      upNextEpisodeNumber != null,
+    staleTime: Infinity,
+    gcTime: DETAILS_GC_TIME_MS,
+  });
+  const upNextEpisode = upNextQuery.data ?? null;
+
   // "Read more" only exists when the clamp actually bites; while expanded the
-  // last verdict is kept so "Show less" stays.
-  useEffect(() => {
+  // last verdict is kept so "Show less" stays. Measured before paint so the hero never shifts.
+  useLayoutEffect(() => {
     if (descriptionExpanded) return;
     const element = descriptionRef.current;
     if (!element) return;
@@ -399,36 +441,26 @@ function DetailsContent() {
     : markSeasonWatched.isPending
       ? markSeasonWatched.variables
       : undefined;
-  const pendingEpisodeKeys = useMemo(
-    () =>
-      new Set(
-        pendingWatchedMutation?.episodes.map((ep) =>
-          episodeProgressKey(baseRouteId, ep.season, ep.episode),
-        ),
-      ),
-    [baseRouteId, pendingWatchedMutation],
+  const pendingEpisodeKeys = new Set(
+    pendingWatchedMutation?.episodes.map((ep) =>
+      episodeProgressKey(baseRouteId, ep.season, ep.episode),
+    ),
   );
-  const optimisticEpisodeWatched = useCallback(
-    (ep: Episode) =>
-      pendingEpisodeKeys.has(episodeProgressKey(baseRouteId, ep.season, ep.episode))
-        ? pendingWatchedMutation?.watched
-        : undefined,
-    [baseRouteId, pendingEpisodeKeys, pendingWatchedMutation?.watched],
-  );
+  const optimisticEpisodeWatched = (ep: Episode) =>
+    pendingEpisodeKeys.has(episodeProgressKey(baseRouteId, ep.season, ep.episode))
+      ? pendingWatchedMutation?.watched
+      : undefined;
 
-  const { seasonWatchedCount, seasonWatchTargets } = useMemo(() => {
-    const targets: Episode[] = [];
-    let watched = 0;
-    for (const ep of seasonEpisodes) {
-      const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
-      if (optimisticEpisodeWatched(ep) ?? !!episodeProgress?.[key]?.is_watched) {
-        watched += 1;
-        continue;
-      }
-      if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) targets.push(ep);
+  const seasonWatchTargets: Episode[] = [];
+  let seasonWatchedCount = 0;
+  for (const ep of seasonEpisodes) {
+    const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
+    if (optimisticEpisodeWatched(ep) ?? !!episodeProgress?.[key]?.is_watched) {
+      seasonWatchedCount += 1;
+      continue;
     }
-    return { seasonWatchedCount: watched, seasonWatchTargets: targets };
-  }, [seasonEpisodes, episodeProgress, unairedEpisodeKeys, baseRouteId, optimisticEpisodeWatched]);
+    if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) seasonWatchTargets.push(ep);
+  }
 
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
   const episodeSearchInputRef = useRef<HTMLInputElement>(null);
@@ -436,6 +468,15 @@ function DetailsContent() {
     button: HTMLButtonElement;
     target: 'resume' | 'heading' | 'search';
   } | null>(null);
+  const holdEpisodeActionFocus = (
+    button: Element | null,
+    target: 'resume' | 'heading' | 'search',
+  ) => {
+    episodeActionFocusRef.current =
+      button instanceof HTMLButtonElement && document.activeElement === button
+        ? { button, target }
+        : null;
+  };
   useLayoutEffect(() => {
     const pending = episodeActionFocusRef.current;
     if (!pending) return;
@@ -476,40 +517,25 @@ function DetailsContent() {
     titleProgress,
   });
 
-  const handleWatchEpisode = useCallback(
-    (ep: Episode) => {
-      if (!item) return;
+  const handleWatchEpisode = (ep: Episode) => {
+    if (!item) return;
 
-      const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-      openEpisodeStreamSelector(ep, {
-        startTime: epProgress?.resume_start_time,
-      });
-    },
-    [episodeProgress, item, baseRouteId, openEpisodeStreamSelector],
-  );
+    const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
+    openEpisodeStreamSelector(ep, {
+      startTime: epProgress?.resume_start_time,
+    });
+  };
 
   // Destructured `mutate` keeps this stable — the mutation object is
   // re-allocated per render and would defeat `EpisodeCard`'s memo.
-  const handleToggleEpisodeWatched = useCallback(
-    (ep: Episode) => {
-      if (!item || !hasWatchProgress || episodeWatchedPending || markSeasonWatched.isPending)
-        return;
-      const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-      mutateEpisodeWatched({
-        episodes: [ep],
-        watched: !epProgress?.is_watched,
-      });
-    },
-    [
-      episodeProgress,
-      hasWatchProgress,
-      item,
-      baseRouteId,
-      mutateEpisodeWatched,
-      episodeWatchedPending,
-      markSeasonWatched.isPending,
-    ],
-  );
+  const handleToggleEpisodeWatched = (ep: Episode) => {
+    if (!item || !hasWatchProgress || episodeWatchedPending || markSeasonWatched.isPending) return;
+    const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
+    mutateEpisodeWatched({
+      episodes: [ep],
+      watched: !epProgress?.is_watched,
+    });
+  };
 
   const primaryPlaybackHistoryEntry =
     item?.type === 'movie' ? (titleProgress?.movieResumeEntry ?? null) : seriesProgress;
@@ -528,17 +554,17 @@ function DetailsContent() {
         )
       : null;
 
-  const scrollToEpisodes = useCallback(() => {
-    document.getElementById('details-episodes-heading')?.focus({ preventScroll: true });
-    document.getElementById('episodes-section')?.scrollIntoView({ behavior: scrollBehavior() });
-  }, []);
-
   const primaryPlayback = useMediaPrimaryPlayback({
     from: currentPathWithSearch(),
     historyEntry: primaryPlaybackHistoryEntry,
     item,
     onPlayMovieWithoutHistory: item?.type === 'movie' ? handleWatchMovie : undefined,
-    onSelectEpisode: item?.type === 'series' ? scrollToEpisodes : undefined,
+    onSelectEpisode:
+      item?.type === 'series'
+        ? upNextEpisode
+          ? () => void openEpisodeStreamSelector(upNextEpisode)
+          : scrollToEpisodes
+        : undefined,
     surface: 'details',
   });
 
@@ -554,12 +580,26 @@ function DetailsContent() {
     !primaryPlaybackHistoryEntry &&
     item?.type === 'series' &&
     isPlaceholderData;
+  const hasNoSeriesResume =
+    item?.type === 'series' &&
+    !primaryPlaybackHistoryEntry &&
+    !primaryPlayback.canReturnToActivePlayer;
+  const upNextPending =
+    hasNoSeriesResume &&
+    !!titleProgress?.upNextSource &&
+    !upNextEpisode &&
+    (isPlaceholderData || upNextQuery.isLoading);
   const primaryActionPending =
-    primaryPlayback.isResolvingPrimaryAction || historyPending || episodeActionPending;
+    primaryPlayback.isResolvingPrimaryAction ||
+    historyPending ||
+    episodeActionPending ||
+    upNextPending;
+  const upNextTarget = hasNoSeriesResume ? upNextEpisode : null;
+  const primaryActionSelectsEpisode = hasNoSeriesResume && !upNextTarget && !upNextPending;
 
   // "Start over" replays the resume target from the beginning: `startTime: 1`
   // rides the player contract — under MIN_RESUME_POSITION_SECS means no seek.
-  const handleStartOver = useCallback(() => {
+  const handleStartOver = () => {
     if (!item || !primaryPlaybackHistoryEntry) return;
     const startTime = 1;
 
@@ -571,7 +611,7 @@ function DetailsContent() {
     const { absolute_season: season, absolute_episode: episode } = primaryPlaybackHistoryEntry;
     if (season == null || episode == null) return;
     openEpisodeSelectorForCoordinates(season, episode, startTime);
-  }, [handleWatchMovie, item, openEpisodeSelectorForCoordinates, primaryPlaybackHistoryEntry]);
+  };
 
   const handleRetryDetails = async () => {
     if (!baseRouteId || isFetching) return;
@@ -580,9 +620,8 @@ function DetailsContent() {
     await queryClient.invalidateQueries(filters);
   };
 
-  // Center the resume episode once per landing — re-centering on each
-  // `visibleEpisodes` re-creation would yank the page mid-typing.
-  const centeredResumeLandingRef = useRef<string | null>(null);
+  // Only explicit episode links scroll the page; browsing and Back keep their position.
+  const centeredEpisodeLandingRef = useRef<string | null>(null);
   const autoCenterNavigationRef = useRef({ key: location.key, type: navigationType });
   useEffect(() => {
     const landing = autoCenterNavigationRef.current;
@@ -590,35 +629,31 @@ function DetailsContent() {
       // The player's POP handoff clears route state with a same-page REPLACE.
       if (navigationType !== 'REPLACE') {
         landing.type = navigationType;
-        centeredResumeLandingRef.current = null;
+        centeredEpisodeLandingRef.current = null;
       }
       landing.key = location.key;
     }
-    if (landing.type === 'POP' && (locationSeason === null || locationEpisode === null)) return;
-    if (!resumeEpisodeCoords || selectedSeason !== resumeEpisodeCoords.season) {
-      centeredResumeLandingRef.current = null;
-      return;
-    }
+    if (landing.type === 'POP' || locationSeason === null || locationEpisode === null) return;
+    if (selectedSeason !== locationSeason) return;
     if (isPlaceholderData || episodeSearch.trim()) return;
-    if (!visibleEpisodes.some((ep) => ep.episode === resumeEpisodeCoords.episode)) return;
-    const landingKey = episodeProgressKey(
-      baseRouteId,
-      resumeEpisodeCoords.season,
-      resumeEpisodeCoords.episode,
+    const episodeButton = document.querySelector<HTMLButtonElement>(
+      `#details-episodes-grid [data-episode-season="${locationSeason}"][data-episode-number="${locationEpisode}"]`,
     );
-    if (centeredResumeLandingRef.current === landingKey) return;
+    if (!episodeButton) return;
+    const landingKey = episodeProgressKey(baseRouteId, locationSeason, locationEpisode);
+    if (centeredEpisodeLandingRef.current === landingKey) return;
 
     const intentListeners = new AbortController();
     const timer = window.setTimeout(() => {
       intentListeners.abort();
-      centeredResumeLandingRef.current = landingKey;
-      resumeEpisodeRef.current?.scrollIntoView({
+      centeredEpisodeLandingRef.current = landingKey;
+      episodeButton.scrollIntoView({
         block: 'center',
         behavior: scrollBehavior(),
       });
     }, 80);
     const cancelCentering = () => {
-      centeredResumeLandingRef.current = landingKey;
+      centeredEpisodeLandingRef.current = landingKey;
       window.clearTimeout(timer);
       intentListeners.abort();
     };
@@ -636,7 +671,6 @@ function DetailsContent() {
     };
   }, [
     visibleEpisodes,
-    resumeEpisodeCoords,
     selectedSeason,
     isPlaceholderData,
     episodeSearch,
@@ -700,7 +734,7 @@ function DetailsContent() {
   }
 
   return (
-    <div className='relative pb-20'>
+    <div className='relative pb-20 page-enter'>
       <div className={DETAILS_HERO_CLASS}>
         <div
           className='absolute inset-0 z-0'
@@ -718,13 +752,10 @@ function DetailsContent() {
               src={heroBackdropSrc}
               fallbackSrc={item.poster}
               alt=''
-              className={cn(
-                'w-full h-full object-cover transition-opacity duration-700 ease-out',
-                loadedBackdrop === heroBackdropSrc ? 'opacity-100' : 'opacity-0',
-              )}
+              className='w-full h-full object-cover'
+              fadeIn
               loading='eager'
               fetchPriority='high'
-              onLoad={() => setLoadedBackdrop(heroBackdropSrc)}
               style={{ objectPosition: 'center 20%' }}
             />
           )}
@@ -732,38 +763,44 @@ function DetailsContent() {
 
         <div className={`${DETAILS_COLUMN_CLASS} relative z-20 flex flex-col`}>
           <div className='flex flex-col gap-6 w-full max-w-4xl'>
-            {error && (
+            {(error || showOfflineDetails) && (
               <RetryBanner
-                message="Couldn't refresh this title. Showing the saved details."
+                message={
+                  showOfflineDetails
+                    ? "You're offline. Reconnect to load the rest of this title."
+                    : "Couldn't refresh this title. Showing the saved details."
+                }
                 onRetry={handleRetryDetails}
                 isRetrying={isFetching}
               />
             )}
             <div className='space-y-6 w-full'>
               <div>
-                <div
-                  className={cn(
-                    'relative mb-5 flex items-center',
-                    logoUrl && 'min-h-24 md:min-h-32',
-                  )}
-                >
+                <div className='relative mb-5 flex min-h-24 items-center md:min-h-32'>
                   <h1
-                    className={cn(
-                      'w-full wrap-break-word text-[32px] font-semibold leading-[1.1] tracking-[-0.035em] text-white drop-shadow-lg transition-opacity duration-500 ease-out sm:text-5xl lg:text-6xl',
-                      logoSrc && loadedLogo === logoSrc ? 'opacity-0' : 'opacity-100',
-                    )}
+                    className={
+                      logoSrc || titlePending
+                        ? 'sr-only'
+                        : 'w-full wrap-break-word text-[32px] font-semibold leading-[1.1] tracking-[-0.035em] text-white drop-shadow-lg animate-in fade-in duration-300 motion-reduce:animate-none sm:text-5xl lg:text-6xl'
+                    }
                   >
                     {item.title}
                   </h1>
+                  {showTitleSkeleton && (
+                    <Skeleton
+                      aria-hidden='true'
+                      className='h-16 w-80 max-w-full bg-zinc-800/60 md:h-20'
+                    />
+                  )}
                   {logoSrc && (
                     <RemoteImage
                       key={logoSrc}
                       src={logoSrc}
                       alt=''
-                      className={cn(
-                        'absolute inset-0 h-full max-h-24 w-full object-contain object-left drop-shadow-2xl transition-opacity duration-500 ease-out md:max-h-32',
-                        loadedLogo === logoSrc ? 'opacity-100' : 'opacity-0',
-                      )}
+                      className='absolute inset-0 h-full max-h-24 w-full object-contain object-left drop-shadow-2xl md:max-h-32'
+                      fadeIn
+                      loading='eager'
+                      fetchPriority='high'
                       onLoad={() => setLoadedLogo(logoSrc)}
                       onError={onLogoError}
                     />
@@ -856,31 +893,43 @@ function DetailsContent() {
               <div className='flex flex-wrap items-center gap-2.5 pt-2'>
                 <button
                   type='button'
-                  className='group rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black aria-disabled:cursor-wait'
+                  className='group rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/60 focus-visible:ring-offset-2 focus-visible:ring-offset-black aria-disabled:cursor-default'
                   aria-disabled={primaryActionPending || undefined}
                   aria-busy={primaryActionPending || undefined}
+                  aria-controls={
+                    primaryActionSelectsEpisode && !isPlaceholderData
+                      ? 'episodes-section'
+                      : undefined
+                  }
                   onClick={() => {
                     if (primaryActionPending) return;
                     if (historyUnavailable) void retryWatchHistory();
                     else void primaryPlayback.handlePrimaryAction();
                   }}
                 >
-                  <span className='flex h-11 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black transition-colors duration-150 group-hover:bg-zinc-200 group-aria-disabled:opacity-80'>
-                    {historyPending ||
-                    episodeActionPending ||
-                    primaryPlayback.showResolvingFeedback ? (
-                      <Loader2 className='w-5 h-5 animate-spin' />
+                  <span className='flex h-11 min-w-40 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black transition-[background-color,opacity] duration-150 group-hover:bg-zinc-200 group-aria-disabled:opacity-80'>
+                    {primaryPlayback.showResolvingFeedback ? (
+                      <Loader2
+                        aria-hidden='true'
+                        className='w-5 h-5 animate-spin motion-reduce:animate-none'
+                      />
+                    ) : historyUnavailable ? (
+                      <RotateCcw aria-hidden='true' className='w-5 h-5' />
+                    ) : primaryActionSelectsEpisode ? (
+                      <ListVideo aria-hidden='true' className='w-5 h-5' />
                     ) : (
-                      <Play className='w-5 h-5 fill-current' />
+                      <Play aria-hidden='true' className='w-5 h-5 fill-current' />
                     )}
                     <span className='text-sm font-semibold tracking-tight'>
-                      {historyPending
-                        ? 'Loading progress…'
-                        : episodeActionPending
-                          ? 'Loading episodes…'
-                          : historyUnavailable
-                            ? 'Retry watch progress'
-                            : primaryPlayback.primaryActionLabel}
+                      {historyUnavailable
+                        ? 'Retry watch progress'
+                        : primaryActionSelectsEpisode
+                          ? 'Choose episode'
+                          : upNextTarget
+                            ? `Play ${formatSeasonEpisode(upNextTarget.season, upNextTarget.episode)}`
+                            : upNextPending
+                              ? 'Play next'
+                              : primaryPlayback.primaryActionLabel}
                     </span>
                   </span>
                 </button>
@@ -915,21 +964,26 @@ function DetailsContent() {
                         className={cn(
                           ICON_ACTION_CLASS,
                           'w-auto min-w-24 gap-2 px-3',
-                          !isSaveReady && 'opacity-45',
-                          isSaveReady &&
-                            isSaved &&
+                          isSaved &&
                             'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                         )}
                       >
-                        {libraryStatusBusy || (!isSaveReady && !collectionStateError) ? (
-                          <Loader2 className='w-5 h-5 animate-spin' />
-                        ) : isSaveReady && isSaved ? (
-                          <Check className='w-5 h-5' />
-                        ) : (
-                          <Plus className='w-5 h-5' />
-                        )}
-                        <span className='text-[13px] font-medium'>
-                          {isSaveReady && isSaved ? 'Saved' : 'Save'}
+                        <span aria-hidden='true' className='relative size-5 shrink-0'>
+                          <Plus
+                            className={cn(
+                              'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+                              isSaved ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
+                            )}
+                          />
+                          <Check
+                            className={cn(
+                              'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+                              isSaved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+                            )}
+                          />
+                        </span>
+                        <span className='min-w-9 text-left text-[13px] font-medium'>
+                          {isSaved ? 'Saved' : 'Save'}
                         </span>
                       </button>
                     </PopoverTrigger>
@@ -964,6 +1018,7 @@ function DetailsContent() {
 
                   {item.trailers && item.trailers.length > 0 && (
                     <button
+                      ref={trailerTriggerRef}
                       type='button'
                       aria-label='Watch trailer'
                       title='Trailer'
@@ -983,7 +1038,10 @@ function DetailsContent() {
                       aria-label='Start over from the beginning'
                       aria-disabled={primaryActionPending || undefined}
                       title='Start over'
-                      className={cn(ICON_ACTION_CLASS, 'animate-in fade-in duration-200')}
+                      className={cn(
+                        ICON_ACTION_CLASS,
+                        'animate-in fade-in duration-200 motion-reduce:animate-none',
+                      )}
                       onClick={() => {
                         if (!primaryActionPending) handleStartOver();
                       }}
@@ -994,7 +1052,7 @@ function DetailsContent() {
                 </div>
 
                 {resumeRemaining && (
-                  <div className='flex basis-full items-center gap-2.5 pt-1 animate-in fade-in duration-200'>
+                  <div className='flex basis-full items-center gap-2.5 pt-1 animate-in fade-in duration-200 motion-reduce:animate-none'>
                     <div className='h-[3px] w-32 overflow-hidden rounded-full bg-white/15'>
                       <div
                         className='h-full rounded-full bg-(--accent-prog)'
@@ -1018,18 +1076,15 @@ function DetailsContent() {
                   }
                 />
               )}
-              <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
+              <div className='flex flex-col items-start gap-2 pt-5'>
                 <span
                   id='details-watch-status-label'
-                  className='text-[12px] font-medium text-white/65'
+                  className='text-[13px] font-semibold text-zinc-200'
                 >
                   My status
                 </span>
                 <div
-                  className={cn(
-                    DETAILS_STATUS_STRIP_CLASS,
-                    !isWatchStateReady && !watchStatusMutation.isPending && 'opacity-45',
-                  )}
+                  className={DETAILS_STATUS_STRIP_CLASS}
                   role='group'
                   aria-labelledby='details-watch-status-label'
                   aria-busy={
@@ -1055,20 +1110,25 @@ function DetailsContent() {
                           }
                         }}
                         className={cn(
-                          'flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
+                          'flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none',
                           isActive
-                            ? cn(colors.bg, colors.text, colors.border, 'hover:brightness-125')
-                            : 'border-transparent text-white/70 hover:bg-white/[0.08] hover:text-white',
-                          (libraryStatusBusy || !isWatchStateReady) && 'cursor-wait',
+                            ? 'border-white/25 bg-white/[0.12] text-white hover:bg-white/[0.16]'
+                            : 'border-transparent text-zinc-300 hover:bg-white/[0.06] hover:text-white',
                         )}
                       >
                         <span
                           aria-hidden='true'
                           className={cn(
-                            'h-1.5 w-1.5 rounded-full bg-current transition-opacity',
-                            !isActive && 'opacity-50',
+                            'flex h-3.5 w-3.5 shrink-0 items-center justify-center',
+                            colors.text,
                           )}
-                        />
+                        >
+                          {isActive ? (
+                            <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
+                          ) : (
+                            <span className='h-1.5 w-1.5 rounded-full bg-current' />
+                          )}
+                        </span>
                         {WATCH_STATUS_LABELS[status]}
                       </button>
                     );
@@ -1082,7 +1142,7 @@ function DetailsContent() {
 
       {hasEpisodesSection && (
         <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} pt-5 pb-8`}>
-          <div className='w-full flex flex-col gap-4 animate-in fade-in duration-300'>
+          <div className='w-full flex flex-col gap-4'>
             <h2
               id='details-episodes-heading'
               tabIndex={-1}
@@ -1134,6 +1194,13 @@ function DetailsContent() {
                   value={episodeSearch}
                   onValueChange={setEpisodeSearch}
                   clearLabel='Clear episode search'
+                  onSubmit={() => {
+                    if (isEpisodeSearchPending || episodeSearchError || !visibleEpisodes.length)
+                      return;
+                    document
+                      .querySelector<HTMLButtonElement>('#details-episodes-grid button')
+                      ?.focus();
+                  }}
                   className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-500 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
                 />
               )}
@@ -1145,7 +1212,7 @@ function DetailsContent() {
                   onRetry={retryEpisodeSearch}
                 />
               )}
-              <div className='flex flex-wrap items-center justify-between gap-x-4 gap-y-2'>
+              <div className='flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2'>
                 <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
                   <p
                     aria-live='polite'
@@ -1167,10 +1234,7 @@ function DetailsContent() {
                       <button
                         type='button'
                         onClick={(event) => {
-                          episodeActionFocusRef.current =
-                            document.activeElement === event.currentTarget
-                              ? { button: event.currentTarget, target: 'resume' }
-                              : null;
+                          holdEpisodeActionFocus(event.currentTarget, 'resume');
                           jumpToEpisode(resumeEpisodeCoords.season, resumeEpisodeCoords.episode);
                         }}
                         className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
@@ -1190,6 +1254,7 @@ function DetailsContent() {
                           episodeWatchedPending ||
                           undefined
                         }
+                        aria-busy={markSeasonWatched.isPending || undefined}
                         onClick={(event) => {
                           if (
                             hasWatchProgress &&
@@ -1197,10 +1262,7 @@ function DetailsContent() {
                             !markSeasonWatched.isPending &&
                             !episodeWatchedPending
                           ) {
-                            episodeActionFocusRef.current =
-                              document.activeElement === event.currentTarget
-                                ? { button: event.currentTarget, target: 'heading' }
-                                : null;
+                            holdEpisodeActionFocus(event.currentTarget, 'heading');
                             markSeasonWatched.mutate({
                               episodes: seasonWatchTargets,
                               watched: true,
@@ -1209,11 +1271,7 @@ function DetailsContent() {
                         }}
                         className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
                       >
-                        {markSeasonWatched.isPending ? (
-                          <Loader2 className='h-3.5 w-3.5 animate-spin' />
-                        ) : (
-                          <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
-                        )}
+                        <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
                         Mark season watched
                       </button>
                     )}
@@ -1261,10 +1319,11 @@ function DetailsContent() {
                 </span>
               )}
               <div
+                id='details-episodes-grid'
                 aria-busy={
                   isLoadingWatchHistoryForItem || (!episodeSearchError && isEpisodeSearchPending)
                 }
-                className='grid grid-cols-1 gap-3 pb-2 sm:grid-cols-2 xl:grid-cols-4'
+                className='grid grid-cols-1 gap-4 pb-2 sm:grid-cols-2 lg:grid-cols-3'
               >
                 {!episodeSearchError && visibleEpisodes.length === 0 && isEpisodeSearchPending ? (
                   <div
@@ -1275,17 +1334,14 @@ function DetailsContent() {
                   </div>
                 ) : !episodeSearchError && visibleEpisodes.length === 0 && episodeSearch.trim() ? (
                   <div className='col-span-full flex flex-col items-center gap-3 py-14 text-center'>
-                    <p className='text-sm text-zinc-400'>
+                    <p role='status' className='text-sm text-zinc-400'>
                       No episodes match &ldquo;
                       {episodeSearch}&rdquo;
                     </p>
                     <button
                       type='button'
                       onClick={(event) => {
-                        episodeActionFocusRef.current =
-                          document.activeElement === event.currentTarget
-                            ? { button: event.currentTarget, target: 'search' }
-                            : null;
+                        holdEpisodeActionFocus(event.currentTarget, 'search');
                         setEpisodeSearch('');
                       }}
                       className='h-8 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
@@ -1361,9 +1417,7 @@ function DetailsContent() {
               message='Episode information unavailable.'
               isRetrying={isFetching}
               onRetry={() => {
-                const button = document.activeElement;
-                episodeActionFocusRef.current =
-                  button instanceof HTMLButtonElement ? { button, target: 'heading' } : null;
+                holdEpisodeActionFocus(document.activeElement, 'heading');
                 void handleRetryDetails();
               }}
             />
@@ -1373,8 +1427,10 @@ function DetailsContent() {
 
       {/* Shimmer the episode grid while the card placeholder's hero is up. */}
       {!hasEpisodesSection && isPlaceholderData && item.type === 'series' && (
-        <div className={`${DETAILS_COLUMN_CLASS} py-8`}>
-          <div className='grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4'>
+        <div className={`${DETAILS_COLUMN_CLASS} flex flex-col gap-4 pt-5 pb-8`} aria-hidden='true'>
+          <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>Episodes</h2>
+          <Skeleton className='h-9 w-full max-w-md rounded-lg bg-zinc-800/40' />
+          <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3'>
             {EPISODE_SKELETON_TILES}
           </div>
         </div>
@@ -1400,68 +1456,8 @@ function DetailsContent() {
         selectedTrailerId={selectedTrailerId}
         onSelectTrailer={selectTrailer}
         title={item.title}
+        returnFocusRef={trailerTriggerRef}
       />
-    </div>
-  );
-}
-
-function DetailsSkeleton() {
-  return (
-    <div className='relative min-h-screen bg-background pb-20' aria-busy='true'>
-      <span role='status' className='sr-only'>
-        Loading…
-      </span>
-      <div className={DETAILS_HERO_CLASS} aria-hidden='true'>
-        <div className='absolute inset-0 bg-zinc-950' />
-        <div className='absolute inset-0 bg-linear-to-t from-background via-background/60 to-transparent' />
-        <div className={`${DETAILS_COLUMN_CLASS} relative z-20 flex flex-col`}>
-          <div className='flex w-full max-w-4xl flex-col gap-6'>
-            <div className='w-full space-y-6'>
-              <div>
-                <div className='mb-5 flex min-h-24 items-center md:min-h-32'>
-                  <Skeleton className='h-16 w-80 max-w-full bg-zinc-800/60 md:h-20' />
-                </div>
-                <div className='flex flex-wrap items-center gap-x-3 gap-y-2'>
-                  <Skeleton className='h-5 w-14 bg-zinc-800/50' />
-                  <Skeleton className='h-5 w-20 bg-zinc-800/50' />
-                  <Skeleton className='h-5 w-16 bg-zinc-800/50' />
-                </div>
-                <div className='mt-3 flex flex-wrap items-center gap-1.5'>
-                  <Skeleton className='h-7 w-20 rounded-md bg-zinc-800/50' />
-                  <Skeleton className='h-7 w-16 rounded-md bg-zinc-800/50' />
-                  <Skeleton className='h-7 w-20 rounded-md bg-zinc-800/50' />
-                </div>
-              </div>
-              <div className='max-w-2xl space-y-2.5'>
-                <Skeleton className='h-4 w-full bg-zinc-800/40' />
-                <Skeleton className='h-4 w-full bg-zinc-800/40' />
-                <Skeleton className='h-4 w-4/5 bg-zinc-800/40' />
-              </div>
-              <div className='flex flex-wrap items-center gap-2.5 pt-2'>
-                <Skeleton className='h-11 w-36 max-w-full rounded-lg bg-zinc-800/50' />
-                <div className='flex flex-wrap gap-2.5'>
-                  <Skeleton className='h-11 w-24 rounded-lg bg-zinc-800/40' />
-                  <Skeleton className='h-11 w-26 rounded-lg bg-zinc-800/40' />
-                </div>
-              </div>
-              <div className='flex flex-wrap items-center gap-x-3.5 gap-y-2 pt-5'>
-                <Skeleton className='h-4 w-16 bg-zinc-800/40' />
-                <div className={DETAILS_STATUS_STRIP_CLASS}>
-                  {WATCH_STATUS_ORDER.map((status) => (
-                    <Skeleton
-                      key={status}
-                      className='flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border border-transparent bg-zinc-800/40 px-3 text-[13px] font-medium text-transparent'
-                    >
-                      <span className='h-1.5 w-1.5' />
-                      {WATCH_STATUS_LABELS[status]}
-                    </Skeleton>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type RefObject, useEffect, useRef, useState } from 'react';
 import type { ResolvedStreamSession } from '@/lib/resolve-player-stream';
 import { nonBlank } from '@/lib/utils';
 
@@ -24,11 +24,9 @@ interface UsePlayerStreamSessionArgs {
   episode?: number;
 }
 
-// Signed URL + headers stay in a ref, never React state — keeps them off inspection/serialization surfaces.
 interface StreamSecrets {
   url?: string;
   mpvHttpHeaderFields?: string;
-  routeSeed: string;
 }
 
 interface SessionStreamOverride {
@@ -36,6 +34,9 @@ interface SessionStreamOverride {
   sourceName?: string;
   routeSeed: string;
 }
+
+// Write once per immutable override; signed URLs/headers stay outside React state.
+const streamSecrets = new WeakMap<SessionStreamOverride, StreamSecrets>();
 
 export function usePlayerStreamSession({
   routeSourceId,
@@ -59,7 +60,6 @@ export function usePlayerStreamSession({
     episode ?? '',
   ]);
   const routeSeedRef = useRef(routeSeed);
-  const secretsRef = useRef<StreamSecrets | null>(null);
   const [sessionStreamOverride, setSessionStreamOverride] = useState<SessionStreamOverride | null>(
     null,
   );
@@ -67,9 +67,7 @@ export function usePlayerStreamSession({
     sessionStreamOverride && sessionStreamOverride.routeSeed === routeSeed
       ? sessionStreamOverride
       : null;
-  const heldSecrets = secretsRef.current;
-  const activeSecrets =
-    activeOverride && heldSecrets && heldSecrets.routeSeed === routeSeed ? heldSecrets : null;
+  const activeSecrets = activeOverride ? streamSecrets.get(activeOverride) : undefined;
   const activeStreamUrl = activeSecrets?.url;
   const activeStreamMpvHttpHeaderFields = activeSecrets?.mpvHttpHeaderFields;
   // Winner key from the last resolve/recovery; falls back to the route pick on a fresh session.
@@ -88,32 +86,26 @@ export function usePlayerStreamSession({
   useEffect(() => {
     routeSeedRef.current = routeSeed;
     // A new seed is a new session — drop held secrets so a stale signed URL can't replay under new coordinates.
-    secretsRef.current = null;
     setSessionStreamOverride(null);
   }, [routeSeed]);
 
-  const setActiveStreamUrl = useCallback(
-    (
-      nextUrl?: string,
-      nextMpvHttpHeaderFields?: string,
-      nextStreamKey?: string,
-      nextSourceName?: string,
-    ) => {
-      const seed = routeSeedRef.current;
-      secretsRef.current = {
-        url: nextUrl,
-        mpvHttpHeaderFields: nextMpvHttpHeaderFields,
-        routeSeed: seed,
-      };
-      // Fresh object each call — a same-seed re-resolve with a new URL must still re-render.
-      setSessionStreamOverride({
-        streamKey: nextStreamKey,
-        sourceName: nonBlank(nextSourceName),
-        routeSeed: seed,
-      });
-    },
-    [],
-  );
+  const setActiveStreamUrl = (
+    nextUrl?: string,
+    nextMpvHttpHeaderFields?: string,
+    nextStreamKey?: string,
+    nextSourceName?: string,
+  ) => {
+    const override: SessionStreamOverride = {
+      streamKey: nextStreamKey,
+      sourceName: nonBlank(nextSourceName),
+      routeSeed: routeSeedRef.current,
+    };
+    streamSecrets.set(override, {
+      url: nextUrl,
+      mpvHttpHeaderFields: nextMpvHttpHeaderFields,
+    });
+    setSessionStreamOverride(override);
+  };
 
   useEffect(() => {
     committedStreamUrlRef.current = activeStreamUrl;
@@ -132,33 +124,18 @@ export function usePlayerStreamSession({
     selectedStreamKeyRef.current = routeSelectedStreamKey;
   }, [routeSelectedStreamKey]);
 
-  // Memoized so `stream` stays dep-safe — identity changes only with a state-derived field.
-  return useMemo(
-    () => ({
-      activeStreamUrl,
-      activeStreamMpvHttpHeaderFields,
-      activeStreamKey,
-      activeStreamSourceName,
-      setActiveStreamUrl,
-      activeStreamSourceIdRef,
-      activeStreamSourceNameRef,
-      activeStreamFamilyRef,
-      streamLookupIdRef,
-      selectedStreamKeyRef,
-      committedStreamUrlRef,
-    }),
-    [
-      activeStreamUrl,
-      activeStreamMpvHttpHeaderFields,
-      activeStreamKey,
-      activeStreamSourceName,
-      setActiveStreamUrl,
-      activeStreamSourceIdRef,
-      activeStreamSourceNameRef,
-      activeStreamFamilyRef,
-      streamLookupIdRef,
-      selectedStreamKeyRef,
-      committedStreamUrlRef,
-    ],
-  );
+  // Compiler-cached so `stream` stays dep-safe.
+  return {
+    activeStreamUrl,
+    activeStreamMpvHttpHeaderFields,
+    activeStreamKey,
+    activeStreamSourceName,
+    setActiveStreamUrl,
+    activeStreamSourceIdRef,
+    activeStreamSourceNameRef,
+    activeStreamFamilyRef,
+    streamLookupIdRef,
+    selectedStreamKeyRef,
+    committedStreamUrlRef,
+  };
 }

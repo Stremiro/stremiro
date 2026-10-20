@@ -4,7 +4,7 @@ import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type WatchProgressSave } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
-import { TITLE_WATCH_PROGRESS_QUERY_KEY } from '@/lib/query-invalidation';
+import { titleWatchProgressQueryKey } from '@/lib/query-invalidation';
 import { isLocalMediaId } from '@/lib/utils';
 
 interface UsePlaybackProgressPersistenceArgs {
@@ -135,13 +135,14 @@ export function usePlaybackProgressPersistence({
         if (getWatchProgressEpoch() !== enqueuedEpoch) return;
         await api.saveWatchProgress(payload);
         // Cancel pre-save reads; only first-load observers need an immediate restart.
-        await queryClient.cancelQueries({ queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY });
+        const queryKey = titleWatchProgressQueryKey(payload.id);
+        await queryClient.cancelQueries({ queryKey });
         await queryClient.invalidateQueries({
-          queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY,
+          queryKey,
           refetchType: 'none',
         });
         void queryClient.refetchQueries({
-          queryKey: TITLE_WATCH_PROGRESS_QUERY_KEY,
+          queryKey,
           type: 'active',
           predicate: (query) => query.state.data === undefined,
         });

@@ -3,7 +3,7 @@ import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useRemoveFromContinueWatching, useResumeRail } from '@/hooks/use-media-library';
-import { type ResumeRailEntry, type WatchProgress } from '@/lib/api';
+import type { ResumeRailEntry } from '@/lib/api';
 import { watchProgressItemKey } from '@/lib/history-playback';
 import { cn, pad2, queryNeedsRetry } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
@@ -18,17 +18,7 @@ const EMPTY_ENTRIES: ResumeRailEntry[] = [];
 // Stable callbacks keep the rail's key-set diff from re-running per render.
 const resumeEntryKey = (entry: ResumeRailEntry) => watchProgressItemKey(entry.row);
 
-const renderResumeEntry = (entry: ResumeRailEntry) =>
-  entry.isNewEpisode === undefined ? (
-    <ResumeCard item={entry.row} />
-  ) : (
-    <WatchProgressCard
-      item={entry.row}
-      playbackIntent='next-episode'
-      metaLine={entry.isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE}
-      playErrorTitle='Failed to open the next episode'
-    />
-  );
+const renderResumeEntry = (entry: ResumeRailEntry) => <ResumeCard entry={entry} />;
 
 export function ResumeSection() {
   const localDay = useLocalDay();
@@ -69,15 +59,16 @@ export function ResumeSection() {
           renderItem={renderResumeEntry}
           skeletonCount={5}
           headerContent={isError && <div className='mt-3'>{retryBanner}</div>}
-          scrollerClassName='gap-4 pt-4 relative z-0'
-          viewportClassName='relative'
+          scrollerClassName='pt-4 relative z-0'
         />
       )}
     </section>
   );
 }
 
-const ResumeCard = memo(function ResumeCard({ item }: { item: WatchProgress }) {
+const ResumeCard = memo(function ResumeCard({ entry }: { entry: ResumeRailEntry }) {
+  const { row: item, isNewEpisode } = entry;
+  const isUpNext = isNewEpisode !== undefined;
   const { mutate: removeFromContinueWatching } = useRemoveFromContinueWatching({
     itemId: item.id,
     itemTitle: item.title,
@@ -88,7 +79,11 @@ const ResumeCard = memo(function ResumeCard({ item }: { item: WatchProgress }) {
     <WatchProgressCard
       item={item}
       onRemove={removeFromContinueWatching}
-      playErrorTitle='Failed to open continue watching item'
+      playbackIntent={isUpNext ? 'next-episode' : 'resume'}
+      metaLine={isUpNext ? (isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE) : undefined}
+      playErrorTitle={
+        isUpNext ? 'Failed to open the next episode' : 'Failed to open continue watching item'
+      }
     />
   );
 });

@@ -10,8 +10,6 @@
   --radius-lg: var(--radius);
   --color-background: hsl(var(--background));
   --color-foreground: hsl(var(--foreground));
-  --color-card: hsl(var(--card));
-  --color-card-foreground: hsl(var(--card-foreground));
   --color-popover: hsl(var(--popover));
   --color-popover-foreground: hsl(var(--popover-foreground));
   --color-primary: hsl(var(--primary));
@@ -36,7 +34,6 @@
     background-color: black;
     color: white;
     scrollbar-width: none;
-    -ms-overflow-style: none;
     overscroll-behavior: none;
   }
 
@@ -52,8 +49,7 @@
     --on-app-accent: #000000;
     /* Ambient tint strength 0..1 — the glow slider drives it live. */
     --app-glow: 1;
-    /* Scoped accents — Layout resolves each to the profile accent, or a soft
-       neutral when the user opted that surface out. */
+    /* Layout resolves opted-out surfaces to neutral accents. */
     --accent-nav: #ffffff;
     --accent-nav-rgb: 255 255 255;
     --on-accent-nav: #000000;
@@ -70,8 +66,6 @@
   .dark {
     --background: 240 10% 3.9%;
     --foreground: 0 0% 98%;
-    --card: 240 10% 3.9%;
-    --card-foreground: 0 0% 98%;
     --popover: 240 10% 3.9%;
     --popover-foreground: 0 0% 98%;
     --primary: 0 0% 98%;
@@ -143,10 +137,7 @@
     background-color: #3f3f46;
   }
 
-  /* Global motion guard: per-site motion-reduce covers only page/player
-     entrances; this caps every other transition/animation (dialogs,
-     overlays, scrims) for reduced-motion users in one place. Loaders keep
-     their icon — the spin just completes instantly. */
+  /* Also cover dialogs, overlays, and loaders without local motion guards. */
   @media (prefers-reduced-motion: reduce) {
     *,
     ::before,
@@ -169,20 +160,17 @@
     }
   }
 
-  /* Shared route entrance: a subtle rise and fade, entirely compositor-side. */
-  @keyframes page-enter-rise {
+  /* Route surfaces fade in without moving or scaling their text. */
+  @keyframes page-enter-fade {
     from {
       opacity: 0;
-      transform: translate3d(0, 6px, 0);
     }
     to {
       opacity: 1;
-      transform: translate3d(0, 0, 0);
     }
   }
 
-  /* Mini-player dock/undock: the shrink-in reads as the fullscreen surface
-     compressing into the corner; the undock dissolves it back out on expand. */
+  /* Dock compresses the surface; undock dissolves it on expand. */
   @keyframes mini-dock {
     from {
       opacity: 0;
@@ -205,18 +193,14 @@
     }
   }
 
-  /* Snap-ghost entrance: opacity ONLY. The shared `enter` keyframe animates
-     transform from 0,0 — on a translate-positioned ghost that reads as
-     sliding in from the top-left corner instead of fading in place. */
+  /* Opacity only: an entrance transform would move the positioned ghost. */
   @keyframes mini-ghost-in {
     from {
       opacity: 0;
     }
   }
 
-  /* Center playback flash: one keyframe owns the whole beat. Pairing
-     tailwindcss-animate's animate-in + animate-out on the same node
-     dead-ends on animation-name (exit wins), so the pop-in never played. */
+  /* One keyframe avoids competing animate-in/animate-out animation names. */
   @keyframes mini-flash {
     0% {
       opacity: 0;
@@ -238,21 +222,13 @@
       transform: scale(0.9);
     }
   }
-}
-
-@layer utilities {
   /* Selection moves on its own layer; labels keep their normal text rendering. */
   .nav-switch-item,
   .nav-switch-item.accent-lattice-soft {
     transition:
       color 150ms cubic-bezier(0.22, 1, 0.36, 1),
       background-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
-      border-color 150ms cubic-bezier(0.22, 1, 0.36, 1),
-      transform 110ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  .nav-switch-item:active:not(:disabled):not([aria-disabled='true']) {
-    transform: scale(0.985);
+      border-color 150ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
   .nav-sliding-pill,
@@ -264,21 +240,7 @@
       opacity 140ms ease;
   }
 
-  @media (prefers-reduced-motion: reduce) {
-    .nav-switch-item,
-    .nav-sliding-pill,
-    .nav-sliding-bar {
-      transition: none !important;
-    }
-
-    /* Sliding transforms still position the indicators, but snap instantly. */
-    .nav-switch-item:active:not(:disabled):not([aria-disabled='true']) {
-      transform: none !important;
-    }
-  }
-
   .scrollbar-hide {
-    -ms-overflow-style: none;
     scrollbar-width: none;
   }
 
@@ -286,31 +248,22 @@
     display: none;
   }
 
-  /* One calm entrance for every routed page — replaces the per-page
-     animate-in durations (150/300/500ms) so navigation feels uniform. */
+  /* Keep routed entrances uniform. */
   .page-enter {
-    animation: page-enter-rise 200ms cubic-bezier(0.22, 1, 0.36, 1);
+    animation: page-enter-fade 180ms cubic-bezier(0.22, 1, 0.36, 1);
   }
 
-  .search-results-enter {
-    animation: page-enter-rise 180ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .page-enter,
-    .search-results-enter {
-      animation: none;
-    }
+  /* Loading chrome that quick loads never show. */
+  .delayed-fade-in {
+    animation: page-enter-fade 200ms ease-out 250ms both;
   }
 
   .animate-mini-dock {
-    /* easeOutCubic — same curve the JS dock FLIP uses, so the entrance feels
-       identical whether a live surface existed or not. */
+    /* Match the JS dock FLIP curve. */
     animation: mini-dock 260ms cubic-bezier(0.33, 1, 0.68, 1);
   }
 
-  /* forwards: the frame unmounts right after — hold the end state so a
-     late timer never flashes the card back at full opacity. */
+  /* Hold the exit frame until unmount. */
   .animate-mini-undock {
     animation: mini-undock 170ms ease-in forwards;
   }
@@ -323,8 +276,7 @@
     animation: mini-flash 500ms ease-out forwards;
   }
 
-  /* Top-center action pill: sonner's li already owns the slide-in — the
-     pill itself only materializes (opacity + a hair of scale, no travel). */
+  /* Sonner owns travel; the pill only fades and scales. */
   @keyframes action-pill-in {
     from {
       opacity: 0;
@@ -334,12 +286,6 @@
 
   .animate-action-pill {
     animation: action-pill-in 280ms cubic-bezier(0.22, 1, 0.36, 1);
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .animate-action-pill {
-      animation: none;
-    }
   }
 
   /* Transform keeps oversized dot layers compositor-side; whole 8px tile shifts loop seamlessly. */
@@ -376,14 +322,21 @@
   }
 
   @media (prefers-reduced-motion: reduce) {
+    .nav-switch-item,
+    .nav-sliding-pill,
+    .nav-sliding-bar {
+      transition: none !important;
+    }
+
+    .page-enter,
+    .animate-action-pill,
     html[data-ambient-active] .ambient-dots-tl,
     html[data-ambient-active] .ambient-dots-br {
       animation: none;
     }
   }
 
-  /* Subtle tinted fill for selected toggles/pills. Color transitions even out
-     the var swap so a tint-target flip fades rather than snapping. */
+  /* Fade tint-target changes rather than snapping. */
   .accent-active {
     background-color: rgb(var(--accent-nav-rgb) / 0.16);
     color: var(--accent-nav);
@@ -392,9 +345,7 @@
       color 180ms ease;
   }
 
-  /* Premium accent action: flat accent with a whisper of top light and a
-     fine inner highlight. No outer glow — the fill stays quiet on light
-     and dark accents and lets the label do the work. */
+  /* Flat accent with a subtle top light, without outer glow. */
   .accent-lattice {
     background-color: var(--accent-act);
     background-image: linear-gradient(180deg, rgb(255 255 255 / 0.08), transparent 55%);

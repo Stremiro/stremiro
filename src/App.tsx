@@ -1,6 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { Loader2 } from 'lucide-react';
 import {
   lazy,
   type ReactNode,
@@ -17,6 +16,7 @@ import { toast } from 'sonner';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
 import { Layout } from '@/components/layout';
 import { Toaster } from '@/components/ui/sonner';
+import { DetailsSkeleton, RouteLoadingBar, Skeleton } from '@/components/ui/skeleton';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import {
   registerAppUiPreferenceFlusher,
@@ -37,7 +37,7 @@ import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { routeChunks } from '@/lib/route-chunks';
 import { mpvDestroy, setMpvProperty } from '@/lib/player-mpv';
 import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
-import { boundedMapSet, clearTimer, withTimeout } from '@/lib/utils';
+import { boundedMapSet, clearTimer, SIDEBAR_PAGE_COLUMN_INSETS, withTimeout } from '@/lib/utils';
 import { Home } from '@/pages/home';
 
 function createRoutePages() {
@@ -52,9 +52,18 @@ function createRoutePages() {
 
 function ContentRouteLoader() {
   return (
-    <div role='status' className='flex min-h-[60vh] w-full items-center justify-center'>
-      <Loader2 className='h-7 w-7 animate-spin text-white/35' />
+    <div
+      role='status'
+      aria-busy='true'
+      className={`mx-auto min-h-[60vh] w-full max-w-6xl space-y-6 py-8 ${SIDEBAR_PAGE_COLUMN_INSETS}`}
+    >
+      <RouteLoadingBar />
       <span className='sr-only'>Loading page</span>
+      <div aria-hidden='true' className='space-y-6'>
+        <Skeleton className='h-8 w-48 max-w-full' />
+        <Skeleton className='h-10 w-full' />
+        <Skeleton className='h-48 w-full' />
+      </div>
     </div>
   );
 }
@@ -62,7 +71,10 @@ function ContentRouteLoader() {
 function RouteSuspense({ children }: { children: ReactNode }) {
   const { pathname } = useLocation();
   return (
-    <Suspense key={pathname} fallback={<ContentRouteLoader />}>
+    <Suspense
+      key={pathname}
+      fallback={pathname.startsWith('/details/') ? <DetailsSkeleton /> : <ContentRouteLoader />}
+    >
       {children}
     </Suspense>
   );
@@ -155,6 +167,8 @@ function RouteScrollManager() {
 
   // Track continuously — at commit time the incoming page may have already clamped scrollY.
   useEffect(() => {
+    const previousScrollRestoration = window.history.scrollRestoration;
+    window.history.scrollRestoration = 'manual';
     const record = () => {
       if (savePausedRef.current) return;
       const entry = lastEntryRef.current;
@@ -163,7 +177,10 @@ function RouteScrollManager() {
       rememberScrollPosition(positionsByPathRef.current, entry.path, window.scrollY);
     };
     window.addEventListener('scroll', record, { passive: true });
-    return () => window.removeEventListener('scroll', record);
+    return () => {
+      window.removeEventListener('scroll', record);
+      window.history.scrollRestoration = previousScrollRestoration;
+    };
   }, []);
 
   useLayoutEffect(() => {
@@ -227,9 +244,8 @@ function RouteScrollManager() {
       }
     }
 
-    // Land keyboard focus on the new page's landmark — a PUSH unmounts the
-    // focused element. POP preserves restored context; a live dialog owns focus.
-    if (navigationType !== 'POP' && !document.querySelector(OPEN_DIALOG_SELECTOR)) {
+    // Preserve surviving focus; otherwise land on content, including Back/Forward.
+    if (!document.querySelector(OPEN_DIALOG_SELECTOR)) {
       const active = document.activeElement;
       if (!active || active === document.body) {
         document.getElementById('app-main')?.focus({ preventScroll: true });
@@ -262,7 +278,9 @@ function AppUpdateManager() {
 
     let disposed = false;
     let running = false;
-    startupReadyAtRef.current ??= Date.now() + UPDATE_STARTUP_DELAY_MS;
+    if (startupReadyAtRef.current === null) {
+      startupReadyAtRef.current = Date.now() + UPDATE_STARTUP_DELAY_MS;
+    }
     const isDeferred = () =>
       document.hidden || window.location.pathname.startsWith('/player') || !navigator.onLine;
 
@@ -280,7 +298,7 @@ function AppUpdateManager() {
       )
         return;
       running = true;
-      try {
+      const checkForUpdate = async () => {
         const isDue =
           state.lastCheckedAt === null ||
           Date.now() - state.lastCheckedAt >= UPDATE_RECHECK_INTERVAL_MS ||
@@ -306,11 +324,13 @@ function AppUpdateManager() {
             unstyled: true,
           },
         );
-      } catch {
+      };
+      await checkForUpdate()
         // Automatic checks stay silent; Settings retains the failure.
-      } finally {
-        running = false;
-      }
+        .catch(() => undefined)
+        .finally(() => {
+          running = false;
+        });
     };
     document.addEventListener('visibilitychange', maybeCheck);
     window.addEventListener('focus', maybeCheck);
@@ -372,7 +392,7 @@ function AppCloseManager() {
           return;
         }
         closing = true;
-        try {
+        const close = async () => {
           const transitionSettled = await settleCloseStep(waitForViewportTransition());
           if (transitionSettled && isPlayerPip()) {
             if (!quitRequested) {
@@ -422,18 +442,21 @@ function AppCloseManager() {
             CLOSE_MPV_TEARDOWN_TIMEOUT_MS,
             () => undefined,
           );
-        } catch {
-          // Veto once so the save retries; the next close quits anyway.
-          if (!saveFailureVetoed) {
-            saveFailureVetoed = true;
-            event.preventDefault();
-            toast.error('Could not save playback progress.', {
-              description: 'Close again to quit anyway.',
-            });
-          }
-        } finally {
-          closing = false;
-        }
+        };
+        await close()
+          .catch(() => {
+            // Veto once so the save retries; the next close quits anyway.
+            if (!saveFailureVetoed) {
+              saveFailureVetoed = true;
+              event.preventDefault();
+              toast.error('Could not save playback progress.', {
+                description: 'Close again to quit anyway.',
+              });
+            }
+          })
+          .finally(() => {
+            closing = false;
+          });
       })
       .then((dispose) => {
         if (!isActive) {

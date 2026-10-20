@@ -1,4 +1,4 @@
-import { memo, type MouseEvent, useCallback, useMemo } from 'react';
+import { memo, type MouseEvent } from 'react';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import type { WatchProgress } from '@/lib/api';
 import {
@@ -7,11 +7,11 @@ import {
   watchProgressMediaItem,
 } from '@/lib/history-playback';
 import { formatSeasonEpisode } from '@/lib/utils';
-import { MediaCard } from './media-card';
+import { MediaCard, type PlaybackIntent } from './media-card';
 
 interface WatchProgressCardProps {
   item: WatchProgress;
-  playbackIntent?: 'resume' | 'next-episode';
+  playbackIntent?: PlaybackIntent;
   /** Overrides the "time left" line (e.g. up-next cards have no progress). */
   metaLine?: string;
   /** Remove mutation differs per surface (history vs. continue watching) — callers own it. */
@@ -23,7 +23,7 @@ interface WatchProgressCardProps {
 // WatchProgress → MediaCard adapter for the resume rail and history grid.
 export const WatchProgressCard = memo(function WatchProgressCard({
   item,
-  playbackIntent = 'resume',
+  playbackIntent,
   metaLine: metaLineOverride,
   onRemove,
   playErrorTitle,
@@ -32,21 +32,23 @@ export const WatchProgressCard = memo(function WatchProgressCard({
   const progressPercent = getWatchProgressPercent(item.position, item.duration);
   const progress = progressPercent > 0 ? progressPercent : undefined;
 
-  const mediaItem = useMemo(() => watchProgressMediaItem(item), [item]);
+  const mediaItem = watchProgressMediaItem(item);
   // The S/E tag rides the poster badge (`subtitle`), so the meta line only
   // carries time left.
   const metaLine =
-    metaLineOverride ?? formatWatchRemaining(item.position, item.duration) ?? undefined;
+    metaLineOverride ??
+    (item.is_watched
+      ? 'Watched'
+      : (formatWatchRemaining(item.position, item.duration) ?? undefined));
+  const season = item.absolute_season ?? undefined;
+  const episode = item.absolute_episode ?? undefined;
+  const subtitle = formatSeasonEpisode(season, episode) || undefined;
 
-  // Stable callbacks keep MediaCard's memo effective.
-  const handleRemove = useCallback(
-    (event: MouseEvent) => {
-      event.preventDefault();
-      event.stopPropagation();
-      onRemove?.();
-    },
-    [onRemove],
-  );
+  const handleRemove = (event: MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    onRemove?.();
+  };
 
   return (
     <MediaCard
@@ -54,15 +56,10 @@ export const WatchProgressCard = memo(function WatchProgressCard({
       progress={progress}
       metaLine={metaLine}
       onPlay={play}
-      playbackIntent={playbackIntent}
+      playbackIntent={playbackIntent ?? (item.is_watched ? 'replay' : 'resume')}
       isPlayPending={isPending}
       onRemoveFromContinue={onRemove ? handleRemove : undefined}
-      subtitle={
-        formatSeasonEpisode(
-          item.absolute_season ?? undefined,
-          item.absolute_episode ?? undefined,
-        ) || undefined
-      }
+      subtitle={subtitle}
     />
   );
 });

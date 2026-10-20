@@ -15,10 +15,10 @@ export function resumeRailQueryKey(localToday: string | undefined) {
 }
 export const WATCH_HISTORY_QUERY_KEY = ['watch-history'] as const;
 export const RECENT_WATCH_SEED_QUERY_KEY = [...WATCH_HISTORY_QUERY_KEY, 'recent-seed'] as const;
-export const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
+const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
 export const TOTAL_WATCH_TIME_QUERY_KEY = ['total-watch-time'] as const;
 export const LISTS_QUERY_KEY = ['lists'] as const;
-const LIST_SUMMARIES_QUERY_KEY = ['list-summaries'] as const;
+export const LIST_SUMMARIES_QUERY_KEY = ['list-summaries'] as const;
 export function listSummariesQueryKey(itemId?: string) {
   return [...LIST_SUMMARIES_QUERY_KEY, nonBlank(itemId)] as const;
 }
@@ -150,13 +150,18 @@ export const RESUME_SECTION_MIN_STALE_MS = 1000 * 30;
 
 export async function invalidateLibraryQueries(
   queryClient: QueryClient,
-  { watchStatusChanged = true }: { watchStatusChanged?: boolean } = {},
+  {
+    watchStatusChanged = true,
+    refetchLibrary = true,
+  }: { watchStatusChanged?: boolean; refetchLibrary?: boolean } = {},
 ) {
   // Watch status is a library attribute; refresh shared dependents once. Smart lists derive from both.
   refreshScheduleQueries(queryClient);
   if (watchStatusChanged) void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
-    invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
+    refetchLibrary
+      ? invalidateQuery(queryClient, LIBRARY_QUERY_KEY)
+      : invalidateQuery(queryClient, LIBRARY_GENRES_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
@@ -220,16 +225,7 @@ export async function invalidateListQueries(queryClient: QueryClient) {
 }
 
 export async function invalidateWatchStatusQueries(queryClient: QueryClient) {
-  // watch_statuses_count lives inside the stats payload.
-  refreshScheduleQueries(queryClient);
-  void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
-  await Promise.all([
-    invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
-    invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
-    invalidateQuery(queryClient, LISTS_QUERY_KEY),
-    invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
-    invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
-  ]);
+  await invalidateLibraryQueries(queryClient, { refetchLibrary: false });
 }
 
 // Selector pages key under the streams prefix so invalidateStreamQueries sweeps them.

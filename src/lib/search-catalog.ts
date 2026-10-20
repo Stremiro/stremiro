@@ -78,8 +78,11 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
 }
 
 // Intent prefetch on hover/focus; staleTime keeps a fresh cached facet free.
-export function prefetchSearchCatalog(queryClient: QueryClient, facets: SearchFacets): void {
-  void queryClient.prefetchInfiniteQuery(
+export function prefetchSearchCatalog(
+  queryClient: QueryClient,
+  facets: SearchFacets,
+): Promise<void> {
+  return queryClient.prefetchInfiniteQuery(
     searchCatalogQueryOptions(facets, new Date().getFullYear()),
   );
 }

@@ -208,7 +208,7 @@ interface PlayerControlsRowProps {
   ) => void;
 }
 
-function SeekTenIcon({ forward = false }: { forward?: boolean }) {
+function SeekTenIcon({ forward }: { forward?: boolean }) {
   const Icon = forward ? RotateCw : RotateCcw;
   return (
     <span aria-hidden='true' className='relative h-6 w-6'>

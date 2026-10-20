@@ -52,8 +52,6 @@ export function usePlayerBackNavigation({
     setShowEpisodes(false);
     restoreCursorVisibility();
     // The selector/Esc can swallow Back mid-pick, so only route coordinates can ride the back target.
-    const backSeason = routeAbsoluteSeason;
-    const backEpisode = routeAbsoluteEpisode;
     const backStartTime = playableResumePosition(
       observedPositionRef.current === null ? undefined : currentTimeRef.current,
       startTime,
@@ -71,16 +69,12 @@ export function usePlayerBackNavigation({
     if (safeOriginFrom && safeOriginFrom !== detailsTarget) {
       reopenSelectorState.from = safeOriginFrom;
     }
-    if (typeof backSeason === 'number' && Number.isFinite(backSeason)) {
-      reopenSelectorState.season = backSeason;
-      reopenSelectorState.reopenStreamSeason = backSeason;
+    if (routeAbsoluteSeason !== undefined) {
+      reopenSelectorState.season = routeAbsoluteSeason;
+      reopenSelectorState.reopenStreamSeason = routeAbsoluteSeason;
     }
-    if (
-      typeof backEpisode === 'number' &&
-      Number.isFinite(backEpisode) &&
-      reopenSelectorState.reopenStreamSeason !== undefined
-    ) {
-      reopenSelectorState.reopenStreamEpisode = backEpisode;
+    if (routeAbsoluteEpisode !== undefined && routeAbsoluteSeason !== undefined) {
+      reopenSelectorState.reopenStreamEpisode = routeAbsoluteEpisode;
     }
     if (backStartTime !== undefined) {
       reopenSelectorState.reopenStartTime = backStartTime;
@@ -96,15 +90,10 @@ export function usePlayerBackNavigation({
       return;
     }
 
-    if (safeFrom) {
-      if (safeFrom.startsWith('/details/')) {
-        navigateApp(safeFrom, { replace: true, state: reopenSelectorState });
-      } else {
-        navigateApp(safeFrom, { replace: true });
-      }
-    } else {
-      navigateApp(detailsTarget, { replace: true, state: reopenSelectorState });
-    }
+    navigateApp(safeFrom ?? detailsTarget, {
+      replace: true,
+      state: !safeFrom || safeFrom.startsWith('/details/') ? reopenSelectorState : undefined,
+    });
   }, [
     routeAbsoluteSeason,
     routeAbsoluteEpisode,

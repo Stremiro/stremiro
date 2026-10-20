@@ -12,8 +12,6 @@ import { lastSearchPath } from '@/lib/search-page-state';
 
 // A focused floating layer owns its keys — includes the docked mini player's [role="dialog"], whose keys belong to the player keymap.
 const OWNED_LAYER_SELECTOR = `[role="dialog"], ${RADIX_POPPER_CONTENT_SELECTOR}, [data-media-card-expanded]`;
-// Document-level yield: an open dialog/popper is a top layer regardless of focus — never navigate out from under it.
-const OPEN_LAYER_SELECTOR = `${OPEN_DIALOG_SELECTOR}, ${RADIX_POPPER_CONTENT_SELECTOR}`;
 const QUICK_SECTION_PATHS = ['/', '/search', '/calendar', '/library', '/settings'] as const;
 
 function isInsideOwnedLayer(target: EventTarget | null): boolean {
@@ -21,7 +19,13 @@ function isInsideOwnedLayer(target: EventTarget | null): boolean {
 }
 
 function hasOpenLayer(): boolean {
-  return document.querySelector(OPEN_LAYER_SELECTOR) !== null;
+  if (document.querySelector(OPEN_DIALOG_SELECTOR)) return true;
+  for (const wrapper of document.querySelectorAll(RADIX_POPPER_CONTENT_SELECTOR)) {
+    const tooltip = wrapper.querySelector('[role="tooltip"]');
+    // Only ignore a tooltip's own wrapper, not an interactive layer containing one.
+    if (tooltip?.closest(RADIX_POPPER_CONTENT_SELECTOR) !== wrapper) return true;
+  }
+  return false;
 }
 
 /** Browse shortcuts yield to editable targets and open layers; player routes own their controls. */
@@ -99,7 +103,8 @@ export function useBrowseHotkeys() {
         break;
       case 'backspace':
       case 'escape':
-        if (hasOpenLayer()) return;
+        if (hasOpenLayer() || (key === 'escape' && document.querySelector('[role="tooltip"]')))
+          return;
         event.preventDefault();
         navigateBack();
         break;

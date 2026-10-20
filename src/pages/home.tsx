@@ -8,7 +8,7 @@ import { ResumeSection } from '@/components/resume-section';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
-import { api } from '@/lib/api';
+import { api, type MediaItem } from '@/lib/api';
 import { similarTitlesQueryKey } from '@/lib/api-discovery';
 import {
   MEDIA_ROW_STALE_TIME_MS,
@@ -42,6 +42,10 @@ export const homeTrendingMoviesQueryOptions = {
   staleTime: MEDIA_ROW_STALE_TIME_MS,
 };
 
+function similarRowQuery(seed: MediaItem) {
+  return { queryKey: similarTitlesQueryKey(seed), queryFn: () => api.querySimilarTitles(seed) };
+}
+
 const recentWatchSeedQueryOptions = {
   queryKey: RECENT_WATCH_SEED_QUERY_KEY,
   queryFn: api.getRecentWatchSeed,
@@ -50,7 +54,7 @@ const recentWatchSeedQueryOptions = {
 };
 
 function HomeRowPlaceholder() {
-  return <div aria-hidden='true' className='h-[450px] md:h-[480px]' />;
+  return <div aria-hidden='true' className='h-[453px] md:h-[483px]' />;
 }
 
 function DeferredHomeRow({ children }: { children: ReactNode }) {
@@ -77,8 +81,7 @@ function RecentWatchRecommendations() {
     <MediaRow
       key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
       title={`Because you watched ${recentWatchSeed.title}`}
-      queryKey={similarTitlesQueryKey(recentWatchSeed)}
-      queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+      {...similarRowQuery(recentWatchSeed)}
       enabled={isOnline}
       minItems={4}
     />
@@ -88,11 +91,23 @@ function RecentWatchRecommendations() {
 export function Home() {
   const isOnline = useOnlineStatus();
   const queryClient = useQueryClient();
-  const [genre, setGenre] = useState(ALL_GENRES);
+  const [selectedGenre, setSelectedGenre] = useState(ALL_GENRES);
 
   useEffect(() => {
     if (!isOnline) return;
-    const prefetch = () => void queryClient.prefetchQuery(recentWatchSeedQueryOptions);
+    // Resolve the seed's similar titles too, so the row is ready before it scrolls into view.
+    const prefetch = () =>
+      void queryClient
+        .fetchQuery(recentWatchSeedQueryOptions)
+        .then((seed) => {
+          if (seed) {
+            void queryClient.prefetchQuery({
+              ...similarRowQuery(seed),
+              staleTime: MEDIA_ROW_STALE_TIME_MS,
+            });
+          }
+        })
+        .catch(() => undefined);
     if (typeof window.requestIdleCallback === 'function') {
       const idle = window.requestIdleCallback(prefetch, { timeout: 1500 });
       return () => window.cancelIdleCallback(idle);
@@ -118,6 +133,7 @@ export function Home() {
 
   const heroSlice = (heroItems ?? []).slice(0, 5);
 
+  const genre = genreOptions.find((option) => sameSearchGenre(option, selectedGenre)) ?? ALL_GENRES;
   const activeGenre = genre === ALL_GENRES ? undefined : genre;
   const showHero = heroSlice.length > 0 || (isOnline && isHeroPending);
 
@@ -160,13 +176,12 @@ export function Home() {
           titleHref={activeGenre ? searchGenrePath('movie', activeGenre) : '/search?type=movie'}
           queryKey={trendingRowQueryKey('movies', genre)}
           queryFn={() => fetchCatalogItems({ mediaType: 'movie', genre: activeGenre })}
-          staleTime={MEDIA_ROW_STALE_TIME_MS}
           enabled={isOnline}
           genreFilter={{
             options: genreOptions,
             allOption: ALL_GENRES,
             active: genre,
-            onChange: setGenre,
+            onChange: setSelectedGenre,
           }}
         />
 

@@ -9,12 +9,13 @@ interface PlayerSliderProps extends React.ComponentPropsWithRef<typeof SliderPri
 
 export function PlayerSlider({
   className,
-  variant = 'pill',
+  variant: variantProp,
   'aria-label': ariaLabel,
   'aria-valuetext': ariaValueText,
   onPointerDown,
   ...props
 }: PlayerSliderProps) {
+  const variant = variantProp === undefined ? 'pill' : variantProp;
   return (
     <SliderPrimitive.Root
       className={cn(

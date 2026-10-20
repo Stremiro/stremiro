@@ -7,14 +7,14 @@ export interface ShortcutRow {
 
 // Global bindings from `use-browse-hotkeys` — active outside the player.
 export const BROWSE_SHORTCUTS: ShortcutRow[] = [
-  { label: 'Jump to search', keys: ['/', 'Ctrl+K'] },
+  { label: 'Search', keys: ['/', 'Ctrl+K'] },
   { label: 'Switch section', keys: ['Alt+1–5'] },
-  { label: 'Back', keys: ['Esc', 'Backspace', 'Alt+←', 'Mouse Back'] },
-  { label: 'Forward', keys: ['Alt+→', 'Mouse Forward'] },
+  { label: 'Back', keys: ['Esc', 'Alt+←'] },
+  { label: 'Forward', keys: ['Alt+→'] },
 ];
 
 // Page-local bindings from the Calendar page's keydown handler.
 export const CALENDAR_SHORTCUTS: ShortcutRow[] = [
   { label: 'Previous / next month', keys: ['←', '→'] },
-  { label: 'Jump to current month', keys: ['T'] },
+  { label: 'This month', keys: ['T'] },
 ];

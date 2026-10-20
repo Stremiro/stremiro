@@ -1,5 +1,5 @@
 import { Film, Play } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
 import {
@@ -27,22 +27,22 @@ export const TINT_TARGETS: ReadonlyArray<{
   {
     field: 'navigation',
     label: 'Navigation & selection',
-    description: 'Sidebar, tab pills, filters, checkmarks, and selected states.',
+    description: 'Sidebar, tabs, filters and selected states.',
   },
   {
     field: 'actions',
     label: 'Buttons & badges',
-    description: 'Accent buttons, soft chips, hover play, switches, and text selection.',
+    description: 'Accent buttons, chips, switches and text selection.',
   },
   {
     field: 'progress',
     label: 'Progress bars',
-    description: 'Continue-watching bars, episode progress, and resume strips.',
+    description: 'Continue-watching and episode progress.',
   },
   {
     field: 'artwork',
     label: 'Artwork tints',
-    description: 'Hero and backdrop gradients that borrow the accent hue.',
+    description: 'Hero and backdrop gradients.',
   },
 ];
 
@@ -96,7 +96,9 @@ export function AppearanceSettings() {
   const [draftIntensity, setDraftIntensity] = useState<number>();
   const mountedRef = useMountedRef();
   const profileRef = useRef(profile);
-  profileRef.current = profile;
+  useLayoutEffect(() => {
+    profileRef.current = profile;
+  }, [profile]);
 
   useEffect(() => {
     if (draftAccentColor === undefined) return;
@@ -114,16 +116,16 @@ export function AppearanceSettings() {
 
   const commitAccentColor = async (color: string) => {
     if (isHydrating) return;
-    try {
-      await updateProfile({ accentColor: color });
-    } catch (error) {
-      toast.error(getErrorMessage(error));
-      throw error;
-    } finally {
-      if (mountedRef.current) {
-        setDraftAccentColor((draft) => (draft === color ? undefined : draft));
-      }
-    }
+    await updateProfile({ accentColor: color })
+      .catch((error: unknown) => {
+        toast.error(getErrorMessage(error));
+        throw error;
+      })
+      .finally(() => {
+        if (mountedRef.current) {
+          setDraftAccentColor((draft) => (draft === color ? undefined : draft));
+        }
+      });
   };
 
   const toggleTarget = (field: keyof AccentTargets) => {
@@ -134,7 +136,7 @@ export function AppearanceSettings() {
     <SettingsGroup>
       <SettingsGroupHeader
         title='Appearance'
-        description='Pick an accent and how strongly it tints the app — changes apply live.'
+        description='Accent color and where it tints the app. Changes apply live.'
       />
       <SettingsBody className='space-y-5'>
         <SettingsQueryError
@@ -166,7 +168,7 @@ export function AppearanceSettings() {
         <SettingsBody className='pb-0'>
           <div className='flex flex-wrap items-baseline justify-between gap-2'>
             <p className='text-[14px] font-medium text-zinc-100'>Tint targets</p>
-            <p className='text-xs text-zinc-400'>Disabled areas stay neutral</p>
+            <p className='text-xs text-zinc-500'>Off areas stay neutral</p>
           </div>
         </SettingsBody>
         <SettingsBody rows>

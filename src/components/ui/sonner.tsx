@@ -2,7 +2,7 @@ import { Toaster as Sonner } from 'sonner';
 
 type ToasterProps = React.ComponentProps<typeof Sonner>;
 
-const Toaster = ({ ...props }: ToasterProps) => {
+const Toaster = (props: ToasterProps) => {
   return (
     <Sonner
       theme='dark'
@@ -15,10 +15,11 @@ const Toaster = ({ ...props }: ToasterProps) => {
         classNames: {
           // Custom pills render `data-styled="false"` but inherit these classNames — scope to styled toasts.
           toast:
-            'group toast group-[.toaster]:data-[styled=true]:bg-background group-[.toaster]:data-[styled=true]:text-foreground group-[.toaster]:data-[styled=true]:border-border group-[.toaster]:data-[styled=true]:shadow-lg',
-          description: 'group-[.toast]:text-muted-foreground',
-          actionButton: 'group-[.toast]:bg-primary group-[.toast]:text-primary-foreground',
-          cancelButton: 'group-[.toast]:bg-muted group-[.toast]:text-muted-foreground',
+            'group toast group-[.toaster]:data-[styled=true]:rounded-xl group-[.toaster]:data-[styled=true]:border-white/[0.08] group-[.toaster]:data-[styled=true]:bg-[#111114]/95 group-[.toaster]:data-[styled=true]:text-[13px] group-[.toaster]:data-[styled=true]:text-zinc-100 group-[.toaster]:data-[styled=true]:shadow-[0_18px_44px_-14px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.05)] group-[.toaster]:data-[styled=true]:backdrop-blur-xl',
+          description: 'group-[.toast]:text-zinc-400',
+          actionButton:
+            'group-[.toast]:rounded-md! group-[.toast]:bg-white/10! group-[.toast]:font-medium group-[.toast]:text-white! group-[.toast]:hover:bg-white/15!',
+          cancelButton: 'group-[.toast]:bg-white/[0.04] group-[.toast]:text-zinc-400',
         },
       }}
       {...props}

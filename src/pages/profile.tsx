@@ -1,9 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
 import { CheckSquare, History, LayoutList, Library, Search } from 'lucide-react';
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import { Link, useLocation, useSearchParams } from 'react-router';
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Link, type SetURLSearchParams, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
-import { ListsManager } from '@/components/list/lists-manager';
 import {
   MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX,
   MediaCard,
@@ -18,6 +17,7 @@ import {
   useCollectionSelection,
   ViewToggle,
   isLibrarySort,
+  SegmentPill,
 } from '@/components/profile-library-controls';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
@@ -44,7 +44,6 @@ import {
 } from '@/hooks/use-local-profile';
 import {
   getOwnWatchStatus,
-  useLibraryItems,
   useProfileLibrary,
   useBulkAddToList,
   useBulkRemoveFromLibrary,
@@ -69,11 +68,18 @@ import {
 import { watchProgressItemKey } from '@/lib/history-playback';
 import { cn, queryNeedsRetry, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
+const loadListsManager = () => import('@/components/list/lists-manager');
+const ListsManager = lazy(() =>
+  loadListsManager().then((module) => ({ default: module.ListsManager })),
+);
+const warmListsManager = () => void loadListsManager().catch(() => undefined);
+
 const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
   { length: 12 },
   (_, index) => `profile-grid-skeleton-${index}`,
 );
 const EMPTY_LIBRARY_ITEMS: MediaItem[] = [];
+const EMPTY_LIBRARY_IDS: string[] = [];
 const EMPTY_HISTORY_ITEMS: WatchProgress[] = [];
 const EMPTY_STATUS_COUNTS: Record<WatchStatus | 'none', number> = {
   watching: 0,
@@ -95,6 +101,23 @@ function isProfileTabId(value: string | null): value is ProfileTabId {
   return PROFILE_TABS.some((tab) => tab.id === value);
 }
 
+function patchSearchParams(
+  setSearchParams: SetURLSearchParams,
+  updates: Record<string, string | null>,
+) {
+  setSearchParams(
+    (current) => {
+      const next = new URLSearchParams(current);
+      for (const [key, value] of Object.entries(updates)) {
+        if (value === null) next.delete(key);
+        else next.set(key, value);
+      }
+      return next;
+    },
+    { replace: true },
+  );
+}
+
 export function Profile() {
   const location = useLocation();
   useDocumentTitle(location.pathname === '/library' ? 'Library' : 'Profile');
@@ -113,20 +136,8 @@ export function Profile() {
   const [searchParams, setSearchParams] = useSearchParams();
   const tabParam = searchParams.get('tab');
   const activeTab = isProfileTabId(tabParam) ? tabParam : 'library';
-  const setActiveTab = useCallback(
-    (tab: string) => {
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          if (tab === 'library') next.delete('tab');
-          else next.set('tab', tab);
-          return next;
-        },
-        { replace: true },
-      );
-    },
-    [setSearchParams],
-  );
+  const setActiveTab = (tab: string) =>
+    patchSearchParams(setSearchParams, { tab: tab === 'library' ? null : tab });
   // Header aggregates do not retain collection rows.
   const dataStatsQuery = useQuery(api.dataStatsQueryOptions());
   const { data: dataStats } = dataStatsQuery;
@@ -135,25 +146,20 @@ export function Profile() {
   const totalWatchTimeQuery = useTotalWatchTime();
   const { data: totalWatchTimeSecs } = totalWatchTimeQuery;
 
-  const handleViewModeChange = useCallback(
-    (mode: 'grid' | 'list') => {
-      void updateViewMode(mode).catch(() => toast.error('Failed to save view mode'));
-    },
-    [updateViewMode],
-  );
+  const handleViewModeChange = (mode: 'grid' | 'list') => {
+    void updateViewMode(mode).catch(() => toast.error('Failed to save view mode'));
+  };
 
   const [libraryTabCount, setLibraryTabCount] = useState<number>();
   const [libraryTabStatusCounts, setLibraryTabStatusCounts] =
     useState<Record<WatchStatus | 'none', number>>();
+  const [historyTabCount, setHistoryTabCount] = useState<number>();
   const libraryTabRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (activeTab !== 'library') {
       setLibraryTabCount(undefined);
       setLibraryTabStatusCounts(undefined);
     }
-  }, [activeTab]);
-  const [historyTabCount, setHistoryTabCount] = useState<number>();
-  useEffect(() => {
     if (activeTab !== 'history') setHistoryTabCount(undefined);
   }, [activeTab]);
   const historyCount =
@@ -222,34 +228,31 @@ export function Profile() {
             aria-label='Profile collections'
             className='relative isolate inline-grid grid-cols-3 max-w-full overflow-x-auto rounded-lg border border-white/[0.07] bg-white/[0.03] p-1 h-auto gap-0 scrollbar-hide'
           >
-            <span
-              aria-hidden='true'
-              className='pointer-events-none absolute top-1 bottom-1 left-1 rounded-md bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
-              style={{
-                width: `calc((100% - 8px) / ${PROFILE_TABS.length})`,
-                transform: `translateX(${PROFILE_TABS.findIndex((tab) => tab.id === activeTab) * 100}%)`,
-              }}
+            <SegmentPill
+              index={PROFILE_TABS.findIndex((tab) => tab.id === activeTab)}
+              count={PROFILE_TABS.length}
+              inset={4}
+              className='rounded-md'
             />
             {PROFILE_TABS.map((tab) => (
               <TabsTrigger
                 key={tab.id}
                 ref={tab.id === 'library' ? libraryTabRef : undefined}
                 value={tab.id}
-                style={{ backgroundColor: 'transparent' }}
+                onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
+                onFocus={tab.id === 'lists' ? warmListsManager : undefined}
                 className={cn(
-                  'nav-switch-item relative z-10 shrink-0 px-3 py-2 rounded-md text-[13px] font-medium shadow-none data-[state=active]:shadow-none data-[state=active]:text-(--on-accent-nav) transition-colors duration-150 flex items-center justify-center gap-1.5 hover:text-zinc-100',
+                  'nav-switch-item relative z-10 shrink-0 gap-1.5 rounded-md bg-transparent px-3 py-2 text-[13px] font-medium shadow-none transition-colors',
                   tab.id === activeTab
-                    ? 'text-(--on-accent-nav) hover:text-(--on-accent-nav)'
-                    : 'text-zinc-400',
+                    ? 'text-(--on-accent-nav)'
+                    : 'text-zinc-400 hover:text-zinc-100',
                 )}
               >
                 <tab.icon className='w-3 h-3' />
                 <span>{tab.label}</span>
-                {tabCounts[tab.id] !== undefined && (
-                  <span className='text-[10px] tabular-nums leading-none opacity-60'>
-                    {tabCounts[tab.id]}
-                  </span>
-                )}
+                <span className='w-[5ch] shrink-0 text-left text-[10px] tabular-nums leading-none opacity-60'>
+                  {tabCounts[tab.id]}
+                </span>
               </TabsTrigger>
             ))}
           </TabsList>
@@ -265,7 +268,21 @@ export function Profile() {
           </TabsContent>
 
           <TabsContent value='lists'>
-            <ListsManager />
+            <Suspense
+              fallback={
+                <div role='status' aria-busy='true' className='space-y-6'>
+                  <span className='sr-only'>Loading lists…</span>
+                  <Skeleton className='h-[46px] w-full' />
+                  <div aria-hidden='true' className='space-y-3'>
+                    <Skeleton className='h-14 w-full rounded-xl' />
+                    <Skeleton className='h-14 w-full rounded-xl' />
+                    <Skeleton className='h-14 w-full rounded-xl' />
+                  </div>
+                </div>
+              }
+            >
+              <ListsManager />
+            </Suspense>
           </TabsContent>
 
           <TabsContent value='history'>
@@ -297,23 +314,11 @@ function ProfileLibraryTab({
   const mountedRef = useMountedRef();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const setCollectionParam = useCallback(
-    (key: 'type' | 'status' | 'sort', value: string, defaultValue = '') => {
-      setSearchParams(
-        (current) => {
-          const next = new URLSearchParams(current);
-          if (value === defaultValue) next.delete(key);
-          else next.set(key, value);
-          return next;
-        },
-        { replace: true },
-      );
-    },
-    [setSearchParams],
-  );
-
-  const libraryQuery = useLibraryItems();
-  const { data: library, isFetching: libraryFetching, refetch: refetchLibrary } = libraryQuery;
+  const setCollectionParam = (
+    key: 'type' | 'status' | 'sort',
+    value: string,
+    defaultValue: string,
+  ) => patchSearchParams(setSearchParams, { [key]: value === defaultValue ? null : value });
 
   const {
     data: allWatchStatuses,
@@ -367,7 +372,6 @@ function ProfileLibraryTab({
   const isBulkBusy =
     bulkRemoveFromLibrary.isPending || bulkSetWatchStatus.isPending || bulkAddToList.isPending;
   const librarySearchRef = useRef<HTMLInputElement>(null);
-  const libraryReadFailed = queryNeedsRetry(libraryQuery) && library === undefined;
   const profileLibraryQuery = useProfileLibrary({
     query: librarySearchParam,
     type: libraryTypeFilter,
@@ -375,28 +379,27 @@ function ProfileLibraryTab({
     sort: librarySort,
   });
   const filteredLibrary = profileLibraryQuery.data?.items ?? EMPTY_LIBRARY_ITEMS;
+  const [lastLibraryIds, setLastLibraryIds] = useState<string[]>();
+  if (profileLibraryQuery.data && profileLibraryQuery.data.allIds !== lastLibraryIds) {
+    setLastLibraryIds(profileLibraryQuery.data.allIds);
+  }
   const librarySearchPending =
     librarySearch !== librarySearchParam || profileLibraryQuery.isFetching;
   const libraryResultsPending =
     profileLibraryQuery.isPlaceholderData ||
     (librarySearch !== librarySearchParam && profileLibraryQuery.data !== undefined);
   const statusCounts = profileLibraryQuery.data?.statusCounts;
-  const libraryCount = library?.length;
+  const libraryIds = profileLibraryQuery.data?.allIds ?? lastLibraryIds;
+  const librarySelectionIds = libraryIds ?? EMPTY_LIBRARY_IDS;
+  const libraryCount = libraryIds?.length;
   useLayoutEffect(() => {
     if (libraryCount !== undefined) onCountChange(libraryCount);
   }, [libraryCount, onCountChange]);
   useLayoutEffect(() => {
     if (statusCounts !== undefined) onStatusCountsChange(statusCounts);
   }, [statusCounts, onStatusCountsChange]);
-  const librarySelectionIds = useMemo(
-    () => (library ?? EMPTY_LIBRARY_ITEMS).map((item) => item.id),
-    [library],
-  );
-  const filteredLibraryIds = useMemo(
-    () => filteredLibrary.map((item) => item.id),
-    [filteredLibrary],
-  );
-  const librarySelection = useCollectionSelection(
+  const filteredLibraryIds = filteredLibrary.map((item) => item.id);
+  const { triggerRef: librarySelectionTriggerRef, ...librarySelection } = useCollectionSelection(
     librarySelectionIds,
     filteredLibraryIds,
     true,
@@ -411,26 +414,13 @@ function ProfileLibraryTab({
     profileLibraryQuery.isPlaceholderData ||
     librarySearch !== librarySearchParam;
 
-  const resetLibraryFilters = useCallback(() => {
+  const resetLibraryFilters = () => {
     setLibrarySearch('');
-    setSearchParams(
-      (current) => {
-        const next = new URLSearchParams(current);
-        for (const key of ['q', 'type', 'status', 'sort']) next.delete(key);
-        return next;
-      },
-      { replace: true },
-    );
+    patchSearchParams(setSearchParams, { q: null, type: null, status: null, sort: null });
     librarySearchRef.current?.focus({ preventScroll: true });
-  }, [setSearchParams]);
+  };
 
-  const selectedItems = useMemo(
-    () =>
-      selectedIds.size === 0
-        ? EMPTY_LIBRARY_ITEMS
-        : (library ?? EMPTY_LIBRARY_ITEMS).filter((item) => selectedIds.has(item.id)),
-    [library, selectedIds],
-  );
+  const selectedLibraryIds = [...selectedIds];
   const allFilteredSelected =
     filteredLibrary.length > 0 && filteredLibrary.every((item) => selectedIds.has(item.id));
 
@@ -443,54 +433,60 @@ function ProfileLibraryTab({
   };
 
   const handleBulkSetStatus = async (status: WatchStatus | null) => {
-    if (selectedItems.length === 0 || isBulkBusy) return;
-    try {
-      const count = await bulkSetWatchStatus.mutateAsync({ ids: [...selectedIds], status });
-      toast.success(
-        status === null
-          ? `Cleared status for ${count} title${count === 1 ? '' : 's'}`
-          : `Set ${count} title${count === 1 ? '' : 's'} to ${WATCH_STATUS_LABELS[status]}`,
-      );
-    } catch (error) {
-      toast.error('Failed to update watch statuses', {
-        description: getWatchStatusErrorMessage(error),
+    if (selectedIds.size === 0 || isBulkBusy) return;
+    await bulkSetWatchStatus
+      .mutateAsync({ ids: [...selectedIds], status })
+      .then((count) => {
+        toast.success(
+          status === null
+            ? `Cleared status for ${count} title${count === 1 ? '' : 's'}`
+            : `Set ${count} title${count === 1 ? '' : 's'} to ${WATCH_STATUS_LABELS[status]}`,
+        );
+      })
+      .catch((error: unknown) => {
+        toast.error('Failed to update watch statuses', {
+          description: getWatchStatusErrorMessage(error),
+        });
       });
-    }
   };
 
-  const handleBulkAddToList = async (listId: string, listName: string, items: MediaItem[]) => {
-    if (items.length === 0 || isBulkBusy) return;
-    try {
-      const count = await bulkAddToList.mutateAsync({
+  const handleBulkAddToList = async (listId: string, listName: string, itemIds: string[]) => {
+    if (itemIds.length === 0 || isBulkBusy) return;
+    await bulkAddToList
+      .mutateAsync({
         listId,
-        itemIds: items.map((item) => item.id),
+        itemIds,
+      })
+      .then((count) => {
+        toast.success(
+          count === 0
+            ? 'Selected titles are already in this list'
+            : `Added ${count} title${count === 1 ? '' : 's'} to "${listName}"`,
+        );
+      })
+      .catch((error: unknown) => {
+        toast.error(getListErrorMessage(error) ?? 'Failed to add titles to list');
       });
-      toast.success(
-        count === 0
-          ? 'Selected titles are already in this list'
-          : `Added ${count} title${count === 1 ? '' : 's'} to "${listName}"`,
-      );
-    } catch (error) {
-      toast.error(getListErrorMessage(error) ?? 'Failed to add titles to list');
-    }
   };
 
   const handleBulkRemove = () => {
-    if (selectedItems.length > 0 && !isBulkBusy) setConfirmBulkRemoveOpen(true);
+    if (selectedIds.size > 0 && !isBulkBusy) setConfirmBulkRemoveOpen(true);
   };
 
   const confirmBulkRemove = async () => {
-    if (selectedItems.length === 0 || isBulkBusy) return;
-    const ids = selectedItems.map((item) => item.id);
-    try {
-      const count = await bulkRemoveFromLibrary.mutateAsync(ids);
-      toast.success(`Removed ${count} title${count === 1 ? '' : 's'} from Library`);
-      if (mountedRef.current) exitSelectionMode();
-    } catch {
-      toast.error('Failed to remove titles from Library');
-    } finally {
-      if (mountedRef.current) setConfirmBulkRemoveOpen(false);
-    }
+    if (selectedIds.size === 0 || isBulkBusy) return;
+    await bulkRemoveFromLibrary
+      .mutateAsync([...selectedIds])
+      .then((count) => {
+        toast.success(`Removed ${count} title${count === 1 ? '' : 's'} from Library`);
+        if (mountedRef.current) exitSelectionMode();
+      })
+      .catch(() => {
+        toast.error('Failed to remove titles from Library');
+      })
+      .finally(() => {
+        if (mountedRef.current) setConfirmBulkRemoveOpen(false);
+      });
   };
 
   return (
@@ -499,6 +495,12 @@ function ProfileLibraryTab({
       data-collection-selection=''
       data-escape-capture={selectionMode ? '' : undefined}
     >
+      {libraryCount === undefined && profileLibraryQuery.isLoading && (
+        <div aria-hidden='true' className='space-y-3'>
+          <Skeleton className='h-10 w-full rounded-lg' />
+          <Skeleton className='h-[38px] w-64 rounded-md' />
+        </div>
+      )}
       {libraryCount !== undefined && libraryCount > 0 && (
         <LibraryToolbar
           typeFilter={libraryTypeFilter}
@@ -519,7 +521,7 @@ function ProfileLibraryTab({
           onViewModeChange={onViewModeChange}
           onReset={resetLibraryFilters}
           selectionMode={selectionMode}
-          selectionTriggerRef={librarySelection.triggerRef}
+          selectionTriggerRef={librarySelectionTriggerRef}
           onToggleSelectionMode={() => {
             if (isBulkBusy) return;
             if (selectionMode) exitSelectionMode();
@@ -550,7 +552,7 @@ function ProfileLibraryTab({
         )}
         {selectionMode && (
           <LibraryBulkActionBar
-            selectedItems={selectedItems}
+            selectedIds={selectedLibraryIds}
             filteredCount={filteredLibrary.length}
             selectAllDisabled={selectAllDisabled}
             allFilteredSelected={allFilteredSelected}
@@ -573,15 +575,12 @@ function ProfileLibraryTab({
           className={cn('transition-opacity', libraryResultsPending && 'opacity-60')}
         >
           <CollectionTabContent
-            isError={libraryReadFailed || queryNeedsRetry(profileLibraryQuery)}
-            isLoading={
-              profileLibraryQuery.isLoading ||
-              (libraryQuery.isLoading && filteredLibrary.length === 0)
-            }
+            isError={queryNeedsRetry(profileLibraryQuery)}
+            isLoading={profileLibraryQuery.isLoading}
             items={filteredLibrary}
             errorLabel='your library'
-            onRetry={() => Promise.all([refetchLibrary(), profileLibraryQuery.refetch()])}
-            isRetrying={libraryFetching || profileLibraryQuery.isFetching}
+            onRetry={() => void profileLibraryQuery.refetch()}
+            isRetrying={profileLibraryQuery.isFetching}
             viewMode={viewMode}
             getItemKey={mediaCardRailKey}
             renderItem={(item) => (
@@ -604,7 +603,7 @@ function ProfileLibraryTab({
               />
             )}
             empty={
-              library && library.length > 0 ? (
+              libraryCount !== undefined && libraryCount > 0 ? (
                 <EmptyState
                   icon={<Library className='w-6 h-6 text-zinc-600' />}
                   title={librarySearch.trim() ? 'No matching items' : 'No items with this filter'}
@@ -632,53 +631,18 @@ function ProfileLibraryTab({
         </div>
       </div>
 
-      <Dialog
+      <ConfirmRemoveDialog
         open={confirmBulkRemoveOpen}
-        onOpenChange={(open) => {
-          if (!bulkRemoveFromLibrary.isPending) setConfirmBulkRemoveOpen(open);
-        }}
-      >
-        <DialogContent
-          onEscapeKeyDown={(event) => {
-            if (bulkRemoveFromLibrary.isPending) event.preventDefault();
-          }}
-          onPointerDownOutside={(event) => {
-            if (bulkRemoveFromLibrary.isPending) event.preventDefault();
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            const trigger = librarySelection.triggerRef.current;
-            (trigger && !trigger.disabled ? trigger : libraryTabRef.current)?.focus({
-              preventScroll: true,
-            });
-          }}
-          className='border-white/10 bg-zinc-950 sm:max-w-md'
-        >
-          <DialogHeader>
-            <DialogTitle>Remove selected titles?</DialogTitle>
-            <DialogDescription>
-              Remove {selectedIds.size} title{selectedIds.size === 1 ? '' : 's'} from your library
-              and clear their watch statuses? Watch history and custom lists will be kept.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              disabled={bulkRemoveFromLibrary.isPending}
-              onClick={() => setConfirmBulkRemoveOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={selectedItems.length === 0 || isBulkBusy}
-              onClick={() => void confirmBulkRemove()}
-              className='border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
-            >
-              {bulkRemoveFromLibrary.isPending ? 'Removing…' : 'Remove from Library'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={setConfirmBulkRemoveOpen}
+        pending={bulkRemoveFromLibrary.isPending}
+        title='Remove selected titles?'
+        description={`Remove ${selectedIds.size} title${selectedIds.size === 1 ? '' : 's'} from your library and clear their watch statuses? Watch history and custom lists will be kept.`}
+        confirmLabel='Remove from Library'
+        confirmDisabled={selectedIds.size === 0 || isBulkBusy}
+        onConfirm={() => void confirmBulkRemove()}
+        triggerRef={librarySelectionTriggerRef}
+        fallbackRef={libraryTabRef}
+      />
     </div>
   );
 }
@@ -708,23 +672,14 @@ function ProfileHistoryTab({
   }, [historyCount, onCountChange]);
 
   const historySearch = searchParams.get('historyQ') ?? '';
-  const setHistorySearch = (value: string) => {
-    setSearchParams(
-      (current) => {
-        const next = new URLSearchParams(current);
-        if (value) next.set('historyQ', value);
-        else next.delete('historyQ');
-        return next;
-      },
-      { replace: true },
-    );
-  };
+  const setHistorySearch = (value: string) =>
+    patchSearchParams(setSearchParams, { historyQ: value || null });
   const historySearchRef = useRef<HTMLInputElement>(null);
   const historyContentRef = useRef<HTMLDivElement>(null);
   const historyRemovalFocusRef = useRef<{ button: HTMLButtonElement; index: number } | null>(null);
-  const handleHistoryRemove = useCallback((button: HTMLButtonElement, index: number) => {
+  const handleHistoryRemove = (button: HTMLButtonElement, index: number) => {
     if (document.activeElement === button) historyRemovalFocusRef.current = { button, index };
-  }, []);
+  };
   const {
     effectiveSearch: effectiveHistorySearch,
     filteredItems: filteredHistory,
@@ -736,15 +691,11 @@ function ProfileHistoryTab({
 
   const bulkRemoveHistory = useBulkRemoveFromWatchHistory();
   const [confirmHistoryRemoveOpen, setConfirmHistoryRemoveOpen] = useState(false);
-  const historySelectionIds = useMemo(
-    () => (history ?? EMPTY_HISTORY_ITEMS).map((item) => `${item.type_}:${item.id}`),
-    [history],
+  const historySelectionIds = (history ?? EMPTY_HISTORY_ITEMS).map(
+    (item) => `${item.type_}:${item.id}`,
   );
-  const filteredHistoryIds = useMemo(
-    () => filteredHistory.map((item) => `${item.type_}:${item.id}`),
-    [filteredHistory],
-  );
-  const historySelection = useCollectionSelection(
+  const filteredHistoryIds = filteredHistory.map((item) => `${item.type_}:${item.id}`);
+  const { triggerRef: historySelectionTriggerRef, ...historySelection } = useCollectionSelection(
     historySelectionIds,
     filteredHistoryIds,
     true,
@@ -759,14 +710,17 @@ function ProfileHistoryTab({
     const items = (history ?? EMPTY_HISTORY_ITEMS)
       .filter((item) => historySelection.selectedIds.has(`${item.type_}:${item.id}`))
       .map((item) => ({ id: item.id, type: item.type_ }));
-    try {
-      await bulkRemoveHistory.mutateAsync(items);
-      if (mountedRef.current) historySelection.exit();
-    } catch {
-      // The mutation restores the optimistic rows and reports the error.
-    } finally {
-      if (mountedRef.current) setConfirmHistoryRemoveOpen(false);
-    }
+    await bulkRemoveHistory
+      .mutateAsync(items)
+      .then(() => {
+        if (mountedRef.current) historySelection.exit();
+      })
+      .catch(() => {
+        // The mutation restores the optimistic rows and reports the error.
+      })
+      .finally(() => {
+        if (mountedRef.current) setConfirmHistoryRemoveOpen(false);
+      });
   };
 
   useLayoutEffect(() => {
@@ -798,6 +752,9 @@ function ProfileHistoryTab({
           Searching history…
         </span>
       )}
+      {history === undefined && historyLoading && (
+        <Skeleton aria-hidden='true' className='h-9 w-full rounded-lg' />
+      )}
       {history !== undefined && (
         <div className='flex items-center gap-2'>
           <SearchInput
@@ -817,7 +774,7 @@ function ProfileHistoryTab({
           </output>
           <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
           <Button
-            ref={historySelection.triggerRef}
+            ref={historySelectionTriggerRef}
             size='sm'
             variant='outline'
             aria-pressed={historySelection.selectionMode}
@@ -917,55 +874,18 @@ function ProfileHistoryTab({
           }
         />
       </div>
-      <Dialog
+      <ConfirmRemoveDialog
         open={confirmHistoryRemoveOpen}
-        onOpenChange={(open) => {
-          if (!bulkRemoveHistory.isPending) setConfirmHistoryRemoveOpen(open);
-        }}
-      >
-        <DialogContent
-          className='border-white/10 bg-zinc-950 sm:max-w-md'
-          onEscapeKeyDown={(event) => {
-            if (bulkRemoveHistory.isPending) event.preventDefault();
-          }}
-          onPointerDownOutside={(event) => {
-            if (bulkRemoveHistory.isPending) event.preventDefault();
-          }}
-          onCloseAutoFocus={(event) => {
-            event.preventDefault();
-            const trigger = historySelection.triggerRef.current;
-            (trigger && !trigger.disabled ? trigger : historySearchRef.current)?.focus({
-              preventScroll: true,
-            });
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Remove selected history?</DialogTitle>
-            <DialogDescription>
-              Remove all watched episodes and playback progress for{' '}
-              {historySelection.selectedIds.size} selected title
-              {historySelection.selectedIds.size === 1 ? '' : 's'}? Your library, watch statuses and
-              custom lists will be kept.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button
-              variant='outline'
-              disabled={bulkRemoveHistory.isPending}
-              onClick={() => setConfirmHistoryRemoveOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button
-              disabled={historySelection.selectedIds.size === 0 || bulkRemoveHistory.isPending}
-              onClick={() => void confirmHistoryRemove()}
-              className='border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
-            >
-              {bulkRemoveHistory.isPending ? 'Removing…' : 'Remove from history'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+        onOpenChange={setConfirmHistoryRemoveOpen}
+        pending={bulkRemoveHistory.isPending}
+        title='Remove selected history?'
+        description={`Remove all watched episodes and playback progress for ${historySelection.selectedIds.size} selected title${historySelection.selectedIds.size === 1 ? '' : 's'}? Your library, watch statuses and custom lists will be kept.`}
+        confirmLabel='Remove from history'
+        confirmDisabled={historySelection.selectedIds.size === 0}
+        onConfirm={() => void confirmHistoryRemove()}
+        triggerRef={historySelectionTriggerRef}
+        fallbackRef={historySearchRef}
+      />
     </div>
   );
 }
@@ -1010,106 +930,160 @@ function ProfileHeader({
   statusCounts: Record<WatchStatus, number>;
 }) {
   return (
-    <div>
-      <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
-        <div className='flex flex-col gap-5 lg:flex-row lg:items-center lg:gap-8'>
-          <div
-            className='flex min-w-0 items-center gap-4 lg:w-80 lg:shrink-0'
-            aria-busy={isHydrating}
-          >
-            {isIdentityReady ? (
-              <>
-                <ProfileAvatarEditor profile={profile} />
+    <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
+      <div className='flex flex-col gap-5 lg:flex-row lg:items-center lg:gap-8'>
+        <div
+          className='flex min-w-0 items-center gap-4 lg:w-80 lg:shrink-0'
+          aria-busy={isHydrating}
+        >
+          {isIdentityReady ? (
+            <>
+              <ProfileAvatarEditor profile={profile} />
 
-                <div className='min-w-0 flex-1'>
-                  <div className='flex min-w-0 items-center gap-2'>
-                    <h1
-                      dir='auto'
-                      title={profile.username}
-                      className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'
-                    >
-                      {profile.username}
-                    </h1>
-                    <div className='shrink-0'>
-                      <ProfileSettingsPopover
-                        profile={profile}
-                        onUpdate={onUpdateProfile}
-                        isSaving={isSaving}
-                        isHydrating={isHydrating}
-                        isError={isError}
-                        isRetrying={isRetrying}
-                        onRetry={onRetry}
-                      />
-                    </div>
+              <div className='min-w-0 flex-1'>
+                <div className='flex min-w-0 items-center gap-2'>
+                  <h1
+                    dir='auto'
+                    title={profile.username}
+                    className='truncate text-[22px] font-semibold tracking-[-0.03em] text-white'
+                  >
+                    {profile.username}
+                  </h1>
+                  <div className='shrink-0'>
+                    <ProfileSettingsPopover
+                      profile={profile}
+                      onUpdate={onUpdateProfile}
+                      isSaving={isSaving}
+                      isHydrating={isHydrating}
+                      isError={isError}
+                      isRetrying={isRetrying}
+                      onRetry={onRetry}
+                    />
                   </div>
                 </div>
-              </>
-            ) : (
-              <>
-                <Skeleton className='h-21 w-21 shrink-0 rounded-full' />
-                <Skeleton className='h-7 w-40 max-w-full' />
-                <span className='sr-only'>
-                  {isHydrating ? 'Loading profile…' : 'Profile unavailable'}
-                </span>
-              </>
-            )}
-          </div>
-
-          <div className='grid w-full max-w-2xl grid-cols-4 gap-3 self-center lg:mx-auto lg:flex-1'>
-            <StatChip
-              value={libraryCount}
-              isLoading={statsLoading}
-              label='Library'
-              valueClassName='text-(--accent-nav)'
-            />
-            <StatChip
-              value={listsCount}
-              isLoading={statsLoading}
-              label='Lists'
-              valueClassName='text-white'
-            />
-            <StatChip
-              value={historyCount}
-              isLoading={statsLoading}
-              label='History'
-              valueClassName='text-white'
-            />
-            <StatChip
-              value={
-                totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)
-              }
-              label='Hours watched'
-              isLoading={watchTimeLoading}
-              valueClassName='text-white'
-              title='Estimated from saved playback progress, including seeks and episodes marked watched.'
-            />
-          </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <Skeleton className='h-21 w-21 shrink-0 rounded-full' />
+              <Skeleton className='h-7 w-40 max-w-full' />
+              <span className='sr-only'>
+                {isHydrating ? 'Loading profile…' : 'Profile unavailable'}
+              </span>
+            </>
+          )}
         </div>
-        {headerError && (
-          <RetryBanner
-            className='mt-4 px-3 py-2'
-            message="Couldn't load some profile information."
-            onRetry={onRetryHeader}
-            isRetrying={headerRetrying}
+
+        <div className='grid w-full max-w-2xl grid-cols-4 gap-3 self-center lg:mx-auto lg:flex-1'>
+          <StatChip
+            value={libraryCount}
+            isLoading={statsLoading}
+            label='Library'
+            valueClassName='text-(--accent-nav)'
           />
-        )}
-        {WATCH_STATUSES.some((status) => statusCounts[status] > 0) && (
-          <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-3'>
-            {WATCH_STATUSES.map((s) => {
-              const count = statusCounts[s] ?? 0;
-              if (count === 0) return null;
-              const colors = WATCH_STATUS_COLORS[s];
-              return (
-                <span key={s} className='flex items-center gap-1.5 text-[12px]'>
-                  <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
-                  <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
-                </span>
-              );
-            })}
-          </div>
-        )}
+          <StatChip
+            value={listsCount}
+            isLoading={statsLoading}
+            label='Lists'
+            valueClassName='text-white'
+          />
+          <StatChip
+            value={historyCount}
+            isLoading={statsLoading}
+            label='History'
+            valueClassName='text-white'
+          />
+          <StatChip
+            value={totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)}
+            label='Hours watched'
+            isLoading={watchTimeLoading}
+            valueClassName='text-white'
+            title='Estimated from saved playback progress, including seeks and episodes marked watched.'
+          />
+        </div>
       </div>
+      {headerError && (
+        <RetryBanner
+          className='mt-4 px-3 py-2'
+          message="Couldn't load some profile information."
+          onRetry={onRetryHeader}
+          isRetrying={headerRetrying}
+        />
+      )}
+      {WATCH_STATUSES.some((status) => statusCounts[status] > 0) && (
+        <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-3'>
+          {WATCH_STATUSES.map((s) => {
+            const count = statusCounts[s] ?? 0;
+            if (count === 0) return null;
+            const colors = WATCH_STATUS_COLORS[s];
+            return (
+              <span key={s} className='flex items-center gap-1.5 text-[12px]'>
+                <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
+                <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
+              </span>
+            );
+          })}
+        </div>
+      )}
     </div>
+  );
+}
+
+function ConfirmRemoveDialog({
+  open,
+  onOpenChange,
+  pending,
+  title,
+  description,
+  confirmLabel,
+  confirmDisabled,
+  onConfirm,
+  triggerRef,
+  fallbackRef,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  pending: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  confirmDisabled: boolean;
+  onConfirm: () => void;
+  triggerRef: React.RefObject<HTMLButtonElement | null>;
+  fallbackRef: React.RefObject<HTMLElement | null>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
+      <DialogContent
+        className='border-white/10 bg-zinc-950 sm:max-w-md'
+        onEscapeKeyDown={(event) => pending && event.preventDefault()}
+        onPointerDownOutside={(event) => pending && event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          event.preventDefault();
+          const trigger = triggerRef.current;
+          (trigger && !trigger.disabled ? trigger : fallbackRef.current)?.focus({
+            preventScroll: true,
+          });
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter>
+          <Button variant='outline' disabled={pending} onClick={() => onOpenChange(false)}>
+            Cancel
+          </Button>
+          <Button
+            disabled={confirmDisabled || pending}
+            onClick={onConfirm}
+            className='border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
+          >
+            {pending ? 'Removing…' : confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 

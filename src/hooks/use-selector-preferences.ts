@@ -50,7 +50,7 @@ function areStreamSelectorPreferencesEqual(
   left: StreamSelectorPreferences,
   right: StreamSelectorPreferences,
 ): boolean {
-  return buildStreamSelectorPreferencesKey(left) === buildStreamSelectorPreferencesKey(right);
+  return STREAM_SELECTOR_PREFERENCE_FIELDS.every((field) => left[field] === right[field]);
 }
 
 export function useSelectorPreferencesState({
@@ -62,8 +62,7 @@ export function useSelectorPreferencesState({
 }: UseSelectorPreferencesStateArgs) {
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
-  const openSessionKeyRef = useRef<string | null>(null);
-  const hasHydratedFiltersRef = useRef(false);
+  const hydratedSessionKeyRef = useRef<string | null>(null);
   const lastRequestedPreferenceKeyRef = useRef<string | null>(null);
   // This instance's last hydrated/adopted snapshot is the dequeue-time diff base.
   const persistedBaselineRef = useRef<StreamSelectorPreferences | null>(null);
@@ -86,7 +85,6 @@ export function useSelectorPreferencesState({
   const latestFiltersRef = useRef(filters);
   // Only explicitly edited fields may override preferences that arrive mid-flight.
   const userEditedFilterFieldsRef = useRef(new Set<keyof StreamSelectorPreferences>());
-  const userEditedFiltersRef = useRef(false);
   const setFilters = useCallback((next: SetStateAction<StreamSelectorPreferences>) => {
     const current = latestFiltersRef.current;
     const nextFilters = typeof next === 'function' ? next(current) : next;
@@ -95,7 +93,6 @@ export function useSelectorPreferencesState({
         userEditedFilterFieldsRef.current.add(field);
       }
     }
-    userEditedFiltersRef.current = true;
     latestFiltersRef.current = nextFilters;
     setFiltersState(nextFilters);
   }, []);
@@ -103,10 +100,18 @@ export function useSelectorPreferencesState({
   const lastPersistOperationRef = useRef<Promise<void> | null>(null);
   const retryPendingSaveRef = useRef<(() => Promise<void>) | null>(null);
   const debouncedFilters = useDebounce(filters, STREAM_SELECTOR_PREFERENCE_SAVE_DELAY_MS);
-
-  useEffect(() => {
-    latestFiltersRef.current = filters;
-  }, [filters]);
+  const showPreferenceSaveError = () => {
+    toast.error("Couldn't save stream filters", {
+      id: STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID,
+      action: {
+        label: 'Retry',
+        onClick: () => {
+          const retry = retryPendingSaveRef.current;
+          if (retry) void trackPendingAppWrite(retry()).catch(() => undefined);
+        },
+      },
+    });
+  };
 
   // Rust sanitizes on read/save so the snapshot is used as-is; the stored batch survives
   // movie sessions (no batch control) so it can't overwrite a series `episodes` pref.
@@ -138,7 +143,6 @@ export function useSelectorPreferencesState({
           lastRequestedPreferenceKeyRef.current =
             buildStreamSelectorPreferencesKey(savedPreferences);
           if (areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters)) {
-            userEditedFiltersRef.current = false;
             userEditedFilterFieldsRef.current.clear();
             toast.dismiss(STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID);
             // Adopt canonical values only while this is still the latest edit.
@@ -161,16 +165,7 @@ export function useSelectorPreferencesState({
         if (lastRequestedPreferenceKeyRef.current === nextPreferenceKey) {
           lastRequestedPreferenceKeyRef.current = null;
           if (areStreamSelectorPreferencesEqual(latestFiltersRef.current, nextFilters)) {
-            toast.error("Couldn't save stream filters", {
-              id: STREAM_SELECTOR_PREFERENCE_ERROR_TOAST_ID,
-              action: {
-                label: 'Retry',
-                onClick: () => {
-                  const retry = retryPendingSaveRef.current;
-                  if (retry) void trackPendingAppWrite(retry()).catch(() => undefined);
-                },
-              },
-            });
+            showPreferenceSaveError();
           }
         }
       });
@@ -180,13 +175,18 @@ export function useSelectorPreferencesState({
 
   // Hydration-safe flusher shared by selector close and app-write barriers.
   const flushPendingSelectorPreferences = useEffectEvent(async (): Promise<void> => {
-    if (userEditedFiltersRef.current) {
-      const needsHydration = !hasHydratedFiltersRef.current;
+    if (userEditedFilterFieldsRef.current.size > 0) {
+      const needsHydration = hydratedSessionKeyRef.current === null;
       // Hydrate before composing the write — never persist over unread stored state.
-      const stored = await queryClient.ensureQueryData({
-        queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
-        queryFn: api.getStreamSelectorPreferences,
-      });
+      const stored = await queryClient
+        .ensureQueryData({
+          queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
+          queryFn: api.getStreamSelectorPreferences,
+        })
+        .catch((error: unknown) => {
+          showPreferenceSaveError();
+          throw error;
+        });
       let nextFilters = latestFiltersRef.current;
       if (needsHydration) {
         const storedFilters = stored.initialized
@@ -241,12 +241,11 @@ export function useSelectorPreferencesState({
       return;
     }
 
-    if (openSessionKeyRef.current === selectorSessionKey && hasHydratedFiltersRef.current) {
+    if (hydratedSessionKeyRef.current === selectorSessionKey) {
       return;
     }
 
-    openSessionKeyRef.current = selectorSessionKey;
-    hasHydratedFiltersRef.current = true;
+    hydratedSessionKeyRef.current = selectorSessionKey;
     lastRequestedPreferenceKeyRef.current = buildStreamSelectorPreferencesKey(
       normalizedPersistedFilters,
     );
@@ -264,12 +263,11 @@ export function useSelectorPreferencesState({
   ]);
 
   const flushOnClose = useEffectEvent(() => {
-    if (userEditedFiltersRef.current) {
+    if (userEditedFilterFieldsRef.current.size > 0) {
       void trackPendingAppWrite(flushPendingSelectorPreferences()).catch(() => undefined);
     }
 
-    openSessionKeyRef.current = null;
-    hasHydratedFiltersRef.current = false;
+    hydratedSessionKeyRef.current = null;
   });
 
   useEffect(() => {
@@ -285,8 +283,8 @@ export function useSelectorPreferencesState({
     if (
       !open ||
       !streamSelectorPreferencesQuery.isSuccess ||
-      !hasHydratedFiltersRef.current ||
-      !userEditedFiltersRef.current ||
+      hydratedSessionKeyRef.current === null ||
+      userEditedFilterFieldsRef.current.size === 0 ||
       !areStreamSelectorPreferencesEqual(debouncedFilters, latestFiltersRef.current)
     ) {
       return;

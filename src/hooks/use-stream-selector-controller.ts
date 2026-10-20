@@ -1,6 +1,6 @@
 import { Channel } from '@tauri-apps/api/core';
 import { replaceEqualDeep, useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useOnlineStatus } from '@/hooks/use-online-status';
@@ -114,19 +114,18 @@ export function useStreamSelectorController({
   useEffect(() => {
     setSearchQuery('');
   }, [open, selectorSessionKey]);
-  const resetFilters = useCallback(() => {
+  const resetFilters = () => {
     setSearchQuery('');
     resetPreferenceFilters();
-  }, [resetPreferenceFilters]);
-  const hasActiveFilter = hasPreferenceFilter || searchQuery.trim().length > 0;
-  const compactOverview = useMemo(() => {
-    if (!overview) return '';
-    const normalized = overview.replace(/\s+/g, ' ').trim();
-    const maxChars = 200;
-    if (normalized.length <= maxChars) return normalized;
-    return `${normalized.slice(0, maxChars).trimEnd()}…`;
-  }, [overview]);
+  };
+  const hasActiveFilter = hasPreferenceFilter || normalizedSearchQuery.length > 0;
+  const normalizedOverview = overview?.replace(/\s+/g, ' ').trim() ?? '';
+  const compactOverview =
+    normalizedOverview.length > 200
+      ? `${normalizedOverview.slice(0, 200).trimEnd()}…`
+      : normalizedOverview;
   const {
+    activeResolveEpisode,
     activeResolveFeedback,
     activeResolveKey,
     cancelResolve,
@@ -143,19 +142,15 @@ export function useStreamSelectorController({
     target,
   });
 
-  const rankingOptions = useMemo(
-    () =>
-      playerStreamRankingOptions({
-        mediaId: id,
-        mediaType: type,
-        streamSeason: season,
-        streamEpisode: episode,
-        absoluteSeason,
-        absoluteEpisode,
-        title,
-      }),
-    [absoluteEpisode, absoluteSeason, episode, id, season, title, type],
-  );
+  const rankingOptions = playerStreamRankingOptions({
+    mediaId: id,
+    mediaType: type,
+    streamSeason: season,
+    streamEpisode: episode,
+    absoluteSeason,
+    absoluteEpisode,
+    title,
+  });
 
   const {
     data: addonConfigs = [],
@@ -195,11 +190,18 @@ export function useStreamSelectorController({
     queryFn: () => {
       // The backend emits a merged+ranked snapshot per addon — cache each so rows appear progressively.
       const generation = ++selectorFetchGenerationRef.current;
+      const hasCachedStreams =
+        !!queryClient.getQueryData<StreamSelectorData>(selectorQueryKey)?.streams.length;
       const onProgress = new Channel<StreamSelectorData>();
       // Channel is not an EventTarget — onmessage is its only surface.
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       onProgress.onmessage = (snapshot) => {
-        if (selectorOpenRef.current && generation === selectorFetchGenerationRef.current) {
+        // Refresh atomically: partial source snapshots must not shrink an already populated list.
+        if (
+          !hasCachedStreams &&
+          selectorOpenRef.current &&
+          generation === selectorFetchGenerationRef.current
+        ) {
           queryClient.setQueryData<StreamSelectorData>(selectorQueryKey, (previous) =>
             previous?.streams.length && snapshot.streams.length === 0 ? previous : snapshot,
           );
@@ -221,57 +223,53 @@ export function useStreamSelectorController({
     gcTime: STREAM_SELECTOR_GC_TIME_MS,
     retry: 0,
   });
-  const streams = useMemo(() => streamSelectorData?.streams ?? [], [streamSelectorData?.streams]);
+  const streams = streamSelectorData?.streams ?? EMPTY_SELECTOR_STREAMS;
   const streamStats = streamSelectorData?.stats ?? EMPTY_STREAM_STATS;
 
   const addonHealthMetrics = streamSelectorData?.sourceSummaries ?? EMPTY_SOURCE_SUMMARIES;
 
-  // sourceSummaries covers exactly the queried addons so count and filter can't drift.
-  const { streamSourceAddonIds, streamSourceCount } = useMemo(() => {
-    const ids = new Set<string>();
-    for (const summary of addonHealthMetrics) ids.add(summary.id);
-    return { streamSourceAddonIds: ids, streamSourceCount: ids.size };
-  }, [addonHealthMetrics]);
-
-  const effectiveAddonFilter = useMemo(() => {
-    const raw = filters.addon.trim();
-    return streamSourceAddonIds.has(raw) ? raw : 'all';
-  }, [streamSourceAddonIds, filters.addon]);
-
-  const effectiveFilters = useMemo<StreamSelectorPreferences>(() => {
-    const addonUnchanged = effectiveAddonFilter === filters.addon;
-    const batchUnchanged = showBatchFilter || filters.batch === 'all';
-    if (addonUnchanged && batchUnchanged) {
-      return filters;
-    }
-
-    return {
-      ...filters,
-      addon: effectiveAddonFilter,
-      batch: showBatchFilter ? filters.batch : 'all',
-    };
-  }, [effectiveAddonFilter, filters, showBatchFilter]);
+  const streamSourceAddonIds = new Set<string>();
+  for (const summary of addonHealthMetrics) streamSourceAddonIds.add(summary.id);
+  const streamSourceCount = streamSourceAddonIds.size;
+  const requestedAddonFilter = filters.addon.trim();
+  const effectiveAddonFilter = streamSourceAddonIds.has(requestedAddonFilter)
+    ? requestedAddonFilter
+    : 'all';
+  const effectiveFilters: StreamSelectorPreferences = {
+    ...filters,
+    addon: effectiveAddonFilter,
+    batch: showBatchFilter ? filters.batch : 'all',
+  };
 
   // Badge the row the title last played so a reopening user can re-pick what worked.
   const { data: titleProgress } = useTitleWatchProgress(id, {
     enabled: open && isOnline && Boolean(id),
   });
   // Exact episode targets read the per-episode map; anything else takes the newest same-kind head.
-  const lastStreamEntry = useMemo(() => {
-    const targetSeason = absoluteSeason ?? season;
-    const targetEpisode = absoluteEpisode ?? episode;
-    const exact =
-      isSeriesLike && id && targetSeason !== undefined && targetEpisode !== undefined
-        ? titleProgress?.episodeProgress?.[episodeProgressKey(id, targetSeason, targetEpisode)]
-        : undefined;
-    return (
-      exact ?? (isSeriesLike ? titleProgress?.latestSeriesEntry : titleProgress?.latestMovieEntry)
-    );
-  }, [absoluteEpisode, absoluteSeason, episode, id, isSeriesLike, season, titleProgress]);
+  const targetSeason = absoluteSeason ?? season;
+  const targetEpisode = absoluteEpisode ?? episode;
+  const exactStreamEntry =
+    isSeriesLike && id && targetSeason !== undefined && targetEpisode !== undefined
+      ? titleProgress?.episodeProgress?.[episodeProgressKey(id, targetSeason, targetEpisode)]
+      : undefined;
+  const lastStreamEntry =
+    exactStreamEntry ??
+    (isSeriesLike ? titleProgress?.latestSeriesEntry : titleProgress?.latestMovieEntry);
   const lastStreamKey = lastStreamEntry?.last_stream_key || undefined;
   const lastStreamFamily = lastStreamEntry?.stream_family || undefined;
   // Per-episode watch rows — the pack picker reads resume points from the same snapshot as the badge.
   const episodeProgress = titleProgress?.episodeProgress;
+  // Rust already ranked these rows; a homogeneous delivery pool needs no partition/filter IPC.
+  const unfilteredView =
+    effectiveFilters.quality === 'all' &&
+    effectiveFilters.source === 'all' &&
+    effectiveFilters.addon === 'all' &&
+    effectiveFilters.batch === 'all' &&
+    effectiveFilters.sort === 'smart' &&
+    !requestedSearchQuery &&
+    (streamStats.p2pCount === 0 || streamStats.playableCount === 0)
+      ? { streams, resetKey: JSON.stringify([effectiveFilters, requestedSearchQuery]) }
+      : undefined;
   const {
     data: selectorView,
     error: selectorViewError,
@@ -286,6 +284,7 @@ export function useStreamSelectorController({
       requestedSearchQuery,
     ],
     queryFn: async () => {
+      if (unfilteredView) return unfilteredView;
       const indices = await api.getStreamSelectorIndices(
         streams,
         effectiveFilters,
@@ -293,19 +292,20 @@ export function useStreamSelectorController({
       );
       return {
         streams: indices.map((index) => streams[index]),
-        searchQuery: requestedSearchQuery,
+        resetKey: JSON.stringify([effectiveFilters, requestedSearchQuery]),
       };
     },
     placeholderData: (previousData, previousQuery) =>
-      previousQuery?.queryKey[1] === selectorSessionKey ? previousData : undefined,
+      unfilteredView ??
+      (previousQuery?.queryKey[1] === selectorSessionKey ? previousData : undefined),
     enabled: open && streams.length > 0,
     staleTime: Infinity,
-    gcTime: 0,
+    gcTime: STREAM_SELECTOR_GC_TIME_MS,
     retry: false,
     structuralSharing: false,
   });
   const sortedStreams = selectorView?.streams ?? EMPTY_SELECTOR_STREAMS;
-  const effectiveSearchQuery = selectorView?.searchQuery ?? '';
+  const listResetKey = selectorView?.resetKey ?? '';
   const isSearchPending = normalizedSearchQuery !== requestedSearchQuery || isFetchingSelectorView;
 
   const [retryState, setRetryState] = useState<{
@@ -313,6 +313,8 @@ export function useStreamSelectorController({
     error: unknown;
   } | null>(null);
   const isRetrying = retryState?.sessionKey === selectorSessionKey;
+  const refreshFailed =
+    streams.length > 0 && !!streamSelectorDataError && !isFetchingStreamSelectorData;
 
   // A failed addon-config read must not masquerade as "no addons" — surface it as a retryable error once loading settles.
   const fatalAddonError =
@@ -332,7 +334,7 @@ export function useStreamSelectorController({
     ((streams.length === 0 && (isLoadingAddonConfigs || isFetchingStreamSelectorData)) ||
       (streams.length > 0 && !selectorView && isFetchingSelectorView));
 
-  const refetchStreams = useCallback(() => {
+  const refetchStreams = () => {
     if (isRetrying) return;
     const retry = { sessionKey: selectorSessionKey, error: fatalAddonError };
     setRetryState(retry);
@@ -342,27 +344,15 @@ export function useStreamSelectorController({
     void Promise.allSettled(requests).then(() => {
       setRetryState((current) => (current === retry ? null : current));
     });
-  }, [
-    fatalAddonError,
-    isRetrying,
-    refetchAddonConfigs,
-    refetchSelectorView,
-    refetchStreamSelectorData,
-    selectorViewError,
-    selectorSessionKey,
-  ]);
+  };
 
   const sourcesStillLoading = !fatalAddonError && isFetchingStreamSelectorData;
 
-  const handleDialogOpenChange = useCallback(
-    (nextOpen: boolean) => {
-      if (!nextOpen) {
-        handleRequestClose();
-      }
-    },
-    [handleRequestClose],
-  );
+  const handleDialogOpenChange = (nextOpen: boolean) => {
+    if (!nextOpen) handleRequestClose();
+  };
   return {
+    activeResolveEpisode,
     activeResolveFeedback,
     activeResolveKey,
     addonHealthMetrics,
@@ -370,13 +360,13 @@ export function useStreamSelectorController({
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
-    effectiveSearchQuery,
     hasEnabledAddons,
     episodeProgress,
     watchedEpisodeCeiling: titleProgress?.watchedEpisodeCeiling,
     fatalAddonError,
     lastStreamKey,
     lastStreamFamily,
+    listResetKey,
     lookupId,
     streamSourceCount,
     handleDialogOpenChange,
@@ -393,6 +383,7 @@ export function useStreamSelectorController({
     qualityFilter,
     rankingOptions,
     refetchStreams,
+    refreshFailed,
     resetFilters,
     selectorSessionKey,
     searchQuery,

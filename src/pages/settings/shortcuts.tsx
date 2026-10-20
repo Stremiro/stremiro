@@ -11,6 +11,7 @@ import {
   FIXED_PLAYER_SHORTCUTS,
   formatBindingKey,
   MAX_KEYS_PER_PLAYER_ACTION,
+  PLAYER_ACTION_GROUPS,
   PLAYER_ACTIONS,
   type PlayerActionId,
   type PlayerKeymap,
@@ -29,7 +30,14 @@ const SLOT_IDS = ['primary', 'secondary'] as const;
 const MODIFIER_KEYS = new Set(['shift', 'control', 'alt', 'altgraph', 'meta', 'os']);
 
 const KEY_SLOT_CLASS =
-  'inline-flex h-7 min-w-[1.85rem] cursor-pointer items-center justify-center rounded-md border px-2 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+  'inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-[5px] border px-1.5 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+const SHORTCUT_CAPTION_CLASS =
+  'mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500';
+const FIXED_SHORTCUT_SECTIONS = [
+  ['Player', FIXED_PLAYER_SHORTCUTS],
+  ['Browsing', BROWSE_SHORTCUTS],
+  ['Calendar', CALENDAR_SHORTCUTS],
+] as const;
 
 interface Capture {
   action: PlayerActionId;
@@ -136,7 +144,7 @@ export function ShortcutsSection() {
       <SettingsGroup>
         <SettingsGroupHeader
           title='Player shortcuts'
-          description={`Click a key to change it — up to ${MAX_KEYS_PER_PLAYER_ACTION} per action. While listening, Esc cancels and Backspace removes the key.`}
+          description={`Click a key to rebind it, up to ${MAX_KEYS_PER_PLAYER_ACTION} per action. Esc cancels, Backspace removes.`}
           action={
             <Button
               size='sm'
@@ -150,7 +158,7 @@ export function ShortcutsSection() {
                 void save({}).then((saved) => {
                   if (!saved) return;
                   let undoUsed = false;
-                  toast.success('All player shortcuts restored to their defaults.', {
+                  toast.success('Player shortcuts reset to defaults.', {
                     duration: 6000,
                     action: {
                       label: 'Undo',
@@ -185,51 +193,45 @@ export function ShortcutsSection() {
         >
           {notice}
         </p>
-        <ul className='divide-y divide-white/[0.06] px-5 py-1'>
-          {PLAYER_ACTIONS.map((action) => (
-            <PlayerBindingRow
-              key={action.id}
-              action={action.id}
-              label={action.label}
-              keymap={keymap}
-              capture={capture}
-              disabled={isHydrating}
-              isSaving={isSaving}
-              onStartCapture={startCapture}
-              onCaptureKey={handleCaptureKey}
-              onCancelCapture={cancelCapture}
-              onReset={() => {
-                cancelCapture();
-                const next = { ...keymap.overrides };
-                delete next[action.id];
-                void save(next);
-              }}
-            />
+        <SettingsBody className='@container space-y-5 py-4'>
+          {PLAYER_ACTION_GROUPS.map((group) => (
+            <section key={group} aria-label={group}>
+              <h3 className={SHORTCUT_CAPTION_CLASS}>{group}</h3>
+              <ul className='grid gap-x-8 @xl:grid-cols-2'>
+                {PLAYER_ACTIONS.filter((action) => action.group === group).map((action) => (
+                  <PlayerBindingRow
+                    key={action.id}
+                    action={action.id}
+                    label={action.label}
+                    keymap={keymap}
+                    capture={capture}
+                    disabled={isHydrating}
+                    isSaving={isSaving}
+                    onStartCapture={startCapture}
+                    onCaptureKey={handleCaptureKey}
+                    onCancelCapture={cancelCapture}
+                    onReset={() => {
+                      cancelCapture();
+                      const next = { ...keymap.overrides };
+                      delete next[action.id];
+                      void save(next);
+                    }}
+                  />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
-        <SettingsBody className='border-t border-white/[0.06]'>
-          <p className='mb-3 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-400'>
-            Always available
-          </p>
-          <ShortcutTable shortcuts={FIXED_PLAYER_SHORTCUTS} />
         </SettingsBody>
       </SettingsGroup>
       <SettingsGroup>
-        <SettingsGroupHeader
-          title='Browse shortcuts'
-          description='Active on every page outside the player.'
-        />
-        <SettingsBody>
-          <ShortcutTable shortcuts={BROWSE_SHORTCUTS} />
-        </SettingsBody>
-      </SettingsGroup>
-      <SettingsGroup>
-        <SettingsGroupHeader
-          title='Calendar shortcuts'
-          description='Active on the Calendar page.'
-        />
-        <SettingsBody>
-          <ShortcutTable shortcuts={CALENDAR_SHORTCUTS} />
+        <SettingsGroupHeader title='Fixed shortcuts' />
+        <SettingsBody className='@container space-y-5 py-4'>
+          {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
+            <section key={title} aria-label={title}>
+              <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
+              <ShortcutTable shortcuts={shortcuts} />
+            </section>
+          ))}
         </SettingsBody>
       </SettingsGroup>
     </div>
@@ -265,17 +267,16 @@ function PlayerBindingRow({
   const visibleSlots = SLOT_IDS.slice(0, Math.min(keys.length + 1, MAX_KEYS_PER_PLAYER_ACTION));
 
   return (
-    <li className='flex min-h-12 items-center justify-between gap-4 py-3'>
-      <span className='flex min-w-0 items-center gap-2 text-[14px] font-medium text-zinc-100'>
+    <li className='flex h-10 items-center justify-between gap-3'>
+      <span className='flex min-w-0 items-center gap-2 text-[13px] text-zinc-200'>
         <span className='truncate'>{label}</span>
         {customized ? (
-          <span className='shrink-0 text-[11.5px] font-normal text-(--accent-nav)'>Custom</span>
-        ) : null}
-        {keys.length === 0 ? (
-          <span className='shrink-0 text-[12px] font-normal text-zinc-500'>Unassigned</span>
+          <span title='Customized' className='h-1.5 w-1.5 shrink-0 rounded-full bg-(--accent-nav)'>
+            <span className='sr-only'>Customized</span>
+          </span>
         ) : null}
       </span>
-      <div className='flex shrink-0 items-center gap-1.5'>
+      <div className='flex shrink-0 items-center gap-1'>
         {visibleSlots.map((slotId, slot) => {
           const key = keys[slot] ?? null;
           const listening = capture?.action === action && capture.slot === slot;
@@ -313,7 +314,7 @@ function PlayerBindingRow({
               )}
             >
               {listening ? (
-                <span className='animate-pulse font-sans'>Press a key…</span>
+                <span className='animate-pulse font-sans'>Press a key</span>
               ) : keyLabel ? (
                 keyLabel
               ) : (
@@ -334,7 +335,7 @@ function PlayerBindingRow({
             onReset();
           }}
           className={cn(
-            'flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 aria-disabled:pointer-events-none',
+            'flex h-6 w-6 items-center justify-center rounded-[5px] text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 aria-disabled:pointer-events-none',
             !customized && 'invisible',
           )}
         >

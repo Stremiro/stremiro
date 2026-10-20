@@ -84,7 +84,7 @@ export const PlayerShortcutsOverlay = memo(function PlayerShortcutsOverlay({
           role='region'
           aria-label='Player shortcuts'
           tabIndex={0}
-          className='min-h-0 flex-1 overflow-y-auto overscroll-contain p-4 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
+          className='@container min-h-0 flex-1 overflow-y-auto overscroll-contain px-5 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
         >
           <ShortcutTable shortcuts={rows} />
         </div>

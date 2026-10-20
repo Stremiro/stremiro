@@ -11,6 +11,7 @@ import type {
   ResolveBestStreamOptions,
   SavedPlaybackLanguagePreference,
   SkipTimesResult,
+  StreamPackRow,
   StreamSelectorData,
   StreamSelectorPreferences,
   SupportedLanguage,
@@ -83,10 +84,10 @@ function bestStreamCacheKey(
 
 export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
   return {
-    getStreamPackEpisodeIndices: (
+    getStreamPackRows: (
       coverage: NonNullable<AddonStream['matchSummary']>['packCoverage'],
       episodes: Pick<Episode, 'season' | 'episode' | 'streamSeason' | 'streamEpisode'>[],
-    ) => safeInvoke<number[]>('get_stream_pack_episode_indices', { coverage, episodes }),
+    ) => safeInvoke<StreamPackRow[]>('get_stream_pack_rows', { coverage, episodes }),
     getStreamLink: (
       type: string,
       id: string,
@@ -140,17 +141,20 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
           isPlayable: stream.presentation.isInstantlyPlayable,
           seeders: stream.seeders,
           sizeBytes: stream.sizeBytes,
-          searchFields: [
-            stream.sourceName,
-            stream.presentation.streamTitle,
-            stream.presentation.sourceName,
-            stream.presentation.codecLabel,
-            stream.presentation.hdrLabel,
-            stream.presentation.audioLabel,
-            stream.presentation.multiAudioLabel,
-            stream.presentation.sizeLabel,
-            stream.presentation.resolution,
-          ],
+          // Filter-only changes skip the nine strings per row — Rust reads them only when searching.
+          searchFields: searchQuery
+            ? [
+                stream.sourceName,
+                stream.presentation.streamTitle,
+                stream.presentation.sourceName,
+                stream.presentation.codecLabel,
+                stream.presentation.hdrLabel,
+                stream.presentation.audioLabel,
+                stream.presentation.multiAudioLabel,
+                stream.presentation.sizeLabel,
+                stream.presentation.resolution,
+              ]
+            : [],
         })),
         filters,
         searchQuery,
@@ -169,6 +173,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       episode?: number,
       absoluteEpisode?: number,
       options?: ResolveBestStreamOptions,
+      signal?: AbortSignal,
     ) => {
       const preferredHints = normalizePreferredStreamHints(options ?? {});
       const cacheKey = bestStreamCacheKey(
@@ -180,16 +185,26 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         options,
         preferredHints,
       );
-      return runCachedRequest(caches.bestStream, cacheKey, () =>
-        safeInvoke<BestResolvedStream>('resolve_best_stream', {
-          mediaType: type,
-          id,
-          season,
-          episode,
-          absoluteEpisode,
-          ...options,
-          ...preferredHints,
-        }),
+      return runCachedRequest(
+        caches.bestStream,
+        cacheKey,
+        (requestId) =>
+          safeInvoke<BestResolvedStream>('resolve_best_stream', {
+            mediaType: type,
+            id,
+            season,
+            episode,
+            absoluteEpisode,
+            ...options,
+            ...preferredHints,
+            requestId,
+          }),
+        signal && {
+          signal,
+          cancel: (requestId) => {
+            void safeInvoke<void>('cancel_stream_request', { requestId }).catch(() => {});
+          },
+        },
       );
     },
     /** Seeds a resolved stream under the exact key the player replays; mismatched options miss. */
@@ -244,8 +259,8 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         }),
       );
     },
-    cancelPlaybackRecovery: (requestId: string) =>
-      safeInvoke<void>('cancel_playback_recovery', { requestId }),
+    cancelStreamRequest: (requestId: string) =>
+      safeInvoke<void>('cancel_stream_request', { requestId }),
     /** Sets one global language default; `undefined` clears it. */
     savePlaybackLanguagePreference: (preferenceKind: 'audio' | 'sub', language?: string) =>
       withStreamingCacheClear(

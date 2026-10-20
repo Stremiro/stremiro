@@ -1,14 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { Check, Loader2, Sparkles } from 'lucide-react';
-import { type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { Check, Sparkles } from 'lucide-react';
+import { type RefObject, useEffect, useEffectEvent, useId, useState } from 'react';
 import { Button } from '@/components/ui/button';
-import {
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { RetryBanner } from '@/components/retry-banner';
 import { api, type SmartListRules, WATCH_STATUSES, WATCH_STATUS_LABELS } from '@/lib/api';
@@ -211,32 +205,30 @@ export function ListEditorContent({
   onOpenChange,
   onSubmit,
   open,
-  returnFocusRef,
+  nameInputRef,
   submitLabel,
   submitReady,
-  title,
-}: ListEditorDialogProps) {
+}: ListEditorDialogProps & { nameInputRef: RefObject<HTMLInputElement | null> }) {
   const [name, setName] = useState(initialName);
   const [selectedIcon, setSelectedIcon] = useState(initialIcon);
   const [isSmart, setIsSmart] = useState(Boolean(initialRules));
   const [rules, setRules] = useState(initialRules ?? EMPTY_RULES);
-  const nameInputRef = useRef<HTMLInputElement>(null);
-  const nameInputId = `${title.replace(/\s+/g, '-').toLowerCase()}-name`;
-
-  const syncInitialState = useEffectEvent((nextInitialIcon: string, nextInitialName: string) => {
-    setName(nextInitialName);
-    setSelectedIcon(nextInitialIcon);
+  const nameInputId = useId();
+  const resetDraft = useEffectEvent(() => {
+    setName(initialName);
+    setSelectedIcon(initialIcon);
     setIsSmart(Boolean(initialRules));
     setRules(initialRules ?? EMPTY_RULES);
   });
 
   useEffect(() => {
-    if (!open) {
-      return;
+    if (!open) return;
+    resetDraft();
+    const input = nameInputRef.current;
+    if (input && document.activeElement === input.closest('[role="dialog"]')) {
+      input.focus({ preventScroll: true });
     }
-
-    syncInitialState(initialIcon, initialName);
-  }, [initialIcon, initialName, initialRules, open]);
+  }, [nameInputRef, open]);
 
   const handleSubmit = (event: React.FormEvent) => {
     event.preventDefault();
@@ -253,150 +245,129 @@ export function ListEditorContent({
     submitReady({ icon: selectedIcon, trimmedName, rules: isSmart ? rules : undefined });
 
   return (
-    <DialogContent
-      className='sm:max-w-md max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 border-white/10 text-zinc-200'
-      onOpenAutoFocus={(event) => {
-        event.preventDefault();
-        nameInputRef.current?.focus();
-      }}
-      onCloseAutoFocus={(event) => {
-        const target = returnFocusRef?.current;
-        if (target?.isConnected) {
-          event.preventDefault();
-          target.focus({ preventScroll: true });
-        }
-      }}
-    >
-      <DialogHeader>
-        <DialogTitle className='text-white font-semibold'>{title}</DialogTitle>
-        <DialogDescription className='text-zinc-400'>
-          A home for your next obsession, favourites, or movie night.
-        </DialogDescription>
-      </DialogHeader>
-
-      <form onSubmit={handleSubmit} className='space-y-5'>
-        <div className='flex items-center gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4'>
-          <ListIconTile iconId={selectedIcon} size='lg' />
-          <div className='min-w-0'>
-            <p className='text-[10px] font-medium uppercase tracking-widest text-zinc-500'>
-              Your collection
-            </p>
-            <p
-              dir='auto'
-              className={cn(
-                'mt-1 truncate text-lg font-semibold tracking-tight',
-                trimmedName ? 'text-white' : 'text-zinc-500',
-              )}
-            >
-              {trimmedName || 'Give it a name'}
-            </p>
-          </div>
-        </div>
-
-        <div className='space-y-2'>
-          <div className='flex items-center justify-between'>
-            <label htmlFor={nameInputId} className='text-xs font-medium text-zinc-300'>
-              List name
-            </label>
-            <span id={`${nameInputId}-count`} className='text-[11px] tabular-nums text-zinc-500'>
-              {nameLength}/64
-            </span>
-          </div>
-          <Input
-            ref={nameInputRef}
-            id={nameInputId}
-            aria-describedby={`${nameInputId}-count`}
-            value={name}
-            onChange={(event) => setName([...event.target.value].slice(0, 64).join(''))}
-            placeholder='Weekend cinema'
-            className='h-10 rounded-lg bg-white/[0.03] border-white/10 focus-visible:ring-white/20 text-white placeholder:text-zinc-600'
-            disabled={isPending}
-          />
-        </div>
-
-        {allowSmart && (
-          <button
-            type='button'
-            aria-pressed={isSmart}
-            disabled={isPending}
-            onClick={() => setIsSmart(!isSmart)}
+    <form onSubmit={handleSubmit} className='space-y-5'>
+      <div className='flex items-center gap-4 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4'>
+        <ListIconTile iconId={selectedIcon} size='lg' />
+        <div className='min-w-0'>
+          <p className='text-[10px] font-medium uppercase tracking-widest text-zinc-500'>
+            Your collection
+          </p>
+          <p
+            dir='auto'
             className={cn(
-              'flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
-              isSmart
-                ? 'border-(--accent-nav) bg-white/5 text-white'
-                : 'border-white/10 text-zinc-400',
+              'mt-1 truncate text-lg font-semibold tracking-tight',
+              trimmedName ? 'text-white' : 'text-zinc-500',
             )}
           >
-            <Sparkles className='size-4' />
-            <span className='flex-1'>
-              Smart list{' '}
-              <span className='block mt-0.5 text-[11px] text-zinc-500'>
-                Automatically collect Library titles using rules
-              </span>
-            </span>
-            {isSmart && <Check className='size-4' />}
-          </button>
-        )}
-        {isSmart && (
-          <SmartRulesEditor
-            rules={rules}
-            onChange={setRules}
-            disabled={isPending}
-            open={open}
-            id={nameInputId}
-          />
-        )}
-
-        <div className='space-y-2'>
-          <div className='text-xs font-medium text-zinc-300'>Choose an icon</div>
-          <div role='group' aria-label='List icon' className='grid grid-cols-6 gap-1.5'>
-            {LIST_ICONS.map(({ id, label }) => (
-              <button
-                key={id}
-                type='button'
-                title={label}
-                aria-label={label}
-                aria-pressed={selectedIcon === id}
-                onClick={() => setSelectedIcon(id)}
-                disabled={isPending}
-                className={cn(
-                  'relative flex items-center justify-center rounded-xl p-2 transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-50',
-                  selectedIcon === id
-                    ? 'bg-white/[0.05] ring-2 ring-[var(--accent-nav)]'
-                    : 'hover:bg-white/[0.04]',
-                )}
-              >
-                <ListIconTile iconId={id} />
-                {selectedIcon === id && (
-                  <span className='absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent-nav)] text-[var(--on-accent-nav)]'>
-                    <Check className='h-2.5 w-2.5' strokeWidth={3} />
-                  </span>
-                )}
-              </button>
-            ))}
-          </div>
+            {trimmedName || 'Give it a name'}
+          </p>
         </div>
+      </div>
 
-        <DialogFooter className='gap-2 mt-4'>
-          <Button
-            type='button'
-            variant='ghost'
-            disabled={isPending}
-            onClick={() => onOpenChange(false)}
-            className='text-zinc-400 hover:text-white hover:bg-white/5'
-          >
-            Cancel
-          </Button>
-          <Button
-            type='submit'
-            disabled={!canSubmit || isPending}
-            className='bg-white text-black hover:bg-zinc-200 font-semibold'
-          >
-            {isPending && <Loader2 className='w-4 h-4 animate-spin' />}
-            {submitLabel}
-          </Button>
-        </DialogFooter>
-      </form>
-    </DialogContent>
+      <div className='space-y-2'>
+        <div className='flex items-center justify-between'>
+          <label htmlFor={nameInputId} className='text-xs font-medium text-zinc-300'>
+            List name
+          </label>
+          <span id={`${nameInputId}-count`} className='text-[11px] tabular-nums text-zinc-500'>
+            {nameLength}/64
+          </span>
+        </div>
+        <Input
+          ref={nameInputRef}
+          id={nameInputId}
+          aria-describedby={`${nameInputId}-count`}
+          value={name}
+          onChange={(event) => setName([...event.target.value].slice(0, 64).join(''))}
+          placeholder='Weekend cinema'
+          className='h-10 rounded-lg bg-white/[0.03] border-white/10 focus-visible:ring-white/20 text-white placeholder:text-zinc-600'
+          disabled={isPending}
+        />
+      </div>
+
+      {allowSmart && (
+        <button
+          type='button'
+          aria-pressed={isSmart}
+          disabled={isPending}
+          onClick={() => setIsSmart(!isSmart)}
+          className={cn(
+            'flex w-full items-center gap-2 rounded-lg border px-3 py-2.5 text-left text-xs focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
+            isSmart
+              ? 'border-(--accent-nav) bg-white/5 text-white'
+              : 'border-white/10 text-zinc-400',
+          )}
+        >
+          <Sparkles className='size-4' />
+          <span className='flex-1'>
+            Smart list{' '}
+            <span className='block mt-0.5 text-[11px] text-zinc-500'>
+              Automatically collect Library titles using rules
+            </span>
+          </span>
+          {isSmart && <Check className='size-4' />}
+        </button>
+      )}
+      {isSmart && (
+        <SmartRulesEditor
+          rules={rules}
+          onChange={setRules}
+          disabled={isPending}
+          open={open}
+          id={nameInputId}
+        />
+      )}
+
+      <div className='space-y-2'>
+        <div className='text-xs font-medium text-zinc-300'>Choose an icon</div>
+        <div role='group' aria-label='List icon' className='grid grid-cols-6 gap-1.5'>
+          {LIST_ICONS.map(({ id, label }) => (
+            <button
+              key={id}
+              type='button'
+              title={label}
+              aria-label={label}
+              aria-pressed={selectedIcon === id}
+              onClick={() => setSelectedIcon(id)}
+              disabled={isPending}
+              className={cn(
+                'relative flex items-center justify-center rounded-xl p-2 transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-50',
+                selectedIcon === id
+                  ? 'bg-white/[0.05] ring-2 ring-[var(--accent-nav)]'
+                  : 'hover:bg-white/[0.04]',
+              )}
+            >
+              <ListIconTile iconId={id} />
+              {selectedIcon === id && (
+                <span className='absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[var(--accent-nav)] text-[var(--on-accent-nav)]'>
+                  <Check className='h-2.5 w-2.5' strokeWidth={3} />
+                </span>
+              )}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <DialogFooter className='gap-2 mt-4'>
+        <Button
+          type='button'
+          variant='ghost'
+          disabled={isPending}
+          onClick={() => onOpenChange(false)}
+          className='text-zinc-400 hover:text-white hover:bg-white/5'
+        >
+          Cancel
+        </Button>
+        <Button
+          type='submit'
+          disabled={!canSubmit}
+          aria-disabled={isPending || undefined}
+          aria-busy={isPending || undefined}
+          className='bg-white text-black hover:bg-zinc-200 font-semibold aria-disabled:cursor-default'
+        >
+          {submitLabel}
+        </Button>
+      </DialogFooter>
+    </form>
   );
 }

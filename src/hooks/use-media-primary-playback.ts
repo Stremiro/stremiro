@@ -1,12 +1,12 @@
 import { useQueryClient } from '@tanstack/react-query';
-import { type RefObject, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { type RefObject, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { type HistoryPlaybackPlanReason, type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
-import { usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
+import { expandedSessionState, usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
 import { openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
@@ -88,17 +88,23 @@ export function useMediaPrimaryPlayback({
   const queryClient = useQueryClient();
   const { session, presentation } = usePlayerSession();
   const playbackType: PlayerRouteMediaType = resolvePlayerRouteMediaType(item?.type);
+  const itemId = item?.id;
+  const itemType = item?.type;
+  const historyId = historyEntry?.id;
+  const historyType = historyEntry?.type_;
+  const sessionId = session?.id;
+  const sessionType = session?.type;
   const resumeEntry =
-    historyEntry?.id === item?.id &&
-    (historyEntry?.type_ === playbackType ||
-      (isSeriesLikeMediaType(historyEntry?.type_) && isSeriesLikeMediaType(playbackType)))
+    historyId === itemId &&
+    (historyType === playbackType ||
+      (isSeriesLikeMediaType(historyType) && isSeriesLikeMediaType(playbackType)))
       ? historyEntry
       : null;
   const activeSession =
     presentation === 'mini' &&
-    session?.id === item?.id &&
-    (session?.type === playbackType ||
-      (isSeriesLikeMediaType(session?.type) && isSeriesLikeMediaType(playbackType)))
+    sessionId === itemId &&
+    (sessionType === playbackType ||
+      (isSeriesLikeMediaType(sessionType) && isSeriesLikeMediaType(playbackType)))
       ? session
       : null;
   const [isResolvingPrimaryAction, setIsResolvingPrimaryAction] = useState(false);
@@ -115,8 +121,6 @@ export function useMediaPrimaryPlayback({
   const isMountedRef = useMountedRef();
   const primaryActionInFlightRef = useRef(false);
   const primaryActionGenerationRef = useRef(0);
-  const itemId = item?.id;
-  const itemType = item?.type;
   useLayoutEffect(() => {
     // A title change frees the button; only a newer Play supersedes an explicit click.
     primaryActionInFlightRef.current = false;
@@ -124,7 +128,7 @@ export function useMediaPrimaryPlayback({
     setShowResolvingFeedback(false);
   }, [itemId, itemType]);
 
-  const navigateToDetails = useCallback(() => {
+  const navigateToDetails = () => {
     if (!itemId || !itemType) {
       return;
     }
@@ -134,19 +138,15 @@ export function useMediaPrimaryPlayback({
       mediaType: itemType,
     });
     navigate(buildDetailsRoute(playbackType, itemId), { state: { from } });
-  }, [from, itemId, itemType, navigate, playbackType, queryClient]);
+  };
 
-  const handlePrimaryAction = useCallback(async () => {
+  const handlePrimaryAction = async () => {
     if (!item || primaryActionInFlightRef.current) {
       return;
     }
     const launchGeneration = claimPlaybackLaunch();
     if (activeSession) {
-      const baseState =
-        typeof activeSession.state === 'object' && activeSession.state !== null
-          ? activeSession.state
-          : {};
-      navigate(activeSession.playerPath, { state: { ...baseState, from } });
+      navigate(activeSession.playerPath, { state: expandedSessionState(activeSession, from) });
       return;
     }
 
@@ -156,7 +156,7 @@ export function useMediaPrimaryPlayback({
       (launchOwnerMountedRef ?? isMountedRef).current &&
       generation === primaryActionGenerationRef.current &&
       isCurrentPlaybackLaunch(launchGeneration);
-    try {
+    const runPrimaryAction = async () => {
       if (resumeEntry) {
         setIsResolvingPrimaryAction(true);
         await openHistoryPlaybackPlan(
@@ -230,41 +230,26 @@ export function useMediaPrimaryPlayback({
         });
         navigateToDetails();
       }
-    } finally {
+    };
+    await runPrimaryAction().finally(() => {
       if (isMountedRef.current && generation === primaryActionGenerationRef.current) {
         primaryActionInFlightRef.current = false;
         setIsResolvingPrimaryAction(false);
       }
-    }
-  }, [
-    activeSession,
-    from,
-    resumeEntry,
-    isMountedRef,
-    item,
-    launchOwnerMountedRef,
-    navigate,
-    navigateToDetails,
-    onPlayMovieWithoutHistory,
-    onSelectEpisode,
-    playbackType,
-    queryClient,
-    surface,
-  ]);
+    });
+  };
 
-  const resumeDetail =
-    formatSeasonEpisode(
-      activeSession
-        ? activeSession.season === undefined
-          ? undefined
-          : Number(activeSession.season)
-        : (resumeEntry?.absolute_season ?? undefined),
-      activeSession
-        ? activeSession.episode === undefined
-          ? undefined
-          : Number(activeSession.episode)
-        : (resumeEntry?.absolute_episode ?? undefined),
-    ) || undefined;
+  const resumeSeason = activeSession
+    ? activeSession.season === undefined
+      ? undefined
+      : Number(activeSession.season)
+    : (resumeEntry?.absolute_season ?? undefined);
+  const resumeEpisode = activeSession
+    ? activeSession.episode === undefined
+      ? undefined
+      : Number(activeSession.episode)
+    : (resumeEntry?.absolute_episode ?? undefined);
+  const resumeDetail = formatSeasonEpisode(resumeSeason, resumeEpisode) || undefined;
   const primaryActionLabel = getPrimaryPlaybackLabel(
     surface,
     showResolvingFeedback,

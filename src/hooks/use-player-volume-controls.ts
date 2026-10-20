@@ -26,6 +26,8 @@ export function usePlayerVolumeControls({
   const volumeRef = useRef(volume);
   const nativeVolumeRef = useRef(playerVolume);
   const nativeMutedRef = useRef(false);
+  // Echoes of superseded writes must not rebase rapid relative steps.
+  const pendingVolumeRef = useRef<number | null>(null);
   const wheelDeltaAccumulatorRef = useRef(0);
   const lastWheelEventAtRef = useRef(0);
   // mpv re-inits (stream swap, recovery) read this so a muted session stays muted.
@@ -33,44 +35,43 @@ export function usePlayerVolumeControls({
   const setIsMuted = (muted: boolean) => {
     isMutedRef.current = muted;
     setIsMutedState(muted);
+    if (!muted) setVolume(volumeRef.current);
   };
 
   const applyNativeVolume = (value: number) => {
     nativeVolumeRef.current = value;
-    // Muted chrome shows 0; the ref keeps the level to restore.
+    if (pendingVolumeRef.current !== null) {
+      if (value !== pendingVolumeRef.current) return;
+      pendingVolumeRef.current = null;
+    }
     if (!isMutedRef.current) setVolume(value);
     volumeRef.current = value;
   };
   const applyNativeMute = (muted: boolean) => {
     nativeMutedRef.current = muted;
     setIsMuted(muted);
-    setVolume(muted ? 0 : volumeRef.current);
   };
 
   // Coalesce preference writes and flush the last input on unmount.
   const scheduleVolumePersist = useDebouncedPrefsPersist(updatePreferences);
   const rollbackVolume = useCallback(() => {
+    pendingVolumeRef.current = null;
     const restored = nativeVolumeRef.current;
     volumeRef.current = restored;
-    setVolume(isMutedRef.current ? 0 : restored);
+    setVolume(restored);
     scheduleVolumePersist({ playerVolume: restored });
   }, [scheduleVolumePersist]);
-  const rollbackMute = () => {
-    const restored = nativeMutedRef.current;
-    setIsMuted(restored);
-    setVolume(restored ? 0 : volumeRef.current);
-  };
+  const rollbackMute = () => setIsMuted(nativeMutedRef.current);
 
   useEffect(() => {
-    const nextVolume = playerVolume;
     // Locally persisted volume already matches the live ref; apply only external changes.
-    const volumeChanged = volumeRef.current !== nextVolume;
-    const displayedVolume = isMutedRef.current ? 0 : nextVolume;
-    setVolume(displayedVolume);
-    volumeRef.current = nextVolume;
+    const volumeChanged = volumeRef.current !== playerVolume;
+    setVolume(playerVolume);
+    volumeRef.current = playerVolume;
 
     if (mpvInitializedRef.current && volumeChanged) {
-      void scheduleMpvSet('volume', nextVolume, rollbackVolume);
+      pendingVolumeRef.current = playerVolume;
+      void scheduleMpvSet('volume', playerVolume, rollbackVolume);
     }
   }, [playerVolume, mpvInitializedRef, scheduleMpvSet, rollbackVolume]);
 
@@ -83,6 +84,7 @@ export function usePlayerVolumeControls({
     setVolume(newVol);
     volumeRef.current = newVol;
     scheduleVolumePersist({ playerVolume: newVol });
+    pendingVolumeRef.current = newVol;
     void scheduleMpvSet('volume', newVol, rollbackVolume);
     triggerOsd({ kind: 'volume', level: newVol });
     if (newVol > 0 && isMutedRef.current) {
@@ -116,40 +118,29 @@ export function usePlayerVolumeControls({
     lastWheelEventAtRef.current = now;
     wheelDeltaAccumulatorRef.current += normalizedDelta;
 
-    // Notched wheels retain 5% steps; fine trackpad input needs 4px for each 1%.
-    const notched = Math.abs(normalizedDelta) >= 20;
-    const threshold = notched ? 20 : 4;
-    const steps = Math.trunc(wheelDeltaAccumulatorRef.current / threshold);
+    // One notch is one 5% step whatever its pixel delta; fine trackpad input needs 4px for each 1%.
+    if (Math.abs(normalizedDelta) >= 20) {
+      wheelDeltaAccumulatorRef.current = 0;
+      return stepVolume(-Math.sign(normalizedDelta) * 5);
+    }
+    const steps = Math.trunc(wheelDeltaAccumulatorRef.current / 4);
     if (steps === 0) return;
-    wheelDeltaAccumulatorRef.current -= steps * threshold;
-    await stepVolume(-steps * (notched ? 5 : 1));
+    wheelDeltaAccumulatorRef.current -= steps * 4;
+    await stepVolume(-steps);
   };
 
   const toggleMute = async () => {
     // At 0% the button already shows muted; pressing it means "sound back".
-    if (!isMutedRef.current && volumeRef.current === 0) {
-      await handleVolumeChange(50);
-      return;
+    if (isMutedRef.current || volumeRef.current === 0) {
+      return handleVolumeChange(volumeRef.current > 0 ? volumeRef.current : 50);
     }
-    const newMute = !isMutedRef.current;
-    setIsMuted(newMute);
-    if (newMute) {
-      setVolume(0);
-      triggerOsd({ kind: 'volume', level: 0 });
-    } else {
-      const restored = volumeRef.current > 0 ? volumeRef.current : 50;
-      setVolume(restored);
-      volumeRef.current = restored;
-      scheduleVolumePersist({ playerVolume: restored });
-      // Replace any pending volume write with the restored value.
-      void scheduleMpvSet('volume', restored, rollbackVolume);
-      triggerOsd({ kind: 'volume', level: restored });
-    }
-    await scheduleMpvSet('mute', newMute, rollbackMute);
+    setIsMuted(true);
+    triggerOsd({ kind: 'volume', level: 0 });
+    await scheduleMpvSet('mute', true, rollbackMute);
   };
 
   return {
-    volume,
+    volume: isMuted ? 0 : volume,
     applyNativeVolume,
     isMuted,
     applyNativeMute,

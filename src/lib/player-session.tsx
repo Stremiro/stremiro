@@ -1,14 +1,12 @@
 import {
   createContext,
   lazy,
-  type RefObject,
   type ReactNode,
   Suspense,
   useCallback,
   useContext,
   useLayoutEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
 import { useLocation, useMatch, useParams } from 'react-router';
@@ -54,7 +52,8 @@ interface PlayerSessionContextValue {
   close: () => void;
   trayPause: SubscribableStore<boolean>;
   /** Survives remounts and close — a user-docked corner never jumps back to the default. */
-  miniPositionRef: RefObject<MiniPlayerPosition | null>;
+  miniPosition: MiniPlayerPosition | null;
+  setMiniPosition: (position: MiniPlayerPosition) => void;
 }
 
 const PlayerSessionContext = createContext<PlayerSessionContextValue | null>(null);
@@ -72,7 +71,7 @@ function buildSessionKey(launch: PlayerSessionLaunch): string {
 export function PlayerSessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<PlayerSession | null>(null);
   const [trayPause] = useState(() => createSubscribableStore(false));
-  const miniPositionRef = useRef<MiniPlayerPosition | null>(null);
+  const [miniPosition, setMiniPosition] = useState<MiniPlayerPosition | null>(null);
   const onPlayerRoute = useMatch('/player/*') !== null;
 
   const launch = useCallback(
@@ -92,7 +91,6 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
 
   const close = useCallback(() => {
     setSession(null);
-    // miniPositionRef survives — a new session lands where the last was docked.
   }, []);
 
   const presentation: PlayerPresentation | null = session
@@ -102,11 +100,25 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
     : null;
 
   const value = useMemo<PlayerSessionContextValue>(
-    () => ({ session, presentation, launch, close, miniPositionRef, trayPause }),
-    [session, presentation, launch, close, trayPause],
+    () => ({
+      session,
+      presentation,
+      launch,
+      close,
+      miniPosition,
+      setMiniPosition,
+      trayPause,
+    }),
+    [session, presentation, launch, close, miniPosition, trayPause],
   );
 
   return <PlayerSessionContext.Provider value={value}>{children}</PlayerSessionContext.Provider>;
+}
+
+/** Route state for expanding a docked session, with an updated Back destination. */
+export function expandedSessionState(session: PlayerSessionLaunch, from: string) {
+  const state = typeof session.state === 'object' && session.state !== null ? session.state : {};
+  return { ...state, from };
 }
 
 export function usePlayerSession(): PlayerSessionContextValue {

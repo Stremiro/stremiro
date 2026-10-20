@@ -48,6 +48,9 @@ export interface Episode {
   streamEpisode?: number;
 }
 
+/** Pack picker row from Rust; `index` points into the submitted episode list. */
+export type StreamPackRow = { type: 'header'; season: number } | { type: 'episode'; index: number };
+
 export interface EpisodeNavigationRequest {
   episodes: Pick<Episode, 'season' | 'episode' | 'releaseDate'>[];
   season: number;
@@ -160,6 +163,7 @@ export interface LibraryFilters {
 
 export interface ProfileLibrary {
   items: MediaItem[];
+  allIds: string[];
   statusCounts: Record<WatchStatus | 'none', number>;
 }
 
@@ -510,27 +514,9 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   defaultPlayerKeybindings: {},
 };
 
-export interface AppUiPreferencesPatch {
-  playerVolume?: number;
-  playerSpeed?: number;
-  spoilerProtection?: boolean;
-  subtitleDelay?: number;
-  subtitlePos?: number;
-  subtitleScale?: number;
-  autoPlayNext?: boolean;
-  nextEpisodeCountdownSecs?: number;
-  controlsHideDelayMs?: number;
-  trailerPreviews?: boolean;
-  autoSkipIntro?: boolean;
-  automaticUpdateChecks?: boolean;
-  closeToTray?: boolean;
-  minimizeToTray?: boolean;
-  startMinimized?: boolean;
-  startupPage?: StartupPage;
-  lastLocation?: string | null;
-  /** Replaces the whole override map; `{}` restores every default. */
-  playerKeybindings?: Record<string, string[]>;
-}
+export type AppUiPreferencesPatch = Partial<
+  Omit<AppUiPreferences, 'effectivePlayerKeybindings' | 'defaultPlayerKeybindings'>
+>;
 
 export type StreamSelectorQuality = 'all' | '4k' | '1080p' | '720p' | 'sd';
 export type StreamSelectorSource = 'all' | 'cached';
@@ -692,6 +678,8 @@ export interface TitleWatchProgress {
   /** Per-kind resumable picks (series-like vs movie), pre-folded. */
   seriesResumeEntry?: WatchProgress;
   movieResumeEntry?: WatchProgress;
+  /** Set only when nothing is resumable; carries the furthest watched episode (Home's Up Next anchor). */
+  upNextSource?: WatchProgress;
   /** Latest per-kind history heads and latest overall (`last_watched` DESC). */
   latestSeriesEntry?: WatchProgress;
   latestMovieEntry?: WatchProgress;

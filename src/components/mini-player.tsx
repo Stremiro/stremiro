@@ -10,11 +10,10 @@ import {
   X,
 } from 'lucide-react';
 import {
-  memo,
   useCallback,
+  memo,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   useSyncExternalStore,
@@ -366,12 +365,12 @@ export const MiniPlayer = memo(function MiniPlayer({
   isMuted,
   volume,
   upNext,
-  endOfMedia = false,
+  endOfMedia,
   skipAction,
-  exiting = false,
+  exiting,
   initialPosition,
   dockOrigin,
-  claimFocusOnMount = false,
+  claimFocusOnMount,
   onVideoRectChange,
   onPositionChange,
   onTogglePlay,
@@ -396,15 +395,11 @@ export const MiniPlayer = memo(function MiniPlayer({
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
   const [hovered, setHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
-  const positionRef = useRef<MiniPlayerPosition | null>(null);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
-  if (positionRef.current === null) {
-    // A saved position can outlive its viewport — clamp at init; the mount re-clamp runs a frame too late.
-    positionRef.current = clampMiniPosition(
-      initialPosition ?? defaultMiniPosition(metrics),
-      metrics,
-    );
-  }
+  const [renderPosition] = useState(() =>
+    clampMiniPosition(initialPosition ?? defaultMiniPosition(metrics), metrics),
+  );
+  const positionRef = useRef<MiniPlayerPosition>(renderPosition);
   const dragStateRef = useRef<{
     pointerId: number;
     startX: number;
@@ -417,7 +412,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const reportFrameRef = useRef<number | null>(null);
   const snapFrameRef = useRef<number | null>(null);
   // External store, not state — per-pointermove publishes reach only the tick leaves.
-  const seekPreviewStore = useMemo(() => createSubscribableStore<number | null>(null), []);
+  const [seekPreviewStore] = useState(() => createSubscribableStore<number | null>(null));
   const [isMoving, setIsMoving] = useState(false);
   // Mount veiled when a live surface exists — the mask hole beats the first margin IPC, and an uncovered gap
   // shows a wrong-cropped slice. The exiting instance dissolves over live video — never veiled.
@@ -441,8 +436,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const motionGenerationRef = useRef(0);
   const landingRef = useRef(false);
   const lastVideoTapAtRef = useRef(0);
-  const renderPosition = positionRef.current;
-  const anchors = useMemo(() => snapAnchors(metrics), [metrics]);
+  const anchors = snapAnchors(metrics);
 
   // The reported hole is the video's content box (frame minus bezel); the painted border covers the rim and square corners.
   const reportVideoRect = useCallback(() => {
@@ -712,30 +706,27 @@ export const MiniPlayer = memo(function MiniPlayer({
     };
   }, [cancelSnap]);
 
-  const handlePointerDown = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      if (event.button !== 0 || !event.isPrimary || dragStateRef.current !== null) return;
-      const target = event.target;
-      if (!(target instanceof Element)) return;
-      if (target.closest('button, a, input, [role="slider"]')) return;
+  const handlePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0 || !event.isPrimary || dragStateRef.current !== null) return;
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    if (target.closest('button, a, input, [role="slider"]')) return;
 
-      const position = positionRef.current;
-      if (!position || !frameRef.current) return;
+    const position = positionRef.current;
+    if (!position || !frameRef.current) return;
 
-      cancelSnap();
-      frameRef.current.setPointerCapture(event.pointerId);
-      dragStateRef.current = {
-        pointerId: event.pointerId,
-        startX: event.clientX,
-        startY: event.clientY,
-        originX: position.x,
-        originY: position.y,
-        moved: false,
-        videoClick: !!target.closest('[data-mini-video]'),
-      };
-    },
-    [cancelSnap],
-  );
+    cancelSnap();
+    frameRef.current.setPointerCapture(event.pointerId);
+    dragStateRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: position.x,
+      originY: position.y,
+      moved: false,
+      videoClick: !!target.closest('[data-mini-video]'),
+    };
+  };
 
   // Nearest snap anchor within the magnet radius — drives the release glide and the drag ghost outline.
   const findSnapAnchorIndex = useCallback(
@@ -755,7 +746,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   );
 
   // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
-  const snapToNextAnchor = useCallback(() => {
+  const snapToNextAnchor = () => {
     const position = positionRef.current;
     if (!position) return;
     // The cycle advances even from a free-floating position outside the drag magnet's radius.
@@ -763,26 +754,23 @@ export const MiniPlayer = memo(function MiniPlayer({
     if (nearest === null) return;
     setIsMoving(true);
     animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
-  }, [anchors, animateTo, findSnapAnchorIndex]);
+  };
 
-  const handlePointerMove = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const drag = dragStateRef.current;
-      if (!drag || event.pointerId !== drag.pointerId) return;
+  const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragStateRef.current;
+    if (!drag || event.pointerId !== drag.pointerId) return;
 
-      const deltaX = event.clientX - drag.startX;
-      const deltaY = event.clientY - drag.startY;
-      if (!drag.moved && Math.hypot(deltaX, deltaY) < DRAG_CLICK_TOLERANCE_PX) return;
+    const deltaX = event.clientX - drag.startX;
+    const deltaY = event.clientY - drag.startY;
+    if (!drag.moved && Math.hypot(deltaX, deltaY) < DRAG_CLICK_TOLERANCE_PX) return;
 
-      drag.moved = true;
-      setIsMoving(true);
-      applyPosition({ x: drag.originX + deltaX, y: drag.originY + deltaY });
-      const live = positionRef.current;
-      setSnapTargetIndex(live ? findSnapAnchorIndex(live) : null);
-      scheduleVideoRectReport();
-    },
-    [applyPosition, findSnapAnchorIndex, scheduleVideoRectReport],
-  );
+    drag.moved = true;
+    setIsMoving(true);
+    applyPosition({ x: drag.originX + deltaX, y: drag.originY + deltaY });
+    const live = positionRef.current;
+    setSnapTargetIndex(live ? findSnapAnchorIndex(live) : null);
+    scheduleVideoRectReport();
+  };
 
   // Ends the drag this pointer owns; null when it isn't the tracked pointer.
   const releaseDrag = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
@@ -848,31 +836,20 @@ export const MiniPlayer = memo(function MiniPlayer({
     ],
   );
 
-  const handlePointerCancel = useCallback(
-    (event: React.PointerEvent<HTMLDivElement>) => {
-      const drag = releaseDrag(event);
-      if (!drag) return;
-      if (drag.moved) {
-        // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
-        reportVideoRect();
-        endMotion();
-        const position = positionRef.current;
-        if (position) onPositionChange(position);
-      } else {
-        setIsMoving(false);
-        if (isMoving || isSettling) startSurfaceSettle();
-      }
-    },
-    [
-      endMotion,
-      isMoving,
-      isSettling,
-      onPositionChange,
-      releaseDrag,
-      reportVideoRect,
-      startSurfaceSettle,
-    ],
-  );
+  const handlePointerCancel = (event: React.PointerEvent<HTMLDivElement>) => {
+    const drag = releaseDrag(event);
+    if (!drag) return;
+    if (drag.moved) {
+      // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
+      reportVideoRect();
+      endMotion();
+      const position = positionRef.current;
+      if (position) onPositionChange(position);
+    } else {
+      setIsMoving(false);
+      if (isMoving || isSettling) startSurfaceSettle();
+    }
+  };
 
   useEffect(() => {
     if (!isMoving) return;
@@ -901,91 +878,78 @@ export const MiniPlayer = memo(function MiniPlayer({
     return () => surface.removeEventListener('wheel', handleWheel);
   }, [onVolumeWheel, onSeekRelative]);
 
-  const handleVideoSurfaceKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      // Scoped to the focused frame — child-handled, composing, or modifier-chord keys are never media shortcuts.
-      if (
-        event.defaultPrevented ||
-        event.nativeEvent.isComposing ||
-        event.ctrlKey ||
-        event.altKey ||
-        event.metaKey
-      ) {
+  const handleVideoSurfaceKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    // Scoped to the focused frame — child-handled, composing, or modifier-chord keys are never media shortcuts.
+    if (
+      event.defaultPrevented ||
+      event.nativeEvent.isComposing ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey
+    ) {
+      return;
+    }
+    const keyTarget = event.target;
+    const key = event.key.toLowerCase();
+    if (keyTarget instanceof HTMLElement && keyTarget !== event.currentTarget) {
+      // Text inputs own every key outright.
+      if (isEditableTarget(keyTarget)) return;
+      // A focused control keeps only its activation keys — sliders self-consume arrows via Radix
+      // (defaultPrevented above). Matches the expanded player's contract.
+      if ((key === ' ' || key === 'enter') && keyTarget.closest('button, a')) {
         return;
       }
-      const keyTarget = event.target;
-      const key = event.key.toLowerCase();
-      if (keyTarget instanceof HTMLElement && keyTarget !== event.currentTarget) {
-        // Text inputs own every key outright.
-        if (isEditableTarget(keyTarget)) return;
-        // A focused control keeps only its activation keys — sliders self-consume arrows via Radix
-        // (defaultPrevented above). Matches the expanded player's contract.
-        if ((key === ' ' || key === 'enter') && keyTarget.closest('button, a')) {
-          return;
-        }
+    }
+    const action =
+      key === 'escape'
+        ? 'expand'
+        : (keymap.byKey.get(key) ?? (key === 'enter' ? 'expand' : undefined));
+    if (!action) return;
+    if (event.repeat && (action === 'expand' || !isRepeatablePlayerAction(action))) {
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    const handled = (() => {
+      switch (action) {
+        case 'togglePlay':
+          onTogglePlay();
+          return true;
+        case 'expand':
+        case 'toggleFullscreen':
+        case 'dock':
+          onExpand();
+          return true;
+        case 'seekBackward':
+          onSeekRelative(event.shiftKey ? -5 : -10);
+          return true;
+        case 'seekForward':
+          onSeekRelative(event.shiftKey ? 5 : 10);
+          return true;
+        case 'volumeUp':
+          onVolumeStep(5);
+          return true;
+        case 'volumeDown':
+          onVolumeStep(-5);
+          return true;
+        case 'toggleMute':
+          onToggleMute();
+          return true;
+        case 'nextEpisode':
+          if (canGoNext) onNextEpisode();
+          return canGoNext;
+        case 'skipSegment':
+          if (skipAction) skipAction.onSkip();
+          return !!skipAction;
+        default:
+          return false;
       }
-      const action =
-        key === 'escape'
-          ? 'expand'
-          : (keymap.byKey.get(key) ?? (key === 'enter' ? 'expand' : undefined));
-      if (!action) return;
-      if (event.repeat && (action === 'expand' || !isRepeatablePlayerAction(action))) {
-        event.preventDefault();
-        event.stopPropagation();
-        return;
-      }
-      const handled = (() => {
-        switch (action) {
-          case 'togglePlay':
-            onTogglePlay();
-            return true;
-          case 'expand':
-          case 'toggleFullscreen':
-          case 'dock':
-            onExpand();
-            return true;
-          case 'seekBackward':
-            onSeekRelative(event.shiftKey ? -5 : -10);
-            return true;
-          case 'seekForward':
-            onSeekRelative(event.shiftKey ? 5 : 10);
-            return true;
-          case 'volumeUp':
-            onVolumeStep(5);
-            return true;
-          case 'volumeDown':
-            onVolumeStep(-5);
-            return true;
-          case 'toggleMute':
-            onToggleMute();
-            return true;
-          case 'nextEpisode':
-            if (canGoNext) onNextEpisode();
-            return canGoNext;
-          case 'skipSegment':
-            if (skipAction) skipAction.onSkip();
-            return !!skipAction;
-          default:
-            return false;
-        }
-      })();
-      if (handled) {
-        event.preventDefault();
-        event.stopPropagation();
-      }
-    },
-    [
-      canGoNext,
-      keymap,
-      onExpand,
-      onNextEpisode,
-      onSeekRelative,
-      onToggleMute,
-      onTogglePlay,
-      onVolumeStep,
-      skipAction,
-    ],
-  );
+    })();
+    if (handled) {
+      event.preventDefault();
+      event.stopPropagation();
+    }
+  };
 
   const snapGhostAnchor = snapTargetIndex !== null ? anchors[snapTargetIndex] : null;
   const showLiveSurface = hasVideo && !error;

@@ -79,7 +79,10 @@ function useNavIndicator(items: SidebarNavItem[], pathname: string) {
   return { navRef, itemRefs, activeHref, indicator };
 }
 
-function SidebarNavIndicator({ indicator, activeHref }: ReturnType<typeof useNavIndicator>) {
+function SidebarNavIndicator({
+  indicator,
+  activeHref,
+}: Omit<ReturnType<typeof useNavIndicator>, 'navRef'>) {
   if (!indicator) return null;
   return (
     <>
@@ -116,14 +119,18 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
   const updateTooltip = pendingUpdate?.version
     ? `Update v${pendingUpdate.version} available`
     : 'Update available';
-  const primaryNav = useNavIndicator(PRIMARY_NAV_ITEMS, pathname);
-  const secondaryNav = useNavIndicator(SECONDARY_NAV_ITEMS, pathname);
+  const { navRef: primaryNavRef, ...primaryNav } = useNavIndicator(PRIMARY_NAV_ITEMS, pathname);
+  const { navRef: secondaryNavRef, ...secondaryNav } = useNavIndicator(
+    SECONDARY_NAV_ITEMS,
+    pathname,
+  );
 
   useEffect(() => {
     if (sidebarRoutesWarmed) return;
     const warm = () => {
       sidebarRoutesWarmed = true;
       Object.keys(ROUTE_CHUNK_WARMERS).forEach(warmRouteChunk);
+      void routeChunks.details().catch(() => undefined);
     };
     if (typeof window.requestIdleCallback === 'function') {
       const idle = window.requestIdleCallback(warm, { timeout: 2_000 });
@@ -133,7 +140,10 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
     return () => window.clearTimeout(timer);
   }, []);
 
-  const renderItem = (item: SidebarNavItem, group: ReturnType<typeof useNavIndicator>) => {
+  const renderItem = (
+    item: SidebarNavItem,
+    group: Omit<ReturnType<typeof useNavIndicator>, 'navRef'>,
+  ) => {
     const showUpdate = item.href === SETTINGS_HREF && isUpdateAvailable;
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
     const isActive = isNavItemActive(item, pathname);
@@ -218,7 +228,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         </div>
 
         <nav
-          ref={primaryNav.navRef}
+          ref={primaryNavRef}
           aria-label='Primary'
           className='relative isolate flex-1 flex flex-col gap-2.5 w-full px-2 pointer-events-auto'
         >
@@ -227,7 +237,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         </nav>
 
         <nav
-          ref={secondaryNav.navRef}
+          ref={secondaryNavRef}
           aria-label='Secondary'
           className='relative isolate flex flex-col gap-2.5 mt-auto w-full px-2 pb-4 pointer-events-auto'
         >

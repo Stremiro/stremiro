@@ -2,36 +2,33 @@ import type { ShortcutRow } from '@/lib/shortcuts';
 
 // Display order; ids mirror
 // `PLAYER_KEYBINDING_ACTIONS` in `src-tauri/src/commands/config_store/keybindings.rs`.
+export const PLAYER_ACTION_GROUPS = ['Playback', 'Sound & subtitles', 'Window & panels'] as const;
+
 export const PLAYER_ACTIONS = [
-  { id: 'togglePlay', label: 'Play / Pause' },
-  {
-    id: 'seekBackward',
-    label: 'Seek backward 10 s',
-    repeat: true,
-  },
-  { id: 'seekForward', label: 'Seek forward 10 s', repeat: true },
-  { id: 'volumeUp', label: 'Volume up', repeat: true },
-  { id: 'volumeDown', label: 'Volume down', repeat: true },
-  { id: 'toggleMute', label: 'Mute / Unmute' },
-  { id: 'toggleFullscreen', label: 'Toggle fullscreen' },
-  { id: 'frameBackward', label: 'Frame step back', repeat: true },
-  { id: 'frameForward', label: 'Frame step forward', repeat: true },
-  { id: 'speedDown', label: 'Slower playback', repeat: true },
-  { id: 'speedUp', label: 'Faster playback', repeat: true },
-  { id: 'speedReset', label: 'Reset speed to 1×' },
-  { id: 'cycleSubtitles', label: 'Cycle subtitles' },
-  { id: 'cycleAudio', label: 'Cycle audio track' },
-  { id: 'subtitleEarlier', label: 'Subtitle sync earlier', repeat: true },
-  { id: 'subtitleLater', label: 'Subtitle sync later', repeat: true },
-  { id: 'skipSegment', label: 'Skip intro / recap (when shown)' },
-  { id: 'nextEpisode', label: 'Next episode' },
-  { id: 'episodes', label: 'Episodes panel' },
-  { id: 'streamSelector', label: 'Choose stream / quality' },
-  { id: 'dock', label: 'Dock to mini player' },
-  { id: 'shortcuts', label: 'Keyboard shortcuts' },
+  { id: 'togglePlay', label: 'Play / Pause', group: 'Playback' },
+  { id: 'seekBackward', label: 'Back 10 s', group: 'Playback', repeat: true },
+  { id: 'seekForward', label: 'Forward 10 s', group: 'Playback', repeat: true },
+  { id: 'skipSegment', label: 'Skip intro / recap', group: 'Playback' },
+  { id: 'nextEpisode', label: 'Next episode', group: 'Playback' },
+  { id: 'speedDown', label: 'Slower', group: 'Playback', repeat: true },
+  { id: 'speedUp', label: 'Faster', group: 'Playback', repeat: true },
+  { id: 'speedReset', label: 'Normal speed', group: 'Playback' },
+  { id: 'volumeUp', label: 'Volume up', group: 'Sound & subtitles', repeat: true },
+  { id: 'volumeDown', label: 'Volume down', group: 'Sound & subtitles', repeat: true },
+  { id: 'toggleMute', label: 'Mute', group: 'Sound & subtitles' },
+  { id: 'cycleAudio', label: 'Next audio track', group: 'Sound & subtitles' },
+  { id: 'cycleSubtitles', label: 'Next subtitles', group: 'Sound & subtitles' },
+  { id: 'subtitleEarlier', label: 'Subtitles earlier', group: 'Sound & subtitles', repeat: true },
+  { id: 'subtitleLater', label: 'Subtitles later', group: 'Sound & subtitles', repeat: true },
+  { id: 'toggleFullscreen', label: 'Fullscreen', group: 'Window & panels' },
+  { id: 'episodes', label: 'Episodes', group: 'Window & panels' },
+  { id: 'streamSelector', label: 'Streams', group: 'Window & panels' },
+  { id: 'dock', label: 'Mini player', group: 'Window & panels' },
+  { id: 'shortcuts', label: 'Shortcuts', group: 'Window & panels' },
 ] as const satisfies readonly {
   id: string;
   label: string;
+  group: (typeof PLAYER_ACTION_GROUPS)[number];
   repeat?: boolean;
 }[];
 
@@ -109,11 +106,10 @@ export function ariaKeyShortcuts(keymap: PlayerKeymap, action: PlayerActionId) {
 }
 
 export const FIXED_PLAYER_SHORTCUTS: ShortcutRow[] = [
-  { label: 'Fine seek 5 s', keys: ['Shift + seek key', 'Shift+Scroll'] },
-  { label: 'Seek to % of duration', keys: ['0–9'] },
+  { label: 'Seek 5 s', keys: ['Shift+seek'] },
+  { label: 'Jump to 0–90%', keys: ['0–9'] },
   { label: 'Volume', keys: ['Scroll'] },
-  { label: 'Fullscreen', keys: ['Double-click'] },
-  { label: 'Back / close panel', keys: ['Esc'] },
+  { label: 'Close panel / back', keys: ['Esc'] },
 ];
 
 /** The live table for the `?` overlay — reflects the user's bindings. */

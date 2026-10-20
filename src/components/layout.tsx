@@ -93,6 +93,16 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
 
   return (
     <>
+      <a
+        href='#app-main'
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById('app-main')?.focus({ preventScroll: true });
+        }}
+        className='fixed left-16 top-10 z-90 -translate-y-32 rounded-lg bg-white px-4 py-2 text-sm font-medium text-black focus:translate-y-0 focus:outline-none focus:ring-2 focus:ring-(--accent-nav)'
+      >
+        Skip to content
+      </a>
       <DesktopTitlebar historyControls />
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
       {/* Ambient accent tint. Radial gradients only — blur on viewport layers

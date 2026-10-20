@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { type RefObject, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
@@ -103,45 +103,43 @@ export function usePlayerAddonSubtitles({
   // Distinguishes "asked, got nothing" from "never asked" — gates the empty-state hint.
   const addonSubtitlesQueried = subtitlesEnabled;
 
-  const handleSelectAddonSubtitle = useCallback(
-    async (subtitle: AddonSubtitle) => {
-      if (addonSubtitleLoadingId || !mountedRef.current) return;
-      const subtitleKey = subtitle.selectionKey;
-      const epoch = subtitleSessionEpochRef.current;
-      setAddonSubtitleLoadingId(subtitleKey);
-      try {
-        // The track controller owns the mpv side: URL reuse, single-switch gate, fetch polling, preference persistence.
-        const selected = await selectAddonSubtitle(subtitle);
-        if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
-        if (!selected) {
-          toast.error('Failed to load addon subtitle');
-          return;
-        }
-        setPickedAddonSubtitleId(subtitleKey);
-        announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
-      } finally {
-        if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
-          setAddonSubtitleLoadingId(null);
-        }
+  const handleSelectAddonSubtitle = async (subtitle: AddonSubtitle) => {
+    if (addonSubtitleLoadingId || !mountedRef.current) return;
+    const subtitleKey = subtitle.selectionKey;
+    const epoch = subtitleSessionEpochRef.current;
+    setAddonSubtitleLoadingId(subtitleKey);
+    return (async () => {
+      // The track controller owns the mpv side: URL reuse, single-switch gate, fetch polling, preference persistence.
+      const selected = await selectAddonSubtitle(subtitle);
+      if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
+      if (!selected) {
+        toast.error('Failed to load addon subtitle');
+        return;
       }
-    },
-    [addonSubtitleLoadingId, announce, mountedRef, selectAddonSubtitle],
-  );
+      setPickedAddonSubtitleId(subtitleKey);
+      announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
+    })().finally(() => {
+      if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
+        setAddonSubtitleLoadingId(null);
+      }
+    });
+  };
 
-  const handleSubTrackSelect = useCallback(
-    (trackType: 'sub', trackId: number | 'no', options?: { persistPreference?: boolean }) => {
-      const epoch = subtitleSessionEpochRef.current;
-      void setTrack(trackType, trackId, options).then((applied) => {
-        if (!applied || !mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
-        const label =
-          trackId === 'no'
-            ? 'Subtitles off'
-            : `Subtitles: ${subTracks.find((track) => track.id === trackId)?.displayLabel ?? `Track ${trackId}`}`;
-        announce(label, 'subtitles');
-      });
-    },
-    [announce, mountedRef, setTrack, subTracks],
-  );
+  const handleSubTrackSelect = (
+    trackType: 'sub',
+    trackId: number | 'no',
+    options?: { persistPreference?: boolean },
+  ) => {
+    const epoch = subtitleSessionEpochRef.current;
+    void setTrack(trackType, trackId, options).then((applied) => {
+      if (!applied || !mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
+      const label =
+        trackId === 'no'
+          ? 'Subtitles off'
+          : `Subtitles: ${subTracks.find((track) => track.id === trackId)?.displayLabel ?? `Track ${trackId}`}`;
+      announce(label, 'subtitles');
+    });
+  };
 
   // Menu-open state follows the popover: a closed menu stops refetch eligibility while cached data still paints on reopen.
 

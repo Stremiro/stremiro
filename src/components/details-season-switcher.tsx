@@ -1,12 +1,12 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useCallback, useEffect, useRef } from 'react';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
-import { SLIDING_ACCENT_PILL_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { clamp, cn, scrollBehavior } from '@/lib/utils';
 
-export interface LocalSeasonEntry {
+interface LocalSeasonEntry {
   number: number;
-  shortLabel: string;
+  label: string;
   episodeCount: number;
 }
 
@@ -53,19 +53,21 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
       if (!strip || !tab) return;
       const stripBounds = strip.getBoundingClientRect();
       const tabBounds = tab.getBoundingClientRect();
-      strip.scrollTo({
-        left:
-          strip.scrollLeft +
-          tabBounds.left -
-          stripBounds.left -
-          strip.clientLeft +
-          (tabBounds.width - strip.clientWidth) / 2,
-        behavior: scrollBehavior(),
-      });
+      const inset = hasOverflow ? 48 : strip.clientLeft;
+      const visibleLeft = stripBounds.left + inset;
+      const visibleRight = stripBounds.right - inset;
+      const offset =
+        tabBounds.left < visibleLeft
+          ? tabBounds.left - visibleLeft
+          : tabBounds.right > visibleRight
+            ? tabBounds.right - visibleRight
+            : 0;
+      // Keep visible tabs still; only reveal labels hidden by the overflow controls.
+      if (offset !== 0) strip.scrollBy({ left: offset, behavior: scrollBehavior() });
     }, 0);
 
     return () => window.clearTimeout(timer);
-  }, [activeSeason, hasMultipleSeasons]);
+  }, [activeSeason, hasMultipleSeasons, hasOverflow]);
 
   const goToSeasonIndex = useCallback(
     (index: number) => {
@@ -95,6 +97,14 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
       <div
         ref={bindScrollRef}
         onKeyDown={(event) => {
+          if (
+            event.defaultPrevented ||
+            event.altKey ||
+            event.ctrlKey ||
+            event.metaKey ||
+            event.shiftKey
+          )
+            return;
           if (activeIndex < 0) return;
           let nextIndex: number;
           if (event.key === 'ArrowLeft') nextIndex = activeIndex - 1;
@@ -112,7 +122,7 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
         {indicator && (
           <span
             aria-hidden='true'
-            className={SLIDING_ACCENT_PILL_CLASS}
+            className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-md border border-white/15 bg-white/[0.1]'
             style={{
               width: indicator.width,
               height: indicator.height,
@@ -138,24 +148,22 @@ export function SeasonSwitcher({ localSeasons, activeSeason, onLocalSeason }: Se
               aria-label={`${season.number === 0 ? 'Specials' : `Season ${season.number}`}, ${season.episodeCount} ${season.episodeCount === 1 ? 'episode' : 'episodes'}`}
               tabIndex={isActive ? 0 : -1}
               className={cn(
-                'nav-switch-item relative z-1 flex h-9 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md px-3 text-[13px] font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
-                isActive
-                  ? 'text-(--on-accent-nav)'
-                  : 'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+                'relative z-1 flex h-12 min-w-[92px] shrink-0 flex-col items-center justify-center whitespace-nowrap rounded-md px-4 text-[13.5px] font-semibold leading-none transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
+                isActive ? 'text-white' : 'text-zinc-300 hover:bg-white/[0.04] hover:text-white',
               )}
               onClick={() => {
                 if (!isActive) onLocalSeason(season.number);
               }}
             >
-              {season.shortLabel}
+              {season.label}
               {season.episodeCount > 0 && (
                 <span
                   className={cn(
-                    'text-[11px] tabular-nums',
-                    isActive ? 'opacity-60' : 'text-zinc-500',
+                    'mt-1 text-[11px] font-medium tabular-nums',
+                    isActive ? 'text-zinc-200' : 'text-zinc-400',
                   )}
                 >
-                  {season.episodeCount}
+                  {season.episodeCount} {season.episodeCount === 1 ? 'episode' : 'episodes'}
                 </span>
               )}
             </button>

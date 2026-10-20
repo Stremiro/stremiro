@@ -1,6 +1,13 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { lazy, type RefObject, Suspense, useEffect, useState } from 'react';
-import { Dialog } from '@/components/ui/dialog';
+import { lazy, type RefObject, Suspense, useRef } from 'react';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Skeleton } from '@/components/ui/skeleton';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { api, getListErrorMessage, type UserList } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
@@ -17,10 +24,8 @@ export function warmListEditorDialog() {
 }
 
 function ListEditorDialog(props: ListEditorDialogProps) {
-  const [hasOpened, setHasOpened] = useState(props.open);
-  useEffect(() => {
-    if (props.open) setHasOpened(true);
-  }, [props.open]);
+  const contentRef = useRef<HTMLDivElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
 
   return (
     <Dialog
@@ -29,11 +34,43 @@ function ListEditorDialog(props: ListEditorDialogProps) {
         if (!props.isPending) props.onOpenChange(open);
       }}
     >
-      {(props.open || hasOpened) && (
-        <Suspense fallback={null}>
-          <ListEditorContent {...props} />
+      <DialogContent
+        ref={contentRef}
+        className='sm:max-w-md max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 border-white/10 text-zinc-200'
+        onOpenAutoFocus={(event) => {
+          event.preventDefault();
+          (nameInputRef.current ?? contentRef.current)?.focus({ preventScroll: true });
+        }}
+        onCloseAutoFocus={(event) => {
+          const target = props.returnFocusRef?.current;
+          if (target?.isConnected) {
+            event.preventDefault();
+            target.focus({ preventScroll: true });
+          }
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle className='text-white font-semibold'>{props.title}</DialogTitle>
+          <DialogDescription className='text-zinc-400'>
+            A home for your next obsession, favourites, or movie night.
+          </DialogDescription>
+        </DialogHeader>
+        <Suspense
+          fallback={
+            <div role='status'>
+              <span className='sr-only'>Loading list editor…</span>
+              <div aria-hidden='true' className='space-y-5'>
+                <Skeleton className='h-20 rounded-xl' />
+                <Skeleton className='h-16 rounded-lg' />
+                <Skeleton className='h-32 rounded-xl' />
+                <Skeleton className='ml-auto h-9 w-28 rounded-lg' />
+              </div>
+            </div>
+          }
+        >
+          <ListEditorContent {...props} nameInputRef={nameInputRef} />
         </Suspense>
-      )}
+      </DialogContent>
     </Dialog>
   );
 }

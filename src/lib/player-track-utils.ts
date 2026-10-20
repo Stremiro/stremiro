@@ -15,10 +15,6 @@ export interface Track {
   externalFilename?: string;
 }
 
-export function normalizeLanguageToken(value?: string | null): string {
-  return (value ?? '').trim().toLowerCase();
-}
-
 export function toTrackLanguageCandidate(track: Track): TrackLanguageCandidate {
   return {
     id: track.id,
@@ -34,7 +30,7 @@ function trackFingerprintFields(track: Track, includeSelected: boolean): Array<n
   const fields: Array<number | string> = [
     track.id,
     track.displayLabel,
-    normalizeLanguageToken(track.lang),
+    (track.lang ?? '').trim().toLowerCase(),
     track.title?.trim().toLowerCase() ?? '',
   ];
   if (includeSelected) fields.push(track.selected ? '1' : '0');

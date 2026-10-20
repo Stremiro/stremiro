@@ -23,7 +23,7 @@ const SCROLL_BUTTON_CLASS_NAME =
   'h-9 w-9 rounded-md bg-transparent border border-white/[0.08] text-zinc-400 hover:bg-white/[0.08] hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-40';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
-  'flex overflow-x-auto gap-4 pb-8 scrollbar-hide snap-x snap-proximity';
+  'flex overflow-x-auto gap-4 px-1 pt-1 pb-8 scrollbar-hide snap-x snap-proximity';
 // Bounded scroll memory survives route changes.
 const RAIL_SCROLL_MEMORY_MAX = 64;
 const railScrollPositions = new Map<string, number>();
@@ -76,6 +76,7 @@ export function HorizontalMediaRail<T>({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const slotRef = useRef<HTMLDivElement>(null);
   const lastScrollLeftRef = useRef(0);
+  const pendingFocusIndexRef = useRef<number | null>(null);
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const [slotWidth, setSlotWidth] = useState(190);
   const shouldVirtualize = !isLoading && !hasNotice && items.length > RAIL_VIRTUALIZATION_THRESHOLD;
@@ -100,6 +101,23 @@ export function HorizontalMediaRail<T>({
     getItemKey: getVirtualItemKey,
     rangeExtractor,
   });
+
+  const focusItem = useCallback((index: number) => {
+    const slot = scrollContainerRef.current?.querySelector<HTMLElement>(
+      `[data-media-rail-index="${index}"]`,
+    );
+    const target = slot?.querySelector<HTMLElement>(
+      '[data-media-card-poster], a[href], button:not([disabled])',
+    );
+    if (!target) return false;
+    target.focus({ preventScroll: true });
+    return true;
+  }, []);
+
+  useLayoutEffect(() => {
+    const index = pendingFocusIndexRef.current;
+    if (index !== null && focusItem(index)) pendingFocusIndexRef.current = null;
+  }, [focusItem, focusedIndex]);
 
   useLayoutEffect(() => {
     if (shouldVirtualize) virtualizer.measure();
@@ -210,12 +228,17 @@ export function HorizontalMediaRail<T>({
       className={cn('py-4 relative group/section', sectionClassName)}
     >
       <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
-        <div className={cn('flex items-center justify-between mb-3', !hasNotice && 'min-h-9')}>
-          <h2 id={titleId} className='text-[17px] font-semibold tracking-[-0.02em] text-white'>
+        <div
+          className={cn('flex items-center justify-between gap-3 mb-3', !hasNotice && 'min-h-9')}
+        >
+          <h2
+            id={titleId}
+            className='min-w-0 text-[17px] font-semibold tracking-[-0.02em] text-white'
+          >
             {title}
           </h2>
 
-          {!hasNotice && scrollState.hasOverflow && (
+          {!hasNotice && !isLoading && scrollState.hasOverflow && (
             <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150'>
               <Button
                 aria-label='Scroll rail left'
@@ -228,7 +251,7 @@ export function HorizontalMediaRail<T>({
                   if (scrollState.canScrollLeft) scroll('left');
                 }}
               >
-                <ChevronLeft className='h-4 w-4' />
+                <ChevronLeft aria-hidden='true' className='h-4 w-4' />
               </Button>
               <Button
                 aria-label='Scroll rail right'
@@ -240,7 +263,7 @@ export function HorizontalMediaRail<T>({
                   if (scrollState.canScrollRight) scroll('right');
                 }}
               >
-                <ChevronRight className='h-4 w-4' />
+                <ChevronRight aria-hidden='true' className='h-4 w-4' />
               </Button>
             </div>
           )}
@@ -273,15 +296,55 @@ export function HorizontalMediaRail<T>({
             role='region'
             aria-labelledby={titleId}
             // eslint-disable-next-line jsx-a11y/no-noninteractive-tabindex -- Scroll regions must be keyboard reachable.
-            tabIndex={0}
+            tabIndex={isLoading ? -1 : 0}
+            onFocusCapture={(event) => {
+              if (!(event.target instanceof HTMLElement)) return;
+              const slot = event.target.closest<HTMLElement>('[data-media-rail-index]');
+              if (!slot) return;
+              if (shouldVirtualize) setFocusedIndex(Number(slot.dataset.mediaRailIndex));
+              const container = event.currentTarget;
+              const bounds = container.getBoundingClientRect();
+              const card = slot.getBoundingClientRect();
+              const inset = Math.max(0, Math.min(28, (container.clientWidth - card.width) / 2));
+              const left = card.left - bounds.left - inset;
+              const right = card.right - bounds.right + inset;
+              if (left < 0 || right > 0) {
+                container.scrollBy({ left: left < 0 ? left : right, behavior: 'instant' });
+              }
+            }}
+            onBlurCapture={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
+            }}
             onKeyDown={(event) => {
               if (
-                event.target !== event.currentTarget ||
+                event.defaultPrevented ||
                 event.altKey ||
                 event.ctrlKey ||
-                event.metaKey
+                event.metaKey ||
+                event.shiftKey
               )
                 return;
+              if (event.target !== event.currentTarget) {
+                if (!(event.target instanceof HTMLElement)) return;
+                if (!event.target.matches('[data-media-card-poster]')) return;
+                const slot = event.target.closest<HTMLElement>('[data-media-rail-index]');
+                if (!slot) return;
+                const index = Number(slot.dataset.mediaRailIndex);
+                let nextIndex: number;
+                if (event.key === 'ArrowLeft') nextIndex = Math.max(0, index - 1);
+                else if (event.key === 'ArrowRight')
+                  nextIndex = Math.min(items.length - 1, index + 1);
+                else if (event.key === 'Home') nextIndex = 0;
+                else if (event.key === 'End') nextIndex = items.length - 1;
+                else return;
+                event.preventDefault();
+                if (nextIndex === index) return;
+                if (!focusItem(nextIndex) && shouldVirtualize) {
+                  pendingFocusIndexRef.current = nextIndex;
+                  setFocusedIndex(nextIndex);
+                }
+                return;
+              }
               if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
                 event.preventDefault();
                 scroll(event.key === 'ArrowLeft' ? 'left' : 'right');
@@ -316,18 +379,19 @@ export function HorizontalMediaRail<T>({
                 ? virtualizer.getVirtualItems().map((virtualItem) => (
                     <div
                       key={virtualItem.key}
+                      data-media-rail-index={virtualItem.index}
                       className={DEFAULT_ITEM_CLASS_NAME}
                       style={{ gridColumn: virtualItem.index + 1, gridRow: 1 }}
-                      onFocusCapture={() => setFocusedIndex(virtualItem.index)}
-                      onBlurCapture={(event) => {
-                        if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
-                      }}
                     >
                       {renderItem(items[virtualItem.index], virtualItem.index)}
                     </div>
                   ))
                 : items.map((item, index) => (
-                    <div key={getItemKey(item, index)} className={DEFAULT_ITEM_CLASS_NAME}>
+                    <div
+                      key={getItemKey(item, index)}
+                      data-media-rail-index={index}
+                      className={DEFAULT_ITEM_CLASS_NAME}
+                    >
                       {renderItem(item, index)}
                     </div>
                   ))}

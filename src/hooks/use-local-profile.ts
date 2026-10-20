@@ -118,10 +118,12 @@ export function useLocalProfile() {
     (patch: ProfilePreferencesPatch) => {
       const operation = (async () => {
         // Rust applies only the edited fields to the persisted profile under the store gate.
-        await queryClient.ensureQueryData({
-          queryKey: PROFILE_PREFERENCES_QUERY_KEY,
-          queryFn: api.getProfilePreferences,
-        });
+        if (!queryClient.getQueryData(PROFILE_PREFERENCES_QUERY_KEY)) {
+          await queryClient.ensureQueryData({
+            queryKey: PROFILE_PREFERENCES_QUERY_KEY,
+            queryFn: api.getProfilePreferences,
+          });
+        }
         const latest =
           queryClient.getQueryData<ProfilePreferences>(PROFILE_PREFERENCES_QUERY_KEY) ??
           DEFAULT_PROFILE_PREFERENCES;
@@ -148,11 +150,6 @@ export function useLocalProfile() {
     [queryClient, saveProfilePrefs],
   );
 
-  const updateProfile = useCallback(
-    (updates: LocalProfileUpdate) => persistPreferences(updates),
-    [persistPreferences],
-  );
-
   const updateViewMode = useCallback(
     (viewMode: ProfileViewMode) => persistPreferences({ viewMode }),
     [persistPreferences],
@@ -166,7 +163,7 @@ export function useLocalProfile() {
       (!profilePreferencesQuery.isSuccess || profilePreferencesQuery.isPlaceholderData),
     isError: profilePreferencesQuery.isError,
     profilePreferencesQuery,
-    updateProfile,
+    updateProfile: persistPreferences,
     updateViewMode,
     isSaving: savePreferencesMutation.isPending,
   };

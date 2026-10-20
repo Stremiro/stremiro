@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
-import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { getErrorKind, getErrorMessage, type AddonStream } from '@/lib/api';
 import type { NextEpisodeStreamCoordinates } from '@/lib/episode-stream-target';
 import {
@@ -12,6 +11,7 @@ import {
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
+import { formatSeasonEpisode } from '@/lib/utils';
 
 const isDev = import.meta.env.DEV;
 
@@ -26,9 +26,9 @@ interface SelectorEpisodeOverride extends NextEpisodeStreamCoordinates {
 }
 
 interface SelectorResolveAttempt {
+  abort: AbortController;
   feedback: ActiveResolveFeedback;
   stream: AddonStream;
-  attemptId: number;
   launchGeneration: number;
   sessionKey: string;
   episodeOverride?: SelectorEpisodeOverride;
@@ -85,69 +85,46 @@ export function useSelectorResolution({
     type: streamMediaType,
   } = target;
   const navigate = useNavigate();
-  // Key/session/feedback move as one unit — a single nullable state can't tear mid-update.
-  const [activeResolve, setActiveResolve] = useState<{
-    feedback: ActiveResolveFeedback;
-    key: string;
-    sessionKey: string;
-  } | null>(null);
-  // Synchronous in-flight guard: `isPending` is render-time state — two
-  // same-tick selects would both spawn a resolve IPC.
-  const resolveInFlightRef = useRef(false);
-  // A slow resolve can outlive the close click and the component.
+  const [activeResolve, setActiveResolve] = useState<SelectorResolveAttempt | null>(null);
+  // The attempt identity also guards same-tick picks and cancelled continuations.
+  const activeResolveRef = useRef<SelectorResolveAttempt | null>(null);
   const openRef = useRef(open);
-  const latestSessionKeyRef = useRef(selectorSessionKey);
   // Read at resolve time so the selector never subscribes to the playback clock.
   const getStartTimeRef = useRef(getStartTime);
-  // Per-attempt identity: a superseded resolve's late winner can't navigate.
-  const resolveAttemptIdRef = useRef(0);
   // Latest-render binding for the resolve body — `handleSelectStream` is an
   // event handler, so a per-render ref gives latest-closure semantics.
   const resolveStreamRef = useRef<((attempt: SelectorResolveAttempt) => Promise<void>) | undefined>(
     undefined,
   );
-  // Unmount invalidates every outstanding attempt.
-  const mountedRef = useMountedRef(() => {
-    resolveAttemptIdRef.current += 1;
-  });
-
-  useEffect(() => {
-    openRef.current = open;
-    latestSessionKeyRef.current = selectorSessionKey;
-    getStartTimeRef.current = getStartTime;
-  });
-
   const isCurrentResolve = useCallback(
-    (attempt: SelectorResolveAttempt) =>
-      mountedRef.current &&
-      openRef.current &&
-      attempt.attemptId === resolveAttemptIdRef.current &&
-      attempt.sessionKey === latestSessionKeyRef.current,
-    [mountedRef],
+    (attempt: SelectorResolveAttempt) => openRef.current && activeResolveRef.current === attempt,
+    [],
   );
 
   // Only expose the in-flight resolve for its own session.
   const sessionResolve = activeResolve?.sessionKey === selectorSessionKey ? activeResolve : null;
 
-  const resetActiveResolveState = useCallback(() => {
-    resolveInFlightRef.current = false;
+  const cancelResolve = useCallback(() => {
+    activeResolveRef.current?.abort.abort();
+    activeResolveRef.current = null;
     setActiveResolve(null);
   }, []);
 
-  // Invalidate the attempt so its late winner can't navigate; release the UI lock.
-  const cancelResolve = useCallback(() => {
-    resolveAttemptIdRef.current += 1;
-    resetActiveResolveState();
-  }, [resetActiveResolveState]);
-
-  const closeSelector = useCallback(() => {
+  const closeSelector = () => {
+    openRef.current = false;
     cancelResolve();
     onClose();
-  }, [cancelResolve, onClose]);
+  };
 
-  // Open/session transitions invalidate outstanding attempts.
-  useEffect(() => {
+  // Invalidate at commit, before a settled IPC can resume against the previous target.
+  useLayoutEffect(() => {
+    openRef.current = open;
     cancelResolve();
+    return () => {
+      openRef.current = false;
+      activeResolveRef.current?.abort.abort();
+      activeResolveRef.current = null;
+    };
   }, [cancelResolve, open, selectorSessionKey]);
 
   const resolveStream = async (attempt: SelectorResolveAttempt) => {
@@ -156,14 +133,14 @@ export function useSelectorResolution({
       isCurrentResolve(attempt) && isCurrentPlaybackLaunch(attempt.launchGeneration);
     // A pack-episode pick overrides every coordinate with the episode's own.
     const override = attempt.episodeOverride;
-    const coords = {
-      streamLookupId: override?.streamLookupId ?? lookupId,
-      streamSeason: override?.streamSeason ?? season,
-      streamEpisode: override?.streamEpisode ?? episode,
-      absoluteSeason: override?.absoluteSeason ?? absoluteSeason,
-      absoluteEpisode: override?.absoluteEpisode ?? absoluteEpisode,
+    const coords = override ?? {
+      streamLookupId: lookupId,
+      streamSeason: season,
+      streamEpisode: episode,
+      absoluteSeason,
+      absoluteEpisode,
     };
-    try {
+    const runResolve = async () => {
       // Resolve by identity: `preferredStreamKey` keeps the raw stream payload
       // (proxy secrets included) out of JS; source/family soft-match on re-digest.
       const data = await resolvePlayerStream({
@@ -181,8 +158,8 @@ export function useSelectorResolution({
           sourceName: stream.sourceName,
           streamFamily: stream.streamFamily,
         },
+        signal: attempt.abort.signal,
       });
-
       // A cancelled or superseded attempt must never navigate.
       if (!isCurrentLaunch()) {
         return;
@@ -225,78 +202,88 @@ export function useSelectorResolution({
       // The pick supplies the replayed key plus identity fallback for a failover winner.
       launchResolvedStream(navigate, resolvedRequest, data, routeExtras, stream);
       closeSelector();
-    } catch (error) {
-      if (isCurrentLaunch()) {
-        if (isDev) console.error('[player] stream resolution failed:', error);
-        const message = getErrorMessage(error);
-        switch (getErrorKind(error)) {
-          case 'no_direct_url':
-            toast.error('Stream needs a direct-link source', {
-              description: message,
-              duration: 6000,
-            });
-            break;
-          case 'rate_limited':
-            toast.warning('Stream source is rate-limiting', {
-              description:
-                'The stream source is rate-limiting requests. Wait 30 s then retry, or try another stream.',
-              duration: 7000,
-            });
-            break;
-          default:
-            toast.error('Failed to resolve stream', { description: message, duration: 5000 });
+    };
+    await runResolve()
+      .catch((error: unknown) => {
+        if (isCurrentLaunch()) {
+          if (isDev) console.error('[player] stream resolution failed:', error);
+          const message = getErrorMessage(error);
+          switch (getErrorKind(error)) {
+            case 'no_direct_url':
+              toast.error('Stream needs a direct-link source', {
+                description: message,
+                duration: 6000,
+              });
+              break;
+            case 'rate_limited':
+              toast.warning('Stream source is rate-limiting', {
+                description:
+                  'The stream source is rate-limiting requests. Wait 30 s then retry, or try another stream.',
+                duration: 7000,
+              });
+              break;
+            default:
+              toast.error('Failed to resolve stream', { description: message, duration: 5000 });
+          }
         }
-      }
-    } finally {
-      if (isCurrentResolve(attempt)) {
-        resetActiveResolveState();
-      }
-    }
+      })
+      .finally(() => {
+        if (isCurrentResolve(attempt)) {
+          cancelResolve();
+        }
+      });
   };
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    getStartTimeRef.current = getStartTime;
     resolveStreamRef.current = resolveStream;
   });
 
   // A cancelled resolve may still be settling, but the user must be able to pick again.
   const isAnyResolving = sessionResolve !== null;
 
-  const handleSelectStream = useCallback(
-    (stream: AddonStream, episodeOverride?: SelectorEpisodeOverride) => {
-      if (resolveInFlightRef.current) {
-        return;
-      }
+  const handleSelectStream = (stream: AddonStream, episodeOverride?: SelectorEpisodeOverride) => {
+    if (!openRef.current || activeResolveRef.current) {
+      return;
+    }
 
-      // No peer-to-peer engine — explain instead of paying a doomed resolve.
-      if (!stream.presentation.isInstantlyPlayable) {
-        toast.info('P2P source — not playable in this build', {
-          description:
-            'Peer-to-peer streams need a direct link or cached source. Pick a Cached or HTTP row instead.',
-          duration: 5000,
-        });
-        return;
-      }
+    // No peer-to-peer engine — explain instead of paying a doomed resolve.
+    if (!stream.presentation.isInstantlyPlayable) {
+      toast.info('P2P source — not playable in this build', {
+        description:
+          'Peer-to-peer streams need a direct link or cached source. Pick a Cached or HTTP row instead.',
+        duration: 5000,
+      });
+      return;
+    }
 
-      // Claim the attempt synchronously so a same-tick second click can't slip past.
-      const feedback = buildResolveFeedback(stream);
-      const attempt: SelectorResolveAttempt = {
-        feedback,
-        stream,
-        attemptId: ++resolveAttemptIdRef.current,
-        launchGeneration: claimPlaybackLaunch(),
-        sessionKey: selectorSessionKey,
-        episodeOverride,
-      };
-      resolveInFlightRef.current = true;
-      setActiveResolve({ feedback, key: stream.streamKey, sessionKey: selectorSessionKey });
-      void resolveStreamRef.current?.(attempt);
-    },
-    [selectorSessionKey],
-  );
+    // Claim the attempt synchronously so a same-tick second click can't slip past.
+    const feedback = buildResolveFeedback(stream);
+    if (episodeOverride) {
+      feedback.subtitle = [
+        formatSeasonEpisode(episodeOverride.absoluteSeason, episodeOverride.absoluteEpisode),
+        feedback.subtitle,
+      ]
+        .filter(Boolean)
+        .join(' · ');
+    }
+    const attempt: SelectorResolveAttempt = {
+      abort: new AbortController(),
+      feedback,
+      stream,
+      launchGeneration: claimPlaybackLaunch(),
+      sessionKey: selectorSessionKey,
+      episodeOverride,
+    };
+    activeResolveRef.current = attempt;
+    setActiveResolve(attempt);
+    void resolveStreamRef.current?.(attempt);
+  };
 
   return {
+    activeResolveEpisode: sessionResolve?.episodeOverride,
     activeResolveFeedback: sessionResolve?.feedback ?? null,
-    activeResolveKey: sessionResolve?.key ?? null,
+    activeResolveKey: sessionResolve?.stream.streamKey ?? null,
     cancelResolve,
     handleRequestClose: closeSelector,
     handleSelectStream,

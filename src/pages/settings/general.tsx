@@ -1,26 +1,18 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, ChevronDown } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '@/components/ui/dropdown-menu';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { api, getErrorMessage, type StartupPage } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
-import { cn } from '@/lib/utils';
 import {
-  SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
   SettingsRow,
+  SettingsSelect,
   SettingsSwitch,
 } from './chrome';
 
@@ -44,6 +36,15 @@ export function GeneralSettings() {
   );
   const launchQuery = useQuery(launchAtLoginQueryOptions);
   const launchMutation = useMutation({
+    onMutate: async (enabled: boolean) => {
+      await queryClient.cancelQueries({
+        queryKey: launchAtLoginQueryOptions.queryKey,
+        exact: true,
+      });
+      const previous = queryClient.getQueryData<boolean>(launchAtLoginQueryOptions.queryKey);
+      queryClient.setQueryData(launchAtLoginQueryOptions.queryKey, enabled);
+      return previous;
+    },
     mutationFn: async (enabled: boolean) => {
       await flushPendingAppWrites();
       return api.setLaunchAtLogin(enabled);
@@ -55,14 +56,20 @@ export function GeneralSettings() {
       });
       queryClient.setQueryData(launchAtLoginQueryOptions.queryKey, enabled);
     },
-    onError: (error) =>
-      toast.error('Could not change launch at login.', { description: getErrorMessage(error) }),
-    onSettled: (_enabled, error) =>
-      Promise.all([
+    onError: (error, _enabled, previous) => {
+      if (previous !== undefined) {
+        queryClient.setQueryData(launchAtLoginQueryOptions.queryKey, previous);
+      }
+      toast.error('Could not change launch at login.', { description: getErrorMessage(error) });
+    },
+    onSettled: async (_enabled, error) => {
+      await flushPendingAppWrites().catch(() => undefined);
+      await Promise.all([
         error != null &&
           queryClient.invalidateQueries({ queryKey: launchAtLoginQueryOptions.queryKey }),
         queryClient.invalidateQueries({ queryKey: APP_UI_PREFERENCES_QUERY_KEY }),
-      ]),
+      ]);
+    },
   });
 
   const launchPending = launchQuery.isLoading || launchMutation.isPending;
@@ -75,54 +82,21 @@ export function GeneralSettings() {
     <div className='space-y-5'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
       <SettingsGroup>
-        <SettingsGroupHeader
-          title='Startup'
-          description='Choose where Stremiro opens and how it starts with your device.'
-        />
+        <SettingsGroupHeader title='Startup' />
         <SettingsBody rows>
           <SettingsQueryError
             query={launchQuery}
             message='Could not read your login item setting.'
           />
-          <SettingsRow label='Start page' description='The page shown when Stremiro opens.'>
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant='outline'
-                  aria-label={`Start page: ${startPageLabel}`}
-                  disabled={isHydrating}
-                  className={cn(
-                    'h-9 min-w-36 justify-between px-3 text-[13px] shadow-none',
-                    SETTINGS_OUTLINE_BUTTON_CLASS,
-                  )}
-                >
-                  {startPageLabel}
-                  <ChevronDown className='ml-3 h-4 w-4 text-zinc-500 opacity-70' />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent
-                align='end'
-                className='min-w-40 border-white/10 bg-zinc-950 backdrop-blur-none'
-              >
-                {START_PAGES.map((option) => (
-                  <DropdownMenuItem
-                    key={option.value}
-                    role='menuitemradio'
-                    aria-checked={preferences.startupPage === option.value}
-                    disabled={isHydrating}
-                    onClick={() => updatePreferences({ startupPage: option.value })}
-                    className='gap-2.5 rounded-lg px-3 py-2 text-sm text-zinc-200 cursor-pointer transition-colors hover:bg-white/10 hover:text-white'
-                  >
-                    {preferences.startupPage === option.value ? (
-                      <Check className='h-4 w-4 text-white' />
-                    ) : (
-                      <span className='w-4' />
-                    )}
-                    {option.label}
-                  </DropdownMenuItem>
-                ))}
-              </DropdownMenuContent>
-            </DropdownMenu>
+          <SettingsRow label='Start page' description='Where Stremiro opens.'>
+            <SettingsSelect
+              ariaLabel='Start page'
+              valueLabel={startPageLabel}
+              value={preferences.startupPage}
+              options={START_PAGES}
+              disabled={isHydrating}
+              onChange={(startupPage) => updatePreferences({ startupPage })}
+            />
           </SettingsRow>
           <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
             <SettingsSwitch
@@ -137,8 +111,8 @@ export function GeneralSettings() {
             label='Start minimized'
             description={
               canStartMinimized
-                ? 'When launched at login, start in the system tray.'
-                : 'Turn on Launch at login, Close to tray, or Minimize to tray to use this.'
+                ? 'Start in the system tray.'
+                : 'Needs Launch at login or a tray option.'
             }
           >
             <SettingsSwitch
@@ -156,7 +130,7 @@ export function GeneralSettings() {
         <SettingsBody rows>
           <SettingsRow
             label='Close to tray'
-            description='Closing the window keeps Stremiro running in the system tray.'
+            description='Keep running in the tray when the window closes.'
           >
             <SettingsSwitch
               ariaLabel='Close to tray'
@@ -167,7 +141,7 @@ export function GeneralSettings() {
           </SettingsRow>
           <SettingsRow
             label='Minimize to tray'
-            description='Hide to the system tray instead of the taskbar when minimized.'
+            description='Hide to the tray instead of the taskbar.'
           >
             <SettingsSwitch
               ariaLabel='Minimize to tray'

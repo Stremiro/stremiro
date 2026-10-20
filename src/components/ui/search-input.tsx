@@ -1,5 +1,5 @@
 import { Loader2, Search, X } from 'lucide-react';
-import { type RefObject, useRef } from 'react';
+import { type RefObject, useEffect, useEffectEvent, useRef } from 'react';
 import { Input } from '@/components/ui/input';
 import { cn } from '@/lib/utils';
 
@@ -32,6 +32,28 @@ export function SearchInput({
 }: SearchInputProps) {
   const localInputRef = useRef<HTMLInputElement>(null);
   const inputRef = suppliedInputRef ?? localInputRef;
+
+  const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {
+    if (
+      event.key !== 'Escape' ||
+      event.isComposing ||
+      event.defaultPrevented ||
+      event.target !== inputRef.current ||
+      (!value && !event.repeat)
+    ) {
+      return;
+    }
+    event.preventDefault();
+    event.stopPropagation();
+    if (!event.repeat) onValueChange('');
+  });
+
+  // Window capture beats Radix's Escape dismissal; held Escape must not close after clearing.
+  useEffect(() => {
+    window.addEventListener('keydown', handleKeyDown, true);
+    return () => window.removeEventListener('keydown', handleKeyDown, true);
+  }, []);
+
   return (
     <div className={cn('relative', wrapperClassName)}>
       {pending ? (
@@ -58,16 +80,11 @@ export function SearchInput({
             if (!e.repeat) onSubmit();
             return;
           }
-          // Progressive dismissal: Esc clears text, then blurs so page-level Esc (back) becomes the next step.
+          // An empty field blurs on Esc so page-level Esc (back) becomes the next step.
           if (e.key !== 'Escape' || e.defaultPrevented || e.nativeEvent.isComposing) return;
           e.preventDefault();
           e.stopPropagation();
-          if (e.repeat) return;
-          if (value) {
-            onValueChange('');
-          } else {
-            e.currentTarget.blur();
-          }
+          if (!e.repeat) e.currentTarget.blur();
         }}
       />
       {value && (

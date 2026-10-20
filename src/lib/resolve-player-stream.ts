@@ -72,12 +72,14 @@ export function playerStreamRankingOptions(request: PlayerStreamRequest) {
   });
 }
 
+/** `signal` cancels the backend resolve once every caller sharing it has aborted. */
 export function resolvePlayerStream(
   request: PlayerStreamRequest & {
     preferred?: PreferredStreamIdentity;
+    signal?: AbortSignal;
   },
 ): Promise<BestResolvedStream> {
-  const { preferred, ...coords } = request;
+  const { preferred, signal, ...coords } = request;
 
   return api.resolveBestStream(
     coords.mediaType,
@@ -92,6 +94,7 @@ export function resolvePlayerStream(
       preferredStreamFamily: preferred?.streamFamily,
       ...playerStreamRankingOptions(coords),
     },
+    signal,
   );
 }
 

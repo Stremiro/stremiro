@@ -147,14 +147,8 @@ export function usePlayerSessionBoundary({
   });
 
   useEffect(() => {
-    playbackLanguagePreferencesRef.current = {
-      preferredAudioLanguage: playbackLanguagePreferences.preferredAudioLanguage,
-      preferredSubtitleLanguage: playbackLanguagePreferences.preferredSubtitleLanguage,
-    };
-  }, [
-    playbackLanguagePreferences.preferredAudioLanguage,
-    playbackLanguagePreferences.preferredSubtitleLanguage,
-  ]);
+    playbackLanguagePreferencesRef.current = playbackLanguagePreferences;
+  }, [playbackLanguagePreferences]);
 
   useEffect(() => {
     saveProgressRef.current = saveProgress;

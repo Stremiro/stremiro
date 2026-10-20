@@ -1,7 +1,7 @@
 import {
+  useCallback,
   Fragment,
   memo,
-  useCallback,
   useEffect,
   useLayoutEffect,
   useRef,
@@ -42,10 +42,11 @@ interface PlayerTimeDisplayProps {
 export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
   clock,
   duration,
-  playbackSpeed = 1,
-  active = true,
+  playbackSpeed,
+  active: activeProp,
   className,
 }: PlayerTimeDisplayProps) {
+  const active = activeProp === undefined ? true : activeProp;
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const displayTime = useSyncExternalStore(active ? clock.subscribe : subscribeWhileHidden, () =>
     Math.floor(
@@ -54,17 +55,14 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
         : clock.getSnapshot(),
     ),
   );
-  const [endsAtText, setEndsAtText] = useState<string | null>(null);
-  const endsAtMinuteRef = useRef<number | null>(null);
+  const [endsAtMinute, setEndsAtMinute] = useState<number | null>(null);
   const updateEndsAt = useCallback(() => {
     const remainingWallClockSecs = (duration - clock.getSnapshot()) / (playbackSpeed || 1);
-    const endsAtMinute =
+    setEndsAtMinute(
       duration > 0 && remainingWallClockSecs >= 60
         ? Math.floor((Date.now() + remainingWallClockSecs * 1000) / 60_000)
-        : null;
-    if (endsAtMinute === endsAtMinuteRef.current) return;
-    endsAtMinuteRef.current = endsAtMinute;
-    setEndsAtText(endsAtMinute === null ? null : ENDS_AT_FORMATTER.format(endsAtMinute * 60_000));
+        : null,
+    );
   }, [clock, duration, playbackSpeed]);
   useEffect(() => {
     updateEndsAt();
@@ -74,6 +72,7 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
   const displayedTime =
     showRemainingTime && duration > 0 ? `−${formatTime(displayTime)}` : formatTime(displayTime);
   const totalTime = formatTime(duration);
+  const endsAtText = endsAtMinute === null ? null : ENDS_AT_FORMATTER.format(endsAtMinute * 60_000);
   return (
     <button
       type='button'
@@ -203,7 +202,7 @@ interface PlayerProgressBarProps {
 }
 
 export function PlayerProgressBar({
-  active = true,
+  active: activeProp,
   duration,
   clock,
   bufferedClock,
@@ -211,6 +210,7 @@ export function PlayerProgressBar({
   resetKey,
   onSeek,
 }: PlayerProgressBarProps) {
+  const active = activeProp === undefined ? true : activeProp;
   const progressBarRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [keyboardFocused, setKeyboardFocused] = useState(false);
@@ -240,35 +240,29 @@ export function PlayerProgressBar({
       : (skipSegments.find((seg) => hoverTime >= seg.start_time && hoverTime <= seg.end_time) ??
         null);
 
-  const getSeekFraction = useCallback(
-    (clientX: number, rectOverride?: DOMRect | null): number | null => {
-      const rect = rectOverride || progressBarRef.current?.getBoundingClientRect();
-      if (!rect || rect.width <= 0 || !Number.isFinite(duration) || duration <= 0) {
-        return null;
-      }
-      return clamp((clientX - rect.left) / rect.width, 0, 1);
-    },
-    [duration],
-  );
+  const getSeekFraction = (clientX: number, rectOverride?: DOMRect | null): number | null => {
+    const rect = rectOverride || progressBarRef.current?.getBoundingClientRect();
+    if (!rect || rect.width <= 0 || !Number.isFinite(duration) || duration <= 0) {
+      return null;
+    }
+    return clamp((clientX - rect.left) / rect.width, 0, 1);
+  };
 
-  const scheduleHoverUpdate = useCallback(
-    (clientX: number) => {
-      pendingHoverXRef.current = clientX;
-      if (hoverRafRef.current !== null) return;
+  const scheduleHoverUpdate = (clientX: number) => {
+    pendingHoverXRef.current = clientX;
+    if (hoverRafRef.current !== null) return;
 
-      hoverRafRef.current = window.requestAnimationFrame(() => {
-        hoverRafRef.current = null;
-        const pendingClientX = pendingHoverXRef.current;
-        pendingHoverXRef.current = null;
-        if (pendingClientX === null) return;
-        const fraction = getSeekFraction(pendingClientX, dragRectRef.current);
-        if (fraction === null) return;
-        setHoverPct(fraction * 100);
-        if (dragPointerIdRef.current !== null) setSeekPreviewTime(fraction * duration);
-      });
-    },
-    [duration, getSeekFraction],
-  );
+    hoverRafRef.current = window.requestAnimationFrame(() => {
+      hoverRafRef.current = null;
+      const pendingClientX = pendingHoverXRef.current;
+      pendingHoverXRef.current = null;
+      if (pendingClientX === null) return;
+      const fraction = getSeekFraction(pendingClientX, dragRectRef.current);
+      if (fraction === null) return;
+      setHoverPct(fraction * 100);
+      if (dragPointerIdRef.current !== null) setSeekPreviewTime(fraction * duration);
+    });
+  };
 
   const clearHoverState = useCallback(() => {
     // Cancel the queued frame too — a pending rAF would resurrect hover after the pointer left.
@@ -299,128 +293,110 @@ export function PlayerProgressBar({
     clearHoverState();
   }, [resetKey, cancelDrag, clearHoverState]);
 
-  const handleMouseMove = useCallback(
-    (e: React.MouseEvent<HTMLDivElement>) => {
-      if (dragPointerIdRef.current !== null) return;
-      scheduleHoverUpdate(e.clientX);
-    },
-    [scheduleHoverUpdate],
-  );
+  const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (dragPointerIdRef.current !== null) return;
+    scheduleHoverUpdate(e.clientX);
+  };
 
-  const handleMouseLeave = useCallback(() => {
+  const handleMouseLeave = () => {
     if (dragPointerIdRef.current !== null) return;
     clearHoverState();
-  }, [clearHoverState]);
+  };
 
-  const handlePointerDown = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      e.stopPropagation();
-      // Gate before claiming the pointer: a second pointer, non-primary button, or unseekable bar must not capture or focus.
-      if (dragPointerIdRef.current !== null) return;
-      if (e.button !== 0 || !e.isPrimary) return;
-      if (!Number.isFinite(duration) || duration <= 0) return;
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    // Gate before claiming the pointer: a second pointer, non-primary button, or unseekable bar must not capture or focus.
+    if (dragPointerIdRef.current !== null) return;
+    if (e.button !== 0 || !e.isPrimary) return;
+    if (!Number.isFinite(duration) || duration <= 0) return;
 
-      const rect = progressBarRef.current?.getBoundingClientRect() || null;
-      if (!rect || rect.width <= 0) return;
+    const rect = progressBarRef.current?.getBoundingClientRect() || null;
+    if (!rect || rect.width <= 0) return;
 
-      const frac = getSeekFraction(e.clientX, rect);
-      if (frac === null) return;
+    const frac = getSeekFraction(e.clientX, rect);
+    if (frac === null) return;
 
-      clearHoverState();
-      e.currentTarget.setPointerCapture(e.pointerId);
-      // Pointer focus must not trip :focus-visible — the ring is for keyboard tabbing only.
-      e.currentTarget.focus({ preventScroll: true, focusVisible: false });
-      dragPointerIdRef.current = e.pointerId;
-      dragRectRef.current = rect;
+    clearHoverState();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    // Pointer focus must not trip :focus-visible — the ring is for keyboard tabbing only.
+    e.currentTarget.focus({ preventScroll: true, focusVisible: false });
+    dragPointerIdRef.current = e.pointerId;
+    dragRectRef.current = rect;
 
-      setSeekPreviewTime(frac * duration);
-      setHoverPct(frac * 100);
-    },
-    [clearHoverState, duration, getSeekFraction],
-  );
+    setSeekPreviewTime(frac * duration);
+    setHoverPct(frac * 100);
+  };
 
-  const handlePointerMove = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.pointerId !== dragPointerIdRef.current) return;
-      scheduleHoverUpdate(e.clientX);
-    },
-    [scheduleHoverUpdate],
-  );
+  const handlePointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerId !== dragPointerIdRef.current) return;
+    scheduleHoverUpdate(e.clientX);
+  };
 
-  const handlePointerUp = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      e.stopPropagation();
-      if (e.pointerId !== dragPointerIdRef.current) return;
+  const handlePointerUp = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.stopPropagation();
+    if (e.pointerId !== dragPointerIdRef.current) return;
 
-      // Clear the pointer id before releasing capture so `lostpointercapture` can't cancel the seek committing here.
-      const pointerId = e.pointerId;
-      dragPointerIdRef.current = null;
-      clearHoverState();
+    // Clear the pointer id before releasing capture so `lostpointercapture` can't cancel the seek committing here.
+    const pointerId = e.pointerId;
+    dragPointerIdRef.current = null;
+    clearHoverState();
 
-      const frac = getSeekFraction(e.clientX, dragRectRef.current);
-      if (frac !== null) {
-        void Promise.resolve(onSeek(frac * duration)).catch(() => undefined);
-      }
+    const frac = getSeekFraction(e.clientX, dragRectRef.current);
+    if (frac !== null) {
+      void Promise.resolve(onSeek(frac * duration)).catch(() => undefined);
+    }
 
-      if (e.currentTarget.hasPointerCapture(pointerId)) {
-        e.currentTarget.releasePointerCapture(pointerId);
-      }
-      dragRectRef.current = null;
-      setSeekPreviewTime(null);
-    },
-    [clearHoverState, duration, getSeekFraction, onSeek],
-  );
+    if (e.currentTarget.hasPointerCapture(pointerId)) {
+      e.currentTarget.releasePointerCapture(pointerId);
+    }
+    dragRectRef.current = null;
+    setSeekPreviewTime(null);
+  };
 
-  const handlePointerCancel = useCallback(
-    (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.pointerId === dragPointerIdRef.current) cancelDrag();
-    },
-    [cancelDrag],
-  );
+  const handlePointerCancel = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerId === dragPointerIdRef.current) cancelDrag();
+  };
 
-  const handleKeyDown = useCallback(
-    (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (
-        event.defaultPrevented ||
-        event.nativeEvent.isComposing ||
-        event.ctrlKey ||
-        event.altKey ||
-        event.metaKey
-      )
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (
+      event.defaultPrevented ||
+      event.nativeEvent.isComposing ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey
+    )
+      return;
+    if (!Number.isFinite(duration) || duration <= 0) {
+      return;
+    }
+
+    // Shift = fine scrub, matching the global arrow hotkeys (±10, Shift ±5).
+    const step = event.shiftKey ? 5 : 10;
+    const activeTime = seekPreviewTime ?? currentTime;
+    let nextTime: number | null = null;
+
+    switch (event.key) {
+      case 'ArrowLeft':
+        nextTime = Math.max(0, activeTime - step);
+        break;
+      case 'ArrowRight':
+        nextTime = Math.min(duration, activeTime + step);
+        break;
+      case 'Home':
+        nextTime = 0;
+        break;
+      case 'End':
+        nextTime = duration;
+        break;
+      default:
         return;
-      if (!Number.isFinite(duration) || duration <= 0) {
-        return;
-      }
+    }
 
-      // Shift = fine scrub, matching the global arrow hotkeys (±10, Shift ±5).
-      const step = event.shiftKey ? 5 : 10;
-      const activeTime = seekPreviewTime ?? currentTime;
-      let nextTime: number | null = null;
-
-      switch (event.key) {
-        case 'ArrowLeft':
-          nextTime = Math.max(0, activeTime - step);
-          break;
-        case 'ArrowRight':
-          nextTime = Math.min(duration, activeTime + step);
-          break;
-        case 'Home':
-          nextTime = 0;
-          break;
-        case 'End':
-          nextTime = duration;
-          break;
-        default:
-          return;
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-      // No local preview — the parent's optimistic seek updates currentTime; a preview set here would pin the bar at the target.
-      void Promise.resolve(onSeek(nextTime)).catch(() => undefined);
-    },
-    [currentTime, duration, onSeek, seekPreviewTime],
-  );
+    event.preventDefault();
+    event.stopPropagation();
+    // No local preview — the parent's optimistic seek updates currentTime; a preview set here would pin the bar at the target.
+    void Promise.resolve(onSeek(nextTime)).catch(() => undefined);
+  };
 
   // Unmount: cancel queued work only — a dangling capture belongs to the removed element.
   useEffect(() => {

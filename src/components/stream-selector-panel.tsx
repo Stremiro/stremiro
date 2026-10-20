@@ -19,20 +19,20 @@ import {
   type SetStateAction,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
-import { CHROME_CLOSE_BUTTON_CLASS, CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useFailedSrc } from '@/hooks/use-failed-src';
-import { useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import {
   type AddonStream,
   type AddonStreamResolution,
@@ -48,7 +48,10 @@ import {
   type TitleWatchProgress,
 } from '@/lib/api';
 import { whenRowMounted } from '@/lib/dom';
-import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
+import {
+  episodeMatchesCoordinates,
+  type NextEpisodeStreamCoordinates,
+} from '@/lib/episode-stream-target';
 import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
 import { formatAirDate } from '@/lib/schedule-dates';
@@ -117,7 +120,7 @@ function SegmentGroup<T extends string>({
           aria-pressed={value === option.value}
           aria-disabled={isResolving || undefined}
           onClick={() => {
-            if (isResolving) return;
+            if (isResolving || value === option.value) return;
             onChange(option.value);
           }}
           className={cn(
@@ -137,6 +140,36 @@ function SegmentGroup<T extends string>({
       ))}
     </div>
   );
+}
+
+const ROVING_STEP_KEYS = new Map<string, [distance: number, direction: 1 | -1]>([
+  ['ArrowDown', [1, 1]],
+  ['ArrowUp', [1, -1]],
+  ['PageDown', [8, 1]],
+  ['PageUp', [8, -1]],
+]);
+
+/** Arrow/Page/Home/End target for a roving-tabindex list; null leaves the event untouched. */
+export function rovingListTarget(
+  event: React.KeyboardEvent,
+  bounds: { count: number; first: number; last: number },
+  step: (distance: number, direction: 1 | -1) => number,
+): number | null {
+  if (
+    bounds.count === 0 ||
+    event.defaultPrevented ||
+    event.nativeEvent.isComposing ||
+    event.ctrlKey ||
+    event.altKey ||
+    event.metaKey ||
+    event.shiftKey
+  )
+    return null;
+  const move = ROVING_STEP_KEYS.get(event.key);
+  if (!move && event.key !== 'Home' && event.key !== 'End') return null;
+  event.preventDefault();
+  event.stopPropagation();
+  return move ? step(...move) : event.key === 'Home' ? bounds.first : bounds.last;
 }
 
 function SegmentDivider() {
@@ -206,9 +239,9 @@ export function StreamSelectorHeader({
         aria-label='Close stream selector'
         aria-keyshortcuts='Escape'
         title='Close (Esc)'
-        className={cn('absolute right-4 top-4 z-20', CHROME_CLOSE_BUTTON_CLASS)}
+        className='absolute right-4 top-4 z-20 inline-flex h-8 w-8 items-center justify-center rounded-lg border border-red-500/30 bg-red-500/15 text-red-400 backdrop-blur-md transition-colors hover:border-red-500/50 hover:bg-red-500/25 hover:text-red-300 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-red-400/50 motion-reduce:transition-none'
       >
-        <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
+        <X aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
       </button>
 
       <DialogHeader className='relative z-10 p-6 h-full flex flex-col justify-end text-left [@media(max-height:800px)]:p-4'>
@@ -223,7 +256,7 @@ export function StreamSelectorHeader({
           )}
           <div className='flex min-w-0 flex-1 flex-col gap-1.5 pr-8'>
             <p className={HEADER_KICKER_CLASS}>{kicker}</p>
-            <div className='min-w-0'>
+            <div className='flex h-14 min-w-0 items-center [@media(max-height:800px)]:h-10'>
               {logoSrc ? (
                 <>
                   <RemoteImage
@@ -265,15 +298,15 @@ export function StreamSelectorHeader({
 function StreamRowSkeleton() {
   return (
     <div className='flex items-center gap-3 rounded-xl border border-white/[0.05] bg-white/[0.02] px-3 py-2.5'>
-      <div className='h-9 w-9 shrink-0 animate-pulse rounded-[10px] bg-white/[0.05]' />
+      <div className='h-9 w-9 shrink-0 animate-pulse motion-reduce:animate-none rounded-[10px] bg-white/[0.05]' />
       <div className='min-w-0 flex-1 space-y-1.5'>
         <div className='flex items-center gap-1.5'>
-          <div className='h-3 w-28 animate-pulse rounded bg-white/[0.06]' />
-          <div className='h-[18px] w-9 animate-pulse rounded-md bg-white/[0.05]' />
-          <div className='h-[18px] w-12 animate-pulse rounded-md bg-white/[0.05]' />
+          <div className='h-3 w-28 animate-pulse motion-reduce:animate-none rounded bg-white/[0.06]' />
+          <div className='h-[18px] w-9 animate-pulse motion-reduce:animate-none rounded-md bg-white/[0.05]' />
+          <div className='h-[18px] w-12 animate-pulse motion-reduce:animate-none rounded-md bg-white/[0.05]' />
         </div>
-        <div className='h-2.5 w-2/3 animate-pulse rounded bg-white/[0.04]' />
-        <div className='h-2 w-1/3 animate-pulse rounded bg-white/[0.03]' />
+        <div className='h-2.5 w-2/3 animate-pulse motion-reduce:animate-none rounded bg-white/[0.04]' />
+        <div className='h-2 w-1/3 animate-pulse motion-reduce:animate-none rounded bg-white/[0.03]' />
       </div>
     </div>
   );
@@ -328,7 +361,10 @@ export function StreamListLoadingState({
     <div className='flex h-full min-h-0 flex-col px-3 pt-3'>
       {chips}
       <div className='mb-3 flex items-center gap-2 px-1 py-1'>
-        <Loader2 className='h-3.5 w-3.5 animate-spin text-white/45' />
+        <Loader2
+          aria-hidden='true'
+          className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-white/45'
+        />
         <p className='text-[12px] font-medium text-zinc-400'>
           {sourceCount > 0
             ? `Searching ${sourceCount} source${sourceCount === 1 ? '' : 's'}…`
@@ -341,6 +377,30 @@ export function StreamListLoadingState({
         ))}
       </div>
     </div>
+  );
+}
+
+function StreamRetryButton({ isRetrying, onRetry }: { isRetrying: boolean; onRetry: () => void }) {
+  return (
+    <Button
+      variant='outline'
+      size='sm'
+      onClick={() => {
+        if (!isRetrying) onRetry();
+      }}
+      aria-disabled={isRetrying || undefined}
+      aria-busy={isRetrying}
+      className='aria-disabled:cursor-default'
+    >
+      <RotateCcw
+        aria-hidden='true'
+        className={cn(
+          'h-3.5 w-3.5',
+          isRetrying && 'motion-safe:animate-spin motion-safe:[animation-delay:250ms]',
+        )}
+      />
+      Retry
+    </Button>
   );
 }
 
@@ -363,23 +423,7 @@ export function StreamListErrorState({
       icon={<TriangleAlert className='w-10 h-10 text-amber-400/60' strokeWidth={1.5} />}
       title="Couldn't load streams."
       body={message}
-      action={
-        <Button
-          variant='outline'
-          size='sm'
-          onClick={() => {
-            if (!isRetrying) onRetry();
-          }}
-          aria-disabled={isRetrying || undefined}
-          aria-busy={isRetrying}
-          className='aria-disabled:cursor-wait aria-disabled:opacity-50'
-        >
-          <RotateCcw
-            className={cn('h-3.5 w-3.5', isRetrying && 'animate-spin motion-reduce:animate-none')}
-          />
-          Retry
-        </Button>
-      }
+      action={<StreamRetryButton isRetrying={isRetrying} onRetry={onRetry} />}
     />
   );
 }
@@ -422,25 +466,21 @@ export function StreamListOfflineState() {
   return <StreamListMessage title="You're offline." body='Reconnect to load stream sources.' />;
 }
 
-export function StreamListNoAddonsState({ onManageAddons }: { onManageAddons: () => void }) {
+export function StreamListNoAddonsState({
+  metadataOnly,
+  onManageAddons,
+}: {
+  metadataOnly: boolean;
+  onManageAddons: () => void;
+}) {
   return (
     <StreamListMessage
-      title='No enabled stream sources.'
-      body='Enable at least one addon in Settings → Addons, then try again.'
-      action={
-        <Button variant='outline' size='sm' onClick={onManageAddons}>
-          Manage addons
-        </Button>
+      title={metadataOnly ? 'No stream-capable addons enabled.' : 'No enabled stream sources.'}
+      body={
+        metadataOnly
+          ? 'Your enabled addons provide metadata only. Add a stream addon in Settings → Addons to get playable sources.'
+          : 'Enable at least one addon in Settings → Addons, then try again.'
       }
-    />
-  );
-}
-
-export function StreamListNoStreamAddonsState({ onManageAddons }: { onManageAddons: () => void }) {
-  return (
-    <StreamListMessage
-      title='No stream-capable addons enabled.'
-      body='Your enabled addons provide metadata only. Add a stream addon in Settings → Addons to get playable sources.'
       action={
         <Button variant='outline' size='sm' onClick={onManageAddons}>
           Manage addons
@@ -475,26 +515,7 @@ export function StreamListEmptyState({
       }
       action={
         <div className='flex flex-wrap items-center justify-center gap-2'>
-          {sourceCount > 0 && (
-            <Button
-              variant='outline'
-              size='sm'
-              onClick={() => {
-                if (!isRetrying) onRetry();
-              }}
-              aria-disabled={isRetrying || undefined}
-              aria-busy={isRetrying}
-              className='aria-disabled:cursor-wait aria-disabled:opacity-50'
-            >
-              <RotateCcw
-                className={cn(
-                  'h-3.5 w-3.5',
-                  isRetrying && 'animate-spin motion-reduce:animate-none',
-                )}
-              />
-              Retry
-            </Button>
-          )}
+          {sourceCount > 0 && <StreamRetryButton isRetrying={isRetrying} onRetry={onRetry} />}
           <Button variant='outline' size='sm' onClick={onManageAddons}>
             Manage addons
           </Button>
@@ -560,6 +581,7 @@ interface StreamAddonHealthChipsProps {
   metrics: StreamSourceSummary[];
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onRetry?: () => void;
+  refreshFailed?: boolean;
   sourcesStillLoading: boolean;
 }
 
@@ -572,12 +594,12 @@ export function StreamAddonHealthChips({
   metrics,
   onFiltersChange,
   onRetry,
+  refreshFailed = false,
   sourcesStillLoading,
 }: StreamAddonHealthChipsProps) {
   return (
-    // The roster lands mid-fetch — fading in keeps the chip row from popping under the spinner.
-    <div className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3 animate-in fade-in duration-300'>
-      <div className='flex max-h-[4.25rem] items-center gap-2 flex-wrap overflow-y-auto overscroll-contain'>
+    <div className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'>
+      <div className='flex min-w-0 items-center gap-2 overflow-x-auto overscroll-contain scrollbar-hide'>
         {metrics.map((metric) => {
           // Chips filter on the addon config id (stamped on each stream as `sourceId`) — a differing display
           // name can't select a source into a false empty list.
@@ -618,7 +640,7 @@ export function StreamAddonHealthChips({
                 }));
               }}
               className={cn(
-                'inline-flex items-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-all border focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
+                'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-colors border aria-disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
                 isSelected
                   ? 'accent-lattice-soft'
                   : hasStreams
@@ -626,7 +648,6 @@ export function StreamAddonHealthChips({
                     : 'bg-black/40 text-zinc-400 border-white/[0.06] cursor-default',
               )}
             >
-              {isPending && <Loader2 className='h-2.5 w-2.5 shrink-0 animate-spin text-zinc-500' />}
               {/* State lives on the name tint, not a dot — degraded/offline read as muted warnings. */}
               <span
                 className={cn(
@@ -641,17 +662,14 @@ export function StreamAddonHealthChips({
               >
                 {metric.name}
               </span>
-              {!isPending && (
-                <span className='text-zinc-400 tabular-nums'>
-                  {metric.status === 'no_results' ? 'No results' : metric.streamCount}
-                </span>
-              )}
-              {latency && <span className='text-zinc-500 tabular-nums'>· {latency}</span>}
+              <span aria-hidden='true' className='w-[4ch] text-right text-zinc-400 tabular-nums'>
+                {isPending ? '…' : metric.streamCount}
+              </span>
             </button>
           );
         })}
 
-        {hasAnyStreams && (healthSummary.offline > 0 || isRetrying) && onRetry && (
+        {hasAnyStreams && (healthSummary.offline > 0 || refreshFailed || isRetrying) && onRetry && (
           <Button
             variant='ghost'
             size='sm'
@@ -661,21 +679,22 @@ export function StreamAddonHealthChips({
             }}
             aria-disabled={isResolving || isRetrying || sourcesStillLoading || undefined}
             aria-busy={isRetrying}
-            className='h-7 gap-1.5 px-2 text-[10px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-wait aria-disabled:opacity-50'
+            className='h-7 shrink-0 gap-1.5 px-2 text-[10px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-default'
           >
             <RotateCcw
-              className={cn('h-3 w-3', isRetrying && 'animate-spin motion-reduce:animate-none')}
+              aria-hidden='true'
+              className={cn(
+                'h-3 w-3',
+                isRetrying && 'motion-safe:animate-spin motion-safe:[animation-delay:250ms]',
+              )}
             />
             Retry failed sources
           </Button>
         )}
 
-        <span className='ml-auto flex items-center gap-1.5 text-[10px] font-medium text-zinc-400 whitespace-nowrap tabular-nums'>
+        <span className='ml-auto flex shrink-0 items-center gap-1.5 text-[10px] font-medium text-zinc-400 whitespace-nowrap tabular-nums'>
           {healthSummary.pending > 0 && sourcesStillLoading && (
-            <span className='flex items-center gap-1'>
-              <Loader2 className='h-2.5 w-2.5 animate-spin text-zinc-500' />
-              {healthSummary.pending} searching
-            </span>
+            <span>{healthSummary.pending} searching</span>
           )}
           <span>
             {metrics.length} {metrics.length === 1 ? 'source' : 'sources'}
@@ -700,6 +719,7 @@ interface StreamFilterToolbarProps {
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onResetFilters: () => void;
   onSearchQueryChange: (value: string) => void;
+  onSearchSubmit: () => void;
   qualityFilter: StreamSelectorQuality;
   searchInputRef?: RefObject<HTMLInputElement | null>;
   searchQuery: string;
@@ -718,6 +738,7 @@ export function StreamFilterToolbar({
   onFiltersChange,
   onResetFilters,
   onSearchQueryChange,
+  onSearchSubmit,
   qualityFilter,
   searchInputRef,
   searchQuery,
@@ -742,6 +763,7 @@ export function StreamFilterToolbar({
             if (isResolving) return;
             onSearchQueryChange(value);
           }}
+          onSubmit={onSearchSubmit}
           aria-label='Search streams by release, codec or keyword'
           placeholder='Find a release, codec or keyword…'
           className='h-8 text-xs bg-black/20 border-white/[0.07]'
@@ -881,7 +903,7 @@ export function StreamResolveFeedbackToast({
     <div className='pointer-events-none absolute inset-x-3 bottom-3 z-30 flex justify-center'>
       <div
         role='status'
-        className='animate-in fade-in slide-in-from-bottom-2 duration-200 relative w-full max-w-xs overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 shadow-lg shadow-black/40 backdrop-blur-xl'
+        className='animate-in fade-in slide-in-from-bottom-2 duration-200 motion-reduce:animate-none relative w-full max-w-xs overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 shadow-lg shadow-black/40 backdrop-blur-xl'
       >
         <div className='flex items-center gap-2.5 py-2 pl-2 pr-1.5'>
           {poster ? (
@@ -891,7 +913,10 @@ export function StreamResolveFeedbackToast({
               alt=''
             />
           ) : (
-            <Loader2 className='ml-1 h-3.5 w-3.5 shrink-0 animate-spin text-white/45' />
+            <Loader2
+              aria-hidden='true'
+              className='ml-1 h-3.5 w-3.5 shrink-0 animate-spin motion-reduce:animate-none text-white/45'
+            />
           )}
 
           <div className='min-w-0 flex-1'>
@@ -926,20 +951,28 @@ interface StreamPackEpisodeListProps {
   /** Thumb fallback when an episode carries no still of its own. */
   backdrop?: string;
   disabled: boolean;
-  /** Episodes the pack plausibly covers — arrive (season, episode)-sorted. */
-  episodes: Episode[];
+  error: string | null;
+  isLoading: boolean;
   onBack: () => void;
   onPick: (episode: Episode) => void;
+  onPlayTarget: () => void;
+  onRetry: () => void;
   progressFor: (episode: Episode) => WatchProgress | undefined;
+  pendingEpisode?: Pick<NextEpisodeStreamCoordinates, 'absoluteSeason' | 'absoluteEpisode'>;
   watchedEpisodeCeiling?: TitleWatchProgress['watchedEpisodeCeiling'];
+  /** Covered episodes with season headers from Rust, in (season, episode) order. */
+  rows: PackListRow[];
   stream: AddonStream;
-  /** Canonical coordinates of the selector's target — the "Current" marker. */
+  /** Canonical coordinates of the selector's target — the "Selected" marker. */
   targetEpisode?: number;
+  targetMasked?: boolean;
   targetSeason?: number;
 }
 
 // Flattened header|episode row model — the virtualizer keeps long packs cheap with season headers in the same scroll.
-type PackListRow = { type: 'header'; season: number } | { type: 'episode'; episode: Episode };
+export type PackListRow =
+  | { type: 'header'; season: number }
+  | { type: 'episode'; episode: Episode };
 
 const PACK_EPISODE_ROW_ESTIMATE_PX = 70;
 const PACK_HEADER_ROW_ESTIMATE_PX = 30;
@@ -956,18 +989,27 @@ function packRowKey(row: PackListRow): string {
 export function StreamPackEpisodeList({
   backdrop,
   disabled,
-  episodes,
+  error,
+  isLoading,
   onBack,
   onPick,
+  onPlayTarget,
+  onRetry,
   progressFor,
+  pendingEpisode,
   watchedEpisodeCeiling,
+  rows,
   stream,
   targetEpisode,
+  targetMasked,
   targetSeason,
 }: StreamPackEpisodeListProps) {
-  const spoilerProtection = useSpoilerProtection();
+  const { preferences: spoilerProtection, isHydrating: isSpoilerPreferencePending } =
+    useAppUiPreferences((preferences) => preferences.spoilerProtection);
+  const panelRef = useRef<HTMLDivElement | null>(null);
   const listRef = useRef<HTMLDivElement | null>(null);
-  const multiSeason = useMemo(() => new Set(episodes.map((ep) => ep.season)).size > 1, [episodes]);
+  const initialFocusDoneRef = useRef(false);
+  const lastFocusedElementRef = useRef<HTMLElement | null>(null);
   const packTitle = stream.presentation.streamTitle || stream.presentation.sourceName;
   const packMeta = [
     stream.sourceName,
@@ -977,26 +1019,15 @@ export function StreamPackEpisodeList({
     .filter(Boolean)
     .join(' · ');
 
-  const rows = useMemo<PackListRow[]>(() => {
-    const flat: PackListRow[] = [];
-    let lastSeason: number | null = null;
-    for (const episode of episodes) {
-      // Episodes arrive (season, episode)-sorted — a season change is the group boundary.
-      if (multiSeason && episode.season !== lastSeason) {
-        flat.push({ type: 'header', season: episode.season });
-        lastSeason = episode.season;
-      }
-      flat.push({ type: 'episode', episode });
-    }
-    return flat;
-  }, [episodes, multiSeason]);
-
-  // Latched at mount like the stream list — a threshold swap mid-session would rebuild rows under the focused element.
-  const [isVirtualized] = useState(() => rows.length >= PACK_LIST_VIRTUALIZE_THRESHOLD);
+  const isVirtualized = rows.length >= PACK_LIST_VIRTUALIZE_THRESHOLD;
 
   const firstEpisodeIndex = useMemo(() => rows.findIndex((row) => row.type === 'episode'), [rows]);
   const lastEpisodeIndex = useMemo(
     () => rows.findLastIndex((row) => row.type === 'episode'),
+    [rows],
+  );
+  const episodeCount = useMemo(
+    () => rows.reduce((count, row) => (row.type === 'episode' ? count + 1 : count), 0),
     [rows],
   );
   const targetIndex = useMemo(
@@ -1010,15 +1041,23 @@ export function StreamPackEpisodeList({
   );
 
   // Roving tabindex mirroring the stream list — headers never take the stop.
-  const [focusedIndex, setFocusedIndex] = useState(() =>
+  const [requestedFocusedIndex, setFocusedIndex] = useState(() =>
     targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex),
   );
+  const focusedIndex =
+    rows[requestedFocusedIndex]?.type === 'episode'
+      ? requestedFocusedIndex
+      : targetIndex >= 0
+        ? targetIndex
+        : firstEpisodeIndex;
   const rangeExtractor = useCallback(
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
   );
+  const getItemKey = useCallback((index: number) => packRowKey(rows[index]), [rows]);
   const virtualizer = useVirtualizer({
     count: rows.length,
+    getItemKey,
     getScrollElement: () => listRef.current,
     estimateSize: (index) =>
       rows[index]?.type === 'header' ? PACK_HEADER_ROW_ESTIMATE_PX : PACK_EPISODE_ROW_ESTIMATE_PX,
@@ -1028,11 +1067,26 @@ export function StreamPackEpisodeList({
   });
 
   // A virtual row mounts only after the scroll commit — retry one frame before giving up.
-  const scheduleRowFocus = useCallback((index: number, preventScroll: boolean) => {
+  const scheduleRowFocus = useCallback((index: number, initial = false) => {
     whenRowMounted(
       () => listRef.current,
       `[data-pack-row="${index}"]`,
-      (row) => row.focus({ preventScroll }),
+      (row) => {
+        if (initial && document.activeElement !== panelRef.current) return;
+        const list = listRef.current;
+        if (!list) return;
+        const rowBounds = row.getBoundingClientRect();
+        const listBounds = list.getBoundingClientRect();
+        if (initial) {
+          list.scrollTop +=
+            rowBounds.top - listBounds.top - (list.clientHeight - rowBounds.height) / 2;
+        } else if (rowBounds.top < listBounds.top) {
+          list.scrollTop += rowBounds.top - listBounds.top;
+        } else if (rowBounds.bottom > listBounds.bottom) {
+          list.scrollTop += rowBounds.bottom - listBounds.bottom;
+        }
+        row.focus({ preventScroll: true });
+      },
     );
   }, []);
 
@@ -1042,7 +1096,7 @@ export function StreamPackEpisodeList({
       if (isVirtualized) {
         virtualizer.scrollToIndex(index, { align: 'auto' });
       }
-      scheduleRowFocus(index, isVirtualized);
+      scheduleRowFocus(index);
     },
     [isVirtualized, scheduleRowFocus, virtualizer],
   );
@@ -1051,64 +1105,57 @@ export function StreamPackEpisodeList({
   const handleListKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
       const count = rows.length;
-      if (count === 0) return;
-      const step = (distance: number, direction: 1 | -1): number => {
-        let next = focusedIndex;
-        for (let remaining = distance; remaining > 0; remaining -= 1) {
-          let candidate = next + direction;
-          while (candidate >= 0 && candidate < count && rows[candidate]?.type === 'header') {
-            candidate += direction;
+      const next = rovingListTarget(
+        event,
+        { count, first: firstEpisodeIndex, last: lastEpisodeIndex },
+        (distance, direction) => {
+          let position = focusedIndex;
+          for (let remaining = distance; remaining > 0; remaining -= 1) {
+            let candidate = position + direction;
+            while (candidate >= 0 && candidate < count && rows[candidate]?.type === 'header') {
+              candidate += direction;
+            }
+            if (candidate < 0 || candidate >= count) return position;
+            position = candidate;
           }
-          if (candidate < 0 || candidate >= count) return next;
-          next = candidate;
-        }
-        return next;
-      };
-      let next: number | null = null;
-      switch (event.key) {
-        case 'ArrowDown':
-          next = step(1, 1);
-          break;
-        case 'ArrowUp':
-          next = step(1, -1);
-          break;
-        case 'PageDown':
-          next = step(8, 1);
-          break;
-        case 'PageUp':
-          next = step(8, -1);
-          break;
-        case 'Home':
-          next = firstEpisodeIndex;
-          break;
-        case 'End':
-          next = lastEpisodeIndex;
-          break;
-        default:
-          return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      if (next >= 0 && next !== focusedIndex) focusRow(next);
+          return position;
+        },
+      );
+      if (next !== null && next >= 0 && next !== focusedIndex) focusRow(next);
     },
     [firstEpisodeIndex, focusRow, focusedIndex, lastEpisodeIndex, rows],
   );
 
-  // Land on the target episode once — the picker overlays the stream list, so DOM focus must move here explicitly.
   useEffect(() => {
-    const anchor = targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex);
+    panelRef.current?.focus({ preventScroll: true });
+  }, []);
+
+  useLayoutEffect(() => {
+    const lastFocused = lastFocusedElementRef.current;
+    if (lastFocused && !lastFocused.isConnected && document.activeElement === document.body) {
+      panelRef.current?.focus({ preventScroll: true });
+    }
+  }, [error, isLoading, rows]);
+
+  useEffect(() => {
+    if (initialFocusDoneRef.current || isLoading || error) return;
+    const anchor = targetIndex >= 0 ? targetIndex : firstEpisodeIndex;
     if (anchor < 0) return;
+    initialFocusDoneRef.current = true;
+    setFocusedIndex(anchor);
     if (isVirtualized) {
       virtualizer.scrollToIndex(anchor, { align: 'center' });
-    } else {
-      listRef.current
-        ?.querySelector<HTMLElement>(`[data-pack-row="${anchor}"]`)
-        ?.scrollIntoView({ block: 'center' });
     }
     scheduleRowFocus(anchor, true);
-    // Mount-only anchor — later list changes must not re-scroll/refocus.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [
+    error,
+    firstEpisodeIndex,
+    isLoading,
+    isVirtualized,
+    scheduleRowFocus,
+    targetIndex,
+    virtualizer,
+  ]);
 
   const renderRow = (row: PackListRow, index: number) => {
     if (row.type === 'header') {
@@ -1130,16 +1177,23 @@ export function StreamPackEpisodeList({
     const watchEntry = progressFor(ep);
     const isSpoiler = isEpisodeSpoiler(
       ep,
-      spoilerProtection,
+      spoilerProtection || isSpoilerPreferencePending,
       watchedEpisodeCeiling,
       watchEntry,
-      isTarget,
+      isTarget && !targetMasked,
     );
     const episodeTitle = getEpisodeTitle(isSpoiler ? undefined : ep.title, ep.episode);
     const progressPercent = watchEntry
       ? getWatchProgressPercent(watchEntry.position, watchEntry.duration)
       : 0;
     const airDate = formatAirDate(ep.releaseDate);
+    const isPending =
+      disabled &&
+      episodeMatchesCoordinates(
+        ep,
+        pendingEpisode?.absoluteSeason,
+        pendingEpisode?.absoluteEpisode,
+      );
 
     return (
       <div role='listitem'>
@@ -1151,6 +1205,7 @@ export function StreamPackEpisodeList({
           aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)} — ${episodeTitle}`}
           // aria-disabled, not disabled — a resolving pick must not drop the row out of the roving tabindex (focus → <body>).
           aria-disabled={disabled || undefined}
+          aria-busy={isPending || undefined}
           tabIndex={index === focusedIndex ? 0 : -1}
           onFocus={() => setFocusedIndex(index)}
           onClick={() => {
@@ -1158,11 +1213,13 @@ export function StreamPackEpisodeList({
           }}
           className={cn(
             'group relative flex w-full items-center gap-3 rounded-xl border px-2.5 py-2 text-left',
-            'bg-white/[0.02] border-white/[0.05] transition-all duration-150 cursor-pointer',
+            'bg-white/[0.02] border-white/[0.05] transition-colors duration-150 motion-reduce:transition-none cursor-pointer',
             'hover:bg-white/[0.045] hover:border-white/[0.1]',
             'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25',
             isTarget &&
               'border-[rgb(var(--accent-act-rgb)/0.22)] bg-[rgb(var(--accent-act-rgb)/0.05)]',
+            disabled && 'cursor-default',
+            isPending && 'border-white/20 bg-white/[0.05]',
           )}
         >
           {isTarget && (
@@ -1193,7 +1250,7 @@ export function StreamPackEpisodeList({
               </span>
               {isTarget && (
                 <span className='shrink-0 text-[10.5px] font-medium leading-none text-(--accent-act)'>
-                  Current
+                  Selected
                 </span>
               )}
               {watchEntry?.is_watched && (
@@ -1204,22 +1261,42 @@ export function StreamPackEpisodeList({
                 />
               )}
             </div>
-            <p className='mt-0.5 truncate text-[13px] font-medium leading-snug text-zinc-200 transition-colors group-hover:text-white'>
+            <p
+              title={episodeTitle}
+              className='mt-0.5 truncate text-[13px] font-medium leading-snug text-zinc-200 transition-colors group-hover:text-white'
+            >
               {episodeTitle}
             </p>
             {airDate && <p className='mt-0.5 text-[11px] leading-none text-zinc-400'>{airDate}</p>}
           </div>
-          <ChevronRight
-            className='h-4 w-4 shrink-0 text-white/30 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100'
-            strokeWidth={2}
-          />
+          {isPending ? (
+            <Loader2
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none text-zinc-300'
+            />
+          ) : (
+            <ChevronRight
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 text-white/30 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100'
+              strokeWidth={2}
+            />
+          )}
         </button>
       </div>
     );
   };
 
   return (
-    <div className='flex h-full min-h-0 flex-col animate-in fade-in duration-150'>
+    <div
+      ref={panelRef}
+      role='region'
+      aria-label='Episodes in pack'
+      tabIndex={-1}
+      onFocusCapture={(event) => {
+        if (event.target instanceof HTMLElement) lastFocusedElementRef.current = event.target;
+      }}
+      className='flex h-full min-h-0 flex-col outline-hidden animate-in fade-in duration-150 motion-reduce:animate-none'
+    >
       <div className='shrink-0 px-3 pt-3'>
         <div className='mb-2 flex items-center gap-3 rounded-xl border border-white/[0.07] bg-white/[0.025] px-3 py-2.5'>
           <button
@@ -1230,12 +1307,12 @@ export function StreamPackEpisodeList({
             aria-keyshortcuts='Escape Backspace'
             className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-black/40 text-white/70 transition-colors hover:bg-black/60 hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
           >
-            <ChevronLeft className='h-4 w-4' strokeWidth={2.25} />
+            <ChevronLeft aria-hidden='true' className='h-4 w-4' strokeWidth={2.25} />
           </button>
           <div className='min-w-0 flex-1'>
             <p className='flex items-center gap-1.5 text-[10px] font-semibold uppercase tracking-[0.22em] leading-none text-white/40'>
               <span className='h-1 w-1 rounded-full bg-amber-400/80' />
-              Season pack
+              Episode pack
             </p>
             <p
               className='mt-1.5 truncate text-[13px] font-semibold leading-tight text-zinc-100'
@@ -1248,51 +1325,95 @@ export function StreamPackEpisodeList({
             )}
           </div>
         </div>
-        <p className='mb-2 px-1 text-[11px] font-medium text-zinc-500'>
-          Choose an episode · {episodes.length} {episodes.length === 1 ? 'episode' : 'episodes'}
+        <p role='status' className='mb-2 px-1 text-[11px] font-medium text-zinc-400'>
+          {isLoading
+            ? 'Finding episodes in this pack…'
+            : error
+              ? 'Episodes unavailable'
+              : `Choose an episode · ${episodeCount} ${episodeCount === 1 ? 'episode' : 'episodes'}`}
         </p>
       </div>
 
-      {/* Keydown lands here via bubbling from the focused row — the container is never the target. */}
-      {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
-      <div
-        ref={listRef}
-        role='list'
-        aria-label='Episodes'
-        className={cn(
-          'min-h-0 flex-1 overflow-y-auto overscroll-contain px-3',
-          isVirtualized ? 'pb-6' : 'space-y-1.5 pb-6',
-          disabled && 'pointer-events-none opacity-60',
-        )}
-        onKeyDown={handleListKeyDown}
-      >
-        {isVirtualized ? (
-          <div className='relative w-full' style={{ height: `${virtualizer.getTotalSize()}px` }}>
-            {virtualizer.getVirtualItems().map((virtualRow) => {
-              const row = rows[virtualRow.index];
-              if (!row) return null;
-              return (
-                <div
-                  key={packRowKey(row)}
-                  data-index={virtualRow.index}
-                  ref={virtualizer.measureElement}
-                  className='absolute left-0 right-0 top-0'
-                  style={{
-                    transform: `translateY(${virtualRow.start}px)`,
-                    paddingBottom: `${PACK_ROW_GAP_PX}px`,
-                  }}
-                >
-                  {renderRow(row, virtualRow.index)}
-                </div>
-              );
-            })}
-          </div>
-        ) : (
-          rows.map((row, index) => (
-            <Fragment key={packRowKey(row)}>{renderRow(row, index)}</Fragment>
-          ))
-        )}
-      </div>
+      {error ? (
+        <StreamListMessage
+          role='alert'
+          title="Couldn't load pack episodes."
+          body={error}
+          action={<StreamRetryButton isRetrying={isLoading} onRetry={onRetry} />}
+        />
+      ) : isLoading ? (
+        <div aria-hidden='true' className='min-h-0 flex-1 space-y-1.5 overflow-hidden px-3 pb-6'>
+          {Array.from({ length: 4 }, (_, index) => (
+            <div
+              key={index}
+              className='flex items-center gap-3 rounded-xl border border-white/[0.05] px-2.5 py-2'
+            >
+              <div className='h-12 w-[84px] shrink-0 animate-pulse rounded-md bg-white/[0.05] motion-reduce:animate-none' />
+              <div className='flex-1 space-y-2'>
+                <div className='h-2 w-16 animate-pulse rounded bg-white/[0.04] motion-reduce:animate-none' />
+                <div className='h-3 w-2/3 animate-pulse rounded bg-white/[0.06] motion-reduce:animate-none' />
+              </div>
+            </div>
+          ))}
+        </div>
+      ) : episodeCount === 0 ? (
+        <StreamListMessage
+          title='No matching episodes in this pack.'
+          body="This release doesn't match the available episode list. Choose another stream or try playing your original selection."
+          action={
+            <Button
+              variant='outline'
+              size='sm'
+              aria-disabled={disabled || undefined}
+              onClick={() => {
+                if (!disabled) onPlayTarget();
+              }}
+            >
+              Try this stream
+            </Button>
+          }
+        />
+      ) : (
+        // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
+        <div
+          ref={listRef}
+          role='list'
+          aria-label='Episodes'
+          className={cn(
+            'min-h-0 flex-1 overflow-y-auto overscroll-contain px-3',
+            isVirtualized ? 'pb-6' : 'space-y-1.5 pb-6',
+            disabled && 'pointer-events-none',
+          )}
+          onKeyDown={handleListKeyDown}
+        >
+          {isVirtualized ? (
+            <div className='relative w-full' style={{ height: `${virtualizer.getTotalSize()}px` }}>
+              {virtualizer.getVirtualItems().map((virtualRow) => {
+                const row = rows[virtualRow.index];
+                if (!row) return null;
+                return (
+                  <div
+                    key={packRowKey(row)}
+                    data-index={virtualRow.index}
+                    ref={virtualizer.measureElement}
+                    className='absolute left-0 right-0 top-0'
+                    style={{
+                      transform: `translateY(${virtualRow.start}px)`,
+                      paddingBottom: `${PACK_ROW_GAP_PX}px`,
+                    }}
+                  >
+                    {renderRow(row, virtualRow.index)}
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            rows.map((row, index) => (
+              <Fragment key={packRowKey(row)}>{renderRow(row, index)}</Fragment>
+            ))
+          )}
+        </div>
+      )}
     </div>
   );
 }

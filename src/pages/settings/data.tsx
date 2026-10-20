@@ -58,64 +58,69 @@ function BackupRestore() {
 
   const handleExport = async () => {
     setExporting(true);
-    try {
-      await flushPendingAppWrites();
-      if (!(await api.exportAppDataToFile())) return;
-      toast.success('Backup exported successfully');
-    } catch (err) {
-      toast.error(`Export failed: ${getErrorMessage(err)}`);
-    } finally {
-      if (mountedRef.current) setExporting(false);
-    }
+    await flushPendingAppWrites()
+      .then(() => api.exportAppDataToFile())
+      .then((exported) => {
+        if (exported) toast.success('Backup exported successfully');
+      })
+      .catch((err: unknown) => toast.error(`Export failed: ${getErrorMessage(err)}`))
+      .finally(() => {
+        if (mountedRef.current) setExporting(false);
+      });
   };
 
   const handleImport = async () => {
     setImporting(true);
     setConfirmImport(false);
-    try {
-      await flushPendingAppWrites();
-      let result: ImportResult | null | undefined;
-      try {
-        result = await api.importAppDataFromFile();
-      } finally {
-        // Whole-snapshot writers (profile, selector prefs, addon list) compose
-        // writes from cached state — reset, not just invalidate, so a settings
-        // write can't re-persist pre-import values over the restore. The addon
-        // reset also gates the list editor until the fresh registry lands.
-        // Failed restores may have persisted earlier domains before failing.
-        if (result !== null) {
-          const settingsChanged = result?.settings_restored ?? true;
-          if (settingsChanged) {
-            await Promise.all([
-              queryClient.resetQueries({ queryKey: PROFILE_PREFERENCES_QUERY_KEY }),
-              queryClient.resetQueries({ queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY }),
-              queryClient.resetQueries({ queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY }),
-            ]);
-          }
-          if (settingsChanged || (result?.addons_imported ?? 0) > 0) {
-            await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
-          }
-          await invalidateStoredDataQueries(
-            queryClient,
-            settingsChanged || (result?.addons_imported ?? 0) > 0,
-          );
-        }
-      }
-      if (!result) return;
-      const summary = [
-        `${result.history_imported} history`,
-        `${result.library_imported} library`,
-        `${result.lists_imported} lists`,
-        `${result.statuses_imported} statuses`,
-        result.addons_imported > 0 && `${result.addons_imported} addons`,
-        result.settings_restored && 'settings restored',
-      ].filter(Boolean);
-      toast.success('Backup imported', { description: summary.join(' · ') });
-    } catch (err) {
-      toast.error(`Import failed: ${getBackupImportErrorMessage(err)}`);
-    } finally {
-      if (mountedRef.current) setImporting(false);
-    }
+    await flushPendingAppWrites()
+      .then(async () => {
+        let result: ImportResult | null | undefined;
+        await api
+          .importAppDataFromFile()
+          .then((imported) => {
+            result = imported;
+          })
+          .finally(async () => {
+            // Whole-snapshot writers (profile, selector prefs, addon list) compose
+            // writes from cached state — reset, not just invalidate, so a settings
+            // write can't re-persist pre-import values over the restore. The addon
+            // reset also gates the list editor until the fresh registry lands.
+            // Failed restores may have persisted earlier domains before failing.
+            if (result !== null) {
+              const settingsChanged = result?.settings_restored ?? true;
+              if (settingsChanged) {
+                await Promise.all([
+                  queryClient.resetQueries({ queryKey: PROFILE_PREFERENCES_QUERY_KEY }),
+                  queryClient.resetQueries({ queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY }),
+                  queryClient.resetQueries({ queryKey: STREAM_SELECTOR_PREFERENCES_QUERY_KEY }),
+                ]);
+              }
+              if (settingsChanged || (result?.addons_imported ?? 0) > 0) {
+                await queryClient.resetQueries({ queryKey: ADDON_CONFIGS_QUERY_KEY });
+              }
+              await invalidateStoredDataQueries(
+                queryClient,
+                settingsChanged || (result?.addons_imported ?? 0) > 0,
+              );
+            }
+          });
+        if (!result) return;
+        const summary = [
+          `${result.history_imported} history`,
+          `${result.library_imported} library`,
+          `${result.lists_imported} lists`,
+          `${result.statuses_imported} statuses`,
+          result.addons_imported > 0 && `${result.addons_imported} addons`,
+          result.settings_restored && 'settings restored',
+        ].filter(Boolean);
+        toast.success('Backup imported', { description: summary.join(' · ') });
+      })
+      .catch((err: unknown) => {
+        toast.error(`Import failed: ${getBackupImportErrorMessage(err)}`);
+      })
+      .finally(() => {
+        if (mountedRef.current) setImporting(false);
+      });
   };
 
   return (
@@ -123,8 +128,8 @@ function BackupRestore() {
       <div className='min-w-0'>
         <p className='text-[14px] font-medium text-zinc-100'>Backup & restore</p>
         <p className='mt-1 text-[13px] leading-relaxed text-zinc-400'>
-          Export history, library, lists, addons, and settings to a JSON file. Importing merges
-          records and restores settings. Addon URLs can hold account keys — keep backups private.
+          Export your data to a JSON file, or merge one back in. Backups can contain addon keys, so
+          keep them private.
         </p>
       </div>
       <div className='flex shrink-0 items-center gap-2'>
@@ -155,9 +160,9 @@ function BackupRestore() {
           <DialogHeader>
             <DialogTitle>Import backup?</DialogTitle>
             <DialogDescription>
-              History, library, lists, and watch statuses merge with your existing records.
-              Preferences, profile, and appearance are replaced by the backup's settings. Addons and
-              per-title language picks merge. This cannot be undone.
+              Records, addons and per-title language picks merge with your existing data.
+              Preferences, profile and appearance are replaced by the backup's. This cannot be
+              undone.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -191,7 +196,7 @@ function BackupButton({
       variant='outline'
       onClick={onClick}
       disabled={disabled}
-      className={cn('h-8 gap-1.5 px-3 text-[12px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
+      className={cn('h-9 gap-2 px-3.5 text-[13px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
     >
       {busy ? <Loader2 className='h-3.5 w-3.5 animate-spin' /> : <Icon className='h-3.5 w-3.5' />}
       {children}
@@ -256,8 +261,7 @@ function DataManager() {
     {
       key: 'history',
       label: 'Watch history',
-      description:
-        'Watched episodes and movies, resume progress, and per-title audio, subtitle and source picks.',
+      description: 'Watched titles, resume progress and per-title track and source picks.',
       count: stats?.history_count,
       isEmpty: stats?.history_count === 0 && stats.has_learned_playback_data === false,
       unit: stats?.history_count === 1 ? 'entry' : 'entries',
@@ -273,7 +277,7 @@ function DataManager() {
     {
       key: 'library',
       label: 'Library',
-      description: 'Saved movies, shows, and their watch statuses.',
+      description: 'Saved movies and shows, with their watch statuses.',
       count: stats?.library_count,
       unit: stats?.library_count === 1 ? 'item' : 'items',
       clearFn: api.clearLibrary,
@@ -283,7 +287,7 @@ function DataManager() {
     {
       key: 'lists',
       label: 'Custom lists',
-      description: 'All custom lists and their contents.',
+      description: 'Every custom list and its contents.',
       count: stats?.lists_count,
       unit: stats?.lists_count === 1 ? 'list' : 'lists',
       clearFn: api.clearAllLists,
@@ -292,7 +296,7 @@ function DataManager() {
     {
       key: 'statuses',
       label: 'Watch statuses',
-      description: 'Watching / Watched / Plan to Watch / Dropped labels.',
+      description: 'Watching, Watched, Plan to Watch and Dropped labels.',
       count: stats?.watch_statuses_count,
       unit: stats?.watch_statuses_count === 1 ? 'label' : 'labels',
       clearFn: api.clearAllWatchStatuses,
@@ -398,10 +402,7 @@ function DataManager() {
 export function DataSection() {
   return (
     <SettingsGroup>
-      <SettingsGroupHeader
-        title='Data & storage'
-        description='Back up this device or permanently clear local records.'
-      />
+      <SettingsGroupHeader title='Data & storage' />
       <BackupRestore />
       <DataManager />
     </SettingsGroup>

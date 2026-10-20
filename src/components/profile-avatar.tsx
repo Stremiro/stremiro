@@ -85,14 +85,12 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
     setIsProcessing(true);
     focusIntentRef.current =
       document.activeElement === triggerRef.current ? triggerRef.current : null;
-    try {
-      await updateAvatar(file);
-      toast.success('Profile photo updated');
-    } catch (error) {
-      toast.error(getErrorMessage(error));
-    } finally {
-      if (mountedRef.current) setIsProcessing(false);
-    }
+    await updateAvatar(file)
+      .then(() => toast.success('Profile photo updated'))
+      .catch((error: unknown) => toast.error(getErrorMessage(error)))
+      .finally(() => {
+        if (mountedRef.current) setIsProcessing(false);
+      });
   };
 
   const handleRemove = () => {
@@ -121,7 +119,7 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
       aria-busy={isProcessing}
       aria-disabled={isProcessing || undefined}
       onClick={avatar ? undefined : openPicker}
-      className='group/avatar relative shrink-0 rounded-full p-[2px] transition-all duration-700 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black'
+      className='group/avatar relative shrink-0 rounded-full p-[2px] transition-shadow duration-200 motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-black aria-disabled:cursor-default'
       style={{
         background: `linear-gradient(135deg, ${accentColor}80, ${accentColor}14 55%, transparent 80%)`,
       }}
@@ -141,7 +139,7 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
         )}
       >
         {isProcessing ? (
-          <Loader2 className='h-5 w-5 animate-spin' />
+          <Loader2 className='h-5 w-5 animate-spin motion-reduce:animate-none' />
         ) : (
           <Camera className='h-5 w-5' />
         )}

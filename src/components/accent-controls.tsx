@@ -88,7 +88,11 @@ export function AccentControls({
   const isAccentHexInvalid = !HEX_COLOR_PATTERN.test(accentColor);
   const validationId = useId();
   const colorCommitRef = useRef(onAccentColorCommit);
-  colorCommitRef.current = onAccentColorCommit;
+  const committedIntensityRef = useRef(committedIntensity);
+  useLayoutEffect(() => {
+    colorCommitRef.current = onAccentColorCommit;
+    committedIntensityRef.current = committedIntensity;
+  }, [onAccentColorCommit, committedIntensity]);
   const pendingColorRef = useRef<string | null>(null);
   const colorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flushColor = useCallback(async () => {
@@ -99,9 +103,10 @@ export function AccentControls({
   }, []);
   const changeColor = (color: string) => {
     onAccentColorChange(color);
+    clearTimer(colorTimerRef);
+    pendingColorRef.current = null;
     if (!colorCommitRef.current || !HEX_COLOR_PATTERN.test(color)) return;
     pendingColorRef.current = color;
-    if (colorTimerRef.current !== null) clearTimeout(colorTimerRef.current);
     colorTimerRef.current = setTimeout(() => void flushColor().catch(() => undefined), 300);
   };
   useEffect(() => {
@@ -115,14 +120,19 @@ export function AccentControls({
 
   useLayoutEffect(() => setGlowVar(previewIntensity), [previewIntensity]);
 
-  const committedIntensityRef = useRef(committedIntensity);
-  committedIntensityRef.current = committedIntensity;
   // On unmount, snap the ambient back to whatever is actually persisted.
   useEffect(() => () => setGlowVar(committedIntensityRef.current), []);
 
   return (
     <>
-      <div className='space-y-3' onBlurCapture={() => void flushColor().catch(() => undefined)}>
+      <div
+        className='space-y-3'
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) {
+            void flushColor().catch(() => undefined);
+          }
+        }}
+      >
         <div className='flex items-center justify-between gap-2'>
           <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
             Accent
@@ -225,7 +235,7 @@ export function AccentControls({
         </div>
         {isAccentHexInvalid && (
           <p id={validationId} className='text-xs leading-relaxed text-zinc-400'>
-            Enter a 6-digit hex like #22d3ee — preview shows the last saved color.
+            Use a 6-digit hex like #22d3ee.
           </p>
         )}
       </div>
@@ -271,8 +281,8 @@ export function AccentControls({
         </SliderPrimitive.Root>
         <p className='text-xs leading-relaxed text-zinc-400'>
           {previewIntensity === 0
-            ? 'Off — pure black background.'
-            : 'Subtle background tint derived from your accent — previews live.'}
+            ? 'Pure black background.'
+            : 'Tints the background with your accent.'}
         </p>
       </div>
     </>

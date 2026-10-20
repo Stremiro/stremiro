@@ -31,7 +31,6 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useListSummaries } from '@/hooks/use-media-library';
 import {
   type LibraryFilters,
-  type MediaItem,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
   WATCH_STATUSES,
@@ -62,9 +61,22 @@ const FILTER_MENU_BUTTON_CLASS = cn(
   LIBRARY_FOCUS_RING_CLASS,
 );
 
-const VIEW_MODES: { mode: 'grid' | 'list'; label: string; icon: LucideIcon }[] = [
-  { mode: 'grid', label: 'Grid view', icon: LayoutGrid },
-  { mode: 'list', label: 'List view', icon: List },
+const VIEW_MODES: { value: 'grid' | 'list'; label: string; icon: LucideIcon }[] = [
+  { value: 'grid', label: 'Grid view', icon: LayoutGrid },
+  { value: 'list', label: 'List view', icon: List },
+];
+
+const ARROW_STEPS: Record<string, number | undefined> = {
+  ArrowRight: 1,
+  ArrowDown: 1,
+  ArrowLeft: -1,
+  ArrowUp: -1,
+};
+
+const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
+  { value: 'all', label: 'All' },
+  { value: 'movie', label: 'Movies' },
+  { value: 'series', label: 'Series' },
 ];
 
 interface LibraryToolbarProps {
@@ -143,37 +155,12 @@ export function LibraryToolbar({
         </span>
       </div>
       <div className='flex items-center gap-2 flex-wrap'>
-        <div
-          className='relative isolate grid grid-cols-3 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
-          role='group'
-          aria-label='Library media type'
-        >
-          <span
-            aria-hidden='true'
-            className='pointer-events-none absolute top-0.5 bottom-0.5 left-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
-            style={{
-              width: 'calc((100% - 4px) / 3)',
-              transform: `translateX(${typeFilter === 'all' ? 0 : typeFilter === 'movie' ? 100 : 200}%)`,
-            }}
-          />
-          {(['all', 'movie', 'series'] as const).map((t) => (
-            <button
-              key={t}
-              type='button'
-              aria-pressed={typeFilter === t}
-              onClick={() => onTypeFilterChange(t)}
-              className={cn(
-                'nav-switch-item relative z-10 h-8 px-3 rounded-sm text-[12px] font-medium transition-colors duration-150',
-                LIBRARY_FOCUS_RING_CLASS,
-                typeFilter === t
-                  ? 'text-(--on-accent-nav)'
-                  : 'text-zinc-400 hover:text-zinc-100 hover:bg-white/[0.06]',
-              )}
-            >
-              {t === 'all' ? 'All' : t === 'movie' ? 'Movies' : 'Series'}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          label='Library media type'
+          value={typeFilter}
+          options={TYPE_OPTIONS}
+          onChange={onTypeFilterChange}
+        />
 
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -328,6 +315,99 @@ function FilterMenuItem({
   );
 }
 
+export function SegmentPill({
+  index,
+  count,
+  inset,
+  className,
+}: {
+  index: number;
+  count: number;
+  inset: number;
+  className?: string;
+}) {
+  return (
+    <span
+      aria-hidden='true'
+      className={cn(
+        'nav-sliding-pill pointer-events-none absolute rounded-sm bg-(--accent-nav)',
+        className,
+      )}
+      style={{
+        top: inset,
+        bottom: inset,
+        left: inset,
+        width: `calc((100% - ${inset * 2}px) / ${count})`,
+        transform: `translateX(${index * 100}%)`,
+      }}
+    />
+  );
+}
+
+function SegmentedControl<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: readonly { value: T; label: string; icon?: LucideIcon }[];
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div
+      role='radiogroup'
+      aria-label={label}
+      className='relative isolate grid auto-cols-fr grid-flow-col p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
+    >
+      <SegmentPill
+        index={options.findIndex((option) => option.value === value)}
+        count={options.length}
+        inset={2}
+      />
+      {options.map((option, index) => {
+        const Icon = option.icon;
+        const selected = option.value === value;
+        return (
+          <button
+            key={option.value}
+            type='button'
+            role='radio'
+            aria-checked={selected}
+            aria-label={Icon ? option.label : undefined}
+            title={Icon ? option.label : undefined}
+            tabIndex={selected ? 0 : -1}
+            onClick={() => {
+              if (!selected) onChange(option.value);
+            }}
+            onKeyDown={(event) => {
+              const step = ARROW_STEPS[event.key];
+              if (!step || event.altKey || event.ctrlKey || event.metaKey) return;
+              event.preventDefault();
+              const nextIndex = (index + step + options.length) % options.length;
+              onChange(options[nextIndex].value);
+              const radios =
+                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
+                  '[role="radio"]',
+                );
+              radios?.[nextIndex]?.focus();
+            }}
+            className={cn(
+              'nav-switch-item relative z-10 flex h-8 items-center justify-center rounded-sm text-[12px] font-medium',
+              Icon ? 'w-8' : 'px-3',
+              LIBRARY_FOCUS_RING_CLASS,
+              selected ? 'text-(--on-accent-nav)' : 'text-zinc-400 hover:text-zinc-100',
+            )}
+          >
+            {Icon ? <Icon className='w-3.5 h-3.5' /> : option.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ViewToggle({
   viewMode,
   onChange,
@@ -336,39 +416,12 @@ export function ViewToggle({
   onChange: (v: 'grid' | 'list') => void;
 }) {
   return (
-    <div
-      className='relative isolate grid grid-cols-2 p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
-      role='group'
-      aria-label='Collection view'
-    >
-      <span
-        aria-hidden='true'
-        className='pointer-events-none absolute top-0.5 bottom-0.5 left-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
-        style={{
-          width: 'calc((100% - 4px) / 2)',
-          transform: `translateX(${viewMode === 'grid' ? 0 : 100}%)`,
-        }}
-      />
-      {VIEW_MODES.map(({ mode, label, icon: Icon }) => (
-        <button
-          key={mode}
-          type='button'
-          title={label}
-          aria-label={label}
-          aria-pressed={viewMode === mode}
-          onClick={() => {
-            if (mode !== viewMode) onChange(mode);
-          }}
-          className={cn(
-            'nav-switch-item relative z-10 flex h-8 w-8 items-center justify-center rounded-sm transition-colors duration-150',
-            LIBRARY_FOCUS_RING_CLASS,
-            viewMode === mode ? 'text-(--on-accent-nav)' : 'text-zinc-400 hover:text-zinc-200',
-          )}
-        >
-          <Icon className='w-3.5 h-3.5' />
-        </button>
-      ))}
-    </div>
+    <SegmentedControl
+      label='Collection view'
+      value={viewMode}
+      options={VIEW_MODES}
+      onChange={onChange}
+    />
   );
 }
 
@@ -384,23 +437,25 @@ export function useCollectionSelection(
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const triggerRef = useRef<HTMLButtonElement>(null);
   const anchorRef = useRef<string | null>(null);
-  const exit = useCallback(() => {
-    setSelectionMode(false);
+  const clear = useCallback(() => {
     setSelectedIds(new Set());
     anchorRef.current = null;
+  }, []);
+  const exit = useCallback(() => {
+    setSelectionMode(false);
+    clear();
     requestAnimationFrame(() => {
       const trigger = triggerRef.current;
       (trigger && !trigger.disabled ? trigger : fallbackFocusRef?.current)?.focus({
         preventScroll: true,
       });
     });
-  }, [fallbackFocusRef]);
+  }, [clear, fallbackFocusRef]);
   useEffect(() => {
     if (!selectionMode || busy) return;
     if (!active) {
       setSelectionMode(false);
-      setSelectedIds(new Set());
-      anchorRef.current = null;
+      clear();
       return;
     }
     if (ids.length === 0) {
@@ -412,7 +467,7 @@ export function useCollectionSelection(
       const next = new Set([...current].filter((id) => available.has(id)));
       return next.size === current.size ? current : next;
     });
-  }, [ids, active, busy, selectionMode, exit]);
+  }, [ids, active, busy, selectionMode, clear, exit]);
   useEffect(() => {
     if (!selectionMode || busy || dialogOpen) return;
     const handleEscape = (event: KeyboardEvent) => {
@@ -459,10 +514,7 @@ export function useCollectionSelection(
     exit,
     toggle,
     begin: () => setSelectionMode(true),
-    clear: () => {
-      setSelectedIds(new Set());
-      anchorRef.current = null;
-    },
+    clear,
     selectAll: (selected: string[]) =>
       setSelectedIds((current) => new Set([...current, ...selected])),
   };
@@ -479,6 +531,7 @@ export function CollectionBulkActionBar({
   onDone,
   onRemove,
   removeLabel,
+  children,
 }: {
   selectedCount: number;
   filteredCount: number;
@@ -490,6 +543,7 @@ export function CollectionBulkActionBar({
   onDone: () => void;
   onRemove: () => void;
   removeLabel: string;
+  children?: React.ReactNode;
 }) {
   return (
     <div
@@ -514,12 +568,16 @@ export function CollectionBulkActionBar({
         </button>
       </div>
       <div className='flex flex-wrap items-center gap-1.5'>
+        {children}
         <Button
           size='sm'
           variant='outline'
           disabled={selectedCount === 0 || isBusy}
           onClick={onRemove}
-          className='h-8 rounded-lg border-rose-500/25 bg-rose-500/10 text-xs text-rose-300 hover:bg-rose-500/20 hover:text-rose-200'
+          className={cn(
+            'h-8 gap-1.5 rounded-lg border-rose-500/25 bg-rose-500/10 px-2.5 text-xs text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
         >
           <Trash2 className='h-3.5 w-3.5' />
           {removeLabel}
@@ -529,7 +587,10 @@ export function CollectionBulkActionBar({
           variant='ghost'
           disabled={isBusy}
           onClick={onDone}
-          className='h-8 rounded-lg text-xs text-zinc-400 hover:text-white'
+          className={cn(
+            'h-8 gap-1.5 rounded-lg px-2.5 text-xs text-zinc-400 hover:text-white',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
         >
           <X className='h-3.5 w-3.5' />
           Done
@@ -540,7 +601,7 @@ export function CollectionBulkActionBar({
 }
 
 interface LibraryBulkActionBarProps {
-  selectedItems: MediaItem[];
+  selectedIds: string[];
   filteredCount: number;
   selectAllDisabled?: boolean;
   allFilteredSelected: boolean;
@@ -548,7 +609,7 @@ interface LibraryBulkActionBarProps {
   onClearSelection: () => void;
   onExitSelectionMode: () => void;
   onBulkSetStatus: (status: WatchStatus | null) => void;
-  onBulkAddToList: (listId: string, listName: string, items: MediaItem[]) => Promise<void>;
+  onBulkAddToList: (listId: string, listName: string, itemIds: string[]) => Promise<void>;
   onBulkRemove: () => void;
   isBusy?: boolean;
 }
@@ -567,7 +628,7 @@ const BULK_STATUS_OPTIONS: { status: WatchStatus | null; label: string }[] = [
 ];
 
 export function LibraryBulkActionBar({
-  selectedItems,
+  selectedIds,
   filteredCount,
   selectAllDisabled = false,
   allFilteredSelected,
@@ -582,7 +643,7 @@ export function LibraryBulkActionBar({
   const [statusOpen, setStatusOpen] = useState(false);
   const [listsOpen, setListsOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
-  const [createListItems, setCreateListItems] = useState<MediaItem[]>([]);
+  const [createListItemIds, setCreateListItemIds] = useState<string[]>([]);
   const addToListTriggerRef = useRef<HTMLButtonElement>(null);
   const statusHeadingId = useId();
   const listsHeadingId = useId();
@@ -594,205 +655,168 @@ export function LibraryBulkActionBar({
     refetch: refetchLists,
   } = useListSummaries(undefined, { enabled: listsOpen });
   const customLists = allLists.filter((list) => !list.is_smart);
-  const selectedCount = selectedItems.length;
+  const selectedCount = selectedIds.length;
   const actionsDisabled = selectedCount === 0 || isBusy;
 
   return (
-    <div
-      aria-label='Library selection actions'
-      aria-busy={isBusy}
-      className='sticky top-8 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
+    <CollectionBulkActionBar
+      selectedCount={selectedCount}
+      filteredCount={filteredCount}
+      allFilteredSelected={allFilteredSelected}
+      selectAllDisabled={selectAllDisabled}
+      isBusy={isBusy}
+      onSelectAll={onSelectAllFiltered}
+      onClear={onClearSelection}
+      onDone={onExitSelectionMode}
+      onRemove={onBulkRemove}
+      removeLabel='Remove'
     >
-      <div className='flex items-center gap-3'>
-        <span role='status' className='text-[13px] font-semibold text-white tabular-nums'>
-          {selectedCount} selected
-        </span>
-        <button
-          type='button'
-          disabled={filteredCount === 0 || isBusy || selectAllDisabled}
-          onClick={allFilteredSelected ? onClearSelection : onSelectAllFiltered}
-          className={cn(
-            'rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white disabled:opacity-40',
-            LIBRARY_FOCUS_RING_CLASS,
-          )}
-        >
-          {allFilteredSelected ? 'Deselect all' : `Select all (${filteredCount})`}
-        </button>
-      </div>
-      <div className='flex flex-wrap items-center gap-1.5'>
-        <Popover
-          open={statusOpen}
-          onOpenChange={(open) => {
-            if (!open || !actionsDisabled) setStatusOpen(open);
-          }}
-        >
-          <PopoverTrigger asChild>
-            <Button
-              variant='outline'
-              size='sm'
-              aria-disabled={actionsDisabled || undefined}
-              onClick={(event) => {
-                if (actionsDisabled) event.preventDefault();
-              }}
-              className={BULK_BUTTON_CLASS}
-            >
-              <CheckSquare className='h-3.5 w-3.5' />
-              Set Status
-              <ChevronDown className='h-3 w-3 opacity-60' />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            align='end'
-            aria-labelledby={statusHeadingId}
-            className='w-44 rounded-xl border-white/10 bg-zinc-950/98 p-1.5 shadow-xl'
+      <Popover
+        open={statusOpen}
+        onOpenChange={(open) => {
+          if (!open || !actionsDisabled) setStatusOpen(open);
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button
+            variant='outline'
+            size='sm'
+            aria-disabled={actionsDisabled || undefined}
+            onClick={(event) => {
+              if (actionsDisabled) event.preventDefault();
+            }}
+            className={BULK_BUTTON_CLASS}
           >
-            <p id={statusHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
-              Set watch status
-            </p>
-            {BULK_STATUS_OPTIONS.map(({ status, label }) => (
+            <CheckSquare className='h-3.5 w-3.5' />
+            Set Status
+            <ChevronDown className='h-3 w-3 opacity-60' />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align='end'
+          aria-labelledby={statusHeadingId}
+          className='w-44 rounded-xl border-white/10 bg-zinc-950/98 p-1.5 shadow-xl'
+        >
+          <p id={statusHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
+            Set watch status
+          </p>
+          {BULK_STATUS_OPTIONS.map(({ status, label }) => (
+            <button
+              key={status ?? 'clear'}
+              type='button'
+              disabled={actionsDisabled}
+              className={BULK_MENU_ITEM_CLASS}
+              onClick={() => {
+                setStatusOpen(false);
+                onBulkSetStatus(status);
+              }}
+            >
+              <span
+                aria-hidden='true'
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full bg-current',
+                  status === null ? 'text-zinc-500' : WATCH_STATUS_COLORS[status].text,
+                )}
+              />
+              {label}
+            </button>
+          ))}
+        </PopoverContent>
+      </Popover>
+      <Popover
+        open={listsOpen}
+        onOpenChange={(open) => {
+          if (!open || !actionsDisabled) setListsOpen(open);
+        }}
+      >
+        <PopoverTrigger asChild>
+          <Button
+            ref={addToListTriggerRef}
+            variant='outline'
+            size='sm'
+            aria-disabled={actionsDisabled || undefined}
+            onClick={(event) => {
+              if (actionsDisabled) event.preventDefault();
+            }}
+            className={BULK_BUTTON_CLASS}
+          >
+            <ListPlus className='h-3.5 w-3.5' />
+            Add to List
+            <ChevronDown className='h-3 w-3 opacity-60' />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align='end'
+          aria-labelledby={listsHeadingId}
+          className='w-72 rounded-xl border-white/10 bg-zinc-950/95 backdrop-blur-xl p-1.5 shadow-2xl'
+        >
+          <p id={listsHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
+            Add selected titles
+          </p>
+          {listsError && (
+            <RetryBanner
+              className='px-2.5 py-2'
+              message="Couldn't load lists."
+              onRetry={() => void refetchLists()}
+              isRetrying={listsFetching}
+            />
+          )}
+          <div className='max-h-64 overflow-y-auto'>
+            {listsLoading && (
+              <div aria-label='Loading lists' role='status' className='space-y-1.5 p-2.5'>
+                <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+                <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+                <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
+              </div>
+            )}
+            {!listsLoading && !listsError && customLists.length === 0 && (
+              <p className='px-2.5 py-2 text-xs text-zinc-500'>No lists yet.</p>
+            )}
+            {customLists.map((list) => (
               <button
-                key={status ?? 'clear'}
+                key={list.id}
                 type='button'
                 disabled={actionsDisabled}
                 className={BULK_MENU_ITEM_CLASS}
+                title={list.name}
                 onClick={() => {
-                  setStatusOpen(false);
-                  onBulkSetStatus(status);
+                  setListsOpen(false);
+                  void onBulkAddToList(list.id, list.name, selectedIds);
                 }}
               >
-                <span
-                  aria-hidden='true'
-                  className={cn(
-                    'h-1.5 w-1.5 rounded-full bg-current',
-                    status === null ? 'text-zinc-500' : WATCH_STATUS_COLORS[status].text,
-                  )}
-                />
-                {label}
+                <ListIconTile iconId={list.icon} size='sm' />
+                <span className='min-w-0 flex-1 truncate' dir='auto'>
+                  {list.name}
+                </span>
+                <span className='text-[11px] tabular-nums text-zinc-500'>
+                  {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
+                </span>
               </button>
             ))}
-          </PopoverContent>
-        </Popover>
-        <Popover
-          open={listsOpen}
-          onOpenChange={(open) => {
-            if (!open || !actionsDisabled) setListsOpen(open);
-          }}
-        >
-          <PopoverTrigger asChild>
-            <Button
-              ref={addToListTriggerRef}
-              variant='outline'
-              size='sm'
-              aria-disabled={actionsDisabled || undefined}
-              onClick={(event) => {
-                if (actionsDisabled) event.preventDefault();
-              }}
-              className={BULK_BUTTON_CLASS}
-            >
-              <ListPlus className='h-3.5 w-3.5' />
-              Add to List
-              <ChevronDown className='h-3 w-3 opacity-60' />
-            </Button>
-          </PopoverTrigger>
-          <PopoverContent
-            align='end'
-            aria-labelledby={listsHeadingId}
-            className='w-72 rounded-xl border-white/10 bg-zinc-950/95 backdrop-blur-xl p-1.5 shadow-2xl'
+          </div>
+          <button
+            type='button'
+            disabled={actionsDisabled}
+            className={cn(BULK_MENU_ITEM_CLASS, 'mt-1 border-t border-white/[0.06]')}
+            onPointerEnter={warmListEditorDialog}
+            onFocus={warmListEditorDialog}
+            onClick={() => {
+              setListsOpen(false);
+              setCreateListItemIds(selectedIds);
+              setCreateListOpen(true);
+            }}
           >
-            <p id={listsHeadingId} className='px-2.5 py-1.5 text-[11px] font-medium text-zinc-500'>
-              Add selected titles
-            </p>
-            {listsError && (
-              <RetryBanner
-                className='px-2.5 py-2'
-                message="Couldn't load lists."
-                onRetry={() => void refetchLists()}
-                isRetrying={listsFetching}
-              />
-            )}
-            <div className='max-h-64 overflow-y-auto'>
-              {listsLoading && (
-                <div aria-label='Loading lists' role='status' className='space-y-1.5 p-2.5'>
-                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
-                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
-                  <Skeleton className='h-9 rounded-lg bg-white/[0.06]' />
-                </div>
-              )}
-              {!listsLoading && !listsError && customLists.length === 0 && (
-                <p className='px-2.5 py-2 text-xs text-zinc-500'>No lists yet.</p>
-              )}
-              {customLists.map((list) => (
-                <button
-                  key={list.id}
-                  type='button'
-                  disabled={actionsDisabled}
-                  className={BULK_MENU_ITEM_CLASS}
-                  title={list.name}
-                  onClick={() => {
-                    setListsOpen(false);
-                    void onBulkAddToList(list.id, list.name, selectedItems);
-                  }}
-                >
-                  <ListIconTile iconId={list.icon} size='sm' />
-                  <span className='min-w-0 flex-1 truncate' dir='auto'>
-                    {list.name}
-                  </span>
-                  <span className='text-[11px] tabular-nums text-zinc-500'>
-                    {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
-                  </span>
-                </button>
-              ))}
-            </div>
-            <button
-              type='button'
-              disabled={actionsDisabled}
-              className={cn(BULK_MENU_ITEM_CLASS, 'mt-1 border-t border-white/[0.06]')}
-              onPointerEnter={warmListEditorDialog}
-              onFocus={warmListEditorDialog}
-              onClick={() => {
-                setListsOpen(false);
-                setCreateListItems([...selectedItems]);
-                setCreateListOpen(true);
-              }}
-            >
-              <Plus className='h-3.5 w-3.5' />
-              New list…
-            </button>
-          </PopoverContent>
-        </Popover>
-        <CreateListDialog
-          open={createListOpen}
-          onOpenChange={setCreateListOpen}
-          onCreated={(list) => onBulkAddToList(list.id, list.name, createListItems)}
-          returnFocusRef={addToListTriggerRef}
-        />
-        <Button
-          variant='outline'
-          size='sm'
-          disabled={actionsDisabled}
-          onClick={onBulkRemove}
-          className={cn(
-            'h-8 gap-1.5 rounded-lg border-rose-500/25 bg-rose-500/10 px-2.5 text-xs text-rose-300 hover:bg-rose-500/20 hover:text-rose-200',
-            LIBRARY_FOCUS_RING_CLASS,
-          )}
-        >
-          <Trash2 className='h-3.5 w-3.5' />
-          Remove
-        </Button>
-        <Button
-          variant='ghost'
-          size='sm'
-          disabled={isBusy}
-          onClick={onExitSelectionMode}
-          className={cn(
-            'h-8 gap-1.5 rounded-lg px-2.5 text-xs text-zinc-400 hover:text-white',
-            LIBRARY_FOCUS_RING_CLASS,
-          )}
-        >
-          <X className='h-3.5 w-3.5' />
-          Done
-        </Button>
-      </div>
-    </div>
+            <Plus className='h-3.5 w-3.5' />
+            New list…
+          </button>
+        </PopoverContent>
+      </Popover>
+      <CreateListDialog
+        open={createListOpen}
+        onOpenChange={setCreateListOpen}
+        onCreated={(list) => onBulkAddToList(list.id, list.name, createListItemIds)}
+        returnFocusRef={addToListTriggerRef}
+      />
+    </CollectionBulkActionBar>
   );
 }

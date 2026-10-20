@@ -12,7 +12,7 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { useNavigationType } from 'react-router';
 import {
   DropdownMenu,
@@ -38,6 +38,7 @@ import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
 import { SLIDING_ACCENT_PILL_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { getErrorMessage, type MediaItem } from '@/lib/api';
+import { whenRowMounted } from '@/lib/dom';
 import { navigateAppBack } from '@/lib/navigation';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import {
@@ -92,8 +93,8 @@ const SEARCH_SKELETON_KEYS = Array.from(
   { length: SEARCH_SKELETON_COUNT },
   (_, index) => `search-skeleton-${index}`,
 );
-const renderSearchResult = (item: MediaItem) => (
-  <div className={SEARCH_RESULT_ITEM_CLASS_NAME}>
+const renderSearchResult = (item: MediaItem, index: number) => (
+  <div data-search-result-index={index} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
     <MediaCard item={item} />
   </div>
 );
@@ -155,6 +156,7 @@ interface SearchResultsProps {
   isFetchingNextPage: boolean;
   isOnline: boolean;
   isPlaceholderData: boolean;
+  isRefining: boolean;
   isRetryingInitialLoad: boolean;
   onResetFilters: () => void;
   onClearSearch: () => void;
@@ -178,6 +180,7 @@ const SearchResults = memo(function SearchResults({
   isFetchingNextPage,
   isOnline,
   isPlaceholderData,
+  isRefining,
   isRetryingInitialLoad,
   onResetFilters,
   onClearSearch,
@@ -188,11 +191,12 @@ const SearchResults = memo(function SearchResults({
 }: SearchResultsProps) {
   // Sentinel observer; view-state deps re-attach it after offline/error/loading remounts.
   const loadMoreRef = useRef<HTMLDivElement>(null);
+  const [pagingFocused, setPagingFocused] = useState(false);
   useEffect(() => {
     const sentinel = loadMoreRef.current;
     // `isError` must gate observation: a failed next-page leaves the sentinel
     // in view and re-observing would refire `fetchNextPage` in a loop.
-    if (!sentinel || !isOnline || !hasNextPage || isError || isFetching) {
+    if (!sentinel || !isOnline || !hasNextPage || isError || isFetching || isRefining) {
       return;
     }
     const observer = new IntersectionObserver(
@@ -205,7 +209,13 @@ const SearchResults = memo(function SearchResults({
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [fetchNextPage, hasNextPage, isError, isFetching, isOnline, showSkeleton]);
+  }, [fetchNextPage, hasNextPage, isError, isFetching, isOnline, isRefining, showSkeleton]);
+
+  const loadMoreOrRetry = () => {
+    if (!isFetching && !isRefining && (hasNextPage || isError)) {
+      void (isError && !isFetchNextPageError ? refetch() : fetchNextPage());
+    }
+  };
 
   if (!isOnline && results.length === 0) {
     return (
@@ -230,19 +240,11 @@ const SearchResults = memo(function SearchResults({
         action={
           <button
             type='button'
-            aria-disabled={isFetching || undefined}
-            aria-busy={isFetchingNextPage || undefined}
-            onClick={() => {
-              if (!isFetching) void fetchNextPage();
-            }}
+            aria-disabled={isFetching || isRefining || undefined}
+            aria-busy={isFetching || undefined}
+            onClick={loadMoreOrRetry}
             className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
           >
-            {isFetchingNextPage && (
-              <Loader2
-                aria-hidden='true'
-                className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
-              />
-            )}
             {isError ? 'Retry' : 'Load more'}
           </button>
         }
@@ -281,16 +283,13 @@ const SearchResults = memo(function SearchResults({
           <button
             type='button'
             // Keep the recovery button mounted and focusable while it retries.
-            aria-disabled={isFetching || undefined}
+            aria-disabled={isFetching || isRefining || undefined}
             aria-busy={isFetching || undefined}
             onClick={() => {
-              if (!isFetching) void refetch();
+              if (!isFetching && !isRefining) void refetch();
             }}
             className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
           >
-            {isRetryingInitialLoad && (
-              <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
-            )}
             Retry
           </button>
         }
@@ -346,7 +345,10 @@ const SearchResults = memo(function SearchResults({
     // background refreshes of the current facet stay full-opacity.
     <div
       aria-busy={isFetching || undefined}
-      className={cn('transition-opacity duration-200', isPlaceholderData && 'opacity-60')}
+      className={cn(
+        'transition-opacity duration-200 motion-reduce:transition-none',
+        isPlaceholderData && 'opacity-60',
+      )}
     >
       {!isOnline && (
         <div
@@ -367,7 +369,7 @@ const SearchResults = memo(function SearchResults({
         rowGap={SEARCH_GRID_ROW_GAP_PX}
       />
       <div ref={loadMoreRef} aria-hidden='true' className='h-1' />
-      {isOnline && (hasNextPage || isError || isFetchingNextPage) && (
+      {isOnline && (hasNextPage || isError || isFetchingNextPage || pagingFocused) && (
         <div className='flex flex-col items-center gap-1.5 pt-6'>
           {isError && (
             <p role='alert' className='text-[12px] text-zinc-500'>
@@ -376,20 +378,21 @@ const SearchResults = memo(function SearchResults({
           )}
           <button
             type='button'
-            aria-disabled={isFetching || undefined}
-            aria-busy={isFetchingNextPage || undefined}
-            onClick={() => {
-              if (!isFetching) {
-                void (isError && !isFetchNextPageError ? refetch() : fetchNextPage());
-              }
-            }}
+            aria-disabled={isFetching || isRefining || (!hasNextPage && !isError) || undefined}
+            aria-busy={isFetching || undefined}
+            onFocus={() => setPagingFocused(true)}
+            onBlur={() => setPagingFocused(false)}
+            onClick={loadMoreOrRetry}
             className={cn(SEARCH_PILL_BUTTON_CLASS, 'inline-flex items-center gap-2')}
           >
-            {isFetchingNextPage && (
-              <Loader2 aria-hidden='true' className='h-3.5 w-3.5 animate-spin' />
-            )}
             <span aria-live='polite'>
-              {isFetchingNextPage ? 'Loading more titles' : isError ? 'Retry' : 'Load more'}
+              {isFetchingNextPage
+                ? 'Loading more titles'
+                : isError
+                  ? 'Retry'
+                  : hasNextPage
+                    ? 'Load more'
+                    : 'All titles loaded'}
             </span>
           </button>
         </div>
@@ -400,6 +403,36 @@ const SearchResults = memo(function SearchResults({
 
 // Facet switches swap the whole grid; land on the first row, not mid-list.
 const resetScroll = () => window.scrollTo({ top: 0 });
+
+// Re-picking the checked option is a no-op, so the scroll position stays put.
+function FacetMenuItem({
+  checked,
+  children,
+  onSelect,
+  title,
+}: {
+  checked: boolean;
+  children: ReactNode;
+  onSelect: () => void;
+  title?: string;
+}) {
+  return (
+    <DropdownMenuItem
+      role='menuitemradio'
+      aria-checked={checked}
+      title={title}
+      onSelect={() => {
+        if (checked) return;
+        onSelect();
+        resetScroll();
+      }}
+      className='flex h-8 items-center justify-between gap-2 px-2.5 text-[12.5px]'
+    >
+      {children}
+      {checked ? <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' /> : null}
+    </DropdownMenuItem>
+  );
+}
 
 function includesGenre(options: readonly string[], genre: string) {
   return options.some((option) => sameSearchGenre(option, genre));
@@ -415,16 +448,18 @@ export function Search() {
     activeGenre,
     activeType,
     clearGenre,
-    debouncedQuery,
     flushQuery,
     handleFeedChange,
     handleGenreChange,
     handleTypeChange,
     hasActiveFilters,
+    isComposing,
     query,
     resetFilters,
     setQuery,
+    setIsComposing,
     trimmedDebouncedQuery,
+    trimmedQuery,
   } = useSearchPageState();
   const typeGroupRef = useRef<HTMLDivElement>(null);
   const genreTriggerRef = useRef<HTMLButtonElement>(null);
@@ -443,7 +478,13 @@ export function Search() {
     isPlaceholderData,
     refetch,
     results,
-  } = useSearchResults({ query: debouncedQuery, activeType, activeFeed, activeGenre, isOnline });
+  } = useSearchResults({
+    query: trimmedDebouncedQuery,
+    activeType,
+    activeFeed,
+    activeGenre,
+    isOnline,
+  });
 
   // Manifest-driven union of `genre` extra options the enabled addons declare
   // for the active catalog type (Cinemeta first), computed in Rust.
@@ -473,9 +514,15 @@ export function Search() {
 
   // Hover/focus intent warms the next tab's catalog so the switch lands fast.
   const prefetchType = (nextType: SearchMediaType) => {
-    if (!isOnline || nextType === activeType) return;
-    prefetchSearchCatalog(queryClient, {
-      query: debouncedQuery,
+    if (
+      !isOnline ||
+      isComposing ||
+      trimmedQuery !== trimmedDebouncedQuery ||
+      nextType === activeType
+    )
+      return;
+    void prefetchSearchCatalog(queryClient, {
+      query: trimmedDebouncedQuery,
       type: nextType,
       feed: activeFeed,
       genre: isGenreCompatible(nextType) ? activeGenre : undefined,
@@ -484,59 +531,53 @@ export function Search() {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [autoFocusSearch] = useState(
-    () => navigationType !== 'POP' || (!query.trim() && results.length === 0),
+    () => navigationType !== 'POP' || (!trimmedQuery && results.length === 0),
   );
   useEffect(() => {
     const input = searchInputRef.current;
     if (autoFocusSearch && input?.value) input.select();
   }, [autoFocusSearch]);
-  const handleClearSearch = () => {
+  const handleClearSearch = useCallback(() => {
     setQuery('');
     searchInputRef.current?.focus({ preventScroll: true });
     resetScroll();
-  };
+  }, [setQuery]);
 
-  const handleResetFilters = () => {
+  const handleResetFilters = useCallback(() => {
     if (!hasActiveFilters) return;
     resetFilters();
     searchInputRef.current?.focus({ preventScroll: true });
     resetScroll();
-  };
+  }, [hasActiveFilters, resetFilters]);
 
   const isRetryingInitialLoad = isFetched && isLoading;
-  const showSkeleton =
-    !isRetryingInitialLoad &&
-    !isError &&
-    (isLoading || ((isFetching || isPlaceholderData) && results.length === 0));
-  const isBrowsing = query.trim().length === 0;
-  const isUpdating = isOnline && (query.trim() !== trimmedDebouncedQuery || isPlaceholderData);
+  const showSkeleton = isLoading && !isRetryingInitialLoad && results.length === 0;
+  const isBrowsing = !trimmedQuery;
+  const isRefining = isComposing || trimmedQuery !== trimmedDebouncedQuery || isPlaceholderData;
+  const isUpdating = isOnline && isFetching && !isFetchingNextPage;
+  const [updatingRevealed, setUpdatingRevealed] = useState(false);
+  useEffect(() => {
+    if (!isUpdating) {
+      setUpdatingRevealed(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setUpdatingRevealed(true), 150);
+    return () => window.clearTimeout(timer);
+  }, [isUpdating]);
+  const showUpdating = isUpdating && updatingRevealed;
   const activeFeedLabel =
     SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed)?.label ?? 'Trending';
 
   const resultsRef = useRef<HTMLDivElement>(null);
-  const resultsMode = JSON.stringify([
-    activeType,
-    !!trimmedDebouncedQuery,
-    activeGenre ?? null,
-    trimmedDebouncedQuery ? null : activeFeed,
-  ]);
-  const previousResultsMode = useRef(resultsMode);
-  const pendingResultsEntrance = useRef(false);
-  const resultsReady = !isPlaceholderData && !showSkeleton;
-  useLayoutEffect(() => {
-    if (previousResultsMode.current !== resultsMode) {
-      previousResultsMode.current = resultsMode;
-      pendingResultsEntrance.current = true;
-    }
-    if (!pendingResultsEntrance.current || !resultsReady) return;
-    const container = resultsRef.current;
-    if (!container) return;
-    pendingResultsEntrance.current = false;
-    if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    // Rapid switches share an in-flight entrance instead of flashing or remounting the grid.
-    container.classList.add('search-results-enter');
-  }, [resultsMode, resultsReady]);
-
+  const focusFirstResult = () => {
+    if (isRefining || showSkeleton || results.length === 0) return;
+    resetScroll();
+    whenRowMounted(
+      () => resultsRef.current,
+      '[data-search-result-index="0"] [data-media-card-poster]',
+      (element) => element.focus({ preventScroll: true }),
+    );
+  };
   // Ambient "working" cue: any catalog fetch drifts the accent dot fields.
   useAmbientActivity(isFetching);
 
@@ -549,19 +590,17 @@ export function Search() {
       <div className={`mx-auto w-full max-w-[1800px] ${SIDEBAR_PAGE_COLUMN_INSETS} pb-16 pt-8`}>
         <div className='mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex items-end justify-between gap-3'>
-            <div className='min-w-0'>
-              <h1 className='text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
-                {isBrowsing ? 'Discover' : 'Search'}
-              </h1>
-            </div>
-            {results.length > 0 || isUpdating ? (
+            <h1 className='min-w-0 text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
+              {isBrowsing ? 'Discover' : 'Search'}
+            </h1>
+            {results.length > 0 || showUpdating ? (
               // <output> is an implicit live region — silence it during page
               // appends so fetches don't announce the growing count.
               <output
-                aria-live={isUpdating || isFetchingNextPage ? 'off' : 'polite'}
+                aria-live={isRefining || isUpdating || isFetchingNextPage ? 'off' : 'polite'}
                 className='shrink-0 text-[13px] tabular-nums text-zinc-500'
               >
-                {isUpdating
+                {showUpdating
                   ? 'Updating…'
                   : `${results.length} ${isBrowsing ? 'title' : 'result'}${results.length === 1 ? '' : 's'}`}
               </output>
@@ -580,23 +619,36 @@ export function Search() {
               enterKeyHint='search'
               placeholder='Search movies, shows, anime...'
               aria-label='Search movies, shows, and anime'
+              aria-controls='search-results'
+              aria-describedby='search-keyboard-hint'
               data-search-input
               ref={searchInputRef}
               className='h-11 w-full rounded-lg border-white/[0.08] bg-white/[0.04] pl-11 pr-20 text-[14px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              onCompositionStart={() => setIsComposing(true)}
+              onCompositionEnd={(event) => {
+                setQuery(event.currentTarget.value);
+                setIsComposing(false);
+              }}
               onKeyDown={(event) => {
                 if (
                   event.defaultPrevented ||
                   event.nativeEvent.isComposing ||
+                  isComposing ||
                   event.ctrlKey ||
                   event.altKey ||
                   event.metaKey
                 )
                   return;
-                if (event.key === 'Enter') {
+                if (event.key === 'Enter' || event.key === 'ArrowDown') {
                   event.preventDefault();
-                  flushQuery();
+                  if (event.repeat) return;
+                  if (event.key === 'Enter') {
+                    flushQuery();
+                    resetScroll();
+                  }
+                  focusFirstResult();
                   return;
                 }
                 // Progressive dismissal: Esc clears text, then becomes back.
@@ -605,7 +657,7 @@ export function Search() {
                 event.stopPropagation();
                 if (event.repeat) return;
                 if (query) {
-                  setQuery('');
+                  handleClearSearch();
                 } else {
                   navigateAppBack();
                 }
@@ -614,9 +666,11 @@ export function Search() {
             {/* eslint-enable jsx-a11y/no-autofocus */}
             <SearchIcon className='pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-zinc-500' />
             <div className='absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1.5'>
-              {isUpdating ? (
-                <Loader2 aria-hidden='true' className='h-4 w-4 animate-spin text-(--accent-nav)' />
-              ) : null}
+              <span aria-hidden='true' className='h-4 w-4'>
+                {showUpdating && (
+                  <Loader2 className='h-4 w-4 animate-spin text-(--accent-nav) motion-reduce:animate-none' />
+                )}
+              </span>
               {query ? (
                 <button
                   type='button'
@@ -630,6 +684,9 @@ export function Search() {
               ) : null}
             </div>
           </div>
+          <p id='search-keyboard-hint' className='sr-only'>
+            Enter to search. Down arrow to focus the first result. Escape to clear.
+          </p>
 
           <div className='mt-3 flex flex-wrap items-center justify-center gap-2 lg:grid lg:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]'>
             <div className='flex min-w-0 items-center gap-1.5 justify-self-start'>
@@ -654,24 +711,15 @@ export function Search() {
                   sideOffset={6}
                   className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
                 >
-                  <DropdownMenuItem
-                    role='menuitemradio'
-                    aria-checked={!activeGenre}
-                    onSelect={() => {
-                      // No-op when nothing's active — don't bounce the scroll.
-                      if (!activeGenre) return;
-                      clearGenre();
-                      resetScroll();
-                    }}
-                    className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                  >
+                  <FacetMenuItem checked={!activeGenre} onSelect={clearGenre}>
                     All genres
-                    {!activeGenre ? (
-                      <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                    ) : null}
-                  </DropdownMenuItem>
+                  </FacetMenuItem>
                   <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
-                  {hasGenreError ? (
+                  {!isOnline && !browseGenres ? (
+                    <p role='status' className='px-2.5 py-2 text-[12px] text-zinc-400'>
+                      Connect to the internet to load genres.
+                    </p>
+                  ) : hasGenreError ? (
                     <>
                       <p role='alert' className='px-2.5 pt-1 text-[12px] text-zinc-400'>
                         Couldn't load genres.
@@ -699,28 +747,16 @@ export function Search() {
                       </div>
                     </div>
                   ) : null}
-                  {menuGenres.map((genre) => {
-                    const isActive = sameSearchGenre(genre, activeGenre);
-                    return (
-                      <DropdownMenuItem
-                        key={genre}
-                        role='menuitemradio'
-                        aria-checked={isActive}
-                        title={genre}
-                        onSelect={() => {
-                          if (isActive) return;
-                          handleGenreChange(genre);
-                          resetScroll();
-                        }}
-                        className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                      >
-                        <span className='truncate'>{genre}</span>
-                        {isActive ? (
-                          <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                        ) : null}
-                      </DropdownMenuItem>
-                    );
-                  })}
+                  {menuGenres.map((genre) => (
+                    <FacetMenuItem
+                      key={genre}
+                      checked={sameSearchGenre(genre, activeGenre)}
+                      title={genre}
+                      onSelect={() => handleGenreChange(genre)}
+                    >
+                      <span className='truncate'>{genre}</span>
+                    </FacetMenuItem>
+                  ))}
                 </DropdownMenuContent>
               </DropdownMenu>
               {activeGenre && (
@@ -821,27 +857,15 @@ export function Search() {
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align='end' sideOffset={6} className='w-44'>
-                  {SEARCH_FEED_OPTIONS.map((option) => {
-                    const isActive = activeFeed === option.id;
-                    return (
-                      <DropdownMenuItem
-                        key={option.id}
-                        role='menuitemradio'
-                        aria-checked={isActive}
-                        onSelect={() => {
-                          if (isActive) return;
-                          handleFeedChange(option.id);
-                          resetScroll();
-                        }}
-                        className='flex h-8 items-center justify-between px-2.5 text-[12.5px]'
-                      >
-                        {option.label}
-                        {isActive ? (
-                          <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' />
-                        ) : null}
-                      </DropdownMenuItem>
-                    );
-                  })}
+                  {SEARCH_FEED_OPTIONS.map((option) => (
+                    <FacetMenuItem
+                      key={option.id}
+                      checked={activeFeed === option.id}
+                      onSelect={() => handleFeedChange(option.id)}
+                    >
+                      {option.label}
+                    </FacetMenuItem>
+                  ))}
                 </DropdownMenuContent>
               </DropdownMenu>
 
@@ -867,17 +891,28 @@ export function Search() {
         </div>
 
         <div
+          id='search-results'
           ref={resultsRef}
-          aria-busy={(isOnline && (showSkeleton || isUpdating || isFetching)) || undefined}
+          aria-busy={(isOnline && (isRefining || isFetching)) || undefined}
           className='pt-5'
           onClickCapture={flushQuery}
           onKeyDownCapture={(event) => {
             if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing)
               flushQuery();
-          }}
-          onAnimationEnd={(event) => {
-            if (event.target === event.currentTarget) {
-              event.currentTarget.classList.remove('search-results-enter');
+            if (
+              event.key === 'ArrowUp' &&
+              !event.defaultPrevented &&
+              !event.nativeEvent.isComposing &&
+              !event.ctrlKey &&
+              !event.altKey &&
+              !event.metaKey &&
+              event.target instanceof HTMLElement &&
+              event.target.matches('[data-media-card-poster]') &&
+              event.target.closest('[data-search-result-index="0"]')
+            ) {
+              event.preventDefault();
+              searchInputRef.current?.focus({ preventScroll: true });
+              resetScroll();
             }
           }}
         >
@@ -893,6 +928,7 @@ export function Search() {
             isFetchingNextPage={isFetchingNextPage}
             isOnline={isOnline}
             isPlaceholderData={isPlaceholderData}
+            isRefining={isRefining}
             isRetryingInitialLoad={isRetryingInitialLoad}
             onResetFilters={handleResetFilters}
             onClearSearch={handleClearSearch}

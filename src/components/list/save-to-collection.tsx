@@ -1,4 +1,4 @@
-import { Check, Library, Loader2, Plus } from 'lucide-react';
+import { Check, Library, Plus } from 'lucide-react';
 import { warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
@@ -8,23 +8,19 @@ import type { MediaItem } from '@/lib/api';
 import { cn, queryNeedsRetry } from '@/lib/utils';
 
 const ROW_CLASS =
-  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-white/[0.06] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-wait';
+  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-white/[0.06] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default';
 
-function SavedCheck({ saved, pending }: { saved: boolean; pending: boolean }) {
+function SavedCheck({ saved }: { saved: boolean }) {
   return (
     <span className='grid size-5 shrink-0 place-items-center' aria-hidden='true'>
-      {pending ? (
-        <Loader2 className='size-3.5 animate-spin text-zinc-400' />
-      ) : (
-        <span
-          className={cn(
-            'grid size-4.5 place-items-center rounded-full bg-[rgb(var(--accent-act-rgb)/0.14)] text-(--accent-act) transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-            saved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
-          )}
-        >
-          <Check className='size-3' strokeWidth={2.5} />
-        </span>
-      )}
+      <span
+        className={cn(
+          'grid size-4.5 place-items-center rounded-full bg-[rgb(var(--accent-act-rgb)/0.14)] text-(--accent-act) transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+          saved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+        )}
+      >
+        <Check className='size-3' strokeWidth={2.5} />
+      </span>
     </span>
   );
 }
@@ -77,7 +73,7 @@ export function SaveToCollectionPanel({
                 {isInLibrary ? 'Saved to your profile' : 'Add to your profile'}
               </span>
             </span>
-            <SavedCheck saved={isInLibrary} pending={isLibraryBusy} />
+            <SavedCheck saved={isInLibrary} />
           </button>
           <div className='my-1.5 h-px bg-white/[0.08]' />
         </>
@@ -119,6 +115,7 @@ export function SaveToCollectionPanel({
                 title={list.name}
                 aria-pressed={list.contains_item}
                 aria-disabled={pending || undefined}
+                aria-busy={pending || undefined}
                 onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -134,7 +131,7 @@ export function SaveToCollectionPanel({
                     {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
                   </span>
                 </span>
-                <SavedCheck saved={list.contains_item} pending={pending} />
+                <SavedCheck saved={list.contains_item} />
               </button>
             );
           })

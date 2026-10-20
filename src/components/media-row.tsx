@@ -5,7 +5,7 @@ import { Link } from 'react-router';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import type { MediaItem } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
-import { cn } from '@/lib/utils';
+import { cn, scrollBehavior } from '@/lib/utils';
 import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
@@ -26,8 +26,6 @@ interface MediaRowProps {
   titleHref?: string;
   queryKey: string[];
   queryFn: () => Promise<MediaItem[]>;
-  /** Freshness for this row's catalog entry — a parent sharing the query key (home hero) must pass its own so the pair can't drift. */
-  staleTime?: number;
   enabled?: boolean;
   minItems?: number;
   genreFilter?: GenreFilterConfig;
@@ -38,7 +36,6 @@ export function MediaRow({
   titleHref,
   queryKey,
   queryFn,
-  staleTime = MEDIA_ROW_STALE_TIME_MS,
   enabled = true,
   minItems = 1,
   genreFilter,
@@ -66,7 +63,7 @@ export function MediaRow({
   } = useQuery({
     queryKey,
     queryFn,
-    staleTime,
+    staleTime: MEDIA_ROW_STALE_TIME_MS,
     enabled,
     // Genre switches swap the query key — keep the previous rail visible instead of flashing skeletons.
     placeholderData: enabled ? keepPreviousData : undefined,
@@ -88,6 +85,21 @@ export function MediaRow({
               type='button'
               onClick={() => {
                 if (!isActive) genreFilter.onChange(genre);
+              }}
+              onFocus={(event) => {
+                const container = genreScrollRef.current;
+                if (!container) return;
+                const bounds = container.getBoundingClientRect();
+                const tab = event.currentTarget.getBoundingClientRect();
+                if (tab.left < bounds.left + 24 || tab.right > bounds.right - 24) {
+                  container.scrollBy({
+                    left:
+                      tab.left < bounds.left + 24
+                        ? tab.left - bounds.left - 24
+                        : tab.right - bounds.right + 24,
+                    behavior: scrollBehavior(),
+                  });
+                }
               }}
               aria-pressed={isActive}
               className={cn(
@@ -140,13 +152,20 @@ export function MediaRow({
     notice = retryBanner;
   } else if (!isLoading && data.length === 0) {
     if (!genreFilter) return null;
-    notice = (
-      <p>
-        {genreFilter.active === genreFilter.allOption
-          ? 'Nothing to show right now.'
-          : `Nothing in ${genreFilter.active} right now — try another genre.`}
-      </p>
-    );
+    notice =
+      genreFilter.active === genreFilter.allOption ? (
+        <>
+          <p>No titles available. Check your catalog addons or try again later.</p>
+          <Link
+            to='/settings?section=addons'
+            className='rounded-xs text-zinc-200 underline underline-offset-4 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          >
+            Manage addons
+          </Link>
+        </>
+      ) : (
+        <p>Nothing in {genreFilter.active} right now — try another genre.</p>
+      );
   } else if (!isLoading && data.length < minItems) {
     return null;
   }
@@ -154,13 +173,16 @@ export function MediaRow({
   return (
     <HorizontalMediaRail
       title={
-        titleHref && !notice ? (
+        titleHref ? (
           <Link
             to={titleHref}
             className='group/rail-title inline-flex items-center gap-0.5 rounded-xs transition-colors hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--accent-nav)/60'
           >
             {title}
-            <ChevronRight className='h-4 w-4 text-zinc-600 transition-all duration-150 group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-400' />
+            <ChevronRight
+              aria-hidden='true'
+              className='h-4 w-4 shrink-0 text-zinc-600 transition-all duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-400'
+            />
           </Link>
         ) : (
           title
@@ -180,7 +202,11 @@ export function MediaRow({
           {error && !notice && <div className='mt-3'>{retryBanner}</div>}
         </>
       }
-      viewportClassName={cn('transition-opacity duration-200', isPlaceholderData && 'opacity-60')}
+      viewportClassName={cn(
+        'transition-opacity duration-200',
+        // Delayed so a cache-fast genre switch never flickers the dim.
+        isPlaceholderData && 'opacity-60 delay-150',
+      )}
     />
   );
 }

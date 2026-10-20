@@ -64,14 +64,16 @@ export const DesktopTitlebar = memo(function DesktopTitlebar({
     let syncGeneration = 0;
 
     const syncWindowState = async () => {
-      const generation = ++syncGeneration;
+      syncGeneration += 1;
+      const generation = syncGeneration;
+      const isCurrentSync = () => isActive && generation === syncGeneration;
       try {
         const nextValue = await appWindow.isMaximized();
-        if (isActive && generation === syncGeneration) {
+        if (isCurrentSync()) {
           setIsMaximized(nextValue);
         }
       } catch {
-        if (isActive && generation === syncGeneration) {
+        if (isCurrentSync()) {
           setIsMaximized(false);
         }
       }

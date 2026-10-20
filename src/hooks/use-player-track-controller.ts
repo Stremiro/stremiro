@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useEffectEvent, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
@@ -71,13 +71,6 @@ interface UsePlayerTrackControllerArgs {
   resetKey: string;
 }
 
-function resetTrackAutoApplyAttempts(): Record<TrackType, TrackAutoApplyAttemptState> {
-  return {
-    audio: { fingerprint: null, count: 0 },
-    sub: { fingerprint: null, count: 0 },
-  };
-}
-
 export function usePlayerTrackController({
   mediaId,
   mediaType,
@@ -122,9 +115,10 @@ export function usePlayerTrackController({
     audio: false,
     sub: false,
   });
-  const autoApplyAttemptStateRef = useRef<Record<TrackType, TrackAutoApplyAttemptState>>(
-    resetTrackAutoApplyAttempts(),
-  );
+  const autoApplyAttemptStateRef = useRef<Record<TrackType, TrackAutoApplyAttemptState>>({
+    audio: { fingerprint: null, count: 0 },
+    sub: { fingerprint: null, count: 0 },
+  });
   const previousPreferencesRef = useRef<Record<TrackType, string> | null>(null);
   const manualTrackSelectionEpochRef = useRef({ audio: 0, sub: 0 });
   const manualTrackPreferencesRef = useRef<Record<TrackType, ManualTrackPreference | null>>({
@@ -155,14 +149,8 @@ export function usePlayerTrackController({
     setSubTracks([]);
   });
 
-  const activeAudioTrack = useMemo(
-    () => audioTracks.find((track) => !!track.selected) ?? null,
-    [audioTracks],
-  );
-  const activeSubTrack = useMemo(
-    () => subTracks.find((track) => !!track.selected) ?? null,
-    [subTracks],
-  );
+  const activeAudioTrack = audioTracks.find((track) => !!track.selected) ?? null;
+  const activeSubTrack = subTracks.find((track) => !!track.selected) ?? null;
   const subtitlesOff = subTracks.length > 0 && !activeSubTrack;
 
   const applyTrackList = useCallback((nextTracks: Track[]) => {
@@ -186,20 +174,20 @@ export function usePlayerTrackController({
 
   const refreshTracksImmediate = useCallback(async () => {
     const generation = trackRefreshGenerationRef.current;
-    try {
-      const observedIds = observedTrackIdsRef.current;
-      const nextTracks = await readPlayerTrackList(
-        observedIds.audio !== undefined && observedIds.sub !== undefined
-          ? { audio: observedIds.audio ?? null, sub: observedIds.sub ?? null }
-          : undefined,
-      );
+    const observedIds = observedTrackIdsRef.current;
+    const selection =
+      observedIds.audio !== undefined && observedIds.sub !== undefined
+        ? { audio: observedIds.audio, sub: observedIds.sub }
+        : undefined;
+    return (async () => {
+      const nextTracks = await readPlayerTrackList(selection);
       if (generation !== trackRefreshGenerationRef.current) {
         return trackListRef.current;
       }
       return applyTrackList(nextTracks);
-    } catch {
+    })().catch(() => {
       return trackListRef.current;
-    }
+    });
   }, [applyTrackList]);
 
   const startTrackRefresh = useCallback(() => {
@@ -253,7 +241,7 @@ export function usePlayerTrackController({
     [],
   );
 
-  const notifyObservedTrackSelection = useCallback((type: TrackType, id: number | null) => {
+  const notifyObservedTrackSelection = (type: TrackType, id: number | null) => {
     observedTrackIdsRef.current[type] = id;
     const waiters = selectionWaitersRef.current[type];
     let resolvedSelection = false;
@@ -266,7 +254,7 @@ export function usePlayerTrackController({
       }
     }
     return resolvedSelection || cycleRefreshPendingRef.current[type];
-  }, []);
+  };
 
   // Capture generation before the write so resets during IPC remain detectable.
   const confirmTrackSwitch = useCallback(
@@ -296,12 +284,7 @@ export function usePlayerTrackController({
         if (generation !== trackRefreshGenerationRef.current) {
           return false;
         }
-        let selectedId: number | null | undefined;
-        try {
-          selectedId = await readSelectedTrackId(type);
-        } catch {
-          selectedId = undefined;
-        }
+        const selectedId = await readSelectedTrackId(type).catch(() => undefined);
         if (generation !== trackRefreshGenerationRef.current) return false;
         if (selectedId !== undefined) {
           const matched = id === 'no' ? selectedId === null : selectedId === id;
@@ -359,21 +342,6 @@ export function usePlayerTrackController({
     autoAppliedTrackPrefsRef.current[type] = null;
     autoApplyingTrackPrefsRef.current[type] = false;
     autoApplyAttemptStateRef.current[type] = { fingerprint: null, count: 0 };
-  }, []);
-
-  const hasReachedAttemptLimit = useCallback((type: TrackType, fingerprint: string) => {
-    const state = autoApplyAttemptStateRef.current[type];
-    return (
-      state.fingerprint === fingerprint && state.count >= MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT
-    );
-  }, []);
-
-  const recordAttempt = useCallback((type: TrackType, fingerprint: string) => {
-    const state = autoApplyAttemptStateRef.current[type];
-    autoApplyAttemptStateRef.current[type] =
-      state.fingerprint === fingerprint
-        ? { fingerprint, count: state.count + 1 }
-        : { fingerprint, count: 1 };
   }, []);
 
   const markApplied = useCallback((type: TrackType, fingerprint: string) => {
@@ -448,18 +416,21 @@ export function usePlayerTrackController({
     async (
       type: TrackType,
       id: number | 'no',
-      {
-        persistPreference = false,
-        silent = false,
-      }: { persistPreference?: boolean; silent?: boolean } = {},
+      { persistPreference, silent }: TrackChangeOptions = {},
     ): Promise<boolean> => {
       const generation = trackRefreshGenerationRef.current;
-      try {
+      const failed = () => {
+        if (!silent && generation === trackRefreshGenerationRef.current) {
+          toast.error('Failed to switch track');
+        }
+        return false;
+      };
+      return (async () => {
         await setMpvProperty(type === 'audio' ? 'aid' : 'sid', id === 'no' ? 'no' : id);
 
         const switched = await confirmTrackSwitch(type, id, generation);
         if (!switched) {
-          throw new Error('track-switch-not-confirmed');
+          return failed();
         }
 
         if (generation !== trackRefreshGenerationRef.current) {
@@ -471,13 +442,9 @@ export function usePlayerTrackController({
         }
 
         return true;
-      } catch {
-        if (!silent && generation === trackRefreshGenerationRef.current) {
-          toast.error('Failed to switch track');
-        }
-
-        return false;
-      }
+      })().catch(() => {
+        return failed();
+      });
     },
     [confirmTrackSwitch, persistTrackSelection],
   );
@@ -509,14 +476,14 @@ export function usePlayerTrackController({
 
       const generation = trackRefreshGenerationRef.current;
       setTrackSwitchingFlag(type, true);
-      try {
+      return (async () => {
         return await requestTrackSwitch(type, id, {
           persistPreference,
           silent: options?.silent,
         });
-      } finally {
+      })().finally(() => {
         if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag(type, false);
-      }
+      });
     },
     [
       activeAudioTrack?.id,
@@ -529,37 +496,37 @@ export function usePlayerTrackController({
   );
 
   // Hold the switch gate through cycle, refresh and persist to prevent auto-apply reverting it.
-  const cycleTrack = useCallback(
-    async (type: TrackType): Promise<number | 'no' | null> => {
-      if (trackSwitchingRef.current[type]) {
-        return null;
-      }
+  const cycleTrack = async (type: TrackType): Promise<number | 'no' | null> => {
+    if (trackSwitchingRef.current[type]) {
+      return null;
+    }
 
-      const generation = trackRefreshGenerationRef.current;
-      setTrackSwitchingFlag(type, true);
-      cycleRefreshPendingRef.current[type] = true;
-      try {
-        await cycleMpvTrack(type);
-        if (generation !== trackRefreshGenerationRef.current) return null;
-        const selectedId = await readSelectedTrackId(type).catch(() => undefined);
-        if (generation !== trackRefreshGenerationRef.current) return null;
-        if (selectedId !== undefined) observedTrackIdsRef.current[type] = selectedId;
-        // Refresh before persisting the selection's track-list fingerprint.
-        // Only claim events before this snapshot; later changes need their own refresh.
-        cycleRefreshPendingRef.current[type] = false;
-        const fresh = await refreshTracks();
-        if (generation !== trackRefreshGenerationRef.current) return null;
-        const landedId =
-          selectedId !== undefined
-            ? (selectedId ?? 'no')
-            : (fresh.find((track) => track.type === type && track.selected)?.id ?? 'no');
-        persistTrackSelection(
-          type,
-          landedId,
-          fresh.find((track) => track.type === type && track.id === landedId),
-        );
-        return landedId;
-      } catch {
+    const generation = trackRefreshGenerationRef.current;
+    setTrackSwitchingFlag(type, true);
+    cycleRefreshPendingRef.current[type] = true;
+    return (async () => {
+      await cycleMpvTrack(type);
+      if (generation !== trackRefreshGenerationRef.current) return null;
+      const selectedId = await readSelectedTrackId(type).catch(() => undefined);
+      if (generation !== trackRefreshGenerationRef.current) return null;
+      if (selectedId !== undefined) observedTrackIdsRef.current[type] = selectedId;
+      // Refresh before persisting the selection's track-list fingerprint.
+      // Only claim events before this snapshot; later changes need their own refresh.
+      cycleRefreshPendingRef.current[type] = false;
+      const fresh = await refreshTracks();
+      if (generation !== trackRefreshGenerationRef.current) return null;
+      const landedId =
+        selectedId !== undefined
+          ? (selectedId ?? 'no')
+          : (fresh.find((track) => track.type === type && track.selected)?.id ?? 'no');
+      persistTrackSelection(
+        type,
+        landedId,
+        fresh.find((track) => track.type === type && track.id === landedId),
+      );
+      return landedId;
+    })()
+      .catch(async () => {
         if (
           generation === trackRefreshGenerationRef.current &&
           cycleRefreshPendingRef.current[type]
@@ -568,91 +535,85 @@ export function usePlayerTrackController({
           await refreshTracks();
         }
         return null;
-      } finally {
+      })
+      .finally(() => {
         if (generation === trackRefreshGenerationRef.current) {
           cycleRefreshPendingRef.current[type] = false;
           setTrackSwitchingFlag(type, false);
         }
-      }
-    },
-    [persistTrackSelection, refreshTracks, setTrackSwitchingFlag],
-  );
+      });
+  };
 
-  const selectAddonSubtitle = useCallback(
-    async (subtitle: AddonSubtitle): Promise<boolean> => {
-      if (trackSwitchingRef.current.sub) {
-        return false;
-      }
+  const selectAddonSubtitle = async (subtitle: AddonSubtitle): Promise<boolean> => {
+    if (trackSwitchingRef.current.sub) {
+      return false;
+    }
 
-      const existing = findExternalSubtitleTrack(trackListRef.current, subtitle);
-      if (existing) {
-        return setTrack('sub', existing.id, { persistPreference: true });
-      }
+    const existing = findExternalSubtitleTrack(trackListRef.current, subtitle);
+    if (existing) {
+      return setTrack('sub', existing.id, { persistPreference: true });
+    }
 
-      const generation = trackRefreshGenerationRef.current;
-      setTrackSwitchingFlag('sub', true);
-      try {
-        // Read the native baseline before adding; the local list can lag file-load.
-        const baseTrackCount = (await readPlayerTrackCount()) ?? trackListRef.current.length;
-        if (generation !== trackRefreshGenerationRef.current) return false;
-        await addSubtitleTrack(subtitle.url, subtitle.mpvTitle, subtitle.lang);
-        if (generation !== trackRefreshGenerationRef.current) return false;
+    const generation = trackRefreshGenerationRef.current;
+    setTrackSwitchingFlag('sub', true);
+    return (async () => {
+      // Read the native baseline before adding; the local list can lag file-load.
+      const baseTrackCount = (await readPlayerTrackCount()) ?? trackListRef.current.length;
+      if (generation !== trackRefreshGenerationRef.current) return false;
+      await addSubtitleTrack(subtitle.url, subtitle.mpvTitle, subtitle.lang);
+      if (generation !== trackRefreshGenerationRef.current) return false;
 
-        let addedTrack = findExternalSubtitleTrack(trackListRef.current, subtitle) ?? null;
-        /* eslint-disable no-await-in-loop -- sequential verify-poll */
-        for (
-          let attempt = 0;
-          !addedTrack && attempt < ADDON_SUB_TRACK_VERIFY_ATTEMPTS;
-          attempt += 1
-        ) {
-          if (generation !== trackRefreshGenerationRef.current) {
-            return false;
-          }
-          // Avoid full-list reads until the native track count grows.
-          const trackCount = await readPlayerTrackCount();
-          if (generation !== trackRefreshGenerationRef.current) return false;
-          if (trackCount !== null && trackCount > baseTrackCount) {
-            const fresh = await refreshTracks();
-            addedTrack = findExternalSubtitleTrack(fresh, subtitle) ?? null;
-          }
-          if (!addedTrack) {
-            await sleep(TRACK_SWITCH_VERIFY_DELAY_MS);
-          }
-        }
-        /* eslint-enable no-await-in-loop */
-
-        if (generation !== trackRefreshGenerationRef.current) return false;
-        // A reused native slot may land without increasing the count.
-        if (!addedTrack) {
-          const fresh = await refreshTracks();
-          addedTrack = findExternalSubtitleTrack(fresh, subtitle) ?? null;
-        }
-        if (generation !== trackRefreshGenerationRef.current) return false;
-        if (!addedTrack) {
-          throw new Error('addon-subtitle-track-not-added');
-        }
-
-        if (!addedTrack.selected) {
-          const switched = await requestTrackSwitch('sub', addedTrack.id, { silent: true });
-          if (!switched) {
-            throw new Error('addon-subtitle-select-failed');
-          }
-        }
-
+      let addedTrack = findExternalSubtitleTrack(trackListRef.current, subtitle) ?? null;
+      /* eslint-disable no-await-in-loop -- sequential verify-poll */
+      for (
+        let attempt = 0;
+        !addedTrack && attempt < ADDON_SUB_TRACK_VERIFY_ATTEMPTS;
+        attempt += 1
+      ) {
         if (generation !== trackRefreshGenerationRef.current) {
           return false;
         }
-
-        persistTrackSelection('sub', addedTrack.id, addedTrack);
-        return true;
-      } catch {
-        return false;
-      } finally {
-        if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag('sub', false);
+        // Avoid full-list reads until the native track count grows.
+        const trackCount = await readPlayerTrackCount();
+        if (generation !== trackRefreshGenerationRef.current) return false;
+        if (trackCount !== null && trackCount > baseTrackCount) {
+          const fresh = await refreshTracks();
+          addedTrack = findExternalSubtitleTrack(fresh, subtitle) ?? null;
+        }
+        if (!addedTrack) {
+          await sleep(TRACK_SWITCH_VERIFY_DELAY_MS);
+        }
       }
-    },
-    [persistTrackSelection, refreshTracks, requestTrackSwitch, setTrack, setTrackSwitchingFlag],
-  );
+      /* eslint-enable no-await-in-loop */
+
+      if (generation !== trackRefreshGenerationRef.current) return false;
+      // A reused native slot may land without increasing the count.
+      if (!addedTrack) {
+        const fresh = await refreshTracks();
+        addedTrack = findExternalSubtitleTrack(fresh, subtitle) ?? null;
+      }
+      if (generation !== trackRefreshGenerationRef.current) return false;
+      if (!addedTrack) return false;
+
+      if (!addedTrack.selected) {
+        const switched = await requestTrackSwitch('sub', addedTrack.id, { silent: true });
+        if (!switched) return false;
+      }
+
+      if (generation !== trackRefreshGenerationRef.current) {
+        return false;
+      }
+
+      persistTrackSelection('sub', addedTrack.id, addedTrack);
+      return true;
+    })()
+      .catch(() => {
+        return false;
+      })
+      .finally(() => {
+        if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag('sub', false);
+      });
+  };
 
   useEffect(() => {
     resetAutoApplyState('audio');
@@ -711,16 +672,14 @@ export function usePlayerTrackController({
       isCancelled: () => boolean,
     ) => {
       const manualSelectionEpoch = manualTrackSelectionEpochRef.current[kind];
-      let resolution;
-      try {
-        resolution = await api.resolvePreferredTrackSelection(
+      const resolution = await api
+        .resolvePreferredTrackSelection(
           tracks.map(toTrackLanguageCandidate),
           preferredLanguage,
           activeTrackId,
-        );
-      } catch {
-        return;
-      }
+        )
+        .catch(() => null);
+      if (!resolution) return;
 
       if (isCancelled() || manualSelectionEpoch !== manualTrackSelectionEpochRef.current[kind])
         return;
@@ -748,7 +707,11 @@ export function usePlayerTrackController({
       let cancelled = false;
       const generation = trackRefreshGenerationRef.current;
       autoApplyingTrackPrefsRef.current[kind] = true;
-      recordAttempt(kind, fingerprint);
+      const state = autoApplyAttemptStateRef.current[kind];
+      autoApplyAttemptStateRef.current[kind] = {
+        fingerprint,
+        count: state.fingerprint === fingerprint ? state.count + 1 : 1,
+      };
 
       void task(() => cancelled).finally(() => {
         if (generation !== trackRefreshGenerationRef.current) return;
@@ -764,20 +727,18 @@ export function usePlayerTrackController({
         autoApplyingTrackPrefsRef.current[kind] = false;
       };
     },
-    [recordAttempt],
+    [],
   );
 
-  const isAutoApplyHandled = useCallback(
-    (kind: TrackType, fingerprint: string) => {
-      return (
-        manualTrackPreferencesRef.current[kind]?.language === null ||
-        autoAppliedTrackPrefsRef.current[kind] === fingerprint ||
-        autoApplyingTrackPrefsRef.current[kind] ||
-        hasReachedAttemptLimit(kind, fingerprint)
-      );
-    },
-    [hasReachedAttemptLimit],
-  );
+  const isAutoApplyHandled = useCallback((kind: TrackType, fingerprint: string) => {
+    const state = autoApplyAttemptStateRef.current[kind];
+    return (
+      manualTrackPreferencesRef.current[kind]?.language === null ||
+      autoAppliedTrackPrefsRef.current[kind] === fingerprint ||
+      autoApplyingTrackPrefsRef.current[kind] ||
+      (state.fingerprint === fingerprint && state.count >= MAX_AUTO_APPLY_ATTEMPTS_PER_FINGERPRINT)
+    );
+  }, []);
 
   useEffect(() => {
     const preferredAudioLanguage = playbackLanguagePreferences.preferredAudioLanguage ?? '';

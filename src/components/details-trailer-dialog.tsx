@@ -1,6 +1,6 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
 import { ExternalLink, Film, Loader2, RotateCw, X } from 'lucide-react';
-import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react';
+import { type KeyboardEvent, type RefObject, useEffect, useId, useRef, useState } from 'react';
 import {
   Dialog,
   DialogClose,
@@ -23,6 +23,7 @@ interface DetailsTrailerDialogProps {
   selectedTrailerId: string | undefined;
   onSelectTrailer: (id: string) => void;
   title: string;
+  returnFocusRef: RefObject<HTMLButtonElement | null>;
 }
 
 export function DetailsTrailerDialog({
@@ -33,6 +34,7 @@ export function DetailsTrailerDialog({
   selectedTrailerId,
   onSelectTrailer,
   title,
+  returnFocusRef,
 }: DetailsTrailerDialogProps) {
   const selectedIndex = trailers.findIndex((trailer) => trailer.id === selectedTrailerId);
   const activeIndex = Math.max(0, selectedIndex);
@@ -110,6 +112,11 @@ export function DetailsTrailerDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent
         hideCloseButton
+        onCloseAutoFocus={(event) => {
+          if (!returnFocusRef.current) return;
+          event.preventDefault();
+          returnFocusRef.current.focus({ preventScroll: true });
+        }}
         className={cn(
           'max-w-none gap-0 overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-950 p-0 text-white shadow-[0_28px_90px_rgba(0,0,0,0.85)] sm:max-w-5xl sm:rounded-2xl',
           hasPicker
@@ -189,7 +196,7 @@ export function DetailsTrailerDialog({
               role='status'
               className='pointer-events-none absolute inset-0 z-10 grid place-items-center'
             >
-              <div className='flex flex-col items-center gap-3 rounded-xl bg-black/80 p-4 text-center'>
+              <div className='delayed-fade-in flex flex-col items-center gap-3 rounded-xl bg-black/80 p-4 text-center'>
                 <Loader2
                   aria-hidden='true'
                   className='h-6 w-6 animate-spin text-zinc-300 motion-reduce:animate-none'

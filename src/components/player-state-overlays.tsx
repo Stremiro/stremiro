@@ -1,13 +1,5 @@
 import { ArrowLeft, Loader2, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useRef,
-  useState,
-  useSyncExternalStore,
-} from 'react';
+import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -368,12 +360,12 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
   onPlayNext,
 }: PlayerUpNextCardProps) {
   const playNextButtonRef = useRef<HTMLButtonElement | null>(null);
-  const cancelButtonRef = useCallback((button: HTMLButtonElement | null) => {
+  const cancelButtonRef = (button: HTMLButtonElement | null) => {
     if (!button) return;
     return () => {
       if (document.activeElement === button) playNextButtonRef.current?.focus();
     };
-  }, []);
+  };
   const autoPlaySecondsLeft = useSyncExternalStore(
     autoPlayCountdown.subscribe,
     autoPlayCountdown.getSnapshot,
@@ -483,7 +475,7 @@ interface PlayerEndCardProps {
 export const PlayerEndCard = memo(function PlayerEndCard({
   title,
   thumbnail,
-  variant = 'card',
+  variant,
   onReplay,
   onBackToTitle,
 }: PlayerEndCardProps) {

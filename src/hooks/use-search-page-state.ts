@@ -1,7 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router';
 
-import { useDebounce } from '@/hooks/use-debounce';
 import {
   readSearchFacets,
   rememberSearchParams,
@@ -9,26 +8,37 @@ import {
   type SearchMediaType,
 } from '@/lib/search-page-state';
 
-// Search-page state: debounced query text plus browse facets. The URL carries
-// `?q=`, `?type=`, `?feed=`, `?genre=`; the backend defaults anything omitted.
+// The URL owns committed queries and facets; only typing stays local.
 export function useSearchPageState() {
   const { pathname } = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
-  const urlQuery = searchParams.get('q') || '';
-  const { type: activeType, feed: activeFeed, genre: activeGenre } = readSearchFacets(searchParams);
+  const {
+    query: urlQuery,
+    type: activeType,
+    feed: activeFeed,
+    genre: activeGenre,
+  } = readSearchFacets(searchParams);
 
-  const [query, setQuery] = useState(urlQuery);
-  const debouncedInput = useDebounce(query, 250);
-  const debouncedQuery = query.trim() ? debouncedInput : '';
+  const [input, setInput] = useState({ urlQuery, query: urlQuery });
+  const [reflectedQuery, setReflectedQuery] = useState<string | null>(null);
+  const [isComposing, setIsComposing] = useState(false);
+  const { query } = input;
 
+  // Navigation is already committed input; don't debounce it or render the old query.
+  if (input.urlQuery !== urlQuery) {
+    const isReflection = reflectedQuery === urlQuery;
+    const nextQuery = isReflection || query.trim() === urlQuery ? query : urlQuery;
+    setInput({ urlQuery, query: nextQuery });
+    setReflectedQuery(null);
+    if (!isReflection) setIsComposing(false);
+  }
+
+  const setQuery = useCallback(
+    (nextQuery: string) => setInput({ urlQuery, query: nextQuery }),
+    [urlQuery],
+  );
   const trimmedQuery = query.trim();
-  const trimmedDebouncedQuery = debouncedQuery.trim();
-
-  // Adopt the URL only when navigation changed it — keying on `query` too would
-  // wipe keystrokes. The trim-equality guard keeps an in-flight trailing space.
-  useEffect(() => {
-    setQuery((current) => (current.trim() === urlQuery ? current : urlQuery));
-  }, [urlQuery]);
+  const trimmedDebouncedQuery = isComposing || trimmedQuery ? urlQuery.trim() : '';
 
   // Facets are URL-owned; only typing needs a local draft and debounce.
   const updateSearchParams = useCallback(
@@ -42,45 +52,44 @@ export function useSearchPageState() {
     [searchParams, setSearchParams],
   );
   const flushQuery = useCallback(() => {
-    if (window.location.pathname !== pathname) return;
+    if (isComposing || window.location.pathname !== pathname) return;
+    setReflectedQuery(trimmedQuery);
     updateSearchParams((params) => {
       if (trimmedQuery) params.set('q', trimmedQuery);
       else params.delete('q');
     });
-  }, [pathname, trimmedQuery, updateSearchParams]);
+  }, [isComposing, pathname, trimmedQuery, updateSearchParams]);
 
-  // Remember drafts immediately; reflect settled queries without adding history.
-  // Cloning preserves unknown keys. Skip reflection while the
-  // debounce still lags raw input or a navigation-side `q` change is pending.
-  const lastReflectedUrlQueryRef = useRef(urlQuery);
+  // Remember drafts immediately; commit typing without adding history.
   useEffect(() => {
-    if (urlQuery !== lastReflectedUrlQueryRef.current) {
-      lastReflectedUrlQueryRef.current = urlQuery;
-      rememberSearchParams(searchParams);
-      return;
-    }
-
     const rememberedParams = new URLSearchParams(searchParams);
     if (query) rememberedParams.set('q', query);
     else rememberedParams.delete('q');
     rememberSearchParams(rememberedParams);
 
-    if (trimmedQuery !== trimmedDebouncedQuery) {
+    if (isComposing || trimmedQuery === urlQuery) return;
+    if (!trimmedQuery) {
+      flushQuery();
       return;
     }
-
-    flushQuery();
-  }, [flushQuery, query, searchParams, trimmedDebouncedQuery, trimmedQuery, urlQuery]);
+    const timer = window.setTimeout(flushQuery, 180);
+    return () => window.clearTimeout(timer);
+  }, [flushQuery, isComposing, query, searchParams, trimmedQuery, urlQuery]);
 
   const handleTypeChange = useCallback(
     (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
+      if (!isComposing) setReflectedQuery(trimmedQuery);
       updateSearchParams((params) => {
+        if (!isComposing) {
+          if (trimmedQuery) params.set('q', trimmedQuery);
+          else params.delete('q');
+        }
         if (nextType === 'all') params.delete('type');
         else params.set('type', nextType);
         if (clearIncompatibleGenre) params.delete('genre');
       });
     },
-    [updateSearchParams],
+    [isComposing, trimmedQuery, updateSearchParams],
   );
 
   const handleFeedChange = useCallback(
@@ -107,7 +116,6 @@ export function useSearchPageState() {
   const hasActiveFilters =
     activeType !== 'all' || (!trimmedDebouncedQuery && activeFeed !== 'popular') || !!activeGenre;
 
-  // Hard reset back to the default browse: all types, trending, no genre.
   const resetFilters = useCallback(() => {
     updateSearchParams((params) => {
       params.delete('type');
@@ -121,15 +129,17 @@ export function useSearchPageState() {
     activeGenre,
     activeType,
     clearGenre,
-    debouncedQuery,
     flushQuery,
     handleFeedChange,
     handleGenreChange,
     handleTypeChange,
     hasActiveFilters,
+    isComposing,
     query,
     resetFilters,
     setQuery,
+    setIsComposing,
     trimmedDebouncedQuery,
+    trimmedQuery,
   };
 }

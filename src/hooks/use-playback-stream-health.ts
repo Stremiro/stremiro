@@ -33,8 +33,6 @@ export function usePlaybackStreamHealth({
   );
 
   useEffect(() => {
-    lastVerifiedRequestRef.current = null;
-    reportedFailureKeysRef.current.clear();
     identityByRequestRef.current.clear();
   }, [mediaId, mediaType, absoluteSeason, absoluteEpisode]);
 
@@ -49,7 +47,16 @@ export function usePlaybackStreamHealth({
         streamFamily: activeStreamFamilyRef.current ?? undefined,
       });
     }
-  }, [activeStreamUrl, activeStreamKey, activeStreamSourceIdRef, activeStreamFamilyRef]);
+  }, [
+    mediaId,
+    mediaType,
+    absoluteSeason,
+    absoluteEpisode,
+    activeStreamUrl,
+    activeStreamKey,
+    activeStreamSourceIdRef,
+    activeStreamFamilyRef,
+  ]);
 
   const reportOutcome = useCallback(
     async (outcome: PlaybackStreamOutcome, streamUrl: string, streamKey?: string) => {

@@ -54,6 +54,7 @@ export function useMediaSession({
   const supported = typeof navigator !== 'undefined' && 'mediaSession' in navigator;
   // Leave Next unbound when there is no next episode.
   const hasNextTrack = onNextTrack !== undefined;
+  const artworkKey = JSON.stringify(artworkSrcs ?? []);
 
   useEffect(() => {
     if (!supported || typeof MediaMetadata === 'undefined' || !title) return;
@@ -61,21 +62,32 @@ export function useMediaSession({
       title,
       artist: artist ?? '',
       album: 'Stremiro',
-      artwork: (artworkSrcs ?? []).filter((src): src is string => !!src).map((src) => ({ src })),
+      artwork: (JSON.parse(artworkKey) as (string | null)[])
+        .filter((src): src is string => !!src)
+        .map((src) => ({ src })),
     });
     return () => {
       navigator.mediaSession.metadata = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps -- artwork compared structurally below
-  }, [supported, title, artist, JSON.stringify(artworkSrcs ?? [])]);
+  }, [supported, title, artist, artworkKey]);
 
   useEffect(() => {
     if (!supported) return;
     navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+  }, [supported, isPlaying]);
+
+  useEffect(() => {
+    if (!supported) return;
     return () => {
       navigator.mediaSession.playbackState = 'none';
+      if (typeof navigator.mediaSession.setPositionState !== 'function') return;
+      try {
+        navigator.mediaSession.setPositionState();
+      } catch {
+        // Some WebView builds expose an unsupported position API.
+      }
     };
-  }, [supported, isPlaying]);
+  }, [supported]);
 
   // Stable action handlers read the latest callbacks.
   const handleAction = useEffectEvent(

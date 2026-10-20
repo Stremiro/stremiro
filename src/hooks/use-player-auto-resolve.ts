@@ -1,4 +1,4 @@
-import { type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { type RefObject, useEffect, useEffectEvent, useRef } from 'react';
 
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
@@ -52,10 +52,7 @@ export function usePlayerAutoResolve({
   title,
   type,
 }: UsePlayerAutoResolveOptions) {
-  const [resolveAttemptNonce, setResolveAttemptNonce] = useState(0);
   const lastAutoResolveLookupIdRef = useRef<string | null>(null);
-  // Ref, not state — `isResolving` as a dep made each attempt cancel itself (infinite resolve loop).
-  const resolveInFlightRef = useRef<number | null>(null);
   const getTitle = useEffectEvent(() => title);
 
   useEffect(() => {
@@ -73,20 +70,24 @@ export function usePlayerAutoResolve({
     // While the manual selector is open the user owns stream choice.
     if (stream.activeStreamUrl || error || !type || !id || !mountedRef.current) return;
     if (shouldWaitForResolvedLookupId || showStreamSelector) return;
-    if (resolveInFlightRef.current !== null) return;
 
-    let cancelled = false;
+    const abort = new AbortController();
     const attemptGen = ++autoResolveGenRef.current;
-    resolveInFlightRef.current = attemptGen;
 
     const isCurrent = () =>
-      !cancelled && attemptGen === autoResolveGenRef.current && mountedRef.current;
+      !abort.signal.aborted && attemptGen === autoResolveGenRef.current && mountedRef.current;
 
     const resolve = async () => {
       setResolveStatus('');
       setError(null);
       const lookupId = streamLookupId || id;
       lastAutoResolveLookupIdRef.current = lookupId;
+      const preferred = {
+        streamKey: routeRequestedStreamKey ?? routeSelectedStreamKey,
+        sourceId: routeRequestedStreamKey ? undefined : stream.activeStreamSourceIdRef.current,
+        sourceName: routeRequestedStreamKey ? undefined : stream.activeStreamSourceNameRef.current,
+        streamFamily: routeRequestedStreamKey ? undefined : stream.activeStreamFamilyRef.current,
+      };
 
       try {
         const result = await withTimeout(
@@ -99,20 +100,8 @@ export function usePlayerAutoResolve({
             absoluteSeason: resolvedAbsoluteSeason,
             absoluteEpisode: resolvedAbsoluteEpisode,
             title: getTitle(),
-            preferred: {
-              // Replay the clicked key verbatim; otherwise source/family hints soft-match
-              // the prior stream (`uh:` keys rot). Hints fork the cache key — omitted when a replay key exists.
-              streamKey: routeRequestedStreamKey ?? routeSelectedStreamKey,
-              sourceId: routeRequestedStreamKey
-                ? undefined
-                : stream.activeStreamSourceIdRef.current,
-              sourceName: routeRequestedStreamKey
-                ? undefined
-                : stream.activeStreamSourceNameRef.current,
-              streamFamily: routeRequestedStreamKey
-                ? undefined
-                : stream.activeStreamFamilyRef.current,
-            },
+            preferred,
+            signal: abort.signal,
           }),
           // Allow store reads, ranking and IPC beyond the 14s fetch + 10s probe.
           35_000,
@@ -123,7 +112,6 @@ export function usePlayerAutoResolve({
         if (isCurrent()) {
           applyResolvedStreamToSession(stream, result);
           setResolveStatus(null);
-          return;
         }
       } catch (err: unknown) {
         if (isCurrent()) {
@@ -131,12 +119,6 @@ export function usePlayerAutoResolve({
           setError(err instanceof Error ? err.message : 'Failed to resolve stream automatically.');
           setResolveStatus(null);
           stopLoading();
-          return;
-        }
-      } finally {
-        if (resolveInFlightRef.current === attemptGen) {
-          resolveInFlightRef.current = null;
-          if (mountedRef.current) setResolveAttemptNonce((nonce) => nonce + 1);
         }
       }
     };
@@ -144,8 +126,7 @@ export function usePlayerAutoResolve({
     void resolve();
 
     return () => {
-      cancelled = true;
-      if (resolveInFlightRef.current === attemptGen) resolveInFlightRef.current = null;
+      abort.abort();
     };
   }, [
     stream,
@@ -162,7 +143,6 @@ export function usePlayerAutoResolve({
     streamLookupId,
     routeRequestedStreamKey,
     routeSelectedStreamKey,
-    resolveAttemptNonce,
     stopLoading,
     autoResolveGenRef,
     mountedRef,

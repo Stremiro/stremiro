@@ -1,4 +1,4 @@
-import { type RefObject, useCallback, useEffect, useRef } from 'react';
+import { useCallback, type RefObject, useEffect, useRef } from 'react';
 import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
 import { setMpvProperty, setVideoMarginRatio } from '@/lib/player-mpv';
 import { clamp } from '@/lib/utils';
@@ -177,7 +177,7 @@ export function usePlayerSurfaceLayout({
   activeStreamUrl,
   mpvSurfaceReady,
   isFullscreen,
-  isPip = false,
+  isPip,
   isLoading,
   isResolving,
   showErrorOverlay,
@@ -345,13 +345,13 @@ export function usePlayerSurfaceLayout({
   }, [activeStreamUrl, applyVideoMargins, isMini, mpvSurfaceReady]);
 
   // Stable handle for mpv reconfig triggers; routes to the latest gated apply.
-  const requestMarginApply = useCallback(() => {
+  const requestMarginApply = () => {
     marginRequestRef.current();
-  }, []);
+  };
 
   // Where the expanded surface last painted — the mini player's FLIP origin,
   // rebuilt from the live container rect.
-  const getExpandedVideoRect = useCallback((): MiniVideoRect | null => {
+  const getExpandedVideoRect = (): MiniVideoRect | null => {
     const ratio = lastAppliedRatioRef.current;
     const containerRect = playerContainerRef.current?.getBoundingClientRect();
     if (!ratio || !containerRect || containerRect.width <= 0 || containerRect.height <= 0) {
@@ -368,7 +368,7 @@ export function usePlayerSurfaceLayout({
       (ratio.top ?? 0) * containerRect.height -
       (ratio.bottom ?? 0) * containerRect.height;
     return width > 0 && height > 0 ? { x, y, width, height } : null;
-  }, [playerContainerRef]);
+  };
 
   return { requestMarginApply, getExpandedVideoRect };
 }

@@ -181,17 +181,19 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   onApplySubtitlePos,
   onApplySubtitleScale,
   onSelectTrack,
-  addonSubtitles = EMPTY_ADDON_SUBTITLES,
-  addonSubtitlesLoading = false,
+  addonSubtitles: addonSubtitlesProp,
+  addonSubtitlesLoading,
   addonSubtitlesFetching,
   addonSubtitlesError,
   onRetryAddonSubtitles,
-  addonSubtitlesQueried = false,
-  activeAddonSubtitleId = null,
-  addonSubtitleLoadingId = null,
+  addonSubtitlesQueried,
+  activeAddonSubtitleId,
+  addonSubtitleLoadingId,
   onSelectAddonSubtitle,
   onOpenChange,
 }: SubtitleTrackSelectorProps) {
+  const addonSubtitles =
+    addonSubtitlesProp === undefined ? EMPTY_ADDON_SUBTITLES : addonSubtitlesProp;
   const keymap = usePlayerKeymap();
   const headingId = useId();
   const selectedSubTrack = subTracks.find((track) => track.selected);

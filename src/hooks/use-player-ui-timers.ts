@@ -1,8 +1,8 @@
 import {
+  useCallback,
   type Dispatch,
   type RefObject,
   type SetStateAction,
-  useCallback,
   useEffect,
   useEffectEvent,
   useRef,
@@ -43,9 +43,9 @@ export function usePlayerUiTimers({
   const osdClearTimerRef = useRef<TimerHandle | null>(null);
   const osdAnimationFrameRef = useRef<number | null>(null);
 
-  const clearControlsAutoHide = useCallback(() => {
+  const clearControlsAutoHide = () => {
     clearTimer(controlsTimeoutRef);
-  }, []);
+  };
 
   const clearOsdTimers = useCallback(() => {
     clearTimer(osdTimerRef);
@@ -68,79 +68,70 @@ export function usePlayerUiTimers({
     return clearOsdTimers;
   }, [clearOsd, clearOsdTimers, osdEnabled]);
 
-  const showControlsWithAutoHide = useCallback(
-    (delayMs = controlsHideDelayMs) => {
-      setShowControls(true);
-      clearControlsAutoHide();
+  const showControlsWithAutoHide = (delayMs = controlsHideDelayMs) => {
+    setShowControls(true);
+    clearControlsAutoHide();
 
-      if (!isPlayingRef.current) {
-        return;
-      }
+    if (!isPlayingRef.current) {
+      return;
+    }
 
-      const arm = () => {
-        controlsTimeoutRef.current = window.setTimeout(() => {
-          controlsTimeoutRef.current = null;
-          if (!mountedRef.current || !isPlayingRef.current) return;
-          if (shouldHoldControlsNow()) {
-            arm();
-            return;
-          }
-          setShowControls(false);
-        }, delayMs);
-      };
-      arm();
-    },
-    [clearControlsAutoHide, controlsHideDelayMs, isPlayingRef, mountedRef, setShowControls],
-  );
+    const arm = () => {
+      controlsTimeoutRef.current = window.setTimeout(() => {
+        controlsTimeoutRef.current = null;
+        if (!mountedRef.current || !isPlayingRef.current) return;
+        if (shouldHoldControlsNow()) {
+          arm();
+          return;
+        }
+        setShowControls(false);
+      }, delayMs);
+    };
+    arm();
+  };
 
-  const triggerOsd = useCallback(
-    (action: PlayerOsdAction) => {
-      // A seek/track acknowledgement can arrive after docking or opening a panel.
-      if (!canShowOsdNow()) {
-        return;
-      }
+  const triggerOsd = (action: PlayerOsdAction) => {
+    // A seek/track acknowledgement can arrive after docking or opening a panel.
+    if (!canShowOsdNow()) {
+      return;
+    }
 
-      // Swap content in place while still visible — a hide/show cycle per wheel tick reads as flicker.
-      const alreadyVisible = osdTimerRef.current !== null;
-      clearOsdTimers();
+    // Swap content in place while still visible — a hide/show cycle per wheel tick reads as flicker.
+    const alreadyVisible = osdTimerRef.current !== null;
+    clearOsdTimers();
 
-      setOsdAction(action);
-      if (alreadyVisible) {
+    setOsdAction(action);
+    if (alreadyVisible) {
+      setOsdVisible(true);
+    } else {
+      setOsdVisible(false);
+      osdAnimationFrameRef.current = window.requestAnimationFrame(() => {
+        osdAnimationFrameRef.current = null;
         setOsdVisible(true);
-      } else {
-        setOsdVisible(false);
-        osdAnimationFrameRef.current = window.requestAnimationFrame(() => {
-          osdAnimationFrameRef.current = null;
-          setOsdVisible(true);
-        });
-      }
+      });
+    }
 
-      const visibleMs = action.kind === 'message' ? 2800 : 900;
+    const visibleMs = action.kind === 'message' ? 2800 : 900;
 
-      osdTimerRef.current = window.setTimeout(() => {
-        setOsdVisible(false);
-        osdTimerRef.current = null;
-        osdClearTimerRef.current = window.setTimeout(() => {
-          osdClearTimerRef.current = null;
-          setOsdAction(null);
-        }, OSD_CLEAR_DELAY_MS);
-      }, visibleMs);
-    },
-    [clearOsdTimers, setOsdAction, setOsdVisible],
-  );
+    osdTimerRef.current = window.setTimeout(() => {
+      setOsdVisible(false);
+      osdTimerRef.current = null;
+      osdClearTimerRef.current = window.setTimeout(() => {
+        osdClearTimerRef.current = null;
+        setOsdAction(null);
+      }, OSD_CLEAR_DELAY_MS);
+    }, visibleMs);
+  };
 
   // Every announcement is the same { kind: 'message', text, icon } literal.
-  const announce = useCallback(
-    (text: string, icon?: PlayerOsdMessageIcon) => {
-      triggerOsd({ kind: 'message', text, icon });
-    },
-    [triggerOsd],
-  );
+  const announce = (text: string, icon?: PlayerOsdMessageIcon) => {
+    triggerOsd({ kind: 'message', text, icon });
+  };
 
-  const clearUiTimers = useCallback(() => {
+  const clearUiTimers = () => {
     clearControlsAutoHide();
     clearOsd();
-  }, [clearControlsAutoHide, clearOsd]);
+  };
 
   return {
     announce,

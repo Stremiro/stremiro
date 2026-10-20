@@ -108,6 +108,13 @@ export const mediaCardRailKey = (item: MediaItem) => `${item.type}:${item.id}`;
 export const renderMediaCardRailItem = (item: MediaItem) => <MediaCard item={item} />;
 
 type PopoverAlign = 'left' | 'center' | 'right';
+export type PlaybackIntent = 'resume' | 'next-episode' | 'replay';
+
+const PLAYBACK_INTENT_VERB: Record<PlaybackIntent, string> = {
+  resume: 'Resume',
+  'next-episode': 'Play',
+  replay: 'Play again',
+};
 
 interface MediaCardProps {
   item: MediaItem;
@@ -117,7 +124,7 @@ interface MediaCardProps {
   /** Below-title resume line ("S1:E2 · 24m left") — plain string so memo holds. */
   metaLine?: string;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
-  playbackIntent?: 'resume' | 'next-episode';
+  playbackIntent?: PlaybackIntent;
   isPlayPending?: boolean;
   onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   subtitle?: string;
@@ -139,7 +146,7 @@ interface MediaCardPosterProps {
   item: MediaItem;
   metaLine?: string;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
-  playbackIntent: 'resume' | 'next-episode';
+  playbackIntent: PlaybackIntent;
   onPrefetchDetails?: () => void;
   progress?: number;
   subtitle?: string;
@@ -167,7 +174,7 @@ function MediaCardPoster({
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
   const anchorLabel = onPlay
     ? [
-        `${playbackIntent === 'next-episode' ? 'Play next episode of' : 'Resume'} ${item.title}`,
+        `${playbackIntent === 'next-episode' ? 'Play next episode of' : PLAYBACK_INTENT_VERB[playbackIntent]} ${item.title}`,
         subtitle,
         metaLine,
       ]
@@ -242,7 +249,6 @@ function MediaCardPoster({
     <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
       <p
         dir='auto'
-        title={item.title}
         className='line-clamp-2 min-h-[2.5em] [overflow-wrap:anywhere] text-[13px] font-medium leading-tight tracking-[-0.01em] text-zinc-100'
       >
         {item.title}
@@ -308,12 +314,17 @@ function MediaCardPoster({
             state: { from: currentPathWithSearch() },
           });
         }}
-        onFocus={onPlay ? undefined : () => void routeChunks.details().catch(() => undefined)}
+        onFocus={onPrefetchDetails}
+        onPointerEnter={(event) => {
+          if (!onPlay && event.pointerType !== 'touch')
+            void routeChunks.details().catch(() => undefined);
+        }}
         onPointerDown={onPrefetchDetails}
       >
         {poster}
+        {!onPlay && textBlock}
       </a>
-      {textBlock}
+      {onPlay && textBlock}
     </>
   );
 }
@@ -337,7 +348,6 @@ interface MediaCardOverlayProps {
     onCloseAutoFocus: (event: Event) => void;
     onInteractOutside: () => void;
     onOpenChange: (open: boolean) => void;
-    onRemove: () => void;
   };
   createListOpen: boolean;
   currentStatus: WatchStatus | null;
@@ -349,8 +359,9 @@ interface MediaCardOverlayProps {
   launchOwnerMountedRef: RefObject<boolean>;
   metaLine?: string;
   onCreateListOpenChange: (open: boolean) => void;
+  onLibraryRemove: () => void;
   onPlay?: (event: ReactMouseEvent) => void | Promise<void>;
-  playbackIntent: 'resume' | 'next-episode';
+  playbackIntent: PlaybackIntent;
   onRemoveFromContinue?: (event: ReactMouseEvent) => void;
   onToggleListPicker: (event: ReactMouseEvent) => void;
   popoverAlign: PopoverAlign;
@@ -371,6 +382,7 @@ function MediaCardOverlay({
   launchOwnerMountedRef,
   metaLine,
   onCreateListOpenChange,
+  onLibraryRemove,
   onPlay,
   playbackIntent,
   onRemoveFromContinue,
@@ -390,7 +402,7 @@ function MediaCardOverlay({
     enabled: !contextMenu && !!item.id.trim(),
   });
 
-  const { data: lists } = useListSummaries(item.id);
+  const { data: lists } = useListSummaries(item.id, { enabled: !contextMenu });
   const { data: historyEntry } = useMediaResumeEntry(item.id, item.type, {
     enabled: !onPlay,
   });
@@ -442,10 +454,10 @@ function MediaCardOverlay({
   const isInAnyList = lists?.some((list) => list.contains_item) ?? false;
   const primaryActionLabel = onPlay
     ? subtitle
-      ? `${playbackIntent === 'next-episode' ? 'Play' : 'Resume'} ${subtitle}`
+      ? `${PLAYBACK_INTENT_VERB[playbackIntent]} ${subtitle}`
       : playbackIntent === 'next-episode'
         ? 'Play next episode'
-        : 'Resume'
+        : PLAYBACK_INTENT_VERB[playbackIntent]
     : primaryPlayback.primaryActionLabel;
   const isPrimaryPending = isPlayPending || primaryPlayback.isResolvingPrimaryAction;
 
@@ -465,7 +477,7 @@ function MediaCardOverlay({
     event.preventDefault();
     event.stopPropagation();
     if (!libraryReady || toggleLibrary.isPending) return;
-    if (isInLibrary && isInLibraryOverride) contextMenu?.onRemove();
+    if (isInLibrary && isInLibraryOverride) onLibraryRemove();
     toggleLibrary.mutate();
   };
 
@@ -523,7 +535,7 @@ function MediaCardOverlay({
       {/* Top-anchored popout — center uses a negative margin, not translate, so the enter zoom never fights it. */}
       <div
         className={cn(
-          'absolute top-0 z-20 flex h-fit max-h-full max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 animate-in fade-in-0 zoom-in-95 duration-200',
+          'absolute top-0 z-20 flex h-fit max-h-full max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 animate-in fade-in-0 duration-150 motion-reduce:animate-none',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
           popoverAlign === 'center' && 'left-1/2',
@@ -590,7 +602,13 @@ function MediaCardOverlay({
                 <span className='text-[12px] font-semibold text-white'>Add to List</span>
               </div>
 
-              <Suspense fallback={null}>
+              <Suspense
+                fallback={
+                  <p role='status' className='p-3 text-[12px] text-zinc-400'>
+                    Loading lists…
+                  </p>
+                }
+              >
                 <SaveToCollectionPanel
                   item={item}
                   isInLibrary={isInLibrary}
@@ -616,7 +634,6 @@ function MediaCardOverlay({
                   {/* Every other target on a resume card plays — the title link is the non-play path to details. */}
                   <a
                     href={detailsPath}
-                    title={item.title}
                     className='transition-colors hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 rounded-xs'
                     onClick={(event) =>
                       navigateOnAnchorClick(event, detailsPath, { state: { from } })
@@ -643,7 +660,7 @@ function MediaCardOverlay({
                 <button
                   type='button'
                   data-media-card-primary
-                  className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-[0.98] aria-disabled:cursor-wait aria-disabled:opacity-80'
+                  className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[12px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-[0.98] aria-disabled:cursor-default aria-disabled:opacity-80'
                   title={primaryActionLabel}
                   onClick={handlePrimaryAction}
                   aria-disabled={isPrimaryPending || undefined}
@@ -663,21 +680,24 @@ function MediaCardOverlay({
                     isInLibrary
                       ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
                       : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
-                    toggleLibrary.isPending && 'cursor-wait opacity-70',
-                    !libraryReady && 'opacity-50',
                   )}
                   title={libraryActionLabel}
                   aria-label={libraryActionLabel}
                   aria-pressed={libraryReady ? isInLibrary : undefined}
+                  aria-busy={
+                    toggleLibrary.isPending || (!libraryReady && !libraryQuery.isError) || undefined
+                  }
                   // Disabling a focused control would blur and collapse the card.
                   aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
                   onClick={handleToggleLibrary}
                 >
-                  {toggleLibrary.isPending || (!libraryReady && !libraryQuery.isError) ? (
-                    <Loader2 className='h-3.5 w-3.5 animate-spin' />
-                  ) : (
-                    <Heart className={cn('h-3.5 w-3.5', isInLibrary && 'fill-current')} />
-                  )}
+                  <Heart
+                    aria-hidden='true'
+                    className={cn(
+                      'h-3.5 w-3.5 transition-[fill,color] duration-150 motion-reduce:transition-none',
+                      isInLibrary ? 'fill-current' : 'fill-transparent',
+                    )}
+                  />
                 </button>
 
                 <button
@@ -696,7 +716,13 @@ function MediaCardOverlay({
                   onFocus={warmSaveToCollectionPanel}
                   onClick={onToggleListPicker}
                 >
-                  <Bookmark className={cn('h-3.5 w-3.5', isInAnyList && 'fill-current')} />
+                  <Bookmark
+                    aria-hidden='true'
+                    className={cn(
+                      'h-3.5 w-3.5 transition-[fill,color] duration-150 motion-reduce:transition-none',
+                      isInAnyList ? 'fill-current' : 'fill-transparent',
+                    )}
+                  />
                 </button>
               </div>
 
@@ -919,27 +945,24 @@ export const MediaCard = memo(function MediaCard({
     }, delay);
   }, [clearExpandTimer, contextMenuOpenRef, expanded, resolvePopoverAlign, selectionMode]);
 
-  const handleMouseLeave = useCallback(() => {
+  const handleMouseLeave = () => {
     if (
       hasLockedCardInteraction() ||
       (!hoverFocusRef.current && cardRef.current?.querySelector(':focus-visible'))
     )
       return;
     collapseCard();
-  }, [collapseCard, hasLockedCardInteraction]);
+  };
 
-  const handleBlur = useCallback(
-    (event: ReactFocusEvent) => {
-      if (hasLockedCardInteraction()) return;
-      const nextFocus = event.relatedTarget;
-      if (nextFocus instanceof Node && cardRef.current && cardRef.current.contains(nextFocus)) {
-        hoverFocusRef.current = false;
-        return;
-      }
-      collapseCard();
-    },
-    [collapseCard, hasLockedCardInteraction],
-  );
+  const handleBlur = (event: ReactFocusEvent) => {
+    if (hasLockedCardInteraction()) return;
+    const nextFocus = event.relatedTarget;
+    if (nextFocus instanceof Node && cardRef.current && cardRef.current.contains(nextFocus)) {
+      hoverFocusRef.current = false;
+      return;
+    }
+    collapseCard();
+  };
 
   useEffect(() => {
     return () => {
@@ -966,50 +989,41 @@ export const MediaCard = memo(function MediaCard({
     };
   }, [collapseCard, createListOpenRef, showListPicker]);
 
-  const toggleListPicker = useCallback(
-    (e: ReactMouseEvent) => {
-      e.preventDefault();
-      e.stopPropagation();
-      setShowListPickerState((currentState) => !currentState);
-    },
-    [setShowListPickerState],
-  );
+  const toggleListPicker = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setShowListPickerState((currentState) => !currentState);
+  };
 
-  const handleCreateListOpenChange = useCallback(
-    (open: boolean) => {
-      setCreateListOpenState(open);
-      if (!open) {
-        // Restore the picker lock so the card stays expanded.
-        setShowListPickerState(true);
-      }
-    },
-    [setCreateListOpenState, setShowListPickerState],
-  );
+  const handleCreateListOpenChange = (open: boolean) => {
+    setCreateListOpenState(open);
+    if (!open) {
+      // Restore the picker lock so the card stays expanded.
+      setShowListPickerState(true);
+    }
+  };
 
   // The card isn't a [role="dialog"] — without this a keyboard-opened overlay leaks Esc to the global back
   // gesture. Collapses picker first, then the card; the portaled create-list dialog owns its own Esc via Radix.
-  const handleKeyDown = useCallback(
-    (event: ReactKeyboardEvent) => {
-      hoverFocusRef.current = false;
-      if (event.key !== 'Escape' || event.defaultPrevented || !expanded) return;
-      if (createListOpenRef.current) return;
-      event.preventDefault();
-      event.stopPropagation();
-      if (event.repeat) return;
-      if (showListPickerRef.current) {
-        setShowListPickerState(false);
-        return;
-      }
-      collapseCard();
-      // The overlay unmounts with its focused control — hand focus back to the poster link, not <body>.
-      window.requestAnimationFrame(() => {
-        restoringFocusRef.current = true;
-        cardRef.current?.querySelector<HTMLElement>('a[href]')?.focus({ preventScroll: true });
-        restoringFocusRef.current = false;
-      });
-    },
-    [expanded, collapseCard, createListOpenRef, setShowListPickerState, showListPickerRef],
-  );
+  const handleKeyDown = (event: ReactKeyboardEvent) => {
+    hoverFocusRef.current = false;
+    if (event.key !== 'Escape' || event.defaultPrevented || !expanded) return;
+    if (createListOpenRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (event.repeat) return;
+    if (showListPickerRef.current) {
+      setShowListPickerState(false);
+      return;
+    }
+    collapseCard();
+    // The overlay unmounts with its focused control — hand focus back to the poster link, not <body>.
+    window.requestAnimationFrame(() => {
+      restoringFocusRef.current = true;
+      cardRef.current?.querySelector<HTMLElement>('a[href]')?.focus({ preventScroll: true });
+      restoringFocusRef.current = false;
+    });
+  };
 
   useLayoutEffect(() => {
     const pickerChanged = previousListPickerRef.current !== showListPicker;
@@ -1039,9 +1053,14 @@ export const MediaCard = memo(function MediaCard({
           data-media-card-expanded={(!selectionMode && expanded) || undefined}
           className={cn('group/card relative', !selectionMode && expanded && 'z-30')}
           aria-label={item.title}
-          onMouseEnter={scheduleExpand}
-          onMouseLeave={handleMouseLeave}
-          onFocus={scheduleExpand}
+          onPointerEnter={(event) => {
+            if (event.pointerType !== 'touch') scheduleExpand();
+          }}
+          onPointerLeave={handleMouseLeave}
+          onFocus={(event) => {
+            if (event.target instanceof HTMLElement && event.target.matches(':focus-visible'))
+              scheduleExpand();
+          }}
           onBlur={handleBlur}
           onKeyDown={handleKeyDown}
         >
@@ -1074,7 +1093,6 @@ export const MediaCard = memo(function MediaCard({
                         restoreMenuFocusRef.current = false;
                       },
                       onOpenChange: handleContextMenuOpenChange,
-                      onRemove: prepareRemovalFocus,
                     }
                   : undefined
               }
@@ -1087,6 +1105,7 @@ export const MediaCard = memo(function MediaCard({
               launchOwnerMountedRef={launchOwnerMountedRef}
               metaLine={metaLine}
               onCreateListOpenChange={handleCreateListOpenChange}
+              onLibraryRemove={prepareRemovalFocus}
               onPlay={onPlay}
               playbackIntent={playbackIntent}
               onRemoveFromContinue={onRemoveFromContinue ? handleRemoveFromHistory : undefined}
@@ -1106,13 +1125,13 @@ export const MediaCard = memo(function MediaCard({
 export function MediaCardSkeleton() {
   return (
     <div aria-hidden='true'>
-      <div className='aspect-2/3 animate-pulse rounded-lg border border-white/5 bg-zinc-900/50' />
+      <div className='aspect-2/3 animate-pulse motion-reduce:animate-none rounded-lg border border-white/5 bg-zinc-900/50' />
       <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
         <div className='h-8 space-y-1'>
-          <div className='h-3.5 w-3/4 animate-pulse rounded-md bg-zinc-900/40' />
-          <div className='h-3.5 w-1/2 animate-pulse rounded-md bg-zinc-900/30' />
+          <div className='h-3.5 w-3/4 animate-pulse motion-reduce:animate-none rounded-md bg-zinc-900/40' />
+          <div className='h-3.5 w-1/2 animate-pulse motion-reduce:animate-none rounded-md bg-zinc-900/30' />
         </div>
-        <div className='h-3 w-1/3 animate-pulse rounded-md bg-zinc-900/30' />
+        <div className='h-3 w-1/3 animate-pulse motion-reduce:animate-none rounded-md bg-zinc-900/30' />
       </div>
     </div>
   );
