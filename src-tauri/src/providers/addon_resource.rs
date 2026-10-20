@@ -76,28 +76,19 @@ pub(crate) struct CatalogPage {
 /// Card-only decode — search endpoints return full meta objects, so decoding
 /// only card fields keeps memory proportional to what browse renders.
 #[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct CatalogItemJson {
-    #[serde(default)]
     id: Option<Value>,
-    #[serde(default)]
     name: Option<Value>,
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type")]
     type_: Option<Value>,
-    #[serde(default)]
     poster: Option<Value>,
-    #[serde(default)]
     background: Option<Value>,
-    #[serde(default)]
     logo: Option<Value>,
-    #[serde(default)]
     description: Option<Value>,
-    #[serde(default)]
     year: Option<Value>,
-    #[serde(rename = "releaseInfo", default)]
     release_info: Option<Value>,
-    #[serde(default)]
     genre: Option<Value>,
-    #[serde(default)]
     genres: Option<Value>,
 }
 
@@ -109,33 +100,22 @@ struct CatalogResponse<'a> {
 
 #[derive(Debug, Deserialize, Default)]
 struct MetaResponse {
-    #[serde(default)]
     meta: Option<Value>,
 }
 
 #[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct SubtitleItem {
-    #[serde(default)]
     id: Option<String>,
-    #[serde(default)]
     url: Option<String>,
-    #[serde(default)]
     lang: Option<String>,
-    #[serde(default)]
     label: Option<Value>,
-    #[serde(default)]
     title: Option<Value>,
-    #[serde(default)]
     name: Option<Value>,
-    #[serde(rename = "subtitleFileName", default)]
     subtitle_file_name: Option<Value>,
-    #[serde(rename = "movieReleaseName", default)]
     movie_release_name: Option<Value>,
-    #[serde(rename = "releaseName", default)]
     release_name: Option<Value>,
-    #[serde(rename = "fileName", default)]
     file_name: Option<Value>,
-    #[serde(default)]
     filename: Option<Value>,
 }
 
@@ -247,10 +227,7 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_TTL,
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
-            fetch_failures: FetchFailureCooldown::new(
-                RESOURCE_FETCH_FAILURE_TTL,
-                RESOURCE_IN_FLIGHT_SWEEP_AT,
-            ),
+            fetch_failures: FetchFailureCooldown::new(RESOURCE_FETCH_FAILURE_TTL),
             // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
                 RESOURCE_FAILURE_CACHE_MAX_ENTRIES,
@@ -390,10 +367,9 @@ impl AddonResourceClient {
                             serde_json::from_slice(&bytes).map_err(|_| {
                                 FetchFailure::Fatal("Invalid metadata response format.".to_string())
                             })?;
-                        let meta = response.meta.ok_or_else(|| {
-                            FetchFailure::Fatal("Metadata not found.".to_string())
-                        })?;
-                        parse_meta_item(meta)
+                        response
+                            .meta
+                            .and_then(parse_meta_item)
                             .map(normalize)
                             .map(Arc::new)
                             .ok_or_else(|| FetchFailure::Fatal("Metadata not found.".to_string()))
@@ -458,14 +434,6 @@ pub(crate) fn catalog_declares_extra(catalog: &AddonCatalogCapability, extra_nam
         .any(|extra| extra.name.eq_ignore_ascii_case(extra_name))
 }
 
-fn catalog_required_extras(catalog: &AddonCatalogCapability) -> impl Iterator<Item = &str> {
-    catalog
-        .extras
-        .iter()
-        .filter(|extra| extra.is_required)
-        .map(|extra| extra.name.as_str())
-}
-
 pub(crate) fn snapshot_supports_catalog<'a>(
     snapshot: &'a AddonManifest,
     type_: &str,
@@ -494,14 +462,14 @@ pub(crate) fn snapshot_supports_catalog<'a>(
         ));
     }
 
-    for required in catalog_required_extras(catalog) {
+    for required in catalog.extras.iter().filter(|extra| extra.is_required) {
         if !extras
             .iter()
-            .any(|extra| extra.name.eq_ignore_ascii_case(required))
+            .any(|extra| extra.name.eq_ignore_ascii_case(&required.name))
         {
             return Err(format!(
                 "Catalog {} requires extra {}.",
-                catalog.id, required
+                catalog.id, required.name
             ));
         }
     }
@@ -703,7 +671,7 @@ pub(crate) fn normalize_image_url(url: &str) -> Option<String> {
         return None;
     }
     let parsed = parse_fetchable_http_url(url.trim())?;
-    (raw_chars <= MAX_STRING_CHARS || parsed.as_str() == url).then(|| parsed.to_string())
+    (raw_chars <= MAX_STRING_CHARS || parsed.as_str() == url).then(|| parsed.into())
 }
 
 fn normalize_trailer_name(title: &str) -> Option<String> {
@@ -934,7 +902,7 @@ pub(crate) fn build_resource_url(
     };
 
     parsed.set_path(&path);
-    Ok(parsed.to_string())
+    Ok(parsed.into())
 }
 
 async fn fetch_bounded_json(

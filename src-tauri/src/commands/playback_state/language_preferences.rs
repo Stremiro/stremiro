@@ -88,6 +88,12 @@ impl PlaybackStateService {
         media_type: Option<&str>,
         defaults: PlaybackLanguagePreferences,
     ) -> Result<PlaybackLanguagePreferences, String> {
+        let defaults = merge_playback_language_preferences(defaults, None);
+        if defaults.preferred_audio_language.is_some()
+            && defaults.preferred_subtitle_language.is_some()
+        {
+            return Ok(defaults);
+        }
         let Some(scope_key) = playback_title_scope_key(media_type, media_id) else {
             return Ok(defaults);
         };

@@ -43,7 +43,7 @@ pub(crate) enum StreamDeliveryKind {
 }
 
 // Serialize-only: the coordinator owns presentation facts — the wire can never supply them.
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StreamPresentation {
     /// Parsed from the stream's `name`/`title` — not the addon name (`AddonStream.source_name`).
@@ -64,25 +64,6 @@ pub(crate) struct StreamPresentation {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub size_label: Option<String>,
     pub is_batch: bool,
-}
-
-impl Default for StreamPresentation {
-    fn default() -> Self {
-        Self {
-            source_name: String::new(),
-            stream_title: String::new(),
-            resolution: StreamResolution::Sd,
-            delivery_kind: StreamDeliveryKind::PeerToPeer,
-            delivery_label: "",
-            is_instantly_playable: false,
-            hdr_label: None,
-            audio_label: None,
-            codec_label: None,
-            multi_audio_label: None,
-            size_label: None,
-            is_batch: false,
-        }
-    }
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]

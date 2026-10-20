@@ -1471,6 +1471,26 @@ fn watched_episode_ceiling_covers_partial_progress_and_latest_seed() {
 }
 
 #[test]
+fn title_up_next_source_anchors_on_the_furthest_watched_episode_unless_resumable() {
+    let furthest = series_episode_progress(1_000, 2, 6, 2_400.0, 2_400.0);
+    let latest = series_episode_progress(3_000, 1, 2, 2_400.0, 2_400.0);
+    let progress =
+        build_title_watch_progress_with_priorities(vec![furthest.clone(), latest.clone()], None);
+    let source = progress.up_next_source.unwrap();
+    assert_eq!(
+        (source.absolute_season, source.absolute_episode),
+        (Some(2), Some(6))
+    );
+    assert!(progress.series_resume_entry.is_none());
+
+    let partial = series_episode_progress(4_000, 1, 3, 600.0, 2_400.0);
+    let progress =
+        build_title_watch_progress_with_priorities(vec![furthest, latest, partial], None);
+    assert!(progress.up_next_source.is_none());
+    assert!(progress.series_resume_entry.is_some());
+}
+
+#[test]
 fn near_completion_progress_is_not_skipped() {
     let mut existing = mk_watch_progress("tt123", "series", 1_000);
     existing.season = Some(1);
@@ -2613,7 +2633,7 @@ fn library_write_ignores_drifted_body_id_and_preserves_genuine_row() {
             item.description.as_deref(),
             (stored_id == " a ").then_some("Existing metadata"),
         );
-        assert_eq!(index, ["a", "b"]);
+        assert_eq!(index, None);
         store.set(library_item_key(&item.id), serde_json::json!(item));
         assert_eq!(
             store.get(library_item_key("b")),
@@ -2947,4 +2967,16 @@ async fn external_file_work_does_not_wait_for_the_store_gate() {
     .await
     .expect("external file work completes while the store gate is held");
     assert_eq!(result, b"{}");
+
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let expired = tokio::time::Instant::now() - std::time::Duration::from_secs(1);
+    assert_eq!(
+        run_blocking_op(expired, "Expired work.", move || {
+            let _ = sender.send(());
+            Ok(())
+        })
+        .await,
+        Err("Expired work.".to_string())
+    );
+    assert!(receiver.await.is_err());
 }

@@ -91,20 +91,14 @@ fn property_non_blank(value: Option<serde_json::Value>) -> Option<String> {
 /// Duplicate `type:id` rows merge — later non-empty strings win, flags OR
 /// together (mirrors the retired frontend `mergeTrackVariants`).
 fn merge_track_variants(existing: &mut PlayerTrack, next: PlayerTrack) {
-    if next.title.is_some() {
-        existing.title = next.title;
-    }
-    if next.lang.is_some() {
-        existing.lang = next.lang;
-    }
+    existing.title = next.title.or(existing.title.take());
+    existing.lang = next.lang.or(existing.lang.take());
     existing.selected |= next.selected;
     existing.default_track |= next.default_track;
     existing.forced |= next.forced;
     existing.hearing_impaired |= next.hearing_impaired;
     existing.external |= next.external;
-    if next.external_filename.is_some() {
-        existing.external_filename = next.external_filename;
-    }
+    existing.external_filename = next.external_filename.or(existing.external_filename.take());
 }
 
 fn read_track_list(
@@ -163,49 +157,34 @@ fn read_track_list(
         };
         let external = property_flag(read("external", "flag"));
 
-        let track = if track_type == PlayerTrackType::Video {
-            // Video rows only carry identity — every consumer filters to
-            // audio/sub, so their detail reads are skipped outright.
-            PlayerTrack {
-                id,
-                r#type: track_type,
-                display_label: String::new(),
-                lang: None,
-                title: None,
-                selected: false,
-                default_track: false,
-                forced: false,
-                hearing_impaired: false,
-                external,
-                external_filename: None,
-            }
-        } else {
-            let selected_id = match track_type {
+        let mut track = PlayerTrack {
+            id,
+            r#type: track_type,
+            display_label: String::new(),
+            lang: None,
+            title: None,
+            selected: false,
+            default_track: false,
+            forced: false,
+            hearing_impaired: false,
+            external,
+            external_filename: None,
+        };
+        if track_type != PlayerTrackType::Video {
+            track.selected = match track_type {
                 PlayerTrackType::Audio => selected.audio,
                 PlayerTrackType::Sub => selected.sub,
-                // Video returned in the branch above.
                 PlayerTrackType::Video => None,
-            };
-            PlayerTrack {
-                id,
-                r#type: track_type,
-                display_label: String::new(),
-                lang: property_non_blank(read("lang", "string")),
-                title: property_non_blank(read("title", "string")),
-                selected: selected_id == Some(id),
-                default_track: property_flag(read("default", "flag")),
-                forced: property_flag(read("forced", "flag")),
-                hearing_impaired: property_flag(read("hearing-impaired", "flag")),
-                external,
-                // `external-filename` only exists on external
-                // (`sub-add`-loaded) rows.
-                external_filename: if external {
-                    property_non_blank(read("external-filename", "string"))
-                } else {
-                    None
-                },
+            } == Some(id);
+            track.lang = property_non_blank(read("lang", "string"));
+            track.title = property_non_blank(read("title", "string"));
+            track.default_track = property_flag(read("default", "flag"));
+            track.forced = property_flag(read("forced", "flag"));
+            track.hearing_impaired = property_flag(read("hearing-impaired", "flag"));
+            if external {
+                track.external_filename = property_non_blank(read("external-filename", "string"));
             }
-        };
+        }
 
         match index_by_key.entry((track_type.sort_order(), id)) {
             Entry::Occupied(existing) => merge_track_variants(&mut tracks[*existing.get()], track),

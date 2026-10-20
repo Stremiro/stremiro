@@ -320,7 +320,7 @@ pub(super) async fn classify_missing_addon_capabilities(
 ) -> Result<Vec<AddonConfig>, String> {
     let mut classified = configs;
 
-    let pending: Vec<usize> = classified
+    let pending: Vec<_> = classified
         .iter()
         .enumerate()
         .filter(|(_, config)| {
@@ -332,22 +332,13 @@ pub(super) async fn classify_missing_addon_capabilities(
         })
         .map(|(index, _)| index)
         .collect();
-
-    if pending.is_empty() {
-        return Ok(classified);
-    }
-
-    // Shared pool (see `CLASSIFY_CLIENT`): cloned per task, never rebuilt
-    // per burst, so keep-alive/TLS sessions survive across settings opens.
-    let client = CLASSIFY_CLIENT.clone();
-
-    let snapshots: Vec<(usize, Result<AddonManifest, String>)> = stream::iter(pending)
+    let snapshots: Vec<_> = stream::iter(pending)
         .map(|index| {
-            let url = classified[index].url.clone();
-            let client = client.clone();
+            let url = &classified[index].url;
             async move {
                 let snapshot =
-                    fetch_addon_manifest_snapshot(&client, &url, require_valid_manifest).await;
+                    fetch_addon_manifest_snapshot(&CLASSIFY_CLIENT, url, require_valid_manifest)
+                        .await;
                 (index, snapshot)
             }
         })

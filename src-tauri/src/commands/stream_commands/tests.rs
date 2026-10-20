@@ -1,9 +1,9 @@
 use super::{
-    get_stream_pack_episode_indices, normalize_recovery_url, preferred_probe_error,
-    preferred_probe_requests, retain_unprobed_streams, stream_link, validated_info_hash,
-    PackEpisodeCoordinates, PlaybackRecoveryRegistry, ResolveStreamError, ResolveStreamErrorKind,
-    StreamLinkKind, StreamPackCoverage, BEST_STREAM_MAX_CANDIDATES, PACK_COVERAGE_CLAIMS_MAX,
-    PACK_EPISODES_MAX, RECOVERY_EARLY_CANCELS_MAX, RECOVERY_REQUESTS_MAX,
+    get_stream_pack_rows, normalize_recovery_url, preferred_probe_error, retain_unprobed_streams,
+    stream_link, validated_info_hash, PackEpisodeCoordinates, ProbeRequestIdentity,
+    ResolveStreamError, ResolveStreamErrorKind, StreamLinkKind, StreamPackCoverage, StreamPackRow,
+    StreamRequestRegistry, PACK_COVERAGE_CLAIMS_MAX, PACK_EPISODES_MAX, STREAM_EARLY_CANCELS_MAX,
+    STREAM_REQUESTS_MAX,
 };
 use crate::providers::addons::BehaviorHints;
 use crate::test_helpers::test_stream;
@@ -63,8 +63,8 @@ fn preferred_fallback_preserves_the_first_failure_unless_only_fallback_is_rate_l
 }
 
 #[test]
-fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() {
-    let streams: Vec<_> = (0..BEST_STREAM_MAX_CANDIDATES + 4)
+fn preferred_fallback_excludes_only_started_requests_and_their_aliases() {
+    let streams: Vec<_> = (0..28)
         .map(|index| {
             let mut stream = test_stream();
             stream.stream_key = format!("s:{index}");
@@ -72,26 +72,10 @@ fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() 
             stream
         })
         .collect();
-    let mut partial = streams.clone();
-    let mut alias = streams[0].clone();
-    alias.stream_key = "s:alias".to_string();
-    alias.url = Some("https://cdn.example/0.mkv#filename.mkv".to_string());
-    partial.insert(0, alias);
-    partial.insert(0, test_stream());
-    let requests = preferred_probe_requests(&partial, "s:10").expect("preferred row");
-    assert_eq!(requests.len(), BEST_STREAM_MAX_CANDIDATES);
-    assert_eq!(
-        requests
-            .iter()
-            .map(|request| request.url.path())
-            .collect::<Vec<_>>(),
-        std::iter::once(10)
-            .chain((0..BEST_STREAM_MAX_CANDIDATES + 4).filter(|index| *index != 10))
-            .take(BEST_STREAM_MAX_CANDIDATES)
-            .map(|index| format!("/{index}.mkv"))
-            .collect::<Vec<_>>()
-    );
-    assert!(preferred_probe_requests(&partial, "s:missing").is_none());
+    let requests: Vec<_> = std::iter::once(&streams[10])
+        .chain(&streams[..8])
+        .filter_map(ProbeRequestIdentity::from_stream)
+        .collect();
 
     let mut fallback = streams;
     let mut alias = fallback[10].clone();
@@ -114,7 +98,8 @@ fn preferred_fallback_excludes_only_the_capped_probe_plan_and_request_aliases() 
             .iter()
             .map(|stream| stream.stream_key.as_str())
             .collect::<Vec<_>>(),
-        (BEST_STREAM_MAX_CANDIDATES..BEST_STREAM_MAX_CANDIDATES + 4)
+        (8..28)
+            .filter(|index| *index != 10)
             .map(|index| format!("s:{index}"))
             .chain(std::iter::once("s:authenticated".to_string()))
             .collect::<Vec<_>>()
@@ -151,8 +136,7 @@ fn preferred_fallback_request_identity_preserves_header_values_and_duplicates() 
         stream
     })
     .collect();
-    let requests = preferred_probe_requests(&streams[..2], "s:preferred").expect("preferred row");
-    assert_eq!(requests.len(), 1);
+    let requests = vec![ProbeRequestIdentity::from_stream(&streams[0]).unwrap()];
     let mut fallback = streams;
     retain_unprobed_streams(&mut fallback, &requests);
     assert_eq!(
@@ -165,8 +149,8 @@ fn preferred_fallback_request_identity_preserves_header_values_and_duplicates() 
 }
 
 #[tokio::test]
-async fn recovery_registry_honors_early_and_live_cancellation() {
-    let registry = PlaybackRecoveryRegistry::default();
+async fn stream_request_registry_honors_early_and_live_cancellation() {
+    let registry = StreamRequestRegistry::default();
     registry.cancel("early".to_string()).expect("early cancel");
     let (_early_guard, mut early) = registry.register("early".to_string()).expect("register");
     assert!(*early
@@ -187,14 +171,14 @@ async fn recovery_registry_honors_early_and_live_cancellation() {
 }
 
 #[test]
-fn recovery_registry_cleans_guards_and_bounds_requests() {
-    let registry = PlaybackRecoveryRegistry::default();
+fn stream_request_registry_cleans_guards_and_bounds_requests() {
+    let registry = StreamRequestRegistry::default();
     for invalid in ["", "has space", "ümlaut", &"x".repeat(65)] {
         assert!(registry.register(invalid.to_string()).is_err());
         assert!(registry.cancel(invalid.to_string()).is_err());
     }
     let mut guards = Vec::new();
-    for index in 0..RECOVERY_REQUESTS_MAX {
+    for index in 0..STREAM_REQUESTS_MAX {
         guards.push(
             registry
                 .register(format!("live-{index}"))
@@ -209,15 +193,50 @@ fn recovery_registry_cleans_guards_and_bounds_requests() {
         .expect("cleanup");
     drop(replacement);
     drop(guards);
-    for index in 0..=RECOVERY_EARLY_CANCELS_MAX {
+    for index in 0..=STREAM_EARLY_CANCELS_MAX {
         registry.cancel(format!("early-{index}")).expect("cancel");
     }
     let requests = registry.requests.lock().expect("registry");
     assert!(requests.live.is_empty());
-    assert_eq!(requests.early_cancels.len(), RECOVERY_EARLY_CANCELS_MAX);
+    assert_eq!(requests.early_cancels.len(), STREAM_EARLY_CANCELS_MAX);
     assert_eq!(
         requests.early_cancels.front().map(String::as_str),
         Some("early-1")
+    );
+}
+
+fn episode_indices(rows: Vec<StreamPackRow>) -> Vec<u32> {
+    rows.into_iter()
+        .filter_map(|row| match row {
+            StreamPackRow::Episode { index } => Some(index),
+            StreamPackRow::Header { .. } => None,
+        })
+        .collect()
+}
+
+#[test]
+fn pack_rows_add_season_headers_only_for_multi_season_results() {
+    let episodes: Vec<PackEpisodeCoordinates> = serde_json::from_value(json!([
+        {"season": 1, "episode": 1},
+        {"season": 1, "episode": 2},
+        {"season": 2, "episode": 1}
+    ]))
+    .expect("coordinates");
+    let rows = get_stream_pack_rows(None, episodes.clone()).expect("rows");
+    assert_eq!(
+        serde_json::to_value(&rows).expect("serialized rows"),
+        json!([
+            {"type": "header", "season": 1},
+            {"type": "episode", "index": 0},
+            {"type": "episode", "index": 1},
+            {"type": "header", "season": 2},
+            {"type": "episode", "index": 2}
+        ])
+    );
+    let season_two = serde_json::from_value(json!({"seasons": [2]})).expect("coverage");
+    assert_eq!(
+        get_stream_pack_rows(Some(season_two), episodes).expect("rows"),
+        vec![StreamPackRow::Episode { index: 2 }]
     );
 }
 
@@ -228,12 +247,14 @@ fn pack_coverage_absent_or_unrestricted_keeps_all_episodes() {
     )
     .expect("coordinates");
     assert_eq!(
-        get_stream_pack_episode_indices(None, episodes.clone()).expect("absent coverage"),
+        episode_indices(get_stream_pack_rows(None, episodes.clone()).expect("absent coverage")),
         vec![0, 1, 2]
     );
     let coverage = serde_json::from_value(json!({"seasons": []})).expect("coverage");
     assert_eq!(
-        get_stream_pack_episode_indices(Some(coverage), episodes).expect("unrestricted coverage"),
+        episode_indices(
+            get_stream_pack_rows(Some(coverage), episodes).expect("unrestricted coverage")
+        ),
         vec![0, 1, 2]
     );
 }
@@ -269,7 +290,7 @@ fn pack_coverage_matches_source_or_canonical_coordinates_but_not_uncovered_episo
     ]))
     .expect("coordinates");
     assert_eq!(
-        get_stream_pack_episode_indices(Some(coverage), episodes).expect("covered indices"),
+        episode_indices(get_stream_pack_rows(Some(coverage), episodes).expect("covered indices")),
         vec![0, 1]
     );
 }
@@ -290,7 +311,7 @@ fn pack_coverage_source_coordinates_fall_back_independently_and_preserve_zero() 
     ]))
     .expect("coordinates");
     assert_eq!(
-        get_stream_pack_episode_indices(Some(coverage), episodes).expect("fallback indices"),
+        episode_indices(get_stream_pack_rows(Some(coverage), episodes).expect("fallback indices")),
         vec![0, 1, 2, 3]
     );
 }
@@ -337,23 +358,23 @@ fn pack_coverage_rejects_oversized_episode_and_claim_payloads() {
     let episode: PackEpisodeCoordinates =
         serde_json::from_value(json!({"season": 1, "episode": 1})).expect("coordinates");
     assert_eq!(
-        get_stream_pack_episode_indices(None, vec![episode.clone(); PACK_EPISODES_MAX])
+        get_stream_pack_rows(None, vec![episode.clone(); PACK_EPISODES_MAX])
             .expect("bounded episodes")
             .len(),
         PACK_EPISODES_MAX
     );
-    assert!(get_stream_pack_episode_indices(None, vec![episode; PACK_EPISODES_MAX + 1]).is_err());
+    assert!(get_stream_pack_rows(None, vec![episode; PACK_EPISODES_MAX + 1]).is_err());
     let seasons = StreamPackCoverage {
         seasons: vec![1; PACK_COVERAGE_CLAIMS_MAX + 1],
         episode_ranges: None,
     };
-    assert!(get_stream_pack_episode_indices(Some(seasons), Vec::new()).is_err());
+    assert!(get_stream_pack_rows(Some(seasons), Vec::new()).is_err());
     let ranges = serde_json::from_value(json!({
         "seasons": [],
         "episodeRanges": vec![json!({"start": 1, "end": 2}); PACK_COVERAGE_CLAIMS_MAX + 1]
     }))
     .expect("coverage");
-    assert!(get_stream_pack_episode_indices(Some(ranges), Vec::new()).is_err());
+    assert!(get_stream_pack_rows(Some(ranges), Vec::new()).is_err());
 }
 
 #[test]

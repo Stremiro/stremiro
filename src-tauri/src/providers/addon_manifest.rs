@@ -79,13 +79,6 @@ where
         .unwrap_or_default())
 }
 
-fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    deserialize_item_list::<D, String>(deserializer)
-}
-
 /// `Some` only for a real list: explicit `null` behaves like an absent key
 /// (inherit), unlike a declared-empty list ("serve nothing" for `types`, "any id" for `idPrefixes`).
 fn deserialize_optional_string_list<'de, D>(
@@ -102,12 +95,12 @@ struct RawManifest {
     name: Option<String>,
     #[serde(default, deserialize_with = "deserialize_item_list")]
     resources: Vec<RawResource>,
-    #[serde(default, deserialize_with = "deserialize_string_list")]
+    #[serde(default, deserialize_with = "deserialize_item_list")]
     types: Vec<String>,
     #[serde(
         default,
         alias = "idPrefixes",
-        deserialize_with = "deserialize_string_list"
+        deserialize_with = "deserialize_item_list"
     )]
     id_prefixes: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_item_list")]
@@ -143,13 +136,13 @@ struct RawCatalog {
     #[serde(
         default,
         alias = "extraSupported",
-        deserialize_with = "deserialize_string_list"
+        deserialize_with = "deserialize_item_list"
     )]
     extra_supported: Vec<String>,
     #[serde(
         default,
         alias = "extraRequired",
-        deserialize_with = "deserialize_string_list"
+        deserialize_with = "deserialize_item_list"
     )]
     extra_required: Vec<String>,
 }
@@ -159,7 +152,7 @@ struct RawExtra {
     name: Option<String>,
     #[serde(default, alias = "isRequired")]
     is_required: Option<bool>,
-    #[serde(default, deserialize_with = "deserialize_string_list")]
+    #[serde(default, deserialize_with = "deserialize_item_list")]
     options: Vec<String>,
 }
 
@@ -365,7 +358,7 @@ pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String
         format!("{trimmed_path}{MANIFEST_JSON_SUFFIX}")
     };
     parsed.set_path(&manifest_path);
-    Ok(parsed.to_string())
+    Ok(parsed.into())
 }
 
 pub(crate) fn snapshot_supports_request(

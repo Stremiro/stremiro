@@ -209,12 +209,13 @@ fn normalize_stored_stream_selector_preferences(
 pub(crate) fn load_stream_selector_preferences_state(
     store: &DurableStore,
 ) -> (StreamSelectorPreferences, bool) {
-    let stored = store.get(STREAM_SELECTOR_PREFERENCES_KEY);
-    let initialized = stored.is_some();
-    let preferences = stored
-        .and_then(parse_stream_selector_preferences)
-        .unwrap_or_default();
-    (preferences, initialized)
+    store.with_value(STREAM_SELECTOR_PREFERENCES_KEY, |stored| {
+        let preferences = stored
+            .and_then(|value| StoredStreamSelectorPreferences::deserialize(value).ok())
+            .map(normalize_stored_stream_selector_preferences)
+            .unwrap_or_default();
+        (preferences, stored.is_some())
+    })
 }
 
 pub(crate) fn save_stream_selector_preferences_to_store(

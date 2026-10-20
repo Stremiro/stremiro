@@ -106,7 +106,13 @@ where
     T: Send + 'static,
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
-    let mut task = tauri::async_runtime::spawn_blocking(operation);
+    let mut task = tauri::async_runtime::spawn_blocking(move || {
+        // Abort can race a queued worker starting; expired work must not mutate stores.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(timeout_message.to_string());
+        }
+        operation()
+    });
     match tokio::time::timeout_at(deadline, &mut task).await {
         Ok(result) => {
             result.map_err(|error| format!("Background persistence task failed: {}", error))?
@@ -126,7 +132,7 @@ pub(crate) use media_type::{normalize_stream_media_type, normalize_watch_progres
 pub(crate) use startup_validation::validate_startup_stores;
 use store_helpers::{load_library_index, read_watch_status_snapshot};
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct WatchProgress {
     pub id: String,    // opaque addon id (e.g. `tt…`, `kitsu:…`)
     pub type_: String, // "movie" or "series"
@@ -176,6 +182,8 @@ pub struct WatchProgress {
 
 const LIBRARY_INDEX_KEY: &str = "library_index";
 const LIBRARY_ITEM_PREFIX: &str = "library_item:";
+/// Titles a watch status added to the Library; clearing that status removes them again.
+const LIBRARY_STATUS_ADDED_KEY: &str = "library_status_added";
 const WATCH_STATUS_INDEX_KEY: &str = "watch_status_index";
 const WATCH_STATUS_ITEM_PREFIX: &str = "watch_status:";
 const MAX_SEARCH_QUERY_CHARS: usize = 120;
@@ -410,7 +418,11 @@ pub async fn clear_library(app: AppHandle) -> Result<(), String> {
             &[WATCH_STATUS_ITEM_PREFIX],
             &[WATCH_STATUS_INDEX_KEY],
         )?;
-        store_helpers::clear_index_domain(&store, &[LIBRARY_ITEM_PREFIX], &[LIBRARY_INDEX_KEY])
+        store_helpers::clear_index_domain(
+            &store,
+            &[LIBRARY_ITEM_PREFIX],
+            &[LIBRARY_INDEX_KEY, LIBRARY_STATUS_ADDED_KEY],
+        )
     })
     .await
 }
@@ -434,11 +446,16 @@ pub async fn clear_all_lists(app: AppHandle) -> Result<(), String> {
 pub async fn clear_all_watch_statuses(app: AppHandle) -> Result<(), String> {
     run_blocking_store_op(move || {
         let store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
+        let library_store = open_store(&app, LIBRARY_STORE_FILE)?;
         store_helpers::clear_index_domain(
             &store,
             &[WATCH_STATUS_ITEM_PREFIX],
             &[WATCH_STATUS_INDEX_KEY],
-        )
+        )?;
+        if store_helpers::retain_status_added_ids(&library_store, |_| false) {
+            library_store.save()?;
+        }
+        Ok(())
     })
     .await
 }

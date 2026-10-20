@@ -1,6 +1,6 @@
 use super::playback_state::PlaybackStateService;
 use super::stream_fetcher::{
-    fetch_ranked_streams, resolve_stream_ranking_scope, ResolveFetch, StreamQueryRequest,
+    fetch_stream_selector_data, resolve_stream_ranking_scope, ResolveFetch, StreamQueryRequest,
     StreamRankingOverrides, StreamRankingScope,
 };
 use super::stream_resolver::{
@@ -80,7 +80,7 @@ impl StreamPoolQuery {
         }
     }
 
-    /// `fetch_ranked_streams` on this query — rows arrive ingress-filtered and coordinator-ranked.
+    /// Rows arrive ingress-filtered and coordinator-ranked.
     pub(crate) async fn fetch_pool(
         &self,
         app: &AppHandle,
@@ -90,16 +90,23 @@ impl StreamPoolQuery {
         resolve: ResolveFetch<'_>,
         deadline: Instant,
     ) -> Result<Vec<AddonStream>, String> {
-        fetch_ranked_streams(
+        let data = fetch_stream_selector_data(
             app,
             playback_state,
             provider,
             &self.request(fetch_id),
             &self.ranking,
-            resolve,
-            deadline,
+            None,
+            Some(resolve),
+            Some(deadline),
         )
-        .await
+        .await?;
+        if data.streams.is_empty() {
+            if let Some(error) = data.fatal_error_message {
+                return Err(error);
+            }
+        }
+        Ok(data.streams)
     }
 }
 
@@ -112,8 +119,8 @@ pub(crate) fn is_probeable_stream(stream: &AddonStream) -> bool {
         .is_some_and(crate::providers::addon_resource::is_fetchable_http_url)
 }
 
-fn probe_url_identity(url: &reqwest::Url) -> &str {
-    let url = url.as_str();
+fn probe_url_identity(url: &str) -> &str {
+    let url = url.trim();
     // Fragments can guide the player, but HTTP never sends them.
     url.split_once('#').map_or(url, |(request, _)| request)
 }
@@ -126,7 +133,7 @@ pub(super) struct ProbeRequestIdentity {
 
 impl PartialEq for ProbeRequestIdentity {
     fn eq(&self, other: &Self) -> bool {
-        probe_url_identity(&self.url) == probe_url_identity(&other.url)
+        probe_url_identity(self.url.as_str()) == probe_url_identity(other.url.as_str())
             && self.headers == other.headers
     }
 }
@@ -292,7 +299,7 @@ impl<'a> StreamExclusions<'a> {
             ProbeRequestIdentity::from_stream(stream).is_none_or(|request| {
                 !requests.contains(&request)
                     && self.resolved_url.as_ref().is_none_or(|url| {
-                        probe_url_identity(url) != probe_url_identity(&request.url)
+                        probe_url_identity(url.as_str()) != probe_url_identity(request.url.as_str())
                     })
             })
         });
@@ -316,13 +323,10 @@ fn find_preferred_position(
         return None;
     }
 
-    // One probeability pass — tier scans would otherwise re-run `is_probeable_stream` per tier.
-    let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
     if let Some(key) = preferred.stream_key.and_then(normalize_non_empty) {
         if let Some(position) = streams
             .iter()
-            .enumerate()
-            .position(|(index, stream)| probeable[index] && preferred_key_matches(stream, &key))
+            .position(|stream| preferred_key_matches(stream, &key) && is_probeable_stream(stream))
         {
             return Some(position);
         }
@@ -338,6 +342,7 @@ fn find_preferred_position(
         return None;
     }
 
+    let probeable: Vec<bool> = streams.iter().map(is_probeable_stream).collect();
     let best_priority = streams
         .iter()
         .enumerate()
@@ -406,7 +411,11 @@ where
     while let Some((candidate, result)) = candidates.next().await {
         let source_name = candidate.source_name.as_deref().unwrap_or("Unknown source");
         match result {
-            Ok(Ok(resolved)) if excluded_resolved_url != Some(resolved.url.trim()) => {
+            Ok(Ok(resolved))
+                if excluded_resolved_url.is_none_or(|url| {
+                    probe_url_identity(url) != probe_url_identity(&resolved.url)
+                }) =>
+            {
                 return Ok(candidate_resolved_stream(candidate, resolved));
             }
             Ok(Ok(_)) => {}
@@ -440,6 +449,7 @@ async fn resolve_probe_candidates<P, F>(
     excluded_stream_key: Option<&str>,
     excluded_resolved_url: Option<&str>,
     deadline: Instant,
+    mut started_requests: Option<&mut Vec<ProbeRequestIdentity>>,
     mut probe: P,
 ) -> Result<BestResolvedStream, ResolveStreamError>
 where
@@ -453,6 +463,14 @@ where
         .into_iter()
         .enumerate()
         .map(move |(rank, (candidate, delay))| {
+            if let Some(requests) = started_requests.as_deref_mut() {
+                let mut headers = candidate.request_headers.clone();
+                canonicalize_header_identity(&mut headers);
+                requests.push(ProbeRequestIdentity {
+                    url: candidate.direct_url.clone(),
+                    headers,
+                });
+            }
             let probe = probe(candidate, delay.saturating_sub(started.elapsed()), deadline);
             async move { (rank, probe.await) }
         });
@@ -467,8 +485,9 @@ where
                     return Some((result, (pending, inputs, completed, next_rank, has_winner)));
                 }
                 let (rank, result) = pending.next().await?;
-                if matches!(&result.1, Ok(Ok(resolved)) if excluded_resolved_url != Some(resolved.url.trim()))
-                {
+                if matches!(&result.1, Ok(Ok(resolved)) if excluded_resolved_url.is_none_or(|url| {
+                    probe_url_identity(url) != probe_url_identity(&resolved.url)
+                })) {
                     has_winner = true;
                 } else if !has_winner && Instant::now() < deadline {
                     if let Some(next) = inputs.next() {
@@ -509,8 +528,8 @@ fn build_probe_candidates(
             .iter()
             .zip(&header_identities)
             .any(|((existing, _), existing_headers)| {
-                probe_url_identity(&existing.direct_url)
-                    == probe_url_identity(&candidate.direct_url)
+                probe_url_identity(existing.direct_url.as_str())
+                    == probe_url_identity(candidate.direct_url.as_str())
                     && existing_headers == &headers
             })
         {
@@ -540,6 +559,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
     excluded_resolved_url: Option<&str>,
     preferred: PreferredStreamHint<'_>,
     deadline: Instant,
+    started_requests: Option<&mut Vec<ProbeRequestIdentity>>,
 ) -> Result<BestResolvedStream, ResolveStreamError> {
     let deadline =
         deadline.min(Instant::now() + Duration::from_secs(BEST_STREAM_CANDIDATE_TIMEOUT_SECS));
@@ -561,6 +581,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
         excluded_stream_key,
         excluded_resolved_url.as_deref(),
         deadline,
+        started_requests,
         probe_candidate,
     )
     .await

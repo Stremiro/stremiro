@@ -1077,9 +1077,9 @@ fn selector_snapshot_serializes_like_selector_data() {
             fatal_error_message,
         };
         let snapshot = StreamSelectorSnapshot {
-            streams: owned.streams.iter().collect(),
+            streams: owned.streams.iter().collect::<Vec<_>>(),
             stats: StreamSelectorStats::from_snapshot(&owned.streams, &owned.source_summaries),
-            source_summaries: owned.source_summaries.iter().collect(),
+            source_summaries: owned.source_summaries.iter().collect::<Vec<_>>(),
             fatal_error_message: owned.fatal_error_message.as_deref(),
         };
         let payload = serde_json::to_value(&owned).unwrap();

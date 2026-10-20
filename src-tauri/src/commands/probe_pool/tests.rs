@@ -782,6 +782,7 @@ async fn excluded_legacy_key_filters_matching_pool_candidate() {
         PreferredStreamHint::default(),
         tokio::time::Instant::now()
             + Duration::from_secs(super::BEST_STREAM_CANDIDATE_TIMEOUT_SECS),
+        None,
     )
     .await
     .expect_err("the excluded stream must be filtered before probing");
@@ -865,6 +866,7 @@ async fn probe_pool_refills_eight_failed_slots_and_resolves_ninth_request() {
         None,
         None,
         tokio::time::Instant::now() + Duration::from_secs(1),
+        None,
         move |candidate, _, deadline| {
             let activity = probes.clone();
             let barrier = barrier.clone();
@@ -901,8 +903,9 @@ async fn probe_pool_refills_behind_pending_higher_rank_without_changing_the_winn
         let winner = resolve_probe_candidates(
             refill_probe_plan(9),
             None,
-            Some("https://cdn.example/excluded.mkv"),
+            Some("https://cdn.example/excluded.mkv#old"),
             tokio::time::Instant::now() + Duration::from_secs(1),
+            None,
             move |candidate, _, deadline| {
                 let ninth_started = ninth_started.clone();
                 async move {
@@ -916,7 +919,7 @@ async fn probe_pool_refills_behind_pending_higher_rank_without_changing_the_winn
                                     Err("first failed".to_string().into())
                                 }
                             }
-                            "s:1" => Ok(resolved("https://cdn.example/excluded.mkv")),
+                            "s:1" => Ok(resolved("https://cdn.example/excluded.mkv#new")),
                             "s:8" => {
                                 ninth_started.notify_one();
                                 Ok(resolved("https://cdn.example/ninth.mkv"))
@@ -944,11 +947,13 @@ async fn probe_pool_refill_keeps_the_original_deadline_and_drops_timed_out_probe
     let probes = activity.clone();
     let started = tokio::time::Instant::now();
     let original_deadline = started + Duration::from_millis(100);
+    let mut started_requests = Vec::new();
     let error = resolve_probe_candidates(
         refill_probe_plan(BEST_STREAM_MAX_CANDIDATES),
         None,
         None,
         original_deadline,
+        Some(&mut started_requests),
         move |candidate, _, deadline| {
             assert_eq!(deadline, original_deadline);
             let activity = probes.clone();
@@ -972,6 +977,15 @@ async fn probe_pool_refill_keeps_the_original_deadline_and_drops_timed_out_probe
     assert!(error.message.contains("timed out"));
     assert!(started.elapsed() < Duration::from_secs(1));
     assert_eq!(activity.started.load(Ordering::SeqCst), 9);
+    assert_eq!(
+        started_requests
+            .iter()
+            .map(|request| request.url.path())
+            .collect::<Vec<_>>(),
+        (0..9)
+            .map(|index| format!("/{index}.mkv"))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(activity.active.load(Ordering::SeqCst), 0);
 }
 
@@ -987,6 +1001,7 @@ async fn probe_pool_cancellation_drops_all_in_flight_probes_without_starting_the
             None,
             None,
             tokio::time::Instant::now() + Duration::from_secs(60),
+            None,
             move |candidate, _, deadline| {
                 let activity = probes.clone();
                 let signal = signal.clone();
@@ -1084,8 +1099,8 @@ async fn candidate_results_failed_first_rank_passes_to_next() {
         (
             "a",
             Duration::from_secs(1),
-            Box::pin(async { Ok(resolved("https://cdn.example/excluded.mkv")) }),
-            Some("https://cdn.example/excluded.mkv"),
+            Box::pin(async { Ok(resolved("https://cdn.example/excluded.mkv#new")) }),
+            Some("https://cdn.example/excluded.mkv#old"),
         ),
     ];
     for (source, timeout, inner, excluded_url) in cases {
@@ -1121,6 +1136,7 @@ async fn recovery_candidate_results_accept_same_url_for_a_different_prepared_req
             failed_key,
             Some("https://cdn.example/failed.mkv"),
             tokio::time::Instant::now() + Duration::from_secs(1),
+            None,
             |candidate, _, _| async move {
                 let resolved = if candidate.stream_key == "s:alternate" {
                     ResolvedStream {

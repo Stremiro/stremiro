@@ -111,6 +111,13 @@ fn maybe_schedule_capability_classification(app: &AppHandle, addons: &[AddonConf
     schedule_capability_classification(app, |_| {});
 }
 
+fn cached_enabled_addons(generation: u64) -> Option<Arc<Vec<AddonConfig>>> {
+    lock_or_recover(&ENABLED_ADDONS_MEMO)
+        .as_ref()
+        .filter(|(cached_generation, _)| *cached_generation == generation)
+        .map(|(_, addons)| addons.clone())
+}
+
 pub(crate) fn load_enabled_addons(app: &AppHandle) -> Result<Arc<Vec<AddonConfig>>, String> {
     // Blocking store/file IO: async fetch paths must use
     // `load_enabled_addons_snapshot` below, never this directly.
@@ -120,13 +127,8 @@ pub(crate) fn load_enabled_addons(app: &AppHandle) -> Result<Arc<Vec<AddonConfig
     // stale tag and self-heals on the next call, rather than serving a stale
     // registry under a fresh tag forever.
     let generation = addon_configs_generation();
-    {
-        let memo = lock_or_recover(&ENABLED_ADDONS_MEMO);
-        if let Some((cached_generation, cached)) = memo.as_ref() {
-            if *cached_generation == generation {
-                return Ok(cached.clone());
-            }
-        }
+    if let Some(addons) = cached_enabled_addons(generation) {
+        return Ok(addons);
     }
 
     let store = super::open_store(app, SETTINGS_STORE_FILE)?;
@@ -151,15 +153,9 @@ pub async fn load_enabled_addons_snapshot(
     app: &AppHandle,
 ) -> Result<Arc<Vec<AddonConfig>>, String> {
     let generation = addon_configs_generation();
-    {
-        let memo = lock_or_recover(&ENABLED_ADDONS_MEMO);
-        if let Some((cached_generation, cached)) = memo.as_ref() {
-            if *cached_generation == generation {
-                let addons = cached.clone();
-                maybe_schedule_capability_classification(app, &addons);
-                return Ok(addons);
-            }
-        }
+    if let Some(addons) = cached_enabled_addons(generation) {
+        maybe_schedule_capability_classification(app, &addons);
+        return Ok(addons);
     }
     let app_owned = app.clone();
     let addons = super::run_blocking_store_op(move || load_enabled_addons(&app_owned)).await?;
@@ -192,9 +188,9 @@ fn addon_allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
         .is_none_or(|snapshot| snapshot_supports_subtitles(snapshot, type_, id))
 }
 
-fn searchable_catalog_ids(addon: &AddonConfig, type_: &str) -> Vec<(String, bool)> {
+fn searchable_catalog_ids<'a>(addon: &'a AddonConfig, type_: &str) -> Vec<(&'a str, bool)> {
     match addon.capabilities.as_ref() {
-        None => vec![("top".to_string(), false)],
+        None => vec![("top", false)],
         Some(snapshot) => snapshot
             .catalogs
             .iter()
@@ -202,7 +198,7 @@ fn searchable_catalog_ids(addon: &AddonConfig, type_: &str) -> Vec<(String, bool
                 catalog.type_.eq_ignore_ascii_case(type_)
                     && catalog_declares_extra(catalog, "search")
             })
-            .map(|catalog| (catalog.id.clone(), catalog_declares_extra(catalog, "skip")))
+            .map(|catalog| (catalog.id.as_str(), catalog_declares_extra(catalog, "skip")))
             .collect(),
     }
 }
@@ -301,22 +297,6 @@ pub(crate) fn merge_catalog_pages(
     }
 
     Ok(CatalogFetchPage { items, next_skip })
-}
-
-pub async fn fetch_catalog_page(
-    app: &AppHandle,
-    client: &AddonResourceClient,
-    type_: &str,
-    catalog_id: &str,
-    extras: &[CatalogExtra],
-) -> Result<CatalogFetchPage, String> {
-    let snapshot = load_enabled_addons_snapshot(app).await?;
-    let targets = select_catalog_targets(snapshot.as_slice(), type_, catalog_id, extras)?;
-    fetch_catalog_pages_for_target_groups(client, type_, vec![Ok((targets, extras.to_vec()))])
-        .await
-        .into_iter()
-        .next()
-        .unwrap_or_else(|| Err("Failed to load catalog.".to_string()))
 }
 
 /// What a catalog fetch needs from a selected addon — never the whole config
@@ -569,7 +549,7 @@ fn select_search_catalog_work(
             for media_type in media_types {
                 for (catalog_id, supports_skip) in searchable_catalog_ids(addon, media_type) {
                     let key =
-                        search_source_key(genre.as_deref(), &addon.url, media_type, &catalog_id);
+                        search_source_key(genre.as_deref(), &addon.url, media_type, catalog_id);
                     let cursor = if let Some(cursors) = &cursors {
                         let Some(cursor) = cursors.get(key.as_str()).filter(|_| supports_skip)
                         else {
@@ -584,7 +564,7 @@ fn select_search_catalog_work(
                         }
                     };
                     let extras = catalog_search_extras(query, genre.as_deref(), cursor.skip);
-                    if !addon_allows_catalog(addon, media_type, &catalog_id, &extras)
+                    if !addon_allows_catalog(addon, media_type, catalog_id, &extras)
                         || !selected_keys.insert(cursor.key.clone())
                     {
                         continue;
@@ -594,7 +574,7 @@ fn select_search_catalog_work(
                         order: group_sources.len(),
                         addon_url: addon.url.clone(),
                         media_type: (*media_type).to_string(),
-                        catalog_id,
+                        catalog_id: catalog_id.to_string(),
                         extras,
                     });
                     group_sources.push(SearchCatalogSource {

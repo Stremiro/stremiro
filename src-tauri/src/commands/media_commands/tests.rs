@@ -145,6 +145,7 @@ fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress()
             watched_episode_ceiling: std::collections::HashMap::new(),
             series_resume_entry: None,
             movie_resume_entry: None,
+            up_next_source: None,
             latest_series_entry: None,
             latest_movie_entry: None,
             latest_entry: None,

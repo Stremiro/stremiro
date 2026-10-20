@@ -10,11 +10,10 @@ use super::resume_store::{HistoryMergeError, MAX_RESUME_TOTAL_ENTRIES};
 use super::{normalize_media_id, normalize_watch_progress_type, now_unix_millis, WatchProgress};
 use crate::providers::MediaItem;
 use std::borrow::Cow;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
-/// Shared "load rows, then score their sources" blocking op: unwraps the loader's
-/// `(key, item)` pairs and scores `source_id`s in the same store op.
+/// Loads rows and source-health priorities in one store operation.
 pub(super) async fn load_entries_with_source_health<F>(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -44,18 +43,7 @@ where
     .await
 }
 
-async fn load_resume_entries_with_source_health(
-    app: &AppHandle,
-    playback_state: &PlaybackStateService,
-) -> Result<(Vec<WatchProgress>, HashMap<String, u8>), String> {
-    load_entries_with_source_health(app, playback_state, |service, app| {
-        service.load_resume_entries(app)
-    })
-    .await
-}
-
-/// Plain row loader for views that order without source health — skips the priorities
-/// lookup the global history query pays for. Callers pass the store load.
+/// Loads rows without reading source health.
 pub(super) async fn load_resume_rows<F>(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
@@ -74,21 +62,21 @@ where
     .await
 }
 
-/// Groups rows by title, preserving the loader's first-seen order
-/// (`ORDER BY last_watched DESC, history_key DESC`) so downstream stable sorts
-/// keep recency ties instead of HashMap iteration order.
+/// Preserves first-seen title order so stable sorts retain loader recency ties.
 fn group_watch_progress_by_title(items: Vec<WatchProgress>) -> Vec<Vec<WatchProgress>> {
-    let mut positions: HashMap<(String, String), usize> = HashMap::new();
-    let mut grouped: Vec<Vec<WatchProgress>> = Vec::new();
-    for item in items {
-        let key = (item.type_.clone(), item.id.clone());
-        match positions.entry(key) {
-            Entry::Occupied(entry) => grouped[*entry.get()].push(item),
-            Entry::Vacant(entry) => {
-                entry.insert(grouped.len());
-                grouped.push(vec![item]);
-            }
-        }
+    let mut positions: HashMap<(&str, &str), usize> = HashMap::new();
+    let group_indices: Vec<usize> = items
+        .iter()
+        .map(|item| {
+            let next = positions.len();
+            *positions
+                .entry((item.type_.as_str(), item.id.as_str()))
+                .or_insert(next)
+        })
+        .collect();
+    let mut grouped: Vec<Vec<WatchProgress>> = (0..positions.len()).map(|_| Vec::new()).collect();
+    for (item, index) in items.into_iter().zip(group_indices) {
+        grouped[index].push(item);
     }
     grouped
 }
@@ -111,9 +99,7 @@ fn build_unique_watch_history_entries(
     list
 }
 
-/// Title-scoped history returns every hydrated row (per-episode fidelity for the
-/// episode-progress map, exact-episode `last_stream_key` match, and undo snapshot),
-/// not the collapsed one-entry-per-title view. Recency-sorted so `history[0]` is latest.
+/// Returns every hydrated episode row, newest first.
 pub(crate) fn build_title_watch_history_rows(items: Vec<WatchProgress>) -> Vec<WatchProgress> {
     let mut items = items;
     for item in &mut items {
@@ -252,10 +238,7 @@ pub async fn save_watch_progress(
     .await
 }
 
-/// Undo restore writes every removed row at once (one title or a bulk History
-/// selection): one bounded command + one blocking round-trip. Sanitize/build guards
-/// match `save_watch_progress`; the merge's single transaction + SQL recency guard
-/// mean a partial restore can't resurrect cleared rows.
+/// Bounds Undo restores before sanitizing or merging rows.
 pub(super) fn validate_history_batch<'a>(
     rows: impl ExactSizeIterator<Item = &'a WatchProgress>,
 ) -> Result<(), String> {
@@ -298,17 +281,14 @@ pub async fn save_watch_progress_batch(
         return Ok(());
     }
 
-    // One transaction for the whole restore: the merge bumps the generation before
-    // writing so a racing save drops, and a racing clear either wins the resume
-    // mutex first or runs after the committed merge.
+    // The store gate serializes the epoch check and merge against clear/import.
     let service = playback_state.inner().clone();
-    let app_for_merge = app.clone();
     super::run_blocking_store_op(move || {
         if service.history_reset_epoch() != start_epoch {
             return Ok(());
         }
         service
-            .merge_history_entries(&app_for_merge, prepared, false)
+            .merge_history_entries(&app, prepared, false)
             .map(|_| ())
     })
     .await
@@ -320,7 +300,10 @@ pub async fn get_watch_history(
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<Vec<WatchProgress>, String> {
     let (items, source_health_priorities) =
-        load_resume_entries_with_source_health(&app, playback_state.inner()).await?;
+        load_entries_with_source_health(&app, playback_state.inner(), |service, app| {
+            service.load_resume_entries(app)
+        })
+        .await?;
 
     Ok(annotate_watch_progress_list(
         build_unique_watch_history_entries(items, &source_health_priorities),
@@ -343,6 +326,10 @@ pub struct TitleWatchProgress {
     pub series_resume_entry: Option<WatchProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub movie_resume_entry: Option<WatchProgress>,
+    /// Home's Up Next anchor: set only when nothing is resumable, with the
+    /// furthest watched episode's coordinates (the successor is picked from the schedule).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub up_next_source: Option<WatchProgress>,
     /// Latest per-kind history heads and latest overall (`last_watched` DESC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_series_entry: Option<WatchProgress>,
@@ -438,11 +425,20 @@ pub(super) fn build_title_watch_progress_with_priorities(
         .cloned();
     let latest_movie_entry = history.iter().find(|row| row.type_ == "movie").cloned();
     let latest_entry = history.first().cloned();
+    let up_next_source = choose_up_next_source(
+        history
+            .iter()
+            .filter(|row| is_series_like_watch_progress(row))
+            .cloned()
+            .collect(),
+        source_health_priorities.unwrap_or(&HashMap::new()),
+    );
     TitleWatchProgress {
         episode_progress: build_title_episode_progress(&history, source_health_priorities),
         watched_episode_ceiling: build_watched_episode_ceiling(&history),
         series_resume_entry,
         movie_resume_entry,
+        up_next_source,
         latest_series_entry,
         latest_movie_entry,
         latest_entry,
@@ -518,24 +514,8 @@ pub(super) fn prepare_episode_watch_changes(
                 episode: Some(episode.episode),
                 absolute_season: Some(episode.season),
                 absolute_episode: Some(episode.episode),
-                stream_season: None,
-                stream_episode: None,
-                position: 0.0,
-                duration: 0.0,
                 last_watched: stamp,
-                // Filled once in the common path below, before persistence sanitizes the row.
-                title: String::new(),
-                poster: None,
-                backdrop: None,
-                last_stream_format: None,
-                last_stream_lookup_id: None,
-                last_stream_key: None,
-                source_name: None,
-                source_id: None,
-                stream_family: None,
-                resume_start_time: None,
-                is_watched: false,
-                has_started_watching: false,
+                ..WatchProgress::default()
             };
             matches.push((key, row));
         }

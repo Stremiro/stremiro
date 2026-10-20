@@ -942,11 +942,13 @@ fn selection_priority_is_never_forged_or_serialized() {
 }
 
 #[test]
-fn build_stream_endpoint_preserves_config_and_encodes_id() {
-    let url = AddonTransport::build_stream_endpoint(
+fn stream_resource_url_preserves_config_and_encodes_id() {
+    let url = crate::providers::addon_resource::build_resource_url(
         "https://example.com/stremio/v1?token=abc",
+        "stream",
         "movie",
         "tt1234567:1:2",
+        &[],
     )
     .expect("endpoint");
     assert_eq!(
@@ -954,10 +956,12 @@ fn build_stream_endpoint_preserves_config_and_encodes_id() {
         "https://example.com/stremio/v1/stream/movie/tt1234567%3A1%3A2.json?token=abc"
     );
     for token in ["abc/", "abc/manifest.json"] {
-        let url = AddonTransport::build_stream_endpoint(
+        let url = crate::providers::addon_resource::build_resource_url(
             &format!("https://example.com/stremio/v1/manifest.json?token={token}"),
+            "stream",
             "movie",
             "tt1234567",
+            &[],
         )
         .expect("configured manifest endpoint");
         assert_eq!(

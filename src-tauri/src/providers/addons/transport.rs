@@ -208,28 +208,13 @@ impl Drop for StreamRefreshClaim<'_> {
 }
 
 impl AddonTransport {
-    pub(super) fn build_stream_endpoint(
-        base_url: &str,
-        type_: &str,
-        id: &str,
-    ) -> Result<String, String> {
-        // Shared builder: keeps configured path/query, strips manifest.json, encodes the id.
-        build_resource_url(base_url, "stream", type_, id, &[])
-    }
-
     fn build_request_origin(base_url: &str) -> Result<String, String> {
         let parsed =
             reqwest::Url::parse(base_url).map_err(|e| format!("Invalid addon URL: {}", e))?;
-        let host = parsed
+        parsed
             .host_str()
             .ok_or_else(|| "Invalid addon URL: missing host".to_string())?;
-
-        let mut origin = format!("{}://{}", parsed.scheme(), host);
-        if let Some(port) = parsed.port() {
-            origin.push_str(&format!(":{}", port));
-        }
-
-        Ok(origin)
+        Ok(parsed.origin().ascii_serialization())
     }
 
     pub(crate) fn new() -> Self {
@@ -284,10 +269,7 @@ impl AddonTransport {
             ),
             generation: AtomicU64::new(0),
             in_flight: InFlight::new(STREAM_IN_FLIGHT_SWEEP_AT),
-            fetch_failures: FetchFailureCooldown::new(
-                STREAM_FETCH_FAILURE_TTL,
-                STREAM_IN_FLIGHT_SWEEP_AT,
-            ),
+            fetch_failures: FetchFailureCooldown::new(STREAM_FETCH_FAILURE_TTL),
             // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
                 STREAM_CACHE_MAX_ENTRIES,
@@ -400,10 +382,7 @@ impl AddonTransport {
         if base_url.is_empty() {
             return Ok(vec![]);
         }
-        let url = Self::build_stream_endpoint(base_url, type_, id)?;
-
-        // Same-origin Origin/Referer satisfies CDN/WAF origin checks without leaking the API key.
-        let origin = Self::build_request_origin(base_url)?;
+        let url = build_resource_url(base_url, "stream", type_, id, &[])?;
 
         let addon_key = config_cache_segment(addon_url);
         let cache_key = format!("{}|{}|{}", type_, id, addon_key);
@@ -414,7 +393,11 @@ impl AddonTransport {
                 &addon_key,
                 not_before,
                 |streams| streams.is_empty(),
-                || async { self.fetch_streams_once(&url, &origin).await.map(Arc::from) },
+                || async {
+                    let origin =
+                        Self::build_request_origin(base_url).map_err(FetchFailure::Fatal)?;
+                    self.fetch_streams_once(&url, &origin).await.map(Arc::from)
+                },
             )
             .await
             .map(|streams| streams.to_vec())

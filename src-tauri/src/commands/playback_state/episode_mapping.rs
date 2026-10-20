@@ -95,14 +95,14 @@ fn episode_mapping_scope_key(snapshot_key: &str) -> Option<&str> {
 /// Highest canonical season the title's cached mappings cover. The episode battery
 /// resolves numberless "final season" claims through it: a requested season at/beyond
 /// the max is the only season such a claim can refer to. `None` → caller degrades to "not final".
-pub(super) fn max_mapped_canonical_season(
-    index_keys: &[String],
+pub(super) fn max_mapped_canonical_season<'a>(
+    index_keys: impl IntoIterator<Item = &'a String>,
     media_type: &str,
     media_id: &str,
 ) -> Option<u32> {
     let scope_key = super::playback_title_scope_key(Some(media_type), Some(media_id))?;
     index_keys
-        .iter()
+        .into_iter()
         .filter_map(|key| {
             let (scope, season) = split_episode_snapshot_key(key)?;
             if scope == scope_key.as_str() {
@@ -356,9 +356,17 @@ fn mapped_canonical_season_is_final(
     {
         return false;
     }
-    let index = load_advisory_index(store, PLAYBACK_EPISODE_MAPPING_INDEX_KEY);
-    max_mapped_canonical_season(&index, media_type, media_id)
-        .is_some_and(|max_season| season >= max_season)
+    store.with_value(PLAYBACK_EPISODE_MAPPING_INDEX_KEY, |value| {
+        let Some(index) = value.and_then(serde_json::Value::as_array) else {
+            return false;
+        };
+        let keys = index.iter().filter_map(|value| match value {
+            serde_json::Value::String(key) => Some(key),
+            _ => None,
+        });
+        max_mapped_canonical_season(keys, media_type, media_id)
+            .is_some_and(|max_season| season >= max_season)
+    })
 }
 
 impl PlaybackStateService {

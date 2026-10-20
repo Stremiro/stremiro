@@ -29,46 +29,37 @@ fn normalize_skip_time(value: f64) -> Option<f64> {
     Some((value.max(0.0) * 1000.0).round() / 1000.0)
 }
 
-fn normalize_skip_segments(segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
-    let mut normalized_segments = segments
-        .into_iter()
-        .filter_map(|segment| {
-            let start_time = normalize_skip_time(segment.start_time)?;
-            let end_time = normalize_skip_time(segment.end_time)?;
-
-            if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
-                return None;
-            }
-
-            Some(SkipSegment {
-                type_: segment.type_,
-                start_time,
-                end_time,
-            })
-        })
-        .collect::<Vec<_>>();
-
-    normalized_segments.sort_by(|left, right| {
+fn normalize_skip_segments(mut segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
+    segments.retain_mut(|segment| {
+        let Some((start_time, end_time)) =
+            normalize_skip_time(segment.start_time).zip(normalize_skip_time(segment.end_time))
+        else {
+            return false;
+        };
+        if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+            return false;
+        }
+        segment.start_time = start_time;
+        segment.end_time = end_time;
+        true
+    });
+    segments.sort_by(|left, right| {
         left.start_time
             .total_cmp(&right.start_time)
             .then(left.end_time.total_cmp(&right.end_time))
             .then_with(|| left.type_.cmp(&right.type_))
     });
 
-    let mut merged_segments: Vec<SkipSegment> = Vec::with_capacity(normalized_segments.len());
-
-    for mut segment in normalized_segments {
-        if let Some(previous_segment) = merged_segments.last_mut() {
-            segment.start_time = segment.start_time.max(previous_segment.end_time);
-            if segment.end_time - segment.start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
-                continue;
-            }
+    let mut previous_end = 0.0;
+    segments.retain_mut(|segment| {
+        segment.start_time = segment.start_time.max(previous_end);
+        if segment.end_time - segment.start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+            return false;
         }
-
-        merged_segments.push(segment);
-    }
-
-    merged_segments
+        previous_end = segment.end_time;
+        true
+    });
+    segments
 }
 
 /// IMDb ids (`tt` + digits) are the only lookup key SkipDB accepts — bound and

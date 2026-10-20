@@ -278,9 +278,7 @@ pub(super) fn validate_import_capacity<'a>(
 ) -> Result<(), BackupError> {
     let mut known: HashSet<&str> = existing.iter().map(String::as_str).collect();
     let existing_count = known.len();
-    for id in incoming {
-        known.insert(id);
-    }
+    known.extend(incoming);
     if known.len() > limit && known.len() > existing_count {
         return Err(BackupError::new(
             BackupErrorKind::CapacityExceeded,
@@ -328,17 +326,13 @@ pub(super) fn prepare_import_lists(
         };
         let import_icon = normalize_list_icon(Some(list.icon.as_str()));
         // Reuse live add-to-list normalization/dedupe; no truncation.
-        let mut valid_items: Vec<MediaItem> = Vec::with_capacity(list.items.len());
-        let mut valid_ids: Vec<String> = Vec::with_capacity(list.items.len());
         let mut seen_ids: HashSet<String> = HashSet::with_capacity(list.items.len());
-        for item in list.items {
-            if let Some(normalized) = normalize_library_item(item) {
-                if seen_ids.insert(normalized.id.clone()) {
-                    valid_ids.push(normalized.id.clone());
-                    valid_items.push(normalized);
-                }
-            }
-        }
+        let mut valid_items: Vec<_> = list
+            .items
+            .into_iter()
+            .filter_map(normalize_library_item)
+            .filter(|item| seen_ids.insert(item.id.clone()))
+            .collect();
         if valid_items.len() > MAX_LIST_ITEMS {
             return Err(BackupError::new(
                 BackupErrorKind::CapacityExceeded,
@@ -349,7 +343,6 @@ pub(super) fn prepare_import_lists(
             ));
         }
         if rules.is_some() {
-            valid_ids.clear();
             valid_items.clear();
         }
         let new_id = normalized_id
@@ -365,7 +358,7 @@ pub(super) fn prepare_import_lists(
             id: new_id,
             name: import_name,
             icon: import_icon,
-            item_ids: valid_ids,
+            item_ids: valid_items.iter().map(|item| item.id.clone()).collect(),
             items: valid_items,
             rules,
         });
@@ -678,15 +671,11 @@ fn import_app_data_entries(
     let history_imported = service.import_history_entries(app, history_entries)?;
 
     let mut lib_map = library_snapshot.items;
-    let mut library_imported = 0usize;
+    let previous_library_count = lib_map.len();
     for normalized in incoming_library {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            lib_map.entry(normalized.id.clone())
-        {
-            entry.insert(normalized);
-            library_imported += 1;
-        }
+        lib_map.entry(normalized.id.clone()).or_insert(normalized);
     }
+    let library_imported = lib_map.len() - previous_library_count;
 
     persist_index_map(
         &lib_store,
@@ -696,7 +685,7 @@ fn import_app_data_entries(
     )?;
 
     let mut new_order = existing_order;
-    let mut lists_imported = 0usize;
+    let lists_imported = prepared_lists.len();
 
     for list in prepared_lists {
         let list_id = list.id;
@@ -716,19 +705,16 @@ fn import_app_data_entries(
         if !new_order.contains(&list_id) {
             new_order.push(list_id);
         }
-        lists_imported += 1;
     }
     lists_store.set(LISTS_ORDER_KEY, json!(new_order));
     lists_store.save()?;
 
     let mut statuses = status_snapshot.items;
-    let mut statuses_imported = 0usize;
+    let previous_status_count = statuses.len();
     for (clean_id, clean_status) in incoming_statuses {
-        if let std::collections::hash_map::Entry::Vacant(entry) = statuses.entry(clean_id) {
-            entry.insert(clean_status);
-            statuses_imported += 1;
-        }
+        statuses.entry(clean_id).or_insert(clean_status);
     }
+    let statuses_imported = statuses.len() - previous_status_count;
 
     persist_index_map(
         &status_store,

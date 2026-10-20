@@ -321,13 +321,35 @@ fn search_catalog_seen_key_bound_validates_and_ends_paging() {
 }
 
 #[test]
-fn text_search_duplicate_pages_keep_advancing_source_cursors() {
+fn text_search_sparse_and_duplicate_pages_keep_advancing_source_cursors() {
+    let first = super::finish_catalog_page(
+        rank_search_results(
+            "Match",
+            vec![
+                build_item("prefix", "Match sequel", Some("2024")),
+                build_item("TT1", "Match", Some("2020")),
+                build_item("old", "Match", Some("1990")),
+            ],
+            SearchYearRange {
+                year_from: Some(2020),
+                year_to: None,
+            },
+        ),
+        super::SearchCatalogContinuation::default(),
+        None,
+        None,
+        Some(vec![super::SearchSourceCursor {
+            key: "0123456789abcdef".into(),
+            skip: 100,
+            retry: false,
+        }]),
+    );
+    assert_eq!(ids(&first.items), ["TT1", "prefix"]);
+    assert!(!first.exhausted);
+    assert_eq!(first.continuation.seen_keys.len(), 2);
     let page = super::finish_catalog_page(
         vec![test_media_item("TT1", "movie")],
-        super::SearchCatalogContinuation {
-            seen_keys: vec!["movie:tt1".into()],
-            ..Default::default()
-        },
+        first.continuation,
         None,
         None,
         Some(vec![super::SearchSourceCursor {
@@ -338,7 +360,8 @@ fn text_search_duplicate_pages_keep_advancing_source_cursors() {
     );
     assert!(page.items.is_empty());
     assert!(!page.exhausted);
-    assert_eq!(page.continuation.seen_keys, ["movie:tt1"]);
+    assert_eq!(page.continuation.seen_keys.len(), 2);
+    assert!(page.continuation.seen_keys.contains(&"movie:tt1".into()));
     let wire = serde_json::to_value(&page).unwrap();
     assert_eq!(wire["continuation"]["searchCursors"][0]["skip"], 200);
     assert!(wire["continuation"].get("skip").is_none());
@@ -541,6 +564,10 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
     );
     assert_eq!(ids(&ranked[..3]), ["tt1520211", "movie-1936", "movie-1995"]);
     assert_eq!(
+        ids(&rank_search_results("walking dead", ranked.clone(), NO_RANGE)[..3]),
+        ["tt1520211", "movie-1936", "movie-1995"]
+    );
+    assert_eq!(
         ids(&rank_search_results(
             "dead",
             vec![
@@ -550,6 +577,78 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
             NO_RANGE,
         )),
         ["word", "embedded"]
+    );
+    for (query, exact, prefix, word, embedded) in [
+        (
+            "the walking dead",
+            "Walking Dead",
+            "Walking Dead: Origins",
+            "Fear the Walking Dead",
+            "Outwalking Dead",
+        ),
+        (
+            "walking dead",
+            "The Walking Dead",
+            "The Walking Dead: Origins",
+            "Fear the Walking Dead",
+            "Outwalking Dead",
+        ),
+        (
+            "amelie",
+            "Amélie",
+            "Amélie: The Story",
+            "About Amélie",
+            "Damélie",
+        ),
+        (
+            "grey’s anatomy",
+            "Grey's Anatomy",
+            "Grey’s Anatomy: Special",
+            "Inside Grey's Anatomy",
+            "McGrey's Anatomy",
+        ),
+        (
+            "an education",
+            "Education",
+            "An Education: Special",
+            "About Education",
+            "Coeducation",
+        ),
+        (
+            "a quiet place",
+            "Quiet Place",
+            "A Quiet Place: Part II",
+            "Another Quiet Place",
+            "Unquiet Place",
+        ),
+    ] {
+        assert_eq!(
+            ids(&rank_search_results(
+                query,
+                vec![
+                    build_item("unrelated", "Unrelated", None),
+                    build_item("contains", embedded, None),
+                    build_item("word", word, None),
+                    build_item("prefix", prefix, None),
+                    build_item("exact", exact, None),
+                ],
+                NO_RANGE,
+            )),
+            ["exact", "prefix", "word", "contains", "unrelated"],
+            "{query}",
+        );
+    }
+    assert_eq!(
+        ids(&rank_search_results(
+            "dead walk",
+            vec![
+                build_item("contains", "Undead Walkthrough", None),
+                build_item("words", "Walking with the Dead", None),
+                build_item("prefix", "Dead Walking", None),
+            ],
+            NO_RANGE,
+        )),
+        ["prefix", "words", "contains"],
     );
     for title in ["The Walking Dead Girls", "Dead Man Walking"] {
         let position = ranked.iter().position(|item| item.title == title).unwrap();

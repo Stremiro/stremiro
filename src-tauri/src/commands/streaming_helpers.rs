@@ -70,9 +70,9 @@ fn normalize_stream_family_component(value: &str) -> Option<String> {
                 .or_else(|| captures.name("dash_episode"))
                 .and_then(|value| value.as_str().parse::<u32>().ok());
             if bare_episode.is_some_and(|number| (1900..=2099).contains(&number)) {
-                captures[0].to_string()
+                &normalized[captures.get(0).expect("episode match").range()]
             } else {
-                " ".to_string()
+                " "
             }
         });
     let normalized_lower = normalized.to_ascii_lowercase();
@@ -369,7 +369,7 @@ fn normalize_stream_dedup_url(mut parsed: reqwest::Url) -> String {
             .iter()
             .map(|(key, value)| (key.as_str(), value.as_str())),
     );
-    parsed.to_string()
+    parsed.into()
 }
 
 /// Resolution points for the composite quality score (`StreamMatchText::flags` classifier).
@@ -457,12 +457,12 @@ pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) 
             .get(1)
             .map(|capture| capture.as_str())
             .unwrap_or_default();
-        let unit = captures
+        let mut unit = captures
             .get(2)
             .map(|capture| capture.as_str())
             .unwrap_or_default()
-            .to_ascii_uppercase()
-            .replace('I', "");
+            .to_ascii_uppercase();
+        unit.retain(|character| character != 'I');
 
         return Some(format!("{}{}", amount, unit));
     }
@@ -523,7 +523,8 @@ fn strip_display_pictographs(value: &str) -> Cow<'_, str> {
 }
 
 fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, bool) {
-    let mut languages = Vec::new();
+    let mut languages = [""; 3];
+    let mut language_tag_count = 0;
     'fields: for text in [stream.name.as_deref(), stream.title.as_deref()]
         .into_iter()
         .flatten()
@@ -532,16 +533,16 @@ fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, boo
             if !language_mention_is_audio(&text[range.end..]) {
                 continue;
             }
-            if languages.contains(&language) {
+            if languages[..language_tag_count].contains(&language) {
                 continue;
             }
-            languages.push(language);
-            if languages.len() == 3 {
+            languages[language_tag_count] = language;
+            language_tag_count += 1;
+            if language_tag_count == languages.len() {
                 break 'fields;
             }
         }
     }
-    let language_tag_count = languages.len();
     (
         language_tag_count == 2 || flags.dual_audio || flags.english_japanese_pair,
         language_tag_count > 2 || flags.multi_audio,
@@ -832,15 +833,6 @@ pub(crate) fn build_addon_source_priority_map<'a>(
     priorities
 }
 
-pub(crate) fn stream_source_priority(
-    normalized_source: Option<&str>,
-    priorities: &HashMap<String, u32>,
-) -> u32 {
-    normalized_source
-        .and_then(|name| priorities.get(name).copied())
-        .unwrap_or(0)
-}
-
 /// Source-identity normalization: trim, drop empties, char-bound. The bound matters —
 /// normalized values persist as snapshot keys, so an unbounded IPC `source_name`/
 /// `stream_family` would land in `playback_state.json` verbatim.
@@ -859,7 +851,7 @@ pub(crate) fn normalize_source_key(value: &str) -> Option<String> {
 /// display names. Trim + bound only.
 pub(crate) fn normalize_source_id(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.chars().count() > SOURCE_IDENTITY_MAX_CHARS {
+    if trimmed.is_empty() || trimmed.chars().nth(SOURCE_IDENTITY_MAX_CHARS).is_some() {
         None
     } else {
         Some(trimmed.to_string())
@@ -869,12 +861,6 @@ pub(crate) fn normalize_source_id(value: &str) -> Option<String> {
 /// Persisted source-health key suffix for an instance id — `id:` keeps the keyspace distinct from display names.
 pub(crate) fn source_health_key(source_id: &str) -> String {
     format!("id:{source_id}")
-}
-
-/// The `name + title` language haystack, shared by the language-preference and
-/// audio-bonus scores. Backed by the cached match text so callers never re-lowercase.
-pub(crate) fn stream_language_haystack(stream: &AddonStream) -> &str {
-    stream.match_texts().name_title_haystack()
 }
 
 /// Composite quality score over the stream's flag memo; sole owner of the quality

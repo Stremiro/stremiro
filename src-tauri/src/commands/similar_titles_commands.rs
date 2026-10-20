@@ -46,7 +46,7 @@ fn tokens(value: &str) -> BTreeSet<String> {
     value
         .to_lowercase()
         .split(|character: char| !character.is_alphanumeric())
-        .filter(|word| word.chars().count() >= 3 && !STOPWORDS.contains(word))
+        .filter(|word| word.chars().count() >= 3 && STOPWORDS.binary_search(word).is_err())
         .map(str::to_string)
         .collect()
 }
@@ -490,6 +490,11 @@ mod tests {
             description: Some(description.to_string()),
             ..item(id, genres, None)
         }
+    }
+
+    #[test]
+    fn stopwords_stay_sorted_for_binary_search() {
+        assert!(STOPWORDS.windows(2).all(|pair| pair[0] < pair[1]));
     }
 
     #[test]

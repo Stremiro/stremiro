@@ -897,7 +897,7 @@ fn player_keybindings_resolution_keeps_empty_overrides_until_reset() {
         view.effective_player_keybindings,
         view.default_player_keybindings
     );
-    assert_eq!(view.effective_player_keybindings.len(), 22);
+    assert_eq!(view.effective_player_keybindings.len(), 20);
 }
 
 #[test]

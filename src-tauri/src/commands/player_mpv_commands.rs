@@ -17,15 +17,7 @@ use tauri::{command, AppHandle, Window};
 use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
 
 /// mpv verbs the UI is allowed to issue.
-const MPV_COMMANDS: &[&str] = &[
-    "cycle",
-    "frame-back-step",
-    "frame-step",
-    "loadfile",
-    "seek",
-    "set",
-    "sub-add",
-];
+const MPV_COMMANDS: &[&str] = &["cycle", "loadfile", "seek", "set", "sub-add"];
 
 /// Properties writable via `set_property` or the `set` verb.
 const MPV_SETTABLE_PROPERTIES: &[&str] = &[

@@ -144,15 +144,7 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
 
 #[test]
 fn mpv_command_allowlist_admits_only_player_verbs() {
-    for verb in [
-        "seek",
-        "cycle",
-        "loadfile",
-        "sub-add",
-        "set",
-        "frame-step",
-        "frame-back-step",
-    ] {
+    for verb in ["seek", "cycle", "loadfile", "sub-add", "set"] {
         // Property/URL checks still apply; pick args that satisfy them.
         let args = match verb {
             "loadfile" | "sub-add" => vec![json!("https://example.com/x")],

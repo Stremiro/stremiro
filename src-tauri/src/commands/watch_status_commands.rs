@@ -1,8 +1,9 @@
 use super::library_commands::LibraryWriteError;
 use super::store_helpers::{
-    library_item_key, load_watch_status_index, load_watch_statuses_map, normalize_bulk_ids,
+    library_item_key, load_library_index, load_status_added_ids, load_watch_status_index,
+    load_watch_statuses_map, mark_status_added, normalize_bulk_ids, normalize_library_item,
     normalize_watch_status, persist_index_map, read_library_snapshot, read_watch_status_snapshot,
-    watch_status_item_key, WATCH_STATUS_LAYOUT,
+    retain_status_added_ids, watch_status_item_key, WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_typed_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
@@ -11,7 +12,7 @@ use super::{
 use crate::providers::MediaItem;
 use serde::Serialize;
 use serde_json::json;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle};
 
 /// Bound on the status index: every set rewrites the index key, so an
@@ -63,74 +64,99 @@ impl From<LibraryWriteError> for WatchStatusError {
     }
 }
 
+/// Returns the title's Library entry after the write; `None` means it is not in
+/// the Library (clearing a status removes titles that the status added).
 #[command]
 pub async fn set_watch_status(
     app: AppHandle,
     item: MediaItem,
     status: Option<String>,
 ) -> Result<Option<MediaItem>, WatchStatusError> {
-    // Store file IO is blocking: run the read-modify-write off the async
-    // worker, matching the library/history command pattern.
     run_typed_store_op(move || {
         let store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
-        // The id is a store key — reject malformed input rather than truncate, so
-        // hostile ids can't collide onto one key or fail to round-trip.
-        let item_id = normalize_media_id(&item.id).ok_or_else(|| {
-            WatchStatusError::new(
-                WatchStatusErrorKind::InvalidItem,
-                "Invalid media id for watch status.",
-            )
-        })?;
-
-        let mut index = load_watch_status_index(&store)?;
-
-        match status {
-            Some(value) => {
-                let Some(canonical) = normalize_watch_status(&value) else {
-                    return Err(WatchStatusError::new(
-                        WatchStatusErrorKind::InvalidStatus,
-                        "Invalid watch status.",
-                    ));
-                };
-                if !index.contains(&item_id) {
-                    if index.len() >= MAX_WATCH_STATUS_ITEMS {
-                        return Err(WatchStatusError::new(
-                            WatchStatusErrorKind::StatusCapacity,
-                            "Watch status list is full.",
-                        ));
-                    }
-                    index.push(item_id.clone());
-                    index.sort();
-                }
-                let library_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-                let (item, library_index) =
-                    super::library_commands::prepare_library_write(&library_store, item)?;
-                // Both indexes, capacities and payloads are validated before
-                // either domain is mutated, under the shared store-op lock.
-                library_store.set(library_item_key(&item_id), json!(item));
-                library_store.set(LIBRARY_INDEX_KEY, json!(library_index));
-                library_store.save()?;
-                store.set(watch_status_item_key(&item_id), json!(canonical));
-                store.set(WATCH_STATUS_INDEX_KEY, json!(index));
-                store.save()?;
-                return Ok(Some(item));
-            }
-            None => {
-                let removed_item = store.delete(watch_status_item_key(&item_id));
-                let original_len = index.len();
-                index.retain(|id| id != &item_id);
-                if !removed_item && index.len() == original_len {
-                    store.save()?;
-                    return Ok(None);
-                }
-            }
-        }
-
-        store.set(WATCH_STATUS_INDEX_KEY, json!(index));
-        store.save()?;
-        Ok(None)
+        let library_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        write_watch_status(&store, &library_store, item, status)
     })
     .await
+}
+
+fn write_watch_status(
+    store: &DurableStore,
+    library_store: &DurableStore,
+    item: MediaItem,
+    status: Option<String>,
+) -> Result<Option<MediaItem>, WatchStatusError> {
+    // The id is a store key — reject malformed input rather than truncate, so
+    // hostile ids can't collide onto one key or fail to round-trip.
+    let item_id = normalize_media_id(&item.id).ok_or_else(|| {
+        WatchStatusError::new(
+            WatchStatusErrorKind::InvalidItem,
+            "Invalid media id for watch status.",
+        )
+    })?;
+    let mut index = load_watch_status_index(store)?;
+
+    let Some(value) = status else {
+        // Validate the library before the status commits; statuses commit first
+        // so a failed library save can't leave a status on a removed title.
+        let mut library_index = load_library_index(library_store)?;
+        let status_added = load_status_added_ids(library_store).contains(&item_id);
+        let removed_item = store.delete(watch_status_item_key(&item_id));
+        let original_len = index.len();
+        index.retain(|id| id != &item_id);
+        if removed_item || index.len() != original_len {
+            store.set(WATCH_STATUS_INDEX_KEY, json!(index));
+        }
+        store.save()?;
+        if !status_added {
+            return Ok(library_index
+                .contains(&item_id)
+                .then(|| {
+                    library_store
+                        .get_typed(library_item_key(&item_id))
+                        .and_then(normalize_library_item)
+                        .filter(|item| item.id == item_id)
+                })
+                .flatten());
+        }
+        library_store.delete(library_item_key(&item_id));
+        library_index.retain(|id| id != &item_id);
+        library_store.set(LIBRARY_INDEX_KEY, json!(library_index));
+        retain_status_added_ids(library_store, |id| id != item_id);
+        library_store.save()?;
+        return Ok(None);
+    };
+
+    let Some(canonical) = normalize_watch_status(&value) else {
+        return Err(WatchStatusError::new(
+            WatchStatusErrorKind::InvalidStatus,
+            "Invalid watch status.",
+        ));
+    };
+    if !index.contains(&item_id) {
+        if index.len() >= MAX_WATCH_STATUS_ITEMS {
+            return Err(WatchStatusError::new(
+                WatchStatusErrorKind::StatusCapacity,
+                "Watch status list is full.",
+            ));
+        }
+        index.push(item_id.clone());
+        index.sort();
+    }
+    let (item, library_index) =
+        super::library_commands::prepare_library_write(library_store, item)?;
+    // Both indexes, capacities and payloads are validated before
+    // either domain is mutated, under the shared store-op lock.
+    library_store.set(library_item_key(&item_id), json!(item));
+    if let Some(library_index) = library_index {
+        library_store.set(LIBRARY_INDEX_KEY, json!(library_index));
+        mark_status_added(library_store, &item_id);
+    }
+    library_store.save()?;
+    store.set(watch_status_item_key(&item_id), json!(canonical));
+    store.set(WATCH_STATUS_INDEX_KEY, json!(index));
+    store.save()?;
+    Ok(Some(item))
 }
 
 fn normalize_bulk_status(status: Option<String>) -> Result<Option<String>, WatchStatusError> {
@@ -162,8 +188,10 @@ fn resolve_bulk_status_ids(
     Ok(ids)
 }
 
+/// Bulk clears run inside the Library page, so the titles stay and become the user's own.
 fn clear_watch_status_items(
     store: &DurableStore,
+    library_store: &DurableStore,
     ids: &[String],
 ) -> Result<usize, WatchStatusError> {
     let mut statuses = read_watch_status_snapshot(store)?;
@@ -175,6 +203,10 @@ fn clear_watch_status_items(
         persist_index_map(store, WATCH_STATUS_LAYOUT, &statuses.index, &statuses.items)?;
     } else {
         store.save()?;
+    }
+    let cleared: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    if retain_status_added_ids(library_store, |id| !cleared.contains(id)) {
+        library_store.save()?;
     }
     Ok(changed)
 }
@@ -228,7 +260,7 @@ pub async fn bulk_set_watch_status(
         let ids = resolve_bulk_status_ids(&library_store, ids)?;
         let store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
         match status {
-            None => clear_watch_status_items(&store, &ids),
+            None => clear_watch_status_items(&store, &library_store, &ids),
             Some(status) => set_watch_status_items(&store, &library_store, ids, status),
         }
     })
@@ -250,6 +282,46 @@ pub async fn get_all_watch_statuses(
 mod tests {
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn clearing_a_status_removes_only_titles_the_status_added() {
+        let statuses = test_store();
+        let library = test_store();
+        let added = test_media_item("added", "movie");
+        let mut saved = test_media_item("saved", "movie");
+        saved.poster = Some("https://example.com/poster.jpg".into());
+        library.store.set(LIBRARY_INDEX_KEY, json!(["saved"]));
+        library.store.set(library_item_key("saved"), json!(saved));
+        for item in [&added, &saved] {
+            let write = write_watch_status(
+                &statuses.store,
+                &library.store,
+                item.clone(),
+                Some("watched".into()),
+            );
+            assert!(write.unwrap().is_some());
+        }
+        assert_eq!(
+            library.store.get(LIBRARY_INDEX_KEY),
+            Some(json!(["added", "saved"]))
+        );
+        assert_eq!(load_status_added_ids(&library.store), ["added"]);
+        assert!(
+            write_watch_status(&statuses.store, &library.store, added.clone(), None)
+                .unwrap()
+                .is_none()
+        );
+        let mut sparse = saved.clone();
+        sparse.poster = None;
+        assert_eq!(
+            json!(write_watch_status(&statuses.store, &library.store, sparse, None).unwrap()),
+            json!(saved)
+        );
+        assert_eq!(library.store.get(LIBRARY_INDEX_KEY), Some(json!(["saved"])));
+        assert!(library.store.get(library_item_key("added")).is_none());
+        assert!(load_status_added_ids(&library.store).is_empty());
+        assert_eq!(statuses.store.get(WATCH_STATUS_INDEX_KEY), Some(json!([])));
+    }
 
     #[test]
     fn bulk_library_id_resolution_preserves_validation_and_store_error_kinds() {
@@ -412,12 +484,18 @@ mod tests {
         .unwrap();
         let before = std::fs::read(&library.path).unwrap();
         assert_eq!(normalize_bulk_status(None).unwrap(), None);
-        assert_eq!(clear_watch_status_items(&statuses.store, &ids).unwrap(), 2);
+        assert_eq!(
+            clear_watch_status_items(&statuses.store, &library.store, &ids).unwrap(),
+            2
+        );
         assert_eq!(statuses.store.get(WATCH_STATUS_INDEX_KEY), Some(json!([])));
         assert_eq!(std::fs::read(&library.path).unwrap(), before);
         assert_eq!(library.store.save_count(), 1);
         assert_eq!(statuses.store.save_count(), 2);
-        assert_eq!(clear_watch_status_items(&statuses.store, &ids).unwrap(), 0);
+        assert_eq!(
+            clear_watch_status_items(&statuses.store, &library.store, &ids).unwrap(),
+            0
+        );
         assert_eq!(statuses.store.save_count(), 2);
     }
 

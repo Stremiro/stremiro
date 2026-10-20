@@ -181,26 +181,15 @@ fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
     let absolute_episode = watch_progress_absolute_episode(item);
     let should_defer_mapped_coordinates =
         !has_explicit_stream_episode_context(item) && is_mapped_history_item(item);
-    let stream_season = item.stream_season.or({
-        if should_defer_mapped_coordinates {
-            None
-        } else {
-            absolute_season
-        }
-    });
-    let stream_episode = item.stream_episode.or({
-        if should_defer_mapped_coordinates {
-            None
-        } else {
-            absolute_episode
-        }
-    });
-
     HistoryEpisodeContext {
         absolute_season,
         absolute_episode,
-        stream_season,
-        stream_episode,
+        stream_season: item
+            .stream_season
+            .or(absolute_season.filter(|_| !should_defer_mapped_coordinates)),
+        stream_episode: item
+            .stream_episode
+            .or(absolute_episode.filter(|_| !should_defer_mapped_coordinates)),
     }
 }
 
@@ -346,9 +335,8 @@ fn get_latest_history_playback_item(
         .into_iter()
         .map(|(_, item)| item)
         .collect::<Vec<_>>();
-    // Health only ranks series donors; movie rows return before it is read,
-    // so movies skip the `playback_state.json` open entirely.
-    let source_health = is_series_like_watch_progress(item)
+    // Health only ranks series donors; movies and singleton titles have none.
+    let source_health = (items.len() > 1 && is_series_like_watch_progress(item))
         .then(|| {
             playback_state.source_health_priorities_for_ids(
                 app,

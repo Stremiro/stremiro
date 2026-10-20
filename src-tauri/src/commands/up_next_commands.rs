@@ -1,7 +1,8 @@
 use super::calendar_commands::date_ordinal;
 use super::episode_navigation::coordinate_neighbours;
 use super::history_helpers::{
-    is_series_like_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
+    compare_continue_watching, is_series_like_watch_progress, watch_progress_absolute_episode,
+    watch_progress_absolute_season,
 };
 use super::media_commands::{
     fetch_media_schedules_with_response_timeout, MediaSchedule, MediaScheduleRequest,
@@ -105,8 +106,8 @@ pub(crate) fn build_up_next_entries(
         .collect()
 }
 
-/// The rail merge the frontend used to run: Up Next rows slot in by recency
-/// (`last_watched` ties keep continue-watching first); a resumable title never renders twice.
+/// Up Next shares the resume ordering, including startup-stub demotion.
+/// Ties keep continue-watching first; a resumable title never renders twice.
 pub(crate) fn build_resume_rail(
     continue_watching: Vec<WatchProgress>,
     mut up_next: Vec<UpNextCandidate>,
@@ -123,7 +124,8 @@ pub(crate) fn build_resume_rail(
     let mut up_next = up_next.into_iter().peekable();
     let mut rail = Vec::with_capacity(capacity);
     for row in continue_watching {
-        while let Some(candidate) = up_next.next_if(|next| next.row.last_watched > row.last_watched)
+        while let Some(candidate) =
+            up_next.next_if(|next| compare_continue_watching(&next.row, &row).is_lt())
         {
             rail.push(ResumeRailEntry {
                 row: candidate.row,
@@ -199,12 +201,17 @@ pub async fn get_resume_rail(
             .collect();
         let continue_watching =
             annotate_watch_progress_list(build_continue_watching_entries(&rows));
-        let source_health_priorities = service.source_health_priorities_for_ids(
-            &store_app,
-            rows.iter()
-                .filter(|row| is_series_like_watch_progress(row))
-                .map(|row| row.source_id.as_deref()),
-        )?;
+        if let Ok(snapshot) = serde_json::to_string(
+            &continue_watching
+                .iter()
+                .map(|row| ResumeRailEntry {
+                    row,
+                    is_new_episode: None,
+                })
+                .collect::<Vec<_>>(),
+        ) {
+            let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
+        }
         let statuses = match super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)
             .and_then(|store| load_watch_statuses_map(&store))
         {
@@ -219,6 +226,22 @@ pub async fn get_resume_rail(
                 return Ok((continue_watching, Vec::new()));
             }
         };
+        let resumable: HashSet<(&str, &str)> = continue_watching
+            .iter()
+            .map(|row| (row.type_.as_str(), row.id.as_str()))
+            .collect();
+        let source_health_priorities = service.source_health_priorities_for_ids(
+            &store_app,
+            rows.iter()
+                .filter(|row| {
+                    is_series_like_watch_progress(row)
+                        && !resumable.contains(&(row.type_.as_str(), row.id.as_str()))
+                        && statuses
+                            .get(&row.id)
+                            .is_none_or(|status| status != "dropped")
+                })
+                .map(|row| row.source_id.as_deref()),
+        )?;
         let sources = build_up_next_sources(
             rows,
             &statuses,
@@ -228,17 +251,6 @@ pub async fn get_resume_rail(
         Ok((continue_watching, sources))
     })
     .await?;
-    if let Ok(snapshot) = serde_json::to_string(
-        &continue_watching
-            .iter()
-            .map(|row| ResumeRailEntry {
-                row,
-                is_new_episode: None,
-            })
-            .collect::<Vec<_>>(),
-    ) {
-        let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
-    }
     let up_next =
         build_up_next_for_sources(&app, client.inner(), sources, &local_today, local_today_ms)
             .await?;

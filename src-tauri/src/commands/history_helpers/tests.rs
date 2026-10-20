@@ -30,7 +30,7 @@ fn live_progress_requires_explicit_completion_for_unknown_runtime() {
     let annotated = with_progress_annotations(ordinary.clone());
     assert!(!annotated.is_watched);
     assert_eq!(annotated.resume_start_time, Some(120.0));
-    assert!(super::choose_up_next_source(vec![ordinary], &Default::default()).is_none());
+    assert!(super::choose_up_next_source(vec![ordinary.clone()], &Default::default()).is_none());
 
     let completed = super::prepare_live_watch_progress(progress, true)
         .unwrap()
@@ -38,6 +38,16 @@ fn live_progress_requires_explicit_completion_for_unknown_runtime() {
     let annotated = with_progress_annotations(completed.clone());
     assert!(annotated.is_watched);
     assert_eq!(annotated.resume_start_time, None);
+    let mut alias = ordinary;
+    alias.season = Some(2);
+    alias.absolute_season = completed.season;
+    alias.absolute_episode = completed.episode;
+    alias.last_watched = completed.last_watched;
+    let rows = vec![completed.clone(), alias.clone()];
+    assert!(super::continue_watching_candidates(&rows).next().is_none());
+    alias.last_watched += 1;
+    let rows = vec![completed.clone(), alias];
+    assert_eq!(super::continue_watching_candidates(&rows).count(), 1);
     assert!(super::choose_up_next_source(vec![completed], &Default::default()).is_some());
 
     for position in [0.0, 2.0, 120.0] {
@@ -217,5 +227,26 @@ fn compare_continue_watching_demotes_low_confidence_resume_positions() {
     assert_eq!(
         compare_continue_watching(&low_confidence, &meaningful),
         std::cmp::Ordering::Greater
+    );
+    low_confidence.id = "stub".to_string();
+    meaningful.id = "resume".to_string();
+    let up_next = crate::commands::up_next_commands::UpNextCandidate {
+        row: WatchProgress {
+            id: "up-next".to_string(),
+            position: 0.0,
+            last_watched: 50,
+            ..sample_progress()
+        },
+        is_new_episode: false,
+    };
+    let rail = crate::commands::up_next_commands::build_resume_rail(
+        vec![meaningful, low_confidence],
+        vec![up_next],
+    );
+    assert_eq!(
+        rail.iter()
+            .map(|entry| entry.row.id.as_str())
+            .collect::<Vec<_>>(),
+        ["resume", "up-next", "stub"]
     );
 }

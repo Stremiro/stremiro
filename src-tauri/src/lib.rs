@@ -43,7 +43,7 @@ pub fn run() {
         .manage(commands::player_window_commands::PlayerPipState::default())
         .manage(commands::app_shell_commands::AppShellState::default())
         .manage(commands::calendar_commands::CalendarScheduleCache::default())
-        .manage(commands::stream_commands::PlaybackRecoveryRegistry::default())
+        .manage(commands::stream_commands::StreamRequestRegistry::default())
         .setup(|app| {
             if let Some(icon) = app.default_window_icon().cloned() {
                 if let Some(window) = app.get_webview_window("main") {
@@ -99,11 +99,11 @@ pub fn run() {
             commands::app_update_commands::install_app_update,
             commands::stream_commands::resolve_best_stream,
             commands::stream_commands::recover_playback_stream,
-            commands::stream_commands::cancel_playback_recovery,
+            commands::stream_commands::cancel_stream_request,
             commands::stream_commands::get_stream_selector_data,
             commands::stream_commands::get_stream_selector_indices,
             commands::stream_commands::get_stream_link,
-            commands::stream_commands::get_stream_pack_episode_indices,
+            commands::stream_commands::get_stream_pack_rows,
             commands::search_commands::query_search_catalog,
             commands::similar_titles_commands::query_similar_titles,
             commands::similar_titles_commands::get_recent_watch_seed,

@@ -169,10 +169,7 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
 #[test]
 fn classified_search_uses_only_declared_search_catalogs() {
     let addon = classified_cinemeta_addon();
-    assert_eq!(
-        searchable_catalog_ids(&addon, "movie"),
-        vec![("top".to_string(), true)]
-    );
+    assert_eq!(searchable_catalog_ids(&addon, "movie"), vec![("top", true)]);
     assert!(searchable_catalog_ids(&addon, "series").is_empty());
 
     let search = [CatalogExtra {
@@ -213,7 +210,7 @@ fn unclassified_addon_is_not_skipped() {
     assert!(addon_allows_catalog(&addon, "movie", "top", &extras));
     assert_eq!(
         searchable_catalog_ids(&addon, "movie"),
-        vec![("top".to_string(), false)]
+        vec![("top", false)]
     );
 }
 
@@ -253,11 +250,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
     );
     assert_eq!(
         searchable_catalog_ids(&addon, "movie"),
-        [
-            ("single".to_string(), false),
-            ("paged".to_string(), true),
-            ("larger".to_string(), true)
-        ]
+        [("single", false), ("paged", true), ("larger", true)]
     );
     let (work, sources) =
         select_search_catalog_work(&[addon.clone()], "dune", &["movie"], &[None], None);

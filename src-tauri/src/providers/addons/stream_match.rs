@@ -505,46 +505,23 @@ fn episode_matches_lowered_with_scratch(
 
     buf.clear();
     buf.reserve(20);
-
-    // `SxE` probes: groups pad season and episode independently (`S1E05`, `S01E5`).
-    let _ = write!(buf, "s{:02}e{:02}", season, episode);
-    if contains_episode_token(t, buf.as_str(), false) {
-        return true;
-    }
-
-    if season < 10 || episode < 10 {
+    let variants = if season < 10 && episode < 10 {
+        4
+    } else if season < 10 || episode < 10 {
+        2
+    } else {
+        1
+    };
+    for &(season_width, episode_width) in &[(2, 2), (0, 0), (0, 2), (2, 0)][..variants] {
         buf.clear();
-        let _ = write!(buf, "s{}e{}", season, episode);
+        let _ = write!(buf, "s{season:0season_width$}e{episode:0episode_width$}");
         if contains_episode_token(t, buf.as_str(), false) {
             return true;
         }
     }
-
-    if season < 10 && episode < 10 {
+    for &width in if episode < 10 { &[2, 0][..] } else { &[2][..] } {
         buf.clear();
-        let _ = write!(buf, "s{}e{:02}", season, episode);
-        if contains_episode_token(t, buf.as_str(), false) {
-            return true;
-        }
-
-        buf.clear();
-        let _ = write!(buf, "s{:02}e{}", season, episode);
-        if contains_episode_token(t, buf.as_str(), false) {
-            return true;
-        }
-    }
-
-    // `NxNN` probes — `{:02}` never truncates so 3+ digit episodes are
-    // covered; they keep the leading digit boundary.
-    buf.clear();
-    let _ = write!(buf, "{}x{:02}", season, episode);
-    if contains_episode_token(t, buf.as_str(), true) {
-        return true;
-    }
-
-    if episode < 10 {
-        buf.clear();
-        let _ = write!(buf, "{}x{}", season, episode);
+        let _ = write!(buf, "{season}x{episode:0width$}");
         if contains_episode_token(t, buf.as_str(), true) {
             return true;
         }
@@ -1123,11 +1100,12 @@ pub(crate) fn stream_episode_match_texts(
     // Keep scanning matching fields until one carries a verified season claim.
     let mut matched_exact = false;
     let mut episode_token = String::new();
-    for (field, has_range) in fields.iter().zip([
+    let has_ranges = [
         texts.episode_range.name,
         texts.episode_range.title,
         texts.episode_range.filename,
-    ]) {
+    ];
+    for (field, has_range) in fields.iter().zip(has_ranges) {
         let Some((text, season_context, _)) = field else {
             continue;
         };
@@ -1173,10 +1151,13 @@ pub(crate) fn stream_episode_match_texts(
 
     let mut matched_range = false;
     let mut range_claim_verified = false;
-    for (text, season_context, _) in fields.iter().flatten() {
-        if episode_range_contains_text(text, season, episode, *season_context) {
+    for (field, has_range) in fields.iter().zip(has_ranges) {
+        let Some((text, season_context, _)) = field.filter(|_| has_range) else {
+            continue;
+        };
+        if episode_range_contains_text(text, season, episode, season_context) {
             matched_range = true;
-            range_claim_verified |= matches!(*season_context, Some(true));
+            range_claim_verified |= matches!(season_context, Some(true));
         }
     }
     if matched_range {

@@ -11,7 +11,7 @@ use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
-use tauri::{command, AppHandle, State};
+use tauri::{command, ipc::Channel, AppHandle, State};
 
 // List members usually overlap the library; one full list of headroom keeps
 // list-only titles cached without sizing for every list at its cap.
@@ -53,6 +53,7 @@ impl CalendarScheduleCache {
         app: &AppHandle,
         client: &AddonResourceClient,
         requests: Vec<MediaScheduleRequest>,
+        on_cached: impl FnOnce(&[Arc<MediaSchedule>]),
     ) -> Result<Vec<Arc<MediaSchedule>>, String> {
         let generation = self.generation.load(Ordering::SeqCst);
         // Registry generation identifies the source URLs, order and capabilities.
@@ -75,6 +76,13 @@ impl CalendarScheduleCache {
             keys.push(key);
         }
         if !missing.is_empty() {
+            let cached: Vec<_> = keys
+                .iter()
+                .filter_map(|key| schedules.get(key).cloned())
+                .collect();
+            if !cached.is_empty() {
+                on_cached(&cached);
+            }
             match fetch_media_schedules(app, client, missing).await {
                 Ok(fetched) => {
                     for schedule in fetched {
@@ -391,6 +399,7 @@ pub async fn get_calendar_events(
     client: State<'_, AddonResourceClient>,
     cache: State<'_, CalendarScheduleCache>,
     range: CalendarRange,
+    on_cached: Channel<CalendarSchedule>,
 ) -> Result<CalendarSchedule, String> {
     let upcoming = range.validate()?;
     let store_app = app.clone();
@@ -418,7 +427,16 @@ pub async fn get_calendar_events(
     })
     .await?;
     let tracked_count = requests.len();
-    let schedules = cache.fetch(&app, client.inner(), requests).await?;
+    let schedules = cache
+        .fetch(&app, client.inner(), requests, |cached| {
+            let _ = on_cached.send(calendar_schedule(
+                tracked_count,
+                tracked_count.saturating_sub(cached.len()),
+                calendar_events(cached.iter().map(Arc::as_ref), &range, &upcoming),
+                &upcoming,
+            ));
+        })
+        .await?;
     Ok(calendar_schedule(
         tracked_count,
         tracked_count.saturating_sub(schedules.len()),

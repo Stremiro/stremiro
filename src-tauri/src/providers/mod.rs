@@ -268,23 +268,12 @@ pub(crate) fn normalize_media_year(
 /// First 4-ASCII-digit run at or after `start`, with the run's start index so
 /// a caller can resume one byte later ("1232019" skips 1232, finds 2019).
 fn first_ascii_year_run_from(text: &str, start: usize) -> Option<(usize, u32)> {
-    let bytes = text.as_bytes();
-    if bytes.len() < 4 || start > bytes.len() - 4 {
-        return None;
-    }
-
-    for index in start..=bytes.len() - 4 {
-        if !text.is_char_boundary(index) || !text.is_char_boundary(index + 4) {
-            continue;
-        }
-
-        let year_text = &text[index..index + 4];
-        if !year_text.bytes().all(|byte| byte.is_ascii_digit()) {
-            continue;
-        }
-
-        if let Ok(year) = year_text.parse::<u32>() {
-            return Some((index, year));
+    for (offset, digits) in text.as_bytes().get(start..)?.windows(4).enumerate() {
+        if digits.iter().all(u8::is_ascii_digit) {
+            let year = digits
+                .iter()
+                .fold(0, |year, digit| year * 10 + u32::from(digit - b'0'));
+            return Some((start + offset, year));
         }
     }
 

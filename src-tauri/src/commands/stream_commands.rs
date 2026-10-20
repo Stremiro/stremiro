@@ -8,7 +8,7 @@ use super::{
     playback_state::{PlaybackStateService, PlaybackStreamOutcomeKind, StreamOutcomeReport},
     probe_pool::{
         is_probeable_stream, resolve_ranked_best_stream_candidate, PreferredStreamHint,
-        ProbeRequestIdentity, StreamExclusions, StreamPoolQuery, BEST_STREAM_MAX_CANDIDATES,
+        ProbeRequestIdentity, StreamExclusions, StreamPoolQuery,
     },
     stream_fetcher::{
         fetch_stream_for_link, fetch_stream_selector_data, ResolveFetch, StreamRankingOverrides,
@@ -43,46 +43,47 @@ const STREAM_LINK_CHANGED_MESSAGE: &str =
     "This stream changed — reopen the stream list and try again.";
 const PACK_EPISODES_MAX: usize = 2_000;
 const PACK_COVERAGE_CLAIMS_MAX: usize = 2_000;
-const RECOVERY_REQUESTS_MAX: usize = 16;
-const RECOVERY_EARLY_CANCELS_MAX: usize = 32;
+/// Shared by resolves and recoveries; one per open player/selector plus overlap.
+const STREAM_REQUESTS_MAX: usize = 32;
+const STREAM_EARLY_CANCELS_MAX: usize = 32;
 
 #[derive(Default)]
-pub(crate) struct PlaybackRecoveryRegistry {
-    requests: Mutex<PlaybackRecoveryRequests>,
+pub(crate) struct StreamRequestRegistry {
+    requests: Mutex<StreamRequests>,
 }
 
 #[derive(Default)]
-struct PlaybackRecoveryRequests {
+struct StreamRequests {
     live: HashMap<String, watch::Sender<bool>>,
     early_cancels: VecDeque<String>,
 }
 
-struct PlaybackRecoveryGuard<'a> {
-    registry: &'a PlaybackRecoveryRegistry,
+struct StreamRequestGuard<'a> {
+    registry: &'a StreamRequestRegistry,
     request_id: String,
 }
 
-fn validate_recovery_request_id(request_id: &str) -> Result<(), String> {
+fn validate_stream_request_id(request_id: &str) -> Result<(), String> {
     if request_id.is_empty()
         || request_id.len() > 64
         || !request_id
             .bytes()
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
     {
-        return Err("Invalid playback recovery request ID.".to_string());
+        return Err("Invalid stream request ID.".to_string());
     }
     Ok(())
 }
 
-impl PlaybackRecoveryRegistry {
+impl StreamRequestRegistry {
     fn register(
         &self,
         request_id: String,
-    ) -> Result<(PlaybackRecoveryGuard<'_>, watch::Receiver<bool>), String> {
-        validate_recovery_request_id(&request_id)?;
+    ) -> Result<(StreamRequestGuard<'_>, watch::Receiver<bool>), String> {
+        validate_stream_request_id(&request_id)?;
         let mut requests = lock_or_recover(&self.requests);
-        if requests.live.len() >= RECOVERY_REQUESTS_MAX || requests.live.contains_key(&request_id) {
-            return Err("Playback recovery request limit reached or duplicate ID.".to_string());
+        if requests.live.len() >= STREAM_REQUESTS_MAX || requests.live.contains_key(&request_id) {
+            return Err("Stream request limit reached or duplicate ID.".to_string());
         }
         let cancelled = requests
             .early_cancels
@@ -93,7 +94,7 @@ impl PlaybackRecoveryRegistry {
         let (sender, receiver) = watch::channel(cancelled);
         requests.live.insert(request_id.clone(), sender);
         Ok((
-            PlaybackRecoveryGuard {
+            StreamRequestGuard {
                 registry: self,
                 request_id,
             },
@@ -102,12 +103,12 @@ impl PlaybackRecoveryRegistry {
     }
 
     fn cancel(&self, request_id: String) -> Result<(), String> {
-        validate_recovery_request_id(&request_id)?;
+        validate_stream_request_id(&request_id)?;
         let mut requests = lock_or_recover(&self.requests);
         if let Some(sender) = requests.live.get(&request_id) {
             sender.send_replace(true);
         } else if !requests.early_cancels.contains(&request_id) {
-            if requests.early_cancels.len() == RECOVERY_EARLY_CANCELS_MAX {
+            if requests.early_cancels.len() == STREAM_EARLY_CANCELS_MAX {
                 requests.early_cancels.pop_front();
             }
             requests.early_cancels.push_back(request_id);
@@ -116,7 +117,7 @@ impl PlaybackRecoveryRegistry {
     }
 }
 
-impl Drop for PlaybackRecoveryGuard<'_> {
+impl Drop for StreamRequestGuard<'_> {
     fn drop(&mut self) {
         lock_or_recover(&self.registry.requests)
             .live
@@ -125,8 +126,8 @@ impl Drop for PlaybackRecoveryGuard<'_> {
 }
 
 #[command]
-pub fn cancel_playback_recovery(
-    registry: State<'_, PlaybackRecoveryRegistry>,
+pub fn cancel_stream_request(
+    registry: State<'_, StreamRequestRegistry>,
     request_id: String,
 ) -> Result<(), String> {
     registry.cancel(request_id)
@@ -141,11 +142,23 @@ pub(crate) struct PackEpisodeCoordinates {
     stream_episode: Option<u32>,
 }
 
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub(crate) enum StreamPackRow {
+    Header {
+        season: u32,
+    },
+    /// Index into the submitted episode list.
+    Episode {
+        index: u32,
+    },
+}
+
 #[command]
-pub fn get_stream_pack_episode_indices(
+pub fn get_stream_pack_rows(
     coverage: Option<StreamPackCoverage>,
     episodes: Vec<PackEpisodeCoordinates>,
-) -> Result<Vec<u32>, String> {
+) -> Result<Vec<StreamPackRow>, String> {
     if episodes.len() > PACK_EPISODES_MAX {
         return Err("Too many pack episodes.".to_string());
     }
@@ -158,7 +171,7 @@ pub fn get_stream_pack_episode_indices(
     }) {
         return Err("Too many pack coverage claims.".to_string());
     }
-    Ok(episodes
+    let covered: Vec<(u32, Option<u32>)> = episodes
         .iter()
         .enumerate()
         .filter_map(|(index, episode)| {
@@ -170,9 +183,25 @@ pub fn get_stream_pack_episode_indices(
                         episode.stream_episode.or(episode.episode),
                     ) || coverage.covers(episode.season, episode.episode)
                 })
-                .then_some(index as u32)
+                .then_some((index as u32, episode.season))
         })
-        .collect())
+        .collect();
+    // Episodes arrive (season, episode)-sorted; headers mark each boundary only when seasons differ.
+    let multi_season = covered
+        .first()
+        .is_some_and(|(_, first)| covered.iter().any(|(_, season)| season != first));
+    let mut rows = Vec::with_capacity(covered.len());
+    let mut last_season = None;
+    for (index, season) in covered {
+        if multi_season && season != last_season {
+            if let Some(season) = season {
+                rows.push(StreamPackRow::Header { season });
+            }
+            last_season = season;
+        }
+        rows.push(StreamPackRow::Episode { index });
+    }
+    Ok(rows)
 }
 
 #[derive(Serialize)]
@@ -378,7 +407,7 @@ pub(crate) struct StreamSelectorRow {
     is_playable: bool,
     seeders: Option<u32>,
     size_bytes: Option<f64>,
-    search_fields: [Option<String>; 9],
+    search_fields: Vec<Option<String>>,
 }
 
 #[command]
@@ -457,29 +486,6 @@ pub async fn get_stream_selector_indices(
     playable
 }
 
-fn preferred_probe_requests(
-    streams: &[AddonStream],
-    preferred_key: &str,
-) -> Option<Vec<ProbeRequestIdentity>> {
-    let position = streams
-        .iter()
-        .position(|stream| stream.stream_key == preferred_key && is_probeable_stream(stream))?;
-    // The exact-key tier rotates this row first before request deduplication and the probe cap.
-    let ordered = std::iter::once(&streams[position])
-        .chain(&streams[..position])
-        .chain(&streams[position + 1..]);
-    let mut requests = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
-    for request in ordered.filter_map(ProbeRequestIdentity::from_stream) {
-        if !requests.contains(&request) {
-            requests.push(request);
-            if requests.len() == BEST_STREAM_MAX_CANDIDATES {
-                break;
-            }
-        }
-    }
-    Some(requests)
-}
-
 fn retain_unprobed_streams(streams: &mut Vec<AddonStream>, requests: &[ProbeRequestIdentity]) {
     if requests.is_empty() {
         return;
@@ -523,106 +529,126 @@ pub async fn resolve_best_stream(
     ranking_title: Option<String>,
     ranking_season: Option<u32>,
     ranking_episode: Option<u32>,
+    registry: State<'_, StreamRequestRegistry>,
+    request_id: Option<String>,
 ) -> Result<BestResolvedStream, ResolveStreamError> {
-    let deadline = Instant::now() + STREAM_RESOLVE_TIMEOUT;
-    let query = StreamPoolQuery::new(
-        &media_type,
-        &id,
-        season,
-        episode,
-        absolute_episode,
-        StreamRankingOverrides {
-            media_type: ranking_media_type,
-            media_id: ranking_media_id,
-            title: ranking_title,
-            season: ranking_season,
-            episode: ranking_episode,
-        },
-        "stream lookup",
-    )?;
-
-    let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_stream_key(&key));
-    let settled_early = AtomicBool::new(false);
-    let mut streams = query
-        .fetch_pool(
-            &app,
-            &playback_state,
-            &addon_transport,
-            &query.id,
-            ResolveFetch {
-                settle_on_stream_key: preferred_stream_key.as_deref(),
-                settled_early: Some(&settled_early),
-                preferred_source_id: preferred_source_id.as_deref(),
-                ..ResolveFetch::default()
+    // Probes run inside this future, so dropping it on cancel stops them.
+    let work = async move {
+        let deadline = Instant::now() + STREAM_RESOLVE_TIMEOUT;
+        let query = StreamPoolQuery::new(
+            &media_type,
+            &id,
+            season,
+            episode,
+            absolute_episode,
+            StreamRankingOverrides {
+                media_type: ranking_media_type,
+                media_id: ranking_media_id,
+                title: ranking_title,
+                season: ranking_season,
+                episode: ranking_episode,
             },
+            "stream lookup",
+        )?;
+
+        let preferred_stream_key = preferred_stream_key.and_then(|key| normalize_stream_key(&key));
+        let settled_early = AtomicBool::new(false);
+        let streams = query
+            .fetch_pool(
+                &app,
+                &playback_state,
+                &addon_transport,
+                &query.id,
+                ResolveFetch {
+                    settle_on_stream_key: preferred_stream_key.as_deref(),
+                    settled_early: Some(&settled_early),
+                    preferred_source_id: preferred_source_id.as_deref(),
+                    ..ResolveFetch::default()
+                },
+                deadline,
+            )
+            .await?;
+
+        // `prepare_addon_streams` already dropped placeholders and rows with no
+        // playable source during ingress; no second filter pass is needed here.
+        if streams.is_empty() {
+            return Err(ResolveStreamError::new(
+                ResolveStreamErrorKind::NoStreams,
+                "No streams found for this content.",
+            ));
+        }
+
+        // The fetcher already retains only probeable rows when any exist.
+        if !streams.iter().any(is_probeable_stream) {
+            return Err(ResolveStreamError::new(
+                ResolveStreamErrorKind::NoDirectUrl,
+                MISSING_DIRECT_URL_MESSAGE,
+            ));
+        }
+
+        let preferred = PreferredStreamHint {
+            stream_key: preferred_stream_key.as_deref(),
+            source_id: preferred_source_id.as_deref(),
+            source_name: preferred_source_name.as_deref(),
+            stream_family: preferred_stream_family.as_deref(),
+        };
+        let retry_unrestricted = preferred_stream_key
+            .as_deref()
+            .filter(|_| settled_early.load(Ordering::Relaxed))
+            .is_some_and(|key| streams.iter().any(|stream| stream.stream_key == key));
+        let mut started_requests = Vec::new();
+        let error = match resolve_ranked_best_stream_candidate(
+            streams,
+            None,
+            None,
+            preferred,
             deadline,
-        )
-        .await?;
-
-    // `prepare_addon_streams` already dropped placeholders and rows with no
-    // playable source during ingress; no second filter pass is needed here.
-    if streams.is_empty() {
-        return Err(ResolveStreamError::new(
-            ResolveStreamErrorKind::NoStreams,
-            "No streams found for this content.",
-        ));
-    }
-
-    // Best-stream plays direct http(s) only — non-http rows list in the selector
-    // but have no probeable URL, so fail fast with the direct-link guidance.
-    streams.retain(is_probeable_stream);
-    if streams.is_empty() {
-        return Err(ResolveStreamError::new(
-            ResolveStreamErrorKind::NoDirectUrl,
-            MISSING_DIRECT_URL_MESSAGE,
-        ));
-    }
-
-    let preferred = PreferredStreamHint {
-        stream_key: preferred_stream_key.as_deref(),
-        source_id: preferred_source_id.as_deref(),
-        source_name: preferred_source_name.as_deref(),
-        stream_family: preferred_stream_family.as_deref(),
-    };
-    let early_probe_requests = preferred_stream_key
-        .as_deref()
-        .filter(|_| settled_early.load(Ordering::Relaxed))
-        .and_then(|key| preferred_probe_requests(&streams, key));
-    let error = match resolve_ranked_best_stream_candidate(streams, None, None, preferred, deadline)
-        .await
-    {
-        Ok(resolved) => return Ok(resolved),
-        Err(error) => error,
-    };
-    let Some(early_probe_requests) = early_probe_requests else {
-        return Err(error);
-    };
-    if Instant::now() >= deadline {
-        return Err(error);
-    }
-
-    // A preferred row can expire after listing; retry the unrestricted fan-out on the original budget.
-    let Ok(mut streams) = query
-        .fetch_pool(
-            &app,
-            &playback_state,
-            &addon_transport,
-            &query.id,
-            ResolveFetch::default(),
-            deadline,
+            retry_unrestricted.then_some(&mut started_requests),
         )
         .await
-    else {
-        return Err(error);
+        {
+            Ok(resolved) => return Ok(resolved),
+            Err(error) => error,
+        };
+        if !retry_unrestricted || Instant::now() >= deadline {
+            return Err(error);
+        }
+
+        // A preferred row can expire after listing; retry the unrestricted fan-out on the original budget.
+        let Ok(mut streams) = query
+            .fetch_pool(
+                &app,
+                &playback_state,
+                &addon_transport,
+                &query.id,
+                ResolveFetch::default(),
+                deadline,
+            )
+            .await
+        else {
+            return Err(error);
+        };
+        retain_unprobed_streams(&mut streams, &started_requests);
+        streams.retain(is_probeable_stream);
+        if streams.is_empty() {
+            return Err(error);
+        }
+        resolve_ranked_best_stream_candidate(streams, None, None, preferred, deadline, None)
+            .await
+            .map_err(|fallback| preferred_probe_error(error, fallback))
     };
-    retain_unprobed_streams(&mut streams, &early_probe_requests);
-    streams.retain(is_probeable_stream);
-    if streams.is_empty() {
-        return Err(error);
+    let Some(request_id) = request_id else {
+        return work.await;
+    };
+    let (_guard, mut cancellation) = registry.register(request_id)?;
+    tokio::select! {
+        biased;
+        _ = cancellation.wait_for(|cancelled| *cancelled) => Err(ResolveStreamError::new(
+            ResolveStreamErrorKind::Cancelled,
+            "Stream resolve cancelled.",
+        )),
+        result = work => result,
     }
-    resolve_ranked_best_stream_candidate(streams, None, None, preferred, deadline)
-        .await
-        .map_err(|fallback| preferred_probe_error(error, fallback))
 }
 
 #[command]
@@ -631,7 +657,7 @@ pub async fn recover_playback_stream(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     addon_transport: State<'_, AddonTransport>,
-    registry: State<'_, PlaybackRecoveryRegistry>,
+    registry: State<'_, StreamRequestRegistry>,
     request_id: String,
     media_type: String,
     id: String,
@@ -714,7 +740,7 @@ async fn recover_playback_stream_work(
         },
         "stream recovery",
     )?;
-    let normalized_id = query.id.clone();
+    let normalized_id = query.id.as_str();
     let normalized_media_type = query.media_type.as_str();
     let normalized_history_type = normalize_watch_progress_type(js_trim(&media_type))
         .ok_or_else(|| "Invalid media type for stream recovery.".to_string())?;
@@ -734,14 +760,14 @@ async fn recover_playback_stream_work(
     // titles (kitsu: → tt…) the media id is not what addons index streams under.
     // The lookup id becomes the outbound path segment — same bound as the media id.
     let stream_lookup_id = stream_lookup_id.as_deref().and_then(normalize_media_id);
-    let fetch_id = stream_lookup_id.unwrap_or_else(|| normalized_id.clone());
+    let fetch_id = stream_lookup_id.as_deref().unwrap_or(normalized_id);
 
     // Blocking store/file IO on the blocking pool, matching `report_playback_stream_outcome`.
     // Best-effort telemetry — detached so a wedged store cannot delay the re-resolve.
     {
         let outcome_app = app.clone();
         let outcome_service = playback_state.inner().clone();
-        let outcome_normalized_id = normalized_id.clone();
+        let outcome_normalized_id = normalized_id.to_string();
         let outcome_source_id = failed_source_id.clone();
         let outcome_stream_family = failed_stream_family.clone();
         tauri::async_runtime::spawn(async move {
@@ -808,7 +834,7 @@ async fn recover_playback_stream_work(
                 &app,
                 &playback_state,
                 &addon_transport,
-                &fetch_id,
+                fetch_id,
                 recovery_fetch,
                 deadline,
             )
@@ -828,7 +854,7 @@ async fn recover_playback_stream_work(
                     "fetch-failed",
                     &[
                         field("media_type", normalized_media_type),
-                        field("media_id", &normalized_id),
+                        field("media_id", normalized_id),
                         field("outcome", &outcome),
                         field("error", &summary),
                     ],
@@ -845,7 +871,7 @@ async fn recover_playback_stream_work(
                 "empty-pool",
                 &[
                     field("media_type", normalized_media_type),
-                    field("media_id", &normalized_id),
+                    field("media_id", normalized_id),
                     field("outcome", &outcome),
                 ],
             );
@@ -856,6 +882,7 @@ async fn recover_playback_stream_work(
                 failed_stream_url.as_deref(),
                 PreferredStreamHint::default(),
                 deadline,
+                None,
             )
             .await
             {
@@ -868,7 +895,7 @@ async fn recover_playback_stream_work(
                         "resolve-failed",
                         &[
                             field("media_type", normalized_media_type),
-                            field("media_id", &normalized_id),
+                            field("media_id", normalized_id),
                             field("outcome", &outcome),
                             field("error", &summary),
                         ],

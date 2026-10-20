@@ -182,7 +182,7 @@ async fn follow_redirect_hop(
             let status = current.status();
             if status.is_success() {
                 validate_probe_content_type(current.headers())?;
-                return Ok(ProbeLanding::Landed(base.to_string()));
+                return Ok(ProbeLanding::Landed(base.into()));
             }
             return Ok(ProbeLanding::TerminalStatus(status.as_u16()));
         }
@@ -258,7 +258,7 @@ async fn resolve_final_direct_url(
         // Some servers report a default type on HEAD only; the range GET decides.
         Ok(resp) if resp.status().is_success() => match validate_probe_content_type(resp.headers())
         {
-            Ok(()) => return Ok(initial.to_string()),
+            Ok(()) => return Ok(initial.into()),
             Err(message) => message.into(),
         },
         // HEAD-only advisory or hard status: the range GET still runs; its error context starts here.
@@ -298,7 +298,7 @@ async fn resolve_final_direct_url(
         }
         Ok(resp) if resp.status().is_success() => {
             validate_probe_content_type(resp.headers())?;
-            Ok(initial.to_string())
+            Ok(initial.into())
         }
         // Only the GET's own advisory statuses pass — a HEAD-only advisory never overrides a hard GET failure.
         Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => Ok(direct_url.to_string()),

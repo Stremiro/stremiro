@@ -3,8 +3,7 @@ use super::language::{
 };
 use super::normalize_token_text;
 use super::streaming_helpers::{
-    normalize_source_id, normalize_source_key, stream_language_haystack,
-    stream_resolution_priority, stream_source_priority,
+    normalize_source_id, normalize_source_key, stream_resolution_priority,
 };
 use crate::providers::addons::{
     language_mention_is_audio, stream_episode_match_texts, AddonStream, SelectionPriority,
@@ -279,11 +278,8 @@ fn compute_cached_signals(
     reference: Option<&ReferenceTitle>,
     language_prefs: CanonicalLanguagePrefs,
 ) -> CachedStreamSignals {
-    // One normalization pass per stream: haystack, instance id, and family key
-    // feed language, bonus, source-priority, health, affinity, and family lookup.
-    let haystack = stream_language_haystack(stream);
-    let flags = stream.match_texts().flags;
-    // Instance id is the identity for source ordering/health/affinity — display names are shared between instances.
+    let texts = stream.match_texts();
+    let flags = texts.flags;
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
     let resolution = stream_resolution_priority(stream, flags);
     let episode_match = stream_episode_relevance_priority(stream, inputs.match_context);
@@ -303,7 +299,7 @@ fn compute_cached_signals(
             ),
             viability: resolution.viability,
             language: stream_language_preference_priority(
-                haystack,
+                texts.name_title_haystack(),
                 language_prefs,
                 flags,
                 reference,
@@ -313,16 +309,16 @@ fn compute_cached_signals(
                 .and_then(|id| inputs.source_health_priorities.get(id).copied())
                 .unwrap_or(DEFAULT_SOURCE_HEALTH_PRIORITY),
             family: 0,
-            title_source_affinity: stream_title_source_affinity_priority(
-                source_id.as_deref(),
-                inputs.preferred_title_source_id,
-            ),
+            title_source_affinity: u8::from(
+                inputs.preferred_title_source_id.is_some()
+                    && source_id.as_deref() == inputs.preferred_title_source_id,
+            ) * 3,
             quality: resolution.quality,
             language_bonus: resolution.language_bonus,
-            source_priority: stream_source_priority(
-                source_id.as_deref(),
-                inputs.addon_source_priorities,
-            ),
+            source_priority: source_id
+                .as_deref()
+                .and_then(|id| inputs.addon_source_priorities.get(id).copied())
+                .unwrap_or(0),
             oversize: std::cmp::Reverse(resolution.oversize),
             seeders: resolution.seeders,
             size_bytes: resolution.size_bytes,
@@ -337,12 +333,12 @@ fn stream_recommendation_key(
 ) -> StreamRecommendationKey {
     let cached = signals.for_stream(stream, inputs);
     // Family priority is the one ranking input still growing between progressive passes — stays per-pass.
-    let family = stream_family_priority(
-        cached.normalized_family.as_deref(),
-        inputs.stream_family_priorities,
-    );
     StreamRecommendationKey {
-        family,
+        family: cached
+            .normalized_family
+            .as_deref()
+            .and_then(|family| inputs.stream_family_priorities.get(family).copied())
+            .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY),
         ..cached.key
     }
 }
@@ -509,25 +505,6 @@ fn stream_language_preference_priority(
     score.min(6)
 }
 
-fn stream_family_priority(
-    normalized_family: Option<&str>,
-    stream_family_priorities: &HashMap<String, u8>,
-) -> u8 {
-    normalized_family
-        .and_then(|stream_family| stream_family_priorities.get(stream_family).copied())
-        .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY)
-}
-
-/// Title affinity is binary: the stream's instance is the title's preferred source (3) or not (0).
-fn stream_title_source_affinity_priority(
-    normalized_source_id: Option<&str>,
-    preferred_title_source_id: Option<&str>,
-) -> u8 {
-    u8::from(
-        preferred_title_source_id.is_some() && normalized_source_id == preferred_title_source_id,
-    ) * 3
-}
-
 fn is_title_stop_word(token: &str) -> bool {
     TITLE_STOP_WORDS.contains(&token)
 }
@@ -608,6 +585,9 @@ fn stream_episode_relevance_priority(
             episode,
             final_season,
         ));
+        if best_match.kind == StreamEpisodeMatchKind::Exact && best_match.season_claim_verified {
+            break;
+        }
     }
 
     best_match

@@ -26,7 +26,7 @@ use crate::providers::addons::{
 };
 use crate::providers::trim_to_max;
 use futures_util::stream::{self, StreamExt};
-use serde::{ser::SerializeStruct, Serialize, Serializer};
+use serde::{Serialize, Serializer};
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -218,25 +218,13 @@ impl StreamSelectorStats {
 
 impl Serialize for StreamSelectorData {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        // Only selector payloads serialize; counts derive from prepared presentation facts.
-        let mut data = serializer.serialize_struct(
-            "StreamSelectorData",
-            if self.fatal_error_message.is_some() {
-                4
-            } else {
-                3
-            },
-        )?;
-        data.serialize_field("streams", &self.streams)?;
-        data.serialize_field("sourceSummaries", &self.source_summaries)?;
-        data.serialize_field(
-            "stats",
-            &StreamSelectorStats::from_snapshot(&self.streams, &self.source_summaries),
-        )?;
-        if let Some(message) = &self.fatal_error_message {
-            data.serialize_field("fatalErrorMessage", message)?;
+        StreamSelectorSnapshot {
+            streams: &self.streams,
+            stats: StreamSelectorStats::from_snapshot(&self.streams, &self.source_summaries),
+            source_summaries: &self.source_summaries,
+            fatal_error_message: self.fatal_error_message.as_deref(),
         }
-        data.end()
+        .serialize(serializer)
     }
 }
 
@@ -244,10 +232,10 @@ impl Serialize for StreamSelectorData {
 /// identical wire shape, zero clones. Lockstep pinned by `selector_snapshot_serializes_like_selector_data`.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct StreamSelectorSnapshot<'a> {
-    streams: Vec<&'a AddonStream>,
+struct StreamSelectorSnapshot<'a, Streams, Sources> {
+    streams: Streams,
     stats: StreamSelectorStats,
-    source_summaries: Vec<&'a StreamSourceSummary>,
+    source_summaries: Sources,
     #[serde(skip_serializing_if = "Option::is_none")]
     fatal_error_message: Option<&'a str>,
 }
@@ -615,10 +603,13 @@ pub(crate) async fn fetch_stream_for_link(
     source_id: Option<&str>,
 ) -> Result<Option<AddonStream>, String> {
     let effective_type = super::media_type::addon_episode_lookup_type(query.media_type);
-    let video_id =
-        cached_episode_video_id(app, &app.state::<PlaybackStateService>(), ranking, None).await;
+    let playback_state = app.state::<PlaybackStateService>();
+    let (video_id, addons) = tokio::join!(
+        cached_episode_video_id(app, &playback_state, ranking, None),
+        super::addon_registry::load_enabled_addons_snapshot(app)
+    );
+    let addons = addons?;
     let query_ids = query.query_ids(video_id.as_deref());
-    let addons = super::addon_registry::load_enabled_addons_snapshot(app).await?;
     let stream_addons = addons
         .iter()
         .filter(|addon| addon_declares_stream(addon, effective_type, &query_ids))
@@ -896,14 +887,6 @@ fn summarize_addon_outcome(outcome: &AddonStreamFetchOutcome) -> StreamSourceSum
             .is_none()
             .then_some(outcome.latency_ms),
         error_message: outcome.error_message.clone(),
-    }
-}
-
-fn build_fatal_stream_error(errors: &[String]) -> Option<String> {
-    if errors.is_empty() {
-        None
-    } else {
-        Some(errors.join(" | "))
     }
 }
 
@@ -1412,10 +1395,7 @@ async fn merge_selector_outcomes(
 
     retain_rankable_streams(&mut merged, resolve_only);
 
-    // The merged set moves through the ranking snapshot and comes back ranked.
-    let streams = if merged.is_empty() {
-        merged
-    } else {
+    if !merged.is_empty() {
         // Progressive-pass scores are reused; a non-channel caller finds them all
         // missing and pays the same store read. A wedged store costs the family
         // signal, not the pool — unscored families rank on the default.
@@ -1439,23 +1419,18 @@ async fn merge_selector_outcomes(
                 &[field("error", &error)],
             );
         }
-        let mut ranked = merged;
         sort_streams_by_recommendation(
-            &mut ranked,
+            &mut merged,
             ctx.recommendation_inputs(&stream_family_priorities),
             &mut signal_cache,
         );
-        ranked
-    };
+    }
 
     StreamSelectorData {
-        fatal_error_message: if streams.is_empty() {
-            build_fatal_stream_error(&fatal_errors)
-        } else {
-            None
-        },
+        fatal_error_message: (merged.is_empty() && !fatal_errors.is_empty())
+            .then(|| fatal_errors.join(" | ")),
         source_summaries,
-        streams,
+        streams: merged,
     }
 }
 
@@ -1463,36 +1438,6 @@ fn retain_rankable_streams(streams: &mut Vec<AddonStream>, resolve_only: bool) {
     if resolve_only && streams.iter().any(is_probeable_stream) {
         streams.retain(is_probeable_stream);
     }
-}
-
-pub(crate) async fn fetch_ranked_streams(
-    app: &AppHandle,
-    playback_state: &PlaybackStateService,
-    provider: &AddonTransport,
-    query: &StreamQueryRequest<'_>,
-    ranking: &StreamRankingScope,
-    resolve: ResolveFetch<'_>,
-    deadline: tokio::time::Instant,
-) -> Result<Vec<AddonStream>, String> {
-    let data = fetch_stream_selector_data(
-        app,
-        playback_state,
-        provider,
-        query,
-        ranking,
-        None,
-        Some(resolve),
-        Some(deadline),
-    )
-    .await?;
-
-    if data.streams.is_empty() {
-        if let Some(error) = data.fatal_error_message {
-            return Err(error);
-        }
-    }
-
-    Ok(data.streams)
 }
 
 #[cfg(test)]

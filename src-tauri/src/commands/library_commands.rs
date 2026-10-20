@@ -2,8 +2,8 @@ use super::list_helpers::normalize_smart_list_genre;
 use super::store_helpers::{
     library_item_key, load_library_index, load_library_map, load_watch_status_index,
     merge_library_item, normalize_bulk_ids, normalize_library_item, normalize_watch_status,
-    persist_index_map, read_library_snapshot, read_watch_status_snapshot, watch_status_item_key,
-    LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
+    persist_index_map, read_library_snapshot, read_watch_status_snapshot, retain_status_added_ids,
+    watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
     js_trim, normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY,
@@ -12,7 +12,7 @@ use super::{
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{command, AppHandle};
 
 /// Bound on the library index: every add rewrites the index key, so an
@@ -67,10 +67,11 @@ pub(super) fn resolve_library_items(
 
 /// Prepare without mutating either domain: status-set uses this preflight
 /// before writing its status, so a full library rejects the entire action.
+/// The index is `Some` only when the title is new to the Library.
 pub(super) fn prepare_library_write(
     store: &DurableStore,
     item: MediaItem,
-) -> Result<(MediaItem, Vec<String>), LibraryWriteError> {
+) -> Result<(MediaItem, Option<Vec<String>>), LibraryWriteError> {
     let mut index = load_library_index(store)?;
     let item = normalize_library_item(item).ok_or_else(|| {
         LibraryWriteError::InvalidItem(
@@ -82,28 +83,33 @@ pub(super) fn prepare_library_write(
         .and_then(normalize_library_item)
         .filter(|existing| existing.id == item.id);
     let item = merge_library_item(existing.as_ref(), item);
-    if !index.contains(&item.id) {
-        if index.len() >= MAX_LIBRARY_ITEMS {
-            return Err(LibraryWriteError::CapacityExceeded(
-                "Library is full.".to_string(),
-            ));
-        }
-        index.push(item.id.clone());
-        index.sort();
+    if index.contains(&item.id) {
+        return Ok((item, None));
     }
-    Ok((item, index))
+    if index.len() >= MAX_LIBRARY_ITEMS {
+        return Err(LibraryWriteError::CapacityExceeded(
+            "Library is full.".to_string(),
+        ));
+    }
+    index.push(item.id.clone());
+    index.sort();
+    Ok((item, Some(index)))
 }
 
 #[command]
-pub async fn add_to_library(app: AppHandle, item: MediaItem) -> Result<(), String> {
+pub async fn add_to_library(app: AppHandle, item: MediaItem) -> Result<MediaItem, String> {
     run_blocking_store_op(move || {
         let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
         let (final_item, index) = prepare_library_write(&store, item).map_err(String::from)?;
 
         store.set(library_item_key(&final_item.id), json!(final_item));
-        store.set(LIBRARY_INDEX_KEY, json!(index));
+        if let Some(index) = index {
+            store.set(LIBRARY_INDEX_KEY, json!(index));
+        }
+        // An explicit save makes the title the user's own, independent of its status.
+        retain_status_added_ids(&store, |id| id != final_item.id);
         store.save()?;
-        Ok(())
+        Ok(final_item)
     })
     .await
 }
@@ -140,6 +146,7 @@ pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), Strin
         if deleted_item || index.len() != original_len {
             store.set(LIBRARY_INDEX_KEY, json!(index));
         }
+        retain_status_added_ids(&store, |entry| entry != id);
         store.save()?;
 
         Ok(())
@@ -171,6 +178,8 @@ fn remove_library_items(
     } else {
         status_store.save()?;
     }
+    let removed_ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    retain_status_added_ids(store, |id| !removed_ids.contains(id));
     if removed > 0 {
         persist_index_map(store, LIBRARY_LAYOUT, &library.index, &library.items)?;
     } else {
@@ -265,6 +274,7 @@ pub(crate) struct LibraryFilters {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProfileLibrary {
     items: Vec<MediaItem>,
+    all_ids: Vec<String>,
     status_counts: HashMap<String, usize>,
 }
 
@@ -327,6 +337,8 @@ fn filter_profile_library(
         .take(super::MAX_SEARCH_QUERY_CHARS)
         .collect();
     let query = query.to_lowercase();
+    let mut all_ids: Vec<_> = items.iter().map(|item| item.id.clone()).collect();
+    all_ids.sort_unstable();
     let status_counts = library_status_counts(items.iter().map(|item| item.id.as_str()), statuses);
     items.retain(|item| {
         let type_matches = match filters.type_ {
@@ -360,6 +372,7 @@ fn filter_profile_library(
     }
     Ok(ProfileLibrary {
         items: items.into_iter().map(|(_, item)| item).collect(),
+        all_ids,
         status_counts,
     })
 }
@@ -588,6 +601,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.items.len(), 1);
+        assert_eq!(result.all_ids, ["a", "b", "j", "u", "z"]);
         assert_eq!(result.status_counts["watched"], 1);
         assert_eq!(result.status_counts["watching"], 1);
         assert_eq!(result.status_counts["dropped"], 1);
@@ -643,6 +657,10 @@ mod tests {
                 .set(watch_status_item_key(id), json!("watching"));
         }
         library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b", "c"]));
+        library.store.set(
+            super::super::LIBRARY_STATUS_ADDED_KEY,
+            json!(["a", "c", "orphan"]),
+        );
         statuses
             .store
             .set(WATCH_STATUS_INDEX_KEY, json!(["a", "b", "c"]));
@@ -656,6 +674,10 @@ mod tests {
             2
         );
         assert_eq!(library.store.get(LIBRARY_INDEX_KEY), Some(json!(["c"])));
+        assert_eq!(
+            super::super::store_helpers::load_status_added_ids(&library.store),
+            ["c"]
+        );
         assert_eq!(
             statuses.store.get(WATCH_STATUS_INDEX_KEY),
             Some(json!(["c"]))

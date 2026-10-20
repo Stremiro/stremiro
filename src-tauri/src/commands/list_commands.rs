@@ -331,7 +331,7 @@ fn restore_list_entries(
         return Err(ListError::new(ListErrorKind::ListFull, "List is full."));
     }
     drop(known);
-    list.item_ids = restored_list_order(list.item_ids, &prepared);
+    list.item_ids = restored_list_order(list.item_ids, &mut prepared);
     for entry in prepared {
         store.set(
             list_item_store_key(list_id, &entry.item.id),
@@ -343,10 +343,9 @@ fn restore_list_entries(
     Ok(())
 }
 
-fn restored_list_order(mut order: Vec<String>, entries: &[RemovedListItem]) -> Vec<String> {
-    let mut sorted: Vec<&RemovedListItem> = entries.iter().collect();
-    sorted.sort_by_key(|entry| entry.index);
-    for entry in sorted {
+fn restored_list_order(mut order: Vec<String>, entries: &mut [RemovedListItem]) -> Vec<String> {
+    entries.sort_by_key(|entry| entry.index);
+    for entry in entries {
         let position = entry
             .after
             .as_ref()

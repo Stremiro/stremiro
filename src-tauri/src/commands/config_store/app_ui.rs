@@ -375,8 +375,8 @@ pub(crate) fn parse_app_ui_preferences(value: Value) -> Option<AppUiPreferences>
 
 pub(crate) fn load_app_ui_preferences(store: &DurableStore) -> AppUiPreferences {
     store
-        .get(APP_UI_PREFERENCES_KEY)
-        .and_then(parse_app_ui_preferences)
+        .get_typed::<StoredAppUiPreferences>(APP_UI_PREFERENCES_KEY)
+        .map(normalize_stored_app_ui_preferences)
         .unwrap_or_default()
 }
 

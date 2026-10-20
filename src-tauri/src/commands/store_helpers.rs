@@ -1,7 +1,8 @@
 use super::media_normalization::{build_display_year, normalize_media_item};
 use super::{
     normalize_media_id, normalize_watch_progress_type, DurableStore, LIBRARY_INDEX_KEY,
-    LIBRARY_ITEM_PREFIX, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_ITEM_PREFIX,
+    LIBRARY_ITEM_PREFIX, LIBRARY_STATUS_ADDED_KEY, WATCH_STATUS_INDEX_KEY,
+    WATCH_STATUS_ITEM_PREFIX,
 };
 use crate::providers::{extract_primary_year, MediaItem};
 use serde_json::json;
@@ -110,6 +111,9 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
         store.set((layout.item_key)(item_id), json!(item));
     }
     store.set(layout.index_key, json!(index));
+    if layout.index_key == LIBRARY_INDEX_KEY {
+        retain_status_added_ids(store, |id| map.contains_key(id));
+    }
     store.save()
 }
 
@@ -154,13 +158,9 @@ pub(super) fn load_index(store: &DurableStore, index_key: &str) -> Result<Vec<St
         return Ok(Vec::new());
     };
     let member_count = value.as_array().map_or(0, Vec::len);
-    let Some(index) = decode_string_list(value) else {
-        return Err(format!("Invalid {index_key} index."));
-    };
-    if member_count > 0 && index.is_empty() {
-        return Err(format!("Invalid {index_key} index."));
-    }
-    Ok(index)
+    decode_string_list(value)
+        .filter(|index| member_count == 0 || !index.is_empty())
+        .ok_or_else(|| format!("Invalid {index_key} index."))
 }
 
 pub(super) struct IndexStoreSnapshot<T> {
@@ -263,6 +263,33 @@ pub(super) fn read_library_snapshot(
         |_item_id, item| normalize_library_item(item).map(|item| (item.id.clone(), item)),
         |existing, incoming| merge_library_item(Some(existing), incoming),
     )
+}
+
+pub(super) fn load_status_added_ids(store: &DurableStore) -> Vec<String> {
+    store
+        .get(LIBRARY_STATUS_ADDED_KEY)
+        .and_then(decode_string_list)
+        .unwrap_or_default()
+}
+
+pub(super) fn mark_status_added(store: &DurableStore, id: &str) {
+    let mut ids = load_status_added_ids(store);
+    if !ids.iter().any(|entry| entry == id) {
+        ids.push(id.to_string());
+        store.set(LIBRARY_STATUS_ADDED_KEY, json!(ids));
+    }
+}
+
+/// Stages the pruned marker without saving; returns whether it changed.
+pub(super) fn retain_status_added_ids(store: &DurableStore, keep: impl Fn(&str) -> bool) -> bool {
+    let mut ids = load_status_added_ids(store);
+    let len = ids.len();
+    ids.retain(|id| keep(id));
+    let changed = ids.len() != len;
+    if changed {
+        store.set(LIBRARY_STATUS_ADDED_KEY, json!(ids));
+    }
+    changed
 }
 
 pub(super) fn watch_status_item_key(item_id: &str) -> String {
