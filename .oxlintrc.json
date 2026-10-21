@@ -12,9 +12,6 @@
     // bails out on these deliberate patterns; the lint rules would only warn.
     "react/incompatible-library": "off",
     "react/preserve-manual-memoization": "off",
-    // player.tsx reads miniPositionRef.current during render to seed
-    // initialPosition — a mount-time read the rule forbids.
-    "react/refs": "off",
     // Dep lists deliberately carry reset keys (activeStreamUrl, resetKey,
     // nonces) and the effects they re-run intentionally set state on media
     // change (e.g. resetStreamScopedState) — 22 deliberate sites.

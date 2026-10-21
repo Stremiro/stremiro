@@ -22,7 +22,7 @@ export default defineConfig(async () => ({
       output: {
         // Rolldown (Vite 8) requires manualChunks as a function
         manualChunks: (id: string) => {
-          if (/@radix-ui\/react-(avatar|dialog|dropdown-menu|slot|tooltip)\//.test(id))
+          if (/@radix-ui\/react-(dialog|dropdown-menu|slot|tooltip)\//.test(id))
             return 'vendor-radix';
           if (id.includes('@tanstack/react-query')) return 'vendor-query';
           if (

@@ -36,6 +36,7 @@
       "nsis"
     ],
     "windows": {
+      "minimumWebview2Version": "144.0.0.0",
       "nsis": {
         "installMode": "currentUser",
         "installerHooks": "./windows/installer-hooks.nsh"
