@@ -109,6 +109,7 @@ export const FIXED_PLAYER_SHORTCUTS: ShortcutRow[] = [
   { label: 'Seek 5 s', keys: ['Shift+seek'] },
   { label: 'Jump to 0–90%', keys: ['0–9'] },
   { label: 'Volume', keys: ['Scroll'] },
+  { label: 'Wheel seek', keys: ['Shift+Scroll'] },
   { label: 'Close panel / back', keys: ['Esc'] },
 ];
 

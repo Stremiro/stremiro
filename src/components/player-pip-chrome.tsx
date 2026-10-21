@@ -1,7 +1,11 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDownRight, Loader2, Maximize2, X } from 'lucide-react';
+import { ArrowDownRight, ChevronsRight, Loader2, Maximize2, X } from 'lucide-react';
 import { memo, useState, useSyncExternalStore } from 'react';
-import { CHROME_ICON_BUTTON_CLASS, CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
+import {
+  CHROME_ICON_BUTTON_CLASS,
+  CHROME_ICON_STROKE,
+  CHROME_SKIP_BUTTON_CLASS,
+} from '@/components/player-chrome-styles';
 import {
   PlayerMuteButton,
   PlayerNextButton,
@@ -247,9 +251,17 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                   aria-label={props.skipAction.label}
                   aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
                   title={withShortcutHint(props.skipAction.label, keymap, 'skipSegment')}
-                  className='min-w-0 cursor-pointer truncate rounded-md bg-white/15 px-2 py-1.5 text-xs text-white transition-colors hover:bg-white/25 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+                  className={cn(
+                    CHROME_SKIP_BUTTON_CLASS,
+                    'flex min-w-0 cursor-pointer items-center gap-1 px-2 py-1.5 text-xs',
+                  )}
                 >
-                  {props.skipAction.label}
+                  <ChevronsRight
+                    aria-hidden='true'
+                    className='h-3.5 w-3.5 shrink-0 text-(--accent-skip)'
+                    strokeWidth={CHROME_ICON_STROKE}
+                  />
+                  <span className='truncate'>{props.skipAction.label}</span>
                 </button>
               ) : null}
               <button
@@ -258,7 +270,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                 aria-label='Snap picture in picture to bottom-right'
                 title='Snap to bottom-right of this screen'
                 disabled={snapping}
-                onClick={() => void snapToCorner()}
+                onClick={snapToCorner}
               >
                 <ArrowDownRight
                   aria-hidden='true'

@@ -7,6 +7,8 @@ import type { PlaybackClock } from '@/lib/player-clock';
 // Optimistic-seek protocol: publish the target into the clock immediately; ticks still
 // reporting the pre-seek position are swallowed until settle or hold lapse.
 const OPTIMISTIC_SEEK_HOLD_MS = 450;
+// The hold restarts on command ack; this caps it while the IPC is still in flight.
+const OPTIMISTIC_SEEK_ACK_TIMEOUT_MS = 3000;
 const OPTIMISTIC_SEEK_SETTLED_DELTA_SECS = 1.1;
 // Same-direction relative seeks in this window report one running offset — matches the seek OSD's visible window.
 const SEEK_STREAK_WINDOW_MS = 900;
@@ -87,7 +89,7 @@ export function useOptimisticSeek({
       );
 
       pendingSeekTargetRef.current = boundedTarget;
-      pendingSeekDeadlineRef.current = now + OPTIMISTIC_SEEK_HOLD_MS;
+      pendingSeekDeadlineRef.current = now + OPTIMISTIC_SEEK_ACK_TIMEOUT_MS;
       seekGenerationRef.current += 1;
       seekAnnounceEpochRef.current += 1;
       clock.publish(boundedTarget);
@@ -120,6 +122,10 @@ export function useOptimisticSeek({
           clock.publish(previousTime);
         }
         throw seekError;
+      }
+      // Probes queued before mpv applied the seek still report the old position; hold past the ack, not the click.
+      if (seekGenerationRef.current === generation) {
+        pendingSeekDeadlineRef.current = performance.now() + OPTIMISTIC_SEEK_HOLD_MS;
       }
 
       // Announce only while this seek owns the epoch — an out-of-order ack must not flash a stale target.

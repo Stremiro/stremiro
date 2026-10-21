@@ -188,7 +188,7 @@ function TitlebarButton({ children, disabled, label, onClick, tone }: TitlebarBu
         'flex h-full w-12 items-center justify-center text-white transition-colors duration-150',
         'focus:outline-hidden focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/30',
         'disabled:cursor-not-allowed disabled:opacity-40',
-        tone === 'danger' ? 'hover:bg-red-500/80' : 'hover:bg-white/[0.1]',
+        tone === 'danger' ? 'enabled:hover:bg-red-500/80' : 'enabled:hover:bg-white/[0.1]',
       )}
     >
       {children}

@@ -467,6 +467,7 @@ export function StreamingSources() {
               className='pointer-events-none absolute left-3.5 top-1/2 h-4 w-4 -translate-y-1/2 text-zinc-500'
             />
             <Input
+              id='setting-addon-manifest-url'
               ref={newUrlInputRef}
               aria-label='Addon manifest URL'
               aria-describedby='addon-url-hint'
@@ -537,67 +538,69 @@ export function StreamingSources() {
         )}
       </SettingsBody>
 
-      {isLoading && !isFetched ? (
-        <SettingsBody className='flex items-center gap-3 text-[13px] text-zinc-500'>
-          <Loader2 className='h-4 w-4 animate-spin' />
-          Loading sources…
-        </SettingsBody>
-      ) : isLoadingError || (isFetched && isLoading) ? (
-        <SettingsBody>
-          <RetryBanner
-            message="Couldn't load your sources."
-            onRetry={() => void refetch()}
-            isRetrying={isFetching}
-          />
-        </SettingsBody>
-      ) : (
-        // No empty state: the backend always pins default addons.
-        <div
-          ref={addonRowsRef}
-          className='divide-y divide-white/[0.05]'
-          data-escape-capture={isDragging ? '' : undefined}
-        >
-          <SettingsQueryError
-            query={addonsQuery}
-            className='mx-5 my-3'
-            message="Couldn't refresh your sources."
-          />
-          {pinnedAddons.map((addon) => (
-            <PinnedAddonRow
-              key={addon.id}
-              addon={addon}
-              isWorking={isWorking}
-              onToggle={handleToggle}
+      <div id='setting-addon-list'>
+        {isLoading && !isFetched ? (
+          <SettingsBody className='flex items-center gap-3 text-[13px] text-zinc-500'>
+            <Loader2 className='h-4 w-4 animate-spin' />
+            Loading sources…
+          </SettingsBody>
+        ) : isLoadingError || (isFetched && isLoading) ? (
+          <SettingsBody>
+            <RetryBanner
+              message="Couldn't load your sources."
+              onRetry={() => void refetch()}
+              isRetrying={isFetching}
             />
-          ))}
-          {userAddons.length > 0 && (
-            <DndContext
-              sensors={sensors}
-              collisionDetection={closestCenter}
-              onDragStart={() => setIsDragging(true)}
-              onDragEnd={handleDragEnd}
-              onDragCancel={() => setIsDragging(false)}
-            >
-              <SortableContext
-                items={userAddons.map((a) => a.id)}
-                strategy={verticalListSortingStrategy}
+          </SettingsBody>
+        ) : (
+          // No empty state: the backend always pins default addons.
+          <div
+            ref={addonRowsRef}
+            className='divide-y divide-white/[0.05]'
+            data-escape-capture={isDragging ? '' : undefined}
+          >
+            <SettingsQueryError
+              query={addonsQuery}
+              className='mx-5 my-3'
+              message="Couldn't refresh your sources."
+            />
+            {pinnedAddons.map((addon) => (
+              <PinnedAddonRow
+                key={addon.id}
+                addon={addon}
+                isWorking={isWorking}
+                onToggle={handleToggle}
+              />
+            ))}
+            {userAddons.length > 0 && (
+              <DndContext
+                sensors={sensors}
+                collisionDetection={closestCenter}
+                onDragStart={() => setIsDragging(true)}
+                onDragEnd={handleDragEnd}
+                onDragCancel={() => setIsDragging(false)}
               >
-                <div className='divide-y divide-white/[0.05]'>
-                  {userAddons.map((addon) => (
-                    <SortableAddonRow
-                      key={addon.id}
-                      addon={addon}
-                      isWorking={isWorking}
-                      onToggle={handleToggle}
-                      onRemove={handleRemove}
-                    />
-                  ))}
-                </div>
-              </SortableContext>
-            </DndContext>
-          )}
-        </div>
-      )}
+                <SortableContext
+                  items={userAddons.map((a) => a.id)}
+                  strategy={verticalListSortingStrategy}
+                >
+                  <div className='divide-y divide-white/[0.05]'>
+                    {userAddons.map((addon) => (
+                      <SortableAddonRow
+                        key={addon.id}
+                        addon={addon}
+                        isWorking={isWorking}
+                        onToggle={handleToggle}
+                        onRemove={handleRemove}
+                      />
+                    ))}
+                  </div>
+                </SortableContext>
+              </DndContext>
+            )}
+          </div>
+        )}
+      </div>
     </SettingsGroup>
   );
 }

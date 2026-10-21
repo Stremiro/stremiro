@@ -1,18 +1,11 @@
-const SKIPPABLE_SEGMENT_TYPES = new Set(['intro', 'outro', 'recap', 'preview']);
+import type { SkipSegment } from '@/lib/api';
 
-function segmentLabel(type: string): string {
-  if (!SKIPPABLE_SEGMENT_TYPES.has(type)) return '';
-  return ` ${type.charAt(0).toUpperCase()}${type.slice(1)}`;
-}
-
-export function getSkipLabel(type: string): string {
-  return `Skip${segmentLabel(type)}`;
-}
-
-/** Past-tense variant for the post-jump OSD confirmation. */
-export function getSkippedLabel(type: string): string {
-  return `Skipped${segmentLabel(type)}`;
-}
+export const SKIP_SEGMENT_LABELS: Record<SkipSegment['type'], string> = {
+  intro: 'Intro',
+  recap: 'Recap',
+  outro: 'Outro',
+  preview: 'Preview',
+};
 
 export function isNearMediaEnd(position: number, duration: number): boolean {
   return duration > 0 && position >= Math.max(0, duration - 1);

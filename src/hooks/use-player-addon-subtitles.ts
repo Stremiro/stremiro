@@ -1,10 +1,10 @@
 import { useQuery } from '@tanstack/react-query';
-import { type RefObject, useEffect, useMemo, useRef, useState } from 'react';
+import { type RefObject, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
 import { type AddonSubtitle, api, getErrorMessage } from '@/lib/api';
-import { isExternalSubtitleTrack, type Track } from '@/lib/player-track-utils';
+import { isExternalSubtitleTrack, type Track, trackDisplayLabel } from '@/lib/player-track-utils';
 import { addonSubtitlesQueryKey } from '@/lib/query-invalidation';
 import { nonBlank } from '@/lib/utils';
 
@@ -133,31 +133,27 @@ export function usePlayerAddonSubtitles({
     const epoch = subtitleSessionEpochRef.current;
     void setTrack(trackType, trackId, options).then((applied) => {
       if (!applied || !mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
-      const label =
-        trackId === 'no'
-          ? 'Subtitles off'
-          : `Subtitles: ${subTracks.find((track) => track.id === trackId)?.displayLabel ?? `Track ${trackId}`}`;
-      announce(label, 'subtitles');
+      announce(
+        trackId === 'no' ? 'Subtitles off' : `Subtitles: ${trackDisplayLabel(subTracks, trackId)}`,
+        'subtitles',
+      );
     });
   };
 
-  // Menu-open state follows the popover: a closed menu stops refetch eligibility while cached data still paints on reopen.
-
   // Checkmark derives from mpv truth (one selected sid), so the row follows the
   // selected external track; the explicit pick only disambiguates rows matching the same track.
-  const activeAddonSubtitleId = useMemo(() => {
-    const selectedExternal = subTracks.find(
-      (track) => track.type === 'sub' && track.selected && track.external,
-    );
-    if (!selectedExternal) return null;
-    const matches = addonSubtitles.filter((subtitle) =>
-      isExternalSubtitleTrack(selectedExternal, subtitle),
-    );
-    if (matches.length === 0) return null;
-    return matches.some((subtitle) => subtitle.selectionKey === pickedAddonSubtitleId)
-      ? pickedAddonSubtitleId
-      : matches[0].selectionKey;
-  }, [addonSubtitles, pickedAddonSubtitleId, subTracks]);
+  const selectedExternal = subTracks.find(
+    (track) => track.type === 'sub' && track.selected && track.external,
+  );
+  const activeAddonMatches = selectedExternal
+    ? addonSubtitles.filter((subtitle) => isExternalSubtitleTrack(selectedExternal, subtitle))
+    : [];
+  const activeAddonSubtitleId =
+    activeAddonMatches.length === 0
+      ? null
+      : activeAddonMatches.some((subtitle) => subtitle.selectionKey === pickedAddonSubtitleId)
+        ? pickedAddonSubtitleId
+        : activeAddonMatches[0].selectionKey;
 
   return {
     activeAddonSubtitleId,

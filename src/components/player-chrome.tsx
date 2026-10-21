@@ -28,10 +28,13 @@ import {
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { PlayerSlider } from '@/components/player-slider';
-import { AudioTrackSelector, SubtitleTrackSelector } from '@/components/player-track-selectors';
+import {
+  AudioTrackSelector,
+  SubtitleTrackSelector,
+  type SubtitleTrackSelectorProps,
+} from '@/components/player-track-selectors';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
-import type { AddonSubtitle } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
 import type { Track } from '@/lib/player-track-utils';
@@ -55,7 +58,7 @@ interface PlayerTopChromeProps {
   onToggleFullscreen: () => Promise<void>;
 }
 
-// Memoized — the player re-renders per time-pos tick, so chrome subtrees with no tick-dependent props must bail out.
+// Memoized — OSD and controls-visibility changes re-render the player; the static chrome must bail out.
 export const PlayerTopChrome = memo(function PlayerTopChrome({
   chromeRef,
   title,
@@ -146,7 +149,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   );
 });
 
-interface PlayerControlsRowProps {
+interface PlayerControlsRowProps extends SubtitleTrackSelectorProps {
   clock: PlaybackClock;
   duration: number;
   active: boolean;
@@ -177,38 +180,19 @@ interface PlayerControlsRowProps {
   /** e.g. `Next: S1E3 · Title` — the button tooltip names where it goes. */
   nextEpisodeLabel?: string;
   audioTracks: Track[];
-  trackSwitching: { audio: boolean; sub: boolean };
   onSelectAudioTrack: (
     type: 'audio',
     id: number,
     options?: { persistPreference?: boolean },
   ) => void;
-  subTracks: Track[];
-  subtitleDelay: number;
-  subtitlePos: number;
-  subtitleScale: number;
-  addonSubtitles: AddonSubtitle[];
-  addonSubtitlesLoading: boolean;
-  addonSubtitlesFetching: boolean;
-  addonSubtitlesError?: string;
-  onRetryAddonSubtitles: () => void;
-  addonSubtitlesQueried: boolean;
-  activeAddonSubtitleId: string | null;
-  addonSubtitleLoadingId: string | null;
-  onSubtitleMenuOpenChange: (open: boolean) => void;
-  onSelectAddonSubtitle: (subtitle: AddonSubtitle) => void;
-  onResetSubtitleSettings: () => void;
-  onApplySubtitleDelay: (value: number) => void;
-  onApplySubtitlePos: (value: number) => void;
-  onApplySubtitleScale: (value: number) => void;
-  onSelectSubTrack: (
-    type: 'sub',
-    id: number | 'no',
-    options?: { persistPreference?: boolean },
-  ) => void;
 }
 
-function SeekTenIcon({ forward }: { forward?: boolean }) {
+const SEEK_BUTTONS = [
+  { action: 'seekBackward', label: 'Rewind 10 seconds', hint: 'Rewind 10s', delta: -10 },
+  { action: 'seekForward', label: 'Forward 10 seconds', hint: 'Forward 10s', delta: 10 },
+] as const;
+
+function SeekTenIcon({ forward }: { forward: boolean }) {
   const Icon = forward ? RotateCw : RotateCcw;
   return (
     <span aria-hidden='true' className='relative h-6 w-6'>
@@ -251,25 +235,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   audioTracks,
   trackSwitching,
   onSelectAudioTrack,
-  subTracks,
-  subtitleDelay,
-  subtitlePos,
-  subtitleScale,
-  addonSubtitles,
-  addonSubtitlesLoading,
-  addonSubtitlesFetching,
-  addonSubtitlesError,
-  onRetryAddonSubtitles,
-  addonSubtitlesQueried,
-  activeAddonSubtitleId,
-  addonSubtitleLoadingId,
-  onSubtitleMenuOpenChange,
-  onSelectAddonSubtitle,
-  onResetSubtitleSettings,
-  onApplySubtitleDelay,
-  onApplySubtitlePos,
-  onApplySubtitleScale,
-  onSelectSubTrack,
+  ...subtitleProps
 }: PlayerControlsRowProps) {
   const keymap = usePlayerKeymap();
   const speedHeadingId = useId();
@@ -381,53 +347,23 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
       </div>
 
       <div className={cn(CHROME_PILL_CLASS, 'ml-auto')}>
-        <button
-          type='button'
-          aria-label='Rewind 10 seconds'
-          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'seekBackward')}
-          onClick={() => {
-            void onSeekRelative(-10).catch(() => undefined);
-          }}
-          className={CHROME_ICON_BUTTON_CLASS}
-          title={withShortcutHint('Rewind 10s', keymap, 'seekBackward')}
-        >
-          <SeekTenIcon />
-        </button>
-        <button
-          type='button'
-          aria-label='Forward 10 seconds'
-          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'seekForward')}
-          onClick={() => {
-            void onSeekRelative(10).catch(() => undefined);
-          }}
-          className={CHROME_ICON_BUTTON_CLASS}
-          title={withShortcutHint('Forward 10s', keymap, 'seekForward')}
-        >
-          <SeekTenIcon forward />
-        </button>
+        {SEEK_BUTTONS.map(({ action, label, hint, delta }) => (
+          <button
+            key={action}
+            type='button'
+            aria-label={label}
+            aria-keyshortcuts={ariaKeyShortcuts(keymap, action)}
+            onClick={() => {
+              void onSeekRelative(delta).catch(() => undefined);
+            }}
+            className={CHROME_ICON_BUTTON_CLASS}
+            title={withShortcutHint(hint, keymap, action)}
+          >
+            <SeekTenIcon forward={delta > 0} />
+          </button>
+        ))}
 
-        <SubtitleTrackSelector
-          subTracks={subTracks}
-          trackSwitching={trackSwitching}
-          subtitleDelay={subtitleDelay}
-          subtitlePos={subtitlePos}
-          subtitleScale={subtitleScale}
-          addonSubtitles={addonSubtitles}
-          addonSubtitlesLoading={addonSubtitlesLoading}
-          addonSubtitlesFetching={addonSubtitlesFetching}
-          addonSubtitlesError={addonSubtitlesError}
-          onRetryAddonSubtitles={onRetryAddonSubtitles}
-          addonSubtitlesQueried={addonSubtitlesQueried}
-          activeAddonSubtitleId={activeAddonSubtitleId}
-          addonSubtitleLoadingId={addonSubtitleLoadingId}
-          onOpenChange={onSubtitleMenuOpenChange}
-          onSelectAddonSubtitle={onSelectAddonSubtitle}
-          onResetSubtitleSettings={onResetSubtitleSettings}
-          onApplySubtitleDelay={onApplySubtitleDelay}
-          onApplySubtitlePos={onApplySubtitlePos}
-          onApplySubtitleScale={onApplySubtitleScale}
-          onSelectTrack={onSelectSubTrack}
-        />
+        <SubtitleTrackSelector {...subtitleProps} trackSwitching={trackSwitching} />
         <AudioTrackSelector
           audioTracks={audioTracks}
           trackSwitching={trackSwitching}

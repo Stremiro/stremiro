@@ -50,6 +50,7 @@ function setGlowVar(value: number) {
 }
 
 interface AccentControlsProps {
+  idPrefix?: string;
   /** Current draft — may hold a partial hex the pattern rejects mid-typing. */
   accentColor: string;
   /** Persisted color: the preview fallback while the draft is invalid. */
@@ -71,6 +72,7 @@ interface AccentControlsProps {
 // Shared accent + glow editors: one owner for preset/hex/glow logic so the
 // profile popover and Settings → Appearance can't drift.
 export function AccentControls({
+  idPrefix,
   accentColor,
   committedColor,
   intensity,
@@ -126,6 +128,7 @@ export function AccentControls({
   return (
     <>
       <div
+        id={idPrefix ? `${idPrefix}-accent` : undefined}
         className='space-y-3'
         onBlurCapture={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) {
@@ -240,7 +243,7 @@ export function AccentControls({
         )}
       </div>
 
-      <div className='space-y-3'>
+      <div id={idPrefix ? `${idPrefix}-glow` : undefined} className='space-y-3'>
         <div className='flex items-center justify-between'>
           <div className='text-[10px] font-semibold uppercase tracking-widest text-zinc-400'>
             Glow

@@ -1,4 +1,4 @@
-// Shared "does this element own its keys/pointer" predicates for the hotkey layers and drag/context-menu guards.
+import type { KeyboardEvent } from 'react';
 
 /** Elements that own text input — a focused one consumes keys itself. */
 const EDITABLE_TARGET_SELECTOR = 'input, textarea, select, [contenteditable="true"]';
@@ -34,6 +34,39 @@ export function isKeyCaptureTarget(target: EventTarget | null, key?: string): bo
     ) ||
     (key === 'Escape' && document.querySelector('[data-escape-capture]') !== null)
   );
+}
+
+export function handleRadioGroupKeyDown(event: KeyboardEvent<HTMLButtonElement>): void {
+  if (
+    event.defaultPrevented ||
+    event.altKey ||
+    event.ctrlKey ||
+    event.metaKey ||
+    event.shiftKey ||
+    event.nativeEvent.isComposing
+  )
+    return;
+  const radios = Array.from(
+    event.currentTarget
+      .closest('[role="radiogroup"]')
+      ?.querySelectorAll<HTMLButtonElement>(
+        'button[role="radio"]:not(:disabled):not([aria-disabled="true"])',
+      ) ?? [],
+  );
+  const index = radios.indexOf(event.currentTarget);
+  if (index < 0) return;
+  let nextIndex: number;
+  if (event.key === 'ArrowRight' || event.key === 'ArrowDown')
+    nextIndex = (index + 1) % radios.length;
+  else if (event.key === 'ArrowLeft' || event.key === 'ArrowUp')
+    nextIndex = (index - 1 + radios.length) % radios.length;
+  else if (event.key === 'Home') nextIndex = 0;
+  else if (event.key === 'End') nextIndex = radios.length - 1;
+  else return;
+  event.preventDefault();
+  if (nextIndex === index) return;
+  radios[nextIndex].focus({ preventScroll: true });
+  radios[nextIndex].click();
 }
 
 /** Run `onMounted` with the first `selector` match, retrying one frame for virtual rows. */

@@ -1,4 +1,3 @@
-import { createRequestCache } from '@/lib/api-cache';
 import { safeInvoke } from '@/lib/api-core';
 import { createDiscoveryApi } from '@/lib/api-discovery';
 import { createPlaybackApi } from '@/lib/api-playback';
@@ -61,11 +60,6 @@ export interface EpisodeNavigationRequest {
 export interface UnairedEpisodesRequest {
   releaseDates: (string | null)[];
   today: string;
-}
-
-export interface EpisodeNavigation {
-  previousIndex: number | null;
-  nextIndex: number | null;
 }
 
 interface MediaSeason {
@@ -399,10 +393,6 @@ export interface AddonConfig {
   pinned: boolean;
 }
 
-const apiCaches = {
-  bestStream: createRequestCache<BestResolvedStream>(),
-};
-
 export interface PlaybackLanguagePreferences {
   preferredAudioLanguage?: string;
   preferredSubtitleLanguage?: string;
@@ -426,6 +416,7 @@ export interface AccentTargets {
   actions: boolean;
   progress: boolean;
   artwork: boolean;
+  skip: boolean;
 }
 
 export interface LocalProfile {
@@ -455,6 +446,10 @@ export type StartupPage = 'home' | 'library' | 'calendar' | 'lastVisited';
 export interface AppUiPreferences {
   playerVolume: number;
   playerSpeed: number;
+  /** Seconds; positive values play audio later. */
+  audioDelay: number;
+  /** Opt-in volume normalization for quieter listening. */
+  nightMode: boolean;
   spoilerProtection: boolean;
   /** Subtitle tuning persists across the per-episode player remount. */
   subtitleDelay: number;
@@ -494,6 +489,8 @@ export interface BootstrapSnapshot {
 export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   playerVolume: 75,
   playerSpeed: 1,
+  audioDelay: 0,
+  nightMode: false,
   spoilerProtection: false,
   subtitleDelay: 0,
   subtitlePos: 100,
@@ -608,14 +605,8 @@ export const api = {
   ...createDiscoveryApi({
     safeInvoke,
   }),
-  ...createPlaybackApi({
-    safeInvoke,
-    caches: apiCaches,
-  }),
-  ...createStoreApi({
-    safeInvoke,
-    caches: apiCaches,
-  }),
+  ...createPlaybackApi({ safeInvoke }),
+  ...createStoreApi({ safeInvoke }),
 };
 
 export interface DataStats {
@@ -698,9 +689,9 @@ export interface ResumeRailEntry {
   isNewEpisode?: boolean;
 }
 
-/** A skippable playback segment from SkipDB ("intro" | "recap" | "outro" | "preview"). */
+/** A skippable playback segment from SkipDB, sorted and non-overlapping. */
 export interface SkipSegment {
-  type: string;
+  type: 'intro' | 'recap' | 'outro' | 'preview';
   /** Segment start in seconds */
   start_time: number;
   /** Segment end in seconds */

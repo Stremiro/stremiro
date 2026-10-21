@@ -53,6 +53,14 @@ export function setMpvProperties(
   return invoke('player_mpv_set_properties', { properties });
 }
 
+/** Rust owns delay bounds and the fixed Night mode normalization filter. */
+export function setMpvAudioSettings(settings: {
+  audioDelay?: number;
+  nightMode?: boolean;
+}): Promise<void> {
+  return invoke('player_mpv_set_audio_settings', settings);
+}
+
 /** `cycle` steps aid/sid — resolves after mpv applies, so a follow-up read reports the landed id. */
 export function cycleMpvTrack(type: 'audio' | 'sub'): Promise<void> {
   return mpvCommand('cycle', [type === 'audio' ? 'aid' : 'sub']);
@@ -75,11 +83,17 @@ export async function readPlaybackPositionProbe(durationSecs: number): Promise<{
   timePos: number | null;
   bufferedAhead: number | null;
   nearCompletion: boolean;
+  nextEpisodePrefetchDue: boolean;
 }> {
   try {
     return await invoke('player_mpv_get_playback_position', { durationSecs });
   } catch {
-    return { timePos: null, bufferedAhead: null, nearCompletion: false };
+    return {
+      timePos: null,
+      bufferedAhead: null,
+      nearCompletion: false,
+      nextEpisodePrefetchDue: false,
+    };
   }
 }
 

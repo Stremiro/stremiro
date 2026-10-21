@@ -10,9 +10,11 @@ import {
 } from 'react';
 import { listenEvents } from 'tauri-plugin-libmpv-api';
 
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { SubtitleAdjustmentSettings } from '@/hooks/use-subtitle-adjustments';
-import type { PlaybackLanguagePreferences } from '@/lib/api';
+import { getErrorMessage, type PlaybackLanguagePreferences } from '@/lib/api';
+import { notifyAction } from '@/lib/notify';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { enqueuePlayerLifecycle } from '@/lib/player-lifecycle';
 import {
@@ -20,6 +22,7 @@ import {
   mpvDestroy,
   mpvInit,
   readPlaybackPositionProbe,
+  setMpvAudioSettings,
   setMpvProperties,
 } from '@/lib/player-mpv';
 import { isNearMediaEnd } from '@/lib/player-skip';
@@ -160,6 +163,12 @@ export function usePlayerMpvLifecycle({
 }: UsePlayerMpvLifecycleArgs) {
   const { trayPause } = usePlayerSession();
   const {
+    preferences: { audioDelay, nightMode },
+  } = useAppUiPreferences((preferences) => ({
+    audioDelay: preferences.audioDelay,
+    nightMode: preferences.nightMode,
+  }));
+  const {
     activeStreamUrl,
     activeStreamMpvHttpHeaderFields,
     activeStreamKey,
@@ -192,8 +201,31 @@ export function usePlayerMpvLifecycle({
   const isHistoryResumeNow = useEffectEvent(() => isHistoryResume);
   const isLoadingNow = useEffectEvent(() => isLoading);
   const [isBuffering, setIsBuffering] = useState(false);
+  const [nextEpisodePrefetchDue, setNextEpisodePrefetchDue] = useState(false);
   const refreshPositionRef = useRef<(() => void) | null>(null);
   const requestPositionRefresh = useCallback(() => refreshPositionRef.current?.(), []);
+  const applyAudioSettings = useEffectEvent(
+    (settings: Parameters<typeof setMpvAudioSettings>[0] = { audioDelay, nightMode }) =>
+      setMpvAudioSettings(settings).catch((error: unknown) => {
+        if (!mountedRef.current || isDestroyedRef.current) return;
+        notifyAction("Couldn't apply audio settings", {
+          detail: getErrorMessage(error),
+          tone: 'error',
+        });
+      }),
+  );
+
+  useEffect(() => {
+    if (mpvInitializedRef.current && !isDestroyedRef.current) {
+      void applyAudioSettings({ audioDelay });
+    }
+  }, [audioDelay, mpvInitializedRef, isDestroyedRef]);
+
+  useEffect(() => {
+    if (mpvInitializedRef.current && !isDestroyedRef.current) {
+      void applyAudioSettings({ nightMode });
+    }
+  }, [nightMode, mpvInitializedRef, isDestroyedRef]);
 
   useEffect(() => {
     const publishVisiblePosition = () => {
@@ -358,7 +390,12 @@ export function usePlayerMpvLifecycle({
     };
 
     // Playhead tick — driven by the position poll: optimistic-seek gate, publish, ready/resume signals.
-    const handleTimePos = (data: number, nearCompletion: boolean, generation: number) => {
+    const handleTimePos = (
+      data: number,
+      nearCompletion: boolean,
+      prefetchDue: boolean,
+      generation: number,
+    ) => {
       const now = performance.now();
       const seekPending = isSeekPending();
       if (seekPending) {
@@ -367,6 +404,7 @@ export function usePlayerMpvLifecycle({
       // A pending optimistic seek owns the displayed position — swallow stale pre-seek ticks.
       if (observeTimeUpdate(data, now)) return;
 
+      setNextEpisodePrefetchDue(prefetchDue);
       observedPositionRef.current = data;
       clock.ref.current = data;
       // Hidden playback still needs policy ticks without full-rate UI updates.
@@ -490,9 +528,12 @@ export function usePlayerMpvLifecycle({
       const eofReadGeneration = eofGeneration;
       const streamError = recoverableStreamErrorRef.current;
       return (async () => {
-        const { timePos, bufferedAhead, nearCompletion } = await readPlaybackPositionProbe(
-          durationRef.current,
-        );
+        const {
+          timePos,
+          bufferedAhead,
+          nearCompletion,
+          nextEpisodePrefetchDue: prefetchDue,
+        } = await readPlaybackPositionProbe(durationRef.current);
         if (
           streamGone() ||
           generation !== positionGeneration ||
@@ -501,7 +542,7 @@ export function usePlayerMpvLifecycle({
         )
           return;
         if (typeof timePos === 'number' && Number.isFinite(timePos)) {
-          handleTimePos(timePos, nearCompletion, generation);
+          handleTimePos(timePos, nearCompletion, prefetchDue, generation);
         }
         if (typeof bufferedAhead === 'number') handleBufferedAhead(bufferedAhead);
         if (
@@ -563,6 +604,7 @@ export function usePlayerMpvLifecycle({
       setDuration(0);
       isBufferingRef.current = false;
       setIsBuffering(false);
+      setNextEpisodePrefetchDue(false);
 
       setTransparent(false);
 
@@ -740,6 +782,8 @@ export function usePlayerMpvLifecycle({
         if (isMutedRef.current !== initialMuted) liveProperties.push(['mute', isMutedRef.current]);
         await setMpvPropertiesBestEffort(liveProperties);
         if (cancelled) return;
+        await applyAudioSettings();
+        if (cancelled) return;
 
         // A tray hide during init may have paused an instance that did not exist yet.
         const startPaused = resumeStartPaused || trayPause.getSnapshot();
@@ -818,5 +862,5 @@ export function usePlayerMpvLifecycle({
 
   useEffect(() => startPlayer(), [activeStreamLoadKey]);
 
-  return { isBuffering };
+  return { isBuffering, nextEpisodePrefetchDue };
 }

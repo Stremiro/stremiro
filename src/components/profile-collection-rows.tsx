@@ -1,4 +1,4 @@
-import { formatDistanceToNow } from 'date-fns';
+import { formatRelativeTime } from '@/lib/schedule-dates';
 import { Check, Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
@@ -76,10 +76,10 @@ const LibraryListRow = memo(function LibraryListRow({
       aria-pressed={selectionMode ? isSelected : undefined}
       aria-label={selectionMode ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}` : undefined}
       className={cn(
-        'w-full flex items-center gap-3 px-3 py-2.5 rounded-md border hover:bg-white/[0.04] hover:border-white/[0.10] transition-colors text-left group focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-white/20 focus-visible:border-white/20',
+        'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none text-left group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
         selectionMode && isSelected
-          ? 'border-white/[0.18] bg-white/[0.06]'
-          : 'bg-white/[0.015] border-white/[0.05]',
+          ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
+          : 'bg-white/[0.015] border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] focus-visible:bg-white/[0.04] focus-visible:border-white/[0.12]',
       )}
       onPointerEnter={selectionMode ? undefined : prefetchDetails}
       onFocus={selectionMode ? undefined : prefetchDetails}
@@ -184,10 +184,7 @@ const HistoryListRow = memo(function HistoryListRow({
     item.absolute_season ?? undefined,
     item.absolute_episode ?? undefined,
   );
-  const watchedAgo =
-    item.last_watched > 0
-      ? formatDistanceToNow(new Date(item.last_watched), { addSuffix: true })
-      : null;
+  const watchedAgo = item.last_watched > 0 ? formatRelativeTime(item.last_watched) : null;
 
   const removeItem = useRemoveFromWatchHistory({
     itemId: item.id,
@@ -200,7 +197,14 @@ const HistoryListRow = memo(function HistoryListRow({
   );
 
   return (
-    <div className='group/hrow flex items-center gap-3 px-3 py-2.5 rounded-lg bg-white/[0.02] border border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] transition-colors'>
+    <div
+      className={cn(
+        'group/hrow flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        selectionMode && isSelected
+          ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
+          : 'bg-white/[0.02] border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] focus-within:bg-white/[0.04] focus-within:border-white/[0.12]',
+      )}
+    >
       <button
         type='button'
         aria-label={
@@ -254,7 +258,7 @@ const HistoryListRow = memo(function HistoryListRow({
                 {Math.round(progressPct)}%
               </span>
             )}
-            {watchedAgo && <span className='text-[11px] text-zinc-600'>{watchedAgo}</span>}
+            {watchedAgo && <span className='text-[11px] text-zinc-500'>{watchedAgo}</span>}
           </div>
         </div>
       </button>

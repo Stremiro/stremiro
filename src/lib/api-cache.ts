@@ -1,7 +1,13 @@
+import type { BestResolvedStream } from '@/lib/api';
+
 const API_CACHE_MAX_ENTRIES = 200;
 
 type CacheLifetime = { cacheTtlMs: number };
-const resultExpirations = new WeakMap<CacheLifetime, number>();
+const resultExpirations = new WeakMap<CacheLifetime, { expiresAt: number; refreshAt: number }>();
+
+export function getCachedResultRefreshDelayMs(result: CacheLifetime): number {
+  return Math.max(0, (resultExpirations.get(result)?.refreshAt ?? 0) - performance.now());
+}
 
 // UI query keys use the Rust `normalize_query` bound.
 const SEARCH_QUERY_MAX_CHARS = 120;
@@ -28,17 +34,13 @@ export function foldAsciiCase(value: string): string {
 
 type TimedCacheEntry<T> = { value: T; expiresAt: number };
 
-export interface RequestCache<T> {
+interface RequestCache<T> {
   values: Map<string, TimedCacheEntry<T>>;
   inFlight: Map<string, Promise<T>>;
   clear: () => void;
 }
 
-export interface ApiCacheGroups {
-  bestStream: { clear: () => void };
-}
-
-export function createRequestCache<T>(): RequestCache<T> {
+function createRequestCache<T>(): RequestCache<T> {
   const values = new Map<string, TimedCacheEntry<T>>();
   const inFlight = new Map<string, Promise<T>>();
 
@@ -54,6 +56,8 @@ export function createRequestCache<T>(): RequestCache<T> {
 
   return cache;
 }
+
+export const bestStreamCache = createRequestCache<BestResolvedStream>();
 
 function pruneTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>) {
   const now = performance.now();
@@ -80,9 +84,13 @@ function setTimedCache<T extends CacheLifetime>(
     return;
   }
   // Reusing a resolved result must not restart its remaining pool lifetime.
-  const expiresAt = resultExpirations.get(value) ?? performance.now() + ttlMs;
-  resultExpirations.set(value, expiresAt);
-  cache.set(key, { value, expiresAt });
+  let expiration = resultExpirations.get(value);
+  if (!expiration) {
+    const expiresAt = performance.now() + ttlMs;
+    expiration = { expiresAt, refreshAt: expiresAt };
+    resultExpirations.set(value, expiration);
+  }
+  cache.set(key, { value, expiresAt: expiration.expiresAt });
   pruneTimedCache(cache);
 }
 
@@ -99,7 +107,7 @@ function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): 
   return cached.value;
 }
 
-export interface CachedRequestAbort {
+interface CachedRequestAbort {
   signal: AbortSignal;
   /** Stops the backend work started under `requestId`. */
   cancel: (requestId: string) => void;
@@ -146,7 +154,11 @@ export function runCachedRequest<T extends CacheLifetime>(
     const started = load(abortable?.requestId)
       .then((result) => {
         if (!resultExpirations.has(result)) {
-          resultExpirations.set(result, requestedAt + result.cacheTtlMs);
+          resultExpirations.set(result, {
+            expiresAt: requestedAt + result.cacheTtlMs,
+            // Renewal waits for the source pool; cache validity stays conservative.
+            refreshAt: performance.now() + result.cacheTtlMs,
+          });
         }
         // Only the key's current owner publishes — a clear/prime since request start revokes it.
         if (cache.inFlight.get(cacheKey) === started) {
@@ -219,15 +231,12 @@ export function primeCachedRequest<T extends CacheLifetime>(
 }
 
 // Streaming writes always clear the best-stream cache — server re-ranks/cooldowns must not be re-served from TTL.
-export function withStreamingCacheClear<T>(
-  caches: ApiCacheGroups,
-  request: Promise<T>,
-): Promise<T> {
-  return request.finally(() => clearProviderDataCaches(caches));
+export function withStreamingCacheClear<T>(request: Promise<T>): Promise<T> {
+  return request.finally(clearProviderDataCaches);
 }
 
-export function clearProviderDataCaches(caches: ApiCacheGroups) {
-  caches.bestStream.clear();
+export function clearProviderDataCaches() {
+  bestStreamCache.clear();
 }
 
 export function buildStreamCacheKey(

@@ -6,6 +6,7 @@ import { boundedMapSet, clamp } from '@/lib/utils';
 
 const EPISODE_DISPLAY_PAGE_SIZE = 9;
 const EMPTY_EPISODES: Episode[] = [];
+const EMPTY_SEASONS: NonNullable<MediaDetails['seasons']> = [];
 
 // Per-season page memory across remounts: details remounts on player return and
 // would reset to page 0. Bounded FIFO so the map can't grow per title×season.
@@ -20,6 +21,10 @@ interface EpisodePaneState {
 }
 
 const episodePaneMemory = new Map<string, EpisodePaneState>();
+
+function episodesInSeason(item: MediaDetails | undefined, season: number) {
+  return (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === season);
+}
 
 interface UseDetailsEpisodePaneArgs {
   item?: MediaDetails;
@@ -62,11 +67,11 @@ export function useDetailsEpisodePane({
     (typeof resumeSeason === 'number' ? resumeSeason : null);
 
   // `item.seasons` is the backend summary of sorted `episodes`; numbers ascend.
-  const seasons = item?.seasons?.map((season) => season.number) ?? [];
+  const seasons = item?.seasons ?? EMPTY_SEASONS;
   const selectedSeason =
-    selectedSeasonHint !== null && seasons.includes(selectedSeasonHint)
+    selectedSeasonHint !== null && seasons.some((season) => season.number === selectedSeasonHint)
       ? selectedSeasonHint
-      : (seasons.find((season) => season > 0) ?? seasons[0] ?? null);
+      : ((seasons.find((season) => season.number > 0) ?? seasons[0])?.number ?? null);
 
   const setEpisodeSearch = (value: React.SetStateAction<string>) =>
     updatePane((previous) => {
@@ -79,12 +84,6 @@ export function useDetailsEpisodePane({
             search,
           };
     });
-
-  const localSeasonEntries = (item?.seasons ?? []).map((season) => ({
-    number: season.number,
-    label: season.number === 0 ? 'Specials' : `Season ${season.number}`,
-    episodeCount: season.episodeCount,
-  }));
 
   const resumeEpisodeForSelectedSeason =
     item?.type === 'series' &&
@@ -103,11 +102,11 @@ export function useDetailsEpisodePane({
 
   // Key on the route id, not `item.id`: stable from mount (no flip when metadata
   // lands) and matches the identity progress reads/writes use.
-  const currentEpisodeSeasonKey = `${effectiveRouteId || 'unknown'}:${selectedSeason ?? 'none'}`;
+  const episodeSeasonKey = (season: number | 'none') =>
+    `${effectiveRouteId || 'unknown'}:${season}`;
+  const currentEpisodeSeasonKey = episodeSeasonKey(selectedSeason ?? 'none');
   const seasonEpisodes =
-    selectedSeason === null
-      ? EMPTY_EPISODES
-      : (item?.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === selectedSeason);
+    selectedSeason === null ? EMPTY_EPISODES : episodesInSeason(item, selectedSeason);
   const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const {
     effectiveEpisodeSearch,
@@ -131,7 +130,7 @@ export function useDetailsEpisodePane({
     item?.type === 'series' && resumeSeason !== undefined && resumeEpisode !== undefined
       ? (resumeSeason === selectedSeason
           ? seasonEpisodes
-          : (item.episodes ?? EMPTY_EPISODES).filter((episode) => episode.season === resumeSeason)
+          : episodesInSeason(item, resumeSeason)
         ).findIndex((episode) => episode.episode === resumeEpisode)
       : -1;
   const resumeEpisodePageIndex =
@@ -151,6 +150,13 @@ export function useDetailsEpisodePane({
   const totalEpisodeCount = searchFilteredEpisodes.length;
   const totalEpisodePages = Math.max(1, Math.ceil(totalEpisodeCount / EPISODE_DISPLAY_PAGE_SIZE));
   const activeEpisodePageIndex = Math.min(requestedEpisodePageIndex, totalEpisodePages - 1);
+
+  const retainEpisodePosition = () =>
+    updatePane((previous) => ({
+      ...previous,
+      season: selectedSeason,
+      page: { key: episodePageKey, page: activeEpisodePageIndex },
+    }));
 
   const changeEpisodePage = (direction: 'previous' | 'next') => {
     const delta = direction === 'previous' ? -1 : 1;
@@ -191,13 +197,12 @@ export function useDetailsEpisodePane({
   };
 
   const jumpToEpisode = (seasonNumber: number, episodeNumber: number) => {
-    const episodes = (item?.episodes ?? EMPTY_EPISODES).filter(
-      (episode) => episode.season === seasonNumber,
+    const index = episodesInSeason(item, seasonNumber).findIndex(
+      (episode) => episode.episode === episodeNumber,
     );
-    const index = episodes.findIndex((episode) => episode.episode === episodeNumber);
     if (index < 0) return;
     const page = Math.floor(index / EPISODE_DISPLAY_PAGE_SIZE);
-    const seasonKey = `${effectiveRouteId || 'unknown'}:${seasonNumber}`;
+    const seasonKey = episodeSeasonKey(seasonNumber);
     boundedMapSet(episodePageMemory, seasonKey, page, EPISODE_PAGE_MEMORY_MAX);
     updatePane((previous) => ({
       ...previous,
@@ -208,9 +213,8 @@ export function useDetailsEpisodePane({
   };
 
   return {
-    seasonCount: seasons.length,
+    seasons,
     selectedSeason,
-    localSeasonEntries,
     seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
@@ -231,5 +235,6 @@ export function useDetailsEpisodePane({
     hasPreviousEpisodes,
     hasMoreEpisodes,
     changeEpisodePage,
+    retainEpisodePosition,
   };
 }

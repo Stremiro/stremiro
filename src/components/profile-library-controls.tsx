@@ -1,5 +1,6 @@
 import {
   ArrowDownAZ,
+  ArrowUp,
   CalendarArrowDown,
   CalendarArrowUp,
   Check,
@@ -11,6 +12,7 @@ import {
   type LucideIcon,
   Plus,
   RotateCcw,
+  Search,
   Trash2,
   X,
 } from 'lucide-react';
@@ -36,8 +38,13 @@ import {
   WATCH_STATUSES,
   type WatchStatus,
 } from '@/lib/api';
-import { cn } from '@/lib/utils';
-import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
+import { cn, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import {
+  handleRadioGroupKeyDown,
+  isEditableTarget,
+  OPEN_DIALOG_SELECTOR,
+  RADIX_POPPER_CONTENT_SELECTOR,
+} from '@/lib/dom';
 type LibrarySort = Exclude<NonNullable<LibraryFilters['sort']>, 'title-asc'>;
 type LibraryStatusFilter = WatchStatus | 'all' | 'none';
 
@@ -65,13 +72,6 @@ const VIEW_MODES: { value: 'grid' | 'list'; label: string; icon: LucideIcon }[] 
   { value: 'grid', label: 'Grid view', icon: LayoutGrid },
   { value: 'list', label: 'List view', icon: List },
 ];
-
-const ARROW_STEPS: Record<string, number | undefined> = {
-  ArrowRight: 1,
-  ArrowDown: 1,
-  ArrowLeft: -1,
-  ArrowUp: -1,
-};
 
 const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -124,6 +124,26 @@ export function LibraryToolbar({
   selectionTriggerRef,
   onToggleSelectionMode,
 }: LibraryToolbarProps) {
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  const compactToolbarRef = useRef<HTMLDivElement>(null);
+  const [toolbarPassed, setToolbarPassed] = useState(false);
+  useEffect(() => {
+    const toolbar = toolbarRef.current;
+    if (!toolbar) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry) return;
+        const passed =
+          !entry.isIntersecting && entry.boundingClientRect.bottom <= (entry.rootBounds?.top ?? 32);
+        if (!passed && compactToolbarRef.current?.contains(document.activeElement))
+          searchInputRef.current?.focus({ preventScroll: true });
+        setToolbarPassed(passed);
+      },
+      { rootMargin: '-32px 0px 0px 0px' },
+    );
+    observer.observe(toolbar);
+    return () => observer.disconnect();
+  }, [searchInputRef]);
   const activeSortOption = LIBRARY_SORT_OPTIONS[sort];
   const ActiveSortIcon = activeSortOption.icon;
   const hasFilters =
@@ -134,9 +154,25 @@ export function LibraryToolbar({
       : statusFilter === 'none'
         ? 'No status'
         : WATCH_STATUS_LABELS[statusFilter];
+  const filterSummary = [
+    typeFilter === 'movie' ? 'Movies' : typeFilter === 'series' ? 'Series' : null,
+    statusFilter !== 'all' ? statusLabel : null,
+    sort !== 'default' ? activeSortOption.label : null,
+  ]
+    .filter(Boolean)
+    .join(' · ');
+  const countLabel =
+    filteredCount === libraryCount
+      ? `${libraryCount} ${libraryCount === 1 ? 'title' : 'titles'}`
+      : `${filteredCount} of ${libraryCount}`;
+  const showCompactToolbar = toolbarPassed && !selectionMode;
+  const returnToFilters = () => {
+    toolbarRef.current?.scrollIntoView({ block: 'start' });
+    searchInputRef.current?.focus({ preventScroll: true });
+  };
 
   return (
-    <div className='space-y-3'>
+    <div ref={toolbarRef} className='scroll-mt-12 space-y-3'>
       <div className='flex items-center gap-3'>
         <SearchInput
           inputRef={searchInputRef}
@@ -149,9 +185,7 @@ export function LibraryToolbar({
           className='h-10 text-[13px] bg-white/[0.03] border-white/[0.08] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25 rounded-lg'
         />
         <span className='text-[12px] tabular-nums text-zinc-400 shrink-0' role='status'>
-          {filteredCount === libraryCount
-            ? `${libraryCount} ${libraryCount === 1 ? 'title' : 'titles'}`
-            : `${filteredCount} of ${libraryCount}`}
+          {countLabel}
         </span>
       </div>
       <div className='flex items-center gap-2 flex-wrap'>
@@ -285,6 +319,68 @@ export function LibraryToolbar({
           </Button>
         </div>
       </div>
+      <div
+        ref={compactToolbarRef}
+        role='region'
+        aria-label='Library controls'
+        aria-hidden={!showCompactToolbar || undefined}
+        inert={!showCompactToolbar}
+        className={cn(
+          'pointer-events-none fixed inset-x-0 top-8 z-40 transition-[opacity,translate] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+          showCompactToolbar ? 'translate-y-0 opacity-100' : '-translate-y-1.5 opacity-0',
+        )}
+      >
+        <div className={`mx-auto w-full max-w-7xl pt-2 ${SIDEBAR_PAGE_COLUMN_INSETS}`}>
+          <div
+            className={cn(
+              'flex h-11 items-center gap-2 rounded-lg border border-white/[0.09] bg-zinc-950/85 p-1 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md',
+              showCompactToolbar && 'pointer-events-auto',
+            )}
+          >
+            <button
+              type='button'
+              onClick={returnToFilters}
+              title='Back to library filters'
+              className={cn(
+                'flex h-full min-w-0 flex-1 items-center gap-2 rounded-md px-2.5 text-left text-[13px] text-zinc-300 transition-colors duration-150 hover:bg-white/[0.05] hover:text-white motion-reduce:transition-none',
+                LIBRARY_FOCUS_RING_CLASS,
+              )}
+            >
+              <Search aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-zinc-500' />
+              <span className='truncate'>{search || 'Library filters'}</span>
+              <ArrowUp aria-hidden='true' className='h-3 w-3 shrink-0 text-zinc-500' />
+            </button>
+            {filterSummary && (
+              <span
+                title={filterSummary}
+                className='accent-lattice-soft hidden max-w-[40%] truncate rounded-md border px-2 py-1 text-[11px] sm:inline'
+              >
+                {filterSummary}
+              </span>
+            )}
+            <span className='shrink-0 text-[11px] tabular-nums text-zinc-400'>{countLabel}</span>
+            {hasFilters && (
+              <Button
+                size='icon'
+                variant='ghost'
+                aria-label='Reset library filters'
+                title='Reset library filters'
+                onClick={() => {
+                  returnToFilters();
+                  onReset();
+                }}
+                className={cn(
+                  'h-8 w-8 shrink-0 text-zinc-400 hover:text-white',
+                  LIBRARY_FOCUS_RING_CLASS,
+                )}
+              >
+                <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+              </Button>
+            )}
+            <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -366,7 +462,7 @@ function SegmentedControl<T extends string>({
         count={options.length}
         inset={2}
       />
-      {options.map((option, index) => {
+      {options.map((option) => {
         const Icon = option.icon;
         const selected = option.value === value;
         return (
@@ -378,20 +474,9 @@ function SegmentedControl<T extends string>({
             aria-label={Icon ? option.label : undefined}
             title={Icon ? option.label : undefined}
             tabIndex={selected ? 0 : -1}
+            onKeyDown={handleRadioGroupKeyDown}
             onClick={() => {
               if (!selected) onChange(option.value);
-            }}
-            onKeyDown={(event) => {
-              const step = ARROW_STEPS[event.key];
-              if (!step || event.altKey || event.ctrlKey || event.metaKey) return;
-              event.preventDefault();
-              const nextIndex = (index + step + options.length) % options.length;
-              onChange(options[nextIndex].value);
-              const radios =
-                event.currentTarget.parentElement?.querySelectorAll<HTMLButtonElement>(
-                  '[role="radio"]',
-                );
-              radios?.[nextIndex]?.focus();
             }}
             className={cn(
               'nav-switch-item relative z-10 flex h-8 items-center justify-center rounded-sm text-[12px] font-medium',
@@ -547,24 +632,47 @@ export function CollectionBulkActionBar({
 }) {
   return (
     <div
+      role='region'
       aria-label='Selection actions'
       aria-busy={isBusy}
-      className='sticky top-8 z-30 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-white/[0.1] bg-zinc-900/95 px-3.5 py-2.5 shadow-lg backdrop-blur-md'
+      className='sticky top-10 z-30 flex flex-wrap items-center justify-between gap-2 rounded-lg border border-white/[0.12] bg-zinc-950/95 px-3 py-2 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)]'
     >
-      <div className='flex items-center gap-3'>
-        <span role='status' className='text-[13px] font-semibold text-white tabular-nums'>
+      <div className='flex flex-wrap items-center gap-1.5'>
+        <span
+          role='status'
+          aria-atomic='true'
+          className='mr-1.5 text-[13px] font-semibold text-white tabular-nums'
+        >
           {selectedCount} selected
         </span>
         <button
           type='button'
-          disabled={filteredCount === 0 || isBusy || selectAllDisabled}
-          onClick={allFilteredSelected ? onClear : onSelectAll}
+          aria-disabled={
+            filteredCount === 0 || isBusy || selectAllDisabled || allFilteredSelected || undefined
+          }
+          onClick={() => {
+            if (filteredCount > 0 && !isBusy && !selectAllDisabled && !allFilteredSelected)
+              onSelectAll();
+          }}
           className={cn(
-            'rounded-md text-xs font-medium text-zinc-300 hover:text-white disabled:opacity-40',
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >
-          {allFilteredSelected ? 'Deselect all' : `Select all (${filteredCount})`}
+          Select all ({filteredCount})
+        </button>
+        <button
+          type='button'
+          aria-disabled={selectedCount === 0 || isBusy || undefined}
+          onClick={() => {
+            if (selectedCount > 0 && !isBusy) onClear();
+          }}
+          className={cn(
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            LIBRARY_FOCUS_RING_CLASS,
+          )}
+        >
+          Clear
         </button>
       </div>
       <div className='flex flex-wrap items-center gap-1.5'>
@@ -594,6 +702,9 @@ export function CollectionBulkActionBar({
         >
           <X className='h-3.5 w-3.5' />
           Done
+          <kbd aria-hidden='true' className='ml-0.5 hidden text-[10px] text-zinc-500 sm:inline'>
+            Esc
+          </kbd>
         </Button>
       </div>
     </div>

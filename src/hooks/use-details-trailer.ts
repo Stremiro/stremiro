@@ -1,4 +1,4 @@
-import { useCallback, useState } from 'react';
+import { useState } from 'react';
 
 import type { MediaDetails } from '@/lib/api';
 import { buildYouTubeEmbedUrl } from '@/lib/trailer-utils';
@@ -15,9 +15,9 @@ export function useDetailsTrailer(item: MediaDetails | undefined) {
     ? buildYouTubeEmbedUrl(selectedTrailerId, { autoplay: true })
     : null;
 
-  const openTrailer = useCallback(() => {
+  const openTrailer = () => {
     if (trailerUrl) setTrailerOpen(true);
-  }, [trailerUrl]);
+  };
 
   return {
     trailerOpen,

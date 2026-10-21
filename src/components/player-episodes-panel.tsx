@@ -33,7 +33,6 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
-import { ScrollArea } from '@/components/ui/scroll-area';
 import { SearchInput } from '@/components/ui/search-input';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
@@ -227,19 +226,19 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     selectedSeason !== currentSeason &&
     seasons.some((season) => season.number === currentSeason);
 
-  const handleListKeyDown = (event: KeyboardEvent) => {
+  const handleRowKeyDown = useCallback((event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
     const rows = Array.from(
       scrollViewportRef.current?.querySelectorAll<HTMLElement>('[data-episode-row]') ?? [],
     );
-    const index = rows.indexOf(document.activeElement as HTMLElement);
+    const index = rows.indexOf(event.currentTarget);
     if (index < 0) return;
     event.preventDefault();
     event.stopPropagation();
     const next = rows[index + (event.key === 'ArrowDown' ? 1 : -1)];
     next?.focus({ preventScroll: true });
     next?.scrollIntoView({ block: 'nearest' });
-  };
+  }, []);
 
   const renderEpisode = useCallback(
     (ep: Episode) => {
@@ -268,6 +267,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
           type='button'
           key={`${ep.season}-${ep.episode}`}
           data-episode-row
+          onKeyDown={handleRowKeyDown}
           data-current-episode={isCurrent ? '' : undefined}
           aria-current={isCurrent ? 'true' : undefined}
           className={cn(
@@ -357,6 +357,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       currentEpisode,
       currentSeason,
       episodeProgressFor,
+      handleRowKeyDown,
       onEpisodeSelect,
       resumeTarget,
       spoilerProtection,
@@ -517,12 +518,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         )}
       </div>
 
-      <ScrollArea
-        viewportRef={scrollViewportRef}
-        className='min-h-0 flex-1'
-        onKeyDown={handleListKeyDown}
-      >
-        {' '}
+      <div ref={scrollViewportRef} className='min-h-0 flex-1 overflow-y-auto overscroll-contain'>
         {visibleEpisodes.length === 0 ? (
           <p
             role={isSearchPending ? 'status' : undefined}
@@ -532,7 +528,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
               'Searching episodes…'
             ) : effectiveEpisodeSearch ? (
               <>
-                No episodes match <span className='text-zinc-400'>{effectiveEpisodeSearch}</span>
+                No episodes match <span className='text-zinc-200'>{effectiveEpisodeSearch}</span>
               </>
             ) : (
               'No episodes found for this season.'
@@ -569,7 +565,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
         ) : (
           <div className='space-y-0.5 p-1.5'>{visibleEpisodes.map(renderEpisode)}</div>
         )}
-      </ScrollArea>
+      </div>
     </aside>
   );
 });

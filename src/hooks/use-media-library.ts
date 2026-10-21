@@ -6,7 +6,6 @@ import {
   useQuery,
   useQueryClient,
 } from '@tanstack/react-query';
-import { useCallback } from 'react';
 import { Channel } from '@tauri-apps/api/core';
 import { toast } from 'sonner';
 import {
@@ -113,9 +112,7 @@ interface ToggleLibraryMutationContext {
 interface ProfileLibraryRemoval {
   queryKey: QueryKey;
   snapshot: MediaItem[];
-  indices: number[];
   allIds: string[];
-  idIndices: number[];
 }
 
 interface LibraryRemovalSnapshot {
@@ -161,8 +158,7 @@ function toastRemovedWithUndo(
 interface CachedHistoryRemoval {
   matches: (row: WatchProgress) => boolean;
   history: WatchProgress[] | undefined;
-  historyIndices: number[];
-  rail: { queryKey: QueryKey; snapshot: ResumeRailEntry[]; indices: number[] }[];
+  rail: { queryKey: QueryKey; snapshot: ResumeRailEntry[] }[];
 }
 
 async function removeCachedWatchHistory(
@@ -175,14 +171,12 @@ async function removeCachedWatchHistory(
     queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
   ]);
   const history = queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
-  const historyIndices = history?.flatMap((row, index) => (matches(row) ? [index] : [])) ?? [];
   // The rail cache holds one entry list per local day; filter every variant.
   const rail = queryClient
     .getQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] })
     .map(([queryKey, snapshot = []]) => ({
       queryKey,
       snapshot,
-      indices: snapshot.flatMap((entry, index) => (matches(entry.row) ? [index] : [])),
     }));
   queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
     rows?.filter((row) => !matches(row)),
@@ -190,7 +184,7 @@ async function removeCachedWatchHistory(
   queryClient.setQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] }, (rows) =>
     rows?.filter((entry) => !matches(entry.row)),
   );
-  return { matches, history, historyIndices, rail };
+  return { matches, history, rail };
 }
 
 function restoreCachedWatchHistory(
@@ -198,20 +192,26 @@ function restoreCachedWatchHistory(
   context: CachedHistoryRemoval | undefined,
 ) {
   if (!context) return;
-  const { matches, history, historyIndices, rail } = context;
+  const { matches, history, rail } = context;
+  const matchesEntry = (entry: ResumeRailEntry) => matches(entry.row);
   if (history) {
     queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
-      reinsertSnapshotRows(rows ?? [], history, historyIndices, (row) => `${row.type_}:${row.id}`),
+      reinsertSnapshotRows(rows ?? [], history, matches, (row) => `${row.type_}:${row.id}`),
     );
   }
-  for (const { queryKey, snapshot, indices } of rail) {
-    if (indices.length === 0) continue;
+  for (const { queryKey, snapshot } of rail) {
+    if (!snapshot.some(matchesEntry)) continue;
     // A refetch that already surfaced the title owns the rail entry.
-    queryClient.setQueryData<ResumeRailEntry[]>(queryKey, (current) =>
-      !current || current.some((entry) => matches(entry.row))
-        ? current
-        : reinsertSnapshotRows(current, snapshot, indices, resumeRailEntryKey),
-    );
+    queryClient.setQueryData<ResumeRailEntry[]>(queryKey, (current) => {
+      if (!current) return current;
+      const presentTitles = new Set(current.map(({ row }) => `${row.type_}:${row.id}`));
+      return reinsertSnapshotRows(
+        current,
+        snapshot,
+        (entry) => matchesEntry(entry) && !presentTitles.has(`${entry.row.type_}:${entry.row.id}`),
+        resumeRailEntryKey,
+      );
+    });
   }
 }
 
@@ -368,33 +368,38 @@ export function useTitleWatchProgress(itemId?: string, options?: SharedCollectio
 }
 
 export function useIsItemInLibrary(itemId?: string, options?: SharedCollectionQueryOptions) {
-  const selectMembership = useCallback(
-    (library: MediaItem[]) => Boolean(itemId && getLibraryIdSet(library).has(itemId)),
-    [itemId],
-  );
-
   return useQuery({
     queryKey: LIBRARY_QUERY_KEY,
     queryFn: api.getLibrary,
     enabled: (options?.enabled ?? true) && Boolean(itemId),
     staleTime: options?.staleTime ?? LIBRARY_STALE_TIME,
-    select: selectMembership,
+    select: (library: MediaItem[]) => Boolean(itemId && getLibraryIdSet(library).has(itemId)),
   });
 }
 
-export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQueryOptions) {
-  const selectWatchStatus = useCallback(
-    (statuses: Record<string, WatchStatus>) =>
-      itemId ? (getOwnWatchStatus(statuses, itemId) ?? null) : null,
-    [itemId],
-  );
+/// Library toggle state for cards and the hero; a known override skips the membership query.
+export function useLibraryMembership(itemId?: string, override?: boolean) {
+  const { data, isError } = useIsItemInLibrary(itemId, { enabled: override === undefined });
+  const isInLibrary = override ?? data ?? false;
+  const libraryReady = override !== undefined || data !== undefined;
+  const libraryActionLabel = libraryReady
+    ? isInLibrary
+      ? 'Remove from Library'
+      : 'Add to Library'
+    : isError
+      ? 'Library unavailable'
+      : 'Loading Library…';
+  return { isInLibrary, libraryActionLabel, libraryError: isError, libraryReady };
+}
 
+export function useItemWatchStatus(itemId?: string, options?: SharedCollectionQueryOptions) {
   return useQuery({
     queryKey: WATCH_STATUSES_QUERY_KEY,
     queryFn: api.getAllWatchStatuses,
     enabled: (options?.enabled ?? true) && Boolean(itemId),
     staleTime: options?.staleTime ?? WATCH_STATUSES_STALE_TIME,
-    select: selectWatchStatus,
+    select: (statuses: Record<string, WatchStatus>) =>
+      itemId ? (getOwnWatchStatus(statuses, itemId) ?? null) : null,
   });
 }
 
@@ -403,20 +408,15 @@ export function useMediaResumeEntry(
   mediaType?: string,
   options?: SharedCollectionQueryOptions,
 ) {
-  const selectResumeEntry = useCallback(
-    (progress: TitleWatchProgress) =>
+  return useQuery({
+    ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
+    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
+    select: (progress: TitleWatchProgress) =>
       resolvePlayerRouteMediaType(mediaType) === 'movie'
         ? progress.movieResumeEntry
         : isSeriesLikeMediaType(mediaType)
           ? progress.seriesResumeEntry
           : null,
-    [mediaType],
-  );
-
-  return useQuery({
-    ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
-    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
-    select: selectResumeEntry,
   });
 }
 
@@ -427,14 +427,11 @@ export function removeCachedProfileLibraryItems(
   const queries = { queryKey: PROFILE_LIBRARY_QUERY_KEY };
   const previous = queryClient
     .getQueriesData<ProfileLibrary>(queries)
-    .flatMap(([queryKey, data]) => {
-      const indices =
-        data?.items.flatMap((entry, index) => (ids.has(entry.id) ? [index] : [])) ?? [];
-      const idIndices = data?.allIds.flatMap((id, index) => (ids.has(id) ? [index] : [])) ?? [];
-      return data && idIndices.length > 0
-        ? [{ queryKey, snapshot: data.items, indices, allIds: data.allIds, idIndices }]
-        : [];
-    });
+    .flatMap(([queryKey, data]) =>
+      data?.allIds.some((id) => ids.has(id))
+        ? [{ queryKey, snapshot: data.items, allIds: data.allIds }]
+        : [],
+    );
   queryClient.setQueriesData<ProfileLibrary>(queries, (current) =>
     current
       ? {
@@ -450,14 +447,17 @@ export function removeCachedProfileLibraryItems(
 function restoreCachedProfileLibraryItems(
   queryClient: QueryClient,
   previous: ProfileLibraryRemoval[],
+  ids: ReadonlySet<string>,
 ) {
-  for (const { queryKey, snapshot, indices, allIds, idIndices } of previous) {
+  const matchesItem = (row: MediaItem) => ids.has(row.id);
+  const matchesId = (id: string) => ids.has(id);
+  for (const { queryKey, snapshot, allIds } of previous) {
     queryClient.setQueryData<ProfileLibrary>(queryKey, (current) =>
       current
         ? {
             ...current,
-            items: reinsertSnapshotRows(current.items, snapshot, indices, (row) => row.id),
-            allIds: reinsertSnapshotRows(current.allIds, allIds, idIndices, (id) => id),
+            items: reinsertSnapshotRows(current.items, snapshot, matchesItem, (row) => row.id),
+            allIds: reinsertSnapshotRows(current.allIds, allIds, matchesId, (id) => id),
           }
         : current,
     );
@@ -514,11 +514,13 @@ function restoreCachedLibraryItems(
   queryClient: QueryClient,
   { ids, previousLibrary, previousStatuses, previousProfileEntries }: LibraryRemovalSnapshot,
 ) {
-  const indices = previousLibrary.flatMap((entry, index) => (ids.has(entry.id) ? [index] : []));
+  const matchesItem = (row: MediaItem) => ids.has(row.id);
   queryClient.setQueryData<MediaItem[]>(LIBRARY_QUERY_KEY, (current) =>
-    current ? reinsertSnapshotRows(current, previousLibrary, indices, (row) => row.id) : current,
+    current
+      ? reinsertSnapshotRows(current, previousLibrary, matchesItem, (row) => row.id)
+      : current,
   );
-  restoreCachedProfileLibraryItems(queryClient, previousProfileEntries);
+  restoreCachedProfileLibraryItems(queryClient, previousProfileEntries, ids);
   restoreCachedWatchStatuses(queryClient, ids, previousStatuses);
 }
 
@@ -620,6 +622,13 @@ function appendMissingMediaItems(current: MediaItem[], items: MediaItem[]): Medi
   return added.length > 0 ? [...current, ...added.map(toMediaItem)] : current;
 }
 
+function cancelListQueries(queryClient: QueryClient) {
+  return Promise.all([
+    queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY }),
+    queryClient.cancelQueries({ queryKey: LIST_SUMMARIES_QUERY_KEY }),
+  ]);
+}
+
 function setCachedListSummaries(
   queryClient: QueryClient,
   listId: string,
@@ -687,9 +696,8 @@ function restoreCachedListItems(
   if (!context) return;
   const { previous, ids, added } = context;
   if (previous) {
-    const indices = previous.item_ids.flatMap((id, index) => (ids.has(id) ? [index] : []));
-    const itemIndices =
-      previous.items?.flatMap((item, index) => (ids.has(item.id) ? [index] : [])) ?? [];
+    const matchesId = (id: string) => ids.has(id);
+    const matchesItem = (item: MediaItem) => ids.has(item.id);
     queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (lists) =>
       lists?.map((list) =>
         list.id !== listId
@@ -698,13 +706,13 @@ function restoreCachedListItems(
               ...list,
               item_ids: added
                 ? list.item_ids.filter((id) => !ids.has(id))
-                : reinsertSnapshotRows(list.item_ids, previous.item_ids, indices, (id) => id),
+                : reinsertSnapshotRows(list.item_ids, previous.item_ids, matchesId, (id) => id),
               items: added
                 ? list.items?.filter((item) => !ids.has(item.id))
                 : reinsertSnapshotRows(
                     list.items ?? [],
                     previous.items ?? [],
-                    itemIndices,
+                    matchesItem,
                     (item) => item.id,
                   ),
             },
@@ -770,10 +778,7 @@ export function useBulkAddToList() {
         }
       }
       const items = [...itemsById.values()];
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY }),
-        queryClient.cancelQueries({ queryKey: LIST_SUMMARIES_QUERY_KEY }),
-      ]);
+      await cancelListQueries(queryClient);
       return setCachedListItems(queryClient, listId, new Set(items.map((item) => item.id)), items);
     },
     onError: (_error, { listId }, context) => {
@@ -790,10 +795,7 @@ export function useBulkRemoveFromList() {
     mutationFn: ({ listId, itemIds }: { listId: string; itemIds: string[] }) =>
       api.bulkRemoveFromList(listId, itemIds),
     onMutate: async ({ listId, itemIds }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY }),
-        queryClient.cancelQueries({ queryKey: LIST_SUMMARIES_QUERY_KEY }),
-      ]);
+      await cancelListQueries(queryClient);
       return setCachedListItems(queryClient, listId, new Set(itemIds));
     },
     onError: (error, { listId }, context) => {
@@ -1079,10 +1081,7 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
       return { action: 'added' as const, list: summary };
     },
     onMutate: async ({ item: selectedItem, list }) => {
-      await Promise.all([
-        queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY }),
-        queryClient.cancelQueries({ queryKey: LIST_SUMMARIES_QUERY_KEY }),
-      ]);
+      await cancelListQueries(queryClient);
       return selectedItem
         ? setCachedListItems(
             queryClient,
@@ -1122,29 +1121,26 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
     onSettled: () => reconcileCollectionQueries(queryClient, 'list-membership'),
   });
 
-  const addItemToNewList = useCallback(
-    async (list: UserList) => {
-      if (!item || list.rules) return;
-      try {
-        const summary = await api.addToList(list.id, item);
-        queryClient.setQueryData<UserListSummary[]>(listSummariesQueryKey(item.id), (old) => {
-          return old?.some((entry) => entry.id === list.id)
-            ? old.map((entry) => (entry.id === list.id ? summary : entry))
-            : old && [...old, summary];
-        });
-        notifyAction(`Added to "${list.name}"`, {
-          detail: item.title,
-          thumb: item.poster,
-        });
-      } catch (error) {
-        notifyAction(`List created, but couldn't add "${item.title}"`, {
-          detail: getListErrorMessage(error) ?? `Try adding it to "${list.name}" again.`,
-          tone: 'error',
-        });
-      }
-    },
-    [item, queryClient],
-  );
+  const addItemToNewList = async (list: UserList) => {
+    if (!item || list.rules) return;
+    try {
+      const summary = await api.addToList(list.id, item);
+      queryClient.setQueryData<UserListSummary[]>(listSummariesQueryKey(item.id), (old) => {
+        return old?.some((entry) => entry.id === list.id)
+          ? old.map((entry) => (entry.id === list.id ? summary : entry))
+          : old && [...old, summary];
+      });
+      notifyAction(`Added to "${list.name}"`, {
+        detail: item.title,
+        thumb: item.poster,
+      });
+    } catch (error) {
+      notifyAction(`List created, but couldn't add "${item.title}"`, {
+        detail: getListErrorMessage(error) ?? `Try adding it to "${list.name}" again.`,
+        tone: 'error',
+      });
+    }
+  };
 
   return {
     addItemToNewList,

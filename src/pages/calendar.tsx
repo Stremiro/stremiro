@@ -1,21 +1,8 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Channel } from '@tauri-apps/api/core';
-import {
-  addMonths,
-  differenceInCalendarDays,
-  eachDayOfInterval,
-  endOfMonth,
-  endOfWeek,
-  format,
-  isSameDay,
-  isSameMonth,
-  startOfMonth,
-  startOfWeek,
-  subMonths,
-} from 'date-fns';
-import { CalendarDays, ChevronLeft, ChevronRight, Loader2 } from 'lucide-react';
-import { Fragment, memo, useEffect, useEffectEvent } from 'react';
-import { Link, useSearchParams } from 'react-router';
+import { CalendarDays, ChevronLeft, ChevronRight, WifiOff } from 'lucide-react';
+import { Fragment, memo, useEffect, useEffectEvent, useRef } from 'react';
+import { Link, useLocation, useSearchParams } from 'react-router';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -24,19 +11,20 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Skeleton } from '@/components/ui/skeleton';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
+import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api, type CalendarSchedule, type CalendarScheduleEvent } from '@/lib/api';
 import { toCalendarEvent, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
-import { currentPathWithSearch } from '@/lib/navigation';
 import { buildDetailsRoute } from '@/lib/player-navigation';
 import { CALENDAR_EVENTS_STALE_TIME_MS, calendarEventsQueryKey } from '@/lib/query-invalidation';
-import { parseLocalScheduleDate } from '@/lib/schedule-dates';
+import { parseLocalScheduleDate, SHORT_DATE_FORMATTER, toLocalDate } from '@/lib/schedule-dates';
 import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
   queryNeedsRetry,
+  scrollBehavior,
   SIDEBAR_PAGE_COLUMN_INSETS,
 } from '@/lib/utils';
 
@@ -44,15 +32,28 @@ const MAX_VISIBLE_DAY_EVENTS = 3;
 // Shared empty fallback — a fresh `[]` would defeat the memoized cells' prop comparison.
 const EMPTY_DAY_EVENTS: CalendarEvent[] = [];
 const WEEKDAY_LABELS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+const WEEKDAY_FORMATTER = new Intl.DateTimeFormat('en-US', { weekday: 'long' });
+const MONTH_YEAR_FORMATTER = new Intl.DateTimeFormat('en-US', { month: 'long', year: 'numeric' });
+const FULL_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  weekday: 'long',
+  month: 'long',
+  day: 'numeric',
+  year: 'numeric',
+});
+const WEEKDAY_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
+  weekday: 'long',
+  month: 'short',
+  day: 'numeric',
+});
 const CALENDAR_POPOVER_CLASS =
-  'w-72 max-w-[calc(100vw-2rem)] bg-zinc-950/95 backdrop-blur-xl border-white/[0.1] text-white shadow-xl rounded-lg';
+  'w-72 max-w-[calc(100vw-2rem)] bg-zinc-950/95 border-white/[0.1] text-white shadow-xl rounded-lg';
 
-function formatEventDayLabel(date: Date, today: Date): string {
-  const diff = differenceInCalendarDays(date, today);
+function formatEventDayLabel(date: Date, today: Temporal.PlainDate): string {
+  const diff = today.until(toLocalDate(date)).days;
   if (diff <= 0) return 'Today';
   if (diff === 1) return 'Tomorrow';
-  if (diff < 7) return format(date, 'EEEE');
-  return format(date, 'MMM d');
+  if (diff < 7) return WEEKDAY_FORMATTER.format(date);
+  return SHORT_DATE_FORMATTER.format(date);
 }
 
 function calendarEventLinkProps(
@@ -64,7 +65,7 @@ function calendarEventLinkProps(
     event.type === 'episode'
       ? formatEpisodeHeading(event.season, event.episode, event.title) || 'Episode'
       : 'Movie';
-  const label = `${event.seriesTitle} — ${detail} — ${format(event.date, 'EEEE, MMMM d, yyyy')}`;
+  const label = `${event.seriesTitle} — ${detail} — ${FULL_DATE_FORMATTER.format(event.date)}`;
   return {
     to: buildDetailsRoute(event.mediaType, event.mediaId),
     state:
@@ -83,26 +84,39 @@ const toCalendarEvents = (events: CalendarScheduleEvent[]) =>
     return calendarEvent ? [calendarEvent] : [];
   });
 
+function focusCalendarToday(container: HTMLDivElement | null) {
+  const today = container?.querySelector<HTMLElement>('[data-calendar-today]');
+  today?.focus({ preventScroll: true });
+  today?.scrollIntoView({ block: 'center', inline: 'nearest', behavior: scrollBehavior() });
+}
+
 export function Calendar() {
   const queryClient = useQueryClient();
+  const isOnline = useOnlineStatus();
+  const calendarRef = useRef<HTMLDivElement>(null);
+  const pendingTodayJump = useRef(false);
   const [searchParams, setSearchParams] = useSearchParams();
-  const now = useLocalDay();
+  const now = toLocalDate(useLocalDay());
   const monthParam = searchParams.get('month');
-  const currentMonth =
-    (monthParam && /^\d{4}-\d{2}$/.test(monthParam)
+  const selectedMonth =
+    monthParam && /^\d{4}-\d{2}$/.test(monthParam)
       ? parseLocalScheduleDate(`${monthParam}-01`)
-      : null) ?? startOfMonth(now);
-  const from = currentPathWithSearch();
+      : null;
+  const currentMonth = (selectedMonth ? toLocalDate(selectedMonth) : now).with({ day: 1 });
+  const { pathname, search } = useLocation();
+  const from = `${pathname}${search}`;
   useDocumentTitle('Calendar');
 
-  const days = eachDayOfInterval({
-    start: startOfWeek(startOfMonth(currentMonth)),
-    end: endOfWeek(endOfMonth(currentMonth)),
-  });
+  const visibleStart = currentMonth.subtract({ days: currentMonth.dayOfWeek % 7 });
+  const lastDay = currentMonth.with({ day: currentMonth.daysInMonth });
+  const visibleEnd = lastDay.add({ days: 6 - (lastDay.dayOfWeek % 7) });
+  const days = Array.from({ length: visibleStart.until(visibleEnd).days + 1 }, (_, index) =>
+    visibleStart.add({ days: index }),
+  );
   const range = {
-    visibleStart: format(days[0], 'yyyy-MM-dd'),
-    visibleEnd: format(days[days.length - 1], 'yyyy-MM-dd'),
-    upcomingStart: format(now, 'yyyy-MM-dd'),
+    visibleStart: visibleStart.toString(),
+    visibleEnd: visibleEnd.toString(),
+    upcomingStart: now.toString(),
   };
   const {
     data: schedule,
@@ -125,6 +139,7 @@ export function Calendar() {
       return api.getCalendarEvents(range, channel);
     },
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
+    enabled: isOnline,
   });
   const isScheduleError = queryNeedsRetry({ isError, isFetched, isPending });
   const isLoadingSchedules = isLoading && !isScheduleError;
@@ -136,10 +151,15 @@ export function Calendar() {
   );
 
   const airingTodayCount = eventsByDay.get(range.upcomingStart)?.length ?? 0;
-  const monthKey = format(currentMonth, 'yyyy-MM');
+  const monthKey = currentMonth.toPlainYearMonth().toString();
   const hasMonthReleases = schedule?.days.some(
     (day) => day.events.length > 0 && day.date.startsWith(monthKey),
   );
+  useEffect(() => {
+    if (!pendingTodayJump.current) return;
+    pendingTodayJump.current = false;
+    focusCalendarToday(calendarRef.current);
+  }, [monthKey]);
 
   const prefetchEventDetails = (event: CalendarEvent) => {
     prefetchDetailsRouteData(queryClient, {
@@ -148,25 +168,35 @@ export function Calendar() {
     });
   };
 
-  const setCurrentMonth = (month: Date) => {
+  const setCurrentMonth = (month: Temporal.PlainDate) => {
+    if (calendarRef.current?.contains(document.activeElement)) {
+      calendarRef.current.focus({ preventScroll: true });
+    }
     setSearchParams(
       (previous) => {
         const next = new URLSearchParams(previous);
-        if (isSameMonth(month, new Date())) next.delete('month');
-        else next.set('month', format(month, 'yyyy-MM'));
+        if (month.toPlainYearMonth().equals(now.toPlainYearMonth())) next.delete('month');
+        else next.set('month', month.toPlainYearMonth().toString());
         return next;
       },
       { replace: true },
     );
   };
-  const handlePrevMonth = () => setCurrentMonth(subMonths(currentMonth, 1));
-  const handleNextMonth = () => setCurrentMonth(addMonths(currentMonth, 1));
-  const handleToday = () => setCurrentMonth(new Date());
-  const isCurrentMonthView = isSameMonth(currentMonth, now);
+  const handlePrevMonth = () => setCurrentMonth(currentMonth.subtract({ months: 1 }));
+  const handleNextMonth = () => setCurrentMonth(currentMonth.add({ months: 1 }));
+  const isCurrentMonthView = currentMonth.toPlainYearMonth().equals(now.toPlainYearMonth());
+  const handleToday = () => {
+    if (isCurrentMonthView) {
+      focusCalendarToday(calendarRef.current);
+    } else {
+      pendingTodayJump.current = true;
+      setCurrentMonth(now);
+    }
+  };
 
   // Dialogs, the mini player, and popovers own their navigation keys.
   const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {
-    if (event.defaultPrevented) return;
+    if (event.defaultPrevented || event.isComposing) return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
     if (isEditableTarget(event.target, '[role="dialog"]')) return;
     if (document.querySelector(OPEN_DIALOG_SELECTOR)) return;
@@ -199,7 +229,11 @@ export function Calendar() {
           <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
         </div>
 
-        <div className='flex w-full md:w-auto items-center gap-0.5'>
+        <div
+          role='group'
+          aria-label='Calendar navigation'
+          className='flex w-full md:w-auto items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-1'
+        >
           <Button
             variant='ghost'
             size='icon'
@@ -215,7 +249,7 @@ export function Calendar() {
             className='px-1 font-medium text-[13px] flex-1 md:min-w-[130px] text-center text-zinc-200 tabular-nums'
             aria-live='polite'
           >
-            {format(currentMonth, 'MMMM yyyy')}
+            {MONTH_YEAR_FORMATTER.format(currentMonth)}
           </div>
           <Button
             variant='ghost'
@@ -231,19 +265,15 @@ export function Calendar() {
           <Button
             variant='ghost'
             size='sm'
-            // aria-disabled, not disabled: it would drop the focused button's focus to <body>.
-            aria-disabled={isCurrentMonthView || undefined}
-            aria-label='Today — jump to current month'
+            aria-label='Jump to today'
             aria-keyshortcuts='T'
-            onClick={() => {
-              if (!isCurrentMonthView) handleToday();
-            }}
-            title='Jump to current month (T)'
+            onClick={handleToday}
+            title='Jump to today (T)'
             className={cn(
-              'ml-2 text-[12px] font-medium rounded-md h-9 px-3 border border-white/[0.08]',
+              'ml-1 text-[12px] font-medium rounded-md h-9 px-3 border',
               isCurrentMonthView
-                ? 'bg-white/[0.06] text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-400 cursor-default'
-                : 'text-zinc-400 hover:text-white hover:bg-white/[0.06]',
+                ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
+                : 'border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.06]',
             )}
           >
             Today
@@ -251,7 +281,19 @@ export function Calendar() {
         </div>
       </div>
 
-      {isScheduleError || (hasMissingSchedules && !isFetchingSchedules) ? (
+      {!isOnline && (
+        <div
+          role='status'
+          className='mb-4 flex items-center gap-2.5 rounded-lg border border-white/[0.08] bg-white/[0.025] px-4 py-3 text-[12px] text-zinc-400'
+        >
+          <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
+          {schedule
+            ? "You're offline. Showing saved release schedules until you reconnect."
+            : "You're offline. Connect to load release schedules for this month."}
+        </div>
+      )}
+
+      {isOnline && (isScheduleError || (hasMissingSchedules && !isFetchingSchedules)) ? (
         <RetryBanner
           className='mb-4'
           title="Couldn't load all release schedules"
@@ -279,20 +321,24 @@ export function Calendar() {
       {(schedule?.trackedCount !== 0 || isScheduleError) && (
         <div className='mb-5 rounded-lg border border-white/[0.07] bg-white/[0.015] p-3 sm:p-4'>
           <div className='flex flex-wrap items-center justify-between mb-3 gap-2'>
-            <div className='flex items-center gap-2.5'>
+            <div className='flex flex-wrap items-baseline gap-x-2.5 gap-y-1'>
               <h2 className='text-[15px] font-semibold text-white tracking-tight'>Upcoming</h2>
               <span className='text-[12px] text-zinc-500'>Next 14 days · up to 8 releases</span>
               {isFetchingSchedules && !isLoadingSchedules && (
-                <Loader2
-                  className='h-3 w-3 animate-spin text-zinc-500'
-                  aria-label='Refreshing schedules'
-                />
+                <span role='status' className='text-[11px] text-(--accent-nav)'>
+                  Updating…
+                </span>
               )}
             </div>
             {airingTodayCount > 0 && (
-              <span className='text-[12px] font-medium text-[var(--accent-nav)]'>
+              <button
+                type='button'
+                onClick={handleToday}
+                title='Jump to today'
+                className='rounded-md px-2 py-1 text-[12px] font-medium text-(--accent-nav) transition-colors duration-150 hover:bg-(--accent-nav)/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+              >
                 {airingTodayCount} today
-              </span>
+              </button>
             )}
           </div>
           {isLoadingSchedules ? (
@@ -303,10 +349,10 @@ export function Calendar() {
               <div aria-hidden='true' className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
                 {[0, 1, 2, 3].map((key) => (
                   <div key={key} className='flex min-w-0 items-center gap-2.5 p-2'>
-                    <Skeleton className='h-[54px] w-9 shrink-0 rounded-sm bg-white/[0.06]' />
+                    <Skeleton className='h-[54px] w-9 shrink-0 animate-none rounded-sm bg-white/[0.06]' />
                     <div className='min-w-0 flex-1 space-y-2'>
-                      <Skeleton className='h-3.5 w-3/4 bg-white/[0.06]' />
-                      <Skeleton className='h-3 w-1/2 bg-white/[0.06]' />
+                      <Skeleton className='h-3.5 w-3/4 animate-none bg-white/[0.06]' />
+                      <Skeleton className='h-3 w-1/2 animate-none bg-white/[0.06]' />
                     </div>
                   </div>
                 ))}
@@ -314,24 +360,31 @@ export function Calendar() {
             </>
           ) : upcomingEvents.length === 0 ? (
             <div className='flex items-center gap-2 text-[13px] text-zinc-500 py-3' role='status'>
-              {isFetchingSchedules
-                ? 'Loading release schedules…'
-                : isScheduleError || hasMissingSchedules
-                  ? 'Release data is incomplete or unavailable.'
-                  : 'No upcoming releases in the next two weeks.'}
+              {!isOnline && !schedule
+                ? 'Upcoming releases will appear when you reconnect.'
+                : isFetchingSchedules
+                  ? 'Loading release schedules…'
+                  : isScheduleError || hasMissingSchedules
+                    ? 'Release data is incomplete or unavailable.'
+                    : 'No upcoming releases in the next two weeks.'}
             </div>
           ) : (
             <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
               {upcomingEvents.map((event, index) => (
                 <Fragment key={calendarEventKey(event)}>
-                  {(index === 0 || !isSameDay(event.date, upcomingEvents[index - 1].date)) && (
+                  {(index === 0 ||
+                    !toLocalDate(event.date).equals(
+                      toLocalDate(upcomingEvents[index - 1].date),
+                    )) && (
                     <h3
                       className={cn(
                         'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
-                        isSameDay(event.date, now) ? 'text-(--accent-nav)' : 'text-zinc-400',
+                        toLocalDate(event.date).equals(now)
+                          ? 'text-(--accent-nav)'
+                          : 'text-zinc-400',
                       )}
                     >
-                      <time dateTime={format(event.date, 'yyyy-MM-dd')}>
+                      <time dateTime={toLocalDate(event.date).toString()}>
                         {formatEventDayLabel(event.date, now)}
                       </time>
                     </h3>
@@ -346,6 +399,7 @@ export function Calendar() {
 
       {schedule &&
         schedule.trackedCount > 0 &&
+        isOnline &&
         !isFetchingSchedules &&
         !isScheduleError &&
         !hasMissingSchedules &&
@@ -354,15 +408,12 @@ export function Calendar() {
             role='status'
             className='mb-3 flex items-center justify-between gap-3 text-[13px] text-zinc-400'
           >
-            <p>No releases in {format(currentMonth, 'MMMM yyyy')}</p>
+            <p>No releases in {MONTH_YEAR_FORMATTER.format(currentMonth)}</p>
             <Button
               variant='ghost'
               size='sm'
-              aria-disabled={isCurrentMonthView || undefined}
-              onClick={() => {
-                if (!isCurrentMonthView) handleToday();
-              }}
-              className='h-8 rounded-md px-3 text-[12px] aria-disabled:opacity-50'
+              onClick={handleToday}
+              className='h-8 rounded-md px-3 text-[12px]'
             >
               Today
             </Button>
@@ -373,13 +424,14 @@ export function Calendar() {
         <>
           {isLoadingSchedules && (
             <span role='status' className='sr-only'>
-              Loading releases for {format(currentMonth, 'MMMM yyyy')}
+              Loading releases for {MONTH_YEAR_FORMATTER.format(currentMonth)}
             </span>
           )}
           {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
           <div
+            ref={calendarRef}
             role='region'
-            aria-label={`${format(currentMonth, 'MMMM yyyy')} releases`}
+            aria-label={`${MONTH_YEAR_FORMATTER.format(currentMonth)} releases`}
             aria-busy={isFetchingSchedules}
             tabIndex={0}
             onKeyDown={(event) => {
@@ -392,14 +444,14 @@ export function Calendar() {
             }}
             className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
           >
-            <div className={cn('min-w-[640px]', isLoadingSchedules && 'opacity-50')}>
+            <div className='min-w-[640px]'>
               <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
                 {WEEKDAY_LABELS.map((day, dayIndex) => (
                   <div
                     key={day}
                     className={cn(
                       'py-3 text-center text-[11px] font-medium',
-                      isCurrentMonthView && dayIndex === now.getDay()
+                      isCurrentMonthView && dayIndex === now.dayOfWeek % 7
                         ? 'text-[var(--accent-nav)]'
                         : 'text-zinc-500',
                     )}
@@ -411,15 +463,24 @@ export function Calendar() {
 
               <div className='grid grid-cols-7 auto-rows-fr'>
                 {days.map((day, dayIdx) => {
-                  const dayKey = format(day, 'yyyy-MM-dd');
+                  const dayKey = day.toString();
                   return (
                     <CalendarDayCell
                       key={dayKey}
                       day={day}
                       dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
-                      isToday={isSameDay(day, now)}
-                      isCurrentMonth={isSameMonth(day, currentMonth)}
+                      isToday={day.equals(now)}
+                      isCurrentMonth={day
+                        .toPlainYearMonth()
+                        .equals(currentMonth.toPlainYearMonth())}
                       isLastColumn={dayIdx % 7 === 6}
+                      isLoading={isLoadingSchedules}
+                      isComplete={
+                        !!schedule &&
+                        !isScheduleError &&
+                        !hasMissingSchedules &&
+                        !isFetchingSchedules
+                      }
                       from={from}
                       onPrefetch={prefetchEventDetails}
                     />
@@ -474,47 +535,85 @@ const CalendarDayCell = memo(function CalendarDayCell({
   isToday,
   isCurrentMonth,
   isLastColumn,
+  isLoading,
+  isComplete,
   from,
   onPrefetch,
 }: {
-  day: Date;
+  day: Temporal.PlainDate;
   dayEvents: CalendarEvent[];
   isToday: boolean;
   isCurrentMonth: boolean;
   isLastColumn: boolean;
+  isLoading: boolean;
+  isComplete: boolean;
   from: string;
   onPrefetch: (event: CalendarEvent) => void;
 }) {
   const visibleDayEvents = dayEvents.slice(0, MAX_VISIBLE_DAY_EVENTS);
   const hiddenCount = dayEvents.length - visibleDayEvents.length;
+  const daySummary = isLoading
+    ? 'Loading releases'
+    : dayEvents.length > 0
+      ? `${dayEvents.length} ${dayEvents.length === 1 ? 'release' : 'releases'}`
+      : isComplete
+        ? 'No releases'
+        : '';
 
   return (
     <div
+      role='group'
+      aria-label={`${FULL_DATE_FORMATTER.format(day)}${daySummary ? ` — ${daySummary}` : ''}`}
+      data-calendar-today={isToday ? '' : undefined}
+      tabIndex={isToday ? -1 : undefined}
       className={cn(
-        'min-w-0 min-h-[132px] p-1.5 sm:p-2 border-b border-r border-white/[0.05] relative group transition-colors hover:bg-white/[0.025]',
+        'min-w-0 min-h-[132px] p-1.5 sm:p-2 border-b border-r border-white/[0.05] relative group transition-colors duration-150 hover:bg-white/[0.025] focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/50 motion-reduce:transition-none',
         isToday &&
           'bg-[rgb(var(--accent-nav-rgb)/0.035)] shadow-[inset_0_0_0_1px_rgb(var(--accent-nav-rgb)/0.18)]',
         !isCurrentMonth && 'bg-black/20',
         isLastColumn && 'border-r-0',
       )}
     >
-      <time
-        dateTime={format(day, 'yyyy-MM-dd')}
-        aria-label={format(day, 'EEEE, MMMM d, yyyy')}
-        aria-current={isToday ? 'date' : undefined}
-        className={cn(
-          'text-[12px] font-medium tabular-nums mb-2 w-7 h-7 flex items-center justify-center rounded-md transition-colors',
-          isToday
-            ? 'bg-[rgb(var(--accent-nav-rgb)/0.12)] text-[var(--accent-nav)] font-semibold'
-            : isCurrentMonth
-              ? 'text-zinc-400 group-hover:text-zinc-300'
-              : 'text-zinc-600',
-        )}
-      >
-        {format(day, 'd')}
-      </time>
+      <div className='mb-2 flex h-7 items-center justify-between gap-1'>
+        <time
+          dateTime={day.toString()}
+          aria-label={FULL_DATE_FORMATTER.format(day)}
+          aria-current={isToday ? 'date' : undefined}
+          className={cn(
+            'text-[12px] font-medium tabular-nums w-7 h-7 flex shrink-0 items-center justify-center rounded-md',
+            isToday
+              ? 'bg-[rgb(var(--accent-nav-rgb)/0.12)] text-[var(--accent-nav)] font-semibold'
+              : isCurrentMonth
+                ? 'text-zinc-400 group-hover:text-zinc-300'
+                : 'text-zinc-600',
+          )}
+        >
+          {day.day}
+        </time>
+        {isToday ? (
+          <span aria-hidden='true' className='truncate text-[10px] font-medium text-(--accent-nav)'>
+            Today
+          </span>
+        ) : dayEvents.length > 0 ? (
+          <span aria-hidden='true' className='px-1 text-[10px] tabular-nums text-zinc-500'>
+            {dayEvents.length}
+          </span>
+        ) : null}
+      </div>
 
       <div className='space-y-1'>
+        {isLoading && isCurrentMonth && (
+          <div aria-hidden='true' className='space-y-1 px-1.5'>
+            <div className='flex h-10 flex-col justify-center gap-1.5'>
+              <div className='h-2.5 w-4/5 rounded-sm bg-white/[0.06]' />
+              <div className='h-2 w-1/2 rounded-sm bg-white/[0.04]' />
+            </div>
+            <div className='h-2.5 w-3/5 rounded-sm bg-white/[0.04]' />
+          </div>
+        )}
+        {isToday && isComplete && dayEvents.length === 0 && (
+          <p className='px-1.5 py-2 text-[11px] leading-relaxed text-zinc-500'>No releases today</p>
+        )}
         {visibleDayEvents.map((event) => {
           const episodeLabel = formatSeasonEpisode(event.season, event.episode);
           return (
@@ -580,7 +679,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
                       <p className='text-[11px] text-zinc-400 font-medium mb-1.5'>Movie</p>
                     )}
                     <p className='text-[10px] text-zinc-500'>
-                      {format(event.date, 'EEEE, MMM d')}
+                      {WEEKDAY_DATE_FORMATTER.format(event.date)}
                       {isToday && (
                         <span className='text-[var(--accent-nav)] font-semibold'> · Today</span>
                       )}
@@ -597,7 +696,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
             <PopoverTrigger asChild>
               <button
                 type='button'
-                aria-label={`${hiddenCount} more releases on ${format(day, 'EEEE, MMMM d, yyyy')}`}
+                aria-label={`${hiddenCount} more releases on ${FULL_DATE_FORMATTER.format(day)}`}
                 className='min-h-8 w-full text-left text-[11px] font-medium text-zinc-400 hover:text-zinc-200 px-1.5 py-1 rounded-md hover:bg-white/[0.05] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
               >
                 +{hiddenCount} more
@@ -606,10 +705,10 @@ const CalendarDayCell = memo(function CalendarDayCell({
             <PopoverContent
               className={cn(CALENDAR_POPOVER_CLASS, 'p-1.5')}
               align='start'
-              aria-label={`Releases on ${format(day, 'EEEE, MMMM d, yyyy')}`}
+              aria-label={`Releases on ${FULL_DATE_FORMATTER.format(day)}`}
             >
               <p className='px-2 pt-1 pb-1.5 text-[11px] font-semibold text-zinc-400'>
-                {format(day, 'EEEE, MMM d')}
+                {WEEKDAY_DATE_FORMATTER.format(day)}
               </p>
               <div className='max-h-72 overflow-y-auto overscroll-contain space-y-0.5 p-0.5'>
                 {dayEvents.map((event) => (

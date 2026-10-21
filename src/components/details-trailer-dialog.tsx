@@ -1,6 +1,7 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ExternalLink, Film, Loader2, RotateCw, X } from 'lucide-react';
+import { ExternalLink, Film, Loader2, Play, RotateCw, X } from 'lucide-react';
 import { type KeyboardEvent, type RefObject, useEffect, useId, useRef, useState } from 'react';
+import { RemoteImage } from '@/components/remote-image';
 import {
   Dialog,
   DialogClose,
@@ -24,6 +25,18 @@ interface DetailsTrailerDialogProps {
   onSelectTrailer: (id: string) => void;
   title: string;
   returnFocusRef: RefObject<HTMLButtonElement | null>;
+}
+
+function revealTrailer(button: HTMLButtonElement) {
+  const strip = button.parentElement;
+  if (!strip) return;
+  const bounds = strip.getBoundingClientRect();
+  const card = button.getBoundingClientRect();
+  const offset =
+    card.left < bounds.left + 4
+      ? card.left - bounds.left - 4
+      : Math.max(0, card.right - bounds.right + 4);
+  if (offset !== 0) strip.scrollBy({ left: offset, behavior: scrollBehavior() });
 }
 
 export function DetailsTrailerDialog({
@@ -57,11 +70,8 @@ export function DetailsTrailerDialog({
     setLoadedFrameKey(null);
     setDelayedFrameKey(null);
     if (open && selectedKey) {
-      trailerButtons.current.get(selectedKey)?.scrollIntoView({
-        behavior: scrollBehavior(),
-        block: 'nearest',
-        inline: 'center',
-      });
+      const button = trailerButtons.current.get(selectedKey);
+      if (button) revealTrailer(button);
     }
   }, [open, selectedKey]);
 
@@ -79,12 +89,19 @@ export function DetailsTrailerDialog({
   };
 
   const reloadTrailer = () => {
-    setLoadedFrameKey(null);
-    setDelayedFrameKey(null);
     setReloadAttempt((attempt) => attempt + 1);
   };
 
   const handleTrailerKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    if (
+      event.defaultPrevented ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      event.nativeEvent.isComposing
+    )
+      return;
     let nextIndex: number;
     switch (event.key) {
       case 'ArrowLeft':
@@ -105,7 +122,7 @@ export function DetailsTrailerDialog({
     event.preventDefault();
     const trailer = trailers[nextIndex];
     if (!trailer) return;
-    trailerButtons.current.get(trailer.id)?.focus();
+    trailerButtons.current.get(trailer.id)?.focus({ preventScroll: true });
   };
 
   return (
@@ -113,37 +130,35 @@ export function DetailsTrailerDialog({
       <DialogContent
         hideCloseButton
         onCloseAutoFocus={(event) => {
-          if (!returnFocusRef.current) return;
+          if (!returnFocusRef.current?.isConnected) return;
           event.preventDefault();
           returnFocusRef.current.focus({ preventScroll: true });
         }}
         className={cn(
-          'max-w-none gap-0 overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-950 p-0 text-white shadow-[0_28px_90px_rgba(0,0,0,0.85)] sm:max-w-5xl sm:rounded-2xl',
+          'max-w-none gap-0 overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-950 p-0 text-white shadow-[0_28px_90px_rgba(0,0,0,0.85)] motion-reduce:animate-none motion-reduce:transition-none sm:max-w-5xl sm:rounded-2xl',
           hasPicker
-            ? 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-10rem)*16/9))]'
-            : 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-7rem)*16/9))]',
+            ? 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-13rem)*16/9))]'
+            : 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-8rem)*16/9))]',
         )}
       >
-        <div className='flex items-center justify-between gap-3 border-b border-white/[0.07] px-3 py-2 sm:px-4'>
+        <div className='flex h-16 items-center justify-between gap-3 border-b border-white/[0.1] bg-zinc-950 px-3 sm:px-4'>
           <div className='flex min-w-0 items-center gap-2.5'>
             <Film aria-hidden='true' className='hidden h-4 w-4 shrink-0 text-zinc-500 sm:block' />
             <div className='min-w-0'>
               <DialogTitle className='truncate text-[13.5px] font-semibold tracking-tight text-white'>
                 {trailerLabel}
               </DialogTitle>
-              {(hasPicker || trailerLabel !== title) && (
-                <span className='mt-1 hidden truncate text-[11px] text-zinc-500 sm:block'>
-                  {title}
-                </span>
-              )}
+              <span className='mt-1 hidden truncate text-[11px] text-zinc-400 sm:block'>
+                {title}
+                {hasPicker && (
+                  <span className='ml-2 font-mono tabular-nums text-zinc-500'>
+                    {activeIndex + 1} / {trailers.length}
+                  </span>
+                )}
+              </span>
             </div>
           </div>
           <div className='flex shrink-0 items-center gap-0.5'>
-            {hasPicker && (
-              <span className='mr-2 whitespace-nowrap font-mono text-[11px] text-zinc-500 tabular-nums'>
-                {activeIndex + 1} / {trailers.length}
-              </span>
-            )}
             {trailerUrl && (
               <button
                 type='button'
@@ -176,9 +191,16 @@ export function DetailsTrailerDialog({
                 aria-label='Close trailer'
                 aria-keyshortcuts='Escape'
                 title='Close (Esc)'
-                className={TRAILER_ACTION_BUTTON_CLASS}
+                className='ml-2 inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-white/40 bg-white/15 px-2.5 text-white shadow-sm backdrop-blur-md hover:border-white/70 hover:bg-white/25 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950'
               >
-                <X aria-hidden='true' className='h-4 w-4' />
+                <X aria-hidden='true' className='h-5 w-5' />
+                <span className='hidden text-xs font-medium sm:inline'>Close</span>
+                <kbd
+                  aria-hidden='true'
+                  className='hidden rounded border border-white/25 px-1 py-0.5 font-sans text-[10px] leading-none text-white/75 md:inline'
+                >
+                  Esc
+                </kbd>
               </button>
             </DialogClose>
           </div>
@@ -196,7 +218,7 @@ export function DetailsTrailerDialog({
               role='status'
               className='pointer-events-none absolute inset-0 z-10 grid place-items-center'
             >
-              <div className='delayed-fade-in flex flex-col items-center gap-3 rounded-xl bg-black/80 p-4 text-center'>
+              <div className='delayed-fade-in flex flex-col items-center gap-3 rounded-xl bg-black/80 p-4 text-center motion-reduce:animate-none'>
                 <Loader2
                   aria-hidden='true'
                   className='h-6 w-6 animate-spin text-zinc-300 motion-reduce:animate-none'
@@ -220,7 +242,7 @@ export function DetailsTrailerDialog({
           {trailerUrl && (
             <iframe
               key={frameKey}
-              className='relative block h-full w-full border-0'
+              className='absolute inset-0 h-full w-full border-0'
               src={trailerUrl}
               onLoad={() => setLoadedFrameKey(frameKey)}
               title={`${title} — ${trailerLabel}`}
@@ -233,11 +255,20 @@ export function DetailsTrailerDialog({
           {/* eslint-enable react/iframe-missing-sandbox */}
         </div>
         {hasPicker && (
-          <div className='border-t border-white/[0.07] px-2 py-1.5'>
+          <div className='min-w-0 border-t border-white/[0.08] bg-white/[0.015] p-3'>
+            <span id={`${tabId}-help`} className='sr-only'>
+              Use arrow keys, Home or End to browse trailers. Press Enter or Space to play.
+            </span>
             <div
               role='tablist'
               aria-label='Trailers'
-              className='flex items-center gap-1 overflow-x-auto p-1 scrollbar-hide'
+              aria-describedby={`${tabId}-help`}
+              aria-orientation='horizontal'
+              onBlur={(event) => {
+                if (!event.currentTarget.contains(event.relatedTarget))
+                  setFocusedTrailerId(selectedKey);
+              }}
+              className='flex items-center gap-2 overflow-x-auto overscroll-x-contain p-1 scrollbar-hide'
             >
               {trailers.map((trailer, index) => {
                 const isActive = trailer.id === selectedKey;
@@ -252,30 +283,57 @@ export function DetailsTrailerDialog({
                     id={`${tabId}-${index}`}
                     type='button'
                     role='tab'
+                    aria-label={label}
                     aria-selected={isActive}
                     aria-controls={panelId}
                     tabIndex={trailer.id === (focusedTrailerId ?? selectedKey) ? 0 : -1}
                     title={label}
                     className={cn(
-                      'nav-switch-item flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md border px-2.5 text-xs font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40',
+                      'nav-switch-item flex h-18 w-56 shrink-0 items-center gap-3 rounded-lg border p-2 text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-nav)/70 motion-reduce:transition-none',
                       isActive
-                        ? 'border-white/[0.1] bg-white/[0.08] text-white'
-                        : 'border-transparent text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200',
+                        ? 'border-(--accent-nav)/40 bg-(--accent-nav)/10 text-white'
+                        : 'border-white/[0.06] text-zinc-400 hover:border-white/15 hover:bg-white/[0.04] hover:text-zinc-200',
                     )}
-                    onFocus={() => setFocusedTrailerId(trailer.id)}
+                    onFocus={(event) => {
+                      setFocusedTrailerId(trailer.id);
+                      if (event.currentTarget.matches(':focus-visible'))
+                        revealTrailer(event.currentTarget);
+                    }}
                     onClick={() => onSelectTrailer(trailer.id)}
                     onKeyDown={(event) => handleTrailerKeyDown(event, index)}
                   >
                     <span
                       aria-hidden='true'
-                      className={cn(
-                        'font-mono text-[10px] tabular-nums',
-                        isActive ? 'text-zinc-300' : 'text-zinc-500',
-                      )}
+                      className='relative flex aspect-video w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-zinc-800'
                     >
-                      {index + 1}
+                      <Film className='h-5 w-5 text-zinc-500' />
+                      <RemoteImage
+                        src={`https://i.ytimg.com/vi/${encodeURIComponent(trailer.id)}/mqdefault.jpg`}
+                        alt=''
+                        loading='lazy'
+                        className='absolute inset-0 h-full w-full object-cover'
+                      />
+                      <span className='absolute inset-0 grid place-items-center bg-black/35'>
+                        <Play
+                          className={cn(
+                            'h-4 w-4 fill-current drop-shadow-sm',
+                            isActive ? 'text-white' : 'text-white/75',
+                          )}
+                        />
+                      </span>
                     </span>
-                    <span className='max-w-[16rem] truncate'>{label}</span>
+                    <span className='min-w-0'>
+                      <span className='block truncate text-xs font-medium leading-5'>{label}</span>
+                      <span
+                        aria-hidden='true'
+                        className={cn(
+                          'mt-0.5 block text-[10px] font-medium tabular-nums',
+                          isActive ? 'text-(--accent-nav)' : 'text-zinc-500',
+                        )}
+                      >
+                        {isActive ? 'Now playing' : `Trailer ${index + 1}`}
+                      </span>
+                    </span>
                   </button>
                 );
               })}

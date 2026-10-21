@@ -48,10 +48,9 @@ function useTabsContext() {
   return ctx;
 }
 
-const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
+function TabsList({ className, ...props }: React.ComponentProps<'div'>) {
+  return (
     <div
-      ref={ref}
       role='tablist'
       className={cn(
         'inline-flex h-10 items-center justify-center rounded-md bg-muted p-1 text-muted-foreground',
@@ -59,9 +58,8 @@ const TabsList = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivEl
       )}
       {...props}
     />
-  ),
-);
-TabsList.displayName = 'TabsList';
+  );
+}
 
 // Roving tabindex needs the matching ARIA half: arrows/Home/End move focus AND activate.
 const TAB_NAVIGATION_KEYS = new Set([
@@ -73,90 +71,82 @@ const TAB_NAVIGATION_KEYS = new Set([
   'End',
 ]);
 
-type TabsTriggerProps = React.ButtonHTMLAttributes<HTMLButtonElement> & { value: string };
+type TabsTriggerProps = React.ComponentProps<'button'> & { value: string };
 
-const TabsTrigger = React.forwardRef<HTMLButtonElement, TabsTriggerProps>(
-  ({ className, onClick, onKeyDown, value, ...props }, ref) => {
-    const ctx = useTabsContext();
-    const isActive = ctx.value === value;
-    const triggerId = `${ctx.baseId}-trigger-${value}`;
-    const panelId = `${ctx.baseId}-panel-${value}`;
+function TabsTrigger({ className, onClick, onKeyDown, value, ...props }: TabsTriggerProps) {
+  const ctx = useTabsContext();
+  const isActive = ctx.value === value;
+  const triggerId = `${ctx.baseId}-trigger-${value}`;
+  const panelId = `${ctx.baseId}-panel-${value}`;
 
-    return (
-      <button
-        ref={ref}
-        type='button'
-        role='tab'
-        id={triggerId}
-        aria-controls={panelId}
-        className={cn(
-          'inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
-          isActive && 'bg-background text-foreground shadow-xs',
-          className,
-        )}
-        aria-selected={isActive}
-        tabIndex={isActive ? 0 : -1}
-        onClick={(event) => {
-          onClick?.(event);
-          if (!event.defaultPrevented) {
-            ctx.setValue(value);
-          }
-        }}
-        onKeyDown={(event) => {
-          onKeyDown?.(event);
-          if (event.defaultPrevented || !TAB_NAVIGATION_KEYS.has(event.key)) return;
+  return (
+    <button
+      type='button'
+      role='tab'
+      id={triggerId}
+      aria-controls={panelId}
+      className={cn(
+        'inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+        isActive && 'bg-background text-foreground shadow-xs',
+        className,
+      )}
+      aria-selected={isActive}
+      tabIndex={isActive ? 0 : -1}
+      onClick={(event) => {
+        onClick?.(event);
+        if (!event.defaultPrevented) {
+          ctx.setValue(value);
+        }
+      }}
+      onKeyDown={(event) => {
+        onKeyDown?.(event);
+        if (event.defaultPrevented || !TAB_NAVIGATION_KEYS.has(event.key)) return;
 
-          const tablist = event.currentTarget.closest('[role="tablist"]');
-          const triggers = Array.from(
-            tablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [],
-          ).filter((trigger) => !trigger.disabled);
-          const currentIndex = triggers.indexOf(event.currentTarget);
-          if (currentIndex === -1) return;
+        const tablist = event.currentTarget.closest('[role="tablist"]');
+        const triggers = Array.from(
+          tablist?.querySelectorAll<HTMLButtonElement>('[role="tab"]') ?? [],
+        ).filter((trigger) => !trigger.disabled);
+        const currentIndex = triggers.indexOf(event.currentTarget);
+        if (currentIndex === -1) return;
 
-          event.preventDefault();
-          let nextIndex: number;
-          if (event.key === 'Home') {
-            nextIndex = 0;
-          } else if (event.key === 'End') {
-            nextIndex = triggers.length - 1;
-          } else {
-            const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
-            nextIndex = (currentIndex + direction + triggers.length) % triggers.length;
-          }
-          const next = triggers[nextIndex];
-          // `.click()` reuses the trigger's activation path so key and pointer can't diverge.
-          next?.focus();
-          next?.click();
-        }}
-        {...props}
-      />
-    );
-  },
-);
-TabsTrigger.displayName = 'TabsTrigger';
+        event.preventDefault();
+        let nextIndex: number;
+        if (event.key === 'Home') {
+          nextIndex = 0;
+        } else if (event.key === 'End') {
+          nextIndex = triggers.length - 1;
+        } else {
+          const direction = event.key === 'ArrowRight' || event.key === 'ArrowDown' ? 1 : -1;
+          nextIndex = (currentIndex + direction + triggers.length) % triggers.length;
+        }
+        const next = triggers[nextIndex];
+        // `.click()` reuses the trigger's activation path so key and pointer can't diverge.
+        next?.focus();
+        next?.click();
+      }}
+      {...props}
+    />
+  );
+}
 
-type TabsContentProps = React.HTMLAttributes<HTMLDivElement> & { value: string };
+type TabsContentProps = React.ComponentProps<'div'> & { value: string };
 
-const TabsContent = React.forwardRef<HTMLDivElement, TabsContentProps>(
-  ({ className, value, ...props }, ref) => {
-    const ctx = useTabsContext();
-    const triggerId = `${ctx.baseId}-trigger-${value}`;
-    const panelId = `${ctx.baseId}-panel-${value}`;
+function TabsContent({ className, value, ...props }: TabsContentProps) {
+  const ctx = useTabsContext();
+  const triggerId = `${ctx.baseId}-trigger-${value}`;
+  const panelId = `${ctx.baseId}-panel-${value}`;
 
-    if (ctx.value !== value) return null;
+  if (ctx.value !== value) return null;
 
-    return (
-      <div
-        ref={ref}
-        role='tabpanel'
-        id={panelId}
-        aria-labelledby={triggerId}
-        className={cn('mt-2', className)}
-        {...props}
-      />
-    );
-  },
-);
-TabsContent.displayName = 'TabsContent';
+  return (
+    <div
+      role='tabpanel'
+      id={panelId}
+      aria-labelledby={triggerId}
+      className={cn('mt-2', className)}
+      {...props}
+    />
+  );
+}
 
 export { Tabs, TabsContent, TabsList, TabsTrigger };

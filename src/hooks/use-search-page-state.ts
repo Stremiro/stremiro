@@ -33,10 +33,7 @@ export function useSearchPageState() {
     if (!isReflection) setIsComposing(false);
   }
 
-  const setQuery = useCallback(
-    (nextQuery: string) => setInput({ urlQuery, query: nextQuery }),
-    [urlQuery],
-  );
+  const setQuery = (nextQuery: string) => setInput({ urlQuery, query: nextQuery });
   const trimmedQuery = query.trim();
   const trimmedDebouncedQuery = isComposing || trimmedQuery ? urlQuery.trim() : '';
 
@@ -76,53 +73,41 @@ export function useSearchPageState() {
     return () => window.clearTimeout(timer);
   }, [flushQuery, isComposing, query, searchParams, trimmedQuery, urlQuery]);
 
-  const handleTypeChange = useCallback(
-    (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
-      if (!isComposing) setReflectedQuery(trimmedQuery);
-      updateSearchParams((params) => {
-        if (!isComposing) {
-          if (trimmedQuery) params.set('q', trimmedQuery);
-          else params.delete('q');
-        }
-        if (nextType === 'all') params.delete('type');
-        else params.set('type', nextType);
-        if (clearIncompatibleGenre) params.delete('genre');
-      });
-    },
-    [isComposing, trimmedQuery, updateSearchParams],
-  );
+  const handleTypeChange = (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
+    if (!isComposing) setReflectedQuery(trimmedQuery);
+    updateSearchParams((params) => {
+      if (!isComposing) {
+        if (trimmedQuery) params.set('q', trimmedQuery);
+        else params.delete('q');
+      }
+      if (nextType === 'all') params.delete('type');
+      else params.set('type', nextType);
+      if (clearIncompatibleGenre) params.delete('genre');
+    });
+  };
 
-  const handleFeedChange = useCallback(
-    (nextFeed: SearchFeed) => {
-      updateSearchParams((params) => {
-        if (nextFeed === 'popular') params.delete('feed');
-        else params.set('feed', nextFeed);
-      });
-    },
-    [updateSearchParams],
-  );
+  const handleFeedChange = (nextFeed: SearchFeed) => {
+    updateSearchParams((params) => {
+      if (nextFeed === 'popular') params.delete('feed');
+      else params.set('feed', nextFeed);
+    });
+  };
 
-  const handleGenreChange = useCallback(
-    (genre: string) => {
-      updateSearchParams((params) => params.set('genre', genre));
-    },
-    [updateSearchParams],
-  );
+  const handleGenreChange = (genre: string) =>
+    updateSearchParams((params) => params.set('genre', genre));
 
-  const clearGenre = useCallback(() => {
-    updateSearchParams((params) => params.delete('genre'));
-  }, [updateSearchParams]);
+  const clearGenre = () => updateSearchParams((params) => params.delete('genre'));
 
   const hasActiveFilters =
     activeType !== 'all' || (!trimmedDebouncedQuery && activeFeed !== 'popular') || !!activeGenre;
 
-  const resetFilters = useCallback(() => {
+  const resetFilters = () => {
     updateSearchParams((params) => {
       params.delete('type');
       params.delete('feed');
       params.delete('genre');
     });
-  }, [updateSearchParams]);
+  };
 
   return {
     activeFeed,

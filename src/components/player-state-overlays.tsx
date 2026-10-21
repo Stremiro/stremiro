@@ -1,4 +1,4 @@
-import { ArrowLeft, Loader2, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
+import { ArrowLeft, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
 import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
@@ -6,7 +6,7 @@ import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
 import type { SubscribableStore } from '@/lib/subscribable-store';
-import { clamp, cn, formatSeasonEpisode, isHttpUrl } from '@/lib/utils';
+import { clamp, cn, formatEpisodeHeading, isHttpUrl } from '@/lib/utils';
 
 // Presentational player states, memoized like PlayerActionOverlays — unchanged overlays skip the commit.
 
@@ -79,9 +79,17 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
   );
 });
 
+const PLAYER_LOADING_STAGES = [
+  { id: 'finding', label: 'Finding source' },
+  { id: 'connecting', label: 'Connecting' },
+  { id: 'buffering', label: 'Buffering' },
+] as const;
+
 interface PlayerLoadingOverlayProps {
   headline: string;
   detail?: string;
+  /** Index into the finding → connecting → buffering ladder. */
+  stageIndex?: number;
   /** Title logo carried on the route state — brands the card while the resolve/buffer pipeline runs. */
   logo?: string;
   /** Plain-text fallback when no logo is known, so the card always says what is opening. */
@@ -97,6 +105,7 @@ interface PlayerLoadingOverlayProps {
 export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   headline,
   detail,
+  stageIndex = 0,
   logo,
   title,
   context,
@@ -119,7 +128,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   useEffect(() => {
     if (exiting || reveal !== 'pending') return;
     // A CSS exit animation would paint a warm load that never finished its delayed entrance.
-    const timer = window.setTimeout(() => setReveal('enter'), 350);
+    const timer = window.setTimeout(() => setReveal('enter'), 250);
     return () => window.clearTimeout(timer);
   }, [exiting, reveal]);
   useLayoutEffect(() => {
@@ -140,54 +149,98 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
       <div
         inert={exiting}
         className={cn(
-          'relative mx-4 w-full max-w-[19rem] overflow-hidden rounded-2xl border border-white/[0.07] bg-zinc-950/75 px-4 pb-3 pt-3.5 shadow-xl shadow-black/50 backdrop-blur-2xl motion-reduce:animate-none',
+          'relative mx-4 w-full max-w-[22.5rem] overflow-hidden rounded-[14px] border border-white/[0.08] bg-zinc-950/80 px-5 pb-4 pt-5 shadow-2xl shadow-black/60 backdrop-blur-2xl motion-reduce:animate-none',
           exiting
-            ? 'opacity-0 animate-out fade-out duration-180 fill-mode-forwards'
-            : reveal === 'enter' && 'animate-in fade-in duration-150',
+            ? 'animate-out fade-out zoom-out-[0.98] duration-150 ease-in fill-mode-forwards'
+            : reveal === 'enter' &&
+                'animate-in fade-in zoom-in-[0.97] slide-in-from-bottom-1.5 duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
         )}
       >
         {(logoSrc || title || context) && (
-          <div className='mb-3 border-b border-white/[0.06] pb-3'>
+          <div className='mb-4 border-b border-white/[0.06] pb-4'>
             {logoSrc ? (
               <RemoteImage
                 src={logoSrc}
                 alt={title ?? ''}
                 loading='lazy'
                 onError={onLogoError}
-                className='h-7 max-w-40 object-contain object-left opacity-90'
+                className='h-9 max-w-52 object-contain object-left'
               />
             ) : (
               title && (
-                <p className='truncate text-[15px] font-semibold leading-tight text-white'>
+                <p className='truncate text-[17px] font-semibold leading-tight tracking-tight text-white'>
                   {title}
                 </p>
               )
             )}
             {context && (
-              <p className='mt-1.5 truncate text-[12px] font-medium tabular-nums leading-none text-white/55'>
+              <p className='mt-2 truncate text-[12.5px] font-medium tabular-nums leading-none text-white/55'>
                 {context}
               </p>
             )}
           </div>
         )}
 
-        <div role='status' className='flex items-start gap-2.5'>
-          <Loader2 className='mt-0.5 h-4 w-4 shrink-0 animate-spin text-white/60 motion-reduce:animate-none' />
-          <div className='min-w-0 flex-1'>
-            <p className='text-[14px] font-medium leading-snug text-white'>{headline}</p>
-            {detail && (
-              <p className='mt-1 line-clamp-2 text-[12.5px] leading-snug text-white/50'>{detail}</p>
-            )}
+        <p
+          role='status'
+          aria-live={exiting ? 'off' : 'polite'}
+          aria-atomic='true'
+          className='sr-only'
+        >
+          {[PLAYER_LOADING_STAGES[stageIndex].label, headline, detail].filter(Boolean).join('. ')}
+        </p>
+        <div aria-hidden='true'>
+          <div className='flex items-center gap-2.5'>
+            <span className='relative h-4 w-4 shrink-0'>
+              <span className='absolute inset-0 rounded-full border-2 border-white/10' />
+              <span className='absolute inset-0 animate-spin rounded-full border-2 border-transparent border-t-(--accent-act) [animation-duration:650ms]' />
+            </span>
+            <span
+              key={stageIndex}
+              className='min-w-0 truncate text-[14px] font-semibold leading-none text-white animate-in fade-in slide-in-from-bottom-1 duration-150 motion-reduce:animate-none'
+            >
+              {PLAYER_LOADING_STAGES[stageIndex].label}
+            </span>
+            <span className='ml-auto text-[11px] font-medium tabular-nums leading-none text-white/35'>
+              {stageIndex + 1}/{PLAYER_LOADING_STAGES.length}
+            </span>
+          </div>
+          <div className='mt-3.5 flex gap-1'>
+            {PLAYER_LOADING_STAGES.map((step, index) => (
+              <div
+                key={step.id}
+                className={cn(
+                  'relative h-[3px] flex-1 overflow-hidden rounded-full transition-colors duration-200',
+                  index === stageIndex
+                    ? 'bg-[rgb(var(--accent-prog-rgb)/0.22)]'
+                    : 'bg-white/[0.08]',
+                )}
+              >
+                {index === stageIndex && (
+                  <div className='absolute inset-y-0 left-0 w-1/3 rounded-full bg-(--accent-prog) animate-[progress-slide_1s_cubic-bezier(0.45,0,0.55,1)_infinite] motion-reduce:hidden' />
+                )}
+                <div
+                  className='absolute inset-0 origin-left rounded-full bg-(--accent-prog) transition-transform duration-300 ease-[cubic-bezier(0.22,1,0.36,1)]'
+                  style={{ transform: `scaleX(${index < stageIndex ? 1 : 0})` }}
+                />
+              </div>
+            ))}
           </div>
         </div>
+        <p
+          aria-hidden='true'
+          className='mt-3 line-clamp-2 text-[12.5px] leading-snug text-white/50'
+        >
+          {[headline, detail].filter(Boolean).join(' · ')}
+        </p>
 
         {(onChooseStream || onBack) && (
-          <div className='mt-3 flex items-center gap-1.5 pl-[26px] pointer-events-auto'>
+          <div className='mt-4 flex items-center gap-1.5 pointer-events-auto'>
             {onChooseStream && (
               <button
                 type='button'
                 onClick={onChooseStream}
-                className='h-7 rounded-md bg-white/[0.07] px-2.5 text-[12px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+                className='h-8 rounded-lg bg-white/[0.07] px-3 text-[12.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
               >
                 Choose Stream
               </button>
@@ -196,17 +249,13 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
               <button
                 type='button'
                 onClick={onBack}
-                className='h-7 rounded-md px-2.5 text-[12px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+                className='h-8 rounded-lg px-3 text-[12.5px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
               >
                 Go Back
               </button>
             )}
           </div>
         )}
-
-        <div className='absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'>
-          <div className='h-full w-1/3 bg-linear-to-r from-transparent via-white/60 to-transparent motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
-        </div>
       </div>
     </div>
   );
@@ -395,8 +444,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
         <div className='min-w-0'>
           <p className={EOF_EYEBROW_CLASS}>Up Next</p>
           <p className='mt-1 truncate text-sm font-semibold leading-snug text-white'>
-            {formatSeasonEpisode(episode.season, episode.episode)}
-            {episode.title ? ` · ${episode.title}` : ''}
+            {formatEpisodeHeading(episode.season, episode.episode, episode.title)}
           </p>
           <p className='mt-1 text-xs leading-snug text-white/65'>
             {countingDown ? (

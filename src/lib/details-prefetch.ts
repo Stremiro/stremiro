@@ -10,7 +10,7 @@ import {
   getDiscoveryEpoch,
   titleWatchProgressQueryKey,
 } from '@/lib/query-invalidation';
-import { isSeriesLikeMediaType } from '@/lib/utils';
+import { isHttpUrl, isSeriesLikeMediaType } from '@/lib/utils';
 
 interface PrefetchDetailsRouteDataOptions {
   mediaId: string;
@@ -74,6 +74,8 @@ export function prefetchDetailsRouteData(
       if (bundle.details && queryClient.getQueryData(detailsKey) === undefined) {
         queryClient.setQueryData(detailsKey, bundle.details);
       }
+      // A warm logo paints with the page instead of fading in after it.
+      if (isHttpUrl(bundle.details?.logo)) new Image().src = bundle.details.logo;
       if (
         progressEpoch === getWatchProgressEpoch() &&
         progressRevision === getWatchProgressSnapshotRevision() &&

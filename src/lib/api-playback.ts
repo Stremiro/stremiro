@@ -23,12 +23,11 @@ import type {
   WatchProgressSave,
 } from '@/lib/api';
 import {
-  type ApiCacheGroups,
+  bestStreamCache,
   buildStreamCacheKey,
   bumpWatchProgressEpoch,
   bumpWatchProgressSnapshotRevision,
   primeCachedRequest,
-  type RequestCache,
   runCachedRequest,
   withStreamingCacheClear,
 } from '@/lib/api-cache';
@@ -37,13 +36,8 @@ import { trackNoncriticalAppWrite, trackPendingAppWrite } from '@/lib/pending-ap
 import { buildStreamRankingCacheKey, type StreamRankingOptions } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
-interface PlaybackApiCaches extends ApiCacheGroups {
-  bestStream: RequestCache<BestResolvedStream>;
-}
-
 interface PlaybackApiContext {
   safeInvoke: InvokeApi;
-  caches: PlaybackApiCaches;
 }
 
 // One fold for the four preferred-identity hints so cache key and IPC payload agree on "absent".
@@ -82,7 +76,7 @@ function bestStreamCacheKey(
   ]);
 }
 
-export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
+export function createPlaybackApi({ safeInvoke }: PlaybackApiContext) {
   return {
     getStreamPackRows: (
       coverage: NonNullable<AddonStream['matchSummary']>['packCoverage'],
@@ -186,7 +180,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
         preferredHints,
       );
       return runCachedRequest(
-        caches.bestStream,
+        bestStreamCache,
         cacheKey,
         (requestId) =>
           safeInvoke<BestResolvedStream>('resolve_best_stream', {
@@ -218,7 +212,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       result: BestResolvedStream,
     ) => {
       const cacheKey = bestStreamCacheKey(type, id, season, episode, absoluteEpisode, options);
-      primeCachedRequest(caches.bestStream, cacheKey, result);
+      primeCachedRequest(bestStreamCache, cacheKey, result);
     },
     recoverPlaybackStream: ({
       requestId,
@@ -239,7 +233,6 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     }: RecoverPlaybackStreamOptions & { requestId: string }) => {
       // The backend re-ranked past the failure — drop cached entries so a later resolve can't re-serve the failed candidate.
       return withStreamingCacheClear(
-        caches,
         safeInvoke<BestResolvedStream | null>('recover_playback_stream', {
           requestId,
           mediaType,
@@ -264,7 +257,6 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     /** Sets one global language default; `undefined` clears it. */
     savePlaybackLanguagePreference: (preferenceKind: 'audio' | 'sub', language?: string) =>
       withStreamingCacheClear(
-        caches,
         safeInvoke<PlaybackLanguagePreferences>('save_playback_language_preference', {
           preferenceKind,
           language,
@@ -293,7 +285,6 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       options?: { subtitlesOff?: boolean; mediaType?: string; mediaId?: string },
     ) =>
       withStreamingCacheClear(
-        caches,
         safeInvoke<SavedPlaybackLanguagePreference>('save_selected_playback_language_preference', {
           preferenceKind,
           track,
@@ -312,7 +303,6 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
       // Learned per-title picks feed ranking when no global default is set.
       trackNoncriticalAppWrite(
         withStreamingCacheClear(
-          caches,
           safeInvoke<void>('save_playback_language_preference_outcome_from_tracks', {
             mediaId,
             mediaType,
@@ -326,10 +316,7 @@ export function createPlaybackApi({ safeInvoke, caches }: PlaybackApiContext) {
     // Cooldowns change on every report — drop cached rankings so the next fetch re-ranks.
     reportPlaybackStreamOutcome: (report: PlaybackStreamOutcomeReport) =>
       trackNoncriticalAppWrite(
-        withStreamingCacheClear(
-          caches,
-          safeInvoke<void>('report_playback_stream_outcome', { ...report }),
-        ),
+        withStreamingCacheClear(safeInvoke<void>('report_playback_stream_outcome', { ...report })),
       ),
     saveWatchProgress: (progress: WatchProgressSave) =>
       trackPendingAppWrite(

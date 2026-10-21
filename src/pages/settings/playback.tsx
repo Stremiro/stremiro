@@ -31,6 +31,8 @@ type PlaybackUiPreferences = Pick<
   | 'autoSkipIntro'
   | 'spoilerProtection'
   | 'trailerPreviews'
+  | 'audioDelay'
+  | 'nightMode'
 >;
 
 const COUNTDOWN_SECONDS = [5, 8, 10, 15, 30];
@@ -305,17 +307,19 @@ function AppUiPreferenceToggle({
   description,
 }: {
   appUiPreferences: ReturnType<typeof useAppUiPreferences<PlaybackUiPreferences>>;
-  field: 'autoPlayNext' | 'autoSkipIntro' | 'spoilerProtection' | 'trailerPreviews';
+  field: 'autoPlayNext' | 'autoSkipIntro' | 'spoilerProtection' | 'trailerPreviews' | 'nightMode';
   label: string;
   description: string;
 }) {
   const { preferences, updatePreferences, isHydrating } = appUiPreferences;
   const checked = preferences[field];
+  const descriptionId = useId();
 
   return (
-    <SettingsRow label={label} description={description}>
+    <SettingsRow label={label} description={description} descriptionId={descriptionId}>
       <SettingsSwitch
         ariaLabel={label}
+        ariaDescribedBy={descriptionId}
         checked={checked}
         disabled={isHydrating}
         onChange={() => updatePreferences({ [field]: !checked })}
@@ -333,6 +337,8 @@ export function PlaybackSettings() {
       nextEpisodeCountdownSecs,
       controlsHideDelayMs,
       autoSkipIntro,
+      audioDelay,
+      nightMode,
     }) => ({
       spoilerProtection,
       trailerPreviews,
@@ -340,6 +346,8 @@ export function PlaybackSettings() {
       nextEpisodeCountdownSecs,
       controlsHideDelayMs,
       autoSkipIntro,
+      audioDelay,
+      nightMode,
     }),
   );
   const { preferences, isHydrating, updatePreferences } = appUiPreferences;
@@ -348,7 +356,7 @@ export function PlaybackSettings() {
     <SettingsGroup>
       <SettingsGroupHeader
         title='Playback'
-        description='Default track languages. Subtitles can be set to Off.'
+        description='Languages, sound and player behavior. Changes are saved automatically.'
       />
       <SettingsBody>
         <PlaybackLanguageConfig />
@@ -360,6 +368,37 @@ export function PlaybackSettings() {
           message="Couldn't load your preferences."
         />
         <SettingsBody rows>
+          <AppUiPreferenceToggle
+            appUiPreferences={appUiPreferences}
+            field='nightMode'
+            label='Night mode'
+            description='Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound.'
+          />
+          <SettingsRow
+            label='Audio sync'
+            description='Seconds, saved for all videos. Positive plays audio later; negative plays it earlier. Set to 0 to reset.'
+          >
+            <span className='flex items-center gap-3'>
+              <input
+                type='range'
+                aria-label='Audio sync delay in seconds'
+                aria-valuetext={`${preferences.audioDelay > 0 ? '+' : ''}${preferences.audioDelay.toFixed(1)} seconds`}
+                min={-5}
+                max={5}
+                step={0.1}
+                value={preferences.audioDelay}
+                disabled={isHydrating}
+                onChange={(event) =>
+                  updatePreferences({ audioDelay: event.currentTarget.valueAsNumber })
+                }
+                className='h-8 w-24 cursor-pointer accent-(--accent-nav) focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-(--accent-nav) disabled:opacity-35'
+              />
+              <output className='w-12 text-right text-sm tabular-nums text-zinc-200'>
+                {preferences.audioDelay > 0 ? '+' : ''}
+                {preferences.audioDelay.toFixed(1)}s
+              </output>
+            </span>
+          </SettingsRow>
           <AppUiPreferenceToggle
             appUiPreferences={appUiPreferences}
             field='spoilerProtection'

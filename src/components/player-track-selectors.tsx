@@ -1,4 +1,4 @@
-import { AudioLines, Captions, Check, Loader2, Minus, Plus } from 'lucide-react';
+import { AudioLines, Captions, Check, Loader2, Minus, Moon, Plus } from 'lucide-react';
 import { memo, useId, useState } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
@@ -11,7 +11,7 @@ import {
 import { PlayerSlider } from '@/components/player-slider';
 import { RetryBanner } from '@/components/retry-banner';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
+import { useAppUiPreferences, usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { AddonSubtitle } from '@/lib/api';
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import type { Track } from '@/lib/player-track-utils';
@@ -20,7 +20,7 @@ import { clamp, cn } from '@/lib/utils';
 // Stable default — a fresh `[]` literal would defeat this component's memo.
 const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
 
-const SUBTITLE_NUDGE_BUTTON_CLASS = cn(
+const TRACK_NUDGE_BUTTON_CLASS = cn(
   CHROME_MENU_ROW_FOCUS_CLASS,
   'flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-md text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
 );
@@ -88,24 +88,43 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
   onSelectTrack,
 }: AudioTrackSelectorProps) {
   const keymap = usePlayerKeymap();
+  const { preferences, isHydrating, updatePreferences } = useAppUiPreferences(
+    ({ audioDelay, nightMode }) => ({ audioDelay, nightMode }),
+  );
+  const { audioDelay, nightMode } = preferences;
+  const hasAudioSettings = audioDelay !== 0 || nightMode;
   const headingId = useId();
   const selectedAudioTrack = audioTracks.find((track) => track.selected);
   const selectedAudioLabel = selectedAudioTrack?.displayLabel;
-
-  if (audioTracks.length === 0) return null;
 
   return (
     <Popover>
       <PopoverTrigger asChild>
         <button
           type='button'
-          className={CHROME_ICON_BUTTON_CLASS}
-          aria-label={selectedAudioLabel ? `Audio: ${selectedAudioLabel}` : 'Audio track'}
+          className={cn(CHROME_ICON_BUTTON_CLASS, 'relative')}
+          aria-label={`${selectedAudioLabel ? `Audio: ${selectedAudioLabel}` : 'Audio settings'}${nightMode ? ', Night mode on' : ''}`}
           aria-keyshortcuts={ariaKeyShortcuts(keymap, 'cycleAudio')}
-          title={withShortcutHint('Audio Track', keymap, 'cycleAudio')}
+          title={withShortcutHint(
+            nightMode ? 'Audio · Night mode on' : 'Audio',
+            keymap,
+            'cycleAudio',
+          )}
           onClick={(e) => e.stopPropagation()}
         >
           <AudioLines className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
+          {nightMode ? (
+            <Moon
+              aria-hidden='true'
+              className='absolute -top-1 -right-1 h-2.5 w-2.5 text-(--accent-act)'
+              strokeWidth={2.5}
+            />
+          ) : hasAudioSettings ? (
+            <span
+              aria-hidden='true'
+              className='absolute -top-0.5 -right-0.5 h-1.5 w-1.5 rounded-full bg-(--accent-act)'
+            />
+          ) : null}
         </button>
       </PopoverTrigger>
       <PopoverContent
@@ -115,17 +134,70 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
         aria-labelledby={headingId}
         className={cn(
           CHROME_POPOVER_CLASS,
-          'flex max-h-[min(24rem,var(--radix-popover-content-available-height))] w-72 max-w-[calc(100vw-1rem)] flex-col p-1.5',
+          'flex max-h-[min(32rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-1rem)] flex-col overflow-y-auto overscroll-contain p-1.5',
         )}
         onClick={(e) => e.stopPropagation()}
       >
-        <h4
-          id={headingId}
-          className='shrink-0 px-2.5 pb-2 pt-2 text-xs font-semibold text-zinc-300'
+        <div className='flex min-h-9 shrink-0 items-center justify-between px-2.5'>
+          <h4 id={headingId} className='text-xs font-semibold text-zinc-300'>
+            Audio
+          </h4>
+          <span className='text-[10px] text-zinc-500'>
+            {isHydrating ? 'Loading preferences…' : 'Saved for all videos'}
+          </span>
+        </div>
+        <button
+          type='button'
+          role='switch'
+          aria-checked={nightMode}
+          aria-labelledby={`${headingId}-night`}
+          aria-describedby={`${headingId}-night-description`}
+          aria-disabled={isHydrating || undefined}
+          onClick={() => {
+            if (!isHydrating) updatePreferences({ nightMode: !nightMode });
+          }}
+          className={cn(
+            CHROME_MENU_ROW_FOCUS_CLASS,
+            'mx-1 my-1 flex shrink-0 cursor-pointer items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-2.5 py-3 text-left transition-colors hover:bg-white/[0.05] aria-disabled:cursor-wait aria-disabled:opacity-35',
+          )}
         >
-          Audio
-        </h4>
-        <div className='min-h-0 space-y-px overflow-y-auto overscroll-contain'>
+          <Moon
+            aria-hidden='true'
+            className={cn('h-4 w-4 shrink-0', nightMode ? 'text-(--accent-act)' : 'text-zinc-400')}
+            strokeWidth={CHROME_ICON_STROKE}
+          />
+          <span className='min-w-0 flex-1'>
+            <span id={`${headingId}-night`} className='block text-xs font-medium text-zinc-100'>
+              Night mode
+            </span>
+            <span
+              id={`${headingId}-night-description`}
+              className='mt-1 block text-[11px] leading-relaxed text-zinc-400'
+            >
+              Boosts quiet audio and smooths volume changes.
+            </span>
+          </span>
+          <span
+            aria-hidden='true'
+            className={cn(
+              'relative inline-flex h-[22px] w-10 shrink-0 items-center rounded-md transition-colors duration-150 motion-reduce:transition-none',
+              nightMode ? 'bg-(--accent-act)' : 'bg-zinc-800',
+            )}
+          >
+            <span
+              className={cn(
+                'inline-block h-4 w-4 rounded-[3px] shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-[translate,background-color] duration-150 motion-reduce:transition-none',
+                nightMode
+                  ? 'translate-x-[21px] bg-(--on-accent-act)'
+                  : 'translate-x-[3px] bg-zinc-400',
+              )}
+            />
+          </span>
+        </button>
+        {audioTracks.length > 0 && (
+          <p className='px-2.5 pt-2 pb-1 text-[10px] font-medium text-zinc-500'>Audio track</p>
+        )}
+        <div className='min-h-0 max-h-[36vh] space-y-px overflow-y-auto overscroll-contain'>
           {audioTracks.map((track) => (
             <TrackSelectRow
               key={track.id}
@@ -136,12 +208,74 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
             />
           ))}
         </div>
+        <div className='mx-2.5 mt-2 shrink-0 border-t border-white/[0.07] pt-2 pb-1.5'>
+          <div className='flex items-center justify-between gap-2'>
+            <span className='text-xs font-medium text-zinc-300'>Audio sync</span>
+            <button
+              type='button'
+              className={cn(
+                CHROME_MENU_ROW_FOCUS_CLASS,
+                'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 transition-colors hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-35 aria-disabled:hover:bg-transparent aria-disabled:hover:text-zinc-300',
+              )}
+              aria-label='Reset audio sync'
+              aria-disabled={isHydrating || audioDelay === 0 || undefined}
+              onClick={() => {
+                if (!isHydrating && audioDelay !== 0) updatePreferences({ audioDelay: 0 });
+              }}
+            >
+              Reset
+            </button>
+          </div>
+          <div className='flex items-center justify-between gap-2'>
+            <span className='text-[11px] text-zinc-400'>Earlier / later</span>
+            <div className='flex items-center gap-1'>
+              <button
+                type='button'
+                className={TRACK_NUDGE_BUTTON_CLASS}
+                aria-label='Play audio 0.1 seconds earlier'
+                aria-disabled={isHydrating || audioDelay <= -5 || undefined}
+                onClick={() => {
+                  if (!isHydrating && audioDelay > -5)
+                    updatePreferences({
+                      audioDelay: Math.round(clamp(audioDelay - 0.1, -5, 5) * 10) / 10,
+                    });
+                }}
+              >
+                <Minus aria-hidden='true' className='h-3.5 w-3.5' />
+              </button>
+              <output
+                className='w-16 text-center text-xs tabular-nums text-zinc-100'
+                aria-live='polite'
+              >
+                {audioDelay > 0 ? '+' : ''}
+                {audioDelay.toFixed(1)}s
+              </output>
+              <button
+                type='button'
+                className={TRACK_NUDGE_BUTTON_CLASS}
+                aria-label='Play audio 0.1 seconds later'
+                aria-disabled={isHydrating || audioDelay >= 5 || undefined}
+                onClick={() => {
+                  if (!isHydrating && audioDelay < 5)
+                    updatePreferences({
+                      audioDelay: Math.round(clamp(audioDelay + 0.1, -5, 5) * 10) / 10,
+                    });
+                }}
+              >
+                <Plus aria-hidden='true' className='h-3.5 w-3.5' />
+              </button>
+            </div>
+          </div>
+          <p className='text-[11px] leading-relaxed text-zinc-400'>
+            Adjust only if sound and picture are out of sync.
+          </p>
+        </div>
       </PopoverContent>
     </Popover>
   );
 });
 
-interface SubtitleTrackSelectorProps {
+export interface SubtitleTrackSelectorProps {
   subTracks: Track[];
   trackSwitching: { audio: boolean; sub: boolean };
   subtitleDelay: number;
@@ -151,7 +285,7 @@ interface SubtitleTrackSelectorProps {
   onApplySubtitleDelay: (value: number) => void;
   onApplySubtitlePos: (value: number) => void;
   onApplySubtitleScale: (value: number) => void;
-  onSelectTrack: (
+  onSelectSubTrack: (
     type: 'sub',
     id: number | 'no',
     options?: { persistPreference?: boolean },
@@ -167,7 +301,7 @@ interface SubtitleTrackSelectorProps {
   activeAddonSubtitleId?: string | null;
   addonSubtitleLoadingId?: string | null;
   onSelectAddonSubtitle?: (subtitle: AddonSubtitle) => void;
-  onOpenChange?: (open: boolean) => void;
+  onSubtitleMenuOpenChange?: (open: boolean) => void;
 }
 
 export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
@@ -180,7 +314,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   onApplySubtitleDelay,
   onApplySubtitlePos,
   onApplySubtitleScale,
-  onSelectTrack,
+  onSelectSubTrack,
   addonSubtitles: addonSubtitlesProp,
   addonSubtitlesLoading,
   addonSubtitlesFetching,
@@ -190,7 +324,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   activeAddonSubtitleId,
   addonSubtitleLoadingId,
   onSelectAddonSubtitle,
-  onOpenChange,
+  onSubtitleMenuOpenChange,
 }: SubtitleTrackSelectorProps) {
   const addonSubtitles =
     addonSubtitlesProp === undefined ? EMPTY_ADDON_SUBTITLES : addonSubtitlesProp;
@@ -207,7 +341,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   const handleOpenChange = (open: boolean) => {
     // Reopen on the tab owning the active pick — an addon-selected subtitle shows checked immediately.
     if (open) setView(activeAddonSubtitleId ? 'addons' : 'tracks');
-    onOpenChange?.(open);
+    onSubtitleMenuOpenChange?.(open);
   };
 
   return (
@@ -264,7 +398,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
             label='Off'
             selected={subtitlesShownOff}
             busy={trackSwitching.sub || !!addonSubtitleLoadingId}
-            onSelect={() => onSelectTrack('sub', 'no', { persistPreference: true })}
+            onSelect={() => onSelectSubTrack('sub', 'no', { persistPreference: true })}
           />
         </div>
 
@@ -411,7 +545,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                   label={track.displayLabel}
                   selected={!!track.selected}
                   busy={trackSwitching.sub || !!addonSubtitleLoadingId}
-                  onSelect={() => onSelectTrack('sub', track.id, { persistPreference: true })}
+                  onSelect={() => onSelectSubTrack('sub', track.id, { persistPreference: true })}
                 />
               ))}
               {subTracks.length === 0 && (
@@ -481,7 +615,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                     type='button'
                     aria-label={row.decreaseLabel}
                     title={row.decreaseLabel}
-                    className={SUBTITLE_NUDGE_BUTTON_CLASS}
+                    className={TRACK_NUDGE_BUTTON_CLASS}
                     aria-disabled={row.current <= row.min || undefined}
                     onClick={() => {
                       if (row.current > row.min)
@@ -508,7 +642,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                     type='button'
                     aria-label={row.increaseLabel}
                     title={row.increaseLabel}
-                    className={SUBTITLE_NUDGE_BUTTON_CLASS}
+                    className={TRACK_NUDGE_BUTTON_CLASS}
                     aria-disabled={row.current >= row.max || undefined}
                     onClick={() => {
                       if (row.current < row.max)

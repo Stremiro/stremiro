@@ -23,7 +23,6 @@ import type {
   WatchStatus,
 } from '@/lib/api';
 import {
-  type ApiCacheGroups,
   bumpWatchProgressEpoch,
   clearProviderDataCaches,
   withStreamingCacheClear,
@@ -40,7 +39,6 @@ import {
 
 interface StoreApiContext {
   safeInvoke: InvokeApi;
-  caches: ApiCacheGroups;
 }
 
 /** Persist only `MediaItem` fields — a `MediaDetails` caller must not ship episode/cast/trailer arrays over IPC. */
@@ -72,7 +70,7 @@ export function toMediaItem({
   };
 }
 
-export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
+export function createStoreApi({ safeInvoke }: StoreApiContext) {
   const getAddonConfigs = () => safeInvoke<AddonConfig[]>('get_addon_configs');
   const getLaunchAtLogin = () => safeInvoke<boolean>('get_launch_at_login');
   const getDataStats = () => safeInvoke<DataStats>('get_data_stats');
@@ -98,7 +96,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
             return await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
           } finally {
             // A failed save may still have applied the registry in memory.
-            clearProviderDataCaches(caches);
+            clearProviderDataCaches();
           }
         })(),
       ),
@@ -224,9 +222,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
     // Bump before the IPC lands — a queued progress save must not resurrect a wiped row.
     clearWatchHistory: () => {
       bumpWatchProgressEpoch();
-      return trackPendingAppWrite(
-        withStreamingCacheClear(caches, safeInvoke<void>('clear_watch_history')),
-      );
+      return trackPendingAppWrite(withStreamingCacheClear(safeInvoke<void>('clear_watch_history')));
     },
     clearLibrary: () => write<void>('clear_library'),
     clearAllLists: () => write<void>('clear_all_lists'),
@@ -239,7 +235,7 @@ export function createStoreApi({ safeInvoke, caches }: StoreApiContext) {
       return trackPendingAppWrite(
         safeInvoke<ImportResult | null>('import_app_data_from_file').finally(() => {
           bumpWatchProgressEpoch();
-          clearProviderDataCaches(caches);
+          clearProviderDataCaches();
         }),
       );
     },

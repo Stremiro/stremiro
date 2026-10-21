@@ -9,13 +9,12 @@ interface PlayerSliderProps extends React.ComponentPropsWithRef<typeof SliderPri
 
 export function PlayerSlider({
   className,
-  variant: variantProp,
+  variant = 'pill',
   'aria-label': ariaLabel,
   'aria-valuetext': ariaValueText,
   onPointerDown,
   ...props
 }: PlayerSliderProps) {
-  const variant = variantProp === undefined ? 'pill' : variantProp;
   return (
     <SliderPrimitive.Root
       className={cn(
@@ -38,12 +37,12 @@ export function PlayerSlider({
         className={cn(
           'relative w-full grow overflow-hidden',
           variant === 'bar'
-            ? 'h-1.5 rounded-[3px] bg-white/[0.16] transition-[height] duration-150 group-hover/slider:h-2 group-has-[:focus-visible]/slider:h-2 group-has-[:focus-visible]/slider:ring-2 group-has-[:focus-visible]/slider:ring-white/60 motion-reduce:transition-none'
+            ? 'h-2 scale-y-75 rounded-[3px] bg-white/[0.16] transition-transform duration-150 group-hover/slider:scale-y-100 group-has-[:focus-visible]/slider:scale-y-100 group-has-[:focus-visible]/slider:ring-2 group-has-[:focus-visible]/slider:ring-white/60 motion-reduce:transition-none'
             : 'rounded-full bg-white/20',
           variant === 'track' &&
             'h-1 group-has-[:focus-visible]/slider:ring-2 group-has-[:focus-visible]/slider:ring-white/60',
           variant === 'pill' &&
-            'h-[3px] transition-[height] duration-150 group-hover/slider:h-[5px] group-focus-within/slider:h-[5px] motion-reduce:transition-none',
+            'h-[5px] scale-y-60 transition-transform duration-150 group-hover/slider:scale-y-100 group-focus-within/slider:scale-y-100 motion-reduce:transition-none',
         )}
       >
         <SliderPrimitive.Range className='absolute h-full bg-white' />

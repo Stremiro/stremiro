@@ -36,7 +36,7 @@ interface UseMediaPrimaryPlaybackOptions {
 function getPrimaryPlaybackLabel(
   surface: PrimaryPlaybackSurface,
   isResolving: boolean,
-  item?: MediaItem | null,
+  mediaType?: PlayerRouteMediaType,
   hasResumePath?: boolean,
   resumeDetail?: string,
 ): string {
@@ -44,12 +44,12 @@ function getPrimaryPlaybackLabel(
     return 'Opening…';
   }
 
-  if (!item) {
+  if (!mediaType) {
     return 'Play';
   }
 
   if (surface === 'details') {
-    if (item.type === 'movie') {
+    if (mediaType === 'movie') {
       return hasResumePath ? 'Continue' : 'Start Watching';
     }
 
@@ -61,18 +61,18 @@ function getPrimaryPlaybackLabel(
     return 'Resume';
   }
 
-  return item.type === 'movie' ? 'Play' : 'View & Play';
+  return mediaType === 'movie' ? 'Play' : 'View & Play';
 }
 
 function getHistoryPlaybackErrorTitle(
   surface: PrimaryPlaybackSurface,
-  item?: MediaItem | null,
+  mediaType?: PlayerRouteMediaType,
 ): string {
-  if (surface !== 'details' || !item) {
+  if (surface !== 'details' || !mediaType) {
     return 'Failed to resume playback';
   }
 
-  return item.type === 'movie' ? 'Failed to continue movie' : 'Failed to continue series';
+  return mediaType === 'movie' ? 'Failed to continue movie' : 'Failed to continue series';
 }
 
 export function useMediaPrimaryPlayback({
@@ -163,7 +163,7 @@ export function useMediaPrimaryPlayback({
           navigate,
           resumeEntry,
           from,
-          getHistoryPlaybackErrorTitle(surface, item),
+          getHistoryPlaybackErrorTitle(surface, playbackType),
           queryClient,
           { onSelectEpisode, launchGeneration, isCancelled: () => !isCurrentAction() },
         );
@@ -172,7 +172,7 @@ export function useMediaPrimaryPlayback({
 
       warmPlayerChunk();
 
-      if (item.type !== 'movie') {
+      if (playbackType !== 'movie') {
         if (onSelectEpisode) {
           await onSelectEpisode('no-history');
           return;
@@ -253,7 +253,7 @@ export function useMediaPrimaryPlayback({
   const primaryActionLabel = getPrimaryPlaybackLabel(
     surface,
     showResolvingFeedback,
-    item,
+    item ? playbackType : undefined,
     Boolean(activeSession || resumeEntry),
     resumeDetail,
   );

@@ -1,7 +1,6 @@
 import { Camera, ImagePlus, Loader2, Trash2 } from 'lucide-react';
 import { type ChangeEvent, type CSSProperties, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -30,13 +29,34 @@ export function ProfileAvatar({
   fallbackStyle?: CSSProperties;
   name: string;
 }) {
+  const [image, setImage] = useState<{ src: string; loaded: boolean } | null>(null);
+  const status = avatar && image?.src === avatar ? (image.loaded ? 'loaded' : 'failed') : 'loading';
   return (
-    <Avatar className={className}>
-      {avatar ? <AvatarImage src={avatar} alt='' draggable={false} /> : null}
-      <AvatarFallback className={fallbackClassName} style={fallbackStyle}>
-        {Array.from(name)[0]?.toUpperCase()}
-      </AvatarFallback>
-    </Avatar>
+    <span
+      className={cn('relative flex h-10 w-10 shrink-0 overflow-hidden rounded-full', className)}
+    >
+      {status !== 'loaded' && (
+        <span
+          className={cn(
+            'flex h-full w-full items-center justify-center rounded-full bg-muted',
+            fallbackClassName,
+          )}
+          style={fallbackStyle}
+        >
+          {Array.from(name)[0]?.toUpperCase()}
+        </span>
+      )}
+      {avatar && status !== 'failed' && (
+        <img
+          src={avatar}
+          alt=''
+          draggable={false}
+          className='absolute inset-0 h-full w-full object-cover'
+          onLoad={() => setImage({ src: avatar, loaded: true })}
+          onError={() => setImage({ src: avatar, loaded: false })}
+        />
+      )}
+    </span>
   );
 }
 
@@ -128,13 +148,13 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
         name={username}
         avatar={avatar}
         className='h-20 w-20 shadow-xl'
-        fallbackClassName='text-2xl font-black transition-colors duration-300'
+        fallbackClassName='text-2xl font-black transition-colors duration-200 motion-reduce:transition-none'
         fallbackStyle={{ backgroundColor: '#0a0a0b', color: accentColor }}
       />
       <span
         aria-hidden='true'
         className={cn(
-          'absolute inset-[2px] flex items-center justify-center rounded-full bg-black/55 text-white opacity-0 transition-opacity duration-200 group-hover/avatar:opacity-100 group-focus-visible/avatar:opacity-100',
+          'absolute inset-[2px] flex items-center justify-center rounded-full bg-black/55 text-white opacity-0 transition-opacity duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none group-hover/avatar:opacity-100 group-focus-visible/avatar:opacity-100',
           isProcessing && 'opacity-100',
         )}
       >
@@ -143,6 +163,15 @@ export function ProfileAvatarEditor({ profile }: { profile: LocalProfile }) {
         ) : (
           <Camera className='h-5 w-5' />
         )}
+      </span>
+      <span
+        aria-hidden='true'
+        className={cn(
+          'pointer-events-none absolute bottom-0 right-0 flex h-6 w-6 items-center justify-center rounded-md border border-white/[0.12] bg-zinc-900 text-zinc-300 shadow-sm transition-opacity duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] group-hover/avatar:opacity-0 group-focus-visible/avatar:opacity-0 motion-reduce:transition-none',
+          isProcessing && 'opacity-0',
+        )}
+      >
+        <Camera className='h-3 w-3' />
       </span>
     </button>
   );

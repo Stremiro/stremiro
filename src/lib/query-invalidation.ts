@@ -156,8 +156,13 @@ export async function invalidateLibraryQueries(
   }: { watchStatusChanged?: boolean; refetchLibrary?: boolean } = {},
 ) {
   // Watch status is a library attribute; refresh shared dependents once. Smart lists derive from both.
-  refreshScheduleQueries(queryClient);
-  if (watchStatusChanged) void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
+  // The resume rail and similar titles read statuses, not library membership.
+  if (watchStatusChanged) {
+    refreshScheduleQueries(queryClient);
+    void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
+  } else {
+    void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
+  }
   await Promise.all([
     refetchLibrary
       ? invalidateQuery(queryClient, LIBRARY_QUERY_KEY)
@@ -165,7 +170,7 @@ export async function invalidateLibraryQueries(
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
-    invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
+    watchStatusChanged && invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
     invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }

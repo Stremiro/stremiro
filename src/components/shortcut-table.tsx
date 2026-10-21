@@ -7,14 +7,20 @@ const SHORTCUT_KEY_CLASS =
 export function ShortcutTable({
   shortcuts,
   className,
+  idPrefix,
 }: {
   shortcuts: ShortcutRow[];
   className?: string;
+  idPrefix?: string;
 }) {
   return (
     <dl className={cn('grid gap-x-8 @xl:grid-cols-2', className)}>
-      {shortcuts.map(({ label, keys }) => (
-        <div key={label} className='flex h-9 items-center justify-between gap-4'>
+      {shortcuts.map(({ label, keys }, index) => (
+        <div
+          key={label}
+          id={idPrefix ? `${idPrefix}-${index}` : undefined}
+          className='flex h-9 items-center justify-between gap-4'
+        >
           <dt className='truncate text-[13px] text-zinc-300'>{label}</dt>
           <dd className='flex shrink-0 items-center gap-1'>
             {keys.map((key) => (

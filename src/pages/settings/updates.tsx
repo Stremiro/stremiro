@@ -1,5 +1,4 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { format, formatDistanceToNow } from 'date-fns';
 import { ArrowUpRight, Download, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
@@ -16,7 +15,7 @@ import {
   formatAppUpdateProgress,
   isTauriDesktopRuntime,
 } from '@/lib/app-updater';
-import { parseLocalScheduleDate } from '@/lib/schedule-dates';
+import { DATE_FORMATTER, formatRelativeTime, parseLocalScheduleDate } from '@/lib/schedule-dates';
 import { cn } from '@/lib/utils';
 import {
   SETTINGS_HEADER_STATUS_CLASS,
@@ -32,7 +31,7 @@ import {
 function formatReleaseDate(date: string | null | undefined): string | null {
   if (!date) return null;
   const parsed = parseLocalScheduleDate(date);
-  return parsed ? format(parsed, 'MMM d, yyyy') : date;
+  return parsed ? DATE_FORMATTER.format(parsed) : date;
 }
 
 function AppChangelog({
@@ -63,6 +62,7 @@ function AppChangelog({
 
   return (
     <section
+      id='setting-changelog'
       aria-label='Changelog'
       className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'
     >
@@ -203,7 +203,7 @@ export function UpdatesSection() {
   const installPercent = appUpdateProgressPercent(updateState.installProgress);
 
   const lastCheckedLabel = updateState.lastCheckedAt
-    ? formatDistanceToNow(updateState.lastCheckedAt, { addSuffix: true })
+    ? formatRelativeTime(updateState.lastCheckedAt)
     : 'not checked yet';
 
   const statusNote = !isSupported
@@ -302,10 +302,16 @@ export function UpdatesSection() {
             >
               <div
                 className={cn(
-                  'h-full rounded-full bg-emerald-300 transition-[width] duration-300',
-                  installPercent === null && 'w-1/3 animate-pulse',
+                  'h-full rounded-full bg-emerald-300',
+                  installPercent === null
+                    ? 'w-1/3 animate-pulse'
+                    : 'w-full origin-left transition-transform duration-300',
                 )}
-                style={installPercent !== null ? { width: `${installPercent}%` } : undefined}
+                style={
+                  installPercent !== null
+                    ? { transform: `scaleX(${installPercent / 100})` }
+                    : undefined
+                }
               />
             </div>
             <p className='text-[12px] tabular-nums text-zinc-500'>
@@ -333,7 +339,10 @@ export function UpdatesSection() {
           pendingUpdate={pendingUpdate}
         />
 
-        <div className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'>
+        <div
+          id='setting-update-actions'
+          className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'
+        >
           {pendingUpdate ? (
             <Button
               size='sm'

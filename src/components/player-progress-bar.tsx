@@ -11,7 +11,7 @@ import {
 import { CHROME_VALUE_BUBBLE_CLASS } from '@/components/player-chrome-styles';
 import type { SkipSegment } from '@/lib/api';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
-import { getSkipLabel } from '@/lib/player-skip';
+import { SKIP_SEGMENT_LABELS } from '@/lib/player-skip';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
 const SKIP_SEGMENT_STYLES: Record<string, { color: string; badge: string }> = {
@@ -43,10 +43,9 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
   clock,
   duration,
   playbackSpeed,
-  active: activeProp,
+  active = true,
   className,
 }: PlayerTimeDisplayProps) {
-  const active = activeProp === undefined ? true : activeProp;
   const [showRemainingTime, setShowRemainingTime] = useState(false);
   const displayTime = useSyncExternalStore(active ? clock.subscribe : subscribeWhileHidden, () =>
     Math.floor(
@@ -202,7 +201,7 @@ interface PlayerProgressBarProps {
 }
 
 export function PlayerProgressBar({
-  active: activeProp,
+  active = true,
   duration,
   clock,
   bufferedClock,
@@ -210,7 +209,6 @@ export function PlayerProgressBar({
   resetKey,
   onSeek,
 }: PlayerProgressBarProps) {
-  const active = activeProp === undefined ? true : activeProp;
   const progressBarRef = useRef<HTMLDivElement>(null);
   const tooltipRef = useRef<HTMLDivElement>(null);
   const [keyboardFocused, setKeyboardFocused] = useState(false);
@@ -223,7 +221,7 @@ export function PlayerProgressBar({
 
   // Preview state stays local — pointermove during a drag re-renders this bar only, not the player page.
   const [seekPreviewTime, setSeekPreviewTime] = useState<number | null>(null);
-  const subscribeToTicks = active || seekPreviewTime !== null;
+  const subscribeToTicks = active || seekPreviewTime !== null || keyboardFocused;
   const currentTime = useSyncExternalStore(
     subscribeToTicks ? clock.subscribe : subscribeWhileHidden,
     clock.getSnapshot,
@@ -287,10 +285,11 @@ export function PlayerProgressBar({
     clearHoverState();
   }, [clearHoverState]);
 
-  // Stream/scrub resets cancel any in-flight drag and queued hover work.
+  // Stream/scrub resets and unmount cancel any in-flight drag and queued hover work.
   useEffect(() => {
     cancelDrag();
     clearHoverState();
+    return clearHoverState;
   }, [resetKey, cancelDrag, clearHoverState]);
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
@@ -338,18 +337,30 @@ export function PlayerProgressBar({
 
     // Clear the pointer id before releasing capture so `lostpointercapture` can't cancel the seek committing here.
     const pointerId = e.pointerId;
+    const rect = dragRectRef.current;
     dragPointerIdRef.current = null;
+    dragRectRef.current = null;
     clearHoverState();
 
-    const frac = getSeekFraction(e.clientX, dragRectRef.current);
+    const frac = getSeekFraction(e.clientX, rect);
     if (frac !== null) {
       void Promise.resolve(onSeek(frac * duration)).catch(() => undefined);
+      // A mouse released over the bar keeps its hover readout instead of blinking out until the next move.
+      if (
+        e.pointerType === 'mouse' &&
+        rect &&
+        e.clientX >= rect.left &&
+        e.clientX <= rect.right &&
+        e.clientY >= rect.top &&
+        e.clientY <= rect.bottom
+      ) {
+        setHoverPct(frac * 100);
+      }
     }
 
     if (e.currentTarget.hasPointerCapture(pointerId)) {
       e.currentTarget.releasePointerCapture(pointerId);
     }
-    dragRectRef.current = null;
     setSeekPreviewTime(null);
   };
 
@@ -372,7 +383,7 @@ export function PlayerProgressBar({
 
     // Shift = fine scrub, matching the global arrow hotkeys (±10, Shift ±5).
     const step = event.shiftKey ? 5 : 10;
-    const activeTime = seekPreviewTime ?? currentTime;
+    const activeTime = seekPreviewTime ?? clock.ref.current;
     let nextTime: number | null = null;
 
     switch (event.key) {
@@ -397,17 +408,6 @@ export function PlayerProgressBar({
     // No local preview — the parent's optimistic seek updates currentTime; a preview set here would pin the bar at the target.
     void Promise.resolve(onSeek(nextTime)).catch(() => undefined);
   };
-
-  // Unmount: cancel queued work only — a dangling capture belongs to the removed element.
-  useEffect(() => {
-    return () => {
-      if (hoverRafRef.current !== null) {
-        window.cancelAnimationFrame(hoverRafRef.current);
-        hoverRafRef.current = null;
-      }
-      pendingHoverXRef.current = null;
-    };
-  }, []);
 
   const canSeek = Number.isFinite(duration) && duration > 0;
   const displayTime = seekPreviewTime ?? currentTime;
@@ -485,7 +485,11 @@ export function PlayerProgressBar({
         <div
           ref={tooltipRef}
           className='absolute bottom-full mb-2 w-max max-w-[calc(100%-8px)] -translate-x-1/2 pointer-events-none z-10 flex flex-col items-center gap-1'
-          style={{ left: tooltipSize.rail > 0 ? tooltipLeft : '50%' }}
+          style={
+            tooltipSize.rail > 0
+              ? { left: 0, transform: `translateX(${tooltipLeft}px)` }
+              : { left: '50%' }
+          }
         >
           {tooltipSegment && (
             <span
@@ -494,14 +498,14 @@ export function PlayerProgressBar({
                 getSegmentStyle(tooltipSegment.type).badge,
               )}
             >
-              {`${getSkipLabel(tooltipSegment.type).replace(/^Skip\s+/, '')} · ${formatTime(tooltipSegment.start_time)}–${formatTime(tooltipSegment.end_time)}`}
+              {`${SKIP_SEGMENT_LABELS[tooltipSegment.type]} · ${formatTime(tooltipSegment.start_time)}–${formatTime(tooltipSegment.end_time)}`}
             </span>
           )}
           <div className={CHROME_VALUE_BUBBLE_CLASS}>{formatTime(tooltipTime)}</div>
         </div>
       )}
 
-      <div className='relative w-full h-2 group-hover/bar:h-[10px] group-focus-visible/bar:h-[10px] transition-[height] duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
+      <div className='relative w-full h-[10px] scale-y-80 group-hover/bar:scale-y-100 group-focus-visible/bar:scale-y-100 group-active/bar:scale-y-100 transition-transform duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
         {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
             className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
@@ -520,17 +524,21 @@ export function PlayerProgressBar({
 
         {hoverPct !== null && canSeek && (
           <div
-            className='absolute inset-y-0 w-px -translate-x-1/2 bg-white/60 pointer-events-none z-20'
-            style={{ left: `${hoverPct}%` }}
-          />
+            className='absolute inset-0 pointer-events-none z-20'
+            style={{ transform: `translateX(${hoverPct}%)` }}
+          >
+            <div className='absolute inset-y-0 left-0 w-px -translate-x-1/2 bg-white/60' />
+          </div>
         )}
 
         {/* Playhead nub sits above slices so position stays readable inside a segment band. */}
         {canSeek && (
           <div
-            className='absolute inset-y-0 w-[2px] -translate-x-1/2 bg-white pointer-events-none z-30'
-            style={{ left: `${progressPct}%` }}
-          />
+            className='absolute inset-0 pointer-events-none z-30'
+            style={{ transform: `translateX(${progressPct}%)` }}
+          >
+            <div className='absolute inset-y-0 left-0 w-[2px] -translate-x-1/2 bg-white' />
+          </div>
         )}
       </div>
     </div>

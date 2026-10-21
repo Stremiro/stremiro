@@ -21,6 +21,7 @@ const DEFAULT_ACCENT_TARGETS: AccentTargets = {
   actions: true,
   progress: true,
   artwork: true,
+  skip: true,
 };
 
 const DEFAULT_PROFILE: LocalProfile = {

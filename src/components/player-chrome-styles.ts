@@ -8,6 +8,9 @@ export const CHROME_ICON_BUTTON_CLASS =
 export const CHROME_PILL_CLASS =
   'flex min-h-12 shrink-0 items-center gap-0.5 rounded-full bg-zinc-950/75 p-1 ring-1 ring-white/[0.08] shadow-[0_8px_24px_-8px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl';
 
+export const CHROME_SKIP_BUTTON_CLASS =
+  'rounded-full border border-[rgb(var(--accent-skip-rgb)/0.45)] bg-zinc-950/60 text-white/90 shadow-[0_4px_16px_-4px_rgb(0_0_0/0.5),inset_0_1px_0_rgb(255_255_255/0.08)] backdrop-blur-md transition-colors duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] hover:border-[rgb(var(--accent-skip-rgb)/0.65)] hover:bg-zinc-950/70 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-skip)/60 motion-reduce:transition-none';
+
 /** Glass surface for controls-row popovers (speed, audio, subtitles); callers add width and padding. */
 export const CHROME_POPOVER_CLASS =
   'rounded-xl border-white/[0.08] bg-zinc-950/95 shadow-2xl shadow-black/60 backdrop-blur-xl data-[state=closed]:animate-none! motion-reduce:animate-none! motion-reduce:transition-none';

@@ -1,13 +1,13 @@
-import { addDays, startOfDay } from 'date-fns';
 import { useSyncExternalStore } from 'react';
+import { toLocalMidnight } from '@/lib/schedule-dates';
 
 // Single shared midnight-rollover clock; consumers subscribe rather than arming their own timers.
-let currentDay = startOfDay(new Date());
+let currentDay = toLocalMidnight(Temporal.Now.plainDateISO());
 const listeners = new Set<() => void>();
 let timer = 0;
 
 function updateDay() {
-  const next = startOfDay(new Date());
+  const next = toLocalMidnight(Temporal.Now.plainDateISO());
   if (next.getTime() !== currentDay.getTime()) {
     currentDay = next;
     listeners.forEach((listener) => listener());
@@ -20,7 +20,7 @@ function scheduleMidnight() {
       updateDay();
       scheduleMidnight();
     },
-    startOfDay(addDays(new Date(), 1)).getTime() - Date.now(),
+    toLocalMidnight(Temporal.Now.plainDateISO().add({ days: 1 })).getTime() - Date.now(),
   );
 }
 

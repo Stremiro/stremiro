@@ -14,7 +14,7 @@ import { useWindowScrollMargin } from '@/hooks/use-window-scroll-margin';
 
 const DEFAULT_GRID_GAP_PX = 16;
 const DEFAULT_FALLBACK_ITEM_WIDTH_PX = 160;
-const DEFAULT_OVERSCAN_ROWS = 4;
+const DEFAULT_OVERSCAN_ROWS = 2;
 const DEFAULT_VIRTUALIZATION_THRESHOLD = 24;
 const getRowKey = (index: number) => `row-${index}`;
 

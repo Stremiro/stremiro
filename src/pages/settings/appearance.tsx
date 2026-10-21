@@ -35,6 +35,11 @@ export const TINT_TARGETS: ReadonlyArray<{
     description: 'Accent buttons, chips, switches and text selection.',
   },
   {
+    field: 'skip',
+    label: 'Skip button',
+    description: 'Skip intro and recap pill in the player.',
+  },
+  {
     field: 'progress',
     label: 'Progress bars',
     description: 'Continue-watching and episode progress.',
@@ -150,6 +155,7 @@ export function AppearanceSettings() {
           className='grid min-w-0 items-start gap-6 disabled:opacity-50 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] sm:gap-8'
         >
           <AccentControls
+            idPrefix='setting-appearance'
             accentColor={draftAccentColor ?? profile.accentColor}
             committedColor={profile.accentColor}
             intensity={draftIntensity ?? profile.accentIntensity}

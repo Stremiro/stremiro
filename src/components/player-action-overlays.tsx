@@ -1,5 +1,6 @@
-import { FastForward } from 'lucide-react';
+import { ChevronsRight } from 'lucide-react';
 import { memo, useSyncExternalStore } from 'react';
+import { CHROME_ICON_STROKE, CHROME_SKIP_BUTTON_CLASS } from '@/components/player-chrome-styles';
 import { Button } from '@/components/ui/button';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { PlaybackClock } from '@/lib/player-clock';
@@ -37,7 +38,7 @@ function SkipSegmentProgress({
       className='pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-white/10'
     >
       <span
-        className='block h-full origin-left bg-white/70 transition-transform duration-300 ease-linear motion-reduce:transition-none'
+        className='block h-full origin-left bg-(--accent-skip) transition-transform duration-200 ease-linear motion-reduce:transition-none'
         style={{ transform: `scaleX(${pct / 100})` }}
       />
     </span>
@@ -66,15 +67,16 @@ export const PlayerActionOverlays = memo(function PlayerActionOverlays({
         aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
         title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
         className={cn(
-          'relative min-h-11 max-w-full overflow-hidden px-4 py-2.5 text-sm font-semibold rounded-xl',
-          'bg-zinc-950/80 hover:bg-zinc-900/90 text-white',
-          'border border-white/20 hover:border-white/40',
-          'shadow-2xl shadow-black/60',
-          'flex items-center gap-2 transition-colors duration-150',
-          'animate-in fade-in duration-150 motion-reduce:animate-none',
+          CHROME_SKIP_BUTTON_CLASS,
+          'relative flex min-h-11 max-w-full items-center gap-2 overflow-hidden px-4 py-2.5 text-[13px] font-semibold',
+          'animate-in fade-in zoom-in-95 slide-in-from-bottom-1 duration-200 motion-reduce:animate-none',
         )}
       >
-        <FastForward className='h-4 w-4 shrink-0' strokeWidth={2.5} />
+        <ChevronsRight
+          aria-hidden='true'
+          className='h-4 w-4 shrink-0 text-(--accent-skip)'
+          strokeWidth={CHROME_ICON_STROKE}
+        />
         <span className='truncate'>{skipAction.label}</span>
         {segmentStart !== undefined && segmentEnd !== undefined && segmentEnd > segmentStart && (
           <SkipSegmentProgress clock={clock} start={segmentStart} end={segmentEnd} />

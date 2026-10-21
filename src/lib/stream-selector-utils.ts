@@ -17,9 +17,10 @@ export const DEFAULT_FILTERS: StreamSelectorPreferences = {
 interface TechBadge {
   label: string;
   cls: string;
+  description?: string;
 }
 
-export interface StreamMatchBadge {
+interface StreamMatchBadge {
   kind: StreamMatchBadgeKind;
   label: string;
   /** Only the exact-episode badge carries the profile accent; weaker tiers stay neutral. */
@@ -27,6 +28,7 @@ export interface StreamMatchBadge {
 }
 
 const MATCH_BADGE_NEUTRAL_CLASS = 'border-white/[0.1] bg-white/[0.04] text-zinc-200';
+const AMBER_BADGE_CLASS = 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20';
 
 export const MATCH_BADGES: Record<StreamMatchBadgeKind, StreamMatchBadge> = {
   episode: { kind: 'episode', label: 'Exact episode', cls: 'accent-lattice-soft' },
@@ -116,16 +118,17 @@ export function buildStreamTechBadges(stream: AddonStream): TechBadge[] {
   if (hdrLabel) {
     techBadges.push({
       label: hdrLabel,
+      description: `${hdrLabel} source. This label does not indicate your display's HDR mode.`,
       cls:
-        hdrLabel === 'DV'
+        hdrLabel === 'Dolby Vision'
           ? 'bg-fuchsia-400/[0.12] text-fuchsia-100 border-fuchsia-300/20'
-          : 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',
+          : AMBER_BADGE_CLASS,
     });
   }
   if (stream.showPackBadge) {
     techBadges.push({
       label: 'Pack',
-      cls: 'bg-amber-400/[0.12] text-amber-100 border-amber-300/20',
+      cls: AMBER_BADGE_CLASS,
     });
   }
 

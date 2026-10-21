@@ -1,9 +1,8 @@
-import { type ClassValue, clsx } from 'clsx';
-import { twMerge } from 'tailwind-merge';
+import { type ClassNameValue, twMerge } from 'tailwind-merge';
 import type { AccentTargets } from '@/lib/api';
 
-export function cn(...inputs: ClassValue[]) {
-  return twMerge(clsx(inputs));
+export function cn(...inputs: ClassNameValue[]) {
+  return twMerge(inputs);
 }
 
 export function queryNeedsRetry(query: {
@@ -91,6 +90,7 @@ export function applyAccentVars(accent: string, targets: AccentTargets) {
     ['accent-act', targets.actions],
     ['accent-prog', targets.progress],
     ['accent-art', targets.artwork],
+    ['accent-skip', targets.skip],
   ];
   for (const [scope, enabled] of scopes) {
     const color = enabled ? accent : NEUTRAL_ACCENT;

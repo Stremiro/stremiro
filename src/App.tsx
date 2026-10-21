@@ -260,11 +260,10 @@ function RouteScrollManager() {
 
 const UPDATE_STARTUP_DELAY_MS = 3_000;
 const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
-const UPDATE_SCHEDULE_TICK_MS = 60_000;
 
 function AppUpdateManager() {
   const queryClient = useQueryClient();
-  const { isSupported, getUpdateState } = useAppUpdater();
+  const { isSupported, isInstalling, getUpdateState } = useAppUpdater();
   const { preferences: automaticUpdateChecks, isHydrating } = useAppUiPreferences(
     (preferences) => preferences.automaticUpdateChecks,
   );
@@ -274,10 +273,18 @@ function AppUpdateManager() {
   const announcedVersionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (import.meta.env.DEV || !isSupported || isHydrating || !automaticUpdateChecks) return;
+    if (
+      import.meta.env.DEV ||
+      !isSupported ||
+      isHydrating ||
+      !automaticUpdateChecks ||
+      isInstalling
+    )
+      return;
 
     let disposed = false;
     let running = false;
+    let dueTimer: number | undefined;
     if (startupReadyAtRef.current === null) {
       startupReadyAtRef.current = Date.now() + UPDATE_STARTUP_DELAY_MS;
     }
@@ -330,27 +337,42 @@ function AppUpdateManager() {
         .catch(() => undefined)
         .finally(() => {
           running = false;
+          if (!disposed) armDueTimer();
         });
+    };
+    // One wake per due check instead of a polling tick; deferred checks resume on visibility, focus, online or
+    // route change.
+    const armDueTimer = () => {
+      window.clearTimeout(dueTimer);
+      const { lastCheckedAt } = getUpdateState();
+      const dueAt = Math.max(
+        startupReadyAtRef.current!,
+        (lastCheckedAt ?? 0) + UPDATE_RECHECK_INTERVAL_MS,
+      );
+      dueTimer = window.setTimeout(() => void maybeCheck(), Math.max(0, dueAt - Date.now()));
     };
     document.addEventListener('visibilitychange', maybeCheck);
     window.addEventListener('focus', maybeCheck);
     window.addEventListener('online', maybeCheck);
+    armDueTimer();
     void maybeCheck();
-    const startupTimer = window.setTimeout(
-      () => void maybeCheck(),
-      Math.max(0, startupReadyAtRef.current - Date.now()),
-    );
-    const interval = window.setInterval(() => void maybeCheck(), UPDATE_SCHEDULE_TICK_MS);
 
     return () => {
       disposed = true;
-      window.clearTimeout(startupTimer);
-      window.clearInterval(interval);
+      window.clearTimeout(dueTimer);
       document.removeEventListener('visibilitychange', maybeCheck);
       window.removeEventListener('focus', maybeCheck);
       window.removeEventListener('online', maybeCheck);
     };
-  }, [isSupported, isHydrating, automaticUpdateChecks, pathname, queryClient, getUpdateState]);
+  }, [
+    isSupported,
+    isHydrating,
+    automaticUpdateChecks,
+    isInstalling,
+    pathname,
+    queryClient,
+    getUpdateState,
+  ]);
 
   return null;
 }

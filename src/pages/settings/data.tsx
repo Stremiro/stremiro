@@ -33,6 +33,7 @@ import {
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
+  settingsControlId,
 } from './chrome';
 
 const CLEAR_CONFIRM_TIMEOUT_MS = 8_000;
@@ -192,6 +193,7 @@ function BackupButton({
 }) {
   return (
     <Button
+      id={settingsControlId(children)}
       size='sm'
       variant='outline'
       onClick={onClick}
@@ -328,6 +330,7 @@ function DataManager() {
           return (
             <div
               key={cat.key}
+              id={settingsControlId(cat.label)}
               data-clear-row={cat.key}
               className='flex flex-col items-start justify-between gap-3 py-4 first:pt-0 last:pb-0 sm:flex-row sm:items-center'
             >

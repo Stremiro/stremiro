@@ -20,7 +20,7 @@ export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'pr-6 pl-[84px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
 
 const SCROLL_BUTTON_CLASS_NAME =
-  'h-9 w-9 rounded-md bg-transparent border border-white/[0.08] text-zinc-400 hover:bg-white/[0.08] hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-40';
+  'h-9 w-9 rounded-md bg-transparent border border-white/[0.08] text-zinc-400 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-40 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
   'flex overflow-x-auto gap-4 px-1 pt-1 pb-8 scrollbar-hide snap-x snap-proximity';
@@ -73,6 +73,7 @@ export function HorizontalMediaRail<T>({
   'use no memo';
   const hasNotice = notice !== undefined;
   const titleId = useId();
+  const scrollerId = `${titleId}-scroller`;
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const slotRef = useRef<HTMLDivElement>(null);
   const lastScrollLeftRef = useRef(0);
@@ -228,9 +229,7 @@ export function HorizontalMediaRail<T>({
       className={cn('py-4 relative group/section', sectionClassName)}
     >
       <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
-        <div
-          className={cn('flex items-center justify-between gap-3 mb-3', !hasNotice && 'min-h-9')}
-        >
+        <div className='flex min-h-9 items-center justify-between gap-3 mb-3'>
           <h2
             id={titleId}
             className='min-w-0 text-[17px] font-semibold tracking-[-0.02em] text-white'
@@ -239,11 +238,13 @@ export function HorizontalMediaRail<T>({
           </h2>
 
           {!hasNotice && !isLoading && scrollState.hasOverflow && (
-            <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150'>
+            <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150 motion-reduce:transition-none'>
               <Button
                 aria-label='Scroll rail left'
+                aria-describedby={titleId}
+                aria-controls={scrollerId}
                 size='icon'
-                variant='ghost'
+                variant={null}
                 className={SCROLL_BUTTON_CLASS_NAME}
                 // Keep keyboard focus when reaching an edge.
                 aria-disabled={!scrollState.canScrollLeft || undefined}
@@ -255,8 +256,10 @@ export function HorizontalMediaRail<T>({
               </Button>
               <Button
                 aria-label='Scroll rail right'
+                aria-describedby={titleId}
+                aria-controls={scrollerId}
                 size='icon'
-                variant='ghost'
+                variant={null}
                 className={SCROLL_BUTTON_CLASS_NAME}
                 aria-disabled={!scrollState.canScrollRight || undefined}
                 onClick={() => {
@@ -292,6 +295,7 @@ export function HorizontalMediaRail<T>({
           {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- Scroll regions handle their own navigation keys. */}
           <div
             ref={bindScrollContainer}
+            id={scrollerId}
             data-media-scroller
             role='region'
             aria-labelledby={titleId}
@@ -302,6 +306,7 @@ export function HorizontalMediaRail<T>({
               const slot = event.target.closest<HTMLElement>('[data-media-rail-index]');
               if (!slot) return;
               if (shouldVirtualize) setFocusedIndex(Number(slot.dataset.mediaRailIndex));
+              if (!event.target.matches(':focus-visible')) return;
               const container = event.currentTarget;
               const bounds = container.getBoundingClientRect();
               const card = slot.getBoundingClientRect();
@@ -318,6 +323,7 @@ export function HorizontalMediaRail<T>({
             onKeyDown={(event) => {
               if (
                 event.defaultPrevented ||
+                event.nativeEvent.isComposing ||
                 event.altKey ||
                 event.ctrlKey ||
                 event.metaKey ||

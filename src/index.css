@@ -56,6 +56,9 @@
     --accent-act: #ffffff;
     --accent-act-rgb: 255 255 255;
     --on-accent-act: #000000;
+    --accent-skip: #ffffff;
+    --accent-skip-rgb: 255 255 255;
+    --on-accent-skip: #000000;
     --accent-prog: #ffffff;
     --accent-prog-rgb: 255 255 255;
     --accent-art: #ffffff;
@@ -87,17 +90,11 @@
     border-color: hsl(var(--border));
   }
 
+  /* Native-app feel: no sweep-highlight or ghost-drag outside real inputs. Descendants inherit `none`. */
   body {
     background-color: transparent;
     color: hsl(var(--foreground));
     -webkit-font-smoothing: antialiased;
-  }
-
-  /* Native-app feel: no sweep-highlight or ghost-drag outside real inputs. */
-  *:not(input):not(textarea):not(select):not([contenteditable='true']):not(
-      [data-selectable='true'],
-      [data-selectable='true'] *
-    ) {
     -webkit-user-select: none;
     user-select: none;
   }
@@ -137,6 +134,55 @@
     background-color: #3f3f46;
   }
 
+  /* Opening a title: the clicked artwork zooms through in place and the details hero settles in. */
+  ::view-transition-old(details-source) {
+    animation: vt-zoom-out 200ms cubic-bezier(0.4, 0, 1, 1) both;
+  }
+
+  ::view-transition-new(details-hero) {
+    height: 100%;
+    object-fit: cover;
+    animation: vt-zoom-in 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation-duration: 180ms;
+  }
+
+  /* The root crossfade already reveals the page; a zero duration (not a name change, which would
+     restart it on unpin) finishes the route fade instead of stacking a second one. */
+  :root[data-vt-pin] .page-enter {
+    animation-duration: 0s;
+  }
+
+  /* Transition snapshots paint above every layer; pinning the shell chrome keeps the effect under it. */
+  :root[data-vt-pin] .vt-pin-sidebar {
+    view-transition-name: app-sidebar;
+  }
+
+  :root[data-vt-pin] .vt-pin-titlebar {
+    view-transition-name: app-titlebar;
+  }
+
+  ::view-transition-new(app-sidebar),
+  ::view-transition-new(app-titlebar) {
+    animation: none;
+  }
+
+  @keyframes vt-zoom-out {
+    to {
+      opacity: 0;
+      transform: scale(1.06);
+    }
+  }
+
+  @keyframes vt-zoom-in {
+    from {
+      opacity: 0;
+      transform: scale(1.04);
+    }
+  }
   /* Also cover dialogs, overlays, and loaders without local motion guards. */
   @media (prefers-reduced-motion: reduce) {
     *,
@@ -287,40 +333,6 @@
   .animate-action-pill {
     animation: action-pill-in 280ms cubic-bezier(0.22, 1, 0.36, 1);
   }
-
-  /* Transform keeps oversized dot layers compositor-side; whole 8px tile shifts loop seamlessly. */
-  @keyframes ambient-dots-drift {
-    to {
-      transform: translate(8px, 8px);
-    }
-  }
-
-  @keyframes ambient-dots-march {
-    to {
-      transform: translateX(24px);
-    }
-  }
-
-  @keyframes ambient-dots-pulse {
-    0%,
-    100% {
-      opacity: 0.55;
-    }
-    50% {
-      opacity: 1;
-    }
-  }
-
-  html[data-ambient-active] .ambient-dots-tl {
-    animation: ambient-dots-drift 1.6s linear infinite;
-  }
-
-  html[data-ambient-active] .ambient-dots-br {
-    animation:
-      ambient-dots-march 1.2s linear infinite,
-      ambient-dots-pulse 2.4s ease-in-out infinite;
-  }
-
   @media (prefers-reduced-motion: reduce) {
     .nav-switch-item,
     .nav-sliding-pill,
@@ -329,9 +341,7 @@
     }
 
     .page-enter,
-    .animate-action-pill,
-    html[data-ambient-active] .ambient-dots-tl,
-    html[data-ambient-active] .ambient-dots-br {
+    .animate-action-pill {
       animation: none;
     }
   }
@@ -367,6 +377,111 @@
       background-color 180ms ease,
       border-color 180ms ease,
       color 180ms ease;
+  }
+
+  /* Details hero: the backdrop drifts and a vignette settles as content scrolls over it. */
+  @keyframes details-hero-drift {
+    to {
+      transform: translate3d(0, 8%, 0) scale(1.05);
+    }
+  }
+
+  @keyframes details-hero-vignette {
+    to {
+      opacity: 1;
+    }
+  }
+
+  .details-hero-vignette {
+    background: radial-gradient(120% 95% at 60% 25%, transparent 35%, hsl(var(--background)) 100%);
+    opacity: 0;
+  }
+
+  @supports (animation-timeline: scroll()) {
+    .details-hero-drift,
+    .details-hero-vignette {
+      animation: details-hero-drift linear both;
+      animation-timeline: scroll(root);
+      animation-range: 0 75vh;
+    }
+
+    .details-hero-vignette {
+      animation-name: details-hero-vignette;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .details-hero-drift {
+      animation: none;
+    }
+  }
+
+  .hero-scroll-dim {
+    opacity: 0;
+  }
+
+  .hero-scroll-content,
+  .hero-scroll-indicators {
+    opacity: 1;
+  }
+
+  @supports (animation-timeline: scroll()) {
+    @keyframes hero-scroll-dim {
+      from {
+        opacity: 0;
+      }
+      to {
+        opacity: 0.9;
+      }
+    }
+
+    @keyframes hero-scroll-content {
+      from {
+        opacity: 1;
+      }
+      to {
+        opacity: 0.1;
+      }
+    }
+
+    @keyframes hero-scroll-indicators {
+      from {
+        opacity: 1;
+      }
+      to {
+        opacity: 0;
+      }
+    }
+
+    @keyframes hero-scroll-indicators-pointer {
+      from {
+        pointer-events: auto;
+      }
+      to {
+        pointer-events: none;
+      }
+    }
+
+    .hero-scroll-dim,
+    .hero-scroll-content {
+      animation: hero-scroll-dim linear both;
+      animation-duration: auto;
+      animation-timeline: scroll(root);
+      animation-range: 0px 540px;
+    }
+
+    .hero-scroll-content {
+      animation-name: hero-scroll-content;
+    }
+
+    .hero-scroll-indicators {
+      animation:
+        hero-scroll-indicators linear both,
+        hero-scroll-indicators-pointer steps(1, end) both;
+      animation-duration: auto;
+      animation-timeline: scroll(root);
+      animation-range: 0px 300px;
+    }
   }
 
   /* Film grain that dithers large gradients so they never band. */

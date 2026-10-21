@@ -12,6 +12,7 @@ import {
 import {
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
   lazy,
   Suspense,
   useCallback,
@@ -27,27 +28,32 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
-import { FIXED_PLAYER_SHORTCUTS, PLAYER_ACTIONS } from '@/lib/player-keybindings';
-import { BROWSE_SHORTCUTS, CALENDAR_SHORTCUTS } from '@/lib/shortcuts';
-import { cn } from '@/lib/utils';
+import { PLAYER_ACTIONS } from '@/lib/player-keybindings';
+import { cn, scrollBehavior } from '@/lib/utils';
 import { AppearanceSettings, TINT_TARGETS } from './appearance';
-import { SettingsBody, SettingsGroup } from './chrome';
+import { settingsControlId, SettingsBody, SettingsGroup } from './chrome';
 import { DataSection } from './data';
 import { GeneralSettings, START_PAGES } from './general';
 import { PlaybackSettings } from './playback';
-import { ShortcutsSection } from './shortcuts';
+import { FIXED_SHORTCUT_SECTIONS, ShortcutsSection } from './shortcuts';
 import { UpdatesSection } from './updates';
 
 const StreamingSources = lazy(() =>
   import('./streaming').then((module) => ({ default: module.StreamingSources })),
 );
 
+interface SearchControl {
+  label: string;
+  keywords?: string;
+  target?: string;
+}
+
 interface NavItem {
   id: string;
   label: string;
   icon: LucideIcon;
   description: string;
-  controls: readonly string[];
+  controls: readonly SearchControl[];
   component: ComponentType;
 }
 
@@ -59,16 +65,20 @@ const NAV_ITEMS = [
     icon: SlidersHorizontal,
     description: 'Start page, launch at login and tray behavior.',
     controls: [
-      'Start page',
-      ...START_PAGES.map((page) => page.label),
-      'Launch at login',
-      'Start minimized',
-      'Close to tray',
-      'Minimize to tray',
-      'mouse back',
-      'mouse forward',
-      'titlebar',
-      'hide to tray',
+      {
+        label: 'Start page',
+        keywords: `Where Stremiro opens. ${START_PAGES.map((page) => page.label).join(' ')}`,
+      },
+      { label: 'Launch at login', keywords: 'Open Stremiro when you sign in. Startup autostart' },
+      {
+        label: 'Start minimized',
+        keywords: 'Start in the system tray. Needs Launch at login or a tray option.',
+      },
+      { label: 'Close to tray', keywords: 'Keep running in the tray when the window closes.' },
+      {
+        label: 'Minimize to tray',
+        keywords: 'Hide to the tray instead of the taskbar. Hide to tray now',
+      },
     ],
   },
   {
@@ -78,12 +88,16 @@ const NAV_ITEMS = [
     icon: Zap,
     description: 'Install, enable and reorder addons.',
     controls: [
-      'Addon manifest URL',
-      'Add addon',
-      'Copy addon link',
-      'Remove',
-      'Cinemeta',
-      'OpenSubtitles',
+      {
+        label: 'Addon manifest URL',
+        keywords: 'Add addon Paste a Stremio manifest.json or stremio:// URL to add an addon.',
+      },
+      {
+        label: 'Manage addons',
+        keywords:
+          'Enable disable reorder remove copy addon link Cinemeta OpenSubtitles pinned defaults drag stream priority',
+        target: 'setting-addon-list',
+      },
     ],
   },
   {
@@ -91,18 +105,35 @@ const NAV_ITEMS = [
     component: PlaybackSettings,
     label: 'Playback',
     icon: Settings2,
-    description: 'Languages, spoilers, trailers, auto-play and auto-skip.',
+    description: 'Languages, audio, spoilers, auto-play and auto-skip.',
     controls: [
-      'Audio',
-      'Subtitles',
-      'Auto',
-      'Off',
-      'Spoiler protection',
-      'Trailer previews',
-      'Auto-play next episode',
-      'Next episode countdown',
-      'Hide player controls after',
-      'Auto-skip intros & recaps',
+      { label: 'Audio', keywords: 'Languages Auto preferred language' },
+      { label: 'Subtitles', keywords: 'Languages Auto Off preferred language captions' },
+      {
+        label: 'Audio sync',
+        keywords:
+          'Delay offset seconds saved for all videos. Positive plays audio later; negative plays it earlier. Set to 0 to reset.',
+      },
+      {
+        label: 'Night mode',
+        keywords:
+          'Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound. volume normalization loud jumps listening',
+      },
+      {
+        label: 'Spoiler protection',
+        keywords: 'Blur unwatched episode thumbnails and descriptions.',
+      },
+      { label: 'Trailer previews', keywords: 'Play a muted trailer when hovering a title card.' },
+      {
+        label: 'Auto-play next episode',
+        keywords: 'Count down and start the next episode automatically.',
+      },
+      { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30' },
+      { label: 'Hide player controls after', keywords: 'Seconds 2 3 5 8 delay' },
+      {
+        label: 'Auto-skip intros & recaps',
+        keywords: 'Skip detected intros and recaps. Outros stay manual.',
+      },
     ],
   },
   {
@@ -112,17 +143,16 @@ const NAV_ITEMS = [
     icon: Palette,
     description: 'Accent color, glow and tint targets.',
     controls: [
-      'Accent',
-      'Reset',
-      ...ACCENT_PRESET_LABELS,
-      'Soft',
-      'Vivid',
-      'Custom accent color hex',
-      'Pick a custom color',
-      'Glow',
-      'Background glow intensity',
-      'Tint targets',
-      ...TINT_TARGETS.map((target) => target.label),
+      {
+        label: 'Accent',
+        keywords: `Reset Soft Vivid Custom accent color hex Pick a custom color ${ACCENT_PRESET_LABELS.join(' ')}`,
+        target: 'setting-appearance-accent',
+      },
+      { label: 'Glow', keywords: 'Background glow intensity', target: 'setting-appearance-glow' },
+      ...TINT_TARGETS.map((target) => ({
+        label: target.label,
+        keywords: `Tint targets Off areas stay neutral ${target.description}`,
+      })),
     ],
   },
   {
@@ -132,13 +162,24 @@ const NAV_ITEMS = [
     icon: Keyboard,
     description: 'Player, browse and Calendar keys.',
     controls: [
-      'Customize keybindings',
-      'Rebind key',
-      'Reset all',
-      ...PLAYER_ACTIONS.map((action) => action.label),
-      ...FIXED_PLAYER_SHORTCUTS.map((row) => row.label),
-      ...BROWSE_SHORTCUTS.map((row) => row.label),
-      ...CALENDAR_SHORTCUTS.map((row) => row.label),
+      {
+        label: 'Player shortcuts',
+        keywords:
+          'Customize keybindings Rebind key Reset all Click a key to rebind it, up to 2 per action. Esc cancels, Backspace removes.',
+        target: 'setting-player-shortcuts',
+      },
+      ...PLAYER_ACTIONS.map((action) => ({
+        label: action.label,
+        keywords: `Player shortcuts ${action.group}`,
+        target: `setting-shortcut-${action.id}`,
+      })),
+      ...FIXED_SHORTCUT_SECTIONS.flatMap(([group, rows]) =>
+        rows.map((row, index) => ({
+          label: row.label,
+          keywords: `${group} fixed shortcuts ${row.keys.join(' ')}`,
+          target: `setting-fixed-${group}-${index}`,
+        })),
+      ),
     ],
   },
   {
@@ -148,12 +189,20 @@ const NAV_ITEMS = [
     icon: RefreshCw,
     description: 'Check for and install app updates.',
     controls: [
-      'Check for updates',
-      'Check for updates automatically',
-      'Last checked',
-      'Check again',
-      'Update & restart',
-      'View on GitHub',
+      {
+        label: 'Check for updates automatically',
+        keywords: 'After launch and every six hours. You choose when to install.',
+      },
+      {
+        label: 'Check for updates',
+        keywords: 'Check again Update & restart install Last checked',
+        target: 'setting-update-actions',
+      },
+      {
+        label: 'Changelog',
+        keywords: "Release notes What's new Installed New View on GitHub",
+        target: 'setting-changelog',
+      },
     ],
   },
   {
@@ -163,20 +212,53 @@ const NAV_ITEMS = [
     icon: Database,
     description: 'Backups, storage and clearing local records.',
     controls: [
-      'Backup & restore',
-      'Export',
-      'Import',
-      'Clear local records',
-      'Watch history',
-      'Library',
-      'Custom lists',
-      'Watch statuses',
-      'Clear',
-      'Cancel',
-      'Clear permanently',
+      {
+        label: 'Export',
+        keywords:
+          'Backup & restore Export your data to a JSON file. Backups can contain addon keys, so keep them private.',
+      },
+      {
+        label: 'Import',
+        keywords:
+          'Backup & restore merge Records addons and per-title language picks merge with your existing data. Preferences, profile and appearance are replaced by the backup.',
+      },
+      {
+        label: 'Watch history',
+        keywords:
+          'Clear local records permanently Cancel Watched titles, resume progress and per-title track and source picks.',
+      },
+      {
+        label: 'Library',
+        keywords:
+          'Clear local records permanently Cancel Saved movies and shows, with their watch statuses.',
+      },
+      {
+        label: 'Custom lists',
+        keywords: 'Clear local records permanently Cancel Every custom list and its contents.',
+      },
+      {
+        label: 'Watch statuses',
+        keywords:
+          'Clear local records permanently Cancel Watching, Watched, Plan to Watch and Dropped labels.',
+      },
     ],
   },
 ] as const satisfies readonly NavItem[];
+
+const SEARCH_ITEMS = NAV_ITEMS.flatMap((section) => [
+  {
+    section,
+    label: section.label,
+    keywords: section.description,
+    target: undefined as string | undefined,
+  },
+  ...section.controls.map((control: SearchControl) => ({
+    section,
+    label: control.label,
+    keywords: control.keywords ?? '',
+    target: control.target ?? settingsControlId(control.label),
+  })),
+]);
 
 type SectionId = (typeof NAV_ITEMS)[number]['id'];
 const DEFAULT_SECTION: SectionId = NAV_ITEMS[0].id;
@@ -188,6 +270,53 @@ function resolveSection(value: string | null) {
   return NAV_ITEMS.find((item) => item.id === id) ?? NAV_ITEMS[0];
 }
 
+interface SearchTarget {
+  sectionId: SectionId;
+  id: string;
+}
+
+const SEARCH_HIGHLIGHT_MS = 2400;
+
+function SettingsSectionContent({
+  children,
+  searchTarget,
+}: {
+  children: ReactNode;
+  searchTarget?: SearchTarget;
+}) {
+  const contentRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!searchTarget) return;
+    const target = document.getElementById(searchTarget.id);
+    if (!target || !contentRef.current?.contains(target)) {
+      contentRef.current?.focus({ preventScroll: true });
+      return;
+    }
+    const addedTabIndex = target.tabIndex < 0 && !target.hasAttribute('tabindex');
+    if (addedTabIndex) target.tabIndex = -1;
+    target.dataset.settingHighlighted = '';
+    target.focus({ preventScroll: true });
+    if (document.activeElement !== target) contentRef.current.focus({ preventScroll: true });
+    target.scrollIntoView({ block: 'center', behavior: scrollBehavior() });
+    const clearHighlight = () => delete target.dataset.settingHighlighted;
+    const timer = window.setTimeout(clearHighlight, SEARCH_HIGHLIGHT_MS);
+    return () => {
+      window.clearTimeout(timer);
+      clearHighlight();
+      if (addedTabIndex) target.removeAttribute('tabindex');
+    };
+  }, [searchTarget]);
+  return (
+    <div
+      ref={contentRef}
+      tabIndex={-1}
+      className='outline-none [&_[data-setting-highlighted]]:rounded-lg [&_[data-setting-highlighted]]:bg-(--accent-nav)/10 [&_[data-setting-highlighted]]:outline-2 [&_[data-setting-highlighted]]:outline-offset-4 [&_[data-setting-highlighted]]:outline-(--accent-nav)/60'
+    >
+      {children}
+    </div>
+  );
+}
+
 export function Settings() {
   const [searchParams, setSearchParams] = useSearchParams();
   const { currentVersion, isUpdateAvailable } = useAppUpdater({ includeCurrentVersion: true });
@@ -197,16 +326,22 @@ export function Settings() {
   const shownSection = useDeferredValue(activeSection);
   const ActiveSection = shownSection.component;
   const [query, setQuery] = useState('');
+  const [searchTarget, setSearchTarget] = useState<SearchTarget | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const sectionRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
   const navButtons = useRef(new Map<SectionId, HTMLButtonElement>());
   const indicator = useSlidingIndicator(active, navRef, navButtons);
-  const searchWords = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
-  const matches = NAV_ITEMS.filter((item) => {
-    const searchText = `${item.label} ${item.description} ${item.controls.join(' ')}`.toLowerCase();
-    return searchWords.every((word) => searchText.includes(word));
-  });
+  const searchText = query.trim().toLowerCase();
+  const searchWords = searchText.split(/\s+/).filter(Boolean);
+  const matches = SEARCH_ITEMS.filter((item) => {
+    const text = `${item.section.label} ${item.label} ${item.keywords}`.toLowerCase();
+    return searchWords.every((word) => text.includes(word));
+  }).toSorted(
+    (a, b) =>
+      Number(b.label.toLowerCase().includes(searchText)) -
+      Number(a.label.toLowerCase().includes(searchText)),
+  );
   useDocumentTitle('Settings');
 
   // Ctrl/Cmd+F finds a setting instead of opening the WebView find bar.
@@ -232,6 +367,7 @@ export function Settings() {
   const handleSectionChange = useCallback(
     (sectionId: SectionId) => {
       setQuery('');
+      setSearchTarget(null);
       // Same-path replaces are skipped by the route scroll manager — land at top.
       if (window.scrollY > 0) window.scrollTo(0, 0);
       setSearchParams(
@@ -261,9 +397,10 @@ export function Settings() {
     if (next) navButtons.current.get(next.id)?.focus();
   };
 
-  const openSearchResult = (sectionId: SectionId) => {
-    handleSectionChange(sectionId);
-    window.requestAnimationFrame(() => sectionRef.current?.focus({ preventScroll: true }));
+  const openSearchResult = (result: (typeof SEARCH_ITEMS)[number]) => {
+    handleSectionChange(result.section.id);
+    if (result.target) setSearchTarget({ sectionId: result.section.id, id: result.target });
+    else window.requestAnimationFrame(() => sectionRef.current?.focus({ preventScroll: true }));
   };
 
   return (
@@ -298,7 +435,7 @@ export function Settings() {
               inputRef={searchInputRef}
               onSubmit={() => {
                 const [first] = matches;
-                if (searchWords.length && first) openSearchResult(first.id);
+                if (searchWords.length && first) openSearchResult(first);
               }}
               placeholder='Find a setting…'
               aria-label='Search settings'
@@ -391,50 +528,41 @@ export function Settings() {
             {searchWords.length ? (
               <div className='space-y-3'>
                 <output className='block text-[12px] text-zinc-500'>
-                  {matches.length} {matches.length === 1 ? 'section' : 'sections'} found
+                  {matches.length} {matches.length === 1 ? 'setting' : 'settings'} found
                   {matches.length > 0 ? ' · Enter opens the first' : ''}
                 </output>
-                {matches.map((item) => {
-                  const matchedControls = item.controls
-                    .filter((control) =>
-                      searchWords.some((word) => control.toLowerCase().includes(word)),
-                    )
-                    .slice(0, 3);
-                  return (
-                    <SettingsGroup key={item.id} className='focus-within:border-white/[0.14]'>
-                      <button
-                        type='button'
-                        onClick={() => openSearchResult(item.id)}
-                        className='group flex w-full items-center gap-3.5 rounded-xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
-                      >
-                        <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]'>
-                          <item.icon
-                            aria-hidden='true'
-                            className='h-4 w-4 text-(--accent-nav)'
-                            strokeWidth={1.75}
-                          />
-                        </span>
-                        <span className='min-w-0 flex-1'>
-                          <span className='block text-[14px] font-medium text-zinc-100'>
-                            {item.label}
-                          </span>
-                          <span className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
-                            {item.description}
-                          </span>
-                          {matchedControls.length > 0 && (
-                            <span className='mt-1.5 block text-xs leading-relaxed text-zinc-400'>
-                              {matchedControls.join(' · ')}
-                            </span>
-                          )}
-                        </span>
-                        <ChevronRight
+                {matches.map((item) => (
+                  <SettingsGroup
+                    key={`${item.section.id}-${item.target ?? 'section'}`}
+                    className='focus-within:border-white/[0.14]'
+                  >
+                    <button
+                      type='button'
+                      onClick={() => openSearchResult(item)}
+                      className='group flex w-full items-center gap-3.5 rounded-xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+                    >
+                      <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]'>
+                        <item.section.icon
                           aria-hidden='true'
-                          className='h-3.5 w-3.5 shrink-0 text-zinc-500 group-hover:text-zinc-300'
+                          className='h-4 w-4 text-(--accent-nav)'
+                          strokeWidth={1.75}
                         />
-                      </button>
-                    </SettingsGroup>
-                  );
-                })}
+                      </span>
+                      <span className='min-w-0 flex-1'>
+                        <span className='block text-[14px] font-medium text-zinc-100'>
+                          {item.label}
+                        </span>
+                        <span className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
+                          {item.section.label} · {item.section.description}
+                        </span>
+                      </span>
+                      <ChevronRight
+                        aria-hidden='true'
+                        className='h-3.5 w-3.5 shrink-0 text-zinc-500 group-hover:text-zinc-300'
+                      />
+                    </button>
+                  </SettingsGroup>
+                ))}
                 {matches.length === 0 && (
                   <SettingsGroup>
                     <SettingsBody className='py-8 text-center'>
@@ -466,7 +594,14 @@ export function Settings() {
                   />
                 }
               >
-                <ActiveSection key={shownSection.id} />
+                <SettingsSectionContent
+                  key={shownSection.id}
+                  searchTarget={
+                    searchTarget?.sectionId === shownSection.id ? searchTarget : undefined
+                  }
+                >
+                  <ActiveSection />
+                </SettingsSectionContent>
               </Suspense>
             )}
           </div>

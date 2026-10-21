@@ -19,7 +19,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
+import { CHROME_ICON_STROKE, CHROME_SKIP_BUTTON_CLASS } from '@/components/player-chrome-styles';
 import {
   MINI_ICON_BUTTON_CLASS,
   PlayerMuteButton,
@@ -124,6 +124,12 @@ function fitRectToAspect(rect: MiniVideoRect, aspect: number): MiniVideoRect {
     width,
     height,
   };
+}
+
+function cancelFrame(frameRef: { current: number | null }) {
+  if (frameRef.current === null) return;
+  window.cancelAnimationFrame(frameRef.current);
+  frameRef.current = null;
 }
 
 // Shared ease for snap glides and the dock FLIP — fast start, soft landing.
@@ -328,7 +334,7 @@ interface MiniPlayerProps {
   skipAction?: { label: string; onSkip: () => void } | null;
   /** Rendered one extra beat after expand so the chrome dissolves out — inert while it plays. */
   exiting?: boolean;
-  initialPosition?: MiniPlayerPosition | null;
+  getInitialPosition: () => MiniPlayerPosition | null;
   /** Expanded surface rect at dock time — the frame FLIPs from it into the docked corner. */
   dockOrigin?: MiniVideoRect | null;
   /** True only on the expanded→mini transition: keyboard minimize orphans focus on unmounted chrome, so the fresh dock claims it. */
@@ -368,7 +374,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   endOfMedia,
   skipAction,
   exiting,
-  initialPosition,
+  getInitialPosition,
   dockOrigin,
   claimFocusOnMount,
   onVideoRectChange,
@@ -397,7 +403,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const [hasFocus, setHasFocus] = useState(false);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
   const [renderPosition] = useState(() =>
-    clampMiniPosition(initialPosition ?? defaultMiniPosition(metrics), metrics),
+    clampMiniPosition(getInitialPosition() ?? defaultMiniPosition(metrics), metrics),
   );
   const positionRef = useRef<MiniPlayerPosition>(renderPosition);
   const dragStateRef = useRef<{
@@ -441,7 +447,6 @@ export const MiniPlayer = memo(function MiniPlayer({
   // The reported hole is the video's content box (frame minus bezel); the painted border covers the rim and square corners.
   const reportVideoRect = useCallback(() => {
     const position = positionRef.current;
-    if (!position) return;
     return onVideoRectChange({
       x: position.x + MINI_BEZEL_PX,
       y: position.y + MINI_BEZEL_PX,
@@ -467,10 +472,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   const cancelSnap = useCallback(() => {
     motionGenerationRef.current += 1;
     clearTimer(settleTimerRef);
-    if (snapFrameRef.current !== null) {
-      window.cancelAnimationFrame(snapFrameRef.current);
-      snapFrameRef.current = null;
-    }
+    cancelFrame(snapFrameRef);
   }, []);
 
   const applyPosition = useCallback(
@@ -493,10 +495,7 @@ export const MiniPlayer = memo(function MiniPlayer({
         generation === motionGenerationRef.current;
       const attempt = async (retryDelay: number) => {
         if (!isCurrent()) return;
-        if (reportFrameRef.current !== null) {
-          window.cancelAnimationFrame(reportFrameRef.current);
-          reportFrameRef.current = null;
-        }
+        cancelFrame(reportFrameRef);
         const holeReady = await Promise.resolve(rectOpsRef.current.reportVideoRect()).catch(
           () => false,
         );
@@ -565,7 +564,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     (target: MiniPlayerPosition) => {
       cancelSnap();
       const start = positionRef.current;
-      if (!start) return;
       if (prefersReducedMotion()) {
         const landed = applyPosition(target);
         reportVideoRect();
@@ -587,7 +585,7 @@ export const MiniPlayer = memo(function MiniPlayer({
         } else {
           snapFrameRef.current = null;
           endMotion();
-          if (positionRef.current) onPositionChange(positionRef.current);
+          onPositionChange(positionRef.current);
         }
       };
       snapFrameRef.current = window.requestAnimationFrame(step);
@@ -605,9 +603,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   // The dock flight owns geometry until landing.
   useEffect(() => {
     if (isDocking) return;
-    if (positionRef.current) {
-      onPositionChange(applyPosition(positionRef.current));
-    }
+    onPositionChange(applyPosition(positionRef.current));
     reportVideoRect();
   }, [applyPosition, reportVideoRect, isDocking, onPositionChange]);
 
@@ -618,7 +614,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     const generation = ++motionGenerationRef.current;
     const frame = frameRef.current;
     const target = positionRef.current;
-    if (!frame || !target) {
+    if (!frame) {
       setIsDocking(false);
       return;
     }
@@ -679,10 +675,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     const handleResize = () => {
       // Stop old-geometry frames before the new metrics clamp/report.
       cancelSnap();
-      if (reportFrameRef.current !== null) {
-        window.cancelAnimationFrame(reportFrameRef.current);
-        reportFrameRef.current = null;
-      }
+      cancelFrame(reportFrameRef);
       if (!dragStateRef.current) setIsMoving(false);
       setSnapTargetIndex(null);
       setIsDocking(false);
@@ -696,10 +689,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   // Unmount-only teardown — a rebuilt `onVideoRectChange` mid-life would kill an in-flight snap.
   useEffect(() => {
     return () => {
-      if (reportFrameRef.current !== null) {
-        window.cancelAnimationFrame(reportFrameRef.current);
-        reportFrameRef.current = null;
-      }
+      cancelFrame(reportFrameRef);
       cancelSnap();
       clearTimer(flashTimerRef);
       rectOpsRef.current.onVideoRectChange(null);
@@ -713,7 +703,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     if (target.closest('button, a, input, [role="slider"]')) return;
 
     const position = positionRef.current;
-    if (!position || !frameRef.current) return;
+    if (!frameRef.current) return;
 
     cancelSnap();
     frameRef.current.setPointerCapture(event.pointerId);
@@ -747,10 +737,8 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
   const snapToNextAnchor = () => {
-    const position = positionRef.current;
-    if (!position) return;
     // The cycle advances even from a free-floating position outside the drag magnet's radius.
-    const nearest = findSnapAnchorIndex(position, Infinity);
+    const nearest = findSnapAnchorIndex(positionRef.current, Infinity);
     if (nearest === null) return;
     setIsMoving(true);
     animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
@@ -766,9 +754,9 @@ export const MiniPlayer = memo(function MiniPlayer({
 
     drag.moved = true;
     setIsMoving(true);
-    applyPosition({ x: drag.originX + deltaX, y: drag.originY + deltaY });
-    const live = positionRef.current;
-    setSnapTargetIndex(live ? findSnapAnchorIndex(live) : null);
+    setSnapTargetIndex(
+      findSnapAnchorIndex(applyPosition({ x: drag.originX + deltaX, y: drag.originY + deltaY })),
+    );
     scheduleVideoRectReport();
   };
 
@@ -791,32 +779,28 @@ export const MiniPlayer = memo(function MiniPlayer({
       reportVideoRect();
 
       const position = positionRef.current;
-      if (position) {
-        if (drag.moved) {
-          // Magnetic corner snap: release near a corner and the frame glides in.
-          const anchorIndex = findSnapAnchorIndex(position);
-          if (anchorIndex !== null) {
-            animateTo(anchors[anchorIndex]);
-          } else {
-            endMotion();
-            onPositionChange(position);
-          }
+      if (drag.moved) {
+        // Magnetic corner snap: release near a corner and the frame glides in.
+        const anchorIndex = findSnapAnchorIndex(position);
+        if (anchorIndex !== null) {
+          animateTo(anchors[anchorIndex]);
         } else {
-          setIsMoving(false);
-          if (isMoving || isSettling) startSurfaceSettle();
+          endMotion();
           onPositionChange(position);
-          if (drag.videoClick) {
-            // A second tap inside the window is a double-click: undo the first tap's toggle (net-zero) and expand.
-            const now = performance.now();
-            const isDoubleTap = now - lastVideoTapAtRef.current < DOUBLE_TAP_MS;
-            lastVideoTapAtRef.current = isDoubleTap ? 0 : now;
-            triggerPlaybackFlash();
-            onTogglePlay();
-            if (isDoubleTap) onExpand();
-          }
         }
       } else {
         setIsMoving(false);
+        if (isMoving || isSettling) startSurfaceSettle();
+        onPositionChange(position);
+        if (drag.videoClick) {
+          // A second tap inside the window is a double-click: undo the first tap's toggle (net-zero) and expand.
+          const now = performance.now();
+          const isDoubleTap = now - lastVideoTapAtRef.current < DOUBLE_TAP_MS;
+          lastVideoTapAtRef.current = isDoubleTap ? 0 : now;
+          triggerPlaybackFlash();
+          onTogglePlay();
+          if (isDoubleTap) onExpand();
+        }
       }
     },
     [
@@ -843,8 +827,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
       reportVideoRect();
       endMotion();
-      const position = positionRef.current;
-      if (position) onPositionChange(position);
+      onPositionChange(positionRef.current);
     } else {
       setIsMoving(false);
       if (isMoving || isSettling) startSurfaceSettle();
@@ -1088,16 +1071,17 @@ export const MiniPlayer = memo(function MiniPlayer({
               }}
               aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
               title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
-              className='absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 rounded-lg border border-white/15 bg-black/80 px-3 py-2 transition-opacity duration-200 hover:bg-black/90 group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0'
+              className={cn(
+                CHROME_SKIP_BUTTON_CLASS,
+                'absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 px-3 py-2 transition-[opacity,color,background-color,border-color] group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0',
+              )}
             >
               <FastForward
                 aria-hidden='true'
-                className='h-4 w-4 shrink-0 text-white/90'
+                className='h-4 w-4 shrink-0 text-(--accent-skip)'
                 strokeWidth={CHROME_ICON_STROKE}
               />
-              <span className='text-xs font-medium leading-tight text-white'>
-                {skipAction.label}
-              </span>
+              <span className='text-xs font-medium leading-tight'>{skipAction.label}</span>
             </button>
           )}
 
@@ -1223,11 +1207,11 @@ export const MiniPlayer = memo(function MiniPlayer({
                         title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
                         aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
                         onClick={skipAction.onSkip}
-                        className={MINI_ICON_BUTTON_CLASS}
+                        className={cn(MINI_ICON_BUTTON_CLASS, CHROME_SKIP_BUTTON_CLASS)}
                       >
                         <FastForward
                           aria-hidden='true'
-                          className='h-4 w-4'
+                          className='h-4 w-4 text-(--accent-skip)'
                           strokeWidth={CHROME_ICON_STROKE}
                         />
                       </button>

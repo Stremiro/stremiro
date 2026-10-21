@@ -24,7 +24,7 @@ import {
 } from 'react';
 import { toast } from 'sonner';
 import {
-  StreamAddonHealthChips,
+  StreamAddonHealthStrip,
   StreamFilterToolbar,
   StreamListEmptyState,
   StreamListErrorState,
@@ -100,11 +100,11 @@ const REASON_TONE_CLASS: Record<StreamReasonChip['tone'], string> = {
 
 const DELIVERY_TILES: Record<
   AddonStream['presentation']['deliveryKind'],
-  { Icon: LucideIcon; iconClass: string }
+  { Icon: LucideIcon; iconClass: string; labelClass: string }
 > = {
-  cached: { Icon: CloudCheck, iconClass: 'text-(--accent-act)' },
-  http: { Icon: Link2, iconClass: 'text-zinc-200' },
-  p2p: { Icon: Waypoints, iconClass: 'text-zinc-500' },
+  cached: { Icon: CloudCheck, iconClass: 'text-(--accent-act)', labelClass: 'text-(--accent-act)' },
+  http: { Icon: Link2, iconClass: 'text-zinc-200', labelClass: 'text-zinc-300' },
+  p2p: { Icon: Waypoints, iconClass: 'text-zinc-500', labelClass: 'text-zinc-500' },
 };
 
 interface StreamItemProps {
@@ -142,16 +142,15 @@ const StreamItem = memo(function StreamItem({
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
   const matchBadges = stream.matchBadgeKinds.map((kind) => MATCH_BADGES[kind]);
-  const deliveryClass =
-    presentation.deliveryKind === 'cached'
-      ? 'text-(--accent-act)'
-      : presentation.deliveryKind === 'http'
-        ? 'text-zinc-300'
-        : 'text-zinc-500';
+  const deliveryTile = DELIVERY_TILES[presentation.deliveryKind];
 
   const metaParts: { key: string; className?: string; text: string }[] = [];
   if (stream.sourceName) metaParts.push({ key: 'addon', text: stream.sourceName });
-  metaParts.push({ key: 'delivery', text: presentation.deliveryLabel, className: deliveryClass });
+  metaParts.push({
+    key: 'delivery',
+    text: presentation.deliveryLabel,
+    className: deliveryTile.labelClass,
+  });
   if (presentation.codecLabel) metaParts.push({ key: 'codec', text: presentation.codecLabel });
   if (presentation.audioLabel) metaParts.push({ key: 'audio', text: presentation.audioLabel });
   if (presentation.multiAudioLabel)
@@ -160,12 +159,12 @@ const StreamItem = memo(function StreamItem({
   const sourceName = nonBlank(presentation.sourceName) || 'Unknown';
   const streamTitle = nonBlank(presentation.streamTitle) || 'Unknown';
   const techBadges = buildStreamTechBadges(stream);
+  const hdrDescription = techBadges.find((badge) => badge.description)?.description;
   const matchTier = stream.matchTier;
   const recommendationReasons = buildStreamReasonChips(stream);
   const matchAria =
     matchBadges.length > 0 ? `, ${matchBadges.map((badge) => badge.label).join(', ')}` : '';
   const playableAria = isPlayable ? '' : ', P2P source, not playable in this build';
-  const deliveryTile = DELIVERY_TILES[presentation.deliveryKind];
   const DeliveryIcon = deliveryTile.Icon;
   const opensPack = canBrowsePack && isPlayable && stream.presentation.isBatch;
 
@@ -181,12 +180,14 @@ const StreamItem = memo(function StreamItem({
           'group relative px-3 py-2.5 rounded-xl',
           'bg-white/[0.02] border border-white/[0.05]',
           'hover:bg-white/[0.045] hover:border-white/[0.1]',
-          'transition-[background-color,border-color,opacity] duration-150 cursor-pointer w-full overflow-hidden',
+          'transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
           !isPlayable && 'opacity-55 saturate-[0.65]',
           isActive &&
             'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
           disabled && 'cursor-default',
-          isResolving && 'pointer-events-none border-white/[0.16] bg-white/[0.05]',
+          disabled && !isResolving && 'opacity-60',
+          isResolving &&
+            'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.06)]',
         )}
       >
         {matchTier && (
@@ -218,16 +219,25 @@ const StreamItem = memo(function StreamItem({
             aria-busy={isResolving || undefined}
             data-stream-key={stream.streamKey}
             tabIndex={tabIndex}
-            title={streamTitle}
-            aria-label={`${opensPack ? 'Browse episodes in' : 'Select'} ${sourceName} ${opensPack ? 'pack' : 'stream'}${techBadges.map((badge) => `, ${badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
+            title={hdrDescription ? `${streamTitle}\n${hdrDescription}` : streamTitle}
+            aria-label={`${opensPack ? 'Browse episodes in' : 'Select'} ${sourceName} ${opensPack ? 'pack' : 'stream'}${techBadges.map((badge) => `, ${badge.description ? `${badge.label} source` : badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
             className='absolute inset-0 z-0 rounded-xl aria-disabled:cursor-default focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
           />
         </ContextMenuTrigger>
 
         {isResolving && (
-          <div className='absolute bottom-0 left-0 right-0 h-[2px] bg-white/5 overflow-hidden rounded-b-xl'>
-            <div className='h-full w-1/3 bg-white/50 motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
-          </div>
+          <>
+            <span
+              aria-hidden='true'
+              className='pointer-events-none absolute inset-y-2 left-0 w-0.5 bg-(--accent-act)'
+            />
+            <div
+              aria-hidden='true'
+              className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
+            >
+              <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+            </div>
+          </>
         )}
 
         <div className='relative z-10 flex items-center gap-3 pointer-events-none'>
@@ -287,8 +297,13 @@ const StreamItem = memo(function StreamItem({
             </p>
 
             <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
-              <span className='w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums text-zinc-400'>
-                {stream.presentation.sizeLabel}
+              <span
+                className={cn(
+                  'w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums',
+                  isResolving ? 'text-(--accent-act)' : 'text-zinc-400',
+                )}
+              >
+                {isResolving ? 'Opening…' : stream.presentation.sizeLabel}
               </span>
               <span
                 className={cn(
@@ -377,11 +392,12 @@ const StreamItem = memo(function StreamItem({
               type='button'
               aria-label='Copy stream URL'
               title='Copy stream URL'
+              aria-disabled={disabled || undefined}
               tabIndex={tabIndex}
               onFocus={() => onRowFocus(stream.streamKey)}
               onClick={(event) => {
                 event.stopPropagation();
-                void onCopyLink(stream);
+                if (!disabled) void onCopyLink(stream);
               }}
               className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
             >
@@ -397,7 +413,7 @@ const StreamItem = memo(function StreamItem({
           rowRef.current?.focus({ preventScroll: true });
         }}
       >
-        <ContextMenuItem onSelect={() => void onCopyLink(stream)}>
+        <ContextMenuItem disabled={disabled} onSelect={() => void onCopyLink(stream)}>
           <Copy className='h-4 w-4' />
           {stream.presentation.deliveryKind === 'p2p' ? 'Copy magnet link' : 'Copy stream link'}
         </ContextMenuItem>
@@ -680,6 +696,8 @@ export function StreamSelector({
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchFocusPendingRef = useRef(false);
   const resultsFocusPendingRef = useRef(false);
+  const resultsMotionRef = useRef<HTMLDivElement | null>(null);
+  const previousViewRef = useRef({ sessionKey: '', resetKey: '' });
   const {
     absoluteEpisode,
     absoluteSeason,
@@ -747,6 +765,27 @@ export function StreamSelector({
     target,
   });
 
+  useLayoutEffect(() => {
+    const previous = previousViewRef.current;
+    previousViewRef.current = { sessionKey: selectorSessionKey, resetKey: listResetKey };
+    if (
+      previous.sessionKey !== selectorSessionKey ||
+      !previous.resetKey ||
+      previous.resetKey === listResetKey ||
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    )
+      return;
+    // Animate the viewport, not row mounts: progressive snapshots and scrolling never replay it or disturb focus.
+    const animation = resultsMotionRef.current?.animate(
+      [
+        { opacity: 0, transform: 'translateY(4px)' },
+        { opacity: 1, transform: 'translateY(0)' },
+      ],
+      { duration: 180, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' },
+    );
+    return () => animation?.cancel();
+  }, [listResetKey, selectorSessionKey]);
+
   const focusResults = () =>
     dialogContentRef.current
       ?.querySelector<HTMLElement>('[data-stream-key][tabindex="0"]')
@@ -805,7 +844,7 @@ export function StreamSelector({
     packReturnFocusRef.current = null;
   }, [open, selectorSessionKey]);
 
-  const closePackPicker = useCallback(() => {
+  const closePackPicker = () => {
     cancelResolve();
     packOpenRef.current = false;
     setPackSelection(null);
@@ -817,7 +856,7 @@ export function StreamSelector({
       const focusTarget = returnTarget?.isConnected ? returnTarget : searchInputRef.current;
       (focusTarget ?? dialogContentRef.current)?.focus({ preventScroll: true });
     });
-  }, [cancelResolve]);
+  };
 
   const allPackEpisodes = episodes ?? EMPTY_PACK_EPISODES;
   const packCoordinates = isPackOpen
@@ -908,10 +947,9 @@ export function StreamSelector({
     navigateApp('/settings?section=addons');
   };
 
-  // Per-source chips ride the loading state too — the roster lands before any stream, so "searching" shows real names.
-  const healthChips =
+  const healthStrip =
     addonHealthMetrics.length > 0 ? (
-      <StreamAddonHealthChips
+      <StreamAddonHealthStrip
         effectiveAddonFilter={effectiveAddonFilter}
         hasStreams={streams.length > 0}
         healthSummary={healthSummary}
@@ -953,13 +991,13 @@ export function StreamSelector({
       <div className='relative flex-1 min-h-0 bg-zinc-950'>
         <div className='h-full min-h-0' inert={isPackOpen}>
           {isLoading ? (
-            <StreamListLoadingState sourceCount={streamSourceCount} chips={healthChips} />
+            <StreamListLoadingState sourceCount={streamSourceCount} healthStrip={healthStrip} />
           ) : fatalAddonError ? (
             <StreamListErrorState
               isRetrying={isRetrying}
               message={getErrorMessage(fatalAddonError)}
               onRetry={refetchStreams}
-              chips={healthChips}
+              healthStrip={healthStrip}
             />
           ) : !isOnline ? (
             <StreamListOfflineState />
@@ -975,7 +1013,7 @@ export function StreamSelector({
                 isAnyResolving && 'pointer-events-none',
               )}
             >
-              {healthChips}
+              {healthStrip}
 
               <StreamFilterToolbar
                 batchFilter={batchFilter}
@@ -1004,7 +1042,11 @@ export function StreamSelector({
               )}
 
               {sortedStreams.length > 0 ? (
-                <div className='min-h-0 flex-1' aria-busy={isSearchPending || undefined}>
+                <div
+                  ref={resultsMotionRef}
+                  className='min-h-0 flex-1'
+                  aria-busy={isSearchPending || undefined}
+                >
                   <StreamVirtualList
                     key={selectorSessionKey}
                     resetKey={listResetKey}
@@ -1042,7 +1084,7 @@ export function StreamSelector({
               sourceCount={streamSourceCount}
               onRetry={refetchStreams}
               onManageAddons={handleManageAddons}
-              chips={healthChips}
+              healthStrip={healthStrip}
             />
           )}
         </div>

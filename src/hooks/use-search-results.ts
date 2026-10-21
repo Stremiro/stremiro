@@ -1,5 +1,4 @@
 import { keepPreviousData, useInfiniteQuery } from '@tanstack/react-query';
-import { useMemo } from 'react';
 
 import { useLocalDay } from '@/hooks/use-local-day';
 import { searchCatalogQueryOptions } from '@/lib/search-catalog';
@@ -48,7 +47,7 @@ export function useSearchResults({
     enabled: isOnline,
   });
 
-  const results = useMemo(() => data?.pages.flatMap((page) => page.items) ?? [], [data?.pages]);
+  const results = data?.pages.flatMap((page) => page.items) ?? [];
 
   return {
     results,
@@ -57,7 +56,7 @@ export function useSearchResults({
     isFetching,
     isFetchingNextPage,
     isPlaceholderData,
-    hasNextPage: Boolean(hasNextPage),
+    hasNextPage,
     fetchNextPage,
     isError,
     isFetchNextPageError,

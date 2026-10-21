@@ -46,15 +46,22 @@ export const SETTINGS_HEADER_STATUS_CLASS =
 export const SETTINGS_OUTLINE_BUTTON_CLASS =
   'rounded-lg border-white/10 bg-white/[0.04] font-medium text-zinc-100 hover:bg-white/[0.08] hover:text-white';
 
+export function settingsControlId(label: string) {
+  return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
+}
+
 export function SettingsGroup({
   children,
   className,
+  id,
 }: {
   children: ReactNode;
   className?: string;
+  id?: string;
 }) {
   return (
     <section
+      id={id}
       className={cn(
         'overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/45 shadow-[inset_0_1px_0_rgba(255,255,255,0.035),0_8px_28px_-20px_rgba(0,0,0,0.65)]',
         className,
@@ -109,15 +116,18 @@ export function SettingsRow({
   children,
   className,
   description,
+  descriptionId,
   label,
 }: {
   children: ReactNode;
   className?: string;
   description?: string;
+  descriptionId?: string;
   label: string;
 }) {
   return (
     <label
+      id={settingsControlId(label)}
       className={cn(
         'flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0 cursor-pointer',
         className,
@@ -126,7 +136,7 @@ export function SettingsRow({
       <div className='min-w-0'>
         <span className='block text-[14px] font-medium text-zinc-100'>{label}</span>
         {description ? (
-          <span className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
+          <span id={descriptionId} className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
             {description}
           </span>
         ) : null}
@@ -138,12 +148,14 @@ export function SettingsRow({
 
 export function SettingsSwitch({
   ariaLabel,
+  ariaDescribedBy,
   checked,
   disabled,
   pending,
   onChange,
 }: {
   ariaLabel: string;
+  ariaDescribedBy?: string;
   checked: boolean;
   disabled?: boolean;
   /** Blocks toggling but stays focusable, so a save never drops keyboard focus. */
@@ -156,6 +168,7 @@ export function SettingsSwitch({
       type='button'
       role='switch'
       aria-label={ariaLabel}
+      aria-describedby={ariaDescribedBy}
       aria-checked={checked}
       aria-disabled={inactive || undefined}
       aria-busy={pending || undefined}

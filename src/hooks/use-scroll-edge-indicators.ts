@@ -75,17 +75,16 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
         syncScrollState();
       });
     };
-    const resizeObserver =
-      typeof ResizeObserver === 'undefined' ? null : new ResizeObserver(syncScrollState);
+    const resizeObserver = new ResizeObserver(syncScrollState);
 
     node.addEventListener('scroll', handleScroll, { passive: true });
-    resizeObserver?.observe(node);
+    resizeObserver.observe(node);
 
     return () => {
       window.cancelAnimationFrame(initialSyncFrame);
       if (scrollFrame !== null) window.cancelAnimationFrame(scrollFrame);
       node.removeEventListener('scroll', handleScroll);
-      resizeObserver?.disconnect();
+      resizeObserver.disconnect();
     };
   }, [node, positionRef, syncScrollState]);
 

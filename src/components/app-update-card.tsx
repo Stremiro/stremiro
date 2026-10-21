@@ -74,10 +74,10 @@ function UpdateProgress({
       >
         <div
           className={cn(
-            'h-full rounded-full bg-emerald-300/90 transition-[width] duration-300',
-            percent === null && 'w-1/3 animate-pulse',
+            'h-full origin-left rounded-full bg-emerald-300/90 transition-transform duration-300 motion-reduce:transition-none',
+            percent === null && 'w-1/3 motion-safe:animate-pulse',
           )}
-          style={percent !== null ? { width: `${percent}%` } : undefined}
+          style={percent !== null ? { transform: `scaleX(${percent / 100})` } : undefined}
         />
       </div>
     </div>

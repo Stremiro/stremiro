@@ -27,24 +27,22 @@ export function restoreQueryArrayEntry<T extends { id: string }>(
 export function reinsertSnapshotRows<T>(
   current: readonly T[],
   snapshot: readonly T[],
-  indices: readonly number[],
+  isRestored: (row: T) => boolean,
   key: (row: T) => string,
 ): T[] {
   const positions = new Map(current.map((row, index) => [key(row), index]));
-  const restoredIndices = new Set(indices);
   const buckets = new Map<number, T[]>();
   const leading: T[] = [];
   let predecessor: number | undefined;
   let successor: number | undefined;
-  for (let index = 0; index < snapshot.length; index++) {
-    const row = snapshot[index];
+  for (const row of snapshot) {
     const position = positions.get(key(row));
     if (position !== undefined) {
       predecessor = position;
       successor ??= position;
       continue;
     }
-    if (!restoredIndices.has(index)) continue;
+    if (!isRestored(row)) continue;
     if (predecessor === undefined) {
       leading.push(row);
       continue;

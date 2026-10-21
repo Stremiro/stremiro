@@ -351,15 +351,14 @@ export function StreamResultsStatus({
 
 export function StreamListLoadingState({
   sourceCount,
-  chips,
+  healthStrip,
 }: {
   sourceCount: number;
-  /** Per-source health chips once the roster lands — real progress beats anonymous skeletons. */
-  chips?: ReactNode;
+  healthStrip?: ReactNode;
 }) {
   return (
     <div className='flex h-full min-h-0 flex-col px-3 pt-3'>
-      {chips}
+      {healthStrip}
       <div className='mb-3 flex items-center gap-2 px-1 py-1'>
         <Loader2
           aria-hidden='true'
@@ -405,20 +404,19 @@ function StreamRetryButton({ isRetrying, onRetry }: { isRetrying: boolean; onRet
 }
 
 export function StreamListErrorState({
-  chips,
+  healthStrip,
   isRetrying = false,
   message,
   onRetry,
 }: {
-  /** Per-source health chips — the roster often shows *which* addon failed. */
-  chips?: ReactNode;
+  healthStrip?: ReactNode;
   isRetrying?: boolean;
   message: string;
   onRetry: () => void;
 }) {
   return (
     <StreamListMessage
-      chips={chips}
+      healthStrip={healthStrip}
       role='alert'
       icon={<TriangleAlert className='w-10 h-10 text-amber-400/60' strokeWidth={1.5} />}
       title="Couldn't load streams."
@@ -433,22 +431,21 @@ const STREAM_LIST_MESSAGE_ICON = <FileVideo className='w-10 h-10 opacity-15' />;
 function StreamListMessage({
   action,
   body,
-  chips,
+  healthStrip,
   icon = STREAM_LIST_MESSAGE_ICON,
   role,
   title,
 }: {
   action?: ReactNode;
   body: string;
-  /** Health chips ride the message states so per-source failures stay visible on error/empty outcomes. */
-  chips?: ReactNode;
+  healthStrip?: ReactNode;
   icon?: ReactNode;
   role?: 'alert' | 'status';
   title: string;
 }) {
   return (
     <div className='flex h-full min-h-0 flex-col overflow-y-auto overscroll-contain px-3 py-3'>
-      {chips}
+      {healthStrip}
       <div
         role={role}
         className='flex flex-1 shrink-0 flex-col items-center justify-center gap-2 text-muted-foreground text-center'
@@ -491,14 +488,13 @@ export function StreamListNoAddonsState({
 }
 
 export function StreamListEmptyState({
-  chips,
+  healthStrip,
   isRetrying = false,
   sourceCount,
   onRetry,
   onManageAddons,
 }: {
-  /** Per-source health chips — a zero-result roster explains the empty list. */
-  chips?: ReactNode;
+  healthStrip?: ReactNode;
   isRetrying?: boolean;
   sourceCount: number;
   onRetry: () => void;
@@ -506,7 +502,7 @@ export function StreamListEmptyState({
 }) {
   return (
     <StreamListMessage
-      chips={chips}
+      healthStrip={healthStrip}
       title='No streams found.'
       body={
         sourceCount > 0
@@ -572,7 +568,7 @@ export function StreamListFilteredEmptyState({
   );
 }
 
-interface StreamAddonHealthChipsProps {
+interface StreamAddonHealthStripProps {
   effectiveAddonFilter: string;
   hasStreams?: boolean;
   healthSummary: { degraded: number; offline: number; pending: number };
@@ -585,7 +581,15 @@ interface StreamAddonHealthChipsProps {
   sourcesStillLoading: boolean;
 }
 
-export function StreamAddonHealthChips({
+const SOURCE_TONE_CLASS = {
+  searching: 'bg-zinc-500',
+  healthy: 'bg-emerald-400',
+  slow: 'bg-amber-400',
+  empty: 'bg-zinc-600',
+  offline: 'bg-rose-400',
+} as const;
+
+export function StreamAddonHealthStrip({
   effectiveAddonFilter,
   hasStreams: hasAnyStreams = false,
   healthSummary,
@@ -596,22 +600,44 @@ export function StreamAddonHealthChips({
   onRetry,
   refreshFailed = false,
   sourcesStillLoading,
-}: StreamAddonHealthChipsProps) {
+}: StreamAddonHealthStripProps) {
+  const returnedSourceCount = metrics.reduce(
+    (count, metric) => count + Number(metric.streamCount > 0),
+    0,
+  );
+  const summary = `${returnedSourceCount} of ${metrics.length} sources returned streams${
+    healthSummary.pending > 0 && sourcesStillLoading ? `, ${healthSummary.pending} searching` : ''
+  }${healthSummary.degraded > 0 ? `, ${healthSummary.degraded} slow` : ''}${
+    healthSummary.offline > 0 ? `, ${healthSummary.offline} unavailable` : ''
+  }`;
+
   return (
-    <div className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'>
-      <div className='flex min-w-0 items-center gap-2 overflow-x-auto overscroll-contain scrollbar-hide'>
+    <div className='mb-3 flex shrink-0 items-center gap-3'>
+      <div
+        role='group'
+        aria-label={`Sources: ${summary}`}
+        className='flex min-w-0 flex-1 overflow-x-auto overscroll-contain rounded-md border border-white/[0.07] bg-white/[0.02] scrollbar-hide'
+      >
         {metrics.map((metric) => {
-          // Chips filter on the addon config id (stamped on each stream as `sourceId`) — a differing display
-          // name can't select a source into a false empty list.
+          // Filters key on the addon config id stamped on each stream as `sourceId`, not the display name.
           const isSelected = effectiveAddonFilter === metric.id;
           const isPending = sourcesStillLoading && metric.status === 'pending';
           const hasStreams = metric.streamCount > 0;
+          const tone = isPending
+            ? 'searching'
+            : metric.status === 'offline'
+              ? 'offline'
+              : metric.status === 'degraded'
+                ? 'slow'
+                : hasStreams
+                  ? 'healthy'
+                  : 'empty';
           const sourceStatus = isPending
             ? 'Searching…'
             : metric.status === 'no_results'
               ? 'No results for this title'
               : metric.status === 'degraded'
-                ? 'Slow response'
+                ? `Slow response · ${metric.streamCount} streams`
                 : metric.status === 'offline'
                   ? 'Unavailable'
                   : `${metric.streamCount} streams`;
@@ -621,92 +647,88 @@ export function StreamAddonHealthChips({
                 ? `${metric.latencyMs}ms`
                 : `${(metric.latencyMs / 1000).toFixed(1)}s`
               : null;
+          const description = `${metric.name}: ${sourceStatus}${
+            metric.errorMessage ? ` · ${metric.errorMessage}` : ''
+          }${latency ? ` · ${latency}` : ''}`;
+          // A selected source whose count drops to 0 stays clickable; `disabled` would drop focus mid-fetch.
+          const isUnavailable = isResolving || (!hasStreams && !isSelected);
 
           return (
             <button
               key={metric.id}
               type='button'
-              // Truncated chips hide the name — keep the full name (and any fetch error) reachable on hover.
-              title={`${metric.name} — ${metric.errorMessage ?? sourceStatus}${latency ? ` · ${latency}` : ''}`}
-              // A selected chip whose count drops to 0 must stay clickable — `disabled` would drop focus to <body> mid-fetch.
-              aria-disabled={isResolving || (!hasStreams && !isSelected) || undefined}
+              title={description}
+              aria-disabled={isUnavailable || undefined}
               aria-pressed={isSelected}
-              aria-label={`${metric.name}: ${sourceStatus}${metric.errorMessage ? `, ${metric.errorMessage}` : ''}`}
+              aria-label={description}
               onClick={() => {
-                if (isResolving || (!hasStreams && !isSelected)) return;
+                if (isUnavailable) return;
                 onFiltersChange((prev) => ({
                   ...prev,
                   addon: isSelected ? 'all' : metric.id,
                 }));
               }}
               className={cn(
-                'inline-flex shrink-0 items-center gap-1.5 rounded-md px-2 py-1.5 text-[10px] font-semibold transition-colors border aria-disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
+                'relative flex h-8 flex-[1_0_auto] items-center justify-center gap-1.5 border-r border-white/[0.06] px-3 text-[11.5px] font-medium transition-colors duration-150 last:border-r-0 aria-disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
                 isSelected
-                  ? 'accent-lattice-soft'
+                  ? 'bg-white/[0.07] text-white'
                   : hasStreams
-                    ? 'bg-black/40 text-zinc-300 border-white/10 hover:border-white/20 hover:text-white'
-                    : 'bg-black/40 text-zinc-400 border-white/[0.06] cursor-default',
+                    ? 'text-zinc-300 not-aria-disabled:hover:bg-white/[0.04] not-aria-disabled:hover:text-white'
+                    : 'text-zinc-500',
               )}
             >
-              {/* State lives on the name tint, not a dot — degraded/offline read as muted warnings. */}
+              <span className='max-w-[120px] truncate'>{metric.name}</span>
               <span
-                className={cn(
-                  'truncate max-w-[90px]',
-                  !isSelected &&
-                    (metric.status === 'offline'
-                      ? 'text-red-300/80'
-                      : metric.status === 'degraded'
-                        ? 'text-amber-200/80'
-                        : undefined),
-                )}
+                aria-hidden='true'
+                className={cn('tabular-nums', isSelected ? 'text-zinc-300' : 'text-zinc-500')}
               >
-                {metric.name}
-              </span>
-              <span aria-hidden='true' className='w-[4ch] text-right text-zinc-400 tabular-nums'>
                 {isPending ? '…' : metric.streamCount}
               </span>
+              <span
+                aria-hidden='true'
+                className={cn(
+                  'absolute inset-x-0 bottom-0 h-[2px] transition-opacity duration-150',
+                  SOURCE_TONE_CLASS[tone],
+                  isSelected ? 'opacity-100' : 'opacity-55',
+                )}
+              />
             </button>
           );
         })}
-
-        {hasAnyStreams && (healthSummary.offline > 0 || refreshFailed || isRetrying) && onRetry && (
-          <Button
-            variant='ghost'
-            size='sm'
-            onClick={() => {
-              if (isResolving || isRetrying || sourcesStillLoading) return;
-              onRetry();
-            }}
-            aria-disabled={isResolving || isRetrying || sourcesStillLoading || undefined}
-            aria-busy={isRetrying}
-            className='h-7 shrink-0 gap-1.5 px-2 text-[10px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-default'
-          >
-            <RotateCcw
-              aria-hidden='true'
-              className={cn(
-                'h-3 w-3',
-                isRetrying && 'motion-safe:animate-spin motion-safe:[animation-delay:250ms]',
-              )}
-            />
-            Retry failed sources
-          </Button>
-        )}
-
-        <span className='ml-auto flex shrink-0 items-center gap-1.5 text-[10px] font-medium text-zinc-400 whitespace-nowrap tabular-nums'>
-          {healthSummary.pending > 0 && sourcesStillLoading && (
-            <span>{healthSummary.pending} searching</span>
-          )}
-          <span>
-            {metrics.length} {metrics.length === 1 ? 'source' : 'sources'}
-          </span>
-          {healthSummary.degraded > 0 && (
-            <span className='text-amber-200/70'>· {healthSummary.degraded} slow</span>
-          )}
-          {healthSummary.offline > 0 && (
-            <span className='text-red-300/70'>· {healthSummary.offline} unavailable</span>
-          )}
-        </span>
       </div>
+
+      <span
+        aria-hidden='true'
+        title={summary}
+        className='shrink-0 whitespace-nowrap text-[11px] tabular-nums text-zinc-500'
+      >
+        {returnedSourceCount}/{metrics.length}
+      </span>
+
+      {hasAnyStreams && (healthSummary.offline > 0 || refreshFailed || isRetrying) && onRetry && (
+        <Button
+          variant='ghost'
+          size='sm'
+          onClick={() => {
+            if (isResolving || isRetrying || sourcesStillLoading) return;
+            onRetry();
+          }}
+          aria-disabled={isResolving || isRetrying || sourcesStillLoading || undefined}
+          aria-busy={isRetrying}
+          aria-label='Retry failed sources'
+          title='Retry failed sources'
+          className='h-8 shrink-0 gap-1.5 rounded-md px-2 text-[11.5px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-default'
+        >
+          <RotateCcw
+            aria-hidden='true'
+            className={cn(
+              'h-3 w-3',
+              isRetrying && 'motion-safe:animate-spin motion-safe:[animation-delay:250ms]',
+            )}
+          />
+          Retry
+        </Button>
+      )}
     </div>
   );
 }
@@ -771,7 +793,7 @@ export function StreamFilterToolbar({
         />
         <span className='shrink-0 text-[10px] font-semibold text-zinc-400 tabular-nums whitespace-nowrap'>
           {filteredCount === totalCount
-            ? `${totalCount} streams`
+            ? `${totalCount} stream${totalCount === 1 ? '' : 's'}`
             : `${filteredCount} / ${totalCount}`}
           {stats.p2pCount > 0 && (
             <span className='hidden sm:inline'>{` · ${stats.playableCount} playable`}</span>
@@ -1212,18 +1234,31 @@ export function StreamPackEpisodeList({
             if (!disabled) onPick(ep);
           }}
           className={cn(
-            'group relative flex w-full items-center gap-3 rounded-xl border px-2.5 py-2 text-left',
-            'bg-white/[0.02] border-white/[0.05] transition-colors duration-150 motion-reduce:transition-none cursor-pointer',
+            'group relative flex w-full items-center gap-3 overflow-hidden rounded-xl border px-2.5 py-2 text-left',
+            'bg-white/[0.02] border-white/[0.05] transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer',
             'hover:bg-white/[0.045] hover:border-white/[0.1]',
             'focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25',
             isTarget &&
               'border-[rgb(var(--accent-act-rgb)/0.22)] bg-[rgb(var(--accent-act-rgb)/0.05)]',
             disabled && 'cursor-default',
-            isPending && 'border-white/20 bg-white/[0.05]',
+            disabled && !isPending && 'opacity-60',
+            isPending &&
+              'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.06)]',
           )}
         >
-          {isTarget && (
-            <span className='absolute left-0 inset-y-2.5 w-[2px] rounded-full bg-(--accent-act)' />
+          {(isTarget || isPending) && (
+            <span
+              aria-hidden='true'
+              className='absolute left-0 inset-y-2.5 w-0.5 bg-(--accent-act)'
+            />
+          )}
+          {isPending && (
+            <div
+              aria-hidden='true'
+              className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
+            >
+              <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+            </div>
           )}
           <div className='relative h-12 w-[84px] shrink-0 overflow-hidden rounded-md bg-zinc-900'>
             <div className='absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-wide text-white/15 bg-zinc-800/50'>
@@ -1248,9 +1283,9 @@ export function StreamPackEpisodeList({
               <span className='shrink-0 text-[10px] font-semibold uppercase tracking-wider tabular-nums text-zinc-500'>
                 {formatSeasonEpisode(ep.season, ep.episode)}
               </span>
-              {isTarget && (
+              {(isTarget || isPending) && (
                 <span className='shrink-0 text-[10.5px] font-medium leading-none text-(--accent-act)'>
-                  Selected
+                  {isPending ? 'Opening…' : 'Selected'}
                 </span>
               )}
               {watchEntry?.is_watched && (
@@ -1269,18 +1304,16 @@ export function StreamPackEpisodeList({
             </p>
             {airDate && <p className='mt-0.5 text-[11px] leading-none text-zinc-400'>{airDate}</p>}
           </div>
-          {isPending ? (
-            <Loader2
-              aria-hidden='true'
-              className='h-4 w-4 shrink-0 animate-spin motion-reduce:animate-none text-zinc-300'
-            />
-          ) : (
-            <ChevronRight
-              aria-hidden='true'
-              className='h-4 w-4 shrink-0 text-white/30 opacity-0 transition-opacity duration-150 group-hover:opacity-100 group-focus-visible:opacity-100'
-              strokeWidth={2}
-            />
-          )}
+          <ChevronRight
+            aria-hidden='true'
+            className={cn(
+              'h-4 w-4 shrink-0 transition-opacity duration-150 motion-reduce:transition-none',
+              isPending
+                ? 'text-(--accent-act)'
+                : 'text-white/30 opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100',
+            )}
+            strokeWidth={2}
+          />
         </button>
       </div>
     );

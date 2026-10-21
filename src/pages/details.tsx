@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { format } from 'date-fns';
+import { toLocalDate } from '@/lib/schedule-dates';
 import {
   Check,
   ChevronLeft,
@@ -14,8 +14,16 @@ import {
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, useLocation, useNavigationType, useParams } from 'react-router';
-import { EpisodeCard, isEpisodeSpoiler } from '@/components/details-episode-card';
-import { SeasonSwitcher } from '@/components/details-season-switcher';
+import {
+  EpisodeCard,
+  type EpisodeEmphasis,
+  isEpisodeSpoiler,
+} from '@/components/details-episode-card';
+import {
+  type SeasonEpisodeState,
+  SeasonProgressRail,
+  SeasonSwitcher,
+} from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
 import { DetailsTrailerDialog } from '@/components/details-trailer-dialog';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
@@ -52,12 +60,12 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
+import { claimDetailsHero } from '@/lib/navigation';
 import {
   episodeProgressKey,
   formatWatchRemaining,
   getWatchProgressPercent,
 } from '@/lib/history-playback';
-import { currentPathWithSearch } from '@/lib/navigation';
 import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
@@ -69,7 +77,6 @@ import {
   createObjectIdentity,
   formatSeasonEpisode,
   GENRE_LINK_CLASS,
-  isSeriesLikeMediaType,
   mediaTypeLabel,
   queryNeedsRetry,
   scrollBehavior,
@@ -263,7 +270,7 @@ function DetailsContent() {
   const seriesResumeSeason = seriesProgress?.absolute_season;
   const seriesResumeEpisode = seriesProgress?.absolute_episode;
   const resumeEpisodeCoords =
-    seriesCanResume && seriesResumeSeason != null && seriesResumeEpisode != null
+    seriesResumeSeason != null && seriesResumeEpisode != null
       ? { season: seriesResumeSeason, episode: seriesResumeEpisode }
       : null;
 
@@ -315,13 +322,12 @@ function DetailsContent() {
   const showTitleSkeleton = titlePending || (!!logoSrc && loadedLogo !== logoSrc);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
-  const localToday = format(useLocalDay(), 'yyyy-MM-dd');
+  const localToday = toLocalDate(useLocalDay()).toString();
   const descriptionRef = useRef<HTMLParagraphElement | null>(null);
 
   const {
-    seasonCount,
+    seasons,
     selectedSeason,
-    localSeasonEntries,
     seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
@@ -342,6 +348,7 @@ function DetailsContent() {
     hasPreviousEpisodes,
     hasMoreEpisodes,
     changeEpisodePage,
+    retainEpisodePosition,
   } = useDetailsEpisodePane({
     item,
     effectiveRouteId: baseRouteId,
@@ -398,14 +405,13 @@ function DetailsContent() {
       upNextEpisodeNumber,
     ],
     queryFn: async () => {
-      const episodes = item!.episodes!;
-      const { nextIndex } = await api.getEpisodeNavigation({
-        episodes,
+      const { next } = await api.getEpisodeNavigation({
+        episodes: item!.episodes!,
         season: upNextSeason!,
         episode: upNextEpisodeNumber!,
         today: localToday,
       });
-      return nextIndex === null ? null : episodes[nextIndex];
+      return next ?? null;
     },
     enabled:
       hasEpisodesSection &&
@@ -451,14 +457,50 @@ function DetailsContent() {
       ? pendingWatchedMutation?.watched
       : undefined;
 
+  const isEpisodeWatched = (ep: Episode) =>
+    optimisticEpisodeWatched(ep) ??
+    !!episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)]?.is_watched;
+  // The resumable episode leads; otherwise Rust's aired successor of the furthest watched one.
+  const nextUpEpisode = seriesCanResume ? resumeEpisodeCoords : upNextEpisode;
+  const episodeEmphasis = (ep: Episode): EpisodeEmphasis =>
+    nextUpEpisode && episodeMatchesCoordinates(ep, nextUpEpisode.season, nextUpEpisode.episode)
+      ? seriesCanResume
+        ? 'resume'
+        : 'next'
+      : null;
+
+  const seasonWatchedCounts = new Map<number, number>();
+  if (hasWatchProgress) {
+    for (const ep of item?.episodes ?? []) {
+      if (isEpisodeWatched(ep)) {
+        seasonWatchedCounts.set(ep.season, (seasonWatchedCounts.get(ep.season) ?? 0) + 1);
+      }
+    }
+  }
+
   const seasonWatchTargets: Episode[] = [];
+  const seasonRail: { key: string; state: SeasonEpisodeState }[] = [];
   let seasonWatchedCount = 0;
+  let seasonHasStarted = false;
   for (const ep of seasonEpisodes) {
     const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
-    if (optimisticEpisodeWatched(ep) ?? !!episodeProgress?.[key]?.is_watched) {
+    if (isEpisodeWatched(ep)) {
       seasonWatchedCount += 1;
+      seasonRail.push({ key, state: 'watched' });
       continue;
     }
+    const started = !!episodeProgress?.[key]?.has_started_watching;
+    seasonHasStarted = seasonHasStarted || started;
+    seasonRail.push({
+      key,
+      state: episodeEmphasis(ep)
+        ? 'next'
+        : started
+          ? 'started'
+          : unairedEpisodeKeys?.has(key)
+            ? 'unaired'
+            : 'unwatched',
+    });
     if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) seasonWatchTargets.push(ep);
   }
 
@@ -518,8 +560,6 @@ function DetailsContent() {
   });
 
   const handleWatchEpisode = (ep: Episode) => {
-    if (!item) return;
-
     const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
     openEpisodeStreamSelector(ep, {
       startTime: epProgress?.resume_start_time,
@@ -531,6 +571,7 @@ function DetailsContent() {
   const handleToggleEpisodeWatched = (ep: Episode) => {
     if (!item || !hasWatchProgress || episodeWatchedPending || markSeasonWatched.isPending) return;
     const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
+    retainEpisodePosition();
     mutateEpisodeWatched({
       episodes: [ep],
       watched: !epProgress?.is_watched,
@@ -555,7 +596,7 @@ function DetailsContent() {
       : null;
 
   const primaryPlayback = useMediaPrimaryPlayback({
-    from: currentPathWithSearch(),
+    from: `${location.pathname}${location.search}`,
     historyEntry: primaryPlaybackHistoryEntry,
     item,
     onPlayMovieWithoutHistory: item?.type === 'movie' ? handleWatchMovie : undefined,
@@ -737,7 +778,8 @@ function DetailsContent() {
     <div className='relative pb-20 page-enter'>
       <div className={DETAILS_HERO_CLASS}>
         <div
-          className='absolute inset-0 z-0'
+          ref={claimDetailsHero}
+          className='absolute inset-0 z-0 overflow-hidden'
           aria-hidden='true'
           style={{
             background:
@@ -746,13 +788,13 @@ function DetailsContent() {
         >
           <div className='absolute inset-0 bg-linear-to-t from-background via-background/70 to-background/10 z-10' />
           <div className='absolute inset-0 bg-linear-to-r from-background/80 via-background/20 to-transparent z-10' />
+          <div className='details-hero-vignette absolute inset-0 z-10' />
           {heroBackdropSrc && (
             <RemoteImage
-              key={heroBackdropSrc}
               src={heroBackdropSrc}
               fallbackSrc={item.poster}
               alt=''
-              className='w-full h-full object-cover'
+              className='details-hero-drift w-full h-full object-cover'
               fadeIn
               loading='eager'
               fetchPriority='high'
@@ -794,7 +836,6 @@ function DetailsContent() {
                   )}
                   {logoSrc && (
                     <RemoteImage
-                      key={logoSrc}
                       src={logoSrc}
                       alt=''
                       className='absolute inset-0 h-full max-h-24 w-full object-contain object-left drop-shadow-2xl md:max-h-32'
@@ -817,8 +858,8 @@ function DetailsContent() {
                         ·
                       </span>
                     )}
-                    {isSeriesLikeMediaType(item.type) && hasEpisodesSection && seasonCount > 0
-                      ? `${seasonCount} Season${seasonCount === 1 ? '' : 's'}`
+                    {hasEpisodesSection && seasons.length > 0
+                      ? `${seasons.length} Season${seasons.length === 1 ? '' : 's'}`
                       : mediaTypeLabel(item.type)}
                   </span>
 
@@ -991,7 +1032,7 @@ function DetailsContent() {
                       align='start'
                       sideOffset={8}
                       aria-label='Save to'
-                      className='w-72 rounded-xl border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl backdrop-blur-xl'
+                      className='w-72 rounded-xl border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl'
                     >
                       <h2 className='px-2.5 pb-1.5 pt-2 text-sm font-semibold text-white'>
                         Save to
@@ -1021,6 +1062,8 @@ function DetailsContent() {
                       ref={trailerTriggerRef}
                       type='button'
                       aria-label='Watch trailer'
+                      aria-haspopup='dialog'
+                      aria-expanded={trailerOpen}
                       title='Trailer'
                       className={cn(ICON_ACTION_CLASS, 'w-auto gap-2 px-3')}
                       onClick={openTrailer}
@@ -1150,22 +1193,21 @@ function DetailsContent() {
             >
               Episodes
             </h2>
-            {localSeasonEntries.length > 1 && (
-              <div className='w-full'>
-                <SeasonSwitcher
-                  localSeasons={localSeasonEntries}
-                  activeSeason={selectedSeason}
-                  onLocalSeason={selectSeason}
-                />
-              </div>
+            {seasons.length > 1 && (
+              <SeasonSwitcher
+                seasons={seasons}
+                activeSeason={selectedSeason}
+                watchedCounts={seasonWatchedCounts}
+                onSelectSeason={selectSeason}
+              />
             )}
             <div
               id='details-episodes-panel'
               className='min-w-0 space-y-3'
               // Panel semantics only exist while the season tablist renders.
-              role={localSeasonEntries.length > 1 ? 'tabpanel' : undefined}
+              role={seasons.length > 1 ? 'tabpanel' : undefined}
               aria-labelledby={
-                localSeasonEntries.length > 1 && selectedSeason !== null
+                seasons.length > 1 && selectedSeason !== null
                   ? `season-tab-${selectedSeason}`
                   : undefined
               }
@@ -1222,10 +1264,10 @@ function DetailsContent() {
                     {visibleEpisodeStart > 0 && (
                       <span className='text-zinc-500'>{` of ${totalEpisodeCount}`}</span>
                     )}
-                    {seasonWatchedCount > 0 && (
-                      <span className='text-zinc-500'>{` · ${seasonWatchedCount} watched`}</span>
-                    )}
                   </p>
+                  {hasWatchProgress && (seasonWatchedCount > 0 || seasonHasStarted) && (
+                    <SeasonProgressRail segments={seasonRail} watchedCount={seasonWatchedCount} />
+                  )}
                   {resumeEpisodeCoords &&
                     (selectedSeason !== resumeEpisodeCoords.season ||
                       (resumeEpisodePageIndex !== null &&
@@ -1263,6 +1305,7 @@ function DetailsContent() {
                             !episodeWatchedPending
                           ) {
                             holdEpisodeActionFocus(event.currentTarget, 'heading');
+                            retainEpisodePosition();
                             markSeasonWatched.mutate({
                               episodes: seasonWatchTargets,
                               watched: true,
@@ -1365,10 +1408,7 @@ function DetailsContent() {
                             epProgress?.position ?? 0,
                             epProgress?.duration ?? 0,
                           );
-                    const isResumeEp =
-                      hasWatchProgress &&
-                      seriesCanResume &&
-                      episodeMatchesCoordinates(ep, seriesResumeSeason, seriesResumeEpisode);
+                    const emphasis = episodeEmphasis(ep);
                     const isWatched = optimisticWatched ?? !!epProgress?.is_watched;
                     const remainingText =
                       epProgress && !isWatched && epProgress.has_started_watching
@@ -1379,7 +1419,7 @@ function DetailsContent() {
                       <EpisodeCard
                         key={`${ep.id}:${ep.season}:${ep.episode}`}
                         episode={ep}
-                        isResume={isResumeEp}
+                        emphasis={emphasis}
                         isSpoiler={isEpisodeSpoiler(
                           ep,
                           isHydratingSpoilerProtection || spoilerProtection,
@@ -1392,7 +1432,7 @@ function DetailsContent() {
                         isWatchedPending={pendingEpisodeKeys.has(episodeKey)}
                         progressPercent={progressPercent}
                         remainingText={remainingText}
-                        resumeRef={isResumeEp ? resumeEpisodeRef : undefined}
+                        resumeRef={emphasis === 'resume' ? resumeEpisodeRef : undefined}
                         onPlay={handleWatchEpisode}
                         onToggleWatched={hasWatchProgress ? handleToggleEpisodeWatched : undefined}
                       />

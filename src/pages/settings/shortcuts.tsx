@@ -33,7 +33,7 @@ const KEY_SLOT_CLASS =
   'inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-[5px] border px-1.5 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
 const SHORTCUT_CAPTION_CLASS =
   'mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500';
-const FIXED_SHORTCUT_SECTIONS = [
+export const FIXED_SHORTCUT_SECTIONS = [
   ['Player', FIXED_PLAYER_SHORTCUTS],
   ['Browsing', BROWSE_SHORTCUTS],
   ['Calendar', CALENDAR_SHORTCUTS],
@@ -141,7 +141,7 @@ export function ShortcutsSection() {
   return (
     <div className='space-y-5'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your shortcuts." />
-      <SettingsGroup>
+      <SettingsGroup id='setting-player-shortcuts'>
         <SettingsGroupHeader
           title='Player shortcuts'
           description={`Click a key to rebind it, up to ${MAX_KEYS_PER_PLAYER_ACTION} per action. Esc cancels, Backspace removes.`}
@@ -229,7 +229,7 @@ export function ShortcutsSection() {
           {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
             <section key={title} aria-label={title}>
               <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
-              <ShortcutTable shortcuts={shortcuts} />
+              <ShortcutTable shortcuts={shortcuts} idPrefix={`setting-fixed-${title}`} />
             </section>
           ))}
         </SettingsBody>
@@ -267,7 +267,7 @@ function PlayerBindingRow({
   const visibleSlots = SLOT_IDS.slice(0, Math.min(keys.length + 1, MAX_KEYS_PER_PLAYER_ACTION));
 
   return (
-    <li className='flex h-10 items-center justify-between gap-3'>
+    <li id={`setting-shortcut-${action}`} className='flex h-10 items-center justify-between gap-3'>
       <span className='flex min-w-0 items-center gap-2 text-[13px] text-zinc-200'>
         <span className='truncate'>{label}</span>
         {customized ? (

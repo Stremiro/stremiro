@@ -7,6 +7,7 @@ import {
   useContext,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
 } from 'react';
 import { useLocation, useMatch, useParams } from 'react-router';
@@ -51,8 +52,8 @@ interface PlayerSessionContextValue {
   launch: (launch: PlayerSessionLaunch, preserveTrayPause?: boolean) => void;
   close: () => void;
   trayPause: SubscribableStore<boolean>;
-  /** Survives remounts and close — a user-docked corner never jumps back to the default. */
-  miniPosition: MiniPlayerPosition | null;
+  /** Survives remounts and close — a user-docked corner never jumps back to the default. Read at mount only. */
+  getMiniPosition: () => MiniPlayerPosition | null;
   setMiniPosition: (position: MiniPlayerPosition) => void;
 }
 
@@ -71,7 +72,7 @@ function buildSessionKey(launch: PlayerSessionLaunch): string {
 export function PlayerSessionProvider({ children }: { children: ReactNode }) {
   const [session, setSession] = useState<PlayerSession | null>(null);
   const [trayPause] = useState(() => createSubscribableStore(false));
-  const [miniPosition, setMiniPosition] = useState<MiniPlayerPosition | null>(null);
+  const miniPositionRef = useRef<MiniPlayerPosition | null>(null);
   const onPlayerRoute = useMatch('/player/*') !== null;
 
   const launch = useCallback(
@@ -93,6 +94,11 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
     setSession(null);
   }, []);
 
+  const getMiniPosition = useCallback(() => miniPositionRef.current, []);
+  const setMiniPosition = useCallback((position: MiniPlayerPosition) => {
+    miniPositionRef.current = position;
+  }, []);
+
   const presentation: PlayerPresentation | null = session
     ? onPlayerRoute
       ? 'expanded'
@@ -105,11 +111,11 @@ export function PlayerSessionProvider({ children }: { children: ReactNode }) {
       presentation,
       launch,
       close,
-      miniPosition,
+      getMiniPosition,
       setMiniPosition,
       trayPause,
     }),
-    [session, presentation, launch, close, miniPosition, trayPause],
+    [session, presentation, launch, close, getMiniPosition, setMiniPosition, trayPause],
   );
 
   return <PlayerSessionContext.Provider value={value}>{children}</PlayerSessionContext.Provider>;

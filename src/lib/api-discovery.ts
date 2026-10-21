@@ -6,7 +6,6 @@ import type {
   CalendarSchedule,
   DetailsPrefetchBundle,
   Episode,
-  EpisodeNavigation,
   EpisodeNavigationRequest,
   MediaDetails,
   MediaItem,
@@ -51,8 +50,13 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
       includeEpisodes,
     });
 
-  const getEpisodeNavigation = (request: EpisodeNavigationRequest) =>
-    safeInvoke<EpisodeNavigation>('get_episode_navigation', {
+  const getEpisodeNavigation = async <E extends EpisodeNavigationRequest['episodes'][number]>(
+    request: EpisodeNavigationRequest & { episodes: E[] },
+  ) => {
+    const { previousIndex, nextIndex } = await safeInvoke<{
+      previousIndex: number | null;
+      nextIndex: number | null;
+    }>('get_episode_navigation', {
       request: {
         ...request,
         episodes: request.episodes.map(({ season, episode, releaseDate }) => ({
@@ -62,6 +66,11 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
         })),
       },
     });
+    return {
+      previous: previousIndex === null ? undefined : request.episodes[previousIndex],
+      next: nextIndex === null ? undefined : request.episodes[nextIndex],
+    };
+  };
 
   const getUnairedEpisodeIndices = (request: UnairedEpisodesRequest) =>
     safeInvoke<number[]>('get_unaired_episode_indices', { request });

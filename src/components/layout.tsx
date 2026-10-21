@@ -6,6 +6,7 @@ import { useProfileAccent } from '@/hooks/use-local-profile';
 import { navigateApp } from '@/lib/navigation';
 import { applyAccentVars, clamp } from '@/lib/utils';
 import { DesktopTitlebar } from './desktop-titlebar';
+import { MediaCardMenuScope } from './media-card';
 import { Sidebar } from './sidebar';
 
 // A route render crash must not unmount PlayerHost and the docked mini player —
@@ -70,7 +71,9 @@ function RouteOutlet({ onRetry }: { onRetry: () => void }) {
   const { key } = useLocation();
   return (
     <RouteErrorBoundary resetKey={key} onRetry={onRetry}>
-      <Outlet />
+      <MediaCardMenuScope resetKey={key}>
+        <Outlet />
+      </MediaCardMenuScope>
     </RouteErrorBoundary>
   );
 }
@@ -103,42 +106,19 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
       >
         Skip to content
       </a>
-      <DesktopTitlebar historyControls />
+      <DesktopTitlebar historyControls className='vt-pin-titlebar' />
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
       {/* Ambient accent tint. Radial gradients only — blur on viewport layers
           clips and quantizes into visible rings on WebView2. Alpha rides
           var(--app-glow) so the settings slider previews live (always mounted). */}
-      <div aria-hidden='true' data-mini-mask className='pointer-events-none fixed inset-0 z-0'>
-        <div
-          className='absolute inset-0'
-          style={{
-            background: `radial-gradient(55% 42% at 12% 0%, rgb(var(--app-accent-rgb) / calc(0.09 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.045 * var(--app-glow))) 42%, transparent 70%), radial-gradient(36% 28% at 94% 112%, rgb(var(--app-accent-rgb) / calc(0.04 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 45%, transparent 72%)`,
-          }}
-        />
-        {/* Dot halftone at the frame edges breaks up banding without a
-          fullscreen filter. Fields end off-screen before content like the
-          calendar grid; separate elements so ambient-activity drifts each. */}
-        <div
-          // Slack past the viewport lets the composited drift translate land
-          // without exposing an unpainted edge (see ambient-dots keyframes).
-          className='ambient-dots-tl absolute -inset-2'
-          style={{
-            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.008 * var(--app-glow))) 1px, transparent 1.9px)`,
-            backgroundSize: '8px 8px',
-            maskImage: 'radial-gradient(38% 28% at 8% 0%, black 0%, transparent 55%)',
-            WebkitMaskImage: 'radial-gradient(38% 28% at 8% 0%, black 0%, transparent 55%)',
-          }}
-        />
-        <div
-          className='ambient-dots-br absolute inset-y-0 -inset-x-7'
-          style={{
-            backgroundImage: `radial-gradient(rgb(var(--app-accent-rgb) / calc(0.008 * var(--app-glow))) 1px, transparent 1.9px)`,
-            backgroundSize: '8px 8px',
-            maskImage: 'radial-gradient(18% 12% at 99% 121%, black 0%, transparent 40%)',
-            WebkitMaskImage: 'radial-gradient(18% 12% at 99% 121%, black 0%, transparent 40%)',
-          }}
-        />
-      </div>
+      <div
+        aria-hidden='true'
+        data-mini-mask
+        className='pointer-events-none fixed inset-0 z-0'
+        style={{
+          background: `radial-gradient(55% 42% at 12% 0%, rgb(var(--app-accent-rgb) / calc(0.09 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.045 * var(--app-glow))) 42%, transparent 70%), radial-gradient(36% 28% at 94% 112%, rgb(var(--app-accent-rgb) / calc(0.04 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 45%, transparent 72%)`,
+        }}
+      />
       {/* Dithering grain behind page content — dithers gradients through
           translucent panels without sitting over text. */}
       <div
@@ -147,7 +127,7 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
         className='grain-overlay pointer-events-none fixed inset-0 z-0 opacity-[0.05]'
       />
       <div className='relative z-10 min-h-screen text-foreground font-sans antialiased'>
-        <Sidebar className='fixed left-0 top-0 z-50 flex' />
+        <Sidebar className='vt-pin-sidebar fixed left-0 top-0 z-50 flex' />
         <div
           data-mini-mask
           className='relative flex min-h-[calc(100vh-2rem)] min-w-0 flex-col pt-8 overflow-x-clip'

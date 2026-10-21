@@ -1,22 +1,29 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Plus, Star } from 'lucide-react';
-import { memo, useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import {
+  memo,
+  type MouseEvent,
+  useCallback,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
-  useIsItemInLibrary,
+  useLibraryMembership,
   useMediaResumeEntry,
   useToggleLibraryItem,
 } from '@/hooks/use-media-library';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useOnlineStatus } from '@/hooks/use-online-status';
-import { useRafScrollListener } from '@/hooks/use-raf-scroll-listener';
 import { api, type MediaItem } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
-import { currentPathWithSearch } from '@/lib/navigation';
+import { currentPathWithSearch, navigateToDetails } from '@/lib/navigation';
 import { buildDetailsRoute, resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
@@ -36,7 +43,7 @@ interface HeroCarouselStateOptions {
 }
 
 const HERO_ROTATION_INTERVAL_MS = 10_000;
-const HERO_TRANSITION_DURATION_MS = 300;
+const HERO_TRANSITION_DURATION_MS = 180;
 const HERO_CONTAINER_CLASS =
   'relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden';
 
@@ -68,8 +75,7 @@ function HeroCarouselIndicators({
     <div
       role='group'
       aria-label='Featured title controls'
-      className='absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex w-max max-w-[calc(100vw-76px)] -translate-x-1/2 items-center gap-2 sm:gap-3 transition-opacity duration-300 motion-reduce:transition-none focus-within:opacity-100! group-data-[indicators-hidden]:not-focus-within:pointer-events-none'
-      style={{ opacity: 'calc(1 - var(--hero-scroll-opacity, 0) * 2)' }}
+      className='hero-scroll-indicators absolute bottom-28 md:bottom-32 left-[calc(50%+30px)] z-20 flex w-max max-w-[calc(100vw-76px)] -translate-x-1/2 items-center gap-2 sm:gap-3 focus-within:opacity-100! focus-within:pointer-events-auto!'
     >
       <button
         type='button'
@@ -87,8 +93,8 @@ function HeroCarouselIndicators({
         className='relative h-px w-12 sm:w-24 overflow-hidden rounded bg-white/20'
       >
         <span
-          className='absolute inset-y-0 left-0 rounded bg-(--accent-art) transition-[width] duration-500 ease-out motion-reduce:transition-none'
-          style={{ width: `${progressPercent}%` }}
+          className='absolute inset-y-0 left-0 w-full origin-left rounded bg-(--accent-art) transition-transform duration-300 ease-out motion-reduce:transition-none'
+          style={{ transform: `scaleX(${progressPercent / 100})` }}
         />
       </span>
       <button
@@ -306,13 +312,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
     enabled: isOnline && !!activeHeroItemId,
   });
 
-  useRafScrollListener(() => {
-    // Direct style write — a setState here would re-render the whole hero on every scroll frame.
-    const scrollOpacity = Math.min(window.scrollY / 600, 0.9);
-    sectionRef.current?.style.setProperty('--hero-scroll-opacity', String(scrollOpacity));
-    sectionRef.current?.toggleAttribute('data-indicators-hidden', scrollOpacity >= 0.5);
-  });
-
   useEffect(() => {
     if (!isOnline || items.length <= 1 || !isHeroDetailsFetched || isOffscreen || document.hidden) {
       return;
@@ -347,16 +346,9 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
 
   const heroRating = heroDetails?.rating ?? null;
   const heroLogo = item?.logo || heroDetails?.logo;
-  const libraryQuery = useIsItemInLibrary(item?.id);
-  const libraryReady = libraryQuery.data !== undefined;
-  const isInLibrary = libraryQuery.data === true;
-  const libraryActionLabel = libraryReady
-    ? isInLibrary
-      ? 'Remove from Library'
-      : 'Add to Library'
-    : libraryQuery.isError
-      ? 'Library unavailable'
-      : 'Loading Library…';
+  const { isInLibrary, libraryActionLabel, libraryError, libraryReady } = useLibraryMembership(
+    item?.id,
+  );
   const toggleLibrary = useToggleLibraryItem({ item, isInLibrary });
   const { data: historyEntry } = useMediaResumeEntry(activeHeroItemId, item?.type, {
     staleTime: 1000 * 60 * 5,
@@ -380,15 +372,16 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
           aria-hidden='true'
           className='absolute inset-x-0 bottom-0 space-y-5 px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16'
         >
-          <Skeleton className='h-12 w-80 max-w-full bg-white/[0.08] md:h-16 motion-reduce:animate-none' />
-          <Skeleton className='h-4 w-40 max-w-full bg-white/[0.06] motion-reduce:animate-none' />
+          <Skeleton className='h-12 w-80 max-w-full bg-white/[0.08] md:h-16' />
+          <Skeleton className='h-4 w-40 max-w-full bg-white/[0.06]' />
           <div className='max-w-md space-y-2.5'>
-            <Skeleton className='h-3.5 w-full bg-white/[0.05] motion-reduce:animate-none' />
-            <Skeleton className='h-3.5 w-4/5 bg-white/[0.05] motion-reduce:animate-none' />
+            <Skeleton className='h-3.5 w-full bg-white/[0.05]' />
+            <Skeleton className='h-3.5 w-4/5 bg-white/[0.05]' />
           </div>
           <div className='flex gap-2'>
-            <Skeleton className='h-11 w-28 rounded-lg bg-white/[0.08] motion-reduce:animate-none' />
-            <Skeleton className='h-11 w-11 rounded-lg bg-white/[0.06] motion-reduce:animate-none' />
+            <Skeleton className='h-11 w-28 rounded-md bg-white/[0.08]' />
+            <Skeleton className='h-11 w-11 rounded-md bg-white/[0.06]' />
+            <Skeleton className='hidden h-11 w-20 rounded-md bg-white/[0.05] sm:block' />
           </div>
         </div>
       </div>
@@ -402,12 +395,23 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const detailsPath = buildDetailsRoute(item.type, item.id);
   const prefetchActiveDetails = () =>
     isOnline && prefetchDetailsRouteData(queryClient, { mediaId: item.id, mediaType: item.type });
+  const openDetails = (event: MouseEvent<HTMLAnchorElement>) =>
+    navigateToDetails(
+      event,
+      detailsPath,
+      { state: { from } },
+      sectionRef.current?.querySelector<HTMLElement>('[data-details-artwork]'),
+    );
+  const slideTransitionClass = isTransitioning
+    ? 'opacity-0 duration-180 ease-in'
+    : 'opacity-100 duration-300 ease-out';
 
   return (
     <section
       ref={sectionRef}
-      className={cn(HERO_CONTAINER_CLASS, 'group')}
+      className={HERO_CONTAINER_CLASS}
       aria-label='Featured titles'
+      aria-roledescription='carousel'
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
       onFocusCapture={() => setHasFocus(true)}
@@ -415,26 +419,21 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         setHasFocus(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget));
       }}
     >
-      {/* Scroll dim is opacity-only — a fullscreen backdrop-filter repaints every scroll frame even at
-          opacity 0. The accent wash below reuses the same var. */}
-      <div
-        className='absolute inset-0 bg-black/60 pointer-events-none transition-opacity duration-300 ease-out z-[5] motion-reduce:transition-none'
-        style={{ opacity: 'var(--hero-scroll-opacity, 0)' }}
-      />
+      <div className='hero-scroll-dim absolute inset-0 bg-black/60 pointer-events-none z-[5]' />
       <div
         aria-hidden='true'
-        className='absolute inset-0 pointer-events-none z-[5]'
+        className='hero-scroll-dim absolute inset-0 pointer-events-none z-[5]'
         style={{
-          opacity: 'var(--hero-scroll-opacity, 0)',
           background:
             'radial-gradient(55% 38% at 50% 0%, rgb(var(--accent-art-rgb) / 0.10) 0%, transparent 70%)',
         }}
       />
 
       <div
+        data-details-artwork
         className={cn(
-          'absolute inset-0 transition-opacity duration-300 ease-in-out motion-reduce:transition-none',
-          isTransitioning ? 'opacity-0' : 'opacity-100',
+          'absolute inset-0 transition-opacity motion-reduce:transition-none',
+          slideTransitionClass,
         )}
       >
         {backdropUrl && isHttpUrl(backdropUrl) && (
@@ -480,18 +479,16 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
           {/* Bottom-padded past the rail overlap (-mt-* on home rails) so actions never sit under the first cards. */}
           <div
             className={cn(
-              'absolute inset-0 flex items-end transition-opacity duration-300 ease-in-out px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16 motion-reduce:transition-none',
-              isTransitioning ? 'opacity-0' : 'opacity-100',
+              'absolute inset-0 flex items-end transition-opacity px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16 motion-reduce:transition-none',
+              slideTransitionClass,
             )}
           >
-            <div
-              className='flex w-full items-end justify-between gap-10 focus-within:opacity-100!'
-              style={{ opacity: 'calc(1 - var(--hero-scroll-opacity, 0))' }}
-            >
+            <div className='hero-scroll-content flex w-full items-end justify-between gap-10 focus-within:opacity-100!'>
               <div className='flex min-w-0 max-w-2xl flex-col items-start text-left'>
                 <Link
                   to={detailsPath}
                   state={{ from }}
+                  onClick={openDetails}
                   onFocus={prefetchActiveDetails}
                   onPointerEnter={prefetchActiveDetails}
                   className='relative mb-5 flex h-[150px] w-[440px] max-w-full items-end rounded-md transition-opacity duration-150 hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 focus-visible:ring-offset-4 focus-visible:ring-offset-black/40 motion-reduce:transition-none md:h-[185px]'
@@ -522,42 +519,45 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   </p>
                 )}
 
-                <div className='mt-5 flex items-center gap-2'>
+                <div className='mt-5 flex flex-wrap items-center gap-2'>
                   <Button
                     size='sm'
+                    variant={null}
                     onClick={() => {
-                      if (isOnline) void primaryPlayback.handlePrimaryAction();
+                      if (isOnline && !primaryPlayback.isResolvingPrimaryAction)
+                        void primaryPlayback.handlePrimaryAction();
                     }}
                     aria-disabled={
                       !isOnline || primaryPlayback.isResolvingPrimaryAction || undefined
                     }
                     aria-busy={primaryPlayback.isResolvingPrimaryAction || undefined}
                     title={isOnline ? undefined : 'Reconnect to find streams'}
-                    className='h-11 min-w-[108px] gap-2 rounded-lg bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80'
+                    className='h-11 min-w-[108px] gap-2 rounded-md bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 not-aria-disabled:hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80 motion-reduce:transition-none'
                   >
                     {primaryPlayback.showResolvingFeedback ? (
-                      <Loader2 className='h-4 w-4 animate-spin motion-reduce:animate-none' />
+                      <Loader2
+                        aria-hidden='true'
+                        className='h-4 w-4 animate-spin motion-reduce:animate-none'
+                      />
                     ) : (
-                      <Play className='h-4 w-4 fill-current' />
+                      <Play aria-hidden='true' className='h-4 w-4 fill-current' />
                     )}
                     {primaryPlayback.primaryActionLabel}
                   </Button>
                   <Button
                     size='icon'
-                    variant='ghost'
+                    variant={null}
                     aria-label={libraryActionLabel}
                     title={libraryActionLabel}
                     aria-pressed={libraryReady ? isInLibrary : undefined}
                     aria-busy={
-                      (!libraryReady && !libraryQuery.isError) ||
-                      toggleLibrary.isPending ||
-                      undefined
+                      (!libraryReady && !libraryError) || toggleLibrary.isPending || undefined
                     }
                     className={cn(
-                      'h-11 w-11 shrink-0 rounded-lg border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-default',
+                      'h-11 w-11 shrink-0 rounded-md border transition-colors duration-150 focus-visible:ring-white/60 aria-disabled:cursor-default motion-reduce:transition-none',
                       isInLibrary
-                        ? 'border-white/30 bg-white/15 text-white hover:bg-white/20 hover:text-white'
-                        : 'border-white/20 bg-black/25 text-white/80 hover:border-white/35 hover:bg-white/10 hover:text-white',
+                        ? 'border-white/30 bg-white/15 text-white not-aria-disabled:hover:bg-white/20'
+                        : 'border-white/20 bg-black/25 text-white/80 not-aria-disabled:hover:border-white/35 not-aria-disabled:hover:bg-white/10 not-aria-disabled:hover:text-white',
                     )}
                     // Guard, not `disabled` — disabling the focused button blurs it, unpausing the carousel mid-click.
                     aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
@@ -580,6 +580,18 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                       />
                     </span>
                   </Button>
+                  <Link
+                    to={detailsPath}
+                    state={{ from }}
+                    onClick={openDetails}
+                    onFocus={prefetchActiveDetails}
+                    onPointerEnter={prefetchActiveDetails}
+                    aria-label={`Details for ${item.title}`}
+                    className='hidden h-11 items-center gap-1 rounded-md px-3 text-[13px] font-medium text-white/65 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/60 motion-reduce:transition-none sm:inline-flex'
+                  >
+                    Details
+                    <ChevronRight aria-hidden='true' className='h-3.5 w-3.5' />
+                  </Link>
                 </div>
               </div>
 

@@ -66,6 +66,10 @@ export function isExternalSubtitleTrack(
   );
 }
 
+export function trackDisplayLabel(tracks: readonly Track[], id: number): string {
+  return tracks.find((track) => track.id === id)?.displayLabel ?? `Track ${id}`;
+}
+
 export function findExternalSubtitleTrack(
   tracks: readonly Track[],
   subtitle: { mpvTitle: string; url: string },

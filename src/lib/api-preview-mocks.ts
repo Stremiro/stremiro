@@ -16,6 +16,7 @@ import {
   type StreamSelectorPreferences,
   type StreamSelectorPreferencesState,
   type UserList,
+  type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
 import { toMediaItem } from '@/lib/api-store';
@@ -33,6 +34,7 @@ let previewProfilePreferences: ProfilePreferences = {
       actions: true,
       progress: true,
       artwork: true,
+      skip: true,
     },
   },
   viewMode: 'grid',
@@ -260,6 +262,7 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const current = previewAppUiPreferences;
   const volume = readFiniteNumber(patch, 'playerVolume');
   const speed = readFiniteNumber(patch, 'playerSpeed');
+  const audioDelay = readFiniteNumber(patch, 'audioDelay');
   const delay = readFiniteNumber(patch, 'subtitleDelay');
   const pos = readFiniteNumber(patch, 'subtitlePos');
   const scale = readFiniteNumber(patch, 'subtitleScale');
@@ -271,31 +274,17 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const claimedKeys = new Set(Object.values(overrides).flat());
 
   previewAppUiPreferences = {
+    ...current,
     playerVolume: volume === undefined ? current.playerVolume : clamp(Math.round(volume), 0, 100),
     playerSpeed: speed === undefined ? current.playerSpeed : speed > 0 ? clamp(speed, 0.25, 4) : 1,
-    spoilerProtection:
-      typeof patch.spoilerProtection === 'boolean'
-        ? patch.spoilerProtection
-        : current.spoilerProtection,
-    autoPlayNext:
-      typeof patch.autoPlayNext === 'boolean' ? patch.autoPlayNext : current.autoPlayNext,
+    audioDelay:
+      audioDelay === undefined
+        ? current.audioDelay
+        : Math.round(clamp(audioDelay, -5, 5) * 10) / 10,
     nextEpisodeCountdownSecs:
       (patch.nextEpisodeCountdownSecs as number | undefined) ?? current.nextEpisodeCountdownSecs,
     controlsHideDelayMs:
       (patch.controlsHideDelayMs as number | undefined) ?? current.controlsHideDelayMs,
-    trailerPreviews:
-      typeof patch.trailerPreviews === 'boolean' ? patch.trailerPreviews : current.trailerPreviews,
-    autoSkipIntro:
-      typeof patch.autoSkipIntro === 'boolean' ? patch.autoSkipIntro : current.autoSkipIntro,
-    automaticUpdateChecks:
-      typeof patch.automaticUpdateChecks === 'boolean'
-        ? patch.automaticUpdateChecks
-        : current.automaticUpdateChecks,
-    closeToTray: typeof patch.closeToTray === 'boolean' ? patch.closeToTray : current.closeToTray,
-    minimizeToTray:
-      typeof patch.minimizeToTray === 'boolean' ? patch.minimizeToTray : current.minimizeToTray,
-    startMinimized:
-      typeof patch.startMinimized === 'boolean' ? patch.startMinimized : current.startMinimized,
     startupPage:
       patch.startupPage === undefined
         ? current.startupPage
@@ -335,6 +324,19 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
     ),
     defaultPlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
   };
+  for (const key of [
+    'nightMode',
+    'spoilerProtection',
+    'autoPlayNext',
+    'trailerPreviews',
+    'autoSkipIntro',
+    'automaticUpdateChecks',
+    'closeToTray',
+    'minimizeToTray',
+    'startMinimized',
+  ] as const) {
+    if (typeof patch[key] === 'boolean') previewAppUiPreferences[key] = patch[key];
+  }
 }
 
 // Mirrors `apply_addon_configs_op` without validation — enough for settings edits to round-trip in preview.
@@ -768,35 +770,19 @@ export async function handlePreviewInvoke<T>(
       // The command returns the rows it deleted — preview holds no history.
       return [] as T;
     case 'build_history_playback_plan': {
-      const item =
-        typeof args?.item === 'object' && args?.item !== null
-          ? (args.item as Record<string, unknown>)
-          : null;
-      const mediaId = typeof item?.id === 'string' && item.id.trim() ? item.id : 'mock-id';
-      const itemType = typeof item?.type_ === 'string' ? item.type_.trim().toLowerCase() : 'movie';
+      const item = args?.item as WatchProgress | undefined;
+      const mediaId = item?.id.trim() ? item.id : 'mock-id';
+      const itemType = item?.type_.trim().toLowerCase() ?? 'movie';
       const mediaType = mediaId.startsWith('kitsu:')
         ? 'anime'
         : itemType === 'movie'
           ? 'movie'
           : 'series';
-      const absoluteSeason =
-        typeof item?.absolute_season === 'number'
-          ? item.absolute_season
-          : typeof item?.season === 'number'
-            ? item.season
-            : undefined;
-      const absoluteEpisode =
-        typeof item?.absolute_episode === 'number'
-          ? item.absolute_episode
-          : typeof item?.episode === 'number'
-            ? item.episode
-            : undefined;
+      const absoluteSeason = item?.absolute_season ?? item?.season;
+      const absoluteEpisode = item?.absolute_episode ?? item?.episode;
       const from = readStringArg(args, 'from', '/');
 
-      if (
-        mediaType !== 'movie' &&
-        (typeof absoluteSeason !== 'number' || typeof absoluteEpisode !== 'number')
-      ) {
+      if (mediaType !== 'movie' && (absoluteSeason == null || absoluteEpisode == null)) {
         return {
           kind: 'details',
           reason: 'missing-episode-context',
@@ -807,31 +793,26 @@ export async function handlePreviewInvoke<T>(
 
       // Route state carries opaque identities, never stream URLs; mirrors the backend's media-id lookup fallback.
       const target =
-        typeof absoluteSeason === 'number' && typeof absoluteEpisode === 'number'
+        absoluteSeason != null && absoluteEpisode != null
           ? `/player/${mediaType}/${encodeURIComponent(mediaId)}/${absoluteSeason}/${absoluteEpisode}`
           : `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
 
       const state: HistoryPlaybackPlan['state'] = {
         from,
-        title: typeof item?.title === 'string' ? item.title : undefined,
-        poster: typeof item?.poster === 'string' ? item.poster : undefined,
-        backdrop: typeof item?.backdrop === 'string' ? item.backdrop : undefined,
-        streamSourceId: typeof item?.source_id === 'string' ? item.source_id : undefined,
-        streamSourceName: typeof item?.source_name === 'string' ? item.source_name : undefined,
-        streamFamily: typeof item?.stream_family === 'string' ? item.stream_family : undefined,
-        selectedStreamKey:
-          typeof item?.last_stream_key === 'string' ? item.last_stream_key : undefined,
-        startTime: typeof item?.resume_start_time === 'number' ? item.resume_start_time : undefined,
+        title: item?.title,
+        poster: item?.poster,
+        backdrop: item?.backdrop,
+        streamSourceId: item?.source_id,
+        streamSourceName: item?.source_name,
+        streamFamily: item?.stream_family,
+        selectedStreamKey: item?.last_stream_key,
+        startTime: item?.resume_start_time,
         absoluteSeason,
         absoluteEpisode,
-        streamSeason: typeof item?.stream_season === 'number' ? item.stream_season : absoluteSeason,
-        streamEpisode:
-          typeof item?.stream_episode === 'number' ? item.stream_episode : absoluteEpisode,
+        streamSeason: item?.stream_season ?? absoluteSeason,
+        streamEpisode: item?.stream_episode ?? absoluteEpisode,
         resumeFromHistory: true,
-        streamLookupId:
-          typeof item?.last_stream_lookup_id === 'string' && item.last_stream_lookup_id.trim()
-            ? item.last_stream_lookup_id
-            : mediaId,
+        streamLookupId: item?.last_stream_lookup_id?.trim() ? item.last_stream_lookup_id : mediaId,
       };
       const plan: HistoryPlaybackPlan = {
         kind: 'player',

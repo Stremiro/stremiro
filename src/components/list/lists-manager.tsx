@@ -16,7 +16,6 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query';
 import {
-  ChevronDown,
   ChevronRight,
   Check,
   CheckSquare,
@@ -29,7 +28,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { memo, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router';
 import {
   CreateListDialog,
@@ -146,6 +145,7 @@ function SortableListCard({
   onRename,
   onDelete,
 }: SortableListCardProps) {
+  const contentId = useId();
   const rulesSummary = list.rules ? smartRulesSummary(list.rules) : undefined;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: list.id,
@@ -162,10 +162,12 @@ function SortableListCard({
       data-list-row={list.id}
       style={style}
       className={cn(
-        'rounded-xl border transition-[background-color,border-color,opacity] duration-200',
+        'rounded-lg border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
         isDragging
           ? 'opacity-40 border-white/20 bg-zinc-900/80 scale-[0.98]'
-          : 'border-white/8 bg-zinc-900/40 hover:border-white/15 hover:bg-zinc-900/60',
+          : isExpanded
+            ? 'border-white/[0.12] bg-zinc-900/50'
+            : 'border-white/[0.08] bg-zinc-900/40 hover:border-white/[0.12] hover:bg-zinc-900/60 focus-within:border-white/[0.12] focus-within:bg-zinc-900/60',
       )}
     >
       <div className='flex items-center gap-3 px-4 py-3'>
@@ -183,6 +185,7 @@ function SortableListCard({
           type='button'
           onClick={() => onToggleExpand(list.id)}
           aria-expanded={isExpanded}
+          aria-controls={isExpanded ? contentId : undefined}
           className='flex min-h-8 items-center gap-3 flex-1 min-w-0 rounded-md group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
         >
           <ListIconTile iconId={list.icon} />
@@ -214,11 +217,13 @@ function SortableListCard({
           </div>
           <ListPosterStack items={list.items} />
           <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
-            {isExpanded ? (
-              <ChevronDown className='w-4 h-4' />
-            ) : (
-              <ChevronRight className='w-4 h-4' />
-            )}
+            <ChevronRight
+              aria-hidden='true'
+              className={cn(
+                'w-4 h-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+                isExpanded && 'rotate-90',
+              )}
+            />
           </div>
         </button>
 
@@ -253,7 +258,7 @@ function SortableListCard({
       </div>
 
       {isExpanded && (
-        <div className='border-t border-white/5'>
+        <div id={contentId} className='border-t border-white/[0.06]'>
           <ListItemsView key={list.id} list={list} />
         </div>
       )}
@@ -953,14 +958,25 @@ export function ListsManager() {
     />
   );
 
+  const setCachedOrder = (ids: string[]) =>
+    queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) => {
+      if (!current) return current;
+      const remaining = new Map(current.map((list) => [list.id, list]));
+      const ordered = ids.flatMap((id) => {
+        const list = remaining.get(id);
+        remaining.delete(id);
+        return list ? [list] : [];
+      });
+      return [...ordered, ...remaining.values()];
+    });
   const reorderLists = useMutation({
-    mutationFn: (next: UserList[]) => api.reorderLists(next.map((list) => list.id)),
+    mutationFn: (ids: string[]) => api.reorderLists(ids),
     onMutate: async (next) => {
       const generation = ++listOrderGenerationRef.current;
       await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
       const previous = queryClient.getQueryData<UserList[]>(LISTS_QUERY_KEY);
       if (generation === listOrderGenerationRef.current) {
-        queryClient.setQueryData(LISTS_QUERY_KEY, next);
+        setCachedOrder(next);
       }
       return { previousOrder: previous?.map((list) => list.id), generation };
     },
@@ -968,16 +984,7 @@ export function ListsManager() {
     onError: (_, _next, context) => {
       const previousOrder = context?.previousOrder;
       if (context?.generation === listOrderGenerationRef.current && previousOrder) {
-        queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) => {
-          if (!current) return current;
-          const remaining = new Map(current.map((list) => [list.id, list]));
-          const ordered = previousOrder.flatMap((id) => {
-            const list = remaining.get(id);
-            remaining.delete(id);
-            return list ? [list] : [];
-          });
-          return [...ordered, ...remaining.values()];
-        });
+        setCachedOrder(previousOrder);
       }
       notifyAction('Failed to save list order', { tone: 'error' });
     },
@@ -1034,7 +1041,13 @@ export function ListsManager() {
     const newIdx = lists.findIndex((l) => l.id === over.id);
     if (oldIdx === -1 || newIdx === -1) return;
 
-    reorderLists.mutate(arrayMove(lists, oldIdx, newIdx));
+    reorderLists.mutate(
+      arrayMove(
+        lists.map((list) => list.id),
+        oldIdx,
+        newIdx,
+      ),
+    );
   };
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
@@ -1098,6 +1111,16 @@ export function ListsManager() {
               details page.
             </p>
           </div>
+          <Button
+            size='sm'
+            onPointerEnter={warmListEditorDialog}
+            onFocus={warmListEditorDialog}
+            onClick={() => setCreateOpen(true)}
+            className='accent-lattice mt-1 h-8 border-0 text-xs'
+          >
+            <Plus aria-hidden='true' className='h-3.5 w-3.5' />
+            Create your first list
+          </Button>
         </div>
       ) : (
         <DndContext
@@ -1127,7 +1150,11 @@ export function ListsManager() {
         </DndContext>
       )}
 
-      <CreateListDialog open={createOpen} onOpenChange={setCreateOpen} />
+      <CreateListDialog
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        returnFocusRef={newListButtonRef}
+      />
 
       {renameTarget && (
         <RenameListDialog
