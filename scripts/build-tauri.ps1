@@ -141,7 +141,7 @@ try {
   if ($Unsigned) {
     # PowerShell 5.1 strips literal quotes from native-command arguments —
     # \" survives CommandLineToArgvW and reaches cargo as real JSON quotes.
-    & cargo tauri build --ci --bundles nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}' -- --locked
+    & bun tauri build --ci --bundles nsis --config '{\"bundle\":{\"createUpdaterArtifacts\":false}}' -- --locked
     exit $LASTEXITCODE
   }
 
@@ -192,7 +192,7 @@ try {
     }
   }
 
-  & cargo tauri build --ci --bundles nsis -- --locked
+  & bun tauri build --ci --bundles nsis -- --locked
   exit $LASTEXITCODE
 }
 finally {
