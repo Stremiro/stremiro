@@ -1,7 +1,7 @@
 {
   "name": "stremiro",
   "private": true,
-  "version": "0.8.3-alpha",
+  "version": "0.8.4-alpha",
   "type": "module",
   "packageManager": "bun@1.4.2",
   "engines": {
