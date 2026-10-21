@@ -3,6 +3,7 @@ use super::browse_genre_commands::build_browse_genres;
 use super::js_trim;
 use super::media_normalization::normalize_media_item;
 use super::media_type::normalize_watch_progress_type;
+use super::playback_state::PLAYBACK_RESUME_STORE_FILE;
 use super::resume_store::ResumeStore;
 use super::search_commands::{
     query_search_catalog_for_request, SearchCatalogPage, SearchCatalogRequest,
@@ -196,21 +197,16 @@ fn rank_similar_titles(
     if candidates.is_empty() {
         return Vec::new();
     }
-    let genre_weights = IdfWeights::new(
-        candidates
-            .iter()
-            .map(|candidate| (candidate.item().id.as_str(), &candidate.genres)),
-    );
-    let description_weights = IdfWeights::new(
-        candidates
-            .iter()
-            .map(|candidate| (candidate.item().id.as_str(), &candidate.description)),
-    );
-    let title_weights = IdfWeights::new(
-        candidates
-            .iter()
-            .map(|candidate| (candidate.item().id.as_str(), &candidate.title)),
-    );
+    let weights = |terms: fn(&Candidate) -> &BTreeSet<String>| {
+        IdfWeights::new(
+            candidates
+                .iter()
+                .map(|candidate| (candidate.item().id.as_str(), terms(candidate))),
+        )
+    };
+    let genre_weights = weights(|candidate| &candidate.genres);
+    let description_weights = weights(|candidate| &candidate.description);
+    let title_weights = weights(|candidate| &candidate.title);
     // Keep the squared norms so the denominator's floating-point evaluation
     // remains identical while the invariant source work happens only once.
     let source_description_norm_squared =
@@ -344,7 +340,7 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
 fn resume_store_path(app: &AppHandle) -> Result<PathBuf, String> {
     app.path()
         .app_data_dir()
-        .map(|dir| dir.join("playback_resume.sqlite3"))
+        .map(|dir| dir.join(PLAYBACK_RESUME_STORE_FILE))
         .map_err(|error| error.to_string())
 }
 

@@ -140,7 +140,8 @@ pub(super) fn recent_successful_source(
         snapshot
             .source_id
             .as_deref()
-            .and_then(normalize_source_id)?,
+            .and_then(normalize_source_id)?
+            .to_string(),
         last_success_at,
     ))
 }
@@ -389,7 +390,10 @@ pub(super) fn update_verified_family_source_id(
     outcome: PlaybackStreamOutcomeKind,
 ) {
     if matches!(outcome, PlaybackStreamOutcomeKind::Verified) {
-        snapshot.source_id = resolved_source_id.and_then(|value| normalize_source_id(&value));
+        snapshot.source_id = resolved_source_id
+            .as_deref()
+            .and_then(normalize_source_id)
+            .map(str::to_string);
     }
 }
 
@@ -586,7 +590,11 @@ impl PlaybackStateService {
         let store = self.open_state_store(app)?;
         // Health attribution uses the resolved stream's `source_id`; a name-only
         // report (legacy route state) skips the health write rather than guessing.
-        let resolved_source_id = report.source_id.as_deref().and_then(normalize_source_id);
+        let resolved_source_id = report
+            .source_id
+            .as_deref()
+            .and_then(normalize_source_id)
+            .map(str::to_string);
         // `set` mutates the shared map immediately, so the generation guard must run
         // before the first mutation, not only before `save`. The lock serializes the
         // whole section so a `clear`/`remove_keys` bump+delete can't interleave.
@@ -647,7 +655,7 @@ impl PlaybackStateService {
             .flatten()
             .filter(|source_id| seen.insert(*source_id))
             .filter_map(normalize_source_id)
-            .map(|source_id| (source_id, DEFAULT_SOURCE_HEALTH_PRIORITY))
+            .map(|source_id| (source_id.to_string(), DEFAULT_SOURCE_HEALTH_PRIORITY))
             .collect();
         if priorities.is_empty() {
             return Ok(priorities);
@@ -673,14 +681,14 @@ impl PlaybackStateService {
         season: Option<u32>,
         episode: Option<u32>,
         stream_families: impl IntoIterator<Item = &'a str>,
-    ) -> Result<HashMap<String, u8>, String> {
+    ) -> HashMap<String, u8> {
         let Some(scope_key) = playback_title_scope_key(Some(media_type), Some(media_id)) else {
-            return Ok(HashMap::new());
+            return HashMap::new();
         };
         let store = self.open_advisory_store(app, "stream-family-priorities");
         let now_ms = now_unix_millis();
 
-        Ok(scored_priorities(
+        scored_priorities(
             stream_families.into_iter().map(Some),
             normalize_source_key,
             |stream_family| {
@@ -693,7 +701,7 @@ impl PlaybackStateService {
                         score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
                     })
             },
-        ))
+        )
     }
 
     /// Single-open read of the title scope's preferred source: the last addon
@@ -703,18 +711,10 @@ impl PlaybackStateService {
         app: &AppHandle,
         media_id: &str,
         media_type: &str,
-    ) -> Result<Option<String>, String> {
-        let Some(scope_key) = playback_title_scope_key(Some(media_type), Some(media_id)) else {
-            return Ok(None);
-        };
-        let Some(store) = self.open_advisory_store(app, "preferred-title-source") else {
-            return Ok(None);
-        };
-        Ok(preferred_title_source_id_from_success(
-            &store,
-            &scope_key,
-            now_unix_millis(),
-        ))
+    ) -> Option<String> {
+        let scope_key = playback_title_scope_key(Some(media_type), Some(media_id))?;
+        let store = self.open_advisory_store(app, "preferred-title-source")?;
+        preferred_title_source_id_from_success(&store, &scope_key, now_unix_millis())
     }
 
     /// Reputation only orders sources, so an unreadable store ranks neutrally

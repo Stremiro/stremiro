@@ -637,13 +637,14 @@ pub(crate) struct StreamFlags {
     pub capture_release: bool,
     pub dolby_vision: bool,
     pub hdr10_plus: bool,
+    pub hdr10: bool,
     pub hdr: bool,
     /// TrueHD folds into Atmos for both badge and score.
     pub atmos: bool,
     /// `dts-hd`/`dts-x`/`dtsx`; `dts` stays raw — consumers gate it on `!dts_hd`.
     pub dts_hd: bool,
     pub dts: bool,
-    /// eac3/dd+/ddp/dd5.1 — union of the score and badge spellings.
+    /// eac3/dd+/ddp — plain `dd5.1` is AC3 and counts as surround only.
     pub eac3: bool,
     pub aac: bool,
     /// 5.1/7.1 surround — quality-score signal only today.
@@ -671,7 +672,7 @@ impl StreamFlags {
         }
         fill!(RESOLUTION, resolution);
         fill!(RELEASE, release, capture_release);
-        fill!(HDR, dolby_vision, hdr10_plus, hdr);
+        fill!(HDR, dolby_vision, hdr10_plus, hdr10, hdr);
         fill!(AUDIO, atmos, dts_hd, dts, eac3, aac);
         fill!(CHANNELS, surround);
         fill!(CODEC, hevc, av1);
@@ -763,25 +764,28 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
             || haystack.contains("dovi")
             || STREAM_DV_REGEX.is_match(haystack),
         hdr10_plus: haystack.contains("hdr10+"),
-        hdr: STREAM_HDR_REGEX.is_match(haystack),
+        hdr10: false,
+        hdr: false,
         atmos: haystack.contains("atmos") || haystack.contains("truehd"),
         dts_hd: haystack.contains("dts-hd")
             || haystack.contains("dts-x")
             || haystack.contains("dtsx"),
         dts: haystack.contains("dts"),
-        eac3: haystack.contains("eac3")
-            || haystack.contains("dd+")
-            || haystack.contains("ddp")
-            || haystack.contains("dd5.1"),
+        eac3: haystack.contains("eac3") || haystack.contains("dd+") || haystack.contains("ddp"),
         aac: haystack.contains("aac"),
-        surround: STREAM_SURROUND_REGEX
-            .is_match(&STREAM_SURROUND_SIZE_REGEX.replace_all(haystack, " ")),
+        surround: haystack.contains("dd5.1")
+            || STREAM_SURROUND_REGEX
+                .is_match(&STREAM_SURROUND_SIZE_REGEX.replace_all(haystack, " ")),
         hevc: haystack.contains("x265")
             || haystack.contains("hevc")
             || haystack.contains("h265")
             || haystack.contains("h.265"),
         av1: STREAM_AV1_REGEX.is_match(haystack),
     };
+    for tag in STREAM_HDR_REGEX.find_iter(haystack) {
+        flags.hdr = true;
+        flags.hdr10 |= tag.as_str().eq_ignore_ascii_case("hdr10");
+    }
     for (present, group) in [
         (
             flags.resolution != StreamResolutionTier::Sd,
@@ -813,7 +817,7 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
         flags.explicit_groups |= match token {
             "sd" | "240p" | "360p" | "576p" => StreamFlags::RESOLUTION,
             "sdr" => StreamFlags::HDR,
-            "ac3" | "mp3" | "flac" | "opus" | "pcm" => StreamFlags::AUDIO,
+            "ac3" | "dd5" | "mp3" | "flac" | "opus" | "pcm" => StreamFlags::AUDIO,
             "stereo" | "mono" => StreamFlags::CHANNELS,
             "h264" | "x264" | "avc" | "mpeg2" | "xvid" | "divx" | "vp9" => StreamFlags::CODEC,
             _ => 0,
@@ -1085,17 +1089,21 @@ pub(crate) fn stream_episode_match_texts(
     episode: u32,
     final_season: bool,
 ) -> StreamEpisodeMatch {
-    if stream_conflicts_with_episode_targets(
-        texts,
-        &[(season, episode)],
-        final_season.then_some(season),
-    ) {
+    let fields = texts.fields_with_season_context(season, final_season);
+    // Same conflict rule as `stream_conflicts_with_episode_targets`, reusing the season context.
+    let claimed = texts
+        .claims
+        .iter()
+        .zip(fields.iter().rev())
+        .find_map(|(profile, field)| Some((profile.as_ref()?, (*field)?)));
+    if claimed.is_some_and(|(profile, (text, season_context, _))| {
+        !numeric_episode_claim_matches(profile, text, season, episode, season_context)
+    }) {
         return StreamEpisodeMatch {
             kind: StreamEpisodeMatchKind::None,
             season_claim_verified: false,
         };
     }
-    let fields = texts.fields_with_season_context(season, final_season);
 
     // Keep scanning matching fields until one carries a verified season claim.
     let mut matched_exact = false;
@@ -1253,9 +1261,8 @@ fn numeric_episode_claim_matches(
     text: &str,
     season: u32,
     episode: u32,
-    final_season: bool,
+    season_context: Option<bool>,
 ) -> bool {
-    let season_context = text_matches_requested_season(text, season, final_season);
     if profile.has_season && season_context == Some(false) {
         return false;
     }
@@ -1305,7 +1312,7 @@ pub(crate) fn stream_conflicts_with_episode_targets(
                 text,
                 season,
                 episode,
-                final_season_season == Some(season),
+                text_matches_requested_season(text, season, final_season_season == Some(season)),
             )
         });
     }

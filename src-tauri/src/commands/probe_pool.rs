@@ -366,7 +366,7 @@ fn find_preferred_position(
                     .stream_family
                     .as_deref()
                     .is_some_and(|value| value.trim().eq_ignore_ascii_case(&family))
-                && source_id.as_deref().is_none_or(|id| {
+                && source_id.is_none_or(|id| {
                     stream
                         .source_id
                         .as_deref()
@@ -518,21 +518,17 @@ fn build_probe_candidates(
 
     let mut candidates: Vec<(StreamResolveCandidateInput, Duration)> =
         Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
-    let mut header_identities = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
+    let mut identities = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
     let mut host_counts = HashMap::<String, u32>::new();
     for candidate in streams.into_iter().filter_map(build_candidate_input) {
         let mut headers = candidate.request_headers.clone();
         canonicalize_header_identity(&mut headers);
+        let identity = ProbeRequestIdentity {
+            url: candidate.direct_url.clone(),
+            headers,
+        };
         // Equivalent requests share a probe; different auth headers stay separate even on the same URL.
-        if candidates
-            .iter()
-            .zip(&header_identities)
-            .any(|((existing, _), existing_headers)| {
-                probe_url_identity(existing.direct_url.as_str())
-                    == probe_url_identity(candidate.direct_url.as_str())
-                    && existing_headers == &headers
-            })
-        {
+        if identities.contains(&identity) {
             continue;
         }
         let host = candidate
@@ -542,7 +538,7 @@ fn build_probe_candidates(
         let count = host_counts.entry(host.to_string()).or_default();
         let delay = SAME_HOST_PROBE_SPACING * *count;
         *count += 1;
-        header_identities.push(headers);
+        identities.push(identity);
         candidates.push((candidate, delay));
         if candidates.len() == BEST_STREAM_MAX_CANDIDATES {
             break;

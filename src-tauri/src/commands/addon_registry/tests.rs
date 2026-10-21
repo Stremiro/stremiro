@@ -291,6 +291,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
             .collect::<Vec<_>>(),
         [2, 4]
     );
+    assert_eq!(page.claims.get("movie:single"), Some(&None));
     let mut added = addon.clone();
     added.url = "https://new.example/manifest.json".into();
     let snapshot = [added, addon];
@@ -316,7 +317,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
             (
                 1,
                 Ok(CatalogPage {
-                    items: vec![],
+                    items: vec![test_media_item("next", "movie")],
                     source_item_count: 3,
                 }),
             ),
@@ -326,6 +327,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
     .unwrap();
     assert_eq!(page.cursors.len(), 1);
     assert_eq!(page.cursors[0].skip, 7);
+    assert_eq!(page.claims.get("movie:next"), Some(&Some(0)));
     let (work, sources) =
         select_search_catalog_work(&snapshot, "dune", &["movie"], &[None], Some(&page.cursors));
     assert_eq!(work.len(), 1);

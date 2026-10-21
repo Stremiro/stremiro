@@ -320,60 +320,138 @@ fn search_catalog_seen_key_bound_validates_and_ends_paging() {
     }
 }
 
+fn search_cursor(key: &str, skip: u32, retry: bool) -> super::SearchSourceCursor {
+    super::SearchSourceCursor {
+        key: key.into(),
+        skip,
+        retry,
+    }
+}
+
+fn search_claims(claims: &[(&str, Option<usize>)]) -> super::SearchCursorClaims {
+    claims
+        .iter()
+        .map(|(key, claimant)| ((*key).to_string(), *claimant))
+        .collect()
+}
+
 #[test]
-fn text_search_sparse_and_duplicate_pages_keep_advancing_source_cursors() {
+fn text_search_source_cursors_continue_only_while_adding_titles() {
+    const PAGED: &str = "0123456789abcdef";
+    const FILTERED: &str = "1123456789abcdef";
+    const RETRY: &str = "2123456789abcdef";
+    let ranked = rank_search_results(
+        "Match",
+        vec![
+            build_item("prefix", "Match sequel", Some("2024")),
+            build_item("TT1", "Match", Some("2020")),
+            build_item("old", "Match", Some("1990")),
+        ],
+        SearchYearRange {
+            year_from: Some(2020),
+            year_to: None,
+        },
+    );
     let first = super::finish_catalog_page(
-        rank_search_results(
-            "Match",
-            vec![
-                build_item("prefix", "Match sequel", Some("2024")),
-                build_item("TT1", "Match", Some("2020")),
-                build_item("old", "Match", Some("1990")),
-            ],
-            SearchYearRange {
-                year_from: Some(2020),
-                year_to: None,
-            },
-        ),
+        ranked,
         super::SearchCatalogContinuation::default(),
         None,
         None,
-        Some(vec![super::SearchSourceCursor {
-            key: "0123456789abcdef".into(),
-            skip: 100,
-            retry: false,
-        }]),
+        Some((
+            vec![
+                search_cursor(PAGED, 100, false),
+                search_cursor(FILTERED, 50, false),
+                search_cursor(RETRY, 0, true),
+            ],
+            search_claims(&[
+                ("movie:prefix", Some(0)),
+                ("movie:tt1", Some(0)),
+                ("movie:old", Some(1)),
+            ]),
+        )),
     );
     assert_eq!(ids(&first.items), ["TT1", "prefix"]);
     assert!(!first.exhausted);
-    assert_eq!(first.continuation.seen_keys.len(), 2);
-    let page = super::finish_catalog_page(
-        vec![test_media_item("TT1", "movie")],
-        first.continuation,
-        None,
-        None,
-        Some(vec![super::SearchSourceCursor {
-            key: "0123456789abcdef".into(),
-            skip: 200,
-            retry: false,
-        }]),
+    // The year-filtered title still counts as its source's progress and is remembered.
+    assert_eq!(first.continuation.seen_keys.len(), 3);
+    assert!(first.continuation.seen_keys.contains(&"movie:old".into()));
+    let wire = serde_json::to_value(&first).unwrap();
+    assert_eq!(
+        wire["continuation"]["searchCursors"],
+        serde_json::json!([
+            {"key": PAGED, "skip": 100, "retry": false},
+            {"key": FILTERED, "skip": 50, "retry": false},
+            {"key": RETRY, "skip": 0, "retry": true},
+        ])
     );
-    assert!(page.items.is_empty());
-    assert!(!page.exhausted);
-    assert_eq!(page.continuation.seen_keys.len(), 2);
-    assert!(page.continuation.seen_keys.contains(&"movie:tt1".into()));
-    let wire = serde_json::to_value(&page).unwrap();
-    assert_eq!(wire["continuation"]["searchCursors"][0]["skip"], 200);
     assert!(wire["continuation"].get("skip").is_none());
-    let page = super::finish_catalog_page(
-        vec![test_media_item("new", "movie")],
-        page.continuation,
+    let criteria = super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({
+            "query": "Match", "continuation": wire["continuation"],
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let second = super::finish_catalog_page(
+        vec![
+            test_media_item("tt1", "movie"),
+            test_media_item("fresh", "movie"),
+        ],
+        criteria.continuation,
         None,
         None,
-        Some(Vec::new()),
+        Some((
+            vec![
+                search_cursor(PAGED, 200, false),
+                search_cursor(FILTERED, 100, false),
+                search_cursor(RETRY, 20, false),
+            ],
+            search_claims(&[
+                ("movie:tt1", Some(0)),
+                ("movie:old", Some(1)),
+                ("movie:fresh", Some(2)),
+            ]),
+        )),
     );
-    assert_eq!(ids(&page.items), ["new"]);
+    assert_eq!(ids(&second.items), ["fresh"]);
+    assert!(!second.exhausted);
+    assert_eq!(
+        second.continuation.search_cursors,
+        Some(vec![search_cursor(RETRY, 20, false)])
+    );
+    assert_eq!(second.continuation.seen_keys.len(), 4);
+
+    let replayed = super::finish_catalog_page(
+        vec![test_media_item("FRESH", "movie")],
+        second.continuation,
+        None,
+        None,
+        Some((
+            vec![search_cursor(RETRY, 40, false)],
+            search_claims(&[("movie:fresh", Some(0))]),
+        )),
+    );
+    assert!(replayed.items.is_empty());
+    assert!(replayed.exhausted);
+    assert_eq!(replayed.continuation.search_cursors, Some(Vec::new()));
+}
+
+#[test]
+fn text_search_without_skip_support_serves_page_one_and_exhausts() {
+    let page = super::finish_catalog_page(
+        vec![test_media_item("only", "movie")],
+        super::SearchCatalogContinuation {
+            skip: Some(0),
+            ..Default::default()
+        },
+        None,
+        None,
+        Some((Vec::new(), search_claims(&[("movie:only", None)]))),
+    );
+    assert_eq!(ids(&page.items), ["only"]);
     assert!(page.exhausted);
+    assert_eq!(page.continuation.skip, None);
 }
 
 #[test]
@@ -650,6 +728,34 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
         )),
         ["prefix", "words", "contains"],
     );
+    for (query, first, other) in [
+        ("shogun", ("Shōgun", None), ("Shogun Assassin", None)),
+        (
+            "fast and furious",
+            ("Fast & Furious", None),
+            ("Fast Five", None),
+        ),
+        ("spiderman", ("Spider-Man", None), ("Superman", None)),
+        ("dune 2021", ("Dune", Some("2021")), ("Dune", Some("1984"))),
+        (
+            "blade runner 2049",
+            ("Blade Runner 2049", Some("2017")),
+            ("Blade Runner", Some("1982")),
+        ),
+    ] {
+        assert_eq!(
+            ids(&rank_search_results(
+                query,
+                vec![
+                    build_item("other", other.0, other.1),
+                    build_item("first", first.0, first.1),
+                ],
+                NO_RANGE,
+            )),
+            ["first", "other"],
+            "{query}",
+        );
+    }
     for title in ["The Walking Dead Girls", "Dead Man Walking"] {
         let position = ranked.iter().position(|item| item.title == title).unwrap();
         for (index, item) in ranked.iter().enumerate() {
@@ -668,6 +774,11 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
         ("  GREY’S---ANATOMY!  ", "greys anatomy"),
         ("ÉÀÇÑØÜÝŸẞÆŒ", "eacnouyyssaeoe"),
         ("東京物語 / МОСКВА", "東京物語 москва"),
+        ("Shōgun", "shogun"),
+        ("Diriliş: Ertuğrul", "dirilis ertugrul"),
+        ("Łódź", "lodz"),
+        ("Fast & Furious", "fast and furious"),
+        ("ガンダム", "カ\u{3099}ンタ\u{3099}ム"),
     ] {
         assert_eq!(super::normalize_search_text(title), expected);
     }

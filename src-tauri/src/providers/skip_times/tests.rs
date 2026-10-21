@@ -70,34 +70,37 @@ fn skipdb_body_failures_distinguish_transient_reads_from_oversize_payloads() {
 
 #[test]
 fn normalize_skip_segments_sorts_and_trims_overlaps_between_types() {
-    let normalized = normalize_skip_segments(vec![
-        SkipSegment {
-            type_: "recap".to_string(),
-            start_time: 30.0,
-            end_time: 60.0,
-        },
-        SkipSegment {
-            type_: "intro".to_string(),
-            start_time: -4.0004,
-            end_time: 40.0,
-        },
-        SkipSegment {
-            type_: "outro".to_string(),
-            start_time: 80.0,
-            end_time: 79.0,
-        },
-    ]);
+    let normalized = normalize_skip_segments(
+        vec![
+            SkipSegment {
+                type_: "recap",
+                start_time: 30.0,
+                end_time: 60.0,
+            },
+            SkipSegment {
+                type_: "intro",
+                start_time: -4.0004,
+                end_time: 40.0,
+            },
+            SkipSegment {
+                type_: "outro",
+                start_time: 80.0,
+                end_time: 79.0,
+            },
+        ],
+        None,
+    );
 
     assert_eq!(
         normalized,
         vec![
             SkipSegment {
-                type_: "intro".to_string(),
+                type_: "intro",
                 start_time: 0.0,
                 end_time: 40.0,
             },
             SkipSegment {
-                type_: "recap".to_string(),
+                type_: "recap",
                 start_time: 40.0,
                 end_time: 60.0,
             },
@@ -144,7 +147,7 @@ fn skipdb_response_converts_ms_and_keeps_all_submitted_segments() {
     assert_eq!(
         segment,
         SkipSegment {
-            type_: "intro".to_string(),
+            type_: "intro",
             start_time: 61.0,
             end_time: 91.0,
         }
@@ -180,7 +183,7 @@ fn skipdb_malformed_entry_drops_only_that_segment() {
     assert_eq!(
         segments,
         vec![SkipSegment {
-            type_: "outro".to_string(),
+            type_: "outro",
             start_time: 2760.0,
             end_time: 2820.0,
         }],
@@ -209,7 +212,7 @@ fn skipdb_end_less_outro_runs_to_requested_duration_only() {
     assert_eq!(
         end_less().into_segment("outro", Some(2820.0)),
         Some(SkipSegment {
-            type_: "outro".to_string(),
+            type_: "outro",
             start_time: 2700.0,
             end_time: 2820.0,
         }),
@@ -217,4 +220,27 @@ fn skipdb_end_less_outro_runs_to_requested_duration_only() {
     // Without a stream duration there is no usable cut, and only outros run to the end.
     assert!(end_less().into_segment("outro", None).is_none());
     assert!(end_less().into_segment("preview", Some(2820.0)).is_none());
+}
+
+#[test]
+fn normalize_skip_segments_clamps_to_stream_duration() {
+    let segment = |type_, start_time, end_time| SkipSegment {
+        type_,
+        start_time,
+        end_time,
+    };
+    assert_eq!(
+        normalize_skip_segments(
+            vec![
+                segment("outro", 2700.0, 2830.0),
+                segment("preview", 2819.5, 2900.0),
+                segment("intro", 60.0, 90.0),
+            ],
+            Some(2820.0),
+        ),
+        vec![
+            segment("intro", 60.0, 90.0),
+            segment("outro", 2700.0, 2820.0)
+        ],
+    );
 }

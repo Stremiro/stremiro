@@ -1,6 +1,7 @@
 use super::{
-    lenient_option, DurableStore, PROFILE_ACCENT_INTENSITY_DEFAULT, PROFILE_AVATAR_MAX_CHARS,
-    PROFILE_AVATAR_PREFIXES, PROFILE_NAME_MAX_CHARS, PROFILE_PREFERENCES_KEY,
+    lenient_option, DurableStore, PROFILE_ACCENT_INTENSITY_DEFAULT, PROFILE_AVATAR_KEY,
+    PROFILE_AVATAR_MAX_CHARS, PROFILE_AVATAR_PREFIXES, PROFILE_NAME_MAX_CHARS,
+    PROFILE_PREFERENCES_KEY,
 };
 use crate::providers::bound_optional;
 use serde::{Deserialize, Serialize};
@@ -14,6 +15,7 @@ pub struct AccentTargets {
     pub actions: bool,
     pub progress: bool,
     pub artwork: bool,
+    pub skip: bool,
 }
 
 impl Default for AccentTargets {
@@ -23,6 +25,7 @@ impl Default for AccentTargets {
             actions: true,
             progress: true,
             artwork: true,
+            skip: true,
         }
     }
 }
@@ -84,6 +87,7 @@ struct AccentTargetsPatch {
     actions: Option<bool>,
     progress: Option<bool>,
     artwork: Option<bool>,
+    skip: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +101,8 @@ struct StoredAccentTargets {
     progress: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     artwork: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    skip: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -163,6 +169,7 @@ fn normalize_accent_targets(value: Option<StoredAccentTargets>) -> AccentTargets
         actions: targets.actions.unwrap_or(true),
         progress: targets.progress.unwrap_or(true),
         artwork: targets.artwork.unwrap_or(true),
+        skip: targets.skip.unwrap_or(true),
     }
 }
 
@@ -231,6 +238,7 @@ pub(crate) fn apply_profile_preferences_patch(
             actions: targets.actions.unwrap_or(profile.accent_targets.actions),
             progress: targets.progress.unwrap_or(profile.accent_targets.progress),
             artwork: targets.artwork.unwrap_or(profile.accent_targets.artwork),
+            skip: targets.skip.unwrap_or(profile.accent_targets.skip),
         };
     }
     if let Some(value) = patch.view_mode {
@@ -255,16 +263,69 @@ pub(crate) fn parse_profile_preferences(value: Value) -> Option<ProfilePreferenc
         .map(normalize_stored_profile_preferences)
 }
 
-pub(crate) fn load_profile_preferences(store: &DurableStore) -> ProfilePreferences {
-    store
+/// The avatar has its own store so frequent settings writes stay small. A legacy
+/// settings copy moves once; settings drop it only after the avatar store committed.
+pub(crate) fn load_profile_preferences(
+    settings: &DurableStore,
+    avatars: &DurableStore,
+) -> ProfilePreferences {
+    let mut preferences = settings
         .get(PROFILE_PREFERENCES_KEY)
         .and_then(parse_profile_preferences)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    let Some(legacy) = preferences.profile.avatar.take() else {
+        preferences.profile.avatar =
+            normalize_profile_avatar(avatars.get_typed(PROFILE_AVATAR_KEY));
+        return preferences;
+    };
+    let stored = normalize_profile_avatar(avatars.get_typed(PROFILE_AVATAR_KEY));
+    let mut migrated = stored.is_some();
+    if !migrated {
+        avatars.set(PROFILE_AVATAR_KEY, Value::String(legacy.clone()));
+        migrated = avatars.save().is_ok();
+        if !migrated {
+            // Keep the unsaved copy out of memory so a later load still sees settings as the source.
+            avatars.delete(PROFILE_AVATAR_KEY);
+        }
+    }
+    preferences.profile.avatar = Some(stored.unwrap_or(legacy));
+    if migrated {
+        // A failed save leaves settings dirty for the exit flush; the avatar is already durable.
+        let _ = save_profile_preferences_to_store(settings, avatars, &preferences)
+            .and_then(|()| settings.save());
+    } else {
+        crate::operational_log::log_warn("store", "profile-avatar-migration", "deferred", &[]);
+    }
+    preferences
 }
 
+/// Commit the avatar before staging settings so failed saves cannot leave legacy removal dirty.
 pub(crate) fn save_profile_preferences_to_store(
-    store: &DurableStore,
+    settings: &DurableStore,
+    avatars: &DurableStore,
     preferences: &ProfilePreferences,
-) {
-    store.set(PROFILE_PREFERENCES_KEY, serde_json::json!(preferences));
+) -> Result<(), String> {
+    let mut value = serde_json::json!(preferences);
+    let previous_avatar = avatars.get(PROFILE_AVATAR_KEY);
+    match value
+        .get_mut("profile")
+        .and_then(Value::as_object_mut)
+        .and_then(|profile| profile.remove("avatar"))
+    {
+        Some(avatar) => avatars.set(PROFILE_AVATAR_KEY, avatar),
+        None => {
+            avatars.delete(PROFILE_AVATAR_KEY);
+        }
+    }
+    if let Err(error) = avatars.save() {
+        match previous_avatar {
+            Some(previous) => avatars.set(PROFILE_AVATAR_KEY, previous),
+            None => {
+                avatars.delete(PROFILE_AVATAR_KEY);
+            }
+        }
+        return Err(error);
+    }
+    settings.set(PROFILE_PREFERENCES_KEY, value);
+    Ok(())
 }

@@ -94,15 +94,18 @@ fn navigation(episodes: &[Episode], request: &EpisodeNavigationRequest) -> Episo
 }
 
 #[test]
-fn player_episode_navigation_includes_specials_and_ungated_previous() {
-    let mut special = episode(0, 1);
+fn player_episode_navigation_keeps_specials_separate_and_ungated_previous() {
+    let mut special = episode(0, 2);
     special.release_date = Some("2099-01-01".to_string());
-    let episodes = [special, episode(1, 1)];
+    let episodes = [episode(0, 1), special, episode(1, 1), episode(1, 2)];
     let result = navigation(&episodes, &request(1, 1));
+    assert!(result.previous_index.is_none());
+    assert_eq!(result.next_index, Some(3));
+    let result = navigation(&episodes, &request(0, 2));
     assert_eq!(result.previous_index, Some(0));
     assert!(result.next_index.is_none());
     let result = navigation(&episodes, &request(0, 1));
-    assert_eq!(result.next_index, Some(1));
+    assert!(result.next_index.is_none());
 }
 
 #[test]

@@ -6,11 +6,15 @@ use super::list_helpers::{
     LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::store_helpers::{merge_library_item, normalize_library_item};
-use super::{normalize_media_id, run_typed_store_op, DurableStore, LISTS_STORE_FILE};
+use super::{normalize_media_id, run_typed_store_op, with_store, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
 use std::collections::{hash_map::Entry, HashMap, HashSet};
 use tauri::{command, AppHandle};
+
+fn require_list_id(list_id: &str) -> Result<String, String> {
+    normalize_list_id(list_id).ok_or_else(|| "Invalid list id.".to_string())
+}
 
 #[command]
 pub async fn create_list(
@@ -21,9 +25,7 @@ pub async fn create_list(
 ) -> Result<UserList, ListError> {
     // Store file IO is blocking: run the read-modify-write off the async
     // worker, matching the library/history command pattern.
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    with_store(app, LISTS_STORE_FILE, move |store| {
         let name = normalize_list_name(&name).ok_or_else(|| {
             ListError::new(ListErrorKind::ListNameRequired, "List name is required.")
         })?;
@@ -57,10 +59,8 @@ pub async fn create_list(
 
 #[command]
 pub async fn delete_list(app: AppHandle, list_id: String) -> Result<(), ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    let list_id = require_list_id(&list_id)?;
+    with_store(app, LISTS_STORE_FILE, move |store| {
         // Validate the order index before the first mutation — a corrupt header must
         // fail without leaving dirty deletes the exit flush would commit.
         let mut order = load_lists_order(&store)?;
@@ -90,10 +90,8 @@ pub async fn rename_list(
     icon: Option<String>,
     rules: Option<SmartListRules>,
 ) -> Result<(), ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    let list_id = require_list_id(&list_id)?;
+    with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
 
         if let Some(rules) = rules {
@@ -126,10 +124,8 @@ pub async fn add_to_list(
     list_id: String,
     item: MediaItem,
 ) -> Result<UserListSummary, ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    let list_id = require_list_id(&list_id)?;
+    with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
         list.require_manual()?;
         let item = normalize_library_item(item).ok_or_else(|| {
@@ -219,7 +215,7 @@ pub async fn bulk_add_to_list(
     item_ids: Vec<String>,
 ) -> Result<usize, ListError> {
     run_typed_store_op(move || {
-        let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
+        let list_id = require_list_id(&list_id)?;
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
         load_list(&store, &list_id)?.require_manual()?;
         let library = super::open_store(&app, super::LIBRARY_STORE_FILE)?;
@@ -288,9 +284,8 @@ pub async fn bulk_remove_from_list(
     list_id: String,
     item_ids: Vec<String>,
 ) -> Result<Vec<RemovedListItem>, ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
+    let list_id = require_list_id(&list_id)?;
+    with_store(app, LISTS_STORE_FILE, move |store| {
         remove_list_items(&store, &list_id, item_ids)
     })
     .await
@@ -362,9 +357,8 @@ pub async fn restore_list_items(
     list_id: String,
     entries: Vec<RemovedListItem>,
 ) -> Result<(), ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
+    let list_id = require_list_id(&list_id)?;
+    with_store(app, LISTS_STORE_FILE, move |store| {
         restore_list_entries(&store, &list_id, entries)
     })
     .await
@@ -376,14 +370,11 @@ pub async fn remove_from_list(
     list_id: String,
     item_id: String,
 ) -> Result<(), ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
+    let list_id = require_list_id(&list_id)?;
     let item_id =
         normalize_media_id(&item_id).ok_or_else(|| "Invalid list item id.".to_string())?;
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
-        remove_list_items(&store, &list_id, vec![item_id])?;
-        Ok(())
+    with_store(app, LISTS_STORE_FILE, move |store| {
+        remove_list_items(&store, &list_id, vec![item_id]).map(|_| ())
     })
     .await
 }
@@ -394,12 +385,10 @@ pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, ListErr
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
         let mut lists = read_lists(&store)?;
         if lists.iter().any(|list| list.rules.is_some()) {
-            let statuses_required = lists
-                .iter()
-                .filter_map(|list| list.rules.as_ref())
-                .any(|rules| !rules.statuses.is_empty());
-            let (library, statuses) =
-                read_smart_list_sources(|file| super::open_store(&app, file), statuses_required)?;
+            let (library, statuses) = read_smart_list_sources(
+                |file| super::open_store(&app, file),
+                lists.iter().filter_map(|list| list.rules.as_ref()),
+            )?;
             let library = normalize_smart_list_library(&library);
             for list in &mut lists {
                 if let Some(rules) = &list.rules {
@@ -434,11 +423,10 @@ pub async fn get_list_summaries(
             |list, _| list,
         )?;
         let (library, statuses) = if lists.iter().any(|list| list.rules.is_some()) {
-            let statuses_required = lists
-                .iter()
-                .filter_map(|list| list.rules.as_ref())
-                .any(|rules| !rules.statuses.is_empty());
-            read_smart_list_sources(|file| super::open_store(&app, file), statuses_required)?
+            read_smart_list_sources(
+                |file| super::open_store(&app, file),
+                lists.iter().filter_map(|list| list.rules.as_ref()),
+            )?
         } else {
             (Vec::new(), HashMap::new())
         };
@@ -475,9 +463,9 @@ pub async fn get_list_summaries(
     .await
 }
 
-fn read_smart_list_sources(
+fn read_smart_list_sources<'a>(
     open_store: impl Fn(&str) -> Result<DurableStore, String>,
-    statuses_required: bool,
+    rules: impl IntoIterator<Item = &'a SmartListRules>,
 ) -> Result<(Vec<MediaItem>, HashMap<String, String>), String> {
     let library = open_store(super::LIBRARY_STORE_FILE)?;
     let mut snapshot = super::store_helpers::read_library_snapshot(&library)?;
@@ -486,7 +474,7 @@ fn read_smart_list_sources(
         .iter()
         .filter_map(|id| normalize_media_id(id).and_then(|id| snapshot.items.remove(&id)))
         .collect();
-    let statuses = if statuses_required {
+    let statuses = if rules.into_iter().any(|rules| !rules.statuses.is_empty()) {
         super::store_helpers::read_watch_status_snapshot(&open_store(
             super::WATCH_STATUS_STORE_FILE,
         )?)?
@@ -621,15 +609,13 @@ pub async fn reorder_list_items(
     list_id: String,
     item_ids: Vec<String>,
 ) -> Result<(), ListError> {
-    let list_id = normalize_list_id(&list_id).ok_or_else(|| "Invalid list id.".to_string())?;
+    let list_id = require_list_id(&list_id)?;
     // Payload bound before spawning: the merge is O(n+m) but still allocates
     // per payload element, so reject oversized payloads up front.
     if item_ids.len() > MAX_LIST_ITEMS {
         return Err(format!("Too many list items. Maximum is {}.", MAX_LIST_ITEMS).into());
     }
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
         list.require_manual()?;
 
@@ -651,9 +637,7 @@ pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), 
             format!("Too many lists. Maximum is {}.", MAX_LISTS),
         ));
     }
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, LISTS_STORE_FILE)?;
-
+    with_store(app, LISTS_STORE_FILE, move |store| {
         let current_order = load_lists_order(&store)?;
         // Merge rule lives in `reorder_known_ids` — omitted ids append in current order.
         let new_order = reorder_known_ids(&current_order, list_ids);
@@ -701,13 +685,17 @@ mod tests {
             super::super::WATCH_STATUS_INDEX_KEY,
             json!({"corrupt": true}),
         );
+        let status_rules = SmartListRules {
+            statuses: vec![super::super::list_helpers::WatchStatus::Watching],
+            ..Default::default()
+        };
         let open = |file: &str| match file {
             super::super::LIBRARY_STORE_FILE => Ok(library.store.clone()),
             super::super::WATCH_STATUS_STORE_FILE => Ok(statuses.store.clone()),
             _ => unreachable!(),
         };
         assert_eq!(
-            read_smart_list_sources(open, true).unwrap_err(),
+            read_smart_list_sources(open, Some(&status_rules)).unwrap_err(),
             "Invalid watch_status_index index."
         );
         let (items, statuses) = read_smart_list_sources(
@@ -715,7 +703,7 @@ mod tests {
                 assert_eq!(file, super::super::LIBRARY_STORE_FILE);
                 Ok(library.store.clone())
             },
-            false,
+            None,
         )
         .unwrap();
         assert_eq!(items.len(), 1);
@@ -728,7 +716,7 @@ mod tests {
                     Err("Status store unavailable.".into())
                 }
             },
-            true,
+            Some(&status_rules),
         )
         .unwrap_err();
         assert_eq!(error, "Status store unavailable.");

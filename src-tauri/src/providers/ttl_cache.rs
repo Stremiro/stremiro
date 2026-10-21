@@ -41,7 +41,7 @@ impl<V: Clone> TtlCache<V> {
         self.get_fresh(key, None)
     }
 
-    pub(crate) fn get_fresh(&self, key: &str, not_before: Option<Instant>) -> Option<V> {
+    fn get_fresh(&self, key: &str, not_before: Option<Instant>) -> Option<V> {
         let mut entries = lock_or_recover(&self.entries);
         let entry = entries.get(key)?;
         if entry.expires_at > Instant::now() {
@@ -298,13 +298,7 @@ impl FetchFailureCooldown {
     /// Re-arm the mark after a failed probe: deadline refreshes, next probe
     /// waits `COOLDOWN_PROBE_GAP`. A mark lifted meanwhile (sibling success) is
     /// not reinstalled — the host already proved reachable.
-    pub(crate) fn note_probe_failure(
-        &self,
-        key: &str,
-        probe_id: u64,
-        generation: &AtomicU64,
-        expected: u64,
-    ) {
+    fn note_probe_failure(&self, key: &str, probe_id: u64, generation: &AtomicU64, expected: u64) {
         let mut table = lock_or_recover(&self.table);
         if generation.load(Ordering::SeqCst) != expected {
             return;

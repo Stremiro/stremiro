@@ -38,6 +38,8 @@ pub(crate) struct EpisodeNavigation {
     next_index: Option<usize>,
 }
 
+/// Specials (season 0) and regular seasons are separate sequences: neither
+/// steps into the other.
 pub(crate) fn coordinate_neighbours<T: Copy>(
     episodes: impl Iterator<Item = T>,
     current: (u32, u32),
@@ -47,6 +49,9 @@ pub(crate) fn coordinate_neighbours<T: Copy>(
     let mut next = None;
     for candidate in episodes {
         let coordinate = coordinates(candidate);
+        if (coordinate.0 == 0) != (current.0 == 0) {
+            continue;
+        }
         if coordinate < current
             && previous.is_none_or(|previous| coordinate >= coordinates(previous))
         {

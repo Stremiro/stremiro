@@ -1,5 +1,6 @@
 use super::language::{
     bracketed_language_tags, canonicalize_language_token, canonicalize_language_value,
+    flag_language_tags,
 };
 use super::normalize_token_text;
 use super::streaming_helpers::{
@@ -176,6 +177,8 @@ pub(crate) struct StreamRecommendationKey {
     pub season_claim_verified: bool,
     pub title_match: i8,
     pub viability: u8,
+    /// Audio named only in other languages ranks below untagged releases; `Reverse` = descending sort.
+    pub audio_language_conflict: std::cmp::Reverse<bool>,
     pub language: u8,
     pub health: u8,
     pub family: u8,
@@ -234,7 +237,6 @@ pub(crate) struct StreamSignalCache {
     /// Slot for key-less streams so `for_stream` always returns a borrow —
     /// unprepared rows (tests) carry no identity and a "" key would collapse them.
     uncached: Option<CachedStreamSignals>,
-    sort_scratch: Vec<(StreamRecommendationKey, AddonStream)>,
 }
 
 impl StreamSignalCache {
@@ -283,6 +285,12 @@ fn compute_cached_signals(
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
     let resolution = stream_resolution_priority(stream, flags);
     let episode_match = stream_episode_relevance_priority(stream, inputs.match_context);
+    let (language, audio_language_conflict) = stream_language_preference_priority(
+        texts.name_title_haystack(),
+        language_prefs,
+        flags,
+        reference,
+    );
 
     CachedStreamSignals {
         normalized_family: stream
@@ -298,25 +306,19 @@ fn compute_cached_signals(
                 reference,
             ),
             viability: resolution.viability,
-            language: stream_language_preference_priority(
-                texts.name_title_haystack(),
-                language_prefs,
-                flags,
-                reference,
-            ),
+            audio_language_conflict: std::cmp::Reverse(audio_language_conflict),
+            language,
             health: source_id
-                .as_deref()
                 .and_then(|id| inputs.source_health_priorities.get(id).copied())
                 .unwrap_or(DEFAULT_SOURCE_HEALTH_PRIORITY),
             family: 0,
             title_source_affinity: u8::from(
                 inputs.preferred_title_source_id.is_some()
-                    && source_id.as_deref() == inputs.preferred_title_source_id,
+                    && source_id == inputs.preferred_title_source_id,
             ) * 3,
             quality: resolution.quality,
             language_bonus: resolution.language_bonus,
             source_priority: source_id
-                .as_deref()
                 .and_then(|id| inputs.addon_source_priorities.get(id).copied())
                 .unwrap_or(0),
             oversize: std::cmp::Reverse(resolution.oversize),
@@ -379,29 +381,54 @@ fn language_label_is_in_title(
     false
 }
 
+fn is_language_role_word(token: &str) -> bool {
+    matches!(
+        token,
+        "audio" | "dub" | "dubbed" | "sub" | "subs" | "subbed" | "subtitle" | "subtitles"
+    )
+}
+
+/// Language score plus whether the only audio languages named differ from the preferred one.
 fn stream_language_preference_priority(
     haystack: &str,
     language_prefs: CanonicalLanguagePrefs,
     flags: StreamFlags,
     reference: Option<&ReferenceTitle>,
-) -> u8 {
+) -> (u8, bool) {
     let preferred_audio_language = language_prefs.audio;
     let preferred_subtitle_language = language_prefs.subtitle;
 
     if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
-        return 0;
+        return (0, false);
     }
 
-    // Track the two language memberships while tokenizing instead of allocating a set per stream.
+    // Track the language memberships while tokenizing instead of allocating a set per stream.
     let mut audio_matches = false;
+    let mut other_audio = false;
     let mut subtitle_matches = false;
     let mut has_dub = false;
     let mut has_subtitle_hint = false;
+    // Two-letter prose aliases ("de", "en", "pt") are ordinary title words too, so only
+    // unambiguous mentions may demote a stream; they still count toward a match.
+    let mut record_mention = |canonical: &'static str, role: Option<&str>, unambiguous: bool| {
+        let audio_only = matches!(role, Some("audio" | "dub" | "dubbed"));
+        let audio = language_mention_is_audio(role.unwrap_or(""));
+        audio_matches |= audio && preferred_audio_language == Some(canonical);
+        other_audio |= audio
+            && unambiguous
+            && preferred_audio_language.is_some_and(|preferred| preferred != canonical);
+        subtitle_matches |= !audio_only
+            && matches!(
+                preferred_subtitle_language,
+                Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
+            );
+    };
+    let is_word_separator = |ch: char| !ch.is_ascii_alphanumeric();
     for segment in haystack.split(['/', '|', '\n', '\r', ';', ',']) {
         let mut tags = bracketed_language_tags(segment).peekable();
         let mut previous = None;
         let mut tokens = segment
-            .split(|ch: char| !ch.is_ascii_alphanumeric())
+            .split(is_word_separator)
             .filter(|token| !token.is_empty())
             .peekable();
         while let Some(token) = tokens.next() {
@@ -422,33 +449,9 @@ fn stream_language_preference_priority(
             let role = tokens
                 .peek()
                 .copied()
-                .filter(|next| {
-                    matches!(
-                        *next,
-                        "audio"
-                            | "dub"
-                            | "dubbed"
-                            | "sub"
-                            | "subs"
-                            | "subbed"
-                            | "subtitle"
-                            | "subtitles"
-                    )
-                })
+                .filter(|next| is_language_role_word(next))
                 .or(preceding);
-            let explicit_role = matches!(
-                role,
-                Some(
-                    "audio"
-                        | "dub"
-                        | "dubbed"
-                        | "sub"
-                        | "subs"
-                        | "subbed"
-                        | "subtitle"
-                        | "subtitles"
-                )
-            );
+            let explicit_role = role.is_some_and(is_language_role_word);
             if bracketed.is_none()
                 && reference.is_some_and(|reference| {
                     reference.tokens.contains(token)
@@ -464,14 +467,22 @@ fn stream_language_preference_priority(
             let Some(canonical) = bracketed.or_else(|| canonicalize_language_token(token)) else {
                 continue;
             };
-            let audio_only = matches!(role, Some("audio" | "dub" | "dubbed"));
-            audio_matches |= language_mention_is_audio(role.unwrap_or(""))
-                && preferred_audio_language == Some(canonical);
-            subtitle_matches |= !audio_only
-                && matches!(
-                    preferred_subtitle_language,
-                    Some(CanonicalSubtitlePref::Lang(preferred)) if preferred == canonical
-                );
+            record_mention(
+                canonical,
+                role,
+                bracketed.is_some() || explicit_role || token.len() > 2,
+            );
+        }
+        for (range, canonical) in flag_language_tags(segment) {
+            let preceding = segment[..range.start]
+                .split(is_word_separator)
+                .rfind(|token| !token.is_empty());
+            let role = segment[range.end..]
+                .split(is_word_separator)
+                .find(|token| !token.is_empty())
+                .filter(|next| is_language_role_word(next))
+                .or(preceding);
+            record_mention(canonical, role, true);
         }
     }
     // Flags come from the shared `StreamFlags` memo so ranking and the badge score the same vocabulary.
@@ -502,7 +513,8 @@ fn stream_language_preference_priority(
         _ => {}
     }
 
-    score.min(6)
+    let audio_conflict = other_audio && !audio_matches && !has_dual_audio && !has_multi_audio;
+    (score.min(6), audio_conflict)
 }
 
 fn is_title_stop_word(token: &str) -> bool {
@@ -597,7 +609,6 @@ fn stream_episode_relevance_priority(
 struct ReferenceTitle {
     tokens: HashSet<String>,
     initialism: Option<String>,
-    len: usize,
     normalized: String,
 }
 
@@ -613,11 +624,9 @@ fn build_reference_title(title: Option<&str>) -> Option<ReferenceTitle> {
         return None;
     }
     let initialism = build_title_initialism(&words);
-    let len = tokens.len();
     Some(ReferenceTitle {
         tokens,
         initialism,
-        len,
         normalized,
     })
 }
@@ -694,9 +703,9 @@ fn stream_title_relevance_score(
             continue;
         }
 
-        let mut score = if overlap_count >= reference.len {
+        let mut score = if overlap_count >= reference_tokens.len() {
             4
-        } else if overlap_count * 3 >= reference.len * 2 {
+        } else if overlap_count * 3 >= reference_tokens.len() * 2 {
             3
         } else {
             2
@@ -704,14 +713,14 @@ fn stream_title_relevance_score(
 
         if has_spin_off_marker {
             score -= 5;
-        } else if significant_extra_count > 0 && reference.len <= 2 {
+        } else if significant_extra_count > 0 && reference_tokens.len() <= 2 {
             score -= 2;
         } else if significant_extra_count > 1 {
             score -= 1;
         }
 
         // Bare numbers can be episode labels on series; only movie sequels are unambiguous.
-        if media_type == "movie" && overlap_count >= reference.len {
+        if media_type == "movie" && overlap_count >= reference_tokens.len() {
             let mut words = candidate
                 .split(|ch: char| !ch.is_ascii_alphanumeric())
                 .filter(|word| !word.is_empty())
@@ -925,21 +934,16 @@ pub(crate) fn sort_streams_by_recommendation(
     inputs: StreamRecommendationInputs<'_>,
     signals: &mut StreamSignalCache,
 ) {
-    // Draining moves streams without cloning and keeps the output buffer for the
-    // repeated ranking passes of progressive fetches.
-    let mut keyed = std::mem::take(&mut signals.sort_scratch);
-    keyed.clear();
-    keyed.extend(streams.drain(..).map(|mut stream| {
-        let key = rank_stream_by_recommendation(&mut stream, inputs, signals);
-        (key, stream)
-    }));
+    let mut keyed: Vec<_> = streams
+        .drain(..)
+        .map(|mut stream| {
+            let key = rank_stream_by_recommendation(&mut stream, inputs, signals);
+            (key, stream)
+        })
+        .collect();
     // Stable sort keeps input order for tied keys.
     keyed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-
-    for (_, stream) in keyed.drain(..) {
-        streams.push(stream);
-    }
-    signals.sort_scratch = keyed;
+    streams.extend(keyed.into_iter().map(|(_, stream)| stream));
 }
 
 #[cfg(test)]

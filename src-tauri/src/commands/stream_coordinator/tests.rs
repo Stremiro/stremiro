@@ -425,19 +425,72 @@ recommendation_sort_tests! {
         wrong.name = Some("Show S01E07 English Dub 2160p".to_string());
         [(correct, wrong)]
     };
+    sorts_untagged_release_above_other_audio_language_at_higher_quality: |fixture| {
+        fixture.match_context = episode_match_context("Show", &[(1, 5)]);
+        fixture.audio_language = Some("en");
+        fixture.subtitle_language = Some("en");
+        fixture.source_health.insert("beta".to_string(), 3);
+        let mut untagged = sort_stream("alpha");
+        untagged.name = Some("Show S01E05 1080p WEB-DL".to_string());
+        let mut italian = sort_stream("beta");
+        italian.name = Some("Show S01E05 2160p REMUX HDR \u{1F1EE}\u{1F1F9}".to_string());
+        let mut german_audio = sort_stream("beta");
+        german_audio.name = Some("Show S01E05 2160p German audio English subs".to_string());
+        [(untagged.clone(), italian), (untagged, german_audio)]
+    };
+    sorts_original_audio_above_dub_for_japanese_audio_pref: |fixture| {
+        fixture.audio_language = Some("ja");
+        let mut original = sort_stream("alpha");
+        original.name = Some("[Group] Show - 05 (720p)".to_string());
+        let mut dub = sort_stream("beta");
+        dub.name = Some("[Group] Show - 05 (1080p) English Dub".to_string());
+        [(original, dub)]
+    };
 }
 
 #[test]
 fn language_priority_ignores_unspecified_dub_for_english_pref() {
     let prefs = canonicalize_language_prefs(Some("en"), None);
-    let score = |haystack: &str| {
+    let fit = |haystack: &str| {
         stream_language_preference_priority(haystack, prefs, detect_stream_flags(haystack), None)
     };
+    let score = |haystack: &str| fit(haystack).0;
 
     assert_eq!(score("German Dub"), score("German"));
     assert_eq!(score("German"), 0);
     assert_eq!(score("Dub"), 0);
     assert!(score("English Dub") > 0);
+    for (haystack, conflict) in [
+        ("German", true),
+        ("German Dub", true),
+        ("German audio", true),
+        ("de audio", true),
+        ("Show S01E05 2160p 🇮🇹", true),
+        ("Cidade.de.Deus.2002.1080p.BluRay.x264", false),
+        ("La.Casa.de.Papel.S01E01.1080p", false),
+        ("[ITA] 2160p", true),
+        ("\u{1F1EE}\u{1F1F9}", true),
+        ("japanese audio english subs", true),
+        ("Dub", false),
+        ("1080p", false),
+        ("German subs", false),
+        ("German English", false),
+        ("German Dual Audio", false),
+        ("Multi Audio \u{1F1EE}\u{1F1F9}", false),
+        ("\u{1F1EC}\u{1F1E7} / \u{1F1EE}\u{1F1F9}", false),
+    ] {
+        assert_eq!(fit(haystack).1, conflict, "{haystack}");
+    }
+    let no_audio_pref = canonicalize_language_prefs(None, Some("en"));
+    assert!(
+        !stream_language_preference_priority(
+            "German",
+            no_audio_pref,
+            detect_stream_flags("German"),
+            None
+        )
+        .1
+    );
 }
 
 #[test]
@@ -494,6 +547,13 @@ fn language_priority_tracks_independent_memberships_without_double_counting() {
         ("subtitles unrelated text english", "en", "en", 6),
         ("subtitles: [NL]", "nl", "nl", 3),
         ("(RU) subs", "ru", "ru", 3),
+        ("show s01e05 1080p \u{1F1EE}\u{1F1F9}", "it", "", 4),
+        ("\u{1F1EC}\u{1F1E7} / \u{1F1EE}\u{1F1F9}", "en", "en", 6),
+        ("\u{1F1EC}\u{1F1E7} subs", "en", "en", 3),
+        ("subs: \u{1F1EC}\u{1F1E7}", "en", "en", 3),
+        ("\u{1F1EF}\u{1F1F5} audio", "ja", "en", 4),
+        ("\u{1F1E8}\u{1F1E6}", "en", "en", 0),
+        ("\u{1F1EE}\u{1F1F9}", "en", "", 0),
     ] {
         assert_eq!(
             stream_language_preference_priority(
@@ -501,7 +561,8 @@ fn language_priority_tracks_independent_memberships_without_double_counting() {
                 canonicalize_language_prefs(Some(audio), Some(subtitle)),
                 detect_stream_flags(haystack),
                 None,
-            ),
+            )
+            .0,
             expected,
             "{haystack}, audio={audio}, subtitle={subtitle}"
         );
@@ -565,7 +626,8 @@ fn stream_audit_labelled_language_overrides_reference_title_suppression() {
                 canonicalize_language_prefs(Some("en"), Some("en")),
                 detect_stream_flags(text),
                 Some(&reference),
-            ),
+            )
+            .0,
             expected,
             "{text}"
         );
@@ -584,7 +646,8 @@ fn stream_audit_labelled_language_overrides_reference_title_suppression() {
                 canonicalize_language_prefs(Some("en"), Some("en")),
                 detect_stream_flags(text),
                 Some(&reference),
-            ),
+            )
+            .0,
             expected,
             "{text}"
         );
@@ -637,6 +700,7 @@ fn recommendation_reasons_preserve_order_cap_and_fallback() {
         season_claim_verified: false,
         title_match: 0,
         viability: 0,
+        audio_language_conflict: std::cmp::Reverse(false),
         language: 0,
         health: 2,
         family: 2,
@@ -855,8 +919,6 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
     // must preserve that buffer instead of discarding its spare capacity.
     streams.reserve(126);
     let capacity = streams.capacity();
-    let mut scratch_capacity = 0;
-    let mut scratch_pointer = std::ptr::null();
 
     for (pass, expected_source) in ["alpha", "beta", "beta"].into_iter().enumerate() {
         if pass == 1 {
@@ -882,15 +944,6 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
         );
         assert_eq!(streams[0].source_name.as_deref(), Some(expected_source));
         assert_eq!(streams.capacity(), capacity);
-        assert!(signals.sort_scratch.is_empty());
-        if pass == 0 {
-            scratch_capacity = signals.sort_scratch.capacity();
-            scratch_pointer = signals.sort_scratch.as_ptr();
-            assert!(scratch_capacity >= streams.len());
-        } else {
-            assert_eq!(signals.sort_scratch.capacity(), scratch_capacity);
-            assert_eq!(signals.sort_scratch.as_ptr(), scratch_pointer);
-        }
     }
 }
 

@@ -69,16 +69,15 @@ pub(crate) struct DurableStoreRegistry {
 }
 
 impl DurableStoreRegistry {
-    /// First open reads under the registry lock; a missing file starts empty,
-    /// invalid data errors and is never cached so a later open retries disk state.
     pub(crate) fn open_path(&self, path: PathBuf) -> Result<DurableStore, String> {
-        let mut stores = lock_or_recover(&self.stores);
-        if let Some(store) = stores.get(&path) {
+        if let Some(store) = lock_or_recover(&self.stores).get(&path) {
             return Ok(store.clone());
         }
         let store = DurableStore::load(&path)?;
-        stores.insert(path, store.clone());
-        Ok(store)
+        Ok(lock_or_recover(&self.stores)
+            .entry(path)
+            .or_insert(store)
+            .clone())
     }
 
     /// Persists every store with unsaved mutations — the exit path's
@@ -198,7 +197,7 @@ impl DurableStore {
     }
 
     #[cfg(test)]
-    fn is_dirty(&self) -> bool {
+    pub(super) fn is_dirty(&self) -> bool {
         lock_or_recover(&self.data).dirty
     }
 
@@ -214,7 +213,7 @@ impl DurableStore {
         if !data.dirty {
             return Ok(());
         }
-        let bytes = serde_json::to_vec_pretty(&data.entries).map_err(|e| e.to_string())?;
+        let bytes = serde_json::to_vec(&data.entries).map_err(|e| e.to_string())?;
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
         }

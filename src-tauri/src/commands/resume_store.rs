@@ -496,7 +496,7 @@ impl ResumeStore {
     pub(crate) fn merge_entries(
         &mut self,
         entries: Vec<(String, WatchProgress)>,
-        reject_growth_past_cap: bool,
+        is_backup_import: bool,
     ) -> Result<(Vec<(String, WatchProgress)>, bool), HistoryMergeError> {
         if entries.is_empty() {
             return Ok((Vec::new(), false));
@@ -524,7 +524,7 @@ impl ResumeStore {
             if !new_keys.is_empty()
                 && existing.len().saturating_add(new_keys.len()) > MAX_RESUME_TOTAL_ENTRIES as usize
             {
-                let action = if reject_growth_past_cap {
+                let action = if is_backup_import {
                     "This backup"
                 } else {
                     "Restoring this history"

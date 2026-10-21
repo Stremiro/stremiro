@@ -854,6 +854,50 @@ fn prepare_addon_streams_populates_stream_presentation() {
     assert_eq!(presentation.size_label.as_deref(), Some("1.4GB"));
     assert!(presentation.is_batch);
 
+    for (name, filename, expected) in [
+        ("Show 2160p Dolby Vision HDR10", None, Some("Dolby Vision")),
+        ("Show 2160p DoVi", None, Some("Dolby Vision")),
+        ("Show 2160p DV", None, Some("Dolby Vision")),
+        ("Show 2160p HDR10+", None, Some("HDR10+")),
+        ("Show 2160p HDR HDR10", None, Some("HDR10")),
+        ("Show 2160p HDR", None, Some("HDR")),
+        ("Show 2160p HDRip", None, None),
+        ("Show 2160p", None, None),
+        ("Show 2160p", Some("Show.HDR10.mkv"), Some("HDR10")),
+        ("Show 2160p SDR", Some("Show.HDR10.mkv"), None),
+        ("Show 2160p HDR", Some("Show.HDR10.mkv"), Some("HDR")),
+    ] {
+        let stream = mk_stream(
+            Some(name),
+            None,
+            Some("https://example.com/video.mkv"),
+            None,
+            filename,
+        );
+        let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
+        assert_eq!(prepared[0].presentation.hdr_label, expected, "{name}");
+        if expected == Some("Dolby Vision") {
+            for query in ["dv", "dovi", "hdr", "dolby vision"] {
+                let rows = serde_json::from_value(serde_json::json!([{
+                    "resolution": "4k",
+                    "deliveryKind": "http",
+                    "isBatch": false,
+                    "isPlayable": true,
+                    "searchFields": [prepared[0].presentation.hdr_label],
+                }]))
+                .expect("valid selector rows");
+                let indices = tauri::async_runtime::block_on(
+                    super::stream_commands::get_stream_selector_indices(
+                        rows,
+                        Default::default(),
+                        query.to_string(),
+                    ),
+                );
+                assert_eq!(indices, vec![0], "{name}: {query}");
+            }
+        }
+    }
+
     let decorated = mk_stream(
         Some("| ·[XY\u{26A1}]\u{2003}SourceName \u{1F1EC}\u{1F1E7} -:\n4k"),
         Some(":\u{1F4FA} Show\u{2003}S01E05 1080p [\u{1F4BE}]1.2 GB\u{1F464}5 \u{2699}\u{FE0F} TPB •|"),
@@ -879,6 +923,19 @@ fn stream_language_bonus_shares_marker_vocabulary_with_badge() {
         ("Show 1080p english japanese", Some("DUAL")),
         ("Show 1080p [EN] [JA]", Some("DUAL")),
         ("Show 1080p [EN] [JA] [FR]", Some("MULTI")),
+        (
+            "Show 1080p \u{1F1EC}\u{1F1E7} \u{1F1EE}\u{1F1F9}",
+            Some("DUAL"),
+        ),
+        (
+            "Show 1080p \u{1F1EC}\u{1F1E7}\u{1F1EE}\u{1F1F9}\u{1F1EB}\u{1F1F7}",
+            Some("MULTI"),
+        ),
+        ("Show 1080p [IT] \u{1F1EE}\u{1F1F9}", None),
+        (
+            "Show 1080p \u{1F1EC}\u{1F1E7} subs \u{1F1EE}\u{1F1F9}",
+            None,
+        ),
         ("Show Japanese audio English subs", None),
         ("Show English audio Japanese subtitles", None),
         ("Show English subs Japanese subbed", None),
@@ -1702,6 +1759,12 @@ query_ids_tests! {
     query_ids_movie_returns_single_id:
         ("movie", "tt1234567", None, None, None)
         => |ids: &[String]| assert_eq!(ids, ["tt1234567"], "{ids:?}");
+    query_ids_movie_ignores_saved_episode_coordinates:
+        ("movie", "tt1234567", Some(2), Some(5), Some(30))
+        => |ids: &[String]| assert_eq!(ids, ["tt1234567"], "{ids:?}");
+    query_ids_movie_preserves_opaque_id_with_zero_coordinates:
+        ("movie", "catalog:42", Some(0), Some(0), Some(0))
+        => |ids: &[String]| assert_eq!(ids, ["catalog:42"], "{ids:?}");
     query_ids_series_no_anime_no_fallback:
         ("series", "tt9998887", Some(2), Some(5), None)
         => |ids: &[String]| assert_eq!(ids, ["tt9998887:2:5"], "{ids:?}");

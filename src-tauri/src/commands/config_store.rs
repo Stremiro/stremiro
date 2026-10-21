@@ -21,9 +21,9 @@ pub(crate) use addons::{
 pub(super) use addons::{addon_display_url, is_pinned_default_addon_url};
 pub(crate) use app_ui::{
     apply_app_ui_preferences_patch, default_player_keybindings, load_app_ui_preferences,
-    normalize_start_minimized, normalize_subtitle_delay, normalize_subtitle_pos,
-    normalize_subtitle_scale, parse_app_ui_preferences, save_app_ui_preferences_to_store,
-    startup_route,
+    normalize_audio_delay, normalize_start_minimized, normalize_subtitle_delay,
+    normalize_subtitle_pos, normalize_subtitle_scale, parse_app_ui_preferences,
+    save_app_ui_preferences_to_store, startup_route,
 };
 pub(crate) use keybindings::bind_player_key;
 pub(crate) use profile::{
@@ -76,6 +76,7 @@ const DEFAULT_ADDON_INSTALLS: [(&str, &str); 2] = [
 pub(crate) const APP_UI_PREFERENCES_KEY: &str = "app_ui_preferences";
 const LAST_NOTIFIED_APP_UPDATE_VERSION_KEY: &str = "last_notified_app_update_version";
 pub(crate) const PROFILE_PREFERENCES_KEY: &str = "profile_preferences";
+const PROFILE_AVATAR_KEY: &str = "avatar";
 const STREAM_SELECTOR_PREFERENCES_KEY: &str = "stream_selector_preferences";
 const APP_UPDATE_VERSION_MAX_CHARS: usize = 64;
 const PLAYER_VOLUME_DEFAULT: u32 = 75;

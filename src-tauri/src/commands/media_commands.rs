@@ -205,7 +205,7 @@ fn source_coordinates_from_mapping(
 
 /// Cache episode-coordinate mappings and enrich stream targets in one blocking-pool
 /// round-trip — the cache pass returns resolved snapshots so enrichment reuses them.
-pub(crate) async fn cache_and_enrich_episode_targets(
+async fn cache_and_enrich_episode_targets(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
     media_type: &str,
@@ -300,6 +300,13 @@ pub(crate) async fn fetch_media_details_inner(
     ))
 }
 
+fn normalize_details_lookup(media_type: &str, id: &str) -> Result<(&'static str, String), String> {
+    let id = normalize_media_id(id).ok_or_else(|| "Media ID is required.".to_string())?;
+    let media_type = normalize_stream_media_type(media_type, Some(&id))
+        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?;
+    Ok((media_type, id))
+}
+
 #[command]
 pub async fn get_media_details(
     app: AppHandle,
@@ -309,9 +316,7 @@ pub async fn get_media_details(
     id: String,
     include_episodes: Option<bool>,
 ) -> Result<MediaDetails, String> {
-    let id = normalize_media_id(&id).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(&media_type, Some(&id))
-        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?;
+    let (media_type, id) = normalize_details_lookup(&media_type, &id)?;
     let include_episodes = include_episodes.unwrap_or(true);
 
     let mut details =
@@ -352,9 +357,7 @@ pub async fn get_details_prefetch_bundle(
     media_type: String,
     id: String,
 ) -> Result<DetailsPrefetchBundle, String> {
-    let id = normalize_media_id(&id).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(&media_type, Some(&id))
-        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?;
+    let (media_type, id) = normalize_details_lookup(&media_type, &id)?;
 
     // The card shape never carries episodes, so details skips the episode-enrichment
     // hop; the resume read joins the meta fetch with the same source-health join

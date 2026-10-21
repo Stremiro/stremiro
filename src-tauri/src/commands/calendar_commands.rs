@@ -261,6 +261,16 @@ fn calendar_requests(
     requests
 }
 
+fn calendar_event_date<'a>(
+    release_date: Option<&'a str>,
+    range: &CalendarRange,
+    upcoming: &Range<u32>,
+) -> Option<&'a str> {
+    let date = release_date?.trim().get(..10)?;
+    let ordinal = date_ordinal(date)?;
+    range.contains(date, ordinal, upcoming).then_some(date)
+}
+
 fn calendar_events<'a>(
     schedules: impl IntoIterator<Item = &'a MediaSchedule>,
     range: &CalendarRange,
@@ -271,19 +281,11 @@ fn calendar_events<'a>(
     for schedule in schedules {
         let is_movie = schedule.type_ == "movie";
         if is_movie {
-            let Some(date) = schedule
-                .release_date
-                .as_deref()
-                .and_then(|date| date.trim().get(..10))
+            let Some(date) = calendar_event_date(schedule.release_date.as_deref(), range, upcoming)
             else {
                 continue;
             };
-            let Some(ordinal) = date_ordinal(date) else {
-                continue;
-            };
-            if !range.contains(date, ordinal, upcoming)
-                || !seen.insert(("movie", schedule.id.as_str(), "", 0, 0))
-            {
+            if !seen.insert(("movie", schedule.id.as_str(), "", 0, 0)) {
                 continue;
             }
             events.push(CalendarScheduleEvent {
@@ -301,25 +303,17 @@ fn calendar_events<'a>(
             continue;
         }
         for episode in &schedule.episodes {
-            let Some(date) = episode
-                .release_date
-                .as_deref()
-                .and_then(|date| date.trim().get(..10))
+            let Some(date) = calendar_event_date(episode.release_date.as_deref(), range, upcoming)
             else {
                 continue;
             };
-            let Some(ordinal) = date_ordinal(date) else {
-                continue;
-            };
-            if !range.contains(date, ordinal, upcoming)
-                || !seen.insert((
-                    "episode",
-                    schedule.id.as_str(),
-                    episode.id.as_str(),
-                    episode.season,
-                    episode.episode,
-                ))
-            {
+            if !seen.insert((
+                "episode",
+                schedule.id.as_str(),
+                episode.id.as_str(),
+                episode.season,
+                episode.episode,
+            )) {
                 continue;
             }
             events.push(CalendarScheduleEvent {

@@ -7,7 +7,7 @@ use std::sync::LazyLock;
 /// Untrusted addon/backup field bounds shared by the catalog, details, and
 /// store normalization paths — one definition for one policy.
 pub(crate) const MEDIA_DESCRIPTION_MAX_CHARS: usize = 4_096;
-pub(crate) const MEDIA_YEAR_MAX_CHARS: usize = 32;
+const MEDIA_YEAR_MAX_CHARS: usize = 32;
 pub(crate) const MEDIA_GENRES_MAX: usize = 16;
 pub(crate) const MEDIA_GENRE_MAX_CHARS: usize = 64;
 /// Details-only bounds for pathological meta payloads — response-size caps already

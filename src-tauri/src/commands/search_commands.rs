@@ -1,5 +1,5 @@
 use super::{
-    addon_registry::{catalog_dedup_key, CatalogFetchPage, SearchSourceCursor},
+    addon_registry::{catalog_dedup_key, CatalogFetchPage, SearchCursorClaims, SearchSourceCursor},
     config_store::AddonConfig,
     normalize_non_empty, normalize_query, MEDIA_ID_MAX_CHARS,
 };
@@ -7,8 +7,11 @@ use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
     MediaItem,
 };
+use icu_normalizer::{
+    properties::CanonicalCombiningClassMapBorrowed, DecomposingNormalizerBorrowed,
+};
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
 const SEARCH_YEAR_MIN: u32 = 1889;
@@ -299,26 +302,32 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
 fn normalize_search_text(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut separator_pending = false;
-    for ch in value.chars().flat_map(char::to_lowercase) {
+    // NFD splits marks such as kana voicing off their letters; they must not split words.
+    let combining_classes = CanonicalCombiningClassMapBorrowed::new();
+    let lowercase = value.chars().flat_map(char::to_lowercase);
+    for ch in DecomposingNormalizerBorrowed::new_nfd().normalize_iter(lowercase) {
         if matches!(ch, '\'' | '’' | '\u{0300}'..='\u{036f}') {
             continue;
         }
-        if ch.is_alphanumeric() {
+        if ch == '&' {
+            if !normalized.is_empty() {
+                normalized.push(' ');
+            }
+            normalized.push_str("and");
+            separator_pending = true;
+        } else if ch.is_alphanumeric() || combining_classes.get_u8(ch) != 0 {
             if separator_pending && !normalized.is_empty() {
                 normalized.push(' ');
             }
             match ch {
-                'à'..='å' => normalized.push('a'),
-                'ç' => normalized.push('c'),
-                'è'..='ë' => normalized.push('e'),
-                'ì'..='ï' => normalized.push('i'),
-                'ñ' => normalized.push('n'),
-                'ò'..='ö' | 'ø' => normalized.push('o'),
-                'ù'..='ü' => normalized.push('u'),
-                'ý' | 'ÿ' => normalized.push('y'),
                 'ß' => normalized.push_str("ss"),
                 'æ' => normalized.push_str("ae"),
                 'œ' => normalized.push_str("oe"),
+                'þ' => normalized.push_str("th"),
+                'ø' => normalized.push('o'),
+                'ł' => normalized.push('l'),
+                'đ' | 'ð' => normalized.push('d'),
+                'ı' => normalized.push('i'),
                 _ => normalized.push(ch),
             }
             separator_pending = false;
@@ -336,6 +345,48 @@ fn without_search_article(title: &str) -> &str {
         .unwrap_or(title)
 }
 
+fn search_tier(title: &str, title_without_article: &str, query: &str) -> u8 {
+    let query_without_article = without_search_article(query);
+    let tier = if title.is_empty() {
+        0
+    } else if title == query || title_without_article == query_without_article {
+        5
+    } else if title.starts_with(query) || title_without_article.starts_with(query_without_article) {
+        4
+    } else if title
+        .match_indices(' ')
+        .any(|(index, _)| title[index + 1..].starts_with(query_without_article))
+    {
+        3
+    } else if query_without_article
+        .split_whitespace()
+        .all(|token| title.split_whitespace().any(|word| word.starts_with(token)))
+    {
+        2
+    } else if title.contains(query_without_article) {
+        1
+    } else {
+        0
+    };
+    if tier >= 4 {
+        return tier;
+    }
+    let mut compact_title = title_without_article.chars().filter(|ch| *ch != ' ');
+    if query_without_article
+        .chars()
+        .filter(|ch| *ch != ' ')
+        .all(|ch| compact_title.next() == Some(ch))
+    {
+        if compact_title.next().is_none() {
+            5
+        } else {
+            4
+        }
+    } else {
+        tier
+    }
+}
+
 fn rank_search_results(
     query: &str,
     mut items: Vec<MediaItem>,
@@ -348,9 +399,10 @@ fn rank_search_results(
     if normalized_query.is_empty() {
         return items;
     }
-    let query_without_article = without_search_article(&normalized_query);
-    let query_tokens = query_without_article.split_whitespace();
-    let word_start_query = format!(" {query_without_article}");
+    let year_query = normalized_query.rsplit_once(' ').and_then(|(query, year)| {
+        let parsed = year.parse().ok()?;
+        (year.len() == 4 && (1888..=2100).contains(&parsed)).then_some((query, parsed))
+    });
     // Per-type catalog position preserves provider relevance across merged catalogs.
     let mut ranked_items: Vec<_> = items.into_iter().map(|item| (item, 0usize)).collect();
     let mut next_ranks = std::collections::HashMap::new();
@@ -362,26 +414,10 @@ fn rank_search_results(
     ranked_items.sort_by_cached_key(|(item, provider_rank)| {
         let title = normalize_search_text(&item.title);
         let title_without_article = without_search_article(&title);
-        let tier = if title.is_empty() {
-            0
-        } else if title == normalized_query || title_without_article == query_without_article {
-            5
-        } else if title.starts_with(&normalized_query)
-            || title_without_article.starts_with(query_without_article)
-        {
-            4
-        } else if title.contains(&word_start_query) {
-            3
-        } else if query_tokens
-            .clone()
-            .all(|token| title.split_whitespace().any(|word| word.starts_with(token)))
-        {
-            2
-        } else if title.contains(query_without_article) {
-            1
-        } else {
-            0
-        };
+        let mut tier = search_tier(&title, title_without_article, &normalized_query);
+        if let Some((query, _)) = year_query.filter(|(_, year)| item.primary_year == Some(*year)) {
+            tier = tier.max(search_tier(&title, title_without_article, query));
+        }
         (
             std::cmp::Reverse(tier),
             *provider_rank,
@@ -522,7 +558,7 @@ async fn fetch_query_results(
         criteria.continuation,
         None,
         None,
-        Some(page.cursors),
+        Some((page.cursors, page.claims)),
     ))
 }
 
@@ -548,7 +584,7 @@ fn retain_search_items_matching_genres(
     items
 }
 
-fn catalog_browse_extras(genre: Option<&str>, skip: u32) -> Vec<CatalogExtra> {
+pub(super) fn catalog_browse_extras(genre: Option<&str>, skip: u32) -> Vec<CatalogExtra> {
     let mut extras = genre
         .and_then(normalize_non_empty)
         .map(|genre| CatalogExtra {
@@ -773,11 +809,20 @@ fn finish_catalog_page(
     previous: SearchCatalogContinuation,
     next_skip: Option<u32>,
     all_cursors: Option<AllBrowseCursors>,
-    search_cursors: Option<Vec<SearchSourceCursor>>,
+    search_cursors: Option<(Vec<SearchSourceCursor>, SearchCursorClaims)>,
 ) -> SearchCatalogPage {
     let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
     let mut added_movie = false;
     let mut added_series = false;
+    let (search_cursors, claims) = search_cursors.unzip();
+    let mut search_progress = vec![false; search_cursors.as_ref().map_or(0, Vec::len)];
+    // Claims cover the page before genre/year filtering, so a source whose new titles
+    // were all filtered out still advanced.
+    for (key, claimant) in claims.iter().flatten() {
+        if let Some(progress) = claimant.and_then(|index| search_progress.get_mut(index)) {
+            *progress |= !seen.contains(key);
+        }
+    }
     let items: Vec<_> = items
         .into_iter()
         .filter(|item| {
@@ -791,6 +836,14 @@ fn finish_catalog_page(
             true
         })
         .collect();
+    // Filtered-out titles are remembered too, or an addon that ignores `skip` would
+    // replay them as progress forever.
+    for key in claims.into_iter().flat_map(HashMap::into_keys) {
+        if seen.len() >= MAX_CATALOG_SEEN_KEYS {
+            break;
+        }
+        seen.insert(key);
+    }
     let continuation = SearchCatalogContinuation {
         skip: next_skip
             .filter(|next| !items.is_empty() && previous.skip.is_some_and(|skip| *next > skip)),
@@ -805,7 +858,15 @@ fn finish_catalog_page(
                     .filter(|skip| Some(*skip) == previous.series || added_series),
             }
         }),
-        search_cursors,
+        // A source that adds no unseen title stops paging, so an addon that
+        // ignores `skip` cannot replay its first page forever.
+        search_cursors: search_cursors.map(|cursors| {
+            cursors
+                .into_iter()
+                .zip(search_progress)
+                .filter_map(|(cursor, progress)| (cursor.retry || progress).then_some(cursor))
+                .collect()
+        }),
         seen_keys: seen.into_iter().collect(),
     };
     SearchCatalogPage {

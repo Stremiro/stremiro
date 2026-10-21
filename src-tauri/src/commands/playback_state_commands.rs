@@ -26,7 +26,6 @@ pub async fn report_playback_stream_outcome(
     let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
         .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
 
-    let app = app.clone();
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
         service.record_stream_outcome(

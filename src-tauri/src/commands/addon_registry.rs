@@ -4,7 +4,6 @@ use super::config_store::{
 };
 use super::media_normalization::{normalize_media_details, normalize_media_item};
 use super::{js_trim, SETTINGS_STORE_FILE};
-use crate::providers::addon_manifest::snapshot_is_classified;
 use crate::providers::addon_resource::{
     catalog_declares_extra, snapshot_supports_catalog, snapshot_supports_meta,
     snapshot_supports_subtitles, AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
@@ -12,7 +11,10 @@ use crate::providers::addon_resource::{
 use crate::providers::{lock_or_recover, MediaDetails, MediaItem};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
+use std::collections::{
+    hash_map::{DefaultHasher, Entry},
+    HashMap, HashSet,
+};
 use std::hash::{Hash, Hasher};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -91,13 +93,7 @@ pub(crate) fn schedule_capability_classification(
 /// one throttled spawn here reclassifies in the background and the next
 /// request picks up the capability snapshot.
 fn maybe_schedule_capability_classification(app: &AppHandle, addons: &[AddonConfig]) {
-    let needs_classification = addons.iter().any(|addon| {
-        addon
-            .capabilities
-            .as_ref()
-            .is_none_or(|snapshot| !snapshot_is_classified(snapshot))
-    });
-    if !needs_classification {
+    if !addons.iter().any(AddonConfig::needs_classification) {
         return;
     }
 
@@ -118,7 +114,7 @@ fn cached_enabled_addons(generation: u64) -> Option<Arc<Vec<AddonConfig>>> {
         .map(|(_, addons)| addons.clone())
 }
 
-pub(crate) fn load_enabled_addons(app: &AppHandle) -> Result<Arc<Vec<AddonConfig>>, String> {
+fn load_enabled_addons(app: &AppHandle) -> Result<Arc<Vec<AddonConfig>>, String> {
     // Blocking store/file IO: async fetch paths must use
     // `load_enabled_addons_snapshot` below, never this directly.
     //
@@ -218,10 +214,15 @@ pub(crate) struct SearchSourceCursor {
     pub retry: bool,
 }
 
+/// Dedup key of each item -> index in `cursors` of its first claimant's
+/// advanced cursor (`None` when that source cannot page further).
+pub(crate) type SearchCursorClaims = HashMap<String, Option<usize>>;
+
 #[derive(Debug)]
 pub(crate) struct SearchCatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub cursors: Vec<SearchSourceCursor>,
+    pub claims: SearchCursorClaims,
 }
 
 /// Stable identity shared by source merging and cross-page catalog deduplication.
@@ -619,18 +620,7 @@ fn catalog_search_extras(query: &str, genre: Option<&str>, skip: u32) -> Vec<Cat
         name: "search".to_string(),
         value: query.to_string(),
     }];
-    if let Some(genre) = genre.and_then(super::normalize_non_empty) {
-        extras.push(CatalogExtra {
-            name: "genre".to_string(),
-            value: genre,
-        });
-    }
-    if skip > 0 {
-        extras.push(CatalogExtra {
-            name: "skip".to_string(),
-            value: skip.to_string(),
-        });
-    }
+    extras.extend(super::search_commands::catalog_browse_extras(genre, skip));
     extras
 }
 
@@ -640,7 +630,7 @@ fn merge_search_catalog_pages(
     first_page: bool,
 ) -> Result<SearchCatalogFetchPage, String> {
     let mut items = Vec::new();
-    let mut seen = HashSet::new();
+    let mut claims = HashMap::new();
     let mut cursors = Vec::new();
     let mut succeeded = false;
     let mut first_error = None;
@@ -656,15 +646,19 @@ fn merge_search_catalog_pages(
             match outcome {
                 Ok(page) => {
                     succeeded = true;
-                    if let Some(skip) = catalog_page_next_skip(cursor.skip, page.source_item_count)
+                    let advanced = catalog_page_next_skip(cursor.skip, page.source_item_count)
                         .filter(|skip| source.supports_skip && *skip > cursor.skip)
-                    {
-                        cursor.skip = skip;
-                        cursor.retry = false;
-                        cursors.push(cursor);
-                    }
+                        .map(|skip| {
+                            cursor.skip = skip;
+                            cursor.retry = false;
+                            cursors.push(cursor);
+                            cursors.len() - 1
+                        });
                     for item in page.items {
-                        if seen.insert(catalog_dedup_key(&item.type_, &item.id)) {
+                        if let Entry::Vacant(entry) =
+                            claims.entry(catalog_dedup_key(&item.type_, &item.id))
+                        {
+                            entry.insert(advanced);
                             items.push(item);
                         }
                     }
@@ -682,7 +676,11 @@ fn merge_search_catalog_pages(
     if first_page && (!succeeded || (items.is_empty() && first_error.is_some())) {
         return Err(first_error.unwrap_or_else(|| "Failed to search catalog.".into()));
     }
-    Ok(SearchCatalogFetchPage { items, cursors })
+    Ok(SearchCatalogFetchPage {
+        items,
+        cursors,
+        claims,
+    })
 }
 
 pub async fn fetch_meta_details(

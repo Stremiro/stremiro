@@ -27,7 +27,25 @@ fn registry_shares_one_map_and_save_persists() {
     let path = temp_store_path("shared");
     let registry = DurableStoreRegistry::default();
 
-    let first = registry.open_path(path.clone()).expect("open missing file");
+    let barrier = std::sync::Barrier::new(4);
+    let opened = std::thread::scope(|scope| {
+        let handles: Vec<_> = (0..4)
+            .map(|_| {
+                scope.spawn(|| {
+                    barrier.wait();
+                    registry.open_path(path.clone()).expect("open missing file")
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("open thread"))
+            .collect::<Vec<_>>()
+    });
+    let first = &opened[0];
+    assert!(opened
+        .iter()
+        .all(|store| Arc::ptr_eq(&first.data, &store.data)));
     // A nonexistent file stays absent until an explicit save — opening is
     // not a write.
     assert!(!path.exists());

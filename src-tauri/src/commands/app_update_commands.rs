@@ -85,7 +85,8 @@ const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
 const UPDATE_DOWNLOAD_WATCHDOG_TICK: Duration = Duration::from_secs(15);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-pub(crate) const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
+const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
+const UPDATE_OPERATION_ID_MAX_BYTES: usize = 128;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -589,6 +590,13 @@ fn no_pending_update_message(last_error: Option<&str>) -> String {
     }
 }
 
+fn validate_update_operation_id(operation_id: &str) -> Result<(), String> {
+    if operation_id.len() > UPDATE_OPERATION_ID_MAX_BYTES || operation_id.trim().is_empty() {
+        return Err("Invalid application update operation id.".to_string());
+    }
+    Ok(())
+}
+
 #[command]
 pub async fn download_app_update(
     app: AppHandle,
@@ -596,6 +604,7 @@ pub async fn download_app_update(
     version: String,
     operation_id: String,
 ) -> Result<(), String> {
+    validate_update_operation_id(&operation_id)?;
     // Take the handle under check_lock so a remote check can't swap it.
     let update = {
         let _check_guard = pending_update.check_lock.lock().await;
@@ -684,6 +693,7 @@ pub async fn install_app_update(
     version: String,
     operation_id: String,
 ) -> Result<(), String> {
+    validate_update_operation_id(&operation_id)?;
     let (update, bytes) = {
         let _check_guard = pending_update.check_lock.lock().await;
         let mut state = pending_update.lock();
@@ -728,6 +738,17 @@ mod tests {
 
     #[test]
     fn app_update_progress_and_check_errors_match_frontend_contract() {
+        for (operation_id, valid) in [
+            ("attempt-1".to_string(), true),
+            (uuid::Uuid::new_v4().to_string(), true),
+            ("a".repeat(UPDATE_OPERATION_ID_MAX_BYTES), true),
+            ("a".repeat(UPDATE_OPERATION_ID_MAX_BYTES + 1), false),
+            ("語".repeat(UPDATE_OPERATION_ID_MAX_BYTES / 3 + 1), false),
+            (String::new(), false),
+            (" \t\n".to_string(), false),
+        ] {
+            assert_eq!(validate_update_operation_id(&operation_id).is_ok(), valid);
+        }
         assert_eq!(
             serde_json::to_value(AppUpdateProgressEvent {
                 operation_id: "attempt-1",

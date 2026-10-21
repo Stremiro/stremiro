@@ -1,4 +1,4 @@
-use super::config_commands::merge_imported_addon_configs;
+use super::config_commands::{clear_addon_caches, merge_imported_addon_configs};
 use super::config_store::{
     load_addon_configs, load_app_ui_preferences, load_profile_preferences,
     load_stream_selector_preferences_state, parse_app_ui_preferences, parse_profile_preferences,
@@ -29,11 +29,9 @@ use super::watch_status_commands::MAX_WATCH_STATUS_ITEMS;
 use super::{
     normalize_media_id, normalize_non_empty, now_unix_millis, run_blocking_op, run_store_op_at,
     streaming_helpers::is_persistable_stream_key, PlaybackLanguagePreferences, WatchProgress,
-    BLOCKING_OP_TIMEOUT, LIBRARY_STORE_FILE, LISTS_STORE_FILE, SETTINGS_STORE_FILE,
-    WATCH_STATUS_STORE_FILE,
+    BLOCKING_OP_TIMEOUT, LIBRARY_STORE_FILE, LISTS_STORE_FILE, PERSISTENCE_TIMEOUT_MESSAGE,
+    PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE, WATCH_STATUS_STORE_FILE,
 };
-use crate::providers::addon_resource::AddonResourceClient;
-use crate::providers::addons::AddonTransport;
 use crate::providers::{usize_to_u64_saturating, MediaItem};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -388,7 +386,10 @@ fn export_settings(
             })
             .collect(),
         app_ui_preferences: load_app_ui_preferences(&store),
-        profile_preferences: load_profile_preferences(&store),
+        profile_preferences: load_profile_preferences(
+            &store,
+            &super::open_store(app, PROFILE_AVATAR_STORE_FILE)?,
+        ),
         stream_selector_preferences: selector_initialized.then_some(stream_selector_preferences),
         playback_language_preferences: read_playback_language_preferences_from_store(&store),
         title_language_preferences: service.export_title_language_preferences(app)?,
@@ -403,6 +404,7 @@ fn import_settings(
     settings: AppSettingsImportPayload,
 ) -> Result<(usize, bool), String> {
     let store = super::open_store(app, SETTINGS_STORE_FILE)?;
+    let avatars = super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
     let mut restored = false;
     if let Some(preferences) = settings
         .app_ui_preferences
@@ -415,7 +417,7 @@ fn import_settings(
         .profile_preferences
         .and_then(parse_profile_preferences)
     {
-        save_profile_preferences_to_store(&store, &preferences);
+        save_profile_preferences_to_store(&store, &avatars, &preferences)?;
         restored = true;
     }
     if let Some(preferences) = settings
@@ -449,16 +451,11 @@ fn import_settings(
         .map(|value| merge_imported_addon_configs(&store, parse_stored_addon_configs(&value)))
         .unwrap_or(0);
     if restored || addons_imported > 0 {
-        if let Err(error) =
-            super::app_shell_commands::sync_preferences(app, &load_app_ui_preferences(&store))
-        {
-            crate::operational_log::log_warn(
-                "window",
-                "import-preferences-tray-sync",
-                "failed",
-                &[crate::operational_log::field("error", error)],
-            );
-        }
+        super::app_shell_commands::sync_preferences(
+            app,
+            &load_app_ui_preferences(&store),
+            "import-preferences-tray-sync",
+        );
         store.save()?;
     }
 
@@ -469,13 +466,12 @@ fn import_settings(
 
 /// Serialises all persisted user data to pretty-printed JSON for a file download.
 /// Internal helper — only the file-path command wrappers call it; not IPC surface.
-pub(crate) async fn export_app_data(
+async fn export_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<String, BackupError> {
     let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
     let export = run_store_op_at(deadline, {
-        let app = app.clone();
         let service = playback_state.inner().clone();
         move || {
             // Only opaque stream-key identities may leave the app. A failed history read
@@ -512,7 +508,7 @@ pub(crate) async fn export_app_data(
         }
     })
     .await?;
-    run_blocking_op(deadline, "Background persistence timed out.", move || {
+    run_blocking_op(deadline, PERSISTENCE_TIMEOUT_MESSAGE, move || {
         Ok(serialize_backup(&export))
     })
     .await?
@@ -523,7 +519,7 @@ async fn parse_backup(
     data: String,
 ) -> Result<AppDataImportPayload, BackupError> {
     validate_backup_size(data.len())?;
-    run_blocking_op(deadline, "Background persistence timed out.", move || {
+    run_blocking_op(deadline, PERSISTENCE_TIMEOUT_MESSAGE, move || {
         Ok(parse_backup_payload(&data))
     })
     .await?
@@ -563,7 +559,7 @@ fn parse_backup_payload(data: &str) -> Result<AppDataImportPayload, BackupError>
 /// history keeps the newer `last_watched`; library, lists, and watch statuses only
 /// add absent ids; settings restore preferences/profile; addons and language picks merge.
 /// Internal helper — reached via `import_app_data_from_file`, which owns path validation.
-pub(crate) async fn import_app_data(
+async fn import_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
     data: String,
@@ -579,10 +575,7 @@ pub(crate) async fn import_app_data(
             result.addons_imported > 0 || result.settings_restored
         }) {
             // Clear caches at actual completion — a later write can fail after earlier domains changed.
-            app.state::<AddonTransport>().clear_cache();
-            app.state::<AddonResourceClient>().clear_cache();
-            app.state::<super::calendar_commands::CalendarScheduleCache>()
-                .clear_cache();
+            clear_addon_caches(app);
         }
         result
     })
@@ -623,6 +616,7 @@ fn import_app_data_entries(
     let existing_order = load_lists_order(&lists_store)?;
     // `import_settings` reopens these via the registry cache; opening now validates the files first.
     super::open_store(app, SETTINGS_STORE_FILE)?;
+    super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
     super::open_store(app, super::playback_state::PLAYBACK_STATE_STORE_FILE)?;
 
     // Normalize incoming records once — they serve both the capacity check and the merge.

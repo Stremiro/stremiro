@@ -64,6 +64,12 @@ impl AddonConfig {
         });
         resolve_addon_configs(Some(configs))
     }
+
+    pub(crate) fn needs_classification(&self) -> bool {
+        self.capabilities
+            .as_ref()
+            .is_none_or(|snapshot| !snapshot_is_classified(snapshot))
+    }
 }
 
 /// IPC view of an [`AddonConfig`]: `display_url` is the credential-masked URL computed

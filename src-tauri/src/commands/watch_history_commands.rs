@@ -2,8 +2,8 @@ use super::history_helpers::{
     build_history_key, choose_entry, choose_up_next_source, compare_continue_watching,
     continue_watching_candidates, hydrate_watch_progress_lookup_id, is_series_like_watch_progress,
     merge_watch_progress_donors, normalize_episode_coordinate, prepare_live_watch_progress,
-    sanitize_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
-    with_progress_annotations, HistoryEntryQuery,
+    resume_rows, sanitize_watch_progress, watch_progress_absolute_episode,
+    watch_progress_absolute_season, with_progress_annotations, HistoryEntryQuery,
 };
 use super::playback_state::PlaybackStateService;
 use super::resume_store::{HistoryMergeError, MAX_RESUME_TOTAL_ENTRIES};
@@ -27,20 +27,25 @@ where
     let app = app.clone();
     let service = playback_state.clone();
     super::run_blocking_store_op(move || {
-        let items: Vec<WatchProgress> = load(&service, &app)?
-            .into_iter()
-            .map(|(_, item)| item)
-            .collect();
-        let priorities = service.source_health_priorities_for_ids(
-            &app,
-            items
-                .iter()
-                .filter(|item| is_series_like_watch_progress(item))
-                .map(|item| item.source_id.as_deref()),
-        )?;
-        Ok((items, priorities))
+        entries_with_source_health(&app, &service, load(&service, &app)?)
     })
     .await
+}
+
+fn entries_with_source_health(
+    app: &AppHandle,
+    service: &PlaybackStateService,
+    entries: Vec<(String, WatchProgress)>,
+) -> Result<(Vec<WatchProgress>, HashMap<String, u8>), String> {
+    let items = resume_rows(entries);
+    let priorities = service.source_health_priorities_for_ids(
+        app,
+        items
+            .iter()
+            .filter(|item| is_series_like_watch_progress(item))
+            .map(|item| item.source_id.as_deref()),
+    )?;
+    Ok((items, priorities))
 }
 
 /// Loads rows without reading source health.
@@ -56,10 +61,7 @@ where
 {
     let app = app.clone();
     let service = playback_state.clone();
-    super::run_blocking_store_op(move || {
-        load(&service, &app).map(|rows| rows.into_iter().map(|(_, item)| item).collect())
-    })
-    .await
+    super::run_blocking_store_op(move || load(&service, &app).map(resume_rows)).await
 }
 
 /// Preserves first-seen title order so stable sorts retain loader recency ties.
@@ -373,7 +375,11 @@ fn build_title_episode_progress(
 
 fn build_watched_episode_ceiling(history: &[WatchProgress]) -> HashMap<u32, u32> {
     let mut ceiling = HashMap::new();
-    for row in history.iter().filter(|row| row.has_started_watching) {
+    for row in history.iter().filter(|row| row.has_started_watching).chain(
+        history
+            .iter()
+            .find(|row| is_series_like_watch_progress(row)),
+    ) {
         if let (Some(season), Some(episode)) = (
             watch_progress_absolute_season(row),
             watch_progress_absolute_episode(row),
@@ -381,20 +387,6 @@ fn build_watched_episode_ceiling(history: &[WatchProgress]) -> HashMap<u32, u32>
             ceiling
                 .entry(season)
                 .and_modify(|max: &mut u32| *max = (*max).max(episode))
-                .or_insert(episode);
-        }
-    }
-    if let Some(latest) = history
-        .iter()
-        .find(|row| is_series_like_watch_progress(row))
-    {
-        if let (Some(season), Some(episode)) = (
-            watch_progress_absolute_season(latest),
-            watch_progress_absolute_episode(latest),
-        ) {
-            ceiling
-                .entry(season)
-                .and_modify(|max| *max = (*max).max(episode))
                 .or_insert(episode);
         }
     }
@@ -564,7 +556,7 @@ pub async fn set_episodes_watched(
                 prepare_episode_watch_changes(&item, &episodes, existing, watched, now_unix_millis())?;
             if watched {
                 service
-                    .merge_history_entries_checked(&app, writes, true)
+                    .merge_history_entries_checked(&app, writes, false)
                     .map_err(|error| match error {
                         HistoryMergeError::CapacityExceeded(_) => format!(
                             "Watch history is full ({MAX_RESUME_TOTAL_ENTRIES} entries). Remove some entries to mark more episodes watched."
@@ -575,17 +567,10 @@ pub async fn set_episodes_watched(
                 service.remove_keys(&app, &deletes)?;
             }
         }
-        let rows = service
-            .load_resume_entries_for_media_id(&app, &item.id)?
-            .into_iter()
-            .map(|(_, row)| row)
-            .collect::<Vec<_>>();
-        // Same health join as `load_entries_with_source_health` — this op already holds the store.
-        let source_health_priorities = service.source_health_priorities_for_ids(
+        let (rows, source_health_priorities) = entries_with_source_health(
             &app,
-            rows.iter()
-                .filter(|row| is_series_like_watch_progress(row))
-                .map(|row| row.source_id.as_deref()),
+            &service,
+            service.load_resume_entries_for_media_id(&app, &item.id)?,
         )?;
         Ok(build_title_watch_progress_with_priorities(
             rows,
@@ -709,10 +694,15 @@ pub(super) fn select_history_removals(
             let Some(kinds) = targets.get(&row.id) else {
                 return false;
             };
+            // Must match the `build_history_key` movie and series formats.
+            let series_coordinates = key
+                .strip_prefix("series:")
+                .and_then(|rest| rest.strip_prefix(row.id.as_str()))
+                .and_then(|rest| rest.strip_prefix(':'));
             (kinds & 1 != 0
-                && (*key == build_history_key("movie", &row.id, None, None)
-                    || *key == build_history_key("series", &row.id, Some(0), Some(0))))
-                || (kinds & 2 != 0 && key.starts_with(&format!("series:{}:", row.id)))
+                && (key.strip_prefix("movie:") == Some(row.id.as_str())
+                    || series_coordinates == Some("0:0")))
+                || (kinds & 2 != 0 && series_coordinates.is_some())
         })
         .unzip()
 }
@@ -727,10 +717,9 @@ async fn remove_history_items(
         return Ok(Vec::new());
     }
     super::run_blocking_store_op(move || {
-        let rows = if targets.len() == 1 {
-            service.load_resume_entries_for_media_id(&app, targets.keys().next().unwrap())?
-        } else {
-            service.load_resume_entries(&app)?
+        let rows = match targets.keys().next() {
+            Some(id) if targets.len() == 1 => service.load_resume_entries_for_media_id(&app, id)?,
+            _ => service.load_resume_entries(&app)?,
         };
         let (keys, removed) = select_history_removals(rows, &targets);
         // remove_keys fences periodic saves without advancing the clear/import reset epoch.

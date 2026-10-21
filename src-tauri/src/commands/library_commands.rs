@@ -6,8 +6,8 @@ use super::store_helpers::{
     watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
-    js_trim, normalize_media_id, run_blocking_store_op, DurableStore, LIBRARY_INDEX_KEY,
-    LIBRARY_STORE_FILE, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
+    js_trim, normalize_media_id, run_blocking_store_op, with_store, DurableStore,
+    LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
@@ -98,8 +98,7 @@ pub(super) fn prepare_library_write(
 
 #[command]
 pub async fn add_to_library(app: AppHandle, item: MediaItem) -> Result<MediaItem, String> {
-    run_blocking_store_op(move || {
-        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+    with_store(app, LIBRARY_STORE_FILE, move |store| {
         let (final_item, index) = prepare_library_write(&store, item).map_err(String::from)?;
 
         store.set(library_item_key(&final_item.id), json!(final_item));
@@ -204,11 +203,7 @@ pub async fn bulk_remove_from_library(app: AppHandle, ids: Vec<String>) -> Resul
 
 #[command]
 pub async fn get_library(app: AppHandle) -> Result<Vec<MediaItem>, String> {
-    run_blocking_store_op(move || {
-        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        read_library_items(&store)
-    })
-    .await
+    with_store(app, LIBRARY_STORE_FILE, |store| read_library_items(&store)).await
 }
 
 fn read_library_items(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
@@ -233,11 +228,7 @@ fn read_library_genres(store: &DurableStore) -> Result<Vec<String>, String> {
 
 #[command]
 pub async fn get_library_genres(app: AppHandle) -> Result<Vec<String>, String> {
-    run_blocking_store_op(move || {
-        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        read_library_genres(&store)
-    })
-    .await
+    with_store(app, LIBRARY_STORE_FILE, |store| read_library_genres(&store)).await
 }
 
 #[derive(Default, Deserialize)]

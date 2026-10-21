@@ -95,10 +95,11 @@ async fn persist_avatar(
 ) -> Result<ProfilePreferences, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let mut preferences = load_profile_preferences(&store);
+        let avatars = super::open_store(&app, super::PROFILE_AVATAR_STORE_FILE)?;
+        let mut preferences = load_profile_preferences(&store, &avatars);
         preferences.profile.avatar = avatar;
         let preferences = sanitize_profile_preferences(preferences);
-        save_profile_preferences_to_store(&store, &preferences);
+        save_profile_preferences_to_store(&store, &avatars, &preferences)?;
         store.save()?;
         Ok(preferences)
     })

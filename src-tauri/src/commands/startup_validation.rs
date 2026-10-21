@@ -1,4 +1,7 @@
-use super::{LIBRARY_STORE_FILE, LISTS_STORE_FILE, SETTINGS_STORE_FILE, WATCH_STATUS_STORE_FILE};
+use super::{
+    LIBRARY_STORE_FILE, LISTS_STORE_FILE, PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE,
+    WATCH_STATUS_STORE_FILE,
+};
 use serde::{
     de::{MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
@@ -93,6 +96,7 @@ fn validate_json_object(reader: impl std::io::Read) -> serde_json::Result<()> {
 pub(crate) fn validate_startup_stores(app: &AppHandle) {
     let mut stores = [
         SETTINGS_STORE_FILE,
+        PROFILE_AVATAR_STORE_FILE,
         LIBRARY_STORE_FILE,
         LISTS_STORE_FILE,
         WATCH_STATUS_STORE_FILE,

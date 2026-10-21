@@ -25,8 +25,8 @@ pub enum PlaybackLanguagePreferenceKind {
 
 // Settings-store keys for the two global language defaults — the stream
 // fetcher snapshots the same keys, so the literal lives in one place.
-pub(crate) const PREFERRED_AUDIO_LANGUAGE_STORE_KEY: &str = "preferred_audio_language";
-pub(crate) const PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY: &str = "preferred_subtitle_language";
+const PREFERRED_AUDIO_LANGUAGE_STORE_KEY: &str = "preferred_audio_language";
+const PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY: &str = "preferred_subtitle_language";
 
 pub(crate) fn sanitize_language_pref(value: Option<String>, allow_off: bool) -> Option<String> {
     normalize_backend_language_token(value.as_deref(), allow_off)
@@ -128,8 +128,7 @@ pub async fn save_playback_language_preference(
 
     // Store file IO is blocking: run the read-modify-write off the async
     // worker, matching the library/history command pattern.
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
+    super::with_store(app, SETTINGS_STORE_FILE, move |store| {
         let mut preferences = read_playback_language_preferences_from_store(&store);
         match preference_kind {
             PlaybackLanguagePreferenceKind::Audio => {
@@ -149,8 +148,7 @@ pub async fn save_playback_language_preference(
 pub async fn get_playback_language_preferences(
     app: AppHandle,
 ) -> Result<PlaybackLanguagePreferences, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
+    super::with_store(app, SETTINGS_STORE_FILE, |store| {
         Ok(read_playback_language_preferences_from_store(&store))
     })
     .await
@@ -184,7 +182,6 @@ pub async fn get_effective_playback_language_preferences(
 
     // One blocking round-trip for defaults plus the scoped merge — a two-hop
     // form could mix defaults from one instant with a snapshot from another.
-    let app = app.clone();
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
@@ -324,7 +321,6 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
     // languages drops its per-title override and falls back to globals.
 
     // Blocking store/file IO — routed through the dedicated pool like the other playback_state save paths.
-    let app = app.clone();
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
         service.record_playback_language_preference_outcome(

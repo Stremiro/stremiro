@@ -292,6 +292,73 @@ pub(crate) fn bracketed_language_tags(
         })
 }
 
+/// Flag emoji addons print as language markers (`🇮🇹`): regional-indicator pairs by country.
+pub(crate) fn flag_language_tags(
+    text: &str,
+) -> impl Iterator<Item = (Range<usize>, &'static str)> + '_ {
+    let mut chars = text.char_indices().peekable();
+    std::iter::from_fn(move || {
+        while let Some((start, first)) = chars.next() {
+            let Some(first) = regional_indicator_letter(first) else {
+                continue;
+            };
+            let Some(second) = chars
+                .peek()
+                .and_then(|&(_, second)| regional_indicator_letter(second))
+            else {
+                continue;
+            };
+            let (second_start, second_char) = chars.next().expect("peeked flag half");
+            if let Some(language) = flag_language([first, second]) {
+                return Some((start..second_start + second_char.len_utf8(), language));
+            }
+        }
+        None
+    })
+}
+
+fn regional_indicator_letter(ch: char) -> Option<u8> {
+    u32::from(ch)
+        .checked_sub(0x1F1E6)
+        .and_then(|offset| u8::try_from(offset).ok())
+        .filter(|offset| *offset < 26)
+        .map(|offset| b'a' + offset)
+}
+
+fn flag_language(country: [u8; 2]) -> Option<&'static str> {
+    Some(match &country {
+        b"gb" | b"us" | b"au" => "en",
+        b"jp" => "ja",
+        b"es" | b"mx" => "es",
+        b"fr" => "fr",
+        b"de" | b"at" => "de",
+        b"it" => "it",
+        b"pt" | b"br" => "pt",
+        b"kr" => "ko",
+        b"cn" | b"tw" | b"hk" => "zh",
+        b"ru" => "ru",
+        b"sa" | b"ae" | b"eg" => "ar",
+        b"in" => "hi",
+        b"nl" => "nl",
+        b"pl" => "pl",
+        b"tr" => "tr",
+        b"se" => "sv",
+        b"no" => "no",
+        b"dk" => "da",
+        b"fi" => "fi",
+        b"cz" => "cs",
+        b"hu" => "hu",
+        b"gr" => "el",
+        b"il" => "he",
+        b"th" => "th",
+        b"vn" => "vi",
+        b"id" => "id",
+        b"ua" => "uk",
+        b"ro" => "ro",
+        _ => return None,
+    })
+}
+
 fn is_exact_only_language_alias(value: &str) -> bool {
     SUPPORTED_LANGUAGES
         .iter()

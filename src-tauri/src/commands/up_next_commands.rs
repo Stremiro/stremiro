@@ -1,8 +1,8 @@
 use super::calendar_commands::date_ordinal;
 use super::episode_navigation::coordinate_neighbours;
 use super::history_helpers::{
-    compare_continue_watching, is_series_like_watch_progress, watch_progress_absolute_episode,
-    watch_progress_absolute_season,
+    compare_continue_watching, is_series_like_watch_progress, resume_rows,
+    watch_progress_absolute_episode, watch_progress_absolute_season,
 };
 use super::media_commands::{
     fetch_media_schedules_with_response_timeout, MediaSchedule, MediaScheduleRequest,
@@ -62,14 +62,10 @@ pub(crate) fn build_up_next_entries(
             let season = watch_progress_absolute_season(&source)?;
             let episode = watch_progress_absolute_episode(&source)?;
             let schedule = schedules_by_title.get(&(source.type_.as_str(), source.id.as_str()))?;
-            let (_, next) = coordinate_neighbours(
-                schedule
-                    .episodes
-                    .iter()
-                    .filter(|candidate| candidate.season != 0 || season == 0),
-                (season, episode),
-                |candidate| (candidate.season, candidate.episode),
-            );
+            let (_, next) =
+                coordinate_neighbours(schedule.episodes.iter(), (season, episode), |candidate| {
+                    (candidate.season, candidate.episode)
+                });
             let next = next?;
             // Choose by episode coordinates first: an unaired, undated or
             // malformed successor must not skip forward to a later aired one.
@@ -194,11 +190,7 @@ pub async fn get_resume_rail(
     let service = playback_state.inner().clone();
     let store_app = app.clone();
     let (continue_watching, sources) = super::run_blocking_store_op(move || {
-        let rows: Vec<WatchProgress> = service
-            .load_resume_entries(&store_app)?
-            .into_iter()
-            .map(|(_, row)| row)
-            .collect();
+        let rows = resume_rows(service.load_resume_entries(&store_app)?);
         let continue_watching =
             annotate_watch_progress_list(build_continue_watching_entries(&rows));
         if let Ok(snapshot) = serde_json::to_string(

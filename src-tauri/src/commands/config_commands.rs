@@ -138,7 +138,8 @@ pub async fn get_app_ui_preferences(app: AppHandle) -> Result<AppUiPreferencesVi
 pub async fn get_bootstrap_snapshot(app: AppHandle) -> Result<BootstrapSnapshot, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let profile_preferences = load_profile_preferences(&store);
+        let avatars = super::open_store(&app, super::PROFILE_AVATAR_STORE_FILE)?;
+        let profile_preferences = load_profile_preferences(&store, &avatars);
         let app_ui_preferences = load_app_ui_preferences(&store);
         super::app_shell_commands::hydrate_preferences(&app, &app_ui_preferences);
         let startup_route = startup_route(&app_ui_preferences);
@@ -183,14 +184,11 @@ pub async fn save_app_ui_preferences(
         save_app_ui_preferences_to_store(&store, &preferences);
         if sync_tray {
             // Match the in-memory preference even if saving fails; closing still verifies the tray.
-            if let Err(error) = super::app_shell_commands::sync_preferences(&app, &preferences) {
-                crate::operational_log::log_warn(
-                    "window",
-                    "save-preferences-tray-sync",
-                    "failed",
-                    &[crate::operational_log::field("error", error)],
-                );
-            }
+            super::app_shell_commands::sync_preferences(
+                &app,
+                &preferences,
+                "save-preferences-tray-sync",
+            );
         }
         store.save()?;
 
@@ -202,8 +200,7 @@ pub async fn save_app_ui_preferences(
 pub(crate) async fn get_last_notified_app_update_version(
     app: AppHandle,
 ) -> Result<Option<String>, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, |store| {
         Ok(load_last_notified_app_update_version(&store))
     })
     .await
@@ -214,9 +211,7 @@ pub async fn save_last_notified_app_update_version(
     app: AppHandle,
     version: Option<String>,
 ) -> Result<Option<String>, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-
+    super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
         save_last_notified_app_update_version_to_store(&store, version);
         store.save()?;
 
@@ -229,7 +224,8 @@ pub async fn save_last_notified_app_update_version(
 pub async fn get_profile_preferences(app: AppHandle) -> Result<ProfilePreferences, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        Ok(load_profile_preferences(&store))
+        let avatars = super::open_store(&app, super::PROFILE_AVATAR_STORE_FILE)?;
+        Ok(load_profile_preferences(&store, &avatars))
     })
     .await
 }
@@ -241,9 +237,11 @@ pub async fn save_profile_preferences(
 ) -> Result<ProfilePreferences, String> {
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-        let preferences = apply_profile_preferences_patch(load_profile_preferences(&store), patch);
+        let avatars = super::open_store(&app, super::PROFILE_AVATAR_STORE_FILE)?;
+        let preferences =
+            apply_profile_preferences_patch(load_profile_preferences(&store, &avatars), patch);
 
-        save_profile_preferences_to_store(&store, &preferences);
+        save_profile_preferences_to_store(&store, &avatars, &preferences)?;
         store.save()?;
 
         Ok(preferences)
@@ -255,8 +253,7 @@ pub async fn save_profile_preferences(
 pub async fn get_stream_selector_preferences(
     app: AppHandle,
 ) -> Result<StreamSelectorPreferencesState, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, |store| {
         let (preferences, initialized) = load_stream_selector_preferences_state(&store);
         Ok(StreamSelectorPreferencesState::new(
             preferences,
@@ -271,8 +268,7 @@ pub async fn patch_stream_selector_preferences(
     app: AppHandle,
     patch: StreamSelectorPreferencesPatch,
 ) -> Result<StreamSelectorPreferencesState, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
         let (preferences, initialized) = load_stream_selector_preferences_state(&store);
         let preferences = apply_stream_selector_preferences_patch(preferences, initialized, patch);
 
@@ -324,11 +320,7 @@ pub(super) async fn classify_missing_addon_capabilities(
         .iter()
         .enumerate()
         .filter(|(_, config)| {
-            (require_valid_manifest || config.enabled)
-                && config
-                    .capabilities
-                    .as_ref()
-                    .is_none_or(|snapshot| !snapshot_is_classified(snapshot))
+            (require_valid_manifest || config.enabled) && config.needs_classification()
         })
         .map(|(index, _)| index)
         .collect();
@@ -369,14 +361,8 @@ async fn refresh_installed_addon_capabilities(
     mut configs: Vec<AddonConfig>,
     refresh_classified: bool,
 ) -> Result<Vec<AddonConfig>, String> {
-    configs.retain(|config| {
-        config.enabled
-            && (refresh_classified
-                || config
-                    .capabilities
-                    .as_ref()
-                    .is_none_or(|snapshot| !snapshot_is_classified(snapshot)))
-    });
+    configs
+        .retain(|config| config.enabled && (refresh_classified || config.needs_classification()));
     for config in &mut configs {
         // Clear only the fetch candidates, never the stored offline fallback.
         config.capabilities = None;
@@ -432,12 +418,8 @@ async fn refresh_addon_capabilities(
     app: AppHandle,
     refresh_classified: bool,
 ) -> Result<(), String> {
-    let current = super::run_blocking_store_op({
-        let app = app.clone();
-        move || {
-            let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
-            Ok::<_, String>(load_addon_configs(&store))
-        }
+    let current = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, |store| {
+        Ok::<_, String>(load_addon_configs(&store))
     })
     .await?;
     let classified = refresh_installed_addon_capabilities(current, refresh_classified).await?;
@@ -463,8 +445,7 @@ async fn refresh_addon_capabilities(
 
 #[command]
 pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, |store| {
         Ok(AddonConfig::load_identities(&store)
             .into_iter()
             .map(AddonConfigView::from_config)
@@ -483,8 +464,7 @@ fn load_addon_url(store: &DurableStore, id: &str) -> Result<String, String> {
 
 #[command]
 pub async fn get_addon_url(app: AppHandle, id: String) -> Result<String, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
         load_addon_url(&store, &id)
     })
     .await
@@ -557,8 +537,7 @@ fn inspect_addon_url_against(url: &str, installed: &[AddonConfig]) -> AddonUrlIn
 
 #[command]
 pub async fn inspect_addon_url(app: AppHandle, url: String) -> Result<AddonUrlInspection, String> {
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+    super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
         Ok(inspect_addon_url_against(
             &url,
             &AddonConfig::load_identities(&store),
@@ -648,6 +627,13 @@ fn apply_addon_configs_op(
     })
 }
 
+pub(super) fn clear_addon_caches(app: &AppHandle) {
+    app.state::<AddonTransport>().clear_cache();
+    app.state::<AddonResourceClient>().clear_cache();
+    app.state::<super::calendar_commands::CalendarScheduleCache>()
+        .clear_cache();
+}
+
 fn persist_addon_configs(
     store: &DurableStore,
     updated: &[AddonConfig],
@@ -675,12 +661,10 @@ pub async fn update_addon_configs(
         String::new()
     };
     let classified = if matches!(op, AddonConfigsOp::Add { .. }) {
-        let candidate = super::run_blocking_store_op({
-            let app = app.clone();
+        let candidate = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, {
             let op = op.clone();
             let new_addon_id = new_addon_id.clone();
-            move || {
-                let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+            move |store| {
                 let mut updated = load_addon_configs(&store);
                 apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
                 Ok::<_, String>(updated.pop().into_iter().collect())
@@ -700,10 +684,7 @@ pub async fn update_addon_configs(
         changed |= merge_classified_capabilities(&mut updated, classified, true);
         persist_addon_configs(&store, &updated, changed, || {
             // The live registry changed even if saving fails or its caller timed out.
-            app.state::<AddonTransport>().clear_cache();
-            app.state::<AddonResourceClient>().clear_cache();
-            app.state::<super::calendar_commands::CalendarScheduleCache>()
-                .clear_cache();
+            clear_addon_caches(&app)
         })?;
         Ok::<_, String>(updated)
     })

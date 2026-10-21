@@ -109,6 +109,7 @@ fn write_watch_status(
         }
         store.save()?;
         if !status_added {
+            library_store.save()?;
             return Ok(library_index
                 .contains(&item_id)
                 .then(|| {
@@ -205,9 +206,8 @@ fn clear_watch_status_items(
         store.save()?;
     }
     let cleared: HashSet<&str> = ids.iter().map(String::as_str).collect();
-    if retain_status_added_ids(library_store, |id| !cleared.contains(id)) {
-        library_store.save()?;
-    }
+    retain_status_added_ids(library_store, |id| !cleared.contains(id));
+    library_store.save()?;
     Ok(changed)
 }
 
@@ -271,8 +271,7 @@ pub async fn bulk_set_watch_status(
 pub async fn get_all_watch_statuses(
     app: AppHandle,
 ) -> Result<HashMap<String, String>, WatchStatusError> {
-    run_typed_store_op(move || {
-        let store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
+    super::with_store(app, WATCH_STATUS_STORE_FILE, |store| {
         Ok(load_watch_statuses_map(&store)?)
     })
     .await
@@ -497,6 +496,47 @@ mod tests {
             0
         );
         assert_eq!(statuses.store.save_count(), 2);
+        #[cfg(windows)]
+        for (bulk, id) in [(false, "auto-single"), (true, "auto-bulk")] {
+            use std::os::windows::fs::OpenOptionsExt;
+
+            let item = test_media_item(id, "movie");
+            write_watch_status(
+                &statuses.store,
+                &library.store,
+                item.clone(),
+                Some("watched".into()),
+            )
+            .unwrap();
+            let saves = library.store.save_count();
+            let clear = || {
+                if bulk {
+                    clear_watch_status_items(&statuses.store, &library.store, &[id.into()])
+                        .map(|_| ())
+                } else {
+                    write_watch_status(&statuses.store, &library.store, item.clone(), None)
+                        .map(|_| ())
+                }
+            };
+            let held = std::fs::OpenOptions::new()
+                .read(true)
+                .share_mode(0)
+                .open(&library.path)
+                .unwrap();
+            assert!(clear().is_err());
+            assert_eq!(library.store.save_count(), saves);
+            drop(held);
+            clear().unwrap();
+            assert_eq!(library.store.save_count(), saves + 1);
+            let reopened = super::super::DurableStoreRegistry::default()
+                .open_path(library.path.clone())
+                .unwrap();
+            assert!(!load_status_added_ids(&reopened).contains(&id.to_string()));
+            assert_eq!(
+                load_library_index(&reopened).unwrap().contains(&id.into()),
+                bulk
+            );
+        }
     }
 
     #[test]

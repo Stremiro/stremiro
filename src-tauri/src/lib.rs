@@ -26,8 +26,8 @@ pub fn run() {
             }
         })
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::Resized(_)) {
-                commands::app_shell_commands::minimize_main_window_to_tray(window);
+            if window.label() == "main" {
+                commands::app_shell_commands::handle_main_window_event(window, event);
             }
         })
         .plugin(tauri_plugin_opener::init())
@@ -145,6 +145,7 @@ pub fn run() {
             commands::player_mpv_commands::player_mpv_set_video_margin_ratio,
             commands::player_mpv_commands::player_mpv_set_property,
             commands::player_mpv_commands::player_mpv_set_properties,
+            commands::player_mpv_commands::player_mpv_set_audio_settings,
             commands::player_mpv_commands::player_mpv_get_property,
             commands::player_mpv_commands::player_mpv_get_playback_position,
             commands::player_mpv_commands::player_mpv_init,

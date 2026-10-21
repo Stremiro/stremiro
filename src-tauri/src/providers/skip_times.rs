@@ -1,4 +1,4 @@
-use super::ttl_cache::FetchFailure;
+use super::ttl_cache::{FetchFailure, InFlight, TtlCache};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -8,7 +8,7 @@ use urlencoding::encode;
 #[derive(Debug, Serialize, Clone, PartialEq)]
 pub(crate) struct SkipSegment {
     #[serde(rename = "type")]
-    pub type_: String,
+    pub type_: &'static str,
     pub start_time: f64,
     pub end_time: f64,
 }
@@ -29,13 +29,17 @@ fn normalize_skip_time(value: f64) -> Option<f64> {
     Some((value.max(0.0) * 1000.0).round() / 1000.0)
 }
 
-fn normalize_skip_segments(mut segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
+fn normalize_skip_segments(
+    mut segments: Vec<SkipSegment>,
+    duration_secs: Option<f64>,
+) -> Vec<SkipSegment> {
     segments.retain_mut(|segment| {
         let Some((start_time, end_time)) =
             normalize_skip_time(segment.start_time).zip(normalize_skip_time(segment.end_time))
         else {
             return false;
         };
+        let end_time = duration_secs.map_or(end_time, |duration| end_time.min(duration));
         if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
             return false;
         }
@@ -47,7 +51,7 @@ fn normalize_skip_segments(mut segments: Vec<SkipSegment>) -> Vec<SkipSegment> {
         left.start_time
             .total_cmp(&right.start_time)
             .then(left.end_time.total_cmp(&right.end_time))
-            .then_with(|| left.type_.cmp(&right.type_))
+            .then_with(|| left.type_.cmp(right.type_))
     });
 
     let mut previous_end = 0.0;
@@ -80,7 +84,13 @@ pub(crate) fn normalize_imdb_id(input: &str) -> Option<String> {
 
 pub(crate) struct SkipTimesProvider {
     client: Client,
+    cache: TtlCache<SkipTimesResult>,
+    in_flight: InFlight,
 }
+
+const SKIP_TIMES_CACHE_ENTRIES: usize = 256;
+const SKIP_TIMES_TTL: Duration = Duration::from_secs(12 * 60 * 60);
+const SKIP_TIMES_EMPTY_TTL: Duration = Duration::from_secs(60 * 60);
 
 /// Bound crowdsourced JSON before allocation — a compromised endpoint must not OOM the app.
 const SKIP_TIMES_MAX_BYTES: usize = 256 * 1024;
@@ -139,7 +149,44 @@ impl SkipTimesProvider {
                 .build()
                 // Fail closed: a fallback client would silently drop the SSRF redirect policy.
                 .expect("skip-times HTTP client must build"),
+            cache: TtlCache::new(
+                SKIP_TIMES_CACHE_ENTRIES,
+                SKIP_TIMES_TTL,
+                SKIP_TIMES_EMPTY_TTL,
+            ),
+            in_flight: InFlight::new(SKIP_TIMES_CACHE_ENTRIES),
         }
+    }
+
+    /// Cached, single-flight SkipDB lookup keyed by the normalized request:
+    /// definitive answers (including "no data") cache, transient errors do not.
+    pub(crate) async fn get_segments(
+        &self,
+        imdb_id: &str,
+        season: Option<u32>,
+        episode: Option<u32>,
+        duration_secs: Option<f64>,
+    ) -> Result<SkipTimesResult, String> {
+        let key = format!("{imdb_id}:{season:?}:{episode:?}:{duration_secs:?}");
+        if let Some(cached) = self.cache.get(&key) {
+            return Ok(cached);
+        }
+        let key_lock = self.in_flight.claim(&key);
+        let result = async {
+            let _fetch_permit = key_lock.lock().await;
+            if let Some(cached) = self.cache.get(&key) {
+                return Ok(cached);
+            }
+            let result = self
+                .fetch_segments(imdb_id, season, episode, duration_secs)
+                .await?;
+            self.cache
+                .put(&key, result.clone(), result.segments.is_empty(), || true);
+            Ok(result)
+        }
+        .await;
+        self.in_flight.release(&key, &key_lock);
+        result
     }
 
     /// Fetch skippable segments from SkipDB (`GET /api/segments`).
@@ -149,7 +196,7 @@ impl SkipTimesProvider {
     /// payload) are `Ok` — missing skip data is a normal crowdsourced condition.
     /// Transient failures (transport, 408, 429, 5xx) are `Err` so the caller neither
     /// caches them as "no data" nor skips its retry.
-    pub(crate) async fn get_segments(
+    async fn fetch_segments(
         &self,
         imdb_id: &str,
         season: Option<u32>,
@@ -201,10 +248,10 @@ impl SkipTimesProvider {
         };
 
         Ok(SkipTimesResult {
-            segments: normalize_skip_segments(collect_skip_db_segments(
-                body.segments,
+            segments: normalize_skip_segments(
+                collect_skip_db_segments(body.segments, duration_secs),
                 duration_secs,
-            )),
+            ),
         })
     }
 }
@@ -274,7 +321,7 @@ impl SkipDbSegmentEntry {
             None => return None,
         };
         Some(SkipSegment {
-            type_: type_.to_string(),
+            type_,
             start_time: self.start_ms / 1000.0,
             end_time,
         })

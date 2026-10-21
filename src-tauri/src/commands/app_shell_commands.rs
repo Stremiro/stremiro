@@ -18,6 +18,7 @@ pub(crate) struct AppShellState {
     initial_reveal_pending: AtomicBool,
     quit_pending: AtomicBool,
     frontend_quit_ready: AtomicBool,
+    webview_memory_low: AtomicBool,
 }
 
 impl AppShellState {
@@ -88,14 +89,18 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
-pub(crate) fn sync_preferences(
-    app: &AppHandle,
-    preferences: &AppUiPreferences,
-) -> Result<(), String> {
+pub(crate) fn sync_preferences(app: &AppHandle, preferences: &AppUiPreferences, action: &str) {
     let state = app.state::<AppShellState>();
     state.set_preferences(preferences);
     state.preferences_hydrated.store(true, Ordering::Relaxed);
-    sync_tray_visibility(app)
+    if let Err(error) = sync_tray_visibility(app) {
+        crate::operational_log::log_warn(
+            "window",
+            action,
+            "failed",
+            &[crate::operational_log::field("error", error)],
+        );
+    }
 }
 
 pub(crate) fn hydrate_preferences(app: &AppHandle, preferences: &AppUiPreferences) {
@@ -104,14 +109,7 @@ pub(crate) fn hydrate_preferences(app: &AppHandle, preferences: &AppUiPreference
         .preferences_hydrated
         .swap(true, Ordering::Relaxed)
     {
-        if let Err(error) = sync_preferences(app, preferences) {
-            crate::operational_log::log_warn(
-                "window",
-                "hydrate-preferences-tray-sync",
-                "failed",
-                &[crate::operational_log::field("error", error)],
-            );
-        }
+        sync_preferences(app, preferences, "hydrate-preferences-tray-sync");
     }
 }
 
@@ -140,16 +138,30 @@ pub(crate) fn reveal_main_window(app: &AppHandle) {
         state.initial_reveal_pending.store(false, Ordering::Relaxed);
         state.quit_pending.store(false, Ordering::Relaxed);
     }
-    #[cfg(windows)]
-    set_webview_memory_target(&window, false);
+    set_webview_memory_target(app, false);
     let _ = window.unminimize();
     let _ = window.show();
     let _ = window.set_focus();
     let _ = sync_tray_visibility(app);
 }
 
+fn set_webview_memory_target(app: &AppHandle, low: bool) {
+    if app
+        .state::<AppShellState>()
+        .webview_memory_low
+        .swap(low, Ordering::Relaxed)
+        == low
+    {
+        return;
+    }
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        apply_webview_memory_target(&window, low);
+    }
+}
+
 #[cfg(windows)]
-fn set_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
+fn apply_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,
         COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL,
@@ -172,14 +184,19 @@ fn set_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
     });
 }
 
-pub(crate) fn minimize_main_window_to_tray(window: &tauri::Window) {
-    let app = window.app_handle();
-    if app
-        .state::<AppShellState>()
-        .minimize_to_tray
-        .load(Ordering::Relaxed)
-        && window.is_minimized().unwrap_or(false)
-    {
+pub(crate) fn handle_main_window_event(window: &tauri::Window, event: &tauri::WindowEvent) {
+    match event {
+        tauri::WindowEvent::Resized(_) if window.is_minimized().unwrap_or(false) => {
+            handle_main_window_minimized(window.app_handle());
+        }
+        tauri::WindowEvent::Focused(true) => set_webview_memory_target(window.app_handle(), false),
+        _ => {}
+    }
+}
+
+fn handle_main_window_minimized(app: &AppHandle) {
+    let state = app.state::<AppShellState>();
+    if state.minimize_to_tray.load(Ordering::Relaxed) {
         if let Err(error) = hide_main_window(app) {
             crate::operational_log::log_warn(
                 "window",
@@ -188,7 +205,22 @@ pub(crate) fn minimize_main_window_to_tray(window: &tauri::Window) {
                 &[crate::operational_log::field("error", error)],
             );
         }
+        return;
     }
+    if state.webview_memory_low.load(Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        // Playback keeps the normal target: the player still drives its clock and media session.
+        if !super::player_mpv_commands::is_playback_active(app.clone()).await
+            && app
+                .get_webview_window("main")
+                .is_some_and(|window| window.is_minimized().unwrap_or(false))
+        {
+            set_webview_memory_target(&app, true);
+        }
+    });
 }
 
 pub(crate) fn reveal_on_startup(app: &AppHandle) {
@@ -280,8 +312,7 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     state.initial_reveal_pending.store(false, Ordering::Relaxed);
     state.quit_pending.store(false, Ordering::Relaxed);
     window.hide().map_err(|error| error.to_string())?;
-    #[cfg(windows)]
-    set_webview_memory_target(&window, true);
+    set_webview_memory_target(app, true);
     if let Some(transport) = app.try_state::<AddonTransport>() {
         transport.purge_expired_caches();
     }

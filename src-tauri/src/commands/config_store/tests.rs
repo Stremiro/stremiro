@@ -29,7 +29,7 @@ fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
     let saved = super::apply_profile_preferences_patch(
         current.clone(),
         patch(serde_json::json!({
-            "accentColor": " #ABCDEF ", "accentTargets": {"actions":false}, "viewMode":"list"
+            "accentColor": " #ABCDEF ", "accentTargets": {"actions":false, "skip":false}, "viewMode":"list"
         })),
     );
     assert_eq!(saved.profile.username, current.profile.username);
@@ -37,6 +37,7 @@ fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
     assert_eq!(saved.profile.accent_color, "#abcdef");
     assert!(!saved.profile.accent_targets.navigation);
     assert!(!saved.profile.accent_targets.actions);
+    assert!(!saved.profile.accent_targets.skip);
     assert!(saved.profile.accent_targets.progress);
     assert_eq!(saved.view_mode, ProfileViewMode::List);
     let saved = super::apply_profile_preferences_patch(
@@ -45,6 +46,7 @@ fn profile_patches_preserve_unedited_fields_and_merge_target_flags() {
     );
     assert_eq!(saved.profile.accent_color, "#abcdef");
     assert!(!saved.profile.accent_targets.actions);
+    assert!(!saved.profile.accent_targets.skip);
     assert_eq!(saved.view_mode, ProfileViewMode::List);
 }
 
@@ -76,6 +78,171 @@ fn profile_patches_ignore_legacy_avatar_fields() {
     }
 }
 
+#[test]
+fn legacy_settings_avatar_moves_to_its_own_store_before_settings_drop_it() {
+    let read_file = |path: &std::path::Path| -> serde_json::Value {
+        serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+    };
+    let with_avatar = |avatar: &str| ProfilePreferences {
+        profile: LocalProfile {
+            username: "Saved User".into(),
+            avatar: Some(avatar.into()),
+            ..LocalProfile::default()
+        },
+        ..ProfilePreferences::default()
+    };
+    let legacy = with_avatar("data:image/png;base64,AAAA");
+    let settings = crate::test_helpers::test_store();
+    let avatars = crate::test_helpers::test_store();
+    settings
+        .store
+        .set(super::PROFILE_PREFERENCES_KEY, serde_json::json!(legacy));
+    settings.store.save().unwrap();
+
+    let load = || super::load_profile_preferences(&settings.store, &avatars.store);
+    assert_eq!(load(), legacy);
+    assert_eq!(
+        read_file(&avatars.path),
+        serde_json::json!({"avatar": "data:image/png;base64,AAAA"})
+    );
+    let profile = &read_file(&settings.path)["profile_preferences"]["profile"];
+    assert_eq!(profile["username"], "Saved User");
+    assert!(profile.get("avatar").is_none());
+
+    // A crash between the two commits leaves a stale settings copy; the avatar store wins.
+    settings.store.set(
+        super::PROFILE_PREFERENCES_KEY,
+        serde_json::json!(with_avatar("data:image/png;base64,BBBB")),
+    );
+    assert_eq!(load(), legacy);
+    assert!(read_file(&settings.path)["profile_preferences"]["profile"]
+        .get("avatar")
+        .is_none());
+
+    settings.store.set(
+        "last_notified_app_update_version",
+        serde_json::json!("1.0.0"),
+    );
+    settings.store.save().unwrap();
+    assert!(!std::fs::read_to_string(&settings.path)
+        .unwrap()
+        .contains("base64"));
+    let reopen = |path: &std::path::Path| {
+        crate::commands::DurableStoreRegistry::default()
+            .open_path(path.to_path_buf())
+            .unwrap()
+    };
+    assert_eq!(
+        super::load_profile_preferences(&reopen(&settings.path), &reopen(&avatars.path)),
+        legacy
+    );
+}
+
+#[test]
+fn backup_profile_round_trip_restores_the_avatar_into_its_store() {
+    let avatar = "data:image/webp;base64,UklGRg==";
+    let preferences = ProfilePreferences {
+        profile: LocalProfile {
+            avatar: Some(avatar.into()),
+            ..LocalProfile::default()
+        },
+        view_mode: ProfileViewMode::List,
+    };
+    let settings = crate::test_helpers::test_store();
+    let avatars = crate::test_helpers::test_store();
+    super::save_profile_preferences_to_store(&settings.store, &avatars.store, &preferences)
+        .unwrap();
+    let exported = serde_json::json!(super::load_profile_preferences(
+        &settings.store,
+        &avatars.store
+    ));
+    assert_eq!(exported["profile"]["avatar"], avatar);
+
+    let restored_settings = crate::test_helpers::test_store();
+    let restored_avatars = crate::test_helpers::test_store();
+    let restore = |value: serde_json::Value| {
+        super::save_profile_preferences_to_store(
+            &restored_settings.store,
+            &restored_avatars.store,
+            &super::parse_profile_preferences(value).unwrap(),
+        )
+        .unwrap();
+        super::load_profile_preferences(&restored_settings.store, &restored_avatars.store)
+    };
+    assert_eq!(restore(exported), preferences);
+    assert!(restored_settings
+        .store
+        .get(super::PROFILE_PREFERENCES_KEY)
+        .unwrap()["profile"]
+        .get("avatar")
+        .is_none());
+    assert_eq!(
+        restore(serde_json::json!({"profile": {}})).profile.avatar,
+        None
+    );
+    assert!(restored_avatars
+        .store
+        .get(super::PROFILE_AVATAR_KEY)
+        .is_none());
+    #[cfg(windows)]
+    for replacement in [Some(avatar.to_string()), None] {
+        use std::os::windows::fs::OpenOptionsExt;
+
+        let settings = crate::test_helpers::test_store();
+        let avatars = crate::test_helpers::test_store();
+        let legacy = ProfilePreferences {
+            profile: LocalProfile {
+                avatar: Some("data:image/png;base64,AAAA".into()),
+                ..LocalProfile::default()
+            },
+            ..ProfilePreferences::default()
+        };
+        let expected = serde_json::json!(legacy);
+        settings
+            .store
+            .set(super::PROFILE_PREFERENCES_KEY, expected.clone());
+        settings.store.save().unwrap();
+        avatars.store.set(
+            super::PROFILE_AVATAR_KEY,
+            serde_json::json!(legacy.profile.avatar),
+        );
+        avatars.store.save().unwrap();
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&avatars.path)
+            .unwrap();
+        let updated = ProfilePreferences {
+            profile: LocalProfile {
+                avatar: replacement,
+                ..legacy.profile
+            },
+            ..legacy
+        };
+        assert!(super::save_profile_preferences_to_store(
+            &settings.store,
+            &avatars.store,
+            &updated,
+        )
+        .is_err());
+        assert_eq!(
+            settings.store.get(super::PROFILE_PREFERENCES_KEY),
+            Some(expected.clone())
+        );
+        settings.store.save().unwrap();
+        let saved: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&settings.path).unwrap()).unwrap();
+        assert_eq!(saved[super::PROFILE_PREFERENCES_KEY], expected);
+        drop(held);
+        super::save_profile_preferences_to_store(&settings.store, &avatars.store, &updated)
+            .unwrap();
+        settings.store.save().unwrap();
+        assert_eq!(
+            super::load_profile_preferences(&settings.store, &avatars.store),
+            updated
+        );
+    }
+}
 #[test]
 fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     let view = AddonConfigView::from_config(AddonConfig {
@@ -364,7 +531,7 @@ fn stored_profile_ignores_legacy_bio_and_defaults_intensity() {
 
 #[test]
 fn stored_profile_accent_targets_default_per_flag() {
-    let stored = serde_json::json!({
+    let mut stored = serde_json::json!({
         "profile": {
             "username": "Streamer",
             "accentColor": "#abcdef",
@@ -374,7 +541,7 @@ fn stored_profile_accent_targets_default_per_flag() {
         "viewMode": "grid",
     });
 
-    let parsed = serde_json::from_value::<super::StoredProfilePreferences>(stored)
+    let parsed = serde_json::from_value::<super::StoredProfilePreferences>(stored.clone())
         .map(super::normalize_stored_profile_preferences)
         .expect("partial targets payload parses");
 
@@ -383,6 +550,22 @@ fn stored_profile_accent_targets_default_per_flag() {
     assert!(parsed.profile.accent_targets.actions);
     assert!(parsed.profile.accent_targets.progress);
     assert!(parsed.profile.accent_targets.artwork);
+    assert!(parsed.profile.accent_targets.skip);
+
+    for (value, expected) in [
+        (serde_json::json!(null), true),
+        (serde_json::json!("bogus"), true),
+        (serde_json::json!(false), false),
+        (serde_json::json!(true), true),
+    ] {
+        stored["profile"]["accentTargets"]["skip"] = value;
+        let parsed = super::parse_profile_preferences(stored.clone()).unwrap();
+        assert_eq!(parsed.profile.accent_targets.skip, expected);
+        assert_eq!(
+            serde_json::to_value(parsed).unwrap()["profile"]["accentTargets"]["skip"],
+            expected
+        );
+    }
 }
 
 #[test]
@@ -573,6 +756,8 @@ fn sanitize_app_ui_preferences_clamps_runtime_values() {
         auto_skip_intro: true,
         player_volume: 140,
         player_speed: 9.0,
+        audio_delay: -9.04,
+        night_mode: true,
         spoiler_protection: true,
         subtitle_delay: -9.04,
         subtitle_pos: 140.0,
@@ -583,6 +768,8 @@ fn sanitize_app_ui_preferences_clamps_runtime_values() {
 
     assert_eq!(preferences.player_volume, 100);
     assert_eq!(preferences.player_speed, 4.0);
+    assert_eq!(preferences.audio_delay, -5.0);
+    assert!(preferences.night_mode);
     assert!(preferences.spoiler_protection);
     assert_eq!(preferences.subtitle_delay, -5.0);
     assert_eq!(preferences.subtitle_pos, 100.0);
@@ -600,6 +787,8 @@ fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     .expect("legacy payload parses");
 
     assert_eq!(parsed.player_volume, 80);
+    assert_eq!(parsed.audio_delay, 0.0);
+    assert!(!parsed.night_mode);
     assert_eq!(parsed.subtitle_delay, 0.0);
     assert_eq!(parsed.subtitle_pos, 100.0);
     assert_eq!(parsed.subtitle_scale, 1.0);
@@ -619,6 +808,8 @@ fn app_ui_preferences_patch_quantizes_subtitle_tuning() {
         AppUiPreferences::default(),
         super::AppUiPreferencesPatch {
             subtitle_delay: Some(0.26),
+            audio_delay: Some(0.26),
+            night_mode: Some(true),
             subtitle_scale: Some(1.33),
             ..Default::default()
         },
@@ -626,7 +817,16 @@ fn app_ui_preferences_patch_quantizes_subtitle_tuning() {
 
     // Same quanta as the renderer's apply-time clamp: 0.1s delay, 0.05 scale.
     assert_eq!(patched.subtitle_delay, 0.3);
+    assert_eq!(patched.audio_delay, 0.3);
+    assert!(patched.night_mode);
     assert_eq!(patched.subtitle_scale, 1.35);
+    assert_eq!(
+        super::parse_app_ui_preferences(serde_json::to_value(&patched).unwrap()),
+        Some(patched)
+    );
+    for delay in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(super::normalize_audio_delay(Some(delay)), 0.0);
+    }
 }
 
 #[test]

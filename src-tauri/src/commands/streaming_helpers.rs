@@ -1,6 +1,6 @@
 use super::config_store::AddonConfig;
 use super::history_helpers::STREAM_KEY_MAX_CHARS;
-use super::language::bracketed_language_tags;
+use super::language::{bracketed_language_tags, flag_language_tags};
 use crate::providers::addon_resource::is_magnet_url;
 use crate::providers::addons::{
     language_mention_is_audio, normalize_separators, stream_contains_batch_texts, AddonStream,
@@ -77,19 +77,19 @@ fn normalize_stream_family_component(value: &str) -> Option<String> {
         });
     let normalized_lower = normalized.to_ascii_lowercase();
     let normalized = STREAM_FAMILY_NON_WORD_REGEX.replace_all(&normalized_lower, " ");
-    let mut component = String::new();
-    for token in normalized.split_whitespace().take(12) {
-        if !component.is_empty() {
-            component.push('-');
-        }
-        component.push_str(token);
-    }
+    let component = join_words(normalized.split_whitespace().take(12), '-');
+    (!component.is_empty()).then_some(component)
+}
 
-    if component.is_empty() {
-        None
-    } else {
-        Some(component)
+fn join_words<'a>(words: impl Iterator<Item = &'a str>, separator: char) -> String {
+    let mut joined = String::new();
+    for word in words {
+        if !joined.is_empty() {
+            joined.push(separator);
+        }
+        joined.push_str(word);
     }
+    joined
 }
 
 /// Test wrapper — production batches call `derive_stream_family_normalized` directly.
@@ -482,8 +482,8 @@ pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) 
 /// Display-only cleanup: drops addon emoji decoration. Pictographs become spaces first
 /// so `💾1.2GB👤5` cannot fuse into `1.2GB5`.
 fn strip_display_pictographs(value: &str) -> Cow<'_, str> {
-    let trimmed =
-        value.trim_matches(|c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace());
+    let is_display_edge = |c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace();
+    let trimmed = value.trim_matches(is_display_edge);
     let mut previous_space = false;
     let needs_spacing = trimmed.chars().any(|character| {
         let whitespace = character.is_whitespace();
@@ -500,26 +500,13 @@ fn strip_display_pictographs(value: &str) -> Cow<'_, str> {
     }
 
     let spaced = STREAM_PICTOGRAPH_REGEX.replace_all(value, " ");
-    let mut normalized = String::with_capacity(spaced.len());
-    for token in spaced.split_whitespace() {
-        if !normalized.is_empty() {
-            normalized.push(' ');
-        }
-        normalized.push_str(token);
-    }
+    let normalized = join_words(spaced.split_whitespace(), ' ');
     let unpadded = STREAM_BRACKET_PADDING_REGEX.replace_all(&normalized, "${1}${2}");
     let cleaned = STREAM_EMPTY_BRACKETS_REGEX.replace_all(&unpadded, " ");
-    let mut display = String::with_capacity(cleaned.len());
-    for token in cleaned
-        .trim_matches(|c: char| matches!(c, '|' | '·' | '•' | '-' | ':') || c.is_whitespace())
-        .split_whitespace()
-    {
-        if !display.is_empty() {
-            display.push(' ');
-        }
-        display.push_str(token);
-    }
-    Cow::Owned(display)
+    Cow::Owned(join_words(
+        cleaned.trim_matches(is_display_edge).split_whitespace(),
+        ' ',
+    ))
 }
 
 fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, bool) {
@@ -529,7 +516,7 @@ fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, boo
         .into_iter()
         .flatten()
     {
-        for (range, language) in bracketed_language_tags(text) {
+        for (range, language) in bracketed_language_tags(text).chain(flag_language_tags(text)) {
             if !language_mention_is_audio(&text[range.end..]) {
                 continue;
             }
@@ -589,9 +576,11 @@ fn build_stream_presentation(
         },
         is_instantly_playable: !matches!(delivery_kind, StreamDeliveryKind::PeerToPeer),
         hdr_label: if flags.dolby_vision {
-            Some("DV")
+            Some("Dolby Vision")
         } else if flags.hdr10_plus {
             Some("HDR10+")
+        } else if flags.hdr10 {
+            Some("HDR10")
         } else if flags.hdr {
             Some("HDR")
         } else {
@@ -774,6 +763,9 @@ pub(crate) fn build_stream_query_ids(
     episode: Option<u32>,
     absolute_episode: Option<u32>,
 ) -> Vec<String> {
+    if media_type == "movie" {
+        return vec![id.to_string()];
+    }
     let (Some(s), Some(e)) = (season, episode) else {
         return vec![id.to_string()];
     };
@@ -826,7 +818,7 @@ pub(crate) fn build_addon_source_priority_map<'a>(
         };
         let rank = u32::try_from(idx).unwrap_or(u32::MAX);
         priorities
-            .entry(normalized)
+            .entry(normalized.to_string())
             .or_insert(total.saturating_sub(rank));
     }
 
@@ -840,22 +832,16 @@ const SOURCE_IDENTITY_MAX_CHARS: usize = 256;
 
 /// Display-name key: id gate plus ASCII lowercase (display names match case-insensitively; ids don't).
 pub(crate) fn normalize_source_key(value: &str) -> Option<String> {
-    normalize_source_id(value).map(|mut id| {
-        id.make_ascii_lowercase();
-        id
-    })
+    normalize_source_id(value).map(str::to_ascii_lowercase)
 }
 
 /// Stable addon-instance identity (`AddonConfig.id`). Unlike `normalize_source_key` this
 /// is case-sensitive — ids are opaque exact strings (usually the transport URL), not
 /// display names. Trim + bound only.
-pub(crate) fn normalize_source_id(value: &str) -> Option<String> {
+pub(crate) fn normalize_source_id(value: &str) -> Option<&str> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.chars().nth(SOURCE_IDENTITY_MAX_CHARS).is_some() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
+    (!trimmed.is_empty() && trimmed.chars().nth(SOURCE_IDENTITY_MAX_CHARS).is_none())
+        .then_some(trimmed)
 }
 
 /// Persisted source-health key suffix for an instance id — `id:` keeps the keyspace distinct from display names.

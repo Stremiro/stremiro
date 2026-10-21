@@ -68,17 +68,29 @@ fn video_margins_accept_only_finite_unit_ratios() {
 fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
     use std::cell::RefCell;
 
-    for (duration_secs, time_pos, buffered_ahead, near_completion) in [
-        (120.0, Some(json!(12.5)), Some(json!(30)), false),
-        (120.0, None, Some(json!(0)), false),
-        (120.0, Some(json!(0)), None, false),
-        (120.0, Some(Value::Null), Some(json!("unavailable")), false),
-        (120.0, Some(json!(89.9)), None, false),
-        (120.0, Some(json!(90)), None, true),
-        (10000.0, Some(json!(9700)), None, true),
-        (59.0, Some(json!(59)), None, false),
-        (0.0, Some(json!(120)), None, false),
-        (f64::NAN, Some(json!(120)), None, false),
+    for (duration_secs, time_pos, buffered_ahead, near_completion, prefetch_due) in [
+        (120.0, Some(json!(12.5)), Some(json!(30)), false, true),
+        (120.0, None, Some(json!(0)), false, false),
+        (120.0, Some(json!(0)), None, false, false),
+        (
+            120.0,
+            Some(Value::Null),
+            Some(json!("unavailable")),
+            false,
+            false,
+        ),
+        (120.0, Some(json!(89.9)), None, false, true),
+        (120.0, Some(json!(90)), None, true, true),
+        (240.0, Some(json!(119.9)), None, false, false),
+        (240.0, Some(json!(120)), None, false, true),
+        (240.0, Some(json!(240)), None, true, true),
+        (240.0, Some(json!(-1)), None, false, false),
+        (240.0, Some(json!(241)), None, true, false),
+        (10000.0, Some(json!(9700)), None, true, false),
+        (59.0, Some(json!(59)), None, false, true),
+        (0.0, Some(json!(120)), None, false, false),
+        (f64::NAN, Some(json!(120)), None, false, false),
+        (f64::INFINITY, Some(json!(120)), None, false, false),
     ] {
         let calls = RefCell::new(Vec::new());
         let probe = read_playback_position(duration_secs, |name| {
@@ -96,6 +108,7 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
                 "timePos": time_pos.and_then(|value| value.as_f64()),
                 "bufferedAhead": buffered_ahead.and_then(|value| value.as_f64()),
                 "nearCompletion": near_completion,
+                "nextEpisodePrefetchDue": prefetch_due,
             })
         );
     }
@@ -103,8 +116,16 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
 
 #[test]
 fn mpv_config_keeps_native_options_and_observers_fixed() {
+    let shader_dir = std::path::Path::new("C:\\cache\\mpv-shaders");
     for (volume, paused) in [(0.0, false), (78.5, true)] {
-        let config = build_player_mpv_config(volume, paused, paused, Some("en"), Some("off"));
+        let config = build_player_mpv_config(
+            volume,
+            paused,
+            paused,
+            Some("en"),
+            Some("off"),
+            paused.then_some(shader_dir),
+        );
         for (name, value) in [
             ("volume", json!(volume.to_string())),
             ("mute", json!(if paused { "yes" } else { "no" })),
@@ -114,7 +135,6 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
             ("gpu-api", json!("d3d11")),
             ("gpu-context", json!("d3d11")),
             ("cache", json!("auto")),
-            ("cache-secs", json!(12)),
             ("demuxer-max-bytes", json!("96MiB")),
             ("demuxer-max-back-bytes", json!("24MiB")),
             ("load-scripts", json!("no")),
@@ -124,7 +144,12 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
         ] {
             assert_eq!(config.initial_options.get(name), Some(&value), "{name}");
         }
+        assert_eq!(
+            config.initial_options.get("gpu-shader-cache-dir"),
+            paused.then(|| json!(shader_dir.to_str().unwrap())).as_ref()
+        );
         assert!(config.initial_options.contains_key("alang"));
+        assert!(!config.initial_options.contains_key("cache-secs"));
         assert!(!config.initial_options.contains_key("wid"));
         assert_eq!(config.observed_properties.len(), 11);
         assert_eq!(config.observed_properties["duration"], "double");
@@ -380,6 +405,26 @@ fn subtitle_property_values_use_persisted_normalization_and_survive_native_failu
 
 #[test]
 fn property_batch_preserves_order_and_continues_after_native_failure() {
+    assert!(mpv_audio_properties(None, None).is_empty());
+    for (delay, expected) in [(-9.0, -5.0), (0.26, 0.3), (9.0, 5.0), (f64::NAN, 0.0)] {
+        assert_eq!(
+            mpv_audio_properties(Some(delay), None),
+            vec![("audio-delay".to_string(), json!(expected))]
+        );
+    }
+    for (enabled, filter) in [
+        (true, "lavfi=[dynaudnorm=f=250:g=15:p=0.9:m=4]"),
+        (false, ""),
+    ] {
+        assert_eq!(
+            mpv_audio_properties(None, Some(enabled)),
+            vec![("af".to_string(), json!(filter))]
+        );
+    }
+    assert!(
+        validate_mpv_properties(&[("af".to_string(), json!("lavfi=[amovie=secret]"))]).is_err()
+    );
+    assert!(validate_mpv_command("set", &[json!("af"), json!("lavfi=[amovie=secret]")]).is_err());
     let properties = vec![
         ("sub-delay".to_string(), json!(0.2)),
         ("sub-pos".to_string(), json!(90)),
@@ -450,4 +495,19 @@ fn encoded_addon_headers_fit_property_writes_without_widening_other_arguments() 
         }
     }
     assert!(validate_mpv_command("seek", &[json!(fields)]).is_err());
+
+    // Global stream headers are withheld from subtitle hosts on other origins.
+    let stream = "https://cdn.example/video.mkv?token=x";
+    assert!(shares_stream_origin(
+        stream,
+        "HTTPS://CDN.example:443/sub.srt"
+    ));
+    for subtitle in [
+        "http://cdn.example/sub.srt",
+        "https://subs.example/sub.srt",
+        "https://cdn.example:8443/sub.srt",
+        "not a url",
+    ] {
+        assert!(!shares_stream_origin(stream, subtitle), "{subtitle}");
+    }
 }

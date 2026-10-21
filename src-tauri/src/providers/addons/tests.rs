@@ -1430,6 +1430,16 @@ fn release_flags_keep_real_markers() {
     assert!(flags.hdr);
     assert!(flags.surround);
     assert_eq!(flags.resolution, StreamResolutionTier::P2160);
+    // Plain DD5.1 is AC3 surround, not the DD+ (E-AC3) badge.
+    for (text, eac3, surround) in [
+        ("Show.1080p.WEB-DL.DD5.1.H264", false, true),
+        ("Show.1080p.WEB-DL.DDP5.1.H264", true, false),
+        ("Show.1080p.WEB-DL.DD+5.1.H264", true, true),
+        ("Show.1080p.WEB-DL.EAC3.5.1.H264", true, true),
+    ] {
+        let flags = flags_for(text);
+        assert_eq!((flags.eac3, flags.surround), (eac3, surround), "{text}");
+    }
     for marker in [
         "CAM", "CAMRip", "HDCAM", "HD-CAM", "TELESYNC", "HDTS", "HD-TS", "TELECINE", "HDTC",
         "SCREENER", "DVDSCR", "TS", "TC", "R5",

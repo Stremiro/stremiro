@@ -32,6 +32,7 @@ use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 pub(super) const PLAYBACK_STATE_STORE_FILE: &str = "playback_state.json";
+pub(super) const PLAYBACK_RESUME_STORE_FILE: &str = "playback_resume.sqlite3";
 /// Health-index prunes scan every indexed entry, so they run at most once per
 /// window instead of on every outcome write.
 const HEALTH_PRUNE_MIN_INTERVAL_MS: u64 = 60_000;
@@ -212,7 +213,7 @@ impl PlaybackStateService {
         std::fs::create_dir_all(&app_dir)
             .map_err(|error| format!("Failed to create app data directory: {}", error))?;
 
-        ResumeStore::open_or_quarantine(&app_dir.join("playback_resume.sqlite3"))
+        ResumeStore::open_or_quarantine(&app_dir.join(PLAYBACK_RESUME_STORE_FILE))
     }
 
     /// Drops saves superseded by clear/remove/import — re-checks the generation under
@@ -378,9 +379,9 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,
-        reject_growth_past_cap: bool,
+        is_backup_import: bool,
     ) -> Result<usize, String> {
-        self.merge_history_entries_checked(app, entries, reject_growth_past_cap)
+        self.merge_history_entries_checked(app, entries, is_backup_import)
             .map_err(String::from)
     }
 
@@ -397,7 +398,7 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,
-        reject_growth_past_cap: bool,
+        is_backup_import: bool,
     ) -> Result<usize, HistoryMergeError> {
         if entries.is_empty() {
             return Ok(0);
@@ -414,13 +415,13 @@ impl PlaybackStateService {
             if self.history_generation() != start_generation {
                 return Ok(Ok(0));
             }
-            Ok(resume_store
-                .merge_entries(entries, reject_growth_past_cap)
-                .map(|(imported_entries, pruned)| {
+            Ok(resume_store.merge_entries(entries, is_backup_import).map(
+                |(imported_entries, pruned)| {
                     let imported = imported_entries.len();
                     self.mark_history_persisted(imported_entries, pruned, start_generation);
                     imported
-                }))
+                },
+            ))
         })??;
         // Post-merge bump runs after marking so the check above still sees
         // `start_generation`; it drops saves that started mid-merge.

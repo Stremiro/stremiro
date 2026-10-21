@@ -28,6 +28,10 @@ pub enum StartupPage {
 pub struct AppUiPreferences {
     pub player_volume: u32,
     pub player_speed: f64,
+    #[serde(default)]
+    pub audio_delay: f64,
+    #[serde(default)]
+    pub night_mode: bool,
     pub spoiler_protection: bool,
     /// Subtitle tuning persisted across the per-episode player remount (a release group's offset is constant).
     pub subtitle_delay: f64,
@@ -57,6 +61,8 @@ impl Default for AppUiPreferences {
         Self {
             player_volume: PLAYER_VOLUME_DEFAULT,
             player_speed: PLAYER_SPEED_DEFAULT,
+            audio_delay: 0.0,
+            night_mode: false,
             spoiler_protection: false,
             subtitle_delay: SUBTITLE_DELAY_DEFAULT,
             subtitle_pos: SUBTITLE_POS_DEFAULT,
@@ -115,6 +121,8 @@ impl AppUiPreferencesView {
 pub struct AppUiPreferencesPatch {
     pub player_volume: Option<u32>,
     pub player_speed: Option<f64>,
+    pub audio_delay: Option<f64>,
+    pub night_mode: Option<bool>,
     pub spoiler_protection: Option<bool>,
     pub subtitle_delay: Option<f64>,
     pub subtitle_pos: Option<f64>,
@@ -142,6 +150,10 @@ pub(super) struct StoredAppUiPreferences {
     player_volume: Option<u32>,
     #[serde(default, deserialize_with = "lenient_option")]
     player_speed: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    audio_delay: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    night_mode: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     spoiler_protection: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
@@ -203,6 +215,13 @@ fn normalize_controls_hide_delay_ms(value: Option<u32>) -> u32 {
     value
         .filter(|delay| matches!(*delay, 2000 | 3000 | 5000 | 8000))
         .unwrap_or(CONTROLS_HIDE_DELAY_MS_DEFAULT)
+}
+
+pub(crate) fn normalize_audio_delay(value: Option<f64>) -> f64 {
+    value
+        .filter(|delay| delay.is_finite())
+        .map(|delay| (delay.clamp(-5.0, 5.0) * 10.0).round() / 10.0)
+        .unwrap_or(0.0)
 }
 
 pub(crate) fn normalize_subtitle_delay(value: Option<f64>) -> f64 {
@@ -283,6 +302,7 @@ pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppU
     AppUiPreferences {
         player_volume: normalize_player_volume(Some(preferences.player_volume)),
         player_speed: normalize_player_speed(Some(preferences.player_speed)),
+        audio_delay: normalize_audio_delay(Some(preferences.audio_delay)),
         subtitle_delay: normalize_subtitle_delay(Some(preferences.subtitle_delay)),
         subtitle_pos: normalize_subtitle_pos(Some(preferences.subtitle_pos)),
         subtitle_scale: normalize_subtitle_scale(Some(preferences.subtitle_scale)),
@@ -305,6 +325,8 @@ pub(crate) fn apply_app_ui_preferences_patch(
     sanitize_app_ui_preferences(AppUiPreferences {
         player_volume: patch.player_volume.unwrap_or(current.player_volume),
         player_speed: patch.player_speed.unwrap_or(current.player_speed),
+        audio_delay: patch.audio_delay.unwrap_or(current.audio_delay),
+        night_mode: patch.night_mode.unwrap_or(current.night_mode),
         spoiler_protection: patch
             .spoiler_protection
             .unwrap_or(current.spoiler_protection),
@@ -340,6 +362,8 @@ pub(super) fn normalize_stored_app_ui_preferences(
     AppUiPreferences {
         player_volume: normalize_player_volume(preferences.player_volume),
         player_speed: normalize_player_speed(preferences.player_speed),
+        audio_delay: normalize_audio_delay(preferences.audio_delay),
+        night_mode: preferences.night_mode.unwrap_or(false),
         spoiler_protection: preferences.spoiler_protection.unwrap_or(false),
         subtitle_delay: normalize_subtitle_delay(preferences.subtitle_delay),
         subtitle_pos: normalize_subtitle_pos(preferences.subtitle_pos),

@@ -36,6 +36,10 @@ const EPISODE_COORDINATE_MAX: u32 = 100_000;
 /// No real title runs a week; larger finite values are corrupt input.
 const WATCH_PROGRESS_MAX_SECS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
 
+pub(super) fn resume_rows(entries: Vec<(String, WatchProgress)>) -> Vec<WatchProgress> {
+    entries.into_iter().map(|(_, row)| row).collect()
+}
+
 pub(crate) fn normalize_episode_coordinate(value: Option<u32>) -> Option<u32> {
     value.filter(|coordinate| *coordinate <= EPISODE_COORDINATE_MAX)
 }
@@ -286,7 +290,7 @@ fn watch_progress_source_priority(
     item.source_id
         .as_deref()
         .and_then(normalize_source_id)
-        .and_then(|id| source_health_priorities?.get(&id).copied())
+        .and_then(|id| source_health_priorities?.get(id).copied())
         .unwrap_or(super::stream_coordinator::DEFAULT_SOURCE_HEALTH_PRIORITY)
 }
 

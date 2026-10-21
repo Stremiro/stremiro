@@ -4,16 +4,19 @@
 //! init options. These commands expose only the verbs/properties the player UI uses.
 
 use super::config_store::{
-    normalize_subtitle_delay, normalize_subtitle_pos, normalize_subtitle_scale, PLAYER_SPEED_MAX,
-    PLAYER_SPEED_MIN, PLAYER_VOLUME_MAX,
+    normalize_audio_delay, normalize_subtitle_delay, normalize_subtitle_pos,
+    normalize_subtitle_scale, PLAYER_SPEED_MAX, PLAYER_SPEED_MIN, PLAYER_VOLUME_MAX,
 };
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
+use super::player_track_commands::property_flag;
 use super::streaming_helpers::parse_playback_url;
+use crate::providers::fetch_policy::same_origin_for_proxy_headers;
 use serde::Serialize;
 use serde_json::Value;
-use std::sync::{Arc, LazyLock};
-use tauri::{command, AppHandle, Window};
+use std::path::Path;
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use tauri::{command, AppHandle, Manager, Window};
 use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
 
 /// mpv verbs the UI is allowed to issue.
@@ -41,20 +44,40 @@ const MPV_CYCLE_PROPERTIES: &[&str] = &["aid", "pause", "sub"];
 
 /// Properties readable via `get_property`.
 const MPV_READABLE_PROPERTIES: &[&str] = &[
-    "time-pos",
-    "demuxer-cache-duration",
     "track-list/count",
     "current-tracks/audio/id",
     "current-tracks/sub/id",
 ];
 
 /// `get_property` formats the wrapper accepts.
-const MPV_PROPERTY_FORMATS: &[&str] = &["flag", "int64", "double", "string", "none", "native"];
+const MPV_PROPERTY_FORMATS: &[&str] = &["flag", "int64", "double", "string"];
 
 const MPV_COMMAND_MAX_ARGS: usize = 8;
 const MPV_ARG_MAX_CHARS: usize = 4096;
 static MPV_OP_GATE: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+/// Last applied `http-header-fields`: mpv sends this global option with every
+/// new HTTP request, including subtitles fetched from other hosts.
+static MPV_STREAM_HEADER_FIELDS: Mutex<String> = Mutex::new(String::new());
+
+fn stream_header_fields() -> std::sync::MutexGuard<'static, String> {
+    MPV_STREAM_HEADER_FIELDS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
+fn remember_stream_header_fields(name: &str, value: &Value) {
+    if name == "http-header-fields" {
+        *stream_header_fields() = value.as_str().unwrap_or_default().to_owned();
+    }
+}
+
+fn shares_stream_origin(stream_path: &str, url: &str) -> bool {
+    reqwest::Url::parse(stream_path)
+        .ok()
+        .zip(reqwest::Url::parse(url).ok())
+        .is_some_and(|(stream, target)| same_origin_for_proxy_headers(&stream, &target))
+}
 
 pub(crate) async fn run_mpv_op<T, F>(label: &'static str, operation: F) -> Result<T, String>
 where
@@ -96,9 +119,12 @@ fn validate_video_margins(ratio: &VideoMarginRatio) -> Result<(), String> {
 #[command]
 pub async fn player_mpv_destroy(app: AppHandle, window: Window) -> Result<(), String> {
     run_mpv_op("destroy", move || {
-        app.mpv()
+        let result = app
+            .mpv()
             .destroy(window.label())
-            .map_err(|error| format!("mpv destroy failed: {error}"))
+            .map_err(|error| format!("mpv destroy failed: {error}"));
+        stream_header_fields().clear();
+        result
     })
     .await
 }
@@ -126,6 +152,7 @@ fn build_player_mpv_config(
     start_paused: bool,
     preferred_audio_language: Option<&str>,
     preferred_subtitle_language: Option<&str>,
+    shader_cache_dir: Option<&Path>,
 ) -> MpvConfig {
     let mut config = MpvConfig {
         initial_options: [
@@ -193,9 +220,13 @@ fn build_player_mpv_config(
         "pause".to_string(),
         Value::String(if start_paused { "yes" } else { "no" }.to_string()),
     );
-    config
-        .initial_options
-        .insert("cache-secs".to_string(), Value::from(12));
+    // `config=no` disables mpv's default cache path, so shaders need an explicit one.
+    if let Some(dir) = shader_cache_dir.and_then(Path::to_str) {
+        config.initial_options.insert(
+            "gpu-shader-cache-dir".to_string(),
+            Value::String(dir.to_string()),
+        );
+    }
     config.initial_options.extend(
         build_mpv_language_selection_options(preferred_audio_language, preferred_subtitle_language)
             .into_iter()
@@ -301,9 +332,41 @@ pub async fn player_mpv_command(
         normalize_mpv_subtitle_property(property.as_str().unwrap_or_default(), value);
     }
     run_mpv_op("command", move || {
-        app.mpv()
-            .command(&name, &args, window.label())
-            .map_err(|error| format!("mpv command '{name}' failed: {error}"))
+        let mpv = app.mpv();
+        let label = window.label();
+        let run = || {
+            mpv.command(&name, &args, label)
+                .map_err(|error| format!("mpv command '{name}' failed: {error}"))
+        };
+        let (headers, url) = match (name.as_str(), args.as_slice()) {
+            ("set", [property, value, ..]) => {
+                run()?;
+                remember_stream_header_fields(property.as_str().unwrap_or_default(), value);
+                return Ok(());
+            }
+            ("sub-add", [url, ..]) => (
+                stream_header_fields().clone(),
+                url.as_str().unwrap_or_default(),
+            ),
+            _ => return run(),
+        };
+        let same_origin = || {
+            mpv.get_property("path".to_string(), "string".to_string(), label)
+                .is_ok_and(|path| {
+                    path.as_str()
+                        .is_some_and(|path| shares_stream_origin(path, url))
+                })
+        };
+        if headers.is_empty() || same_origin() {
+            return run();
+        }
+        // Verified on bundled mpv 0.41: sub-add fetches synchronously, and an
+        // open stream keeps the headers it was opened with.
+        set_native_mpv_property(&app, label, "http-header-fields", &Value::from(""))?;
+        let result = run();
+        let restored =
+            set_native_mpv_property(&app, label, "http-header-fields", &Value::String(headers));
+        result.and(restored)
     })
     .await
 }
@@ -381,6 +444,67 @@ fn apply_mpv_properties(
     first_error.map_or(Ok(()), Err)
 }
 
+fn set_native_mpv_property(
+    app: &AppHandle,
+    window_label: &str,
+    name: &str,
+    value: &Value,
+) -> Result<(), String> {
+    app.mpv()
+        .set_property(name, value, window_label)
+        .or_else(|_| {
+            let text = value
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| value.to_string());
+            app.mpv().command(
+                "set",
+                &vec![Value::String(name.to_string()), Value::String(text)],
+                window_label,
+            )
+        })
+        .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+}
+
+fn mpv_audio_properties(
+    audio_delay: Option<f64>,
+    night_mode: Option<bool>,
+) -> Vec<(String, Value)> {
+    let mut properties = Vec::with_capacity(2);
+    if let Some(delay) = audio_delay {
+        properties.push((
+            "audio-delay".to_string(),
+            Value::from(normalize_audio_delay(Some(delay))),
+        ));
+    }
+    if let Some(enabled) = night_mode {
+        // Verified on bundled mpv 0.41: one fixed filter, never a webview-supplied graph.
+        let filter = if enabled {
+            "lavfi=[dynaudnorm=f=250:g=15:p=0.9:m=4]"
+        } else {
+            ""
+        };
+        properties.push(("af".to_string(), Value::from(filter)));
+    }
+    properties
+}
+
+#[command]
+pub async fn player_mpv_set_audio_settings(
+    app: AppHandle,
+    window: Window,
+    audio_delay: Option<f64>,
+    night_mode: Option<bool>,
+) -> Result<(), String> {
+    let properties = mpv_audio_properties(audio_delay, night_mode);
+    run_mpv_op("audio settings", move || {
+        apply_mpv_properties(&properties, |name, value| {
+            set_native_mpv_property(&app, window.label(), name, value)
+        })
+    })
+    .await
+}
+
 #[command]
 pub async fn player_mpv_set_properties(
     app: AppHandle,
@@ -394,22 +518,9 @@ pub async fn player_mpv_set_properties(
     let subtitle_properties = normalize_mpv_subtitle_properties(&mut properties);
     let result = run_mpv_op("set", move || {
         apply_mpv_properties(&properties, |name, value| {
-            app.mpv()
-                .set_property(name, value, window.label())
-                .or_else(|_| {
-                    // Some mpv builds reject set_property; keep compatibility inside
-                    // the validated native command rather than retrying over IPC.
-                    let text = value
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| value.to_string());
-                    app.mpv().command(
-                        "set",
-                        &vec![Value::String(name.to_string()), Value::String(text)],
-                        window.label(),
-                    )
-                })
-                .map_err(|error| format!("mpv set '{name}' failed: {error}"))
+            set_native_mpv_property(&app, window.label(), name, value)?;
+            remember_stream_header_fields(name, value);
+            Ok(())
         })
     })
     .await;
@@ -448,6 +559,7 @@ pub struct PlaybackPositionProbe {
     time_pos: Option<f64>,
     buffered_ahead: Option<f64>,
     near_completion: bool,
+    next_episode_prefetch_due: bool,
 }
 
 fn read_playback_position(
@@ -460,6 +572,14 @@ fn read_playback_position(
         buffered_ahead: get_property("demuxer-cache-duration").and_then(|value| value.as_f64()),
         near_completion: time_pos
             .is_some_and(|position| is_near_completion_watch_progress(position, duration_secs)),
+        next_episode_prefetch_due: duration_secs.is_finite()
+            && duration_secs > 0.0
+            && time_pos.is_some_and(|position| {
+                position.is_finite()
+                    && position > 0.0
+                    && position <= duration_secs
+                    && duration_secs - position <= 120.0
+            }),
     }
 }
 
@@ -481,6 +601,20 @@ pub async fn player_mpv_get_playback_position(
     .await
 }
 
+pub(crate) async fn is_playback_active(app: AppHandle) -> bool {
+    run_mpv_op("activity probe", move || {
+        let read = |name: &str| {
+            app.mpv()
+                .get_property(name.to_string(), "flag".to_string(), "main")
+                .ok()
+        };
+        let pause = read("pause");
+        Ok(pause.is_some() && !property_flag(pause) && !property_flag(read("idle-active")))
+    })
+    .await
+    .unwrap_or(false)
+}
+
 #[command]
 pub async fn player_mpv_init(
     app: AppHandle,
@@ -491,14 +625,21 @@ pub async fn player_mpv_init(
     preferred_audio_language: Option<String>,
     preferred_subtitle_language: Option<String>,
 ) -> Result<String, String> {
-    let mpv_config = build_player_mpv_config(
-        initial_volume,
-        initial_muted,
-        start_paused,
-        preferred_audio_language.as_deref(),
-        preferred_subtitle_language.as_deref(),
-    );
+    let shader_cache_dir = app
+        .path()
+        .app_cache_dir()
+        .ok()
+        .map(|dir| dir.join("mpv-shaders"));
     run_mpv_op("init", move || {
+        let shader_cache_dir = shader_cache_dir.filter(|dir| std::fs::create_dir_all(dir).is_ok());
+        let mpv_config = build_player_mpv_config(
+            initial_volume,
+            initial_muted,
+            start_paused,
+            preferred_audio_language.as_deref(),
+            preferred_subtitle_language.as_deref(),
+            shader_cache_dir.as_deref(),
+        );
         app.mpv()
             .init(mpv_config, window.label())
             .map_err(|error| format!("mpv init failed: {error}"))

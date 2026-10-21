@@ -1,5 +1,5 @@
 use super::history_helpers::{
-    choose_entry, is_series_like_watch_progress, playable_resume_start_time,
+    choose_entry, is_series_like_watch_progress, playable_resume_start_time, resume_rows,
     sanitize_watch_progress, watch_progress_absolute_episode, watch_progress_absolute_season,
     HistoryEntryQuery,
 };
@@ -330,11 +330,8 @@ fn get_latest_history_playback_item(
     playback_state: &PlaybackStateService,
     item: &WatchProgress,
 ) -> Result<WatchProgress, String> {
-    let items = playback_state
-        .load_resume_entries_for_title(app, &item.type_, &item.id)?
-        .into_iter()
-        .map(|(_, item)| item)
-        .collect::<Vec<_>>();
+    let items =
+        resume_rows(playback_state.load_resume_entries_for_title(app, &item.type_, &item.id)?);
     // Health only ranks series donors; movies and singleton titles have none.
     let source_health = (items.len() > 1 && is_series_like_watch_progress(item))
         .then(|| {

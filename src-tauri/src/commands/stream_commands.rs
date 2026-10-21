@@ -335,10 +335,6 @@ pub async fn get_stream_link(
     stream_link(&stream)
 }
 
-fn normalize_recovery_text(value: Option<String>) -> Option<String> {
-    value.as_deref().and_then(normalize_opaque_field)
-}
-
 fn normalize_recovery_url(value: Option<String>) -> Option<String> {
     // Recovery URLs feed the player without the probe's landed-URL recheck — apply
     // the shared fetchable-URL gate so a malicious/stale payload can't aim libmpv
@@ -440,7 +436,10 @@ pub async fn get_stream_selector_indices(
                 search_text.clear();
                 for field in &row.search_fields {
                     if let Some(field) = field {
-                        search_text.push_str(field);
+                        search_text.push_str(match field.as_str() {
+                            "Dolby Vision" => "Dolby Vision DV DoVi HDR",
+                            _ => field,
+                        });
                     }
                     search_text.push(' ');
                 }
@@ -747,8 +746,10 @@ async fn recover_playback_stream_work(
     let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
         .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
     let failed_stream_url = normalize_recovery_url(failed_stream_url);
-    let failed_source_id = normalize_recovery_text(failed_source_id);
-    let failed_stream_family = normalize_recovery_text(failed_stream_family);
+    let failed_source_id = failed_source_id.as_deref().and_then(normalize_opaque_field);
+    let failed_stream_family = failed_stream_family
+        .as_deref()
+        .and_then(normalize_opaque_field);
     let failed_stream_key = failed_stream_key.and_then(|key| normalize_stream_key(&key));
     let excluded_stream_keys: Vec<String> = excluded_stream_keys
         .unwrap_or_default()
@@ -812,6 +813,21 @@ async fn recover_playback_stream_work(
         recovery_fetch.failed_source_id = failed_source_id.as_deref();
         recovery_fetch.failed_stream_family = failed_stream_family.as_deref();
     }
+    let warn_recovery = |event: &str, error: &str| {
+        // Error text is a bounded summary, never a URL or header.
+        let summary: String = error.chars().take(160).collect();
+        log_warn(
+            "stream-recovery",
+            "recover_playback_stream",
+            event,
+            &[
+                field("media_type", normalized_media_type),
+                field("media_id", normalized_id),
+                field("outcome", &outcome),
+                field("error", &summary),
+            ],
+        );
+    };
     loop {
         let refresh_claim = if recovery_fetch.not_before.is_some() {
             let refresh_key = format!(
@@ -846,35 +862,14 @@ async fn recover_playback_stream_work(
             Ok(streams) => streams,
             Err(error) => {
                 // Contract stays Ok(None) for compat; observability only.
-                // Error text is a bounded summary, never a URL or header.
-                let summary: String = error.chars().take(160).collect();
-                log_warn(
-                    "stream-recovery",
-                    "recover_playback_stream",
-                    "fetch-failed",
-                    &[
-                        field("media_type", normalized_media_type),
-                        field("media_id", normalized_id),
-                        field("outcome", &outcome),
-                        field("error", &summary),
-                    ],
-                );
+                warn_recovery("fetch-failed", &error);
                 return Ok(None);
             }
         };
 
         exclusions.retain(&mut streams);
         if streams.is_empty() {
-            log_warn(
-                "stream-recovery",
-                "recover_playback_stream",
-                "empty-pool",
-                &[
-                    field("media_type", normalized_media_type),
-                    field("media_id", normalized_id),
-                    field("outcome", &outcome),
-                ],
-            );
+            warn_recovery("empty-pool", "");
         } else {
             match resolve_ranked_best_stream_candidate(
                 streams,
@@ -887,20 +882,7 @@ async fn recover_playback_stream_work(
             .await
             {
                 Ok(resolved) => return Ok(Some(resolved)),
-                Err(error) => {
-                    let summary: String = error.message.chars().take(160).collect();
-                    log_warn(
-                        "stream-recovery",
-                        "recover_playback_stream",
-                        "resolve-failed",
-                        &[
-                            field("media_type", normalized_media_type),
-                            field("media_id", normalized_id),
-                            field("outcome", &outcome),
-                            field("error", &summary),
-                        ],
-                    );
-                }
+                Err(error) => warn_recovery("resolve-failed", &error.message),
             }
         }
 

@@ -57,6 +57,7 @@ static STORE_OP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(())
 /// Shared budget for blocking hops off the async runtime (store ops, plugin IPC,
 /// file IO). A timeout releases the caller; running blocking work can't be cancelled.
 pub(crate) const BLOCKING_OP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+pub(crate) const PERSISTENCE_TIMEOUT_MESSAGE: &str = "Background persistence timed out.";
 
 /// Serialize store work without blocking a worker while it waits in the queue.
 pub(crate) async fn run_blocking_store_op<T, F>(operation: F) -> Result<T, String>
@@ -76,6 +77,20 @@ where
     run_store_op_at(tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT, operation).await
 }
 
+/// Runs `operation` on one opened store inside the store gate.
+pub(crate) async fn with_store<T, E, F>(
+    app: AppHandle,
+    file: &'static str,
+    operation: F,
+) -> Result<T, E>
+where
+    T: Send + 'static,
+    E: From<String> + Send + 'static,
+    F: FnOnce(DurableStore) -> Result<T, E> + Send + 'static,
+{
+    run_typed_store_op(move || operation(open_store(&app, file)?)).await
+}
+
 pub(crate) async fn run_store_op_at<T, E, F>(
     deadline: tokio::time::Instant,
     operation: F,
@@ -88,8 +103,8 @@ where
     // Wait before entering the blocking pool so expired waiters never submit a mutation after their caller failed.
     let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
-        .map_err(|_| "Background persistence timed out.".to_string())?;
-    run_blocking_op(deadline, "Background persistence timed out.", move || {
+        .map_err(|_| PERSISTENCE_TIMEOUT_MESSAGE.to_string())?;
+    run_blocking_op(deadline, PERSISTENCE_TIMEOUT_MESSAGE, move || {
         let _guard = guard;
         Ok(operation())
     })
@@ -194,6 +209,7 @@ const SETTINGS_STORE_FILE: &str = "settings.json";
 const LIBRARY_STORE_FILE: &str = "library.json";
 const LISTS_STORE_FILE: &str = "lists.json";
 const WATCH_STATUS_STORE_FILE: &str = "watch_status.json";
+const PROFILE_AVATAR_STORE_FILE: &str = "profile_avatar.json";
 
 const JS_WHITESPACE: &str =
     "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d} \u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}";
@@ -352,7 +368,6 @@ pub async fn get_data_stats(
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<DataStats, String> {
     run_blocking_store_op({
-        let app = app.clone();
         let service = playback_state.inner().clone();
         move || {
             let history_count = service.count_resume_entries(&app)?;
@@ -396,12 +411,8 @@ pub async fn clear_watch_history(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<(), String> {
-    run_blocking_store_op({
-        let app = app.clone();
-        let service = playback_state.inner().clone();
-        move || service.clear(&app)
-    })
-    .await
+    let service = playback_state.inner().clone();
+    run_blocking_store_op(move || service.clear(&app)).await
 }
 
 /// Wipes all library entries and their watch statuses — a leftover status row would
@@ -430,8 +441,7 @@ pub async fn clear_library(app: AppHandle) -> Result<(), String> {
 /// Removes every custom list and all their items.
 #[command]
 pub async fn clear_all_lists(app: AppHandle) -> Result<(), String> {
-    run_blocking_store_op(move || {
-        let store = open_store(&app, LISTS_STORE_FILE)?;
+    with_store(app, LISTS_STORE_FILE, |store| {
         store_helpers::clear_index_domain(
             &store,
             &[LIST_META_KEY_PREFIX, LIST_ITEM_KEY_PREFIX],

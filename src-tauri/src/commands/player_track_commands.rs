@@ -72,7 +72,7 @@ fn property_i64(value: Option<serde_json::Value>) -> Option<i64> {
     value.and_then(|value| value.as_i64())
 }
 
-fn property_flag(value: Option<serde_json::Value>) -> bool {
+pub(crate) fn property_flag(value: Option<serde_json::Value>) -> bool {
     // mpv flag responses arrive as bool or 0/1 depending on the wrapper.
     match value {
         Some(serde_json::Value::Bool(flag)) => flag,
