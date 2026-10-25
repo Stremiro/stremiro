@@ -7,7 +7,7 @@ import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { type HistoryPlaybackPlanReason, type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { expandedSessionState, usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
-import { openHistoryPlaybackPlan } from '@/lib/history-playback';
+import { isSameMediaKind, openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
   buildDetailsRoute,
@@ -17,7 +17,7 @@ import {
   type PlayerRouteMediaType,
   resolvePlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import { formatSeasonEpisode, isSeriesLikeMediaType } from '@/lib/utils';
+import { formatSeasonEpisode } from '@/lib/utils';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
 type EpisodeSelectionReason = 'no-history' | HistoryPlaybackPlanReason;
@@ -95,16 +95,9 @@ export function useMediaPrimaryPlayback({
   const sessionId = session?.id;
   const sessionType = session?.type;
   const resumeEntry =
-    historyId === itemId &&
-    (historyType === playbackType ||
-      (isSeriesLikeMediaType(historyType) && isSeriesLikeMediaType(playbackType)))
-      ? historyEntry
-      : null;
+    historyId === itemId && isSameMediaKind(historyType, playbackType) ? historyEntry : null;
   const activeSession =
-    presentation === 'mini' &&
-    sessionId === itemId &&
-    (sessionType === playbackType ||
-      (isSeriesLikeMediaType(sessionType) && isSeriesLikeMediaType(playbackType)))
+    presentation === 'mini' && sessionId === itemId && isSameMediaKind(sessionType, playbackType)
       ? session
       : null;
   const [isResolvingPrimaryAction, setIsResolvingPrimaryAction] = useState(false);

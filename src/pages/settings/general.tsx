@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { AppWindow, Power } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -79,99 +80,109 @@ export function GeneralSettings() {
     START_PAGES.find((option) => option.value === preferences.startupPage)?.label ?? 'Home';
 
   return (
-    <div className='space-y-5'>
+    <div className='@container/general space-y-4'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
-      <SettingsGroup>
-        <SettingsGroupHeader title='Startup' />
-        <SettingsBody rows>
-          <SettingsQueryError
-            query={launchQuery}
-            message='Could not read your login item setting.'
+      <div className='grid items-start gap-4 @min-[54rem]/general:grid-cols-2'>
+        <SettingsGroup>
+          <SettingsGroupHeader
+            icon={Power}
+            title='Startup'
+            description='Choose how Stremiro opens.'
           />
-          <SettingsRow label='Start page' description='Where Stremiro opens.'>
-            <SettingsSelect
-              ariaLabel='Start page'
-              valueLabel={startPageLabel}
-              value={preferences.startupPage}
-              options={START_PAGES}
-              disabled={isHydrating}
-              onChange={(startupPage) => updatePreferences({ startupPage })}
+          <SettingsBody rows>
+            <SettingsQueryError
+              query={launchQuery}
+              message='Could not read your login item setting.'
             />
-          </SettingsRow>
-          <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
-            <SettingsSwitch
-              ariaLabel='Launch at login'
-              checked={launchEnabled}
-              disabled={launchQuery.data === undefined}
-              pending={launchPending}
-              onChange={() => launchMutation.mutate(!launchEnabled)}
-            />
-          </SettingsRow>
-          <SettingsRow
-            label='Start minimized'
-            description={
-              canStartMinimized
-                ? 'Start in the system tray.'
-                : 'Needs Launch at login or a tray option.'
-            }
-          >
-            <SettingsSwitch
-              ariaLabel='Start minimized'
-              checked={preferences.startMinimized}
-              disabled={isHydrating || !canStartMinimized}
-              pending={launchMutation.isPending}
-              onChange={() => updatePreferences({ startMinimized: !preferences.startMinimized })}
-            />
-          </SettingsRow>
-        </SettingsBody>
-      </SettingsGroup>
-      <SettingsGroup>
-        <SettingsGroupHeader title='Window' />
-        <SettingsBody rows>
-          <SettingsRow
-            label='Close to tray'
-            description='Keep running in the tray when the window closes.'
-          >
-            <SettingsSwitch
-              ariaLabel='Close to tray'
-              checked={preferences.closeToTray}
-              disabled={isHydrating}
-              onChange={() => updatePreferences({ closeToTray: !preferences.closeToTray })}
-            />
-          </SettingsRow>
-          <SettingsRow
-            label='Minimize to tray'
-            description='Hide to the tray instead of the taskbar.'
-          >
-            <SettingsSwitch
-              ariaLabel='Minimize to tray'
-              checked={preferences.minimizeToTray}
-              disabled={isHydrating}
-              onChange={() => updatePreferences({ minimizeToTray: !preferences.minimizeToTray })}
-            />
-          </SettingsRow>
-          {(preferences.closeToTray || preferences.minimizeToTray) && (
-            <div className='mt-3 flex justify-end'>
-              <Button
-                variant='ghost'
-                size='sm'
+            <SettingsRow label='Start page' description='Where Stremiro opens.'>
+              <SettingsSelect
+                ariaLabel='Start page'
+                valueLabel={startPageLabel}
+                value={preferences.startupPage}
+                options={START_PAGES}
                 disabled={isHydrating}
-                className='h-8 px-2.5 text-xs text-zinc-400 hover:bg-white/[0.04] hover:text-white'
-                onClick={() =>
-                  void api.hideMainWindowToTray().catch((error) =>
-                    notifyAction('Could not hide window to tray', {
-                      detail: getErrorMessage(error),
-                      tone: 'error',
-                    }),
-                  )
-                }
-              >
-                Hide to tray now
-              </Button>
-            </div>
-          )}
-        </SettingsBody>
-      </SettingsGroup>
+                onChange={(startupPage) => updatePreferences({ startupPage })}
+              />
+            </SettingsRow>
+            <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
+              <SettingsSwitch
+                ariaLabel='Launch at login'
+                checked={launchEnabled}
+                disabled={launchQuery.data === undefined}
+                pending={launchPending}
+                onChange={() => launchMutation.mutate(!launchEnabled)}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label='Start minimized'
+              description={
+                canStartMinimized
+                  ? 'Start in the system tray.'
+                  : 'Needs Launch at login or a tray option.'
+              }
+            >
+              <SettingsSwitch
+                ariaLabel='Start minimized'
+                checked={preferences.startMinimized}
+                disabled={isHydrating || !canStartMinimized}
+                pending={launchMutation.isPending}
+                onChange={() => updatePreferences({ startMinimized: !preferences.startMinimized })}
+              />
+            </SettingsRow>
+          </SettingsBody>
+        </SettingsGroup>
+        <SettingsGroup>
+          <SettingsGroupHeader
+            icon={AppWindow}
+            title='Window'
+            description='Keep the app running in the system tray.'
+            action={
+              preferences.closeToTray || preferences.minimizeToTray ? (
+                <Button
+                  variant='ghost'
+                  size='sm'
+                  disabled={isHydrating}
+                  className='h-8 px-2.5 text-xs text-zinc-400 hover:bg-white/[0.04] hover:text-white'
+                  onClick={() =>
+                    void api.hideMainWindowToTray().catch((error) =>
+                      notifyAction('Could not hide window to tray', {
+                        detail: getErrorMessage(error),
+                        tone: 'error',
+                      }),
+                    )
+                  }
+                >
+                  Hide to tray now
+                </Button>
+              ) : undefined
+            }
+          />
+          <SettingsBody rows>
+            <SettingsRow
+              label='Close to tray'
+              description='Keep running in the tray when the window closes.'
+            >
+              <SettingsSwitch
+                ariaLabel='Close to tray'
+                checked={preferences.closeToTray}
+                disabled={isHydrating}
+                onChange={() => updatePreferences({ closeToTray: !preferences.closeToTray })}
+              />
+            </SettingsRow>
+            <SettingsRow
+              label='Minimize to tray'
+              description='Hide to the tray instead of the taskbar.'
+            >
+              <SettingsSwitch
+                ariaLabel='Minimize to tray'
+                checked={preferences.minimizeToTray}
+                disabled={isHydrating}
+                onChange={() => updatePreferences({ minimizeToTray: !preferences.minimizeToTray })}
+              />
+            </SettingsRow>
+          </SettingsBody>
+        </SettingsGroup>
+      </div>
     </div>
   );
 }

@@ -1,5 +1,5 @@
 import type { CalendarScheduleEvent } from '@/lib/api';
-import { parseLocalScheduleDate } from '@/lib/schedule-dates';
+import { parseScheduleDay } from '@/lib/schedule-dates';
 
 export interface CalendarEvent {
   id: string;
@@ -9,7 +9,7 @@ export interface CalendarEvent {
   seriesTitle: string;
   season?: number;
   episode?: number;
-  date: Date;
+  date: Temporal.PlainDate;
   poster?: string;
   type: 'movie' | 'episode';
 }
@@ -25,10 +25,6 @@ export function calendarEventKey(event: CalendarEvent): string {
 }
 
 export function toCalendarEvent(event: CalendarScheduleEvent): CalendarEvent | null {
-  const date = parseLocalScheduleDate(event.releaseDate);
-  if (!date) return null;
-  return {
-    ...event,
-    date,
-  };
+  const date = parseScheduleDay(event.releaseDate);
+  return date && { ...event, date };
 }

@@ -4,14 +4,22 @@ import {
   type RefObject,
   type SetStateAction,
   useEffect,
-  useEffectEvent,
+  useLayoutEffect,
   useRef,
+  useState,
 } from 'react';
 
-import type { PlayerOsdAction, PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
+import type {
+  PlayerOsdAction,
+  PlayerOsdMessageIcon,
+  PlayerOsdState,
+} from '@/components/player-osd-overlay';
+import { createSubscribableStore } from '@/lib/subscribable-store';
 import { clearTimer, type TimerHandle } from '@/lib/utils';
 
 const OSD_CLEAR_DELAY_MS = 120;
+const CONTROLS_HOLD_RECHECK_MS = 250;
+const OSD_HIDDEN: PlayerOsdState = { action: null, visible: false };
 
 interface UsePlayerUiTimersArgs {
   controlsHideDelayMs: number;
@@ -19,8 +27,6 @@ interface UsePlayerUiTimersArgs {
   mountedRef: RefObject<boolean>;
   /** OSD overlay only mounts in the expanded player — docked gestures must not churn its state. */
   osdEnabled: boolean;
-  setOsdAction: Dispatch<SetStateAction<PlayerOsdAction | null>>;
-  setOsdVisible: Dispatch<SetStateAction<boolean>>;
   setShowControls: Dispatch<SetStateAction<boolean>>;
   /** While true, re-arms auto-hide instead of hiding (pointer on chrome, popover open). */
   shouldHoldControls?: () => boolean;
@@ -31,14 +37,20 @@ export function usePlayerUiTimers({
   isPlayingRef,
   mountedRef,
   osdEnabled,
-  setOsdAction,
-  setOsdVisible,
   setShowControls,
   shouldHoldControls,
 }: UsePlayerUiTimersArgs) {
   const controlsTimeoutRef = useRef<TimerHandle | null>(null);
-  const shouldHoldControlsNow = useEffectEvent(() => shouldHoldControls?.());
-  const canShowOsdNow = useEffectEvent(() => osdEnabled && mountedRef.current);
+  // The OSD renders from its own store so each event re-renders only the overlay, not the player.
+  const [osdStore] = useState(() => createSubscribableStore(OSD_HIDDEN));
+  // Refs, not effect events: an effect event gets a new identity every render, and so would every
+  // returned helper closing over it, re-firing any effect that depends on one (hide → render → show).
+  const shouldHoldControlsRef = useRef(shouldHoldControls);
+  const osdEnabledRef = useRef(osdEnabled);
+  useLayoutEffect(() => {
+    shouldHoldControlsRef.current = shouldHoldControls;
+    osdEnabledRef.current = osdEnabled;
+  }, [shouldHoldControls, osdEnabled]);
   const osdTimerRef = useRef<TimerHandle | null>(null);
   const osdClearTimerRef = useRef<TimerHandle | null>(null);
   const osdAnimationFrameRef = useRef<number | null>(null);
@@ -59,40 +71,43 @@ export function usePlayerUiTimers({
 
   const clearOsd = useCallback(() => {
     clearOsdTimers();
-    setOsdVisible(false);
-    setOsdAction(null);
-  }, [clearOsdTimers, setOsdAction, setOsdVisible]);
+    osdStore.publish(OSD_HIDDEN);
+  }, [clearOsdTimers, osdStore]);
 
   useEffect(() => {
     if (!osdEnabled) clearOsd();
     return clearOsdTimers;
   }, [clearOsd, clearOsdTimers, osdEnabled]);
 
-  const showControlsWithAutoHide = (delayMs = controlsHideDelayMs) => {
-    setShowControls(true);
+  const scheduleControlsAutoHide = (delayMs = controlsHideDelayMs) => {
     clearControlsAutoHide();
 
-    if (!isPlayingRef.current) {
+    if (!mountedRef.current || !isPlayingRef.current) {
       return;
     }
 
-    const arm = () => {
+    const arm = (waitMs: number) => {
       controlsTimeoutRef.current = window.setTimeout(() => {
         controlsTimeoutRef.current = null;
         if (!mountedRef.current || !isPlayingRef.current) return;
-        if (shouldHoldControlsNow()) {
-          arm();
+        if (shouldHoldControlsRef.current?.()) {
+          arm(CONTROLS_HOLD_RECHECK_MS);
           return;
         }
         setShowControls(false);
-      }, delayMs);
+      }, waitMs);
     };
-    arm();
+    arm(delayMs);
+  };
+
+  const showControlsWithAutoHide = (delayMs = controlsHideDelayMs) => {
+    setShowControls(true);
+    scheduleControlsAutoHide(delayMs);
   };
 
   const triggerOsd = (action: PlayerOsdAction) => {
     // A seek/track acknowledgement can arrive after docking or opening a panel.
-    if (!canShowOsdNow()) {
+    if (!osdEnabledRef.current || !mountedRef.current) {
       return;
     }
 
@@ -100,25 +115,22 @@ export function usePlayerUiTimers({
     const alreadyVisible = osdTimerRef.current !== null;
     clearOsdTimers();
 
-    setOsdAction(action);
-    if (alreadyVisible) {
-      setOsdVisible(true);
-    } else {
-      setOsdVisible(false);
+    osdStore.publish({ action, visible: alreadyVisible });
+    if (!alreadyVisible) {
       osdAnimationFrameRef.current = window.requestAnimationFrame(() => {
         osdAnimationFrameRef.current = null;
-        setOsdVisible(true);
+        osdStore.publish({ action, visible: true });
       });
     }
 
     const visibleMs = action.kind === 'message' ? 2800 : 900;
 
     osdTimerRef.current = window.setTimeout(() => {
-      setOsdVisible(false);
+      osdStore.publish({ action, visible: false });
       osdTimerRef.current = null;
       osdClearTimerRef.current = window.setTimeout(() => {
         osdClearTimerRef.current = null;
-        setOsdAction(null);
+        osdStore.publish(OSD_HIDDEN);
       }, OSD_CLEAR_DELAY_MS);
     }, visibleMs);
   };
@@ -137,6 +149,8 @@ export function usePlayerUiTimers({
     announce,
     clearControlsAutoHide,
     clearUiTimers,
+    osdStore,
+    scheduleControlsAutoHide,
     showControlsWithAutoHide,
     triggerOsd,
   };

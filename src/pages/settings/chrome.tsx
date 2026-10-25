@@ -1,4 +1,4 @@
-import { Check, ChevronDown } from 'lucide-react';
+import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -9,6 +9,8 @@ import {
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
 import { cn } from '@/lib/utils';
+
+export { Switch as SettingsSwitch } from '@/components/ui/switch';
 
 export function SettingsQueryError({
   query,
@@ -40,11 +42,17 @@ export function SettingsQueryError({
 
 /** Plain status text for a group header's action slot — no chip chrome. */
 export const SETTINGS_HEADER_STATUS_CLASS =
-  'block pt-0.5 text-[12.5px] font-medium tabular-nums text-zinc-500';
+  'block pt-0.5 text-[13px] font-medium leading-5 tabular-nums text-zinc-400';
 
 /** Glass chrome for outline `Button`s across sections; callers own size. */
 export const SETTINGS_OUTLINE_BUTTON_CLASS =
   'rounded-lg border-white/10 bg-white/[0.04] font-medium text-zinc-100 hover:bg-white/[0.08] hover:text-white';
+
+/** Small uppercase caption that groups rows inside one card. */
+export const SETTINGS_CAPTION_CLASS =
+  'text-[13px] font-semibold uppercase leading-5 tracking-[0.08em] text-zinc-400';
+
+export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-lg border border-white/[0.06] bg-black/20';
 
 export function settingsControlId(label: string) {
   return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
@@ -63,10 +71,18 @@ export function SettingsGroup({
     <section
       id={id}
       className={cn(
-        'overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/45 shadow-[inset_0_1px_0_rgba(255,255,255,0.035),0_8px_28px_-20px_rgba(0,0,0,0.65)]',
+        'relative isolate min-w-0 overflow-hidden rounded-xl border border-white/[0.07] bg-zinc-950/70 bg-linear-to-b from-white/[0.04] to-transparent shadow-[0_2px_6px_-2px_rgba(0,0,0,0.4),0_16px_36px_-20px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors duration-300 hover:border-white/[0.1] motion-reduce:transition-none',
         className,
       )}
     >
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(24rem_12rem_at_top_left,rgb(var(--accent-nav-rgb)/calc(0.07*var(--app-glow,1))),transparent_75%)]'
+      />
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute inset-x-6 top-0 h-px bg-linear-to-r from-transparent via-white/[0.14] to-transparent'
+      />
       {children}
     </section>
   );
@@ -75,21 +91,30 @@ export function SettingsGroup({
 export function SettingsGroupHeader({
   action,
   description,
+  icon: Icon,
   title,
 }: {
   action?: ReactNode;
   description?: string;
+  icon?: LucideIcon;
   title: string;
 }) {
   return (
-    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-5 py-4'>
-      <div className='min-w-0 flex-1 basis-48'>
-        <h2 className='text-[15px] font-medium tracking-tight text-white'>{title}</h2>
-        {description ? (
-          <p className='mt-1 max-w-prose text-[13px] leading-relaxed text-zinc-400'>
-            {description}
-          </p>
+    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-4 py-4 sm:px-5'>
+      <div className='flex min-w-0 flex-1 basis-48 items-start gap-3'>
+        {Icon ? (
+          <span className='flex size-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-b from-white/[0.08] to-white/[0.02] ring-1 ring-inset ring-white/[0.08]'>
+            <Icon aria-hidden='true' className='size-4 text-(--accent-nav)' strokeWidth={1.75} />
+          </span>
         ) : null}
+        <div className='min-w-0 flex-1 self-center'>
+          <h3 className='text-[15px] font-semibold tracking-tight text-white'>{title}</h3>
+          {description ? (
+            <p className='mt-1 max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'>
+              {description}
+            </p>
+          ) : null}
+        </div>
       </div>
       {action ? <div className='shrink-0'>{action}</div> : null}
     </div>
@@ -106,12 +131,40 @@ export function SettingsBody({
   rows?: boolean;
 }) {
   return (
-    <div className={cn('px-5 py-5', rows && 'divide-y divide-white/[0.06]', className)}>
+    <div className={cn('px-4 py-4 sm:px-5', rows && 'divide-y divide-white/[0.06]', className)}>
       {children}
     </div>
   );
 }
 
+/** Divider + caption that splits one card into labelled blocks. */
+export function SettingsSection({
+  action,
+  caption,
+  children,
+  className,
+}: {
+  action?: ReactNode;
+  caption: string;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={cn('border-t border-white/[0.06]', className)}>
+      <div className='flex flex-wrap items-baseline justify-between gap-3 px-4 pt-4 pb-1 sm:px-5'>
+        <p className={SETTINGS_CAPTION_CLASS}>{caption}</p>
+        {action ? <div className='shrink-0'>{action}</div> : null}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+/**
+ * Row chrome only — deliberately not a <label>. A label wrapping the control
+ * makes every click on the title or description activate it, which reads as an
+ * over-sensitive row. Controls own their own accessible name instead.
+ */
 export function SettingsRow({
   children,
   className,
@@ -126,72 +179,26 @@ export function SettingsRow({
   label: string;
 }) {
   return (
-    <label
+    <div
       id={settingsControlId(label)}
       className={cn(
-        'flex items-center justify-between gap-4 py-4 first:pt-0 last:pb-0 cursor-pointer',
+        'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0',
         className,
       )}
     >
-      <div className='min-w-0'>
-        <span className='block text-[14px] font-medium text-zinc-100'>{label}</span>
+      <div className='min-w-0 flex-1 basis-32'>
+        <span className='block text-[14px] font-medium leading-snug text-zinc-100'>{label}</span>
         {description ? (
-          <span id={descriptionId} className='mt-1 block text-[13px] leading-relaxed text-zinc-400'>
+          <span
+            id={descriptionId}
+            className='mt-1 block max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'
+          >
             {description}
           </span>
         ) : null}
       </div>
-      <div className='shrink-0'>{children}</div>
-    </label>
-  );
-}
-
-export function SettingsSwitch({
-  ariaLabel,
-  ariaDescribedBy,
-  checked,
-  disabled,
-  pending,
-  onChange,
-}: {
-  ariaLabel: string;
-  ariaDescribedBy?: string;
-  checked: boolean;
-  disabled?: boolean;
-  /** Blocks toggling but stays focusable, so a save never drops keyboard focus. */
-  pending?: boolean;
-  onChange: () => void;
-}) {
-  const inactive = disabled || pending;
-  return (
-    <button
-      type='button'
-      role='switch'
-      aria-label={ariaLabel}
-      aria-describedby={ariaDescribedBy}
-      aria-checked={checked}
-      aria-disabled={inactive || undefined}
-      aria-busy={pending || undefined}
-      disabled={disabled}
-      onClick={() => {
-        if (!pending) onChange();
-      }}
-      className={cn(
-        'relative inline-flex h-[22px] w-10 shrink-0 items-center rounded-md transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/50 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 motion-reduce:transition-none',
-        !checked && 'bg-zinc-800',
-        !checked && !inactive && 'hover:bg-zinc-700',
-        disabled && 'cursor-not-allowed opacity-50',
-        pending && !disabled && 'cursor-default',
-      )}
-      style={checked ? { backgroundColor: 'var(--accent-act)' } : undefined}
-    >
-      <span
-        className={cn(
-          'inline-block h-4 w-4 rounded-[3px] shadow-[0_1px_2px_rgba(0,0,0,0.4)] transition-[translate,background-color] duration-150 motion-reduce:transition-none',
-          checked ? 'translate-x-[21px] bg-(--on-accent-act)' : 'translate-x-[3px] bg-zinc-400',
-        )}
-      />
-    </button>
+      <div className='min-w-0 max-w-full shrink-0 [&>button]:max-w-full'>{children}</div>
+    </div>
   );
 }
 
@@ -218,7 +225,7 @@ export function SettingsSelect<Value extends string>({
           aria-label={`${ariaLabel}: ${valueLabel}`}
           disabled={disabled}
           className={cn(
-            'h-9 min-w-36 justify-between px-3 text-[13px] shadow-none',
+            'h-9 w-40 min-w-0 max-w-full justify-between px-3 text-[14px] shadow-none',
             SETTINGS_OUTLINE_BUTTON_CLASS,
           )}
         >

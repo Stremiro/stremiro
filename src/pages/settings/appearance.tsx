@@ -1,4 +1,4 @@
-import { Film, Play } from 'lucide-react';
+import { Film, Paintbrush, Palette, Play } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
@@ -9,8 +9,9 @@ import {
 } from '@/hooks/use-local-profile';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { getErrorMessage } from '@/lib/api';
-import { applyAccentVars } from '@/lib/utils';
+import { applyAccentVars, cn } from '@/lib/utils';
 import {
+  SETTINGS_INSET_SURFACE_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
@@ -56,7 +57,7 @@ function TintPreview() {
   return (
     <div
       aria-label='Live accent preview'
-      className='flex gap-4 rounded-lg border border-white/[0.07] bg-white/[0.02] p-4'
+      className={cn('flex gap-4 p-4', SETTINGS_INSET_SURFACE_CLASS)}
     >
       <div className='min-w-0 flex-1'>
         <div className='flex items-center gap-2'>
@@ -138,58 +139,62 @@ export function AppearanceSettings() {
   };
 
   return (
-    <SettingsGroup>
-      <SettingsGroupHeader
-        title='Appearance'
-        description='Accent color and where it tints the app. Changes apply live.'
+    <div className='@container/appearance space-y-4'>
+      <SettingsQueryError
+        query={profilePreferencesQuery}
+        message="Couldn't load your appearance preferences."
       />
-      <SettingsBody className='space-y-5'>
-        <SettingsQueryError
-          query={profilePreferencesQuery}
-          message="Couldn't load your appearance preferences."
-        />
-        <TintPreview />
-        <fieldset
-          disabled={isHydrating}
-          inert={isHydrating}
-          className='grid min-w-0 items-start gap-6 disabled:opacity-50 sm:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] sm:gap-8'
-        >
-          <AccentControls
-            idPrefix='setting-appearance'
-            accentColor={draftAccentColor ?? profile.accentColor}
-            committedColor={profile.accentColor}
-            intensity={draftIntensity ?? profile.accentIntensity}
-            committedIntensity={profile.accentIntensity}
-            onAccentColorChange={setDraftAccentColor}
-            onAccentColorCommit={commitAccentColor}
-            onIntensityChange={setDraftIntensity}
-            onIntensityCommit={(value) => {
-              setDraftIntensity(undefined);
-              saveProfile({ accentIntensity: value });
-            }}
+      <div className='grid items-start gap-4 @min-[54rem]/appearance:grid-cols-2'>
+        <SettingsGroup>
+          <SettingsGroupHeader
+            icon={Palette}
+            title='Color & glow'
+            description='Choose an accent and background intensity. Changes apply live.'
           />
-        </fieldset>
-      </SettingsBody>
-      <div className='border-t border-white/[0.06]'>
-        <SettingsBody className='pb-0'>
-          <div className='flex flex-wrap items-baseline justify-between gap-2'>
-            <p className='text-[14px] font-medium text-zinc-100'>Tint targets</p>
-            <p className='text-xs text-zinc-500'>Off areas stay neutral</p>
-          </div>
-        </SettingsBody>
-        <SettingsBody rows>
-          {TINT_TARGETS.map((target) => (
-            <SettingsRow key={target.field} label={target.label} description={target.description}>
-              <SettingsSwitch
-                ariaLabel={target.label}
-                checked={profile.accentTargets[target.field]}
-                disabled={isHydrating}
-                onChange={() => toggleTarget(target.field)}
+          <SettingsBody className='@container/appearance-controls space-y-5'>
+            <TintPreview />
+            <fieldset
+              disabled={isHydrating}
+              inert={isHydrating}
+              className='grid min-w-0 items-start gap-6 disabled:opacity-50 @min-[36rem]/appearance-controls:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]'
+            >
+              <AccentControls
+                idPrefix='setting-appearance'
+                accentColor={draftAccentColor ?? profile.accentColor}
+                committedColor={profile.accentColor}
+                intensity={draftIntensity ?? profile.accentIntensity}
+                committedIntensity={profile.accentIntensity}
+                onAccentColorChange={setDraftAccentColor}
+                onAccentColorCommit={commitAccentColor}
+                onIntensityChange={setDraftIntensity}
+                onIntensityCommit={(value) => {
+                  setDraftIntensity(undefined);
+                  saveProfile({ accentIntensity: value });
+                }}
               />
-            </SettingsRow>
-          ))}
-        </SettingsBody>
+            </fieldset>
+          </SettingsBody>
+        </SettingsGroup>
+        <SettingsGroup>
+          <SettingsGroupHeader
+            icon={Paintbrush}
+            title='Tint targets'
+            description='Choose where your accent appears. Off areas stay neutral.'
+          />
+          <SettingsBody rows>
+            {TINT_TARGETS.map((target) => (
+              <SettingsRow key={target.field} label={target.label} description={target.description}>
+                <SettingsSwitch
+                  ariaLabel={target.label}
+                  checked={profile.accentTargets[target.field]}
+                  disabled={isHydrating}
+                  onChange={() => toggleTarget(target.field)}
+                />
+              </SettingsRow>
+            ))}
+          </SettingsBody>
+        </SettingsGroup>
       </div>
-    </SettingsGroup>
+    </div>
   );
 }

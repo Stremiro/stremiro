@@ -8,7 +8,11 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { CHROME_VALUE_BUBBLE_CLASS } from '@/components/player-chrome-styles';
+import {
+  CHROME_ENTER_TIMING_CLASS,
+  CHROME_EXIT_TIMING_CLASS,
+  CHROME_VALUE_BUBBLE_CLASS,
+} from '@/components/player-chrome-styles';
 import type { SkipSegment } from '@/lib/api';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { SKIP_SEGMENT_LABELS } from '@/lib/player-skip';
@@ -117,8 +121,11 @@ export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
     <div
       aria-hidden='true'
       className={cn(
-        'pointer-events-none absolute bottom-0 left-[60px] right-0 z-40 h-0.5 bg-white/15 transition-opacity duration-150 motion-reduce:transition-none',
-        visible ? 'opacity-100' : 'opacity-0',
+        'pointer-events-none absolute bottom-0 left-[60px] right-0 z-40 h-0.5 bg-white/15 transition-opacity motion-reduce:transition-none',
+        // Hands off with the chrome: arrives on its slower exit, leaves on its quick entrance.
+        visible
+          ? cn(CHROME_EXIT_TIMING_CLASS, 'opacity-100')
+          : cn(CHROME_ENTER_TIMING_CLASS, 'opacity-0'),
       )}
     >
       <div
@@ -247,6 +254,7 @@ export function PlayerProgressBar({
   };
 
   const scheduleHoverUpdate = (clientX: number) => {
+    if (!active) return;
     pendingHoverXRef.current = clientX;
     if (hoverRafRef.current !== null) return;
 
@@ -292,6 +300,29 @@ export function PlayerProgressBar({
     return clearHoverState;
   }, [resetKey, cancelDrag, clearHoverState]);
 
+  useEffect(() => {
+    const releaseInteraction = () => {
+      cancelDrag();
+      clearHoverState();
+      setKeyboardFocused(false);
+    };
+    if (!active) releaseInteraction();
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') releaseInteraction();
+    };
+    const handlePointerOut = (event: PointerEvent) => {
+      if (event.relatedTarget === null && dragPointerIdRef.current === null) clearHoverState();
+    };
+    window.addEventListener('blur', releaseInteraction);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('pointerout', handlePointerOut);
+    return () => {
+      window.removeEventListener('blur', releaseInteraction);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('pointerout', handlePointerOut);
+    };
+  }, [active, cancelDrag, clearHoverState]);
+
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (dragPointerIdRef.current !== null) return;
     scheduleHoverUpdate(e.clientX);
@@ -305,7 +336,7 @@ export function PlayerProgressBar({
   const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.stopPropagation();
     // Gate before claiming the pointer: a second pointer, non-primary button, or unseekable bar must not capture or focus.
-    if (dragPointerIdRef.current !== null) return;
+    if (!active || dragPointerIdRef.current !== null) return;
     if (e.button !== 0 || !e.isPrimary) return;
     if (!Number.isFinite(duration) || duration <= 0) return;
 
@@ -464,8 +495,8 @@ export function PlayerProgressBar({
       aria-valuemin={0}
       aria-valuemax={canSeek ? duration : 0}
       aria-valuenow={canSeek ? clamp(displayTime, 0, duration) : 0}
-      aria-valuetext={formatTime(displayTime)}
-      className='relative group/bar cursor-pointer select-none h-8 -my-2 flex items-center rounded-md touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default'
+      aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
+      className='relative cursor-pointer select-none h-8 -my-2 flex items-center rounded-md touch-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default'
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
       onPointerDown={handlePointerDown}
@@ -474,11 +505,10 @@ export function PlayerProgressBar({
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
       onKeyDown={handleKeyDown}
-      onFocus={(event) => setKeyboardFocused(event.currentTarget.matches(':focus-visible'))}
-      onBlur={() => setKeyboardFocused(false)}
-      onKeyDownCapture={(event) =>
-        setKeyboardFocused(event.currentTarget.matches(':focus-visible'))
+      onFocus={(event) =>
+        setKeyboardFocused(document.hasFocus() && event.currentTarget.matches(':focus-visible'))
       }
+      onBlur={() => setKeyboardFocused(false)}
       onPointerDownCapture={() => setKeyboardFocused(false)}
     >
       {showTooltip && (
@@ -505,7 +535,14 @@ export function PlayerProgressBar({
         </div>
       )}
 
-      <div className='relative w-full h-[10px] scale-y-80 group-hover/bar:scale-y-100 group-focus-visible/bar:scale-y-100 group-active/bar:scale-y-100 transition-transform duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]'>
+      <div
+        className={cn(
+          'relative w-full h-[10px] transition-transform duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]',
+          hoverPct !== null || keyboardFocused || seekPreviewTime !== null
+            ? 'scale-y-100'
+            : 'scale-y-80',
+        )}
+      >
         {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
             className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'

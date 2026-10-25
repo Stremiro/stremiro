@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Check, Sparkles } from 'lucide-react';
+import { Check, Loader2, Sparkles } from 'lucide-react';
 import { type RefObject, useEffect, useEffectEvent, useId, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
@@ -63,24 +63,37 @@ function SmartRulesEditor({
         status can match.
       </p>
       <div className='space-y-1.5'>
-        <label htmlFor={`${id}-type`} className='text-xs text-zinc-300'>
+        <span id={`${id}-type`} className='block text-xs text-zinc-300'>
           Type
-        </label>
-        <select
-          id={`${id}-type`}
-          value={rules.media_type ?? ''}
-          onChange={(event) =>
-            onChange({
-              ...rules,
-              media_type: (event.target.value as SmartListRules['media_type']) || null,
-            })
-          }
-          className='h-9 w-full rounded-md border border-white/10 bg-zinc-950 px-2 text-xs text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+        </span>
+        <div
+          role='group'
+          aria-labelledby={`${id}-type`}
+          className='flex rounded-lg border border-white/[0.08] bg-black/25 p-0.5'
         >
-          <option value=''>Any type</option>
-          <option value='movie'>Movies</option>
-          <option value='series'>Series</option>
-        </select>
+          {(
+            [
+              ['', 'Any type'],
+              ['movie', 'Movies'],
+              ['series', 'Series'],
+            ] as const
+          ).map(([value, label]) => (
+            <button
+              key={value || 'any'}
+              type='button'
+              aria-pressed={(rules.media_type ?? '') === value}
+              onClick={() => onChange({ ...rules, media_type: value || null })}
+              className={cn(
+                'h-7 flex-1 rounded-md text-[11.5px] font-medium transition-colors motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35',
+                (rules.media_type ?? '') === value
+                  ? 'bg-white/[0.1] text-white'
+                  : 'text-zinc-400 hover:text-zinc-200',
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
       <fieldset className='space-y-1.5'>
         <legend className='mb-1.5 text-xs text-zinc-300'>
@@ -119,7 +132,7 @@ function SmartRulesEditor({
             );
           })}
         </div>
-        {genres.length === 0 && (
+        {!libraryGenres.isError && genres.length === 0 && (
           <p className='text-[11px] text-zinc-500'>
             {libraryGenres.isPending
               ? 'Loading genres…'
@@ -365,6 +378,12 @@ export function ListEditorContent({
           aria-busy={isPending || undefined}
           className='bg-white text-black hover:bg-zinc-200 font-semibold aria-disabled:cursor-default'
         >
+          {isPending && (
+            <Loader2
+              aria-hidden='true'
+              className='h-4 w-4 animate-spin motion-reduce:animate-none'
+            />
+          )}
           {submitLabel}
         </Button>
       </DialogFooter>

@@ -36,7 +36,7 @@ import {
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { routeChunks } from '@/lib/route-chunks';
 import { mpvDestroy, setMpvProperty } from '@/lib/player-mpv';
-import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-window';
+import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-pip';
 import { boundedMapSet, clearTimer, SIDEBAR_PAGE_COLUMN_INSETS, withTimeout } from '@/lib/utils';
 import { Home } from '@/pages/home';
 
@@ -529,7 +529,7 @@ function AppCloseManager() {
 function App() {
   const [{ Search, Details, Settings, Profile, Calendar }, setRoutePages] =
     useState(createRoutePages);
-  const retryRoute = useCallback(() => setRoutePages(createRoutePages()), []);
+  const retryRoute = () => setRoutePages(createRoutePages());
 
   useEffect(() => {
     // Native-app chrome: no context menu or ghost-drag outside editable text.

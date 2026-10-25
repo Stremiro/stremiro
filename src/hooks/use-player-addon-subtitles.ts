@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { type RefObject, useEffect, useRef, useState } from 'react';
+import { type RefObject, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import type { PlayerOsdMessageIcon } from '@/components/player-osd-overlay';
@@ -14,13 +14,18 @@ const EMPTY_ADDON_SUBTITLES: AddonSubtitle[] = [];
 interface UsePlayerAddonSubtitlesOptions {
   activeStreamLoadKey: string;
   announce: (text: string, icon?: PlayerOsdMessageIcon) => void;
+  /** Preferred language no embedded track matches; loads the best addon subtitle once per language and stream load. */
+  autoLoadLanguage: string | null;
   effectiveResolveMediaType: string;
   id?: string;
   menuAvailable: boolean;
   mountedRef: RefObject<boolean>;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
-  selectAddonSubtitle: (subtitle: AddonSubtitle) => Promise<boolean>;
+  selectAddonSubtitle: (
+    subtitle: AddonSubtitle,
+    options?: { automatic?: boolean },
+  ) => Promise<boolean>;
   setTrack: (
     type: 'sub',
     id: number | 'no',
@@ -33,6 +38,7 @@ interface UsePlayerAddonSubtitlesOptions {
 export function usePlayerAddonSubtitles({
   activeStreamLoadKey,
   announce,
+  autoLoadLanguage,
   effectiveResolveMediaType,
   id,
   menuAvailable,
@@ -48,6 +54,7 @@ export function usePlayerAddonSubtitles({
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
+  const autoLoadedSelectionKeyRef = useRef<string | null>(null);
 
   // External tracks die with each native load, including same-URL credential swaps.
   useEffect(() => {
@@ -67,7 +74,9 @@ export function usePlayerAddonSubtitles({
   const lookupMediaType = effectiveResolveMediaType.trim();
   const lookupMediaId = (streamLookupId || id)?.trim();
   const subtitlesEnabled =
-    menuAvailable && subtitleMenuOpened && lookupMediaType !== '' && !!lookupMediaId;
+    ((menuAvailable && subtitleMenuOpened) || autoLoadLanguage !== null) &&
+    lookupMediaType !== '' &&
+    !!lookupMediaId;
 
   const subtitlesQuery = useQuery({
     queryKey: addonSubtitlesQueryKey(
@@ -100,30 +109,70 @@ export function usePlayerAddonSubtitles({
         ? getErrorMessage(subtitlesQuery.error)
         : "Couldn't load addon subtitles."
       : undefined;
-  // Distinguishes "asked, got nothing" from "never asked" — gates the empty-state hint.
-  const addonSubtitlesQueried = subtitlesEnabled;
+  // Query availability gates the empty-state hint.
+  const addonSubtitlesAvailable = subtitlesEnabled;
 
-  const handleSelectAddonSubtitle = async (subtitle: AddonSubtitle) => {
+  const handleSelectAddonSubtitle = async (
+    subtitle: AddonSubtitle,
+    { automatic }: { automatic?: boolean } = {},
+  ) => {
     if (addonSubtitleLoadingId || !mountedRef.current) return;
     const subtitleKey = subtitle.selectionKey;
     const epoch = subtitleSessionEpochRef.current;
     setAddonSubtitleLoadingId(subtitleKey);
     return (async () => {
       // The track controller owns the mpv side: URL reuse, single-switch gate, fetch polling, preference persistence.
-      const selected = await selectAddonSubtitle(subtitle);
+      const selected = await selectAddonSubtitle(subtitle, { automatic });
       if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
       if (!selected) {
-        toast.error('Failed to load addon subtitle');
+        if (!automatic) toast.error('Failed to load addon subtitle');
         return;
       }
       setPickedAddonSubtitleId(subtitleKey);
-      announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
+      if (!automatic) announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
     })().finally(() => {
       if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
         setAddonSubtitleLoadingId(null);
       }
     });
   };
+
+  // A manual pick clears `autoLoadLanguage`, so a late resolution never overrides it.
+  const selectAutoLoadedSubtitle = useEffectEvent(
+    (subtitle: AddonSubtitle, streamLoadKey: string, language: string) => {
+      if (autoLoadLanguage === language && streamLoadKey === activeStreamLoadKey) {
+        void handleSelectAddonSubtitle(subtitle, { automatic: true });
+      }
+    },
+  );
+
+  const loadedAddonSubtitles = subtitlesQuery.data;
+  useEffect(() => {
+    const selectionKey = JSON.stringify([activeStreamLoadKey, autoLoadLanguage]);
+    if (
+      !autoLoadLanguage ||
+      !loadedAddonSubtitles?.length ||
+      autoLoadedSelectionKeyRef.current === selectionKey
+    )
+      return;
+    autoLoadedSelectionKeyRef.current = selectionKey;
+    const streamLoadKey = activeStreamLoadKey;
+    void api
+      .resolvePreferredTrackSelection(
+        loadedAddonSubtitles.map((subtitle, index) => ({
+          id: index,
+          lang: subtitle.lang,
+          title: subtitle.label,
+        })),
+        autoLoadLanguage,
+      )
+      .then(({ matchedTrackId }) => {
+        const subtitle =
+          matchedTrackId === undefined ? undefined : loadedAddonSubtitles[matchedTrackId];
+        if (subtitle) selectAutoLoadedSubtitle(subtitle, streamLoadKey, autoLoadLanguage);
+      })
+      .catch(() => undefined);
+  }, [activeStreamLoadKey, autoLoadLanguage, loadedAddonSubtitles]);
 
   const handleSubTrackSelect = (
     trackType: 'sub',
@@ -162,7 +211,7 @@ export function usePlayerAddonSubtitles({
     addonSubtitlesError,
     addonSubtitlesFetching: subtitlesQuery.isFetching && subtitlesEnabled,
     addonSubtitlesLoading,
-    addonSubtitlesQueried,
+    addonSubtitlesAvailable,
     handleAddonSubtitleSelect: handleSelectAddonSubtitle,
     handleSubTrackSelect,
     handleSubtitleMenuOpenChange: setSubtitleMenuOpened,

@@ -19,6 +19,7 @@ import { DATE_FORMATTER, formatRelativeTime, parseLocalScheduleDate } from '@/li
 import { cn } from '@/lib/utils';
 import {
   SETTINGS_HEADER_STATUS_CLASS,
+  SETTINGS_INSET_SURFACE_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
@@ -64,7 +65,7 @@ function AppChangelog({
     <section
       id='setting-changelog'
       aria-label='Changelog'
-      className='overflow-hidden rounded-xl border border-white/[0.07] bg-white/[0.02]'
+      className={cn('overflow-hidden', SETTINGS_INSET_SURFACE_CLASS)}
     >
       {pendingUpdate && currentVersion ? (
         <div className='flex justify-end px-4 pt-3'>
@@ -134,7 +135,7 @@ function AppChangelog({
       <div
         data-selectable='true'
         aria-busy={isLoading}
-        className='max-h-64 overflow-y-auto overscroll-contain px-4 py-3.5'
+        className='max-h-64 overflow-y-auto overscroll-contain p-4'
       >
         {!version ? (
           <p className='text-[13px] leading-relaxed text-zinc-400'>
@@ -244,7 +245,7 @@ export function UpdatesSection() {
   };
 
   return (
-    <SettingsGroup className={isUpdateAvailable ? 'relative' : undefined}>
+    <SettingsGroup>
       {/* Same accent vocabulary as the announce card: a hairline, not a tint. */}
       {isUpdateAvailable ? (
         <span
@@ -252,7 +253,7 @@ export function UpdatesSection() {
           className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/50 to-transparent'
         />
       ) : null}
-      <SettingsGroupHeader title='Updates' action={headerStatus} />
+      <SettingsGroupHeader icon={RefreshCw} title='Updates' action={headerStatus} />
 
       <SettingsBody className='space-y-4'>
         <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />

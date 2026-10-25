@@ -1,14 +1,13 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClientProvider } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
 import React from 'react';
 import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { api } from '@/lib/api';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
+import { queryClient } from '@/lib/query-client';
 import {
   APP_UI_PREFERENCES_QUERY_KEY,
-  DETAILS_GC_TIME_MS,
-  DETAILS_QUERY_KEY,
   invalidateAddonCapabilityQueries,
   PROFILE_PREFERENCES_QUERY_KEY,
   STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
@@ -60,20 +59,6 @@ class RootErrorBoundary extends React.Component<
   }
 }
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      networkMode: 'offlineFirst', // Local IPC — Rust owns networking
-      staleTime: 1000 * 60 * 5, // 5 min default — prevents redundant refetches
-      gcTime: 1000 * 60 * 30, // 30 min in-memory cache retention
-      refetchOnWindowFocus: false, // Desktop app — no tab switching noise
-      retry: 1, // One retry on transient failures
-    },
-    mutations: { networkMode: 'always', gcTime: 0 },
-  },
-});
-queryClient.setQueryDefaults(DETAILS_QUERY_KEY, { gcTime: DETAILS_GC_TIME_MS });
-
 if (isTauriDesktopRuntime()) {
   const listener = listen('app://addon-capabilities-changed', () => {
     void invalidateAddonCapabilityQueries(queryClient);
@@ -120,9 +105,12 @@ const bootstrapSnapshot = api.getBootstrapSnapshot().then(
   () => undefined,
 );
 
-if (window.location.pathname === '/' && navigator.onLine) {
-  void queryClient.prefetchQuery(homeTrendingMoviesQueryOptions);
-}
+// Checked after any startup-route replace so a non-Home start page skips the remote catalog.
+void bootstrapSnapshot.then(() => {
+  if (window.location.pathname === '/' && navigator.onLine) {
+    void queryClient.prefetchQuery(homeTrendingMoviesQueryOptions);
+  }
+});
 
 void Promise.race([bootstrapSnapshot, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]).then(() => {
   rendered = true;

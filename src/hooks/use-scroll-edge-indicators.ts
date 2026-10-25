@@ -90,3 +90,32 @@ export function useScrollEdgeIndicators<T extends HTMLElement>(
 
   return { bind, syncScrollState, ...edges };
 }
+
+/** True once `sentinelRef` scrolls under the 32px frameless titlebar. Focus inside the
+    compact copy moves to `focusRef` when it hides, so it never lands in an inert region. */
+export function useScrolledPastTitlebar(
+  sentinelRef: RefObject<HTMLElement | null>,
+  compactRef: RefObject<HTMLElement | null>,
+  focusRef: RefObject<HTMLElement | null>,
+) {
+  const [passed, setPassed] = useState(false);
+  useEffect(() => {
+    const sentinel = sentinelRef.current;
+    if (!sentinel) return;
+    const observer = new IntersectionObserver(
+      ([entry]) => {
+        if (!entry) return;
+        const next =
+          !entry.isIntersecting && entry.boundingClientRect.bottom <= (entry.rootBounds?.top ?? 32);
+        if (!next && compactRef.current?.contains(document.activeElement)) {
+          focusRef.current?.focus({ preventScroll: true });
+        }
+        setPassed(next);
+      },
+      { rootMargin: '-32px 0px 0px 0px' },
+    );
+    observer.observe(sentinel);
+    return () => observer.disconnect();
+  }, [sentinelRef, compactRef, focusRef]);
+  return passed;
+}

@@ -1,5 +1,6 @@
 import { invoke } from '@tauri-apps/api/core';
 import type { VideoMarginRatio } from 'tauri-plugin-libmpv-api';
+import type { SubtitleColor, SubtitleEdge, SubtitleFont } from '@/lib/api';
 import type { Track } from '@/lib/player-track-utils';
 
 // mpv IPC goes through the allowlisted `player_mpv_*` commands — the webview only reaches backend-admitted verbs/properties.
@@ -44,7 +45,7 @@ export function setMpvProperty(
   name: string,
   value: string | number | boolean,
 ): Promise<MpvSubtitleProperties> {
-  return invoke('player_mpv_set_property', { name, value });
+  return setMpvProperties([[name, value]]);
 }
 
 export function setMpvProperties(
@@ -59,6 +60,17 @@ export function setMpvAudioSettings(settings: {
   nightMode?: boolean;
 }): Promise<void> {
   return invoke('player_mpv_set_audio_settings', settings);
+}
+
+/** Rust maps the choices to fixed subtitle properties outside the generic allowlist. */
+export function setMpvSubtitleAppearance(appearance: {
+  font: SubtitleFont;
+  color: SubtitleColor;
+  edge: SubtitleEdge;
+  bold: boolean;
+  italic: boolean;
+}): Promise<void> {
+  return invoke('player_mpv_set_subtitle_appearance', appearance);
 }
 
 /** `cycle` steps aid/sid — resolves after mpv applies, so a follow-up read reports the landed id. */

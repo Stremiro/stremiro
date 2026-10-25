@@ -20,17 +20,19 @@ export default defineConfig(async () => ({
     target: 'esnext',
     rollupOptions: {
       output: {
-        // Rolldown (Vite 8) requires manualChunks as a function
-        manualChunks: (id: string) => {
-          if (/@radix-ui\/react-(dialog|dropdown-menu|slot|tooltip)\//.test(id))
-            return 'vendor-radix';
-          if (id.includes('@tanstack/react-query')) return 'vendor-query';
-          if (
-            id.includes('/react-router') ||
-            id.includes('/react-dom/') ||
-            id.includes('/node_modules/react/')
-          )
-            return 'vendor-react';
+        codeSplitting: {
+          groups: [
+            {
+              name: 'vendor-react',
+              test: /[\\/]node_modules[\\/](?:react(?:-dom|-router)?|scheduler)[\\/]/,
+              tags: ['$initial' as const],
+            },
+            {
+              name: 'vendor-initial',
+              test: /[\\/]node_modules[\\/]/,
+              tags: ['$initial' as const],
+            },
+          ],
         },
       },
     },

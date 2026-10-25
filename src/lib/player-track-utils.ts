@@ -1,4 +1,61 @@
-import type { TrackLanguageCandidate } from '@/lib/api';
+import type { SubtitleColor, SubtitleEdge, SubtitleFont, TrackLanguageCandidate } from '@/lib/api';
+
+// Labels/buttons preview with the same family Rust hands to mpv. The stacks list
+// a modern Windows face first and fall back to what ships with the OS, so the
+// preview never lies about the result.
+export const SUBTITLE_FONT_OPTIONS: readonly {
+  value: SubtitleFont;
+  label: string;
+  fontFamily?: string;
+}[] = [
+  { value: 'default', label: 'Default' },
+  {
+    value: 'modern',
+    label: 'Modern',
+    fontFamily: "'Segoe UI Variable Text', 'Segoe UI', system-ui, sans-serif",
+  },
+  { value: 'grotesk', label: 'Grotesk', fontFamily: "'Segoe UI Variable Display', 'Segoe UI'" },
+  { value: 'humanist', label: 'Humanist', fontFamily: "'Corbel', 'Calibri', sans-serif" },
+  { value: 'classic', label: 'Classic', fontFamily: "'Trebuchet MS', 'Segoe UI', sans-serif" },
+  {
+    value: 'screen',
+    label: 'Screen',
+    fontFamily: "'Franklin Gothic Medium', 'Franklin Gothic', 'Segoe UI', sans-serif",
+  },
+  { value: 'serif', label: 'Serif', fontFamily: "'Cambria', Georgia, serif" },
+  { value: 'book', label: 'Book', fontFamily: "'Palatino Linotype', Palatino, serif" },
+  { value: 'rounded', label: 'Rounded', fontFamily: "'Candara', 'Segoe UI', sans-serif" },
+  { value: 'mono', label: 'Mono', fontFamily: "'Cascadia Mono', Consolas, monospace" },
+];
+
+// hex mirrors the sub-color Rust sets, for swatches and previews.
+export const SUBTITLE_COLOR_OPTIONS: readonly {
+  value: SubtitleColor;
+  label: string;
+  hex: string;
+}[] = [
+  { value: 'white', label: 'White', hex: '#ffffff' },
+  { value: 'ivory', label: 'Ivory', hex: '#fff4d6' },
+  { value: 'lavender', label: 'Lavender', hex: '#e3d5ff' },
+  { value: 'mint', label: 'Mint', hex: '#c4f0d9' },
+  { value: 'amber', label: 'Amber', hex: '#ffd89b' },
+  { value: 'gray', label: 'Gray', hex: '#d4d4d4' },
+  { value: 'yellow', label: 'Yellow', hex: '#ffe000' },
+  { value: 'cyan', label: 'Cyan', hex: '#00e5ff' },
+  { value: 'green', label: 'Green', hex: '#66ff66' },
+  { value: 'red', label: 'Red', hex: '#ff5147' },
+  { value: 'orange', label: 'Orange', hex: '#ffa14d' },
+  { value: 'blue', label: 'Blue', hex: '#57a8ff' },
+  { value: 'pink', label: 'Pink', hex: '#ff7ac6' },
+];
+
+export const SUBTITLE_EDGE_OPTIONS: readonly { value: SubtitleEdge; label: string }[] = [
+  { value: 'none', label: 'None' },
+  { value: 'outline', label: 'Outline' },
+  { value: 'thick', label: 'Thick' },
+  { value: 'shadow', label: 'Shadow' },
+  { value: 'box', label: 'Box' },
+];
 
 export interface Track {
   id: number;

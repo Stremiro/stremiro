@@ -72,7 +72,7 @@ import {
   invalidateListQueries,
   LISTS_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { boundedMapSet, cn } from '@/lib/utils';
+import { boundedMapSet, cn, pluralize } from '@/lib/utils';
 import { AddTitlesDialog } from './add-titles-dialog';
 import { ListIconTile } from './list-icons';
 
@@ -207,7 +207,7 @@ function SortableListCard({
               )}
             </div>
             <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
-              {list.item_ids.length} title{list.item_ids.length === 1 ? '' : 's'}
+              {pluralize(list.item_ids.length, 'title')}
             </p>
             {list.rules && (
               <p className='mt-0.5 truncate text-[11px] text-zinc-500' title={rulesSummary}>
@@ -396,7 +396,7 @@ const SortableItemRow = memo(function SortableItemRow({
           type='button'
           aria-label={`Open details for ${item.title}`}
           className='aspect-2/3 w-full cursor-pointer focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
-          onPointerEnter={prefetchDetails}
+          onPointerDown={prefetchDetails}
           onFocus={prefetchDetails}
           onClick={() => navigateToDetails(item.type, item.id)}
         >
@@ -449,7 +449,7 @@ const SortableItemRow = memo(function SortableItemRow({
         type='button'
         aria-label={`Open details for ${item.title}`}
         className='flex flex-1 min-w-0 items-center gap-3 rounded-md cursor-pointer text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
-        onPointerEnter={prefetchDetails}
+        onPointerDown={prefetchDetails}
         onFocus={prefetchDetails}
         onClick={() => navigateToDetails(item.type, item.id)}
       >
@@ -1052,11 +1052,10 @@ export function ListsManager() {
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
 
-  // Non-empty lists confirm in-app; empty ones delete straight away.
   const [deleteTarget, setDeleteTarget] = useState<UserList | null>(null);
   const handleDeleteConfirm = (list: UserList) => {
     if (pendingDeleteIds.includes(list.id)) return;
-    if (list.item_ids.length > 0) {
+    if (list.rules || list.item_ids.length > 0) {
       setDeleteTarget(list);
       return;
     }
@@ -1070,7 +1069,7 @@ export function ListsManager() {
           <h2 className='text-[15px] font-medium tracking-tight text-white'>Lists</h2>
           <p className='text-[13px] text-zinc-400 mt-1'>
             {lists.length > 0
-              ? `${lists.length} list${lists.length !== 1 ? 's' : ''}`
+              ? pluralize(lists.length, 'list')
               : 'Organize saved titles into collections.'}
           </p>
         </div>
@@ -1159,7 +1158,7 @@ export function ListsManager() {
       {renameTarget && (
         <RenameListDialog
           list={renameTarget}
-          open={!!renameTarget}
+          open
           onOpenChange={(open: boolean) => {
             if (!open) setRenameTarget(null);
           }}
@@ -1183,9 +1182,7 @@ export function ListsManager() {
             <DialogTitle>Delete list</DialogTitle>
             <DialogDescription>
               {deleteTarget &&
-                `"${deleteTarget.name}" and its ${deleteTarget.item_ids.length} item${
-                  deleteTarget.item_ids.length === 1 ? '' : 's'
-                } will be removed. This can't be undone.`}
+                `"${deleteTarget.name}"${deleteTarget.rules ? ' and its rules' : ''} will be deleted. Titles in your Library won't be removed. This can't be undone.`}
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className='gap-2 sm:space-x-0'>

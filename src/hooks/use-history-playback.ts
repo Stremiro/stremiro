@@ -2,11 +2,10 @@ import { useQueryClient } from '@tanstack/react-query';
 import { type MouseEvent, useLayoutEffect, useRef, useState } from 'react';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import type { WatchProgress } from '@/lib/api';
-import { openHistoryPlaybackPlan } from '@/lib/history-playback';
+import { isSameMediaKind, openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { boundNavigate, currentPathWithSearch } from '@/lib/navigation';
 import { claimPlaybackLaunch } from '@/lib/player-navigation';
 import { expandedSessionState, usePlayerSession } from '@/lib/player-session';
-import { isSeriesLikeMediaType } from '@/lib/utils';
 
 // Resume-from-history click: resolves the Rust playback plan before navigating. Ref guard blocks double-fires; late completion is dropped after unmount.
 export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
@@ -30,8 +29,7 @@ export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
     if (
       presentation === 'mini' &&
       session?.id === item.id &&
-      (session.type === item.type_ ||
-        (isSeriesLikeMediaType(session.type) && isSeriesLikeMediaType(item.type_))) &&
+      isSameMediaKind(session.type, item.type_) &&
       (item.type_ === 'movie' ||
         (session.season === String(item.absolute_season ?? item.season) &&
           session.episode === String(item.absolute_episode ?? item.episode)))

@@ -20,7 +20,6 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -55,10 +54,17 @@ import {
 import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
 import { RESOLUTION_LABELS } from '@/lib/stream-selector-utils';
 import { formatAirDate } from '@/lib/schedule-dates';
-import { cn, formatSeasonEpisode, formatTime, getEpisodeTitle, isHttpUrl } from '@/lib/utils';
+import {
+  cn,
+  formatSeasonEpisode,
+  formatTime,
+  getEpisodeTitle,
+  isHttpUrl,
+  pluralize,
+} from '@/lib/utils';
 
 const SELECTOR_SEGMENT_BASE_CLASS =
-  'h-7 px-2.5 rounded-md text-[11px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
+  'h-8 px-2.5 rounded-md text-[13px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
 const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 hover:text-zinc-200';
 
 // Filters use the app accent; only Quality keeps its own hue, echoing the violet 4K badge it sorts by.
@@ -132,7 +138,7 @@ function SegmentGroup<T extends string>({
         >
           {option.label}
           {option.count !== undefined && (
-            <span className='ml-1 opacity-60 font-normal text-[9px] tabular-nums'>
+            <span className='ml-1 opacity-80 font-normal text-[13px] tabular-nums'>
               {option.count}
             </span>
           )}
@@ -321,10 +327,10 @@ export function StreamResultsStatus({
   pendingSourceCount: number;
   searching: boolean;
 }) {
-  const summary = `${resultCount} stream${resultCount === 1 ? '' : 's'} found. ${
+  const summary = `${pluralize(resultCount, 'stream')} found. ${
     searching
       ? pendingSourceCount > 0
-        ? `${pendingSourceCount} source${pendingSourceCount === 1 ? '' : 's'} still searching.`
+        ? `${pluralize(pendingSourceCount, 'source')} still searching.`
         : 'Searching sources.'
       : 'Source search complete.'
   }`;
@@ -364,9 +370,9 @@ export function StreamListLoadingState({
           aria-hidden='true'
           className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none text-white/45'
         />
-        <p className='text-[12px] font-medium text-zinc-400'>
+        <p className='text-[13px] font-medium leading-5 text-zinc-400'>
           {sourceCount > 0
-            ? `Searching ${sourceCount} source${sourceCount === 1 ? '' : 's'}…`
+            ? `Searching ${pluralize(sourceCount, 'source')}…`
             : 'Preparing sources…'}
         </p>
       </div>
@@ -452,7 +458,7 @@ function StreamListMessage({
       >
         {icon}
         <p className='text-sm'>{title}</p>
-        <p className='text-xs text-zinc-400 leading-relaxed max-w-sm break-words'>{body}</p>
+        <p className='text-[13px] text-zinc-400 leading-relaxed max-w-sm break-words'>{body}</p>
         {action}
       </div>
     </div>
@@ -623,6 +629,7 @@ export function StreamAddonHealthStrip({
           const isSelected = effectiveAddonFilter === metric.id;
           const isPending = sourcesStillLoading && metric.status === 'pending';
           const hasStreams = metric.streamCount > 0;
+          const streamCountLabel = pluralize(metric.streamCount, 'stream');
           const tone = isPending
             ? 'searching'
             : metric.status === 'offline'
@@ -637,10 +644,10 @@ export function StreamAddonHealthStrip({
             : metric.status === 'no_results'
               ? 'No results for this title'
               : metric.status === 'degraded'
-                ? `Slow response · ${metric.streamCount} streams`
+                ? `Slow response · ${streamCountLabel}`
                 : metric.status === 'offline'
                   ? 'Unavailable'
-                  : `${metric.streamCount} streams`;
+                  : streamCountLabel;
           const latency =
             typeof metric.latencyMs === 'number'
               ? metric.latencyMs < 1000
@@ -669,7 +676,7 @@ export function StreamAddonHealthStrip({
                 }));
               }}
               className={cn(
-                'relative flex h-8 flex-[1_0_auto] items-center justify-center gap-1.5 border-r border-white/[0.06] px-3 text-[11.5px] font-medium transition-colors duration-150 last:border-r-0 aria-disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
+                'relative flex h-8 flex-[1_0_auto] items-center justify-center gap-1.5 border-r border-white/[0.06] px-3 text-[13px] font-medium transition-colors duration-150 last:border-r-0 aria-disabled:cursor-default focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
                 isSelected
                   ? 'bg-white/[0.07] text-white'
                   : hasStreams
@@ -680,7 +687,10 @@ export function StreamAddonHealthStrip({
               <span className='max-w-[120px] truncate'>{metric.name}</span>
               <span
                 aria-hidden='true'
-                className={cn('tabular-nums', isSelected ? 'text-zinc-300' : 'text-zinc-500')}
+                className={cn(
+                  'tabular-nums',
+                  isSelected ? 'text-zinc-300' : hasStreams ? 'text-zinc-400' : 'text-zinc-500',
+                )}
               >
                 {isPending ? '…' : metric.streamCount}
               </span>
@@ -700,7 +710,7 @@ export function StreamAddonHealthStrip({
       <span
         aria-hidden='true'
         title={summary}
-        className='shrink-0 whitespace-nowrap text-[11px] tabular-nums text-zinc-500'
+        className='shrink-0 whitespace-nowrap text-[13px] tabular-nums text-zinc-400'
       >
         {returnedSourceCount}/{metrics.length}
       </span>
@@ -717,7 +727,7 @@ export function StreamAddonHealthStrip({
           aria-busy={isRetrying}
           aria-label='Retry failed sources'
           title='Retry failed sources'
-          className='h-8 shrink-0 gap-1.5 rounded-md px-2 text-[11.5px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-default'
+          className='h-8 shrink-0 gap-1.5 rounded-md px-2 text-[13px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-default'
         >
           <RotateCcw
             aria-hidden='true'
@@ -777,7 +787,7 @@ export function StreamFilterToolbar({
       aria-disabled={isResolving || undefined}
       className='shrink-0 bg-white/[0.025] border border-white/[0.07] rounded-lg px-3 py-2 mb-3'
     >
-      <div className='mb-2 flex items-center gap-2'>
+      <div className='mb-2 flex flex-wrap items-center gap-2'>
         <SearchInput
           inputRef={searchInputRef}
           value={searchQuery}
@@ -788,12 +798,12 @@ export function StreamFilterToolbar({
           onSubmit={onSearchSubmit}
           aria-label='Search streams by release, codec or keyword'
           placeholder='Find a release, codec or keyword…'
-          className='h-8 text-xs bg-black/20 border-white/[0.07]'
-          wrapperClassName='min-w-0 flex-1'
+          className='h-8 text-[14px] bg-black/20 border-white/[0.07]'
+          wrapperClassName='min-w-0 flex-1 basis-48'
         />
-        <span className='shrink-0 text-[10px] font-semibold text-zinc-400 tabular-nums whitespace-nowrap'>
+        <span className='shrink-0 text-[13px] font-semibold leading-5 text-zinc-400 tabular-nums whitespace-nowrap'>
           {filteredCount === totalCount
-            ? `${totalCount} stream${totalCount === 1 ? '' : 's'}`
+            ? pluralize(totalCount, 'stream')
             : `${filteredCount} / ${totalCount}`}
           {stats.p2pCount > 0 && (
             <span className='hidden sm:inline'>{` · ${stats.playableCount} playable`}</span>
@@ -807,7 +817,7 @@ export function StreamFilterToolbar({
             onResetFilters();
           }}
           className={cn(
-            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[12px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
+            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[14px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
             hasActiveFilter
               ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
               : 'pointer-events-none border-white/[0.07] text-zinc-500',
@@ -818,7 +828,7 @@ export function StreamFilterToolbar({
         </button>
       </div>
       <div className='flex items-center gap-2'>
-        <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
+        <div className='-my-1 flex min-w-0 flex-1 items-center gap-2 overflow-x-auto py-1 pr-5 scrollbar-hide [mask-image:linear-gradient(to_right,black_calc(100%_-_20px),transparent)]'>
           <SegmentGroup
             label='Quality filter'
             isResolving={isResolving}
@@ -901,9 +911,9 @@ export function StreamP2pNotice({ p2pCount }: { p2pCount: number }) {
   return (
     <div className='mb-3 flex items-start gap-2 rounded-lg border border-amber-400/15 bg-amber-400/[0.06] px-3 py-2'>
       <Magnet className='mt-px h-3.5 w-3.5 shrink-0 text-amber-300/70' />
-      <p className='text-[11px] leading-snug text-amber-200/80'>
-        {p2pCount} P2P source{p2pCount === 1 ? '' : 's'} found, but none are playable in this build
-        — it plays cached and direct links only. Try another addon.
+      <p className='text-[13px] leading-5 text-amber-200/90'>
+        {pluralize(p2pCount, 'P2P source')} found, but none are playable in this build — it plays
+        cached and direct links only. Try another addon.
       </p>
     </div>
   );
@@ -942,10 +952,8 @@ export function StreamResolveFeedbackToast({
           )}
 
           <div className='min-w-0 flex-1'>
-            <p className='truncate text-[13px] font-medium leading-tight text-white/90'>
-              Opening stream
-            </p>
-            <p className='mt-0.5 truncate text-[11.5px] leading-tight text-white/45'>
+            <p className='text-[14px] font-medium leading-5 text-zinc-100'>Opening stream</p>
+            <p className='mt-0.5 line-clamp-2 wrap-break-word text-[13px] leading-4 text-zinc-400'>
               {[feedback.title, feedback.subtitle].filter(Boolean).join(' · ')}
             </p>
           </div>
@@ -955,7 +963,7 @@ export function StreamResolveFeedbackToast({
             onClick={onCancel}
             title='Cancel opening stream (Esc)'
             aria-keyshortcuts='Escape'
-            className='pointer-events-auto h-7 shrink-0 rounded-md px-2.5 text-[12px] font-medium text-white/55 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
+            className='pointer-events-auto h-8 shrink-0 rounded-md px-2.5 text-[14px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
           >
             Cancel
           </button>
@@ -1043,23 +1051,12 @@ export function StreamPackEpisodeList({
 
   const isVirtualized = rows.length >= PACK_LIST_VIRTUALIZE_THRESHOLD;
 
-  const firstEpisodeIndex = useMemo(() => rows.findIndex((row) => row.type === 'episode'), [rows]);
-  const lastEpisodeIndex = useMemo(
-    () => rows.findLastIndex((row) => row.type === 'episode'),
-    [rows],
-  );
-  const episodeCount = useMemo(
-    () => rows.reduce((count, row) => (row.type === 'episode' ? count + 1 : count), 0),
-    [rows],
-  );
-  const targetIndex = useMemo(
-    () =>
-      rows.findIndex(
-        (row) =>
-          row.type === 'episode' &&
-          episodeMatchesCoordinates(row.episode, targetSeason, targetEpisode),
-      ),
-    [rows, targetEpisode, targetSeason],
+  const firstEpisodeIndex = rows.findIndex((row) => row.type === 'episode');
+  const lastEpisodeIndex = rows.findLastIndex((row) => row.type === 'episode');
+  const episodeCount = rows.reduce((count, row) => (row.type === 'episode' ? count + 1 : count), 0);
+  const targetIndex = rows.findIndex(
+    (row) =>
+      row.type === 'episode' && episodeMatchesCoordinates(row.episode, targetSeason, targetEpisode),
   );
 
   // Roving tabindex mirroring the stream list — headers never take the stop.
@@ -1188,7 +1185,7 @@ export function StreamPackEpisodeList({
             index === 0 ? 'pt-0' : 'pt-2',
           )}
         >
-          Season {row.season}
+          {row.season === 0 ? 'Specials' : `Season ${row.season}`}
         </p>
       );
     }
@@ -1363,7 +1360,7 @@ export function StreamPackEpisodeList({
             ? 'Finding episodes in this pack…'
             : error
               ? 'Episodes unavailable'
-              : `Choose an episode · ${episodeCount} ${episodeCount === 1 ? 'episode' : 'episodes'}`}
+              : `Choose an episode · ${pluralize(episodeCount, 'episode')}`}
         </p>
       </div>
 

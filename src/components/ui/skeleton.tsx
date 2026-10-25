@@ -23,7 +23,7 @@ function RouteLoadingBar() {
 // Shared by the route-chunk fallback and the metadata query to avoid two loading layouts.
 function DetailsSkeleton() {
   return (
-    <div className='relative min-h-screen bg-background pb-20' aria-busy='true'>
+    <div className='relative min-h-[calc(100vh-2rem)] bg-background pb-20' aria-busy='true'>
       <RouteLoadingBar />
       <span role='status' className='sr-only'>
         Loading title details…

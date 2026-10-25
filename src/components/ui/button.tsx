@@ -1,7 +1,8 @@
 import { Slot } from '@radix-ui/react-slot';
+import { Check, Plus } from 'lucide-react';
 import * as React from 'react';
 
-import { cn } from '@/lib/utils';
+import { cn, prefersReducedMotion } from '@/lib/utils';
 
 const BUTTON_VARIANTS = {
   default: 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90',
@@ -46,4 +47,53 @@ function Button({
   );
 }
 
-export { Button };
+/** Library membership only; list membership keeps its own bookmark vocabulary. */
+function SaveIndicator({ saved, className }: { saved: boolean; className?: string }) {
+  return (
+    <span
+      aria-hidden='true'
+      data-save-indicator
+      className={cn('relative size-4 shrink-0', className)}
+    >
+      <span
+        data-save-ring
+        className='pointer-events-none absolute -inset-1 rounded-full border border-(--accent-act) opacity-0'
+      />
+      <Plus
+        className={cn(
+          'absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+          saved ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
+        )}
+      />
+      <Check
+        className={cn(
+          'absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+          saved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+        )}
+      />
+    </span>
+  );
+}
+
+/** Call only after accepting a user add — query hydration must never pulse. */
+function animateLibrarySave(control: HTMLElement) {
+  if (prefersReducedMotion()) return;
+  const indicator = control.querySelector<HTMLElement>('[data-save-indicator]');
+  indicator?.animate(
+    [
+      { transform: 'scale(1)' },
+      { transform: 'scale(1.25)', offset: 0.45 },
+      { transform: 'scale(1)' },
+    ],
+    { duration: 220, easing: 'ease-out' },
+  );
+  indicator?.querySelector<HTMLElement>('[data-save-ring]')?.animate(
+    [
+      { transform: 'scale(0.9)', opacity: 0.45 },
+      { transform: 'scale(1.5)', opacity: 0 },
+    ],
+    { duration: 220, easing: 'ease-out' },
+  );
+}
+
+export { Button, SaveIndicator, animateLibrarySave };

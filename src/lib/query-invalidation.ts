@@ -1,4 +1,4 @@
-import type { QueryClient } from '@tanstack/react-query';
+import { hashKey, type QueryClient, type QueryFilters } from '@tanstack/react-query';
 import type { CalendarRange, LibraryFilters } from '@/lib/api';
 import { nonBlank } from '@/lib/utils';
 
@@ -107,9 +107,9 @@ export function calendarEventsQueryKey(range: CalendarRange) {
 export const DETAILS_STALE_TIME_MS = 1000 * 60 * 30;
 export const DETAILS_GC_TIME_MS = 1000 * 60 * 10;
 
-// Skip data changes rarely; one lookup per episode and stream duration per session.
+// Skip data changes rarely; one lookup per episode and stream duration per session. Rust keeps
+// the bounded 12 h cache, so unused query entries take the default in-memory retention.
 export const SKIP_TIMES_STALE_TIME_MS = 1000 * 60 * 60 * 12;
-export const SKIP_TIMES_GC_TIME_MS = 1000 * 60 * 60 * 24;
 
 // SkipDB shifts segments to fit the reported duration, so the key buckets by it.
 export function skipTimesQueryKey(
@@ -308,9 +308,19 @@ export async function invalidateAddonCapabilityQueries(queryClient: QueryClient)
   ]);
 }
 
-export async function invalidatePlaybackLanguageQueries(queryClient: QueryClient) {
+export async function invalidatePlaybackLanguageQueries(
+  queryClient: QueryClient,
+  seededEffectiveQueryKey?: ReturnType<typeof effectivePlaybackLanguagePreferencesQueryKey>,
+) {
+  const seededEffectiveQueryHash = seededEffectiveQueryKey && hashKey(seededEffectiveQueryKey);
+  const effectiveFilters: QueryFilters = {
+    queryKey: EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
+    predicate: (query) => query.queryHash !== seededEffectiveQueryHash,
+  };
   await Promise.all([
-    invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
+    queryClient
+      .cancelQueries(effectiveFilters, { revert: true })
+      .then(() => queryClient.invalidateQueries(effectiveFilters)),
     invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive'),
   ]);
 }

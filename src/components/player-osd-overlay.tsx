@@ -8,9 +8,10 @@ import {
   Rewind,
   SkipForward,
 } from 'lucide-react';
-import { memo } from 'react';
+import { memo, useSyncExternalStore } from 'react';
 import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import { PlayerVolumeIcon } from '@/components/player-volume-icon';
+import type { SubscribableStore } from '@/lib/subscribable-store';
 import { clamp, cn, formatTime } from '@/lib/utils';
 
 export type PlayerOsdMessageIcon = 'history' | 'subtitles' | 'gauge' | 'audio' | 'skip';
@@ -35,20 +36,27 @@ export type PlayerOsdAction =
       icon?: PlayerOsdMessageIcon;
     };
 
-interface PlayerOsdOverlayProps {
+export interface PlayerOsdState {
   action: PlayerOsdAction | null;
   visible: boolean;
+}
+
+interface PlayerOsdOverlayProps {
+  store: SubscribableStore<PlayerOsdState>;
+  /** Player-state gate; the store's own `visible` drives the fade. */
+  allowed: boolean;
   isFullscreen: boolean;
   compact: boolean;
 }
 
 // Memoized between OSD events. The live region stays mounted while idle — remounting can drop screen-reader output.
 export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
-  action,
-  visible,
+  store,
+  allowed,
   isFullscreen,
   compact,
 }: PlayerOsdOverlayProps) {
+  const { action, visible } = useSyncExternalStore(store.subscribe, store.getSnapshot);
   const MessageIcon = action?.kind === 'message' && action.icon ? MESSAGE_ICONS[action.icon] : null;
 
   return (
@@ -61,7 +69,7 @@ export const PlayerOsdOverlay = memo(function PlayerOsdOverlay({
           : isFullscreen
             ? 'inset-x-0 top-24'
             : 'left-[60px] right-0 top-28',
-        visible ? 'opacity-100' : 'opacity-0',
+        visible && allowed ? 'opacity-100' : 'opacity-0',
       )}
       aria-live='polite'
       aria-atomic='true'

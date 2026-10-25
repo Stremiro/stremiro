@@ -1,10 +1,12 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDownRight, ChevronsRight, Loader2, Maximize2, X } from 'lucide-react';
-import { memo, useState, useSyncExternalStore } from 'react';
+import { ArrowDownRight, Loader2, Maximize2, X } from 'lucide-react';
+import { memo, useEffect, useState, useSyncExternalStore } from 'react';
+import { PlayerSkipButton } from '@/components/player-action-overlays';
 import {
+  CHROME_ENTER_TIMING_CLASS,
+  CHROME_EXIT_TIMING_CLASS,
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_STROKE,
-  CHROME_SKIP_BUTTON_CLASS,
 } from '@/components/player-chrome-styles';
 import {
   PlayerMuteButton,
@@ -16,8 +18,7 @@ import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import type { SkipSegment } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
-import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
-import { snapPlayerPip } from '@/lib/player-window';
+import { snapPlayerPip } from '@/lib/player-pip';
 import type { SubscribableStore } from '@/lib/subscribable-store';
 import { cn } from '@/lib/utils';
 
@@ -62,6 +63,18 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
   const keymap = usePlayerKeymap();
   const [snapping, setSnapping] = useState(false);
   const [focused, setFocused] = useState(false);
+  useEffect(() => {
+    const clearFocus = () => setFocused(false);
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') clearFocus();
+    };
+    window.addEventListener('blur', clearFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', clearFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
   const chromeVisible = visible || !props.isPlaying || !!status || !!error || ended || focused;
   const volumeIsSilent = props.isMuted || props.volume === 0;
   const returnToApp = () => void onReturn().catch(() => undefined);
@@ -104,7 +117,11 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         </div>
       )}
       <div
-        onFocus={() => setFocused(true)}
+        data-player-pip-chrome
+        onFocus={(event) =>
+          setFocused(document.hasFocus() && event.target.matches(':focus-visible'))
+        }
+        onPointerDownCapture={() => setFocused(false)}
         onBlur={(event) => {
           if (
             !(event.relatedTarget instanceof Node) ||
@@ -113,8 +130,10 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
             setFocused(false);
         }}
         className={cn(
-          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity duration-150 ease-out motion-reduce:transition-none',
-          chromeVisible ? 'opacity-100' : 'opacity-0',
+          'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity motion-reduce:transition-none',
+          chromeVisible
+            ? cn(CHROME_ENTER_TIMING_CLASS, 'opacity-100')
+            : cn(CHROME_EXIT_TIMING_CLASS, 'opacity-0'),
         )}
       >
         <div
@@ -245,24 +264,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
                   Cancel autoplay
                 </button>
               ) : props.skipAction && !status && !error && !ended ? (
-                <button
-                  type='button'
-                  onClick={props.skipAction.onSkip}
-                  aria-label={props.skipAction.label}
-                  aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
-                  title={withShortcutHint(props.skipAction.label, keymap, 'skipSegment')}
-                  className={cn(
-                    CHROME_SKIP_BUTTON_CLASS,
-                    'flex min-w-0 cursor-pointer items-center gap-1 px-2 py-1.5 text-xs',
-                  )}
-                >
-                  <ChevronsRight
-                    aria-hidden='true'
-                    className='h-3.5 w-3.5 shrink-0 text-(--accent-skip)'
-                    strokeWidth={CHROME_ICON_STROKE}
-                  />
-                  <span className='truncate'>{props.skipAction.label}</span>
-                </button>
+                <PlayerSkipButton action={props.skipAction} keymap={keymap} variant='compact' />
               ) : null}
               <button
                 type='button'

@@ -20,6 +20,7 @@ import { type RefObject, useCallback, useEffect, useId, useRef, useState } from 
 import { CreateListDialog, warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
+import { WatchStatusIcon } from '@/components/watch-status-icon';
 import { Button } from '@/components/ui/button';
 import {
   DropdownMenu,
@@ -31,14 +32,14 @@ import { SearchInput } from '@/components/ui/search-input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useListSummaries } from '@/hooks/use-media-library';
+import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
 import {
   type LibraryFilters,
-  WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
   WATCH_STATUSES,
   type WatchStatus,
 } from '@/lib/api';
-import { cn, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import { cn, pluralize, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 import {
   handleRadioGroupKeyDown,
   isEditableTarget,
@@ -126,24 +127,8 @@ export function LibraryToolbar({
 }: LibraryToolbarProps) {
   const toolbarRef = useRef<HTMLDivElement>(null);
   const compactToolbarRef = useRef<HTMLDivElement>(null);
-  const [toolbarPassed, setToolbarPassed] = useState(false);
-  useEffect(() => {
-    const toolbar = toolbarRef.current;
-    if (!toolbar) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry) return;
-        const passed =
-          !entry.isIntersecting && entry.boundingClientRect.bottom <= (entry.rootBounds?.top ?? 32);
-        if (!passed && compactToolbarRef.current?.contains(document.activeElement))
-          searchInputRef.current?.focus({ preventScroll: true });
-        setToolbarPassed(passed);
-      },
-      { rootMargin: '-32px 0px 0px 0px' },
-    );
-    observer.observe(toolbar);
-    return () => observer.disconnect();
-  }, [searchInputRef]);
+  const toolbarPassed = useScrolledPastTitlebar(toolbarRef, compactToolbarRef, searchInputRef);
+
   const activeSortOption = LIBRARY_SORT_OPTIONS[sort];
   const ActiveSortIcon = activeSortOption.icon;
   const hasFilters =
@@ -163,7 +148,7 @@ export function LibraryToolbar({
     .join(' · ');
   const countLabel =
     filteredCount === libraryCount
-      ? `${libraryCount} ${libraryCount === 1 ? 'title' : 'titles'}`
+      ? pluralize(libraryCount, 'title')
       : `${filteredCount} of ${libraryCount}`;
   const showCompactToolbar = toolbarPassed && !selectionMode;
   const returnToFilters = () => {
@@ -205,13 +190,7 @@ export function LibraryToolbar({
               aria-label={`Library status: ${statusLabel}`}
             >
               {statusFilter !== 'all' && statusFilter !== 'none' && (
-                <span
-                  aria-hidden='true'
-                  className={cn(
-                    'h-1.5 w-1.5 rounded-full bg-current',
-                    WATCH_STATUS_COLORS[statusFilter].text,
-                  )}
-                />
+                <WatchStatusIcon status={statusFilter} className='size-3.5' strokeWidth={2.1} />
               )}
               <span>{statusLabel}</span>
               <ChevronDown className='w-3 h-3 opacity-50' />
@@ -226,17 +205,13 @@ export function LibraryToolbar({
               <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>{libraryCount}</span>
             </FilterMenuItem>
             {WATCH_STATUSES.map((s) => {
-              const colors = WATCH_STATUS_COLORS[s];
               return (
                 <FilterMenuItem
                   key={s}
                   checked={statusFilter === s}
                   onSelect={() => onStatusFilterChange(s)}
                 >
-                  <span
-                    aria-hidden='true'
-                    className={cn('h-1.5 w-1.5 rounded-full bg-current', colors.text)}
-                  />
+                  <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
                   {WATCH_STATUS_LABELS[s]}
                   <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
                     {statusesAvailable ? (statusCounts[s] ?? 0) : '—'}
@@ -822,13 +797,15 @@ export function LibraryBulkActionBar({
                 onBulkSetStatus(status);
               }}
             >
-              <span
-                aria-hidden='true'
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full bg-current',
-                  status === null ? 'text-zinc-500' : WATCH_STATUS_COLORS[status].text,
-                )}
-              />
+              {status === null ? (
+                <X
+                  aria-hidden='true'
+                  className='size-3.5 shrink-0 text-zinc-500'
+                  strokeWidth={2.1}
+                />
+              ) : (
+                <WatchStatusIcon status={status} className='size-3.5' strokeWidth={2.1} />
+              )}
               {label}
             </button>
           ))}
@@ -881,7 +858,14 @@ export function LibraryBulkActionBar({
               </div>
             )}
             {!listsLoading && !listsError && customLists.length === 0 && (
-              <p className='px-2.5 py-2 text-xs text-zinc-500'>No lists yet.</p>
+              <p className='px-2.5 py-2 text-xs text-zinc-500'>
+                No manual lists yet — create one to group titles.
+                {allLists.length > 0 && (
+                  <span className='mt-1 block'>
+                    Smart lists fill automatically from their rules.
+                  </span>
+                )}
+              </p>
             )}
             {customLists.map((list) => (
               <button
@@ -900,7 +884,7 @@ export function LibraryBulkActionBar({
                   {list.name}
                 </span>
                 <span className='text-[11px] tabular-nums text-zinc-500'>
-                  {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
+                  {pluralize(list.item_count, 'title')}
                 </span>
               </button>
             ))}

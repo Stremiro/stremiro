@@ -22,27 +22,31 @@ export function toLocalMidnight(date: Temporal.PlainDate): Date {
 }
 
 /** Rust normalizes release dates; an ISO timestamp's prefix still means its named local day. */
-export function parseLocalScheduleDate(value?: string | null): Date | null {
+export function parseScheduleDay(value?: string | null): Temporal.PlainDate | null {
   const prefix = value?.trim().match(/^\d{4}-\d{2}-\d{2}/)?.[0];
   if (!prefix) return null;
   try {
-    return toLocalMidnight(Temporal.PlainDate.from(prefix));
+    return Temporal.PlainDate.from(prefix);
   } catch {
     return null;
   }
 }
 
+export function parseLocalScheduleDate(value?: string | null): Date | null {
+  const day = parseScheduleDay(value);
+  return day && toLocalMidnight(day);
+}
+
 /** Air-date line: absolute for aired ("Apr 7, 2013"), compact countdown ("in 3d") for unaired. */
 export function formatAirDate(value?: string | null): string | null {
-  if (!value) return null;
-  const date = parseLocalScheduleDate(value);
-  if (!date) return null;
-  const daysAhead = Temporal.Now.plainDateISO().until(toLocalDate(date)).days;
-  if (daysAhead <= 0) return DATE_FORMATTER.format(date);
+  const day = parseScheduleDay(value);
+  if (!day) return null;
+  const daysAhead = Temporal.Now.plainDateISO().until(day).days;
+  if (daysAhead <= 0) return DATE_FORMATTER.format(day);
   if (daysAhead === 1) return 'Tomorrow';
   if (daysAhead < 14) return `in ${daysAhead}d`;
   if (daysAhead < 63) return `in ${Math.round(daysAhead / 7)}w`;
-  return SHORT_DATE_FORMATTER.format(date);
+  return SHORT_DATE_FORMATTER.format(day);
 }
 
 const RELATIVE_TIME_UNITS: readonly [Intl.RelativeTimeFormatUnit, number][] = [

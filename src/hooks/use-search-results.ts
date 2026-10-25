@@ -51,6 +51,7 @@ export function useSearchResults({
 
   return {
     results,
+    partial: data?.pages.some((page) => page.partial) ?? false,
     isFetched,
     isLoading,
     isFetching,

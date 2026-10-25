@@ -1,14 +1,4 @@
-import {
-  FastForward,
-  Loader2,
-  Maximize2,
-  Move,
-  Pause,
-  Play,
-  TriangleAlert,
-  VolumeX,
-  X,
-} from 'lucide-react';
+import { Loader2, Maximize2, Move, Pause, Play, TriangleAlert, VolumeX, X } from 'lucide-react';
 import {
   useCallback,
   memo,
@@ -19,12 +9,14 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { createPortal } from 'react-dom';
-import { CHROME_ICON_STROKE, CHROME_SKIP_BUTTON_CLASS } from '@/components/player-chrome-styles';
+import { PlayerSkipButton } from '@/components/player-action-overlays';
+import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import {
   MINI_ICON_BUTTON_CLASS,
   PlayerMuteButton,
   PlayerNextButton,
   PlayerPlayButton,
+  PlayerPreviousButton,
 } from '@/components/player-control-buttons';
 import { PlayerSlider } from '@/components/player-slider';
 import { PlayerEndCard } from '@/components/player-state-overlays';
@@ -36,13 +28,11 @@ import {
   type MiniVideoRect,
 } from '@/hooks/use-player-surface-layout';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
-import { isEditableTarget } from '@/lib/dom';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { createWheelSeekAccumulator } from '@/lib/player-dom';
 import {
   ariaKeyShortcuts,
   formatBindingKey,
-  isRepeatablePlayerAction,
   type PlayerKeymap,
   withShortcutHint,
 } from '@/lib/player-keybindings';
@@ -321,6 +311,7 @@ interface MiniPlayerProps {
   /** Playback clock — the mini player is a tick subscriber; the tree isn't. */
   clock: PlaybackClock;
   duration: number;
+  canGoPrevious: boolean;
   canGoNext: boolean;
   hasVideo: boolean;
   isMuted: boolean;
@@ -345,12 +336,11 @@ interface MiniPlayerProps {
   onToggleMute: () => void;
   onVolumeChange: (volume: number) => void;
   onVolumeWheel: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
-  /** Relative key nudges — the parent owns the live volume ref. */
-  onVolumeStep: (delta: number) => void;
   onSeek: (seconds: number) => void;
   onSeekRelative: (deltaSeconds: number) => void;
   onExpand: () => void;
   onClose: () => void;
+  onPreviousEpisode: () => void;
   onNextEpisode: () => void;
   onReplay: () => void;
   onBackToTitle: () => void;
@@ -366,6 +356,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   error,
   clock,
   duration,
+  canGoPrevious,
   canGoNext,
   hasVideo,
   isMuted,
@@ -383,11 +374,11 @@ export const MiniPlayer = memo(function MiniPlayer({
   onToggleMute,
   onVolumeChange,
   onVolumeWheel,
-  onVolumeStep,
   onSeek,
   onSeekRelative,
   onExpand,
   onClose,
+  onPreviousEpisode,
   onNextEpisode,
   onReplay,
   onBackToTitle,
@@ -401,6 +392,26 @@ export const MiniPlayer = memo(function MiniPlayer({
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
   const [hovered, setHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
+  useEffect(() => {
+    const releaseInteraction = () => {
+      setHovered(false);
+      setHasFocus(false);
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') releaseInteraction();
+    };
+    const handlePointerOut = (event: PointerEvent) => {
+      if (event.relatedTarget === null) setHovered(false);
+    };
+    window.addEventListener('blur', releaseInteraction);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('pointerout', handlePointerOut);
+    return () => {
+      window.removeEventListener('blur', releaseInteraction);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('pointerout', handlePointerOut);
+    };
+  }, []);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
   const [renderPosition] = useState(() =>
     clampMiniPosition(getInitialPosition() ?? defaultMiniPosition(metrics), metrics),
@@ -861,79 +872,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     return () => surface.removeEventListener('wheel', handleWheel);
   }, [onVolumeWheel, onSeekRelative]);
 
-  const handleVideoSurfaceKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
-    // Scoped to the focused frame — child-handled, composing, or modifier-chord keys are never media shortcuts.
-    if (
-      event.defaultPrevented ||
-      event.nativeEvent.isComposing ||
-      event.ctrlKey ||
-      event.altKey ||
-      event.metaKey
-    ) {
-      return;
-    }
-    const keyTarget = event.target;
-    const key = event.key.toLowerCase();
-    if (keyTarget instanceof HTMLElement && keyTarget !== event.currentTarget) {
-      // Text inputs own every key outright.
-      if (isEditableTarget(keyTarget)) return;
-      // A focused control keeps only its activation keys — sliders self-consume arrows via Radix
-      // (defaultPrevented above). Matches the expanded player's contract.
-      if ((key === ' ' || key === 'enter') && keyTarget.closest('button, a')) {
-        return;
-      }
-    }
-    const action =
-      key === 'escape'
-        ? 'expand'
-        : (keymap.byKey.get(key) ?? (key === 'enter' ? 'expand' : undefined));
-    if (!action) return;
-    if (event.repeat && (action === 'expand' || !isRepeatablePlayerAction(action))) {
-      event.preventDefault();
-      event.stopPropagation();
-      return;
-    }
-    const handled = (() => {
-      switch (action) {
-        case 'togglePlay':
-          onTogglePlay();
-          return true;
-        case 'expand':
-        case 'toggleFullscreen':
-        case 'dock':
-          onExpand();
-          return true;
-        case 'seekBackward':
-          onSeekRelative(event.shiftKey ? -5 : -10);
-          return true;
-        case 'seekForward':
-          onSeekRelative(event.shiftKey ? 5 : 10);
-          return true;
-        case 'volumeUp':
-          onVolumeStep(5);
-          return true;
-        case 'volumeDown':
-          onVolumeStep(-5);
-          return true;
-        case 'toggleMute':
-          onToggleMute();
-          return true;
-        case 'nextEpisode':
-          if (canGoNext) onNextEpisode();
-          return canGoNext;
-        case 'skipSegment':
-          if (skipAction) skipAction.onSkip();
-          return !!skipAction;
-        default:
-          return false;
-      }
-    })();
-    if (handled) {
-      event.preventDefault();
-      event.stopPropagation();
-    }
-  };
-
   const snapGhostAnchor = snapTargetIndex !== null ? anchors[snapTargetIndex] : null;
   const showLiveSurface = hasVideo && !error;
   const controlsActive =
@@ -949,7 +887,8 @@ export const MiniPlayer = memo(function MiniPlayer({
   const frame = (
     <div
       ref={frameRef}
-      role='dialog'
+      data-mini-player
+      role='region'
       aria-label='Mini player'
       inert={exiting || isDocking}
       className={cn(
@@ -975,9 +914,14 @@ export const MiniPlayer = memo(function MiniPlayer({
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
-      onPointerEnter={() => setHovered(true)}
+      onPointerEnter={() =>
+        setHovered(document.hasFocus() && document.visibilityState !== 'hidden')
+      }
       onPointerLeave={() => setHovered(false)}
-      onFocusCapture={() => setHasFocus(true)}
+      onPointerDownCapture={() => setHasFocus(false)}
+      onFocusCapture={(event) =>
+        setHasFocus(document.hasFocus() && event.target.matches(':focus-visible'))
+      }
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget)) setHasFocus(false);
       }}
@@ -986,7 +930,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           stays transparent — a fill would cover the mask hole below. */}
       <div
         className={cn(
-          'group/mini overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
+          'overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
           // A FLIPped mount already entered — the pop-in would restart at the dock rect and read as a second pop.
           exiting ? 'animate-mini-undock' : dockFlipFrom ? '' : 'animate-mini-dock',
           isMoving
@@ -998,14 +942,12 @@ export const MiniPlayer = memo(function MiniPlayer({
             bezel covering the mask hole's rim, and overflow-hidden clips children to its inner edge. */}
         {/* Focusable media region scopes hotkeys without making controls children of a button. */}
         {/* eslint-disable jsx-a11y/no-noninteractive-tabindex */}
-        {/* eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions */}
         <div
           data-mini-video
           ref={videoSurfaceRef}
           role='application'
           tabIndex={0}
           aria-label={`Mini player: ${title}.${playKey !== undefined ? ` ${formatBindingKey(playKey)} to play or pause.` : ''}${expandKey !== undefined ? ` ${formatBindingKey(expandKey)} to expand.` : ''}`}
-          onKeyDown={handleVideoSurfaceKeyDown}
           className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
           style={{ height: metrics.videoHeight }}
         >
@@ -1061,28 +1003,17 @@ export const MiniPlayer = memo(function MiniPlayer({
 
           {/* During playback the skip chip yields to the hover controls. */}
           {skipAction && showLiveSurface && isPlaying && !upNext && !endOfMedia && (
-            <button
-              type='button'
+            <PlayerSkipButton
+              action={skipAction}
+              keymap={keymap}
+              variant='compact'
               // Same rest-state contract as the Up Next strip — docked chrome owns the action under hover/focus.
               tabIndex={-1}
-              onClick={(e) => {
-                e.stopPropagation();
-                skipAction.onSkip();
-              }}
-              aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
-              title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
               className={cn(
-                CHROME_SKIP_BUTTON_CLASS,
-                'absolute bottom-2.5 right-2 z-[25] flex min-h-9 items-center gap-2 px-3 py-2 transition-[opacity,color,background-color,border-color] group-hover/mini:pointer-events-none group-hover/mini:opacity-0 group-focus-within/mini:pointer-events-none group-focus-within/mini:opacity-0',
+                'absolute bottom-2.5 right-2 z-[25] min-h-9 gap-2 px-3 py-2 font-medium leading-tight transition-[opacity,color,background-color,border-color]',
+                (hovered || hasFocus) && 'pointer-events-none opacity-0',
               )}
-            >
-              <FastForward
-                aria-hidden='true'
-                className='h-4 w-4 shrink-0 text-(--accent-skip)'
-                strokeWidth={CHROME_ICON_STROKE}
-              />
-              <span className='text-xs font-medium leading-tight'>{skipAction.label}</span>
-            </button>
+            />
           )}
 
           {/* EOF without next: the end card in strip form — never fades; docked chrome has no replay control. */}
@@ -1098,7 +1029,12 @@ export const MiniPlayer = memo(function MiniPlayer({
 
           {/* Rest-state indicators: buffering and mute are invisible until hover otherwise. */}
           {showLiveSurface && (isWorking || effectivelyMuted) && (
-            <div className='pointer-events-none absolute right-2 top-2 z-[15] flex items-center gap-1.5 transition-opacity duration-200 group-hover/mini:opacity-0 group-focus-within/mini:opacity-0'>
+            <div
+              className={cn(
+                'pointer-events-none absolute right-2 top-2 z-[15] flex items-center gap-1.5 transition-opacity duration-200',
+                (hovered || hasFocus) && 'opacity-0',
+              )}
+            >
               {effectivelyMuted && (
                 <VolumeX
                   aria-hidden='true'
@@ -1182,6 +1118,15 @@ export const MiniPlayer = memo(function MiniPlayer({
                     onSeek={onSeek}
                   />
                   <div className='flex items-center gap-1'>
+                    {canGoPrevious && !upNext && (
+                      <PlayerPreviousButton
+                        variant='mini'
+                        keymap={keymap}
+                        label='Previous episode'
+                        onClick={onPreviousEpisode}
+                      />
+                    )}
+
                     <PlayerPlayButton
                       variant='mini'
                       keymap={keymap}
@@ -1201,20 +1146,7 @@ export const MiniPlayer = memo(function MiniPlayer({
 
                     {/* Hover-state skip: the resting chip fades under the chrome. */}
                     {skipAction && (
-                      <button
-                        type='button'
-                        aria-label={skipAction.label}
-                        title={withShortcutHint(skipAction.label, keymap, 'skipSegment')}
-                        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'skipSegment')}
-                        onClick={skipAction.onSkip}
-                        className={cn(MINI_ICON_BUTTON_CLASS, CHROME_SKIP_BUTTON_CLASS)}
-                      >
-                        <FastForward
-                          aria-hidden='true'
-                          className='h-4 w-4 text-(--accent-skip)'
-                          strokeWidth={CHROME_ICON_STROKE}
-                        />
-                      </button>
+                      <PlayerSkipButton action={skipAction} keymap={keymap} variant='icon' />
                     )}
 
                     <div className='ml-auto flex shrink-0 items-center gap-2'>
@@ -1228,6 +1160,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                       />
                       <PlayerSlider
                         variant='bar'
+                        active={controlsActive}
                         aria-label='Volume'
                         aria-valuetext={effectivelyMuted ? 'Muted' : `${displayedVolume}%`}
                         title={effectivelyMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
@@ -1286,26 +1219,19 @@ export const MiniPlayer = memo(function MiniPlayer({
               {/* Pointer-transparent — rendered last, it would otherwise cover the buttons/expand target above. */}
               <div className='pointer-events-none absolute inset-0 flex flex-col items-center justify-center gap-2 px-4 text-center'>
                 {error ? (
-                  <>
-                    <TriangleAlert className='h-5 w-5 text-amber-400/90' strokeWidth={1.75} />
-                    <p
-                      role='alert'
-                      className='line-clamp-2 text-[11px] font-medium leading-snug text-white/80'
-                    >
-                      {error}
-                    </p>
-                  </>
+                  <TriangleAlert className='h-5 w-5 text-amber-400/90' strokeWidth={1.75} />
                 ) : (
-                  <>
-                    <Loader2 className='h-5 w-5 animate-spin text-white/70' />
-                    <p
-                      role='status'
-                      className='line-clamp-2 text-[11px] font-medium leading-snug text-white/70'
-                    >
-                      {statusText || 'Preparing playback'}
-                    </p>
-                  </>
+                  <Loader2 className='h-5 w-5 animate-spin text-white/70' />
                 )}
+                <p
+                  role={error ? 'alert' : 'status'}
+                  className={cn(
+                    'line-clamp-2 text-[11px] font-medium leading-snug',
+                    error ? 'text-white/80' : 'text-white/70',
+                  )}
+                >
+                  {error || statusText || 'Preparing playback'}
+                </p>
                 <p className='absolute inset-x-0 bottom-2 truncate px-3 text-[10px] text-white/50'>
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>

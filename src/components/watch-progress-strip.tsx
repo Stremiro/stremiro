@@ -5,9 +5,11 @@ import { cn } from '@/lib/utils';
 export function WatchProgressStrip({
   percent,
   className,
+  animateEntrance = false,
 }: {
   percent: number;
   className?: string;
+  animateEntrance?: boolean;
 }) {
   if (percent <= 0) return null;
   return (
@@ -17,7 +19,10 @@ export function WatchProgressStrip({
         className,
       )}
     >
-      <div className='h-full bg-(--accent-prog)' style={{ width: `${percent}%` }} />
+      <div
+        className={cn('h-full bg-(--accent-prog)', animateEntrance && 'watch-progress-entrance')}
+        style={{ width: `${percent}%` }}
+      />
     </div>
   );
 }

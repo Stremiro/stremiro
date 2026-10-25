@@ -6,7 +6,11 @@ import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
 import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
-import { getOwnWatchStatus, useRemoveFromWatchHistory } from '@/hooks/use-media-library';
+import {
+  getOwnWatchStatus,
+  useRemoveFromWatchHistory,
+  watchTitleKey,
+} from '@/hooks/use-media-library';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import {
   type MediaItem,
@@ -81,7 +85,7 @@ const LibraryListRow = memo(function LibraryListRow({
           ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
           : 'bg-white/[0.015] border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] focus-visible:bg-white/[0.04] focus-visible:border-white/[0.12]',
       )}
-      onPointerEnter={selectionMode ? undefined : prefetchDetails}
+      onPointerDown={selectionMode ? undefined : prefetchDetails}
       onFocus={selectionMode ? undefined : prefetchDetails}
       onClick={(event) => {
         if (selectionMode) {
@@ -155,7 +159,7 @@ export function HistoryListView({
           index={index}
           onRemove={onRemove}
           selectionMode={selectionMode}
-          isSelected={selectedIds?.has(`${item.type_}:${item.id}`)}
+          isSelected={selectedIds?.has(watchTitleKey(item))}
           onToggleSelect={onToggleSelect}
         />
       )}
@@ -218,7 +222,7 @@ const HistoryListRow = memo(function HistoryListRow({
             ? onToggleSelect?.(item, event.shiftKey)
             : navigateToDetails(item.type_, item.id)
         }
-        onPointerEnter={selectionMode ? undefined : prefetchDetails}
+        onPointerDown={selectionMode ? undefined : prefetchDetails}
         onFocus={selectionMode ? undefined : prefetchDetails}
         className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
       >

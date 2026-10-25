@@ -56,7 +56,10 @@ export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
 
 export const GENRE_LINK_CLASS =
-  'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[12px] font-medium text-white/75 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
+  'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[13px] font-medium text-white/85 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
+
+export const POPOVER_MOTION_CLASS =
+  'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
 
 function parseHexRgb(value: string): [number, number, number] | null {
   const match = HEX_COLOR_PATTERN.exec(value.trim());
@@ -75,28 +78,31 @@ function hexToRgbTriplet(value: string): `${number} ${number} ${number}` {
 export function getAccentTextColor(value: string): '#000000' | '#ffffff' {
   const rgb = parseHexRgb(value);
   if (!rgb) return '#000000';
-  const [r, g, b] = rgb;
-  const luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
-  return luminance > 0.6 ? '#000000' : '#ffffff';
+  const [r, g, b] = rgb.map((channel) => {
+    const normalized = channel / 255;
+    return normalized <= 0.04045 ? normalized / 12.92 : ((normalized + 0.055) / 1.055) ** 2.4;
+  });
+  const luminance = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luminance > 0.179 ? '#000000' : '#ffffff';
 }
 
 const NEUTRAL_ACCENT = '#d4d4d8';
 
 export function applyAccentVars(accent: string, targets: AccentTargets) {
   const root = document.documentElement;
-  const scopes: Array<[string, boolean]> = [
-    ['app-accent', true],
-    ['accent-nav', targets.navigation],
-    ['accent-act', targets.actions],
-    ['accent-prog', targets.progress],
-    ['accent-art', targets.artwork],
-    ['accent-skip', targets.skip],
+  root.style.setProperty('--app-accent-rgb', hexToRgbTriplet(accent));
+  const scopes: Array<[string, boolean, boolean]> = [
+    ['accent-nav', targets.navigation, true],
+    ['accent-act', targets.actions, true],
+    ['accent-prog', targets.progress, false],
+    ['accent-art', targets.artwork, false],
+    ['accent-skip', targets.skip, true],
   ];
-  for (const [scope, enabled] of scopes) {
+  for (const [scope, enabled, foreground] of scopes) {
     const color = enabled ? accent : NEUTRAL_ACCENT;
     root.style.setProperty(`--${scope}`, color);
     root.style.setProperty(`--${scope}-rgb`, hexToRgbTriplet(color));
-    root.style.setProperty(`--on-${scope}`, getAccentTextColor(color));
+    if (foreground) root.style.setProperty(`--on-${scope}`, getAccentTextColor(color));
   }
 }
 
@@ -165,9 +171,13 @@ export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T)
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
 }
 
+let reducedMotionQuery: MediaQueryList | undefined;
+
 /** OS reduced-motion check — JS-driven motion (smooth scrolls) goes instant; CSS is covered by the index.css guard. */
 export function prefersReducedMotion(): boolean {
-  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') return false;
+  reducedMotionQuery ??= window.matchMedia('(prefers-reduced-motion: reduce)');
+  return reducedMotionQuery.matches;
 }
 
 /** `ScrollBehavior` honoring reduced motion. */
@@ -194,6 +204,11 @@ export function formatTime(seconds: number) {
 /** Zero-padded two digits — single owner for episode/season/time labels. */
 export function pad2(value: number): string {
   return String(value).padStart(2, '0');
+}
+
+/** `1 title` / `3 titles` — count with an English plural. */
+export function pluralize(count: number, singular: string, plural = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : plural}`;
 }
 
 /** Inclusive numeric clamp — single owner for slider/delay/scale bounds. */

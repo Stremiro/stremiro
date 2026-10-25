@@ -20,6 +20,7 @@ import type {
   TitleWatchProgress,
   UserList,
   UserListSummary,
+  WatchProgress,
   WatchStatus,
 } from '@/lib/api';
 import {
@@ -87,18 +88,13 @@ export function createStoreApi({ safeInvoke }: StoreApiContext) {
         staleTime: ADDON_CONFIGS_STALE_TIME_MS,
       }),
     getAddonUrl: (id: string) => safeInvoke<string>('get_addon_url', { id }),
+    openAddonConfigurePage: (id: string) => safeInvoke<void>('open_addon_configure_page', { id }),
     inspectAddonUrl: (url: string) => safeInvoke<AddonUrlInspection>('inspect_addon_url', { url }),
     updateAddonConfigs: (op: AddonConfigsOp) =>
       // Track the full write incl. cache-clear so a close/export during save waits on it — and sees failure.
       trackPendingAppWrite(
-        (async () => {
-          try {
-            return await safeInvoke<AddonConfig[]>('update_addon_configs', { op });
-          } finally {
-            // A failed save may still have applied the registry in memory.
-            clearProviderDataCaches();
-          }
-        })(),
+        // A failed save may still have applied the registry in memory.
+        withStreamingCacheClear(safeInvoke<AddonConfig[]>('update_addon_configs', { op })),
       ),
     getAppUiPreferences: () => safeInvoke<AppUiPreferences>('get_app_ui_preferences'),
     getDefaultPlayerKeybindings: () =>
@@ -141,6 +137,8 @@ export function createStoreApi({ safeInvoke }: StoreApiContext) {
       safeInvoke<AppUiPreferences>('save_app_ui_preferences', {
         patch,
       }),
+    recordRecentSearch: (query: string) =>
+      safeInvoke<AppUiPreferences>('record_recent_search', { query }),
     getProfilePreferences: () => safeInvoke<ProfilePreferences>('get_profile_preferences'),
     saveProfilePreferences: (patch: ProfilePreferencesPatch) =>
       safeInvoke<ProfilePreferences>('save_profile_preferences', {
@@ -206,7 +204,7 @@ export function createStoreApi({ safeInvoke }: StoreApiContext) {
       watched: boolean,
     ) => {
       bumpWatchProgressEpoch();
-      return write<TitleWatchProgress>('set_episodes_watched', {
+      return write<[TitleWatchProgress, WatchProgress[]]>('set_episodes_watched', {
         item: toMediaItem(item),
         episodes: episodes.map(({ season, episode }) => ({ season, episode })),
         watched,

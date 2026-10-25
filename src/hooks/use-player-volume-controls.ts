@@ -24,6 +24,7 @@ export function usePlayerVolumeControls({
   const [volume, setVolume] = useState(() => playerVolume);
   const [isMuted, setIsMutedState] = useState(false);
   const volumeRef = useRef(volume);
+  const lastPositiveVolumeRef = useRef(playerVolume > 0 ? playerVolume : 50);
   const nativeVolumeRef = useRef(playerVolume);
   const nativeMutedRef = useRef(false);
   // Echoes of superseded writes must not rebase rapid relative steps.
@@ -46,6 +47,7 @@ export function usePlayerVolumeControls({
     }
     if (!isMutedRef.current) setVolume(value);
     volumeRef.current = value;
+    if (value > 0) lastPositiveVolumeRef.current = value;
   };
   const applyNativeMute = (muted: boolean) => {
     nativeMutedRef.current = muted;
@@ -58,6 +60,7 @@ export function usePlayerVolumeControls({
     pendingVolumeRef.current = null;
     const restored = nativeVolumeRef.current;
     volumeRef.current = restored;
+    if (restored > 0) lastPositiveVolumeRef.current = restored;
     setVolume(restored);
     scheduleVolumePersist({ playerVolume: restored });
   }, [scheduleVolumePersist]);
@@ -68,6 +71,7 @@ export function usePlayerVolumeControls({
     const volumeChanged = volumeRef.current !== playerVolume;
     setVolume(playerVolume);
     volumeRef.current = playerVolume;
+    if (playerVolume > 0) lastPositiveVolumeRef.current = playerVolume;
 
     if (mpvInitializedRef.current && volumeChanged) {
       pendingVolumeRef.current = playerVolume;
@@ -83,6 +87,7 @@ export function usePlayerVolumeControls({
     }
     setVolume(newVol);
     volumeRef.current = newVol;
+    if (newVol > 0) lastPositiveVolumeRef.current = newVol;
     scheduleVolumePersist({ playerVolume: newVol });
     pendingVolumeRef.current = newVol;
     void scheduleMpvSet('volume', newVol, rollbackVolume);
@@ -132,7 +137,9 @@ export function usePlayerVolumeControls({
   const toggleMute = async () => {
     // At 0% the button already shows muted; pressing it means "sound back".
     if (isMutedRef.current || volumeRef.current === 0) {
-      return handleVolumeChange(volumeRef.current > 0 ? volumeRef.current : 50);
+      return handleVolumeChange(
+        volumeRef.current > 0 ? volumeRef.current : lastPositiveVolumeRef.current,
+      );
     }
     setIsMuted(true);
     triggerOsd({ kind: 'volume', level: 0 });

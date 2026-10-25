@@ -33,7 +33,10 @@ import {
 } from '@/lib/api-cache';
 import type { InvokeApi } from '@/lib/api-core';
 import { trackNoncriticalAppWrite, trackPendingAppWrite } from '@/lib/pending-app-writes';
-import { buildStreamRankingCacheKey, type StreamRankingOptions } from '@/lib/stream-ranking';
+import {
+  buildStreamRankingCacheKey,
+  type StreamRankingOptions,
+} from '@/lib/stream-ranking-cache-key';
 import { nonBlank } from '@/lib/utils';
 
 interface PlaybackApiContext {
@@ -361,6 +364,11 @@ export function createPlaybackApi({ safeInvoke }: PlaybackApiContext) {
         safeInvoke<WatchProgress[]>('remove_all_from_watch_history', { id, type }),
       );
     },
+    // Hides the title from the home rail (false restores it); history rows stay.
+    setContinueWatchingDismissed: (id: string, type: string, dismissed: boolean) =>
+      trackPendingAppWrite(
+        safeInvoke<void>('set_continue_watching_dismissed', { id, type, dismissed }),
+      ),
     bulkRemoveFromWatchHistory: (items: { id: string; type: string }[]) => {
       bumpWatchProgressEpoch();
       return trackPendingAppWrite(

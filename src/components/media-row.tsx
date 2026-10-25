@@ -1,12 +1,16 @@
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
-import { ChevronRight } from 'lucide-react';
-import { type ReactNode, useEffect, useRef } from 'react';
+import { Check, ChevronDown, ChevronRight } from 'lucide-react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router';
-import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
-import type { MediaItem } from '@/lib/api';
-import { handleRadioGroupKeyDown } from '@/lib/dom';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu';
+import { getErrorMessage, isNoCapableAddonError, type MediaItem } from '@/lib/api';
 import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
-import { cn, scrollBehavior } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
@@ -25,6 +29,7 @@ interface GenreFilterConfig {
 interface MediaRowProps {
   title: string;
   titleHref?: string;
+  headerActions?: ReactNode;
   queryKey: string[];
   queryFn: () => Promise<MediaItem[]>;
   enabled?: boolean;
@@ -35,24 +40,13 @@ interface MediaRowProps {
 export function MediaRow({
   title,
   titleHref,
+  headerActions,
   queryKey,
   queryFn,
   enabled = true,
   minItems = 1,
   genreFilter,
 }: MediaRowProps) {
-  const genreScrollRef = useRef<HTMLDivElement>(null);
-  const {
-    bind: bindGenreScrollRef,
-    canScrollLeft,
-    canScrollRight,
-    syncScrollState,
-  } = useScrollEdgeIndicators(genreScrollRef);
-  const genreOptions = genreFilter?.options;
-  useEffect(() => {
-    syncScrollState();
-  }, [genreOptions, syncScrollState]);
-
   const {
     data = EMPTY_ITEMS,
     isFetching,
@@ -70,76 +64,6 @@ export function MediaRow({
     placeholderData: enabled ? keepPreviousData : undefined,
   });
 
-  const revealGenreTab = (tab: HTMLElement) => {
-    const container = genreScrollRef.current;
-    if (!container) return;
-    const bounds = container.getBoundingClientRect();
-    const { left, right } = tab.getBoundingClientRect();
-    const delta =
-      left < bounds.left + 24 ? left - bounds.left - 24 : Math.max(0, right - bounds.right + 24);
-    if (delta !== 0) container.scrollBy({ left: delta, behavior: scrollBehavior() });
-  };
-
-  const genreTabs = genreFilter ? (
-    <div className='relative'>
-      <div
-        ref={bindGenreScrollRef}
-        role='radiogroup'
-        aria-label={`${title} genres`}
-        className='flex items-center gap-5 overflow-x-auto border-b border-white/[0.06] pr-2 scrollbar-hide'
-      >
-        {genreFilter.options.map((genre) => {
-          const isActive = genreFilter.active === genre;
-          return (
-            <button
-              key={genre}
-              type='button'
-              role='radio'
-              tabIndex={isActive ? 0 : -1}
-              aria-checked={isActive}
-              onKeyDown={handleRadioGroupKeyDown}
-              onClick={(event) => {
-                revealGenreTab(event.currentTarget);
-                if (!isActive) genreFilter.onChange(genre);
-              }}
-              // Pointer focus lands on press; scrolling then would slide the tab out from under the click.
-              onFocus={(event) => {
-                if (event.currentTarget.matches(':focus-visible'))
-                  revealGenreTab(event.currentTarget);
-              }}
-              className={cn(
-                'relative min-h-9 flex-none whitespace-nowrap rounded-xs pb-2.5 pt-1 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none',
-                isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-200',
-              )}
-            >
-              {genre}
-              <span
-                className={cn(
-                  'absolute inset-x-0 -bottom-px h-[2px] rounded-full bg-(--accent-nav) transition-opacity duration-200 motion-reduce:transition-none',
-                  isActive ? 'opacity-100' : 'opacity-0',
-                )}
-              />
-            </button>
-          );
-        })}
-      </div>
-      <div
-        aria-hidden='true'
-        className={cn(
-          'pointer-events-none absolute inset-y-0 left-0 w-6 bg-linear-to-r from-black to-transparent transition-opacity duration-150 motion-reduce:transition-none',
-          canScrollLeft ? 'opacity-100' : 'opacity-0',
-        )}
-      />
-      <div
-        aria-hidden='true'
-        className={cn(
-          'pointer-events-none absolute inset-y-0 right-0 w-6 bg-linear-to-l from-black to-transparent transition-opacity duration-150 motion-reduce:transition-none',
-          canScrollRight ? 'opacity-100' : 'opacity-0',
-        )}
-      />
-    </div>
-  ) : null;
-
   const retryBanner = (
     <RetryBanner
       className='w-full max-w-xl'
@@ -149,10 +73,28 @@ export function MediaRow({
     />
   );
 
+  const manageAddonsLink = (
+    <Link
+      to='/settings?section=addons'
+      className='rounded-xs text-zinc-200 underline underline-offset-4 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+    >
+      Manage addons
+    </Link>
+  );
+
   let notice: ReactNode;
   if (!enabled && data.length === 0) {
     if (!genreFilter) return null;
     notice = <p>Reconnect to browse this catalog.</p>;
+  } else if (isNoCapableAddonError(error) && data.length === 0) {
+    // One explanation per page: secondary rails would repeat the same capability gap.
+    if (!genreFilter) return null;
+    notice = (
+      <>
+        <p>{getErrorMessage(error)}</p>
+        {manageAddonsLink}
+      </>
+    );
   } else if ((error || (isFetched && isLoading)) && data.length === 0) {
     notice = retryBanner;
   } else if (!isLoading && data.length === 0) {
@@ -161,12 +103,7 @@ export function MediaRow({
       genreFilter.active === genreFilter.allOption ? (
         <>
           <p>No titles available. Check your catalog addons or try again later.</p>
-          <Link
-            to='/settings?section=addons'
-            className='rounded-xs text-zinc-200 underline underline-offset-4 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
-          >
-            Manage addons
-          </Link>
+          {manageAddonsLink}
         </>
       ) : (
         <p>Nothing in {genreFilter.active} right now — try another genre.</p>
@@ -177,23 +114,65 @@ export function MediaRow({
 
   return (
     <HorizontalMediaRail
+      headerActions={
+        headerActions || genreFilter ? (
+          <div className='flex min-w-0 flex-wrap items-center gap-x-6 gap-y-3'>
+            {headerActions}
+            {genreFilter && (
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type='button'
+                    aria-label={`${title} genre: ${genreFilter.active}`}
+                    className='ml-auto inline-flex min-h-9 max-w-full items-center gap-2 rounded-md border border-white/10 bg-white/[0.025] px-3 text-[13px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
+                  >
+                    <span className='max-w-44 truncate'>
+                      {genreFilter.active === genreFilter.allOption
+                        ? 'All genres'
+                        : genreFilter.active}
+                    </span>
+                    <ChevronDown aria-hidden='true' className='size-3.5 shrink-0 text-zinc-400' />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent
+                  align='end'
+                  aria-label={`${title} genres`}
+                  className='max-h-80 w-56 overflow-y-auto rounded-lg border-white/10 bg-zinc-950 p-1.5'
+                >
+                  {genreFilter.options.map((genre) => (
+                    <DropdownMenuItem
+                      key={genre}
+                      role='menuitemradio'
+                      aria-checked={genreFilter.active === genre}
+                      onSelect={() => {
+                        if (genreFilter.active !== genre) genreFilter.onChange(genre);
+                      }}
+                      className='min-h-9 justify-between gap-3 rounded-md px-3 text-sm text-zinc-300 aria-checked:bg-white/[0.06] aria-checked:text-white'
+                    >
+                      {genre === genreFilter.allOption ? 'All genres' : genre}
+                      {genreFilter.active === genre && (
+                        <Check aria-hidden='true' className='size-4 shrink-0 text-(--accent-nav)' />
+                      )}
+                    </DropdownMenuItem>
+                  ))}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+        ) : undefined
+      }
       title={
         titleHref ? (
           <Link
             to={titleHref}
-            className='group/rail-title inline-flex max-w-full items-center gap-1 rounded-xs transition-colors hover:text-zinc-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
+            aria-label={`Browse ${title}`}
+            className='group/rail-title inline-flex max-w-full items-center gap-1.5 rounded-xs transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
           >
             {title}
             <ChevronRight
               aria-hidden='true'
-              className='h-4 w-4 shrink-0 text-zinc-600 transition-[color,translate] duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-400'
+              className='h-4 w-4 shrink-0 text-zinc-400 transition-[color,translate] duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-100'
             />
-            <span
-              aria-hidden='true'
-              className='hidden text-[11px] font-medium tracking-normal text-zinc-400 opacity-0 transition-opacity duration-150 group-hover/rail-title:opacity-100 group-focus-visible/rail-title:opacity-100 motion-reduce:transition-none sm:inline'
-            >
-              See all
-            </span>
           </Link>
         ) : (
           title
@@ -207,12 +186,7 @@ export function MediaRow({
       notice={notice}
       getItemKey={mediaCardRailKey}
       renderItem={renderMediaCardRailItem}
-      headerContent={
-        <>
-          {genreTabs}
-          {error && !notice && <div className='mt-3'>{retryBanner}</div>}
-        </>
-      }
+      headerContent={error && !notice && <div className='mt-3'>{retryBanner}</div>}
       viewportClassName={cn(
         'transition-opacity duration-200 motion-reduce:transition-none',
         // Delayed so a cache-fast genre switch never flickers the dim.

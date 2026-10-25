@@ -1,8 +1,6 @@
 import { useSyncExternalStore } from 'react';
 
 function subscribeToOnlineStatus(onStoreChange: () => void) {
-  if (typeof window === 'undefined') return () => {};
-
   window.addEventListener('online', onStoreChange);
   window.addEventListener('offline', onStoreChange);
 
@@ -13,10 +11,9 @@ function subscribeToOnlineStatus(onStoreChange: () => void) {
 }
 
 function getOnlineSnapshot() {
-  if (typeof navigator === 'undefined') return true;
   return navigator.onLine;
 }
 
 export function useOnlineStatus() {
-  return useSyncExternalStore(subscribeToOnlineStatus, getOnlineSnapshot, () => true);
+  return useSyncExternalStore(subscribeToOnlineStatus, getOnlineSnapshot);
 }

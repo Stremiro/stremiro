@@ -2,7 +2,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
-import { clamp, cn, scrollBehavior } from '@/lib/utils';
+import { clamp, cn, pluralize, scrollBehavior } from '@/lib/utils';
 
 interface SeasonSwitcherProps {
   seasons: { number: number; episodeCount: number }[];
@@ -197,7 +197,7 @@ export function SeasonSwitcher({
               id={`season-tab-${season.number}`}
               aria-controls='details-episodes-panel'
               aria-selected={isActive}
-              aria-label={`${label}, ${season.episodeCount} ${season.episodeCount === 1 ? 'episode' : 'episodes'}${watched > 0 ? `, ${watched} watched` : ''}`}
+              aria-label={`${label}, ${pluralize(season.episodeCount, 'episode')}${watched > 0 ? `, ${watched} watched` : ''}`}
               tabIndex={isActive ? 0 : -1}
               className={cn(
                 'relative z-1 flex h-12 min-w-[92px] shrink-0 flex-col items-center justify-center whitespace-nowrap rounded-md px-4 text-[13.5px] font-semibold leading-none transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40 motion-reduce:transition-none',
@@ -215,7 +215,7 @@ export function SeasonSwitcher({
                     isActive ? 'text-zinc-200' : 'text-zinc-400',
                   )}
                 >
-                  {season.episodeCount} {season.episodeCount === 1 ? 'episode' : 'episodes'}
+                  {pluralize(season.episodeCount, 'episode')}
                 </span>
               )}
               {watched > 0 && season.episodeCount > 0 && (

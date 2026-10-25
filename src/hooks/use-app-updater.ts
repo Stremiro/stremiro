@@ -70,11 +70,8 @@ export function useAppUpdater({ includeCurrentVersion = false } = {}) {
     staleTime: 1000 * 60 * 60,
   });
 
-  const checkForUpdates = useCallback(() => runAppUpdateCheck(queryClient), [queryClient]);
-  const installUpdate = useCallback(
-    (update: AppUpdateHandle) => runAppUpdateInstall(queryClient, update),
-    [queryClient],
-  );
+  const checkForUpdates = () => runAppUpdateCheck(queryClient);
+  const installUpdate = (update: AppUpdateHandle) => runAppUpdateInstall(queryClient, update);
   return {
     checkForUpdates,
     currentVersion,

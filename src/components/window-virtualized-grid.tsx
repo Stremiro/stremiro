@@ -87,7 +87,7 @@ export function WindowVirtualizedGrid<T>({
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container || typeof ResizeObserver === 'undefined') return;
+    if (!container) return;
 
     // Viewport-fluid — any metric-changing resize also resizes the container, so the observer owns every resync.
     const resizeObserver = new ResizeObserver(updateMetrics);

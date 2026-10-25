@@ -44,9 +44,7 @@
   }
 
   :root {
-    --app-accent: #ffffff;
     --app-accent-rgb: 255 255 255;
-    --on-app-accent: #000000;
     /* Ambient tint strength 0..1 — the glow slider drives it live. */
     --app-glow: 1;
     /* Layout resolves opted-out surfaces to neutral accents. */
@@ -134,20 +132,28 @@
     background-color: #3f3f46;
   }
 
+  /* WebView2 paints the gutter corner and the resize grip Chrome-white unless
+     colored — a lit square in the bottom-right of any scroll container. Match
+     the app background so it disappears. */
+  ::-webkit-scrollbar-corner,
+  ::-webkit-resizer {
+    background-color: black;
+  }
+
   /* Opening a title: the clicked artwork zooms through in place and the details hero settles in. */
   ::view-transition-old(details-source) {
-    animation: vt-zoom-out 200ms cubic-bezier(0.4, 0, 1, 1) both;
+    animation: vt-zoom-out 160ms cubic-bezier(0.33, 1, 0.68, 1) both;
   }
 
   ::view-transition-new(details-hero) {
     height: 100%;
     object-fit: cover;
-    animation: vt-zoom-in 360ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    animation: vt-zoom-in 260ms cubic-bezier(0.22, 1, 0.36, 1) both;
   }
 
   ::view-transition-old(root),
   ::view-transition-new(root) {
-    animation-duration: 180ms;
+    animation-duration: 160ms;
   }
 
   /* The root crossfade already reveals the page; a zero duration (not a name change, which would
@@ -173,14 +179,14 @@
   @keyframes vt-zoom-out {
     to {
       opacity: 0;
-      transform: scale(1.06);
+      transform: scale(1.03);
     }
   }
 
   @keyframes vt-zoom-in {
     from {
       opacity: 0;
-      transform: scale(1.04);
+      transform: scale(1.015);
     }
   }
   /* Also cover dialogs, overlays, and loaders without local motion guards. */
@@ -197,6 +203,22 @@
 }
 
 @layer utilities {
+  @keyframes watch-progress-entrance {
+    from {
+      transform: scaleX(0);
+    }
+    to {
+      transform: scaleX(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: no-preference) {
+    .watch-progress-entrance {
+      transform-origin: left;
+      animation: watch-progress-entrance 300ms ease-out;
+    }
+  }
+
   @keyframes progress-slide {
     from {
       transform: translateX(-100%);
@@ -333,6 +355,19 @@
   .animate-action-pill {
     animation: action-pill-in 280ms cubic-bezier(0.22, 1, 0.36, 1);
   }
+
+  /* Player menu tab swaps: the new panel fades in place instead of popping. */
+  @keyframes player-menu-swap-in {
+    from {
+      opacity: 0;
+      transform: translate3d(0, 3px, 0);
+    }
+  }
+
+  .player-menu-swap {
+    animation: player-menu-swap-in 140ms cubic-bezier(0.22, 1, 0.36, 1);
+  }
+
   @media (prefers-reduced-motion: reduce) {
     .nav-switch-item,
     .nav-sliding-pill,
@@ -341,7 +376,8 @@
     }
 
     .page-enter,
-    .animate-action-pill {
+    .animate-action-pill,
+    .player-menu-swap {
       animation: none;
     }
   }

@@ -43,7 +43,7 @@ import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
 import { formatAirDate } from '@/lib/schedule-dates';
-import { cn, getEpisodeTitle } from '@/lib/utils';
+import { cn, getEpisodeTitle, pluralize } from '@/lib/utils';
 
 interface PlayerEpisodesToggleButtonProps {
   open: boolean;
@@ -59,10 +59,7 @@ export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesTog
       aria-keyshortcuts={ariaKeyShortcuts(keymap, 'episodes')}
       aria-expanded={open}
       aria-controls={open ? 'player-episodes-panel' : undefined}
-      className={cn(
-        CHROME_ICON_BUTTON_CLASS,
-        'text-[13px] font-semibold tracking-[-0.01em] lg:w-auto lg:gap-2 lg:pl-3 lg:pr-4',
-      )}
+      className={CHROME_ICON_BUTTON_CLASS}
       title={withShortcutHint('Episodes', keymap, 'episodes')}
       onClick={(e) => {
         e.stopPropagation();
@@ -74,7 +71,6 @@ export function PlayerEpisodesToggleButton({ open, onToggle }: PlayerEpisodesTog
         className={CHROME_ICON_CLASS}
         strokeWidth={CHROME_ICON_STROKE}
       />
-      <span className='hidden lg:inline'>Episodes</span>
     </button>
   );
 }
@@ -391,7 +387,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
             Episodes
           </h2>
           <span className='min-w-0 flex-1 truncate text-[12px] tabular-nums text-zinc-500'>
-            {seasonEpisodes.length} {seasonEpisodes.length === 1 ? 'episode' : 'episodes'}
+            {pluralize(seasonEpisodes.length, 'episode')}
           </span>
           {showJumpToCurrent && (
             <button
@@ -475,6 +471,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                           <span className='flex-1'>Season {season}</span>
                           {season === currentSeason && (
                             <span
+                              role='img'
                               aria-label='Now playing'
                               className='h-1.5 w-1.5 rounded-full bg-(--accent-act)'
                             />

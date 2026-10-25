@@ -8,7 +8,7 @@ import {
   parseYouTubePlayerState,
   postYouTubeCommand,
   postYouTubeListening,
-} from '@/lib/trailer-utils';
+} from '@/lib/youtube-player';
 import { cn } from '@/lib/utils';
 
 interface HoverTrailerPreviewProps {
@@ -17,6 +17,8 @@ interface HoverTrailerPreviewProps {
 
 const LISTENING_RETRY_MS = 250;
 const LISTENING_RETRY_BUDGET_MS = 4_000;
+// YouTube reflows its frame and chrome for a moment after playback starts; reveal once it settles.
+const REVEAL_SETTLE_MS = 600;
 
 export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -26,13 +28,32 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
   const visibilityPausedRef = useRef(true);
   const offscreenRef = useRef(true);
   const [revealed, setRevealed] = useState(false);
+  const revealedRef = useRef(false);
+  const revealTimerRef = useRef<number | null>(null);
+
+  const reveal = useCallback((next: boolean) => {
+    if (next && (revealedRef.current || revealTimerRef.current !== null)) return;
+    if (revealTimerRef.current !== null) {
+      window.clearTimeout(revealTimerRef.current);
+      revealTimerRef.current = null;
+    }
+    if (!next) {
+      revealedRef.current = false;
+      setRevealed(false);
+      return;
+    }
+    revealTimerRef.current = window.setTimeout(() => {
+      revealTimerRef.current = null;
+      revealedRef.current = true;
+      setRevealed(true);
+    }, REVEAL_SETTLE_MS);
+  }, []);
 
   const embedUrl = buildYouTubeEmbedUrl(videoId, {
     autoplay: true,
     controls: false,
     mute: true,
-    playsInline: true,
-    rel: false,
+    jsApi: true,
     chromeless: true,
     origin: window.location.origin,
   });
@@ -55,8 +76,9 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     connectedRef.current = false;
     visibilityPausedRef.current = true;
     offscreenRef.current = true;
-    setRevealed(false);
-  }, [videoId]);
+    reveal(false);
+    return () => reveal(false);
+  }, [reveal, videoId]);
 
   useEffect(() => {
     const handleMessage = (event: MessageEvent) => {
@@ -86,7 +108,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       // Autoplay can start after the visibility event already ran.
       if (document.hidden || !document.hasFocus() || offscreenRef.current) {
         visibilityPausedRef.current = true;
-        setRevealed(false);
+        reveal(false);
         if (
           playerState === YOUTUBE_PLAYER_STATE.PLAYING ||
           playerState === YOUTUBE_PLAYER_STATE.BUFFERING
@@ -98,16 +120,16 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
 
       if (playerState === YOUTUBE_PLAYER_STATE.PLAYING) {
         hasPlayedRef.current = true;
-        setRevealed(true);
+        reveal(true);
         return;
       }
 
       if (playerState === YOUTUBE_PLAYER_STATE.BUFFERING && hasPlayedRef.current) {
-        setRevealed(true);
+        reveal(true);
         return;
       }
 
-      setRevealed(false);
+      reveal(false);
 
       if (playerState === YOUTUBE_PLAYER_STATE.ENDED) {
         postYouTubeCommand(iframe, 'seekTo', [0, true]);
@@ -128,7 +150,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     return () => {
       window.removeEventListener('message', handleMessage);
     };
-  }, [handshake, videoId]);
+  }, [handshake, reveal, videoId]);
 
   // Pause while hidden, unfocused or offscreen; late autoplay is handled above.
   useEffect(() => {
@@ -138,7 +160,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       const shouldPause = document.hidden || !document.hasFocus() || offscreenRef.current;
       const wasPaused = visibilityPausedRef.current;
       visibilityPausedRef.current = shouldPause;
-      if (shouldPause) setRevealed(false);
+      if (shouldPause) reveal(false);
       if (connectedRef.current && (shouldPause || wasPaused)) {
         postYouTubeCommand(iframe, shouldPause ? 'pauseVideo' : 'playVideo');
       }
@@ -157,7 +179,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       window.removeEventListener('blur', syncVisibility);
       window.removeEventListener('focus', syncVisibility);
     };
-  }, [videoId]);
+  }, [reveal, videoId]);
 
   useEffect(() => {
     const startedAt = Date.now();
@@ -192,7 +214,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
         // Crop YouTube's edge chrome outside the preview.
         'absolute inset-0 h-full w-full scale-[1.3] border-0 pointer-events-none ease-out',
         revealed
-          ? 'opacity-100 transition-opacity duration-300'
+          ? 'opacity-100 transition-opacity duration-500'
           : 'opacity-0 transition-opacity duration-75',
       )}
       sandbox='allow-scripts allow-same-origin allow-presentation allow-popups'

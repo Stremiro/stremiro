@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { useCallback, useEffect, useMemo } from 'react';
+import { useCallback, useEffect } from 'react';
 
 import {
   type AppUiPreferences,
@@ -27,6 +27,8 @@ const preferenceFlushers = new Set<() => void>();
 let pendingPatch: AppUiPreferencesPatch | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushPendingPreferences: (() => Promise<void>) | null = null;
+let recentSearchTail: Promise<void> = Promise.resolve();
+let recentSearchGeneration = 0;
 
 export function registerAppUiPreferenceFlusher(flush: () => void): () => void {
   preferenceFlushers.add(flush);
@@ -41,11 +43,14 @@ async function flushAppUiPreferenceWrites(): Promise<void> {
   // A patch landing mid-drain re-arms flushPendingPreferences — keep draining
   // until none survives a settle, or close/export strands it on a dead timer.
   for (;;) {
+    const searches = recentSearchTail;
+    // eslint-disable-next-line no-await-in-loop
+    await searches;
     const pending = flushPendingPreferences;
-    if (!pending) break;
+    if (!pending && searches === recentSearchTail) break;
     // Sequential: the settle must observe the tail the drain just registered.
     // eslint-disable-next-line no-await-in-loop
-    await pending();
+    await pending?.();
     // eslint-disable-next-line no-await-in-loop
     await settleOptimisticQueryWrites([APP_UI_PREFERENCES_QUERY_KEY]);
   }
@@ -96,7 +101,7 @@ export function usePlayerKeymap(): PlayerKeymap {
     bindings: defaultBindingsQuery.data ?? DEFAULT_APP_UI_PREFERENCES.effectivePlayerKeybindings,
     overrides: DEFAULT_APP_UI_PREFERENCES.playerKeybindings,
   };
-  return useMemo(() => createPlayerKeymap(bindings, overrides), [bindings, overrides]);
+  return createPlayerKeymap(bindings, overrides);
 }
 
 export function useAppUiPreferences<T = AppUiPreferences>(
@@ -145,7 +150,7 @@ export function useAppUiPreferences<T = AppUiPreferences>(
 
   // Cache stays out of deps so an optimistic update can't re-run cleanup and flush a gesture early.
   const updatePreferences = useCallback(
-    (patch: AppUiPreferencesPatch) => {
+    (patch: AppUiPreferencesPatch, persist = true) => {
       claimOptimisticQueryWrite(APP_UI_PREFERENCES_QUERY_KEY);
       void queryClient.cancelQueries({ queryKey: APP_UI_PREFERENCES_QUERY_KEY, exact: true });
       // Compose on the latest cache value so two patches in one render cycle don't drop each other's fields.
@@ -154,6 +159,8 @@ export function useAppUiPreferences<T = AppUiPreferences>(
         ...patch,
       }));
 
+      // History intents own persistence on their ordered tail.
+      if (!persist) return;
       pendingPatch = { ...pendingPatch, ...patch };
       flushPendingPreferences = flushPreferences;
       if (flushTimer !== null) return;
@@ -181,5 +188,66 @@ export function useAppUiPreferences<T = AppUiPreferences>(
     preferencesQuery,
     updatePreferences,
     savePreferences,
+  };
+}
+
+/// Rust records, deduplicates, and caps the list; removal and clearing are whole-list patches.
+export function useRecentSearches() {
+  const queryClient = useQueryClient();
+  const {
+    preferences: recentSearches,
+    isHydrating,
+    updatePreferences,
+    savePreferences,
+  } = useAppUiPreferences((preferences) => preferences.recentSearches);
+
+  const recordRecentSearch = useCallback(
+    (query: string) => {
+      if (!query.trim()) return;
+      const generation = recentSearchGeneration;
+      // Best-effort: a failed record only loses one history entry.
+      recentSearchTail = recentSearchTail
+        .then(async () => {
+          await flushPendingPreferences?.().catch(() => undefined);
+          await settleOptimisticQueryWrites([APP_UI_PREFERENCES_QUERY_KEY]).catch(() => undefined);
+          if (generation !== recentSearchGeneration) return;
+          const saved = await api.recordRecentSearch(query);
+          if (generation !== recentSearchGeneration) return;
+          claimOptimisticQueryWrite(APP_UI_PREFERENCES_QUERY_KEY);
+          queryClient.setQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY, (current) =>
+            current ? { ...current, recentSearches: saved.recentSearches } : saved,
+          );
+        })
+        .catch(() => undefined);
+    },
+    [queryClient],
+  );
+
+  const updateRecentSearches = (query: string | null) => {
+    if (query === null) ++recentSearchGeneration;
+    const generation = recentSearchGeneration;
+    const patch = () => {
+      const current =
+        queryClient.getQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY) ??
+        DEFAULT_APP_UI_PREFERENCES;
+      return {
+        recentSearches:
+          query === null ? [] : current.recentSearches.filter((entry) => entry !== query),
+      };
+    };
+    updatePreferences(patch(), false);
+    const write = recentSearchTail.then(() =>
+      generation === recentSearchGeneration ? savePreferences(patch()) : undefined,
+    );
+    recentSearchTail = write.catch(() => undefined);
+    return write;
+  };
+
+  return {
+    recentSearches,
+    isHydrating,
+    recordRecentSearch,
+    removeRecentSearch: (query: string) => updateRecentSearches(query),
+    clearRecentSearches: () => updateRecentSearches(null),
   };
 }

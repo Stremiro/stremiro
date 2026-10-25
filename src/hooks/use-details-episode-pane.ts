@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 
 import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
 import { type Episode, type MediaDetails } from '@/lib/api';
@@ -105,8 +105,10 @@ export function useDetailsEpisodePane({
   const episodeSeasonKey = (season: number | 'none') =>
     `${effectiveRouteId || 'unknown'}:${season}`;
   const currentEpisodeSeasonKey = episodeSeasonKey(selectedSeason ?? 'none');
-  const seasonEpisodes =
-    selectedSeason === null ? EMPTY_EPISODES : episodesInSeason(item, selectedSeason);
+  const seasonEpisodes = useMemo(
+    () => (selectedSeason === null ? EMPTY_EPISODES : episodesInSeason(item, selectedSeason)),
+    [item, selectedSeason],
+  );
   const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const {
     effectiveEpisodeSearch,

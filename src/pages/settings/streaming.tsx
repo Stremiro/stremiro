@@ -7,9 +7,19 @@ import {
 } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, GripVertical, Link2, Loader2, Plus, Trash2 } from 'lucide-react';
+import {
+  Check,
+  GripVertical,
+  Link2,
+  Loader2,
+  Plus,
+  Puzzle,
+  SlidersHorizontal,
+  Trash2,
+} from 'lucide-react';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import {
@@ -21,7 +31,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { type AddonConfig, api, getErrorMessage } from '@/lib/api';
+import { type AddonConfig, type AddonResourceKind, api, getErrorMessage } from '@/lib/api';
 import { copyText } from '@/lib/notify';
 import {
   ADDON_CONFIGS_QUERY_KEY,
@@ -30,6 +40,7 @@ import {
 } from '@/lib/query-invalidation';
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
+import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn, queryNeedsRetry } from '@/lib/utils';
@@ -61,11 +72,19 @@ const ADDON_ICON_BUTTON_CLASS =
   'flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35';
 const ADDON_COPIED_FEEDBACK_MS = 1600;
 
+const ADDON_RESOURCE_LABELS: Record<AddonResourceKind, string> = {
+  catalog: 'Catalog',
+  meta: 'Metadata',
+  stream: 'Streams',
+  subtitles: 'Subtitles',
+};
+
 function addonMonogram(name: string) {
   return name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?';
 }
 
 function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: AddonRowProps) {
+  const [addonLogoSrc, onAddonLogoError] = useFailedSrc(addon.logo);
   const [copied, setCopied] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const removeConfirmedRef = useRef(false);
@@ -88,6 +107,12 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
     }
   };
 
+  const handleConfigure = () => {
+    api.openAddonConfigurePage(addon.id).catch((error: unknown) => {
+      toast.error('Could not open addon configuration', { description: getErrorMessage(error) });
+    });
+  };
+
   return (
     <>
       {handle}
@@ -97,19 +122,43 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
           !addon.enabled && 'opacity-45',
         )}
       >
-        <span
-          aria-hidden='true'
-          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
-        >
-          {addonMonogram(addon.name)}
-        </span>
+        {addonLogoSrc ? (
+          // A real logo speaks for itself; the tile treatment stays a letter fallback.
+          <RemoteImage
+            src={addonLogoSrc}
+            alt=''
+            loading='lazy'
+            onError={onAddonLogoError}
+            className='h-9 w-9 shrink-0 object-contain drop-shadow-[0_1px_3px_rgba(0,0,0,0.6)]'
+          />
+        ) : (
+          <span
+            aria-hidden='true'
+            className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.07] bg-linear-to-b from-white/[0.08] to-white/[0.02] text-[13px] font-semibold text-zinc-200 shadow-[inset_0_1px_0_rgba(255,255,255,0.05)]'
+          >
+            {addonMonogram(addon.name)}
+          </span>
+        )}
         <div className='min-w-0 flex-1'>
           <div className='flex min-w-0 items-center gap-2'>
             <span title={addon.name} className='truncate text-[13.5px] font-medium text-zinc-100'>
               {addon.name}
             </span>
+            {addon.version ? (
+              <span className='shrink-0 text-[11.5px] tabular-nums text-zinc-500'>
+                v{addon.version}
+              </span>
+            ) : null}
             {pinned ? <span className='shrink-0 text-[11.5px] text-zinc-500'>Default</span> : null}
           </div>
+          {addon.description ? (
+            <p
+              title={addon.description}
+              className='mt-1 truncate text-[12px] leading-tight text-zinc-400'
+            >
+              {addon.description}
+            </p>
+          ) : null}
           <p
             data-selectable='true'
             title={addon.displayUrl}
@@ -117,11 +166,40 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
           >
             {addon.displayUrl}
           </p>
+          {addon.resources && addon.resources.length > 0 ? (
+            <ul aria-label='Provides' className='mt-1.5 flex flex-wrap gap-1'>
+              {addon.resources.map((resource) => (
+                <li
+                  key={resource}
+                  className='inline-flex h-[18px] items-center rounded-[5px] border border-white/[0.08] bg-transparent px-1.5 text-[10.5px] font-semibold leading-none text-zinc-400'
+                >
+                  {ADDON_RESOURCE_LABELS[resource]}
+                </li>
+              ))}
+            </ul>
+          ) : null}
         </div>
       </div>
 
       {/* Fixed slots keep controls column-aligned; pinned rows reserve the remove slot. */}
       <div className='col-start-2 flex shrink-0 items-center justify-self-end gap-1'>
+        {addon.configurable ? (
+          <button
+            type='button'
+            data-addon-control='configure'
+            title='Configure'
+            aria-label={`Configure ${addon.name}`}
+            onClick={handleConfigure}
+            className={cn(
+              ADDON_ICON_BUTTON_CLASS,
+              'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+            )}
+          >
+            <SlidersHorizontal aria-hidden='true' className='h-4 w-4' />
+          </button>
+        ) : (
+          <span aria-hidden='true' className='h-8 w-8' />
+        )}
         <button
           type='button'
           data-addon-control='copy'
@@ -262,7 +340,7 @@ function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
   );
 }
 
-export function StreamingSources() {
+export function AddonSettings() {
   const queryClient = useQueryClient();
   const [newUrl, setNewUrl] = useState('');
   const [isDragging, setIsDragging] = useState(false);
@@ -296,6 +374,14 @@ export function StreamingSources() {
             addon.id === action.id ? { ...addon, enabled: action.enabled } : addon,
           ),
         );
+      } else if (action.kind === 'reorder' && previous) {
+        const order = new Map(action.ids.map((id, index) => [id, index]));
+        queryClient.setQueryData(ADDON_CONFIGS_QUERY_KEY, [
+          ...previous.filter((addon) => addon.pinned),
+          ...previous
+            .filter((addon) => !addon.pinned)
+            .toSorted((a, b) => (order.get(a.id) ?? Infinity) - (order.get(b.id) ?? Infinity)),
+        ]);
       }
       return previous;
     },
@@ -391,6 +477,20 @@ export function StreamingSources() {
   const duplicateAddonName = inspection?.duplicateOf;
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
   const canSubmitNewAddon = isValidNewUrl && !duplicateAddonName && !isWorking;
+  const addonHintTone = !inspection
+    ? 'text-zinc-500'
+    : isConfigureCandidate || duplicateAddonName
+      ? 'text-amber-400'
+      : !isValidNewUrl
+        ? 'text-red-400'
+        : 'text-emerald-400';
+  const addonHintText = !inspection
+    ? 'Checking…'
+    : !isValidNewUrl
+      ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
+      : duplicateAddonName
+        ? `Already configured as ${duplicateAddonName}.`
+        : `Ready: ${inspection.displayUrl}`;
 
   const handleToggle = (id: string) => {
     if (isWorking) return;
@@ -448,6 +548,7 @@ export function StreamingSources() {
   return (
     <SettingsGroup>
       <SettingsGroupHeader
+        icon={Puzzle}
         title='Addons'
         description='Cinemeta and OpenSubtitles are pinned defaults. Drag other addons to set stream priority.'
         action={
@@ -506,22 +607,10 @@ export function StreamingSources() {
             id='addon-url-hint'
             className={cn(
               'mt-2.5 text-[12px] leading-relaxed [overflow-wrap:anywhere]',
-              !inspection
-                ? 'text-zinc-500'
-                : isConfigureCandidate || duplicateAddonName
-                  ? 'text-amber-400'
-                  : !isValidNewUrl
-                    ? 'text-red-400'
-                    : 'text-emerald-400',
+              addonHintTone,
             )}
           >
-            {!inspection
-              ? 'Checking…'
-              : !isValidNewUrl
-                ? (inspection.error ?? ADDON_URL_INVALID_MESSAGE)
-                : duplicateAddonName
-                  ? `Already configured as ${duplicateAddonName}.`
-                  : `Ready: ${inspection.displayUrl}`}
+            {addonHintText}
           </p>
         ) : (
           <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
@@ -556,7 +645,7 @@ export function StreamingSources() {
           // No empty state: the backend always pins default addons.
           <div
             ref={addonRowsRef}
-            className='divide-y divide-white/[0.05]'
+            className='divide-y divide-white/[0.06]'
             data-escape-capture={isDragging ? '' : undefined}
           >
             <SettingsQueryError
@@ -584,7 +673,7 @@ export function StreamingSources() {
                   items={userAddons.map((a) => a.id)}
                   strategy={verticalListSortingStrategy}
                 >
-                  <div className='divide-y divide-white/[0.05]'>
+                  <div className='divide-y divide-white/[0.06]'>
                     {userAddons.map((addon) => (
                       <SortableAddonRow
                         key={addon.id}

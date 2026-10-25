@@ -6,7 +6,7 @@ const EDITABLE_TARGET_SELECTOR = 'input, textarea, select, [contenteditable="tru
 /** Radix popper content mounts under this wrapper attribute — a focused layer owns its keys. */
 export const RADIX_POPPER_CONTENT_SELECTOR = '[data-radix-popper-content-wrapper]';
 
-/** An open Radix dialog/popover — the docked mini player is a persistent `[role="dialog"]` without `data-state`, so it never matches. */
+/** An open Radix dialog/popover. */
 export const OPEN_DIALOG_SELECTOR = '[role="dialog"][data-state="open"]';
 
 /** Focus + select the Search page box (`data-search-input`); no-op off it. */

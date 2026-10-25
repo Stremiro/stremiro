@@ -18,11 +18,12 @@ import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { buildDetailsRoute } from '@/lib/player-navigation';
 import { CALENDAR_EVENTS_STALE_TIME_MS, calendarEventsQueryKey } from '@/lib/query-invalidation';
-import { parseLocalScheduleDate, SHORT_DATE_FORMATTER, toLocalDate } from '@/lib/schedule-dates';
+import { parseScheduleDay, SHORT_DATE_FORMATTER, toLocalDate } from '@/lib/schedule-dates';
 import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
+  pluralize,
   queryNeedsRetry,
   scrollBehavior,
   SIDEBAR_PAGE_COLUMN_INSETS,
@@ -48,8 +49,8 @@ const WEEKDAY_DATE_FORMATTER = new Intl.DateTimeFormat('en-US', {
 const CALENDAR_POPOVER_CLASS =
   'w-72 max-w-[calc(100vw-2rem)] bg-zinc-950/95 border-white/[0.1] text-white shadow-xl rounded-lg';
 
-function formatEventDayLabel(date: Date, today: Temporal.PlainDate): string {
-  const diff = today.until(toLocalDate(date)).days;
+function formatEventDayLabel(date: Temporal.PlainDate, today: Temporal.PlainDate): string {
+  const diff = today.until(date).days;
   if (diff <= 0) return 'Today';
   if (diff === 1) return 'Tomorrow';
   if (diff < 7) return WEEKDAY_FORMATTER.format(date);
@@ -99,10 +100,8 @@ export function Calendar() {
   const now = toLocalDate(useLocalDay());
   const monthParam = searchParams.get('month');
   const selectedMonth =
-    monthParam && /^\d{4}-\d{2}$/.test(monthParam)
-      ? parseLocalScheduleDate(`${monthParam}-01`)
-      : null;
-  const currentMonth = (selectedMonth ? toLocalDate(selectedMonth) : now).with({ day: 1 });
+    monthParam && /^\d{4}-\d{2}$/.test(monthParam) ? parseScheduleDay(`${monthParam}-01`) : null;
+  const currentMonth = (selectedMonth ?? now).with({ day: 1 });
   const { pathname, search } = useLocation();
   const from = `${pathname}${search}`;
   useDocumentTitle('Calendar');
@@ -124,25 +123,34 @@ export function Calendar() {
     isFetched,
     isPending,
     isLoading,
+    isPlaceholderData,
     isFetching: isFetchingSchedules,
     refetch: refetchSchedules,
   } = useQuery({
     queryKey: calendarEventsQueryKey(range),
     queryFn: ({ queryKey, signal }) => {
       const channel = new Channel<CalendarSchedule>();
+      const acceptSnapshots = queryClient.getQueryData(queryKey) === undefined;
+      let settled = false;
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       channel.onmessage = (cached) => {
-        if (!signal.aborted && queryClient.getQueryData(queryKey) === undefined) {
+        if (acceptSnapshots && !settled && !signal.aborted) {
           queryClient.setQueryData(queryKey, cached);
         }
       };
-      return api.getCalendarEvents(range, channel);
+      return api.getCalendarEvents(range, channel).finally(() => {
+        settled = true;
+      });
     },
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[3] === range.upcomingStart && previous
+        ? { ...previous, days: [] }
+        : undefined,
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,
     enabled: isOnline,
   });
   const isScheduleError = queryNeedsRetry({ isError, isFetched, isPending });
-  const isLoadingSchedules = isLoading && !isScheduleError;
+  const isLoadingSchedules = (isLoading || isPlaceholderData) && !isScheduleError;
   const hasMissingSchedules = (schedule?.missingCount ?? 0) > 0;
   const upcomingEvents = toCalendarEvents(schedule?.upcoming ?? []);
 
@@ -198,7 +206,7 @@ export function Calendar() {
   const handleKeyDown = useEffectEvent((event: KeyboardEvent) => {
     if (event.defaultPrevented || event.isComposing) return;
     if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
-    if (isEditableTarget(event.target, '[role="dialog"]')) return;
+    if (isEditableTarget(event.target, '[role="dialog"], [data-mini-player]')) return;
     if (document.querySelector(OPEN_DIALOG_SELECTOR)) return;
     if (document.querySelector(RADIX_POPPER_CONTENT_SELECTOR)) return;
     if (!['ArrowLeft', 'ArrowRight', 't', 'T'].includes(event.key)) return;
@@ -324,7 +332,7 @@ export function Calendar() {
             <div className='flex flex-wrap items-baseline gap-x-2.5 gap-y-1'>
               <h2 className='text-[15px] font-semibold text-white tracking-tight'>Upcoming</h2>
               <span className='text-[12px] text-zinc-500'>Next 14 days · up to 8 releases</span>
-              {isFetchingSchedules && !isLoadingSchedules && (
+              {isFetchingSchedules && schedule && (
                 <span role='status' className='text-[11px] text-(--accent-nav)'>
                   Updating…
                 </span>
@@ -341,7 +349,7 @@ export function Calendar() {
               </button>
             )}
           </div>
-          {isLoadingSchedules ? (
+          {isLoadingSchedules && !schedule ? (
             <>
               <span role='status' className='sr-only'>
                 Loading upcoming releases
@@ -372,19 +380,14 @@ export function Calendar() {
             <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
               {upcomingEvents.map((event, index) => (
                 <Fragment key={calendarEventKey(event)}>
-                  {(index === 0 ||
-                    !toLocalDate(event.date).equals(
-                      toLocalDate(upcomingEvents[index - 1].date),
-                    )) && (
+                  {(index === 0 || !event.date.equals(upcomingEvents[index - 1].date)) && (
                     <h3
                       className={cn(
                         'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
-                        toLocalDate(event.date).equals(now)
-                          ? 'text-(--accent-nav)'
-                          : 'text-zinc-400',
+                        event.date.equals(now) ? 'text-(--accent-nav)' : 'text-zinc-400',
                       )}
                     >
-                      <time dateTime={toLocalDate(event.date).toString()}>
+                      <time dateTime={event.date.toString()}>
                         {formatEventDayLabel(event.date, now)}
                       </time>
                     </h3>
@@ -402,6 +405,7 @@ export function Calendar() {
         isOnline &&
         !isFetchingSchedules &&
         !isScheduleError &&
+        !isPlaceholderData &&
         !hasMissingSchedules &&
         !hasMonthReleases && (
           <div
@@ -477,6 +481,7 @@ export function Calendar() {
                       isLoading={isLoadingSchedules}
                       isComplete={
                         !!schedule &&
+                        !isPlaceholderData &&
                         !isScheduleError &&
                         !hasMissingSchedules &&
                         !isFetchingSchedules
@@ -555,7 +560,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
   const daySummary = isLoading
     ? 'Loading releases'
     : dayEvents.length > 0
-      ? `${dayEvents.length} ${dayEvents.length === 1 ? 'release' : 'releases'}`
+      ? pluralize(dayEvents.length, 'release')
       : isComplete
         ? 'No releases'
         : '';

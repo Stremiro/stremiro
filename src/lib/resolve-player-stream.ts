@@ -1,7 +1,6 @@
 import type { RefObject } from 'react';
 import { api, type BestResolvedStream, type PlaybackStreamOutcome } from '@/lib/api';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
-import { buildStreamRankingOptions } from '@/lib/stream-ranking';
 import { nonBlank } from '@/lib/utils';
 
 /** Resolve/recover/prime coordinates: commands route on source, ranking overrides are canonical, `streamLookupId` defaults to `mediaId`. */
@@ -63,13 +62,15 @@ interface FailedStreamIdentity extends PreferredStreamIdentity {
 }
 
 export function playerStreamRankingOptions(request: PlayerStreamRequest) {
-  return buildStreamRankingOptions({
-    mediaId: request.mediaId,
-    mediaType: request.mediaType,
-    season: request.absoluteSeason,
-    episode: request.absoluteEpisode,
-    title: request.title,
-  });
+  const rankingMediaId = nonBlank(request.mediaId);
+  if (!rankingMediaId) return undefined;
+  return {
+    rankingMediaId,
+    rankingMediaType: nonBlank(request.mediaType),
+    rankingSeason: request.absoluteSeason,
+    rankingEpisode: request.absoluteEpisode,
+    rankingTitle: nonBlank(request.title),
+  };
 }
 
 /** `signal` cancels the backend resolve once every caller sharing it has aborted. */

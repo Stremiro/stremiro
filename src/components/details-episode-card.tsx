@@ -124,7 +124,7 @@ function EpisodeCardInner({
         )}
 
         <div className='pointer-events-none absolute inset-x-0 bottom-0 z-10 p-3.5'>
-          <p className='flex min-w-0 items-center gap-1.5 text-[11.5px] font-medium tabular-nums text-white/70'>
+          <p className='flex min-w-0 items-center gap-1.5 text-[13px] font-medium leading-4 tabular-nums text-zinc-300'>
             <span className='shrink-0 font-semibold text-white/90'>E{episode.episode}</span>
             {releaseLabel && (
               <>
@@ -147,7 +147,7 @@ function EpisodeCardInner({
               <div className='min-h-0 overflow-hidden'>
                 <p
                   id={descriptionId}
-                  className='line-clamp-3 pt-1.5 text-[12.5px] leading-[1.45] text-zinc-200'
+                  className='line-clamp-2 pt-1.5 text-[13px] leading-snug text-zinc-200'
                 >
                   {description}
                 </p>

@@ -1,4 +1,4 @@
-import { Plus, RotateCcw } from 'lucide-react';
+import { Keyboard, Lock, Plus, RotateCcw } from 'lucide-react';
 import { type KeyboardEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { ShortcutTable } from '@/components/shortcut-table';
@@ -19,6 +19,7 @@ import {
 import { BROWSE_SHORTCUTS, CALENDAR_SHORTCUTS } from '@/lib/shortcuts';
 import { cn } from '@/lib/utils';
 import {
+  SETTINGS_CAPTION_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
   SettingsGroup,
@@ -30,9 +31,8 @@ const SLOT_IDS = ['primary', 'secondary'] as const;
 const MODIFIER_KEYS = new Set(['shift', 'control', 'alt', 'altgraph', 'meta', 'os']);
 
 const KEY_SLOT_CLASS =
-  'inline-flex h-6 min-w-6 cursor-pointer items-center justify-center rounded-[5px] border px-1.5 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
-const SHORTCUT_CAPTION_CLASS =
-  'mb-1 text-[11px] font-medium uppercase tracking-[0.08em] text-zinc-500';
+  'inline-flex h-6 min-w-6 cursor-pointer items-center justify-center whitespace-nowrap rounded-[5px] border px-1.5 font-mono text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/45 disabled:cursor-not-allowed disabled:opacity-50 aria-disabled:cursor-not-allowed aria-disabled:opacity-50';
+const SHORTCUT_CAPTION_CLASS = `mb-1.5 ${SETTINGS_CAPTION_CLASS}`;
 export const FIXED_SHORTCUT_SECTIONS = [
   ['Player', FIXED_PLAYER_SHORTCUTS],
   ['Browsing', BROWSE_SHORTCUTS],
@@ -68,6 +68,30 @@ export function ShortcutsSection() {
       .finally(() => {
         if (mountedRef.current) setIsSaving(false);
       });
+  };
+
+  const handleResetAll = () => {
+    if (isSaving || !hasOverrides) return;
+    cancelCapture();
+    const previous = preferences.playerKeybindings;
+    void save({}).then((saved) => {
+      if (!saved) return;
+      let undoUsed = false;
+      toast.success('Player shortcuts reset to defaults.', {
+        duration: 6000,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            if (undoUsed) return;
+            undoUsed = true;
+            cancelCapture();
+            void save(previous).then((restored) => {
+              if (restored) toast.success('Player shortcuts restored');
+            });
+          },
+        },
+      });
+    });
   };
 
   const startCapture = (next: Capture) => {
@@ -139,10 +163,11 @@ export function ShortcutsSection() {
   };
 
   return (
-    <div className='space-y-5'>
+    <div className='space-y-4'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your shortcuts." />
       <SettingsGroup id='setting-player-shortcuts'>
         <SettingsGroupHeader
+          icon={Keyboard}
           title='Player shortcuts'
           description={`Click a key to rebind it, up to ${MAX_KEYS_PER_PLAYER_ACTION} per action. Esc cancels, Backspace removes.`}
           action={
@@ -151,29 +176,7 @@ export function ShortcutsSection() {
               variant='outline'
               disabled={isHydrating}
               aria-disabled={isSaving || !hasOverrides || undefined}
-              onClick={() => {
-                if (isSaving || !hasOverrides) return;
-                cancelCapture();
-                const previous = preferences.playerKeybindings;
-                void save({}).then((saved) => {
-                  if (!saved) return;
-                  let undoUsed = false;
-                  toast.success('Player shortcuts reset to defaults.', {
-                    duration: 6000,
-                    action: {
-                      label: 'Undo',
-                      onClick: () => {
-                        if (undoUsed) return;
-                        undoUsed = true;
-                        cancelCapture();
-                        void save(previous).then((restored) => {
-                          if (restored) toast.success('Player shortcuts restored');
-                        });
-                      },
-                    },
-                  });
-                });
-              }}
+              onClick={handleResetAll}
               className={cn(
                 'h-9 gap-2 px-3.5 text-[13px] aria-disabled:pointer-events-none aria-disabled:opacity-50',
                 SETTINGS_OUTLINE_BUTTON_CLASS,
@@ -187,51 +190,63 @@ export function ShortcutsSection() {
         <p
           aria-live='polite'
           className={cn(
-            'border-b border-white/[0.06] px-5 text-[12.5px] text-zinc-300',
+            'border-b border-white/[0.06] px-4 sm:px-5 text-[12.5px] text-zinc-300',
             notice ? 'py-2.5' : 'hidden',
           )}
         >
           {notice}
         </p>
-        <SettingsBody className='@container space-y-5 py-4'>
-          {PLAYER_ACTION_GROUPS.map((group) => (
-            <section key={group} aria-label={group}>
-              <h3 className={SHORTCUT_CAPTION_CLASS}>{group}</h3>
-              <ul className='grid gap-x-8 @xl:grid-cols-2'>
-                {PLAYER_ACTIONS.filter((action) => action.group === group).map((action) => (
-                  <PlayerBindingRow
-                    key={action.id}
-                    action={action.id}
-                    label={action.label}
-                    keymap={keymap}
-                    capture={capture}
-                    disabled={isHydrating}
-                    isSaving={isSaving}
-                    onStartCapture={startCapture}
-                    onCaptureKey={handleCaptureKey}
-                    onCancelCapture={cancelCapture}
-                    onReset={() => {
-                      cancelCapture();
-                      const next = { ...keymap.overrides };
-                      delete next[action.id];
-                      void save(next);
-                    }}
-                  />
-                ))}
-              </ul>
-            </section>
-          ))}
+        <SettingsBody className='@container/shortcuts'>
+          <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
+            {PLAYER_ACTION_GROUPS.map((group) => (
+              <section key={group} aria-label={group} className='min-w-0'>
+                <h3 className={SHORTCUT_CAPTION_CLASS}>{group}</h3>
+                <ul className='divide-y divide-white/[0.06]'>
+                  {PLAYER_ACTIONS.filter((action) => action.group === group).map((action) => (
+                    <PlayerBindingRow
+                      key={action.id}
+                      action={action.id}
+                      label={action.label}
+                      keymap={keymap}
+                      capture={capture}
+                      disabled={isHydrating}
+                      isSaving={isSaving}
+                      onStartCapture={startCapture}
+                      onCaptureKey={handleCaptureKey}
+                      onCancelCapture={cancelCapture}
+                      onReset={() => {
+                        cancelCapture();
+                        const next = { ...keymap.overrides };
+                        delete next[action.id];
+                        void save(next);
+                      }}
+                    />
+                  ))}
+                </ul>
+              </section>
+            ))}
+          </div>
         </SettingsBody>
       </SettingsGroup>
       <SettingsGroup>
-        <SettingsGroupHeader title='Fixed shortcuts' />
-        <SettingsBody className='@container space-y-5 py-4'>
-          {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
-            <section key={title} aria-label={title}>
-              <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
-              <ShortcutTable shortcuts={shortcuts} idPrefix={`setting-fixed-${title}`} />
-            </section>
-          ))}
+        <SettingsGroupHeader
+          icon={Lock}
+          title='Fixed shortcuts'
+          description='Built-in player, browsing and Calendar shortcuts. These cannot be reassigned.'
+        />
+        <SettingsBody className='@container/shortcuts'>
+          <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
+            {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
+              <section key={title} aria-label={title} className='min-w-0'>
+                <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
+                <ShortcutTable
+                  shortcuts={shortcuts}
+                  idPrefix={`setting-fixed-${title}`}
+                  className='grid-cols-1 divide-y divide-white/[0.06] @xl:grid-cols-1 [&>div]:h-auto [&>div]:min-h-9 [&>div]:py-1.5 [&_dt]:whitespace-normal [&_dt]:overflow-visible [&_dd]:max-w-[60%] [&_dd]:flex-wrap [&_dd]:justify-end'
+                />
+              </section>
+            ))}
+          </div>
         </SettingsBody>
       </SettingsGroup>
     </div>
@@ -267,16 +282,19 @@ function PlayerBindingRow({
   const visibleSlots = SLOT_IDS.slice(0, Math.min(keys.length + 1, MAX_KEYS_PER_PLAYER_ACTION));
 
   return (
-    <li id={`setting-shortcut-${action}`} className='flex h-10 items-center justify-between gap-3'>
-      <span className='flex min-w-0 items-center gap-2 text-[13px] text-zinc-200'>
-        <span className='truncate'>{label}</span>
+    <li
+      id={`setting-shortcut-${action}`}
+      className='flex min-h-10 items-center justify-between gap-3 py-2'
+    >
+      <span className='flex min-w-0 flex-1 items-center gap-2 text-[13px] leading-snug text-zinc-200'>
+        <span>{label}</span>
         {customized ? (
           <span title='Customized' className='h-1.5 w-1.5 shrink-0 rounded-full bg-(--accent-nav)'>
             <span className='sr-only'>Customized</span>
           </span>
         ) : null}
       </span>
-      <div className='flex shrink-0 items-center gap-1'>
+      <div className='flex max-w-[65%] shrink-0 flex-wrap items-center justify-end gap-1'>
         {visibleSlots.map((slotId, slot) => {
           const key = keys[slot] ?? null;
           const listening = capture?.action === action && capture.slot === slot;
@@ -314,7 +332,9 @@ function PlayerBindingRow({
               )}
             >
               {listening ? (
-                <span className='animate-pulse font-sans'>Press a key</span>
+                <span className='animate-pulse font-sans motion-reduce:animate-none'>
+                  Press a key
+                </span>
               ) : keyLabel ? (
                 keyLabel
               ) : (

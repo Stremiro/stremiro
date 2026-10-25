@@ -1,4 +1,4 @@
-const YOUTUBE_EMBED_BASE_URL = 'https://www.youtube-nocookie.com/embed';
+const YOUTUBE_EMBED_ORIGIN = 'https://www.youtube-nocookie.com';
 
 export const YOUTUBE_PLAYER_STATE = {
   ENDED: 0,
@@ -7,7 +7,13 @@ export const YOUTUBE_PLAYER_STATE = {
   BUFFERING: 3,
 } as const;
 
-type YouTubePlayerCommand = 'addEventListener' | 'mute' | 'pauseVideo' | 'playVideo' | 'seekTo';
+type YouTubePlayerCommand =
+  | 'addEventListener'
+  | 'mute'
+  | 'pauseVideo'
+  | 'playVideo'
+  | 'seekTo'
+  | 'setVolume';
 
 const YOUTUBE_PLAYER_ORIGINS = new Set([
   'https://www.youtube.com',
@@ -23,7 +29,9 @@ interface YouTubeEmbedOptions {
   playsInline?: boolean;
   rel?: boolean;
   origin?: string;
-  // Hover-preview: disable kb/fs/annotations + enable JS API (wait for PLAYING before reveal). Title/channel chrome is unavoidable.
+  // Enables postMessage control (state events, volume).
+  jsApi?: boolean;
+  // Hover-preview: disable kb/fs/annotations. Title/channel chrome is unavoidable.
   chromeless?: boolean;
 }
 
@@ -36,6 +44,7 @@ export function buildYouTubeEmbedUrl(
     playsInline = true,
     rel = false,
     origin,
+    jsApi = false,
     chromeless = false,
   }: YouTubeEmbedOptions = {},
 ): string {
@@ -51,6 +60,9 @@ export function buildYouTubeEmbedUrl(
     params.set('disablekb', '1');
     params.set('fs', '0');
     params.set('iv_load_policy', '3');
+  }
+
+  if (jsApi) {
     params.set('enablejsapi', '1');
   }
 
@@ -58,10 +70,8 @@ export function buildYouTubeEmbedUrl(
     params.set('origin', origin);
   }
 
-  return `${YOUTUBE_EMBED_BASE_URL}/${videoId}?${params.toString()}`;
+  return `${YOUTUBE_EMBED_ORIGIN}/embed/${videoId}?${params.toString()}`;
 }
-
-const YOUTUBE_EMBED_ORIGIN = 'https://www.youtube-nocookie.com';
 
 function postYouTubePlayerMessage(
   iframe: HTMLIFrameElement,

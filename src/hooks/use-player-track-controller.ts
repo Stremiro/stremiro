@@ -129,6 +129,13 @@ export function usePlayerTrackController({
   const [autoApplySettlementRevision, setAutoApplySettlementRevision] = useState(0);
   const autoApplySettlementRevisionRef = useRef(0);
   const lastRecordedTrackOutcomeRef = useRef<string | null>(null);
+  // Preferred subtitle language no embedded track satisfies, until a manual pick or the next load.
+  // Tagged with the load it was computed for — a stream swap within the same episode
+  // commits before the reset effect runs, so the raw state can briefly be stale.
+  const [addonSubtitleLanguage, setAddonSubtitleLanguage] = useState<{
+    key: string;
+    language: string;
+  } | null>(null);
 
   const resetTrackSelectionObservations = useCallback(() => {
     observedTrackIdsRef.current = { audio: undefined, sub: undefined };
@@ -314,21 +321,13 @@ export function usePlayerTrackController({
   );
 
   const setTrackSwitchingFlag = useCallback((type: TrackType, value: boolean) => {
-    trackSwitchingRef.current = {
+    if (trackSwitchingRef.current[type] === value) return;
+    const next = {
       ...trackSwitchingRef.current,
       [type]: value,
     };
-
-    setTrackSwitching((previousState) => {
-      if (previousState[type] === value) {
-        return previousState;
-      }
-
-      return {
-        ...previousState,
-        [type]: value,
-      };
-    });
+    trackSwitchingRef.current = next;
+    setTrackSwitching(next);
   }, []);
 
   const { effectivePlaybackLanguagePreferences, saveGlobalPlaybackLanguagePreferenceSelection } =
@@ -351,6 +350,7 @@ export function usePlayerTrackController({
   const persistTrackSelection = useCallback(
     (type: TrackType, id: number | 'no', explicitTrack?: Track) => {
       manualTrackSelectionEpochRef.current[type] += 1;
+      if (type === 'sub') setAddonSubtitleLanguage(null);
       const selectedTrack =
         explicitTrack ??
         trackListRef.current.find((track) => track.type === type && track.id === id);
@@ -476,12 +476,10 @@ export function usePlayerTrackController({
 
       const generation = trackRefreshGenerationRef.current;
       setTrackSwitchingFlag(type, true);
-      return (async () => {
-        return await requestTrackSwitch(type, id, {
-          persistPreference,
-          silent: options?.silent,
-        });
-      })().finally(() => {
+      return requestTrackSwitch(type, id, {
+        persistPreference,
+        silent: options?.silent,
+      }).finally(() => {
         if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag(type, false);
       });
     },
@@ -544,14 +542,18 @@ export function usePlayerTrackController({
       });
   };
 
-  const selectAddonSubtitle = async (subtitle: AddonSubtitle): Promise<boolean> => {
+  // Automatic selections have no failure toast and no remembered preference.
+  const selectAddonSubtitle = async (
+    subtitle: AddonSubtitle,
+    { automatic }: { automatic?: boolean } = {},
+  ): Promise<boolean> => {
     if (trackSwitchingRef.current.sub) {
       return false;
     }
 
     const existing = findExternalSubtitleTrack(trackListRef.current, subtitle);
     if (existing) {
-      return setTrack('sub', existing.id, { persistPreference: true });
+      return setTrack('sub', existing.id, { silent: true, persistPreference: !automatic });
     }
 
     const generation = trackRefreshGenerationRef.current;
@@ -604,7 +606,7 @@ export function usePlayerTrackController({
         return false;
       }
 
-      persistTrackSelection('sub', addedTrack.id, addedTrack);
+      if (!automatic) persistTrackSelection('sub', addedTrack.id, addedTrack);
       return true;
     })()
       .catch(() => {
@@ -620,6 +622,7 @@ export function usePlayerTrackController({
     resetAutoApplyState('sub');
     previousPreferencesRef.current = null;
     manualTrackPreferencesRef.current = { audio: null, sub: null };
+    setAddonSubtitleLanguage(null);
   }, [resetKey, resetAutoApplyState]);
 
   useEffect(() => {
@@ -688,7 +691,11 @@ export function usePlayerTrackController({
         markApplied(kind, fingerprint);
         return;
       }
-      if (typeof resolution.matchedTrackId !== 'number') return;
+      if (typeof resolution.matchedTrackId !== 'number') {
+        if (kind === 'sub')
+          setAddonSubtitleLanguage({ key: resetKey, language: preferredLanguage });
+        return;
+      }
 
       const switched = await setTrack(kind, resolution.matchedTrackId, { silent: true });
       if (
@@ -699,7 +706,7 @@ export function usePlayerTrackController({
         markApplied(kind, fingerprint);
       }
     },
-    [markApplied, setTrack],
+    [markApplied, resetKey, setTrack],
   );
 
   const launchPreferredTrackAutoApply = useCallback(
@@ -794,7 +801,8 @@ export function usePlayerTrackController({
       });
     }
 
-    if (subTracks.length === 0) return;
+    // An empty subtitle list still resolves once the track list has loaded, so addons can fill the gap.
+    if (subTracks.length === 0 && audioTracks.length === 0) return;
 
     return launchPreferredTrackAutoApply('sub', fingerprint, (isCancelled) =>
       applyPreferredTrack(
@@ -809,6 +817,7 @@ export function usePlayerTrackController({
   }, [
     activeSubTrack?.id,
     applyPreferredTrack,
+    audioTracks.length,
     hasPlaybackStarted,
     isAutoApplyHandled,
     isLoading,
@@ -924,6 +933,13 @@ export function usePlayerTrackController({
   }, [resetKey, resetTrackSelectionObservations]);
 
   return {
+    addonSubtitleLanguage:
+      addonSubtitleLanguage?.key === resetKey &&
+      !!addonSubtitleLanguage.language &&
+      addonSubtitleLanguage.language !== 'off' &&
+      addonSubtitleLanguage.language === playbackLanguagePreferences.preferredSubtitleLanguage
+        ? addonSubtitleLanguage.language
+        : null,
     audioTracks,
     cycleTrack,
     notifyObservedTrackSelection,

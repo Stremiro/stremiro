@@ -5,7 +5,7 @@ import { RetryBanner } from '@/components/retry-banner';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useListSummaries, type useMediaCollectionActions } from '@/hooks/use-media-library';
 import type { MediaItem } from '@/lib/api';
-import { cn, queryNeedsRetry } from '@/lib/utils';
+import { cn, pluralize, queryNeedsRetry } from '@/lib/utils';
 
 const ROW_CLASS =
   'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-white/[0.06] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default';
@@ -128,7 +128,7 @@ export function SaveToCollectionPanel({
                     {list.name}
                   </span>
                   <span className='block text-[10px] tabular-nums text-zinc-500'>
-                    {list.item_count} {list.item_count === 1 ? 'title' : 'titles'}
+                    {pluralize(list.item_count, 'title')}
                   </span>
                 </span>
                 <SavedCheck saved={list.contains_item} />
@@ -137,7 +137,10 @@ export function SaveToCollectionPanel({
           })
         ) : listsQuery.data !== undefined ? (
           <p className='px-2.5 py-3 text-[11px] leading-relaxed text-zinc-500'>
-            No lists yet — create one to group titles
+            No manual lists yet — create one to group titles.
+            {listsQuery.data.length > 0 && (
+              <span className='mt-1 block'>Smart lists fill automatically from their rules.</span>
+            )}
           </p>
         ) : null}
       </div>

@@ -17,8 +17,10 @@ import { useBulkAddToList, useProfileLibrary } from '@/hooks/use-media-library';
 import { getListErrorMessage, type UserList } from '@/lib/api';
 import { navigateApp } from '@/lib/navigation';
 import { notifyAction } from '@/lib/notify';
-import { cn } from '@/lib/utils';
+import { cn, pluralize } from '@/lib/utils';
 import { ListIconTile } from './list-icons';
+
+const VISIBLE_PAGE_SIZE = 150;
 
 export function AddTitlesDialog({
   list,
@@ -31,7 +33,7 @@ export function AddTitlesDialog({
 }) {
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [search, setSearch] = useState('');
-  const [visibleLimit, setVisibleLimit] = useState(150);
+  const [visibleLimit, setVisibleLimit] = useState(VISIBLE_PAGE_SIZE);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const debouncedSearch = useDebounce(search, 180);
   const matchingLibraryQuery = useProfileLibrary({
@@ -107,7 +109,7 @@ export function AddTitlesDialog({
           value={search}
           onValueChange={(value) => {
             setSearch(value);
-            setVisibleLimit(150);
+            setVisibleLimit(VISIBLE_PAGE_SIZE);
           }}
           placeholder='Search your library…'
           clearLabel='Clear library search'
@@ -167,6 +169,7 @@ export function AddTitlesDialog({
               {matchingItems.slice(0, visibleLimit).map((item) => {
                 const inList = existingIds.has(item.id);
                 const selected = selectedIds.has(item.id) && !inList;
+                const year = item.displayYear || item.primaryYear || item.year;
                 return (
                   <button
                     key={item.id}
@@ -194,8 +197,7 @@ export function AddTitlesDialog({
                         {item.title}
                       </span>
                       <span className='mt-0.5 block text-[11px] text-zinc-500'>
-                        {item.displayYear || item.primaryYear || item.year}
-                        {(item.displayYear || item.primaryYear || item.year) && ' · '}
+                        {year && `${year} · `}
                         {item.type === 'movie' ? 'Movie' : 'Series'}
                       </span>
                     </span>
@@ -227,7 +229,7 @@ export function AddTitlesDialog({
                     variant='outline'
                     size='sm'
                     disabled={addTitles.isPending}
-                    onClick={() => setVisibleLimit((limit) => limit + 150)}
+                    onClick={() => setVisibleLimit((limit) => limit + VISIBLE_PAGE_SIZE)}
                   >
                     Load more
                   </Button>
@@ -285,7 +287,7 @@ export function AddTitlesDialog({
                   { listId: list.id, itemIds: selectedItemIds },
                   {
                     onSuccess: (count) => {
-                      notifyAction(`Added ${count} title${count === 1 ? '' : 's'}`, {
+                      notifyAction(`Added ${pluralize(count, 'title')}`, {
                         detail: list.name,
                       });
                       onOpenChange(false);
@@ -300,7 +302,7 @@ export function AddTitlesDialog({
               className='bg-white font-semibold text-black hover:bg-zinc-200'
             >
               {addTitles.isPending && <Loader2 className='h-4 w-4 animate-spin' />}
-              Add {selectedItemIds.length}
+              Add {pluralize(selectedItemIds.length, 'title')}
             </Button>
           </div>
         </DialogFooter>

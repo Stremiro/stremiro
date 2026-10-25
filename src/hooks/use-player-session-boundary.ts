@@ -77,6 +77,7 @@ export function usePlayerSessionBoundary({
   >(undefined);
 
   const {
+    addonSubtitleLanguage,
     audioTracks,
     cycleTrack,
     notifyObservedTrackSelection,
@@ -175,6 +176,7 @@ export function usePlayerSessionBoundary({
   }, [navigationGuardEnabled, flushPlaybackBeforeNavigation]);
 
   return {
+    addonSubtitleLanguage,
     applyResumeIfReady,
     audioTracks,
     cancelAutomaticResume,

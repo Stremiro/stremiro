@@ -48,7 +48,7 @@ import {
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { formatEpisodeHeading, isSeriesLikeMediaType } from '@/lib/utils';
+import { formatEpisodeHeading, isSeriesLikeMediaType, pluralize } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
@@ -140,6 +140,38 @@ async function restoreWatchProgressRows(rows: WatchProgress[], invalidate: () =>
   }
 }
 
+// Re-deletes what the mark created, then replays the rows it replaced or removed.
+async function revertEpisodesWatched(
+  item: MediaItem,
+  episodes: readonly Episode[],
+  watched: boolean,
+  previousRows: WatchProgress[],
+  invalidate: () => Promise<void>,
+) {
+  try {
+    if (watched) await api.setEpisodesWatched(item, episodes, false);
+    if (previousRows.length > 0) await api.saveWatchProgressBatch(previousRows);
+  } catch {
+    toast.error('Could not undo the season change');
+  } finally {
+    await invalidate();
+  }
+}
+
+async function restoreContinueWatchingTitle(
+  id: string,
+  type: string,
+  refreshRail: () => Promise<void>,
+) {
+  try {
+    await api.setContinueWatchingDismissed(id, type, false);
+  } catch {
+    toast.error('Could not restore Continue Watching');
+  } finally {
+    await refreshRail();
+  }
+}
+
 const WATCH_HISTORY_UNDO_DURATION_MS = 6000;
 
 function toastRemovedWithUndo(
@@ -161,16 +193,20 @@ interface CachedHistoryRemoval {
   rail: { queryKey: QueryKey; snapshot: ResumeRailEntry[] }[];
 }
 
+// `railOnly` hides a title from Continue Watching while its history stays.
 async function removeCachedWatchHistory(
   queryClient: QueryClient,
   matches: (row: WatchProgress) => boolean,
+  railOnly = false,
 ): Promise<CachedHistoryRemoval> {
-  bumpWatchProgressEpoch();
+  if (!railOnly) bumpWatchProgressEpoch();
   await Promise.all([
     queryClient.cancelQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] }),
-    queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
+    !railOnly && queryClient.cancelQueries({ queryKey: WATCH_HISTORY_QUERY_KEY }),
   ]);
-  const history = queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
+  const history = railOnly
+    ? undefined
+    : queryClient.getQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY);
   // The rail cache holds one entry list per local day; filter every variant.
   const rail = queryClient
     .getQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] })
@@ -178,13 +214,20 @@ async function removeCachedWatchHistory(
       queryKey,
       snapshot,
     }));
-  queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
-    rows?.filter((row) => !matches(row)),
-  );
+  if (!railOnly) {
+    queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
+      rows?.filter((row) => !matches(row)),
+    );
+  }
   queryClient.setQueriesData<ResumeRailEntry[]>({ queryKey: [RESUME_RAIL_QUERY_KEY] }, (rows) =>
     rows?.filter((entry) => !matches(entry.row)),
   );
   return { matches, history, rail };
+}
+
+/** Whole-title identity shared by history removal and history selection. */
+export function watchTitleKey(row: Pick<WatchProgress, 'id' | 'type_'>): string {
+  return `${row.type_}:${row.id}`;
 }
 
 function restoreCachedWatchHistory(
@@ -196,7 +239,7 @@ function restoreCachedWatchHistory(
   const matchesEntry = (entry: ResumeRailEntry) => matches(entry.row);
   if (history) {
     queryClient.setQueryData<WatchProgress[]>(WATCH_HISTORY_QUERY_KEY, (rows) =>
-      reinsertSnapshotRows(rows ?? [], history, matches, (row) => `${row.type_}:${row.id}`),
+      reinsertSnapshotRows(rows ?? [], history, matches, watchTitleKey),
     );
   }
   for (const { queryKey, snapshot } of rail) {
@@ -204,11 +247,11 @@ function restoreCachedWatchHistory(
     // A refetch that already surfaced the title owns the rail entry.
     queryClient.setQueryData<ResumeRailEntry[]>(queryKey, (current) => {
       if (!current) return current;
-      const presentTitles = new Set(current.map(({ row }) => `${row.type_}:${row.id}`));
+      const presentTitles = new Set(current.map(({ row }) => watchTitleKey(row)));
       return reinsertSnapshotRows(
         current,
         snapshot,
-        (entry) => matchesEntry(entry) && !presentTitles.has(`${entry.row.type_}:${entry.row.id}`),
+        (entry) => matchesEntry(entry) && !presentTitles.has(watchTitleKey(entry.row)),
         resumeRailEntryKey,
       );
     });
@@ -237,7 +280,7 @@ function resolveSharedCollectionQueryOptions(
   };
 }
 
-export function useProfileLibrary(filters: LibraryFilters) {
+export function useProfileLibrary(filters: LibraryFilters, options?: { enabled?: boolean }) {
   const isDefault =
     !filters.query &&
     (filters.type ?? 'all') === 'all' &&
@@ -246,6 +289,7 @@ export function useProfileLibrary(filters: LibraryFilters) {
   return useQuery({
     queryKey: profileLibraryQueryKey(filters),
     queryFn: () => api.getProfileLibrary(filters),
+    enabled: options?.enabled,
     staleTime: LIBRARY_STALE_TIME,
     gcTime: isDefault ? LIBRARY_STALE_TIME : 60_000,
     placeholderData: (previousData, previousQuery) => {
@@ -316,7 +360,6 @@ export function useResumeRail(
     },
     enabled,
     staleTime: options?.staleTime ?? RESUME_SECTION_MIN_STALE_MS,
-    refetchOnWindowFocus: true,
   });
 }
 
@@ -804,7 +847,7 @@ export function useBulkRemoveFromList() {
     },
     onSuccess: (entries, { listId }) => {
       toastRemovedWithUndo(
-        `Removed ${entries.length} title${entries.length === 1 ? '' : 's'} from list`,
+        `Removed ${pluralize(entries.length, 'title')} from list`,
         entries.length > 0,
         async () => {
           await api
@@ -826,7 +869,7 @@ export function useBulkRemoveFromWatchHistory() {
     mutationFn: (items: { id: string; type: string }[]) => api.bulkRemoveFromWatchHistory(items),
     onMutate: (items) => {
       const ids = new Set(items.map((item) => `${item.type}:${item.id}`));
-      return removeCachedWatchHistory(queryClient, (row) => ids.has(`${row.type_}:${row.id}`));
+      return removeCachedWatchHistory(queryClient, (row) => ids.has(watchTitleKey(row)));
     },
     onError: (_error, _items, context) => {
       restoreCachedWatchHistory(queryClient, context);
@@ -834,7 +877,7 @@ export function useBulkRemoveFromWatchHistory() {
     },
     onSuccess: (rows, items) => {
       toastRemovedWithUndo(
-        `Removed ${items.length} title${items.length === 1 ? '' : 's'} from history`,
+        `Removed ${pluralize(items.length, 'title')} from history`,
         rows.length > 0,
         () => restoreWatchProgressRows(rows, () => invalidatePlaybackHistoryQueries(queryClient)),
       );
@@ -848,7 +891,7 @@ interface UseRemoveTitleWatchHistoryOptions extends UseRemoveFromContinueWatchin
 }
 
 function resumeRailEntryKey({ row }: ResumeRailEntry): string {
-  return `${row.type_}:${row.id}:${row.season ?? ''}:${row.episode ?? ''}`;
+  return `${watchTitleKey(row)}:${row.season ?? ''}:${row.episode ?? ''}`;
 }
 
 // Whole-title history delete: collapsed surfaces render one row per title —
@@ -893,14 +936,53 @@ function useRemoveTitleWatchHistory({
   });
 }
 
-export function useRemoveFromContinueWatching(options: UseRemoveFromContinueWatchingOptions) {
-  return useRemoveTitleWatchHistory({
-    ...options,
-    errorTitle: 'Failed to remove from Continue Watching',
+// Rail-only dismissal: Rust hides the title until newer progress lands; history,
+// Details resume, and profile tabs keep it.
+export function useRemoveFromContinueWatching({
+  itemId,
+  itemTitle,
+  mediaType,
+}: UseRemoveFromContinueWatchingOptions) {
+  const queryClient = useQueryClient();
+  const normalizedMediaType = mediaType?.trim();
+  const refreshRail = () => queryClient.invalidateQueries({ queryKey: [RESUME_RAIL_QUERY_KEY] });
+
+  return useMutation({
+    mutationFn: async () => {
+      if (!normalizedMediaType) {
+        throw new Error('Playback history metadata unavailable');
+      }
+      await api.setContinueWatchingDismissed(itemId, normalizedMediaType, true);
+      return normalizedMediaType;
+    },
+    onMutate: () =>
+      removeCachedWatchHistory(
+        queryClient,
+        (entry) => entry.id === itemId && entry.type_ === normalizedMediaType,
+        true,
+      ),
+    onSuccess: (dismissedType, _variables, context) => {
+      toastRemovedWithUndo(
+        'Removed from Continue Watching',
+        true,
+        () => {
+          restoreCachedWatchHistory(queryClient, context);
+          return restoreContinueWatchingTitle(itemId, dismissedType, refreshRail);
+        },
+        itemTitle,
+      );
+    },
+    onError: (error, _variables, context) => {
+      restoreCachedWatchHistory(queryClient, context);
+      toast.error(
+        error instanceof Error ? error.message : 'Failed to remove from Continue Watching',
+      );
+    },
+    onSettled: refreshRail,
   });
 }
 
-// Per-title delete for the profile tabs — same whole-title semantics as the rail.
+// Per-title delete for the profile tabs; deletes every row of the title.
 export function useRemoveFromWatchHistory(options: UseRemoveFromContinueWatchingOptions) {
   return useRemoveTitleWatchHistory({
     ...options,
@@ -922,7 +1004,7 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
   const queryClient = useQueryClient();
   const progressKey = titleWatchProgressQueryKey(item?.id);
   return useMutation<
-    TitleWatchProgress,
+    [TitleWatchProgress, WatchProgress[]],
     unknown,
     EpisodesWatchedVariables,
     { previous?: TitleWatchProgress }
@@ -969,22 +1051,25 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
       });
       return { previous };
     },
-    onSuccess: (progress, { episodes, watched }) => {
+    onSuccess: ([progress, previousRows], { episodes, watched }) => {
       queryClient.setQueryData<TitleWatchProgress>(progressKey, progress);
+      if (seasonAction && item) {
+        toastRemovedWithUndo(
+          watched ? 'Season marked as watched' : 'Season marked as unwatched',
+          true,
+          () =>
+            revertEpisodesWatched(item, episodes, watched, previousRows, () =>
+              invalidatePlaybackHistoryQueriesForTitle(queryClient, item.id),
+            ),
+          pluralize(episodes.length, 'episode'),
+        );
+        return;
+      }
       const episode = episodes[0];
-      notifyAction(
-        seasonAction
-          ? 'Season marked as watched'
-          : watched
-            ? 'Marked as watched'
-            : 'Marked as unwatched',
-        {
-          detail: seasonAction
-            ? `${episodes.length} episode${episodes.length === 1 ? '' : 's'}`
-            : episode && formatEpisodeHeading(episode.season, episode.episode, episode.title),
-          thumb: item?.poster,
-        },
-      );
+      notifyAction(watched ? 'Marked as watched' : 'Marked as unwatched', {
+        detail: episode && formatEpisodeHeading(episode.season, episode.episode, episode.title),
+        thumb: item?.poster,
+      });
     },
     onError: (error, _variables, context) => {
       if (context?.previous !== undefined) {

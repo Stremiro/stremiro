@@ -55,6 +55,7 @@ const PREVIEW_PLAYER_KEYBINDINGS: Record<string, string[]> = {
   subtitleEarlier: ['z'],
   subtitleLater: ['x'],
   skipSegment: ['s', 'enter'],
+  previousEpisode: ['p'],
   nextEpisode: ['n'],
   episodes: ['e'],
   streamSelector: ['q'],
@@ -105,9 +106,32 @@ function getPreviewLibraryStatusCounts(): ProfileLibrary['statusCounts'] {
 }
 
 const EMPTY_SEARCH_CATALOG_PAGE = {
-  items: [],
+  items: [
+    {
+      id: 'probe-1',
+      title: 'Probe Title One',
+      type: 'movie',
+      displayYear: '2024',
+      genres: ['Drama', 'Thriller'],
+      description:
+        'A deliberately long synopsis used only to measure how the hover panel behaves when a title carries a lot of text so that wrapping changes height.',
+      poster: 'https://picsum.photos/seed/probe1/400/600',
+      backdrop: 'https://picsum.photos/seed/probe1b/800/450',
+    },
+    {
+      id: 'probe-2',
+      title: 'Probe Title Two',
+      type: 'series',
+      displayYear: '2023',
+      genres: ['Comedy'],
+      description: 'Short.',
+      poster: 'https://picsum.photos/seed/probe2/400/600',
+      backdrop: 'https://picsum.photos/seed/probe2b/800/450',
+    },
+  ],
   continuation: { seenKeys: [] },
   exhausted: true,
+  partial: false,
 };
 
 const EMPTY_STREAM_SELECTOR_DATA: StreamSelectorData = {
@@ -315,7 +339,38 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
         : scale > 0
           ? Math.round(clamp(scale, 0.25, 3) * 20) / 20
           : 1.0,
+    subtitleFont:
+      patch.subtitleFont === undefined
+        ? current.subtitleFont
+        : ((
+            [
+              'modern',
+              'grotesk',
+              'humanist',
+              'classic',
+              'screen',
+              'serif',
+              'book',
+              'rounded',
+              'mono',
+            ] as const
+          ).find((font) => font === patch.subtitleFont) ?? 'default'),
+    subtitleColor:
+      patch.subtitleColor === undefined
+        ? current.subtitleColor
+        : ((['gray', 'yellow', 'cyan', 'green', 'red', 'orange', 'blue', 'pink'] as const).find(
+            (color) => color === patch.subtitleColor,
+          ) ?? 'white'),
+    subtitleEdge:
+      patch.subtitleEdge === undefined
+        ? current.subtitleEdge
+        : ((['none', 'thick', 'shadow', 'box'] as const).find(
+            (edge) => edge === patch.subtitleEdge,
+          ) ?? 'outline'),
     playerKeybindings: overrides,
+    recentSearches: Array.isArray(patch.recentSearches)
+      ? (patch.recentSearches as string[])
+      : current.recentSearches,
     effectivePlayerKeybindings: Object.fromEntries(
       Object.entries(PREVIEW_PLAYER_KEYBINDINGS).map(([action, keys]) => [
         action,
@@ -330,6 +385,9 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
     'autoPlayNext',
     'trailerPreviews',
     'autoSkipIntro',
+    'autoLoadAddonSubtitles',
+    'subtitleBold',
+    'subtitleItalic',
     'automaticUpdateChecks',
     'closeToTray',
     'minimizeToTray',
@@ -354,6 +412,7 @@ function applyPreviewAddonConfigsOp(op: AddonConfigsOp) {
           enabled: true,
           displayUrl: op.url,
           pinned: false,
+          configurable: false,
         },
       ];
       return;
@@ -411,6 +470,23 @@ export async function handlePreviewInvoke<T>(
     case 'save_app_ui_preferences': {
       const patch = typeof args?.patch === 'object' && args.patch !== null ? args.patch : {};
       mergePreviewAppUiPreferences(patch as Record<string, unknown>);
+      return previewAppUiPreferences as T;
+    }
+    case 'record_recent_search': {
+      // Mirrors `push_recent_search`.
+      const query =
+        typeof args?.query === 'string' ? args.query.trim().replace(/\s+/g, ' ').slice(0, 120) : '';
+      if (query) {
+        previewAppUiPreferences = {
+          ...previewAppUiPreferences,
+          recentSearches: [
+            query,
+            ...previewAppUiPreferences.recentSearches.filter(
+              (entry) => entry.toLowerCase() !== query.toLowerCase(),
+            ),
+          ].slice(0, 8),
+        };
+      }
       return previewAppUiPreferences as T;
     }
     case 'get_profile_preferences':
@@ -679,11 +755,12 @@ export async function handlePreviewInvoke<T>(
     case 'get_calendar_events':
       return { trackedCount: 0, days: [], upcoming: [] } as T;
     case 'get_title_watch_progress':
-    case 'set_episodes_watched':
       return {
         episodeProgress: {},
         watchedEpisodeCeiling: {},
       } as T;
+    case 'set_episodes_watched':
+      return [{ episodeProgress: {}, watchedEpisodeCeiling: {} }, []] as T;
     case 'get_details_prefetch_bundle':
       // No card payload in preview — the mounted details query fetches it.
       return {
@@ -764,6 +841,7 @@ export async function handlePreviewInvoke<T>(
     case 'recover_playback_stream':
       return null as T;
     case 'cancel_stream_request':
+    case 'set_continue_watching_dismissed':
       return undefined as T;
     case 'bulk_remove_from_watch_history':
     case 'remove_all_from_watch_history':

@@ -9,6 +9,7 @@ export const PLAYER_ACTIONS = [
   { id: 'seekBackward', label: 'Back 10 s', group: 'Playback', repeat: true },
   { id: 'seekForward', label: 'Forward 10 s', group: 'Playback', repeat: true },
   { id: 'skipSegment', label: 'Skip intro / recap', group: 'Playback' },
+  { id: 'previousEpisode', label: 'Previous episode', group: 'Playback' },
   { id: 'nextEpisode', label: 'Next episode', group: 'Playback' },
   { id: 'speedDown', label: 'Slower', group: 'Playback', repeat: true },
   { id: 'speedUp', label: 'Faster', group: 'Playback', repeat: true },

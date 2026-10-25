@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
-import { memo, type MouseEvent, type ReactNode, useEffect, useRef } from 'react';
+import { memo, type MouseEvent, type ReactNode, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
@@ -59,7 +59,6 @@ const ROUTE_CHUNK_WARMERS: Record<string, () => Promise<unknown>> = {
   [SETTINGS_HREF]: routeChunks.settings,
   [PROFILE_HREF]: routeChunks.profile,
 };
-let sidebarRoutesWarmed = false;
 
 function warmRouteChunk(href: string): void {
   void ROUTE_CHUNK_WARMERS[href]?.().catch(() => undefined);
@@ -124,21 +123,6 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
     SECONDARY_NAV_ITEMS,
     pathname,
   );
-
-  useEffect(() => {
-    if (sidebarRoutesWarmed) return;
-    const warm = () => {
-      sidebarRoutesWarmed = true;
-      Object.keys(ROUTE_CHUNK_WARMERS).forEach(warmRouteChunk);
-      void routeChunks.details().catch(() => undefined);
-    };
-    if (typeof window.requestIdleCallback === 'function') {
-      const idle = window.requestIdleCallback(warm, { timeout: 2_000 });
-      return () => window.cancelIdleCallback(idle);
-    }
-    const timer = window.setTimeout(warm, 1_000);
-    return () => window.clearTimeout(timer);
-  }, []);
 
   const renderItem = (
     item: SidebarNavItem,

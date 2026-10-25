@@ -35,6 +35,7 @@ import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
+import { WatchStatusIcon } from '@/components/watch-status-icon';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useTitleSearch } from '@/hooks/use-item-search';
 import {
@@ -52,13 +53,16 @@ import {
   useTotalWatchTime,
   useWatchHistory,
   useWatchStatuses,
+  watchTitleKey,
 } from '@/hooks/use-media-library';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import {
   api,
   getListErrorMessage,
   getWatchStatusErrorMessage,
+  type LibraryFilters,
   type MediaItem,
+  type ProfileLibrary,
   type WatchProgress,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
@@ -66,7 +70,7 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { watchProgressItemKey } from '@/lib/history-playback';
-import { cn, queryNeedsRetry, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import { cn, pluralize, queryNeedsRetry, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 
 const loadListsManager = () => import('@/components/list/lists-manager');
 const ListsManager = lazy(() =>
@@ -99,6 +103,20 @@ type ProfileTabId = (typeof PROFILE_TABS)[number]['id'];
 
 function isProfileTabId(value: string | null): value is ProfileTabId {
   return PROFILE_TABS.some((tab) => tab.id === value);
+}
+
+function readLibraryFilters(searchParams: URLSearchParams) {
+  const status = searchParams.get('status');
+  const type = searchParams.get('type');
+  const sort = searchParams.get('sort');
+  return {
+    query: searchParams.get('q') ?? '',
+    type: type === 'movie' || type === 'series' ? type : 'all',
+    status:
+      WATCH_STATUSES.find((watchStatus) => watchStatus === status) ??
+      (status === 'none' ? 'none' : 'all'),
+    sort: isLibrarySort(sort) ? sort : 'default',
+  } satisfies LibraryFilters;
 }
 
 function patchSearchParams(
@@ -150,30 +168,24 @@ export function Profile() {
     void updateViewMode(mode).catch(() => toast.error('Failed to save view mode'));
   };
 
-  const [libraryTabCount, setLibraryTabCount] = useState<number>();
-  const [libraryTabStatusCounts, setLibraryTabStatusCounts] =
-    useState<Record<WatchStatus | 'none', number>>();
-  const [historyTabCount, setHistoryTabCount] = useState<number>();
+  // The open tab's own rows outrank the aggregate header counts.
+  const libraryFilters = readLibraryFilters(searchParams);
+  const profileLibraryQuery = useProfileLibrary(libraryFilters, {
+    enabled: activeTab === 'library',
+  });
+  const historyQuery = useWatchHistory({ enabled: activeTab === 'history' });
+  // A filter switch without placeholder rows keeps the last library totals.
+  const [heldLibrary, setHeldLibrary] = useState<ProfileLibrary>();
+  const tabLibrary =
+    activeTab === 'library' ? (profileLibraryQuery.data ?? heldLibrary) : undefined;
+  if (tabLibrary !== heldLibrary) setHeldLibrary(tabLibrary);
   const libraryTabRef = useRef<HTMLButtonElement>(null);
-  useEffect(() => {
-    if (activeTab !== 'library') {
-      setLibraryTabCount(undefined);
-      setLibraryTabStatusCounts(undefined);
-    }
-    if (activeTab !== 'history') setHistoryTabCount(undefined);
-  }, [activeTab]);
   const historyCount =
-    activeTab === 'history'
-      ? (historyTabCount ?? dataStats?.history_title_count)
-      : dataStats?.history_title_count;
-  const libraryCount =
-    activeTab === 'library'
-      ? (libraryTabCount ?? dataStats?.library_count)
-      : dataStats?.library_count;
+    (activeTab === 'history' ? historyQuery.data?.length : undefined) ??
+    dataStats?.history_title_count;
+  const libraryCount = tabLibrary?.allIds.length ?? dataStats?.library_count;
   const libraryStatusCounts =
-    (activeTab === 'library'
-      ? (libraryTabStatusCounts ?? dataStats?.library_status_counts)
-      : dataStats?.library_status_counts) ?? EMPTY_STATUS_COUNTS;
+    tabLibrary?.statusCounts ?? dataStats?.library_status_counts ?? EMPTY_STATUS_COUNTS;
   const listsCount = dataStats?.lists_count ?? 0;
   // Per-tab counters for the pill labels — 0/loading reads as no badge.
   const tabCounts: Partial<Record<ProfileTabId, number>> = {
@@ -183,7 +195,7 @@ export function Profile() {
   };
 
   return (
-    <div className='relative min-h-screen page-enter'>
+    <div className='relative min-h-[calc(100vh-2rem)] page-enter'>
       <div
         className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-6 pb-16 space-y-6 relative z-10`}
       >
@@ -202,7 +214,6 @@ export function Profile() {
           watchTimeLoading={totalWatchTimeQuery.isPending}
           headerError={
             profilePreferencesError ||
-            (profilePreferencesQuery.isFetched && isHydratingProfile) ||
             queryNeedsRetry(dataStatsQuery) ||
             queryNeedsRetry(totalWatchTimeQuery)
           }
@@ -221,6 +232,7 @@ export function Profile() {
           historyCount={historyCount}
           totalWatchTimeSecs={totalWatchTimeSecs}
           statusCounts={libraryStatusCounts}
+          statusCountsLoading={tabLibrary === undefined && dataStatsQuery.isPending}
         />
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
@@ -259,10 +271,11 @@ export function Profile() {
 
           <TabsContent value='library'>
             <ProfileLibraryTab
+              filters={libraryFilters}
+              profileLibraryQuery={profileLibraryQuery}
+              libraryIds={tabLibrary?.allIds}
               viewMode={viewMode}
               onViewModeChange={handleViewModeChange}
-              onCountChange={setLibraryTabCount}
-              onStatusCountsChange={setLibraryTabStatusCounts}
               libraryTabRef={libraryTabRef}
             />
           </TabsContent>
@@ -287,9 +300,9 @@ export function Profile() {
 
           <TabsContent value='history'>
             <ProfileHistoryTab
+              historyQuery={historyQuery}
               viewMode={viewMode}
               onViewModeChange={handleViewModeChange}
-              onCountChange={setHistoryTabCount}
             />
           </TabsContent>
         </Tabs>
@@ -299,21 +312,23 @@ export function Profile() {
 }
 
 function ProfileLibraryTab({
+  filters,
+  profileLibraryQuery,
+  libraryIds,
   viewMode,
   onViewModeChange,
-  onCountChange,
-  onStatusCountsChange,
   libraryTabRef,
 }: {
+  filters: ReturnType<typeof readLibraryFilters>;
+  profileLibraryQuery: ReturnType<typeof useProfileLibrary>;
+  libraryIds: string[] | undefined;
   viewMode: 'grid' | 'list';
   onViewModeChange: (mode: 'grid' | 'list') => void;
-  onCountChange: (count: number) => void;
-  onStatusCountsChange: (counts: Record<WatchStatus | 'none', number>) => void;
   libraryTabRef: React.RefObject<HTMLButtonElement | null>;
 }) {
   const mountedRef = useMountedRef();
   const location = useLocation();
-  const [searchParams, setSearchParams] = useSearchParams();
+  const [, setSearchParams] = useSearchParams();
   const setCollectionParam = (
     key: 'type' | 'status' | 'sort',
     value: string,
@@ -327,15 +342,12 @@ function ProfileLibraryTab({
     refetch: refetchWatchStatuses,
   } = useWatchStatuses();
 
-  const statusParam = searchParams.get('status');
-  const libraryStatusFilter =
-    WATCH_STATUSES.find((status) => status === statusParam) ??
-    (statusParam === 'none' ? 'none' : 'all');
-  const typeParam = searchParams.get('type');
-  const libraryTypeFilter = typeParam === 'movie' || typeParam === 'series' ? typeParam : 'all';
-  const sortParam = searchParams.get('sort');
-  const librarySort = isLibrarySort(sortParam) ? sortParam : 'default';
-  const librarySearchParam = searchParams.get('q') ?? '';
+  const {
+    query: librarySearchParam,
+    type: libraryTypeFilter,
+    status: libraryStatusFilter,
+    sort: librarySort,
+  } = filters;
   const [librarySearch, setLibrarySearch] = useState(librarySearchParam);
   const [previousSearchParam, setPreviousSearchParam] = useState(librarySearchParam);
   if (previousSearchParam !== librarySearchParam) {
@@ -372,32 +384,15 @@ function ProfileLibraryTab({
   const isBulkBusy =
     bulkRemoveFromLibrary.isPending || bulkSetWatchStatus.isPending || bulkAddToList.isPending;
   const librarySearchRef = useRef<HTMLInputElement>(null);
-  const profileLibraryQuery = useProfileLibrary({
-    query: librarySearchParam,
-    type: libraryTypeFilter,
-    status: libraryStatusFilter,
-    sort: librarySort,
-  });
   const filteredLibrary = profileLibraryQuery.data?.items ?? EMPTY_LIBRARY_ITEMS;
-  const [lastLibraryIds, setLastLibraryIds] = useState<string[]>();
-  if (profileLibraryQuery.data && profileLibraryQuery.data.allIds !== lastLibraryIds) {
-    setLastLibraryIds(profileLibraryQuery.data.allIds);
-  }
   const librarySearchPending =
     librarySearch !== librarySearchParam || profileLibraryQuery.isFetching;
   const libraryResultsPending =
     profileLibraryQuery.isPlaceholderData ||
     (librarySearch !== librarySearchParam && profileLibraryQuery.data !== undefined);
   const statusCounts = profileLibraryQuery.data?.statusCounts;
-  const libraryIds = profileLibraryQuery.data?.allIds ?? lastLibraryIds;
   const librarySelectionIds = libraryIds ?? EMPTY_LIBRARY_IDS;
   const libraryCount = libraryIds?.length;
-  useLayoutEffect(() => {
-    if (libraryCount !== undefined) onCountChange(libraryCount);
-  }, [libraryCount, onCountChange]);
-  useLayoutEffect(() => {
-    if (statusCounts !== undefined) onStatusCountsChange(statusCounts);
-  }, [statusCounts, onStatusCountsChange]);
   const filteredLibraryIds = filteredLibrary.map((item) => item.id);
   const { triggerRef: librarySelectionTriggerRef, ...librarySelection } = useCollectionSelection(
     librarySelectionIds,
@@ -439,8 +434,8 @@ function ProfileLibraryTab({
       .then((count) => {
         toast.success(
           status === null
-            ? `Cleared status for ${count} title${count === 1 ? '' : 's'}`
-            : `Set ${count} title${count === 1 ? '' : 's'} to ${WATCH_STATUS_LABELS[status]}`,
+            ? `Cleared status for ${pluralize(count, 'title')}`
+            : `Set ${pluralize(count, 'title')} to ${WATCH_STATUS_LABELS[status]}`,
         );
       })
       .catch((error: unknown) => {
@@ -461,7 +456,7 @@ function ProfileLibraryTab({
         toast.success(
           count === 0
             ? 'Selected titles are already in this list'
-            : `Added ${count} title${count === 1 ? '' : 's'} to "${listName}"`,
+            : `Added ${pluralize(count, 'title')} to "${listName}"`,
         );
       })
       .catch((error: unknown) => {
@@ -478,7 +473,7 @@ function ProfileLibraryTab({
     await bulkRemoveFromLibrary
       .mutateAsync([...selectedIds])
       .then((count) => {
-        toast.success(`Removed ${count} title${count === 1 ? '' : 's'} from Library`);
+        toast.success(`Removed ${pluralize(count, 'title')} from Library`);
         if (mountedRef.current) exitSelectionMode();
       })
       .catch(() => {
@@ -636,7 +631,7 @@ function ProfileLibraryTab({
         onOpenChange={setConfirmBulkRemoveOpen}
         pending={bulkRemoveFromLibrary.isPending}
         title='Remove selected titles?'
-        description={`Remove ${selectedIds.size} title${selectedIds.size === 1 ? '' : 's'} from your library and clear their watch statuses? Watch history and custom lists will be kept.`}
+        description={`Remove ${pluralize(selectedIds.size, 'title')} from your library and clear their watch statuses? Watch history and custom lists will be kept.`}
         confirmLabel='Remove from Library'
         confirmDisabled={selectedIds.size === 0 || isBulkBusy}
         onConfirm={() => void confirmBulkRemove()}
@@ -648,28 +643,22 @@ function ProfileLibraryTab({
 }
 
 function ProfileHistoryTab({
+  historyQuery,
   viewMode,
   onViewModeChange,
-  onCountChange,
 }: {
+  historyQuery: ReturnType<typeof useWatchHistory>;
   viewMode: 'grid' | 'list';
   onViewModeChange: (mode: 'grid' | 'list') => void;
-  onCountChange: (count: number) => void;
 }) {
   const mountedRef = useMountedRef();
   const [searchParams, setSearchParams] = useSearchParams();
-  const historyQuery = useWatchHistory();
   const {
     data: history,
     isLoading: historyLoading,
     isFetching: historyFetching,
     refetch: refetchHistory,
   } = historyQuery;
-
-  const historyCount = history?.length;
-  useLayoutEffect(() => {
-    if (historyCount !== undefined) onCountChange(historyCount);
-  }, [historyCount, onCountChange]);
 
   const historySearch = searchParams.get('historyQ') ?? '';
   const setHistorySearch = (value: string) =>
@@ -691,10 +680,8 @@ function ProfileHistoryTab({
 
   const bulkRemoveHistory = useBulkRemoveFromWatchHistory();
   const [confirmHistoryRemoveOpen, setConfirmHistoryRemoveOpen] = useState(false);
-  const historySelectionIds = (history ?? EMPTY_HISTORY_ITEMS).map(
-    (item) => `${item.type_}:${item.id}`,
-  );
-  const filteredHistoryIds = filteredHistory.map((item) => `${item.type_}:${item.id}`);
+  const historySelectionIds = (history ?? EMPTY_HISTORY_ITEMS).map(watchTitleKey);
+  const filteredHistoryIds = filteredHistory.map(watchTitleKey);
   const { triggerRef: historySelectionTriggerRef, ...historySelection } = useCollectionSelection(
     historySelectionIds,
     filteredHistoryIds,
@@ -704,11 +691,11 @@ function ProfileHistoryTab({
     historySearchRef,
   );
   const toggleHistorySelection = (item: WatchProgress, shiftKey = false) =>
-    historySelection.toggle(`${item.type_}:${item.id}`, shiftKey);
+    historySelection.toggle(watchTitleKey(item), shiftKey);
   const confirmHistoryRemove = async () => {
     if (bulkRemoveHistory.isPending || historySelection.selectedIds.size === 0) return;
     const items = (history ?? EMPTY_HISTORY_ITEMS)
-      .filter((item) => historySelection.selectedIds.has(`${item.type_}:${item.id}`))
+      .filter((item) => historySelection.selectedIds.has(watchTitleKey(item)))
       .map((item) => ({ id: item.id, type: item.type_ }));
     await bulkRemoveHistory
       .mutateAsync(items)
@@ -770,7 +757,7 @@ function ProfileHistoryTab({
           <output className='shrink-0 text-[12px] tabular-nums text-zinc-400'>
             {effectiveHistorySearch
               ? `${filteredHistory.length} of ${history.length}`
-              : `${history.length} ${history.length === 1 ? 'title' : 'titles'}`}
+              : pluralize(history.length, 'title')}
           </output>
           <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
           <Button
@@ -830,7 +817,7 @@ function ProfileHistoryTab({
             <HistoryItem
               item={item}
               selectionMode={historySelection.selectionMode}
-              isSelected={historySelection.selectedIds.has(`${item.type_}:${item.id}`)}
+              isSelected={historySelection.selectedIds.has(watchTitleKey(item))}
               onToggleSelect={toggleHistorySelection}
             />
           )}
@@ -879,7 +866,7 @@ function ProfileHistoryTab({
         onOpenChange={setConfirmHistoryRemoveOpen}
         pending={bulkRemoveHistory.isPending}
         title='Remove selected history?'
-        description={`Remove all watched episodes and playback progress for ${historySelection.selectedIds.size} selected title${historySelection.selectedIds.size === 1 ? '' : 's'}? Your library, watch statuses and custom lists will be kept.`}
+        description={`Remove all watched episodes and playback progress for ${pluralize(historySelection.selectedIds.size, 'selected title')}? Your library, watch statuses and custom lists will be kept.`}
         confirmLabel='Remove from history'
         confirmDisabled={historySelection.selectedIds.size === 0}
         onConfirm={() => void confirmHistoryRemove()}
@@ -909,6 +896,7 @@ function ProfileHeader({
   historyCount,
   totalWatchTimeSecs,
   statusCounts,
+  statusCountsLoading,
 }: {
   profile: LocalProfile;
   onUpdateProfile: (updates: LocalProfileUpdate) => Promise<void>;
@@ -928,6 +916,7 @@ function ProfileHeader({
   historyCount: number | undefined;
   totalWatchTimeSecs: number | undefined;
   statusCounts: Record<WatchStatus, number>;
+  statusCountsLoading: boolean;
 }) {
   return (
     <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
@@ -1010,19 +999,24 @@ function ProfileHeader({
           isRetrying={headerRetrying}
         />
       )}
-      {WATCH_STATUSES.some((status) => statusCounts[status] > 0) && (
+      {(statusCountsLoading || WATCH_STATUSES.some((status) => statusCounts[status] > 0)) && (
         <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-3'>
-          {WATCH_STATUSES.map((s) => {
-            const count = statusCounts[s] ?? 0;
-            if (count === 0) return null;
-            const colors = WATCH_STATUS_COLORS[s];
-            return (
-              <span key={s} className='flex items-center gap-1.5 text-[12px]'>
-                <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
-                <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
-              </span>
-            );
-          })}
+          {statusCountsLoading ? (
+            <Skeleton aria-hidden='true' className='h-4.5 w-48' />
+          ) : (
+            WATCH_STATUSES.map((s) => {
+              const count = statusCounts[s] ?? 0;
+              if (count === 0) return null;
+              const colors = WATCH_STATUS_COLORS[s];
+              return (
+                <span key={s} className='flex items-center gap-1.5 text-[12px]'>
+                  <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
+                  <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
+                  <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
+                </span>
+              );
+            })
+          )}
         </div>
       )}
     </div>

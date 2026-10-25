@@ -4,7 +4,7 @@ import { createPlaybackApi } from '@/lib/api-playback';
 import { createStoreApi } from '@/lib/api-store';
 import type { PlayerRouteState } from '@/lib/player-navigation';
 import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
-import type { StreamRankingOptions } from '@/lib/stream-ranking';
+import type { StreamRankingOptions } from '@/lib/stream-ranking-cache-key';
 
 export {
   getBackupImportErrorMessage,
@@ -12,6 +12,7 @@ export {
   getErrorMessage,
   getListErrorMessage,
   getWatchStatusErrorMessage,
+  isNoCapableAddonError,
 } from '@/lib/api-core';
 export { toMediaItem } from '@/lib/api-store';
 
@@ -226,9 +227,6 @@ export type AddonStreamRecommendationReason =
   | 'preferred_source'
   | 'fallback';
 
-type AddonStreamEpisodeMatch = 'exact' | 'episode_range' | 'season_pack';
-type AddonStreamTitleMatch = 'close' | 'partial';
-
 export type StreamMatchBadgeKind =
   | 'episode'
   | 'range'
@@ -239,8 +237,6 @@ export type StreamMatchBadgeKind =
 export type StreamMatchTier = 'exact' | 'episode_range' | 'season_pack' | 'title';
 
 interface AddonStreamMatchSummary {
-  episode?: AddonStreamEpisodeMatch;
-  title?: AddonStreamTitleMatch;
   packCoverage?: {
     seasons: number[];
     episodeRanges?: { season?: number; start: number; end: number }[];
@@ -383,6 +379,8 @@ export interface AddonUrlInspection {
   duplicateOf?: string;
 }
 
+export type AddonResourceKind = 'catalog' | 'meta' | 'stream' | 'subtitles';
+
 /** User-configured addon source. `displayUrl` is Rust's credential-masked URL. */
 export interface AddonConfig {
   id: string;
@@ -391,6 +389,13 @@ export interface AddonConfig {
   displayUrl: string;
   /** Backend-pinned default: fixed slot, toggle-only. */
   pinned: boolean;
+  /** Rust-sanitized manifest logo URL. */
+  logo?: string;
+  version?: string;
+  description?: string;
+  /** Absent until the manifest is classified; Rust then routes every request to the addon. */
+  resources?: AddonResourceKind[];
+  configurable: boolean;
 }
 
 export interface PlaybackLanguagePreferences {
@@ -443,6 +448,34 @@ export type ProfilePreferencesPatch = LocalProfileUpdate & { viewMode?: ProfileV
 
 export type StartupPage = 'home' | 'library' | 'calendar' | 'lastVisited';
 
+/** Rust maps each choice to fixed mpv properties for plain-text subtitles. */
+export type SubtitleFont =
+  | 'default'
+  | 'modern'
+  | 'grotesk'
+  | 'humanist'
+  | 'classic'
+  | 'screen'
+  | 'serif'
+  | 'book'
+  | 'rounded'
+  | 'mono';
+export type SubtitleColor =
+  | 'white'
+  | 'ivory'
+  | 'lavender'
+  | 'mint'
+  | 'amber'
+  | 'gray'
+  | 'yellow'
+  | 'cyan'
+  | 'green'
+  | 'red'
+  | 'orange'
+  | 'blue'
+  | 'pink';
+export type SubtitleEdge = 'outline' | 'none' | 'thick' | 'shadow' | 'box';
+
 export interface AppUiPreferences {
   playerVolume: number;
   playerSpeed: number;
@@ -455,6 +488,13 @@ export interface AppUiPreferences {
   subtitleDelay: number;
   subtitlePos: number;
   subtitleScale: number;
+  subtitleFont: SubtitleFont;
+  subtitleColor: SubtitleColor;
+  subtitleEdge: SubtitleEdge;
+  subtitleBold: boolean;
+  subtitleItalic: boolean;
+  /** Loads a preferred-language addon subtitle when no embedded track matches. */
+  autoLoadAddonSubtitles: boolean;
   /** Opt-in: the EOF Up Next card auto-plays after a countdown. */
   autoPlayNext: boolean;
   nextEpisodeCountdownSecs: number;
@@ -475,6 +515,8 @@ export interface AppUiPreferences {
   lastLocation: string | null;
   /** Per-action overrides (`[]` = unbound); see `src/lib/player-keybindings.ts`. */
   playerKeybindings: Record<string, string[]>;
+  /** Newest first; recorded through `api.recordRecentSearch`, cleared by patch. */
+  recentSearches: string[];
   effectivePlayerKeybindings: Record<string, string[]>;
   defaultPlayerKeybindings: Record<string, string[]>;
 }
@@ -495,6 +537,12 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   subtitleDelay: 0,
   subtitlePos: 100,
   subtitleScale: 1.0,
+  subtitleFont: 'default',
+  subtitleColor: 'white',
+  subtitleEdge: 'outline',
+  subtitleBold: false,
+  subtitleItalic: false,
+  autoLoadAddonSubtitles: true,
   autoPlayNext: false,
   nextEpisodeCountdownSecs: 8,
   controlsHideDelayMs: 3000,
@@ -507,6 +555,7 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   startupPage: 'home',
   lastLocation: null,
   playerKeybindings: {},
+  recentSearches: [],
   effectivePlayerKeybindings: {},
   defaultPlayerKeybindings: {},
 };
@@ -514,6 +563,20 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
 export type AppUiPreferencesPatch = Partial<
   Omit<AppUiPreferences, 'effectivePlayerKeybindings' | 'defaultPlayerKeybindings'>
 >;
+
+export const SUBTITLE_APPEARANCE_RESET = {
+  subtitleFont: DEFAULT_APP_UI_PREFERENCES.subtitleFont,
+  subtitleColor: DEFAULT_APP_UI_PREFERENCES.subtitleColor,
+  subtitleEdge: DEFAULT_APP_UI_PREFERENCES.subtitleEdge,
+  subtitleBold: DEFAULT_APP_UI_PREFERENCES.subtitleBold,
+  subtitleItalic: DEFAULT_APP_UI_PREFERENCES.subtitleItalic,
+};
+
+export function hasSubtitleAppearance(preferences: typeof SUBTITLE_APPEARANCE_RESET) {
+  return Object.entries(SUBTITLE_APPEARANCE_RESET).some(
+    ([key, value]) => preferences[key as keyof typeof SUBTITLE_APPEARANCE_RESET] !== value,
+  );
+}
 
 export type StreamSelectorQuality = 'all' | '4k' | '1080p' | '720p' | 'sd';
 export type StreamSelectorSource = 'all' | 'cached';
@@ -581,6 +644,7 @@ export interface SearchCatalogPage {
   items: MediaItem[];
   continuation: SearchCatalogContinuation;
   exhausted: boolean;
+  partial: boolean;
 }
 
 export type HistoryPlaybackPlanReason = 'missing-episode-context';

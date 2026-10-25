@@ -1,7 +1,6 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ExternalLink, Film, Loader2, Play, RotateCw, X } from 'lucide-react';
+import { ExternalLink, Loader2, RotateCw, X } from 'lucide-react';
 import { type KeyboardEvent, type RefObject, useEffect, useId, useRef, useState } from 'react';
-import { RemoteImage } from '@/components/remote-image';
 import {
   Dialog,
   DialogClose,
@@ -11,10 +10,20 @@ import {
 } from '@/components/ui/dialog';
 import type { MediaDetails } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
+import {
+  isYouTubePlayerOrigin,
+  isYouTubeReadyEvent,
+  parseYouTubeMessage,
+  postYouTubeCommand,
+  postYouTubeListening,
+} from '@/lib/youtube-player';
 import { cn, scrollBehavior } from '@/lib/utils';
 
-const TRAILER_ACTION_BUTTON_CLASS =
-  'inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-white/[0.07] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
+const TRAILER_ICON_BUTTON_CLASS =
+  'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
+const TRAILER_START_VOLUME = 25;
+const PLAYER_HANDSHAKE_RETRY_MS = 250;
+const PLAYER_HANDSHAKE_BUDGET_MS = 4_000;
 
 interface DetailsTrailerDialogProps {
   open: boolean;
@@ -27,6 +36,17 @@ interface DetailsTrailerDialogProps {
   returnFocusRef: RefObject<HTMLButtonElement | null>;
 }
 
+// Addon names often repeat the title for every entry; number them unless each name stands apart.
+function trailerLabels(trailers: DetailsTrailerDialogProps['trailers'], title: string) {
+  const names = trailers.map((trailer) => trailer.name?.trim() ?? '');
+  const keys = names.map((name) => name.toLowerCase());
+  const distinct =
+    new Set(keys).size === keys.length &&
+    keys.every((key) => key && key !== title.trim().toLowerCase());
+  if (distinct) return names;
+  return trailers.length > 1 ? names.map((_, index) => `Trailer ${index + 1}`) : ['Trailer'];
+}
+
 function revealTrailer(button: HTMLButtonElement) {
   const strip = button.parentElement;
   if (!strip) return;
@@ -37,6 +57,29 @@ function revealTrailer(button: HTMLButtonElement) {
       ? card.left - bounds.left - 4
       : Math.max(0, card.right - bounds.right + 4);
   if (offset !== 0) strip.scrollBy({ left: offset, behavior: scrollBehavior() });
+}
+
+// Embeds start at YouTube's remembered (often full) volume; lower it once the player is ready.
+function useTrailerStartVolume(frame: HTMLIFrameElement | null) {
+  useEffect(() => {
+    if (!frame) return;
+    // The player ignores the listening handshake until its script boots.
+    const retry = window.setInterval(() => postYouTubeListening(frame), PLAYER_HANDSHAKE_RETRY_MS);
+    const stop = window.setTimeout(() => window.clearInterval(retry), PLAYER_HANDSHAKE_BUDGET_MS);
+    const handleMessage = (event: MessageEvent) => {
+      if (event.source !== frame.contentWindow || !isYouTubePlayerOrigin(event.origin)) return;
+      if (!isYouTubeReadyEvent(parseYouTubeMessage(event.data))) return;
+      window.clearInterval(retry);
+      postYouTubeCommand(frame, 'setVolume', [TRAILER_START_VOLUME]);
+    };
+    window.addEventListener('message', handleMessage);
+    postYouTubeListening(frame);
+    return () => {
+      window.clearInterval(retry);
+      window.clearTimeout(stop);
+      window.removeEventListener('message', handleMessage);
+    };
+  }, [frame]);
 }
 
 export function DetailsTrailerDialog({
@@ -53,17 +96,20 @@ export function DetailsTrailerDialog({
   const activeIndex = Math.max(0, selectedIndex);
   const selectedEntry = trailers[activeIndex];
   const selectedKey = selectedEntry?.id;
-  const trailerLabel = selectedEntry?.name ?? `${title} trailer`;
+  const labels = trailerLabels(trailers, title);
+  const trailerLabel = labels[activeIndex] ?? 'Trailer';
   const hasPicker = trailers.length > 1;
   const tabId = useId();
   const panelId = `${tabId}-panel`;
   const trailerButtons = useRef(new Map<string, HTMLButtonElement>());
   const [focusedTrailerId, setFocusedTrailerId] = useState(selectedKey);
   const [reloadAttempt, setReloadAttempt] = useState(0);
+  const [frame, setFrame] = useState<HTMLIFrameElement | null>(null);
   const frameKey = `${trailerUrl}:${reloadAttempt}`;
   const [loadedFrameKey, setLoadedFrameKey] = useState<string | null>(null);
   const [delayedFrameKey, setDelayedFrameKey] = useState<string | null>(null);
   const isLoadingTrailer = !!trailerUrl && loadedFrameKey !== frameKey;
+  useTrailerStartVolume(frame);
 
   useEffect(() => {
     setFocusedTrailerId(selectedKey);
@@ -86,10 +132,6 @@ export function DetailsTrailerDialog({
     void openUrl(`https://www.youtube.com/watch?v=${encodeURIComponent(selectedTrailerId)}`).catch(
       () => notifyAction("Couldn't open YouTube", { tone: 'error' }),
     );
-  };
-
-  const reloadTrailer = () => {
-    setReloadAttempt((attempt) => attempt + 1);
   };
 
   const handleTrailerKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
@@ -135,75 +177,39 @@ export function DetailsTrailerDialog({
           returnFocusRef.current.focus({ preventScroll: true });
         }}
         className={cn(
-          'max-w-none gap-0 overflow-hidden rounded-2xl border border-white/[0.1] bg-zinc-950 p-0 text-white shadow-[0_28px_90px_rgba(0,0,0,0.85)] motion-reduce:animate-none motion-reduce:transition-none sm:max-w-5xl sm:rounded-2xl',
+          'max-w-none gap-0 overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 p-0 text-white shadow-[0_24px_80px_rgba(0,0,0,0.8)] motion-reduce:animate-none motion-reduce:transition-none sm:max-w-5xl sm:rounded-xl',
           hasPicker
-            ? 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-13rem)*16/9))]'
+            ? 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-11rem)*16/9))]'
             : 'w-[min(60rem,calc(100vw-2rem),calc((100dvh-8rem)*16/9))]',
         )}
       >
-        <div className='flex h-16 items-center justify-between gap-3 border-b border-white/[0.1] bg-zinc-950 px-3 sm:px-4'>
-          <div className='flex min-w-0 items-center gap-2.5'>
-            <Film aria-hidden='true' className='hidden h-4 w-4 shrink-0 text-zinc-500 sm:block' />
-            <div className='min-w-0'>
-              <DialogTitle className='truncate text-[13.5px] font-semibold tracking-tight text-white'>
-                {trailerLabel}
-              </DialogTitle>
-              <span className='mt-1 hidden truncate text-[11px] text-zinc-400 sm:block'>
-                {title}
-                {hasPicker && (
-                  <span className='ml-2 font-mono tabular-nums text-zinc-500'>
-                    {activeIndex + 1} / {trailers.length}
-                  </span>
-                )}
-              </span>
-            </div>
-          </div>
-          <div className='flex shrink-0 items-center gap-0.5'>
-            {trailerUrl && (
-              <button
-                type='button'
-                aria-label='Reload trailer'
-                title='Reload trailer'
-                onClick={reloadTrailer}
-                className={TRAILER_ACTION_BUTTON_CLASS}
-              >
-                <RotateCw aria-hidden='true' className='h-4 w-4' />
-              </button>
-            )}
-            {selectedTrailerId && (
-              <button
-                type='button'
-                aria-label='Watch on YouTube'
-                title='Watch on YouTube'
-                onClick={openSelectedTrailer}
-                className={cn(
-                  TRAILER_ACTION_BUTTON_CLASS,
-                  'gap-1.5 text-xs font-medium sm:w-auto sm:px-2.5',
-                )}
-              >
-                <ExternalLink aria-hidden='true' className='h-4 w-4' />
-                <span className='hidden sm:inline'>YouTube</span>
-              </button>
-            )}
-            <DialogClose asChild>
-              <button
-                type='button'
-                aria-label='Close trailer'
-                aria-keyshortcuts='Escape'
-                title='Close (Esc)'
-                className='ml-2 inline-flex h-10 min-w-10 shrink-0 items-center justify-center gap-2 rounded-lg border border-white/40 bg-white/15 px-2.5 text-white shadow-sm backdrop-blur-md hover:border-white/70 hover:bg-white/25 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950'
-              >
-                <X aria-hidden='true' className='h-5 w-5' />
-                <span className='hidden text-xs font-medium sm:inline'>Close</span>
-                <kbd
-                  aria-hidden='true'
-                  className='hidden rounded border border-white/25 px-1 py-0.5 font-sans text-[10px] leading-none text-white/75 md:inline'
-                >
-                  Esc
-                </kbd>
-              </button>
-            </DialogClose>
-          </div>
+        <div className='flex h-12 items-center gap-1 pl-4 pr-2'>
+          <DialogTitle className='mr-2 min-w-0 flex-1 truncate text-sm font-medium leading-5 text-white'>
+            {title}
+            <span className='font-normal text-zinc-500'> · {trailerLabel}</span>
+          </DialogTitle>
+          {selectedTrailerId && (
+            <button
+              type='button'
+              aria-label='Watch on YouTube'
+              title='Watch on YouTube'
+              onClick={openSelectedTrailer}
+              className={TRAILER_ICON_BUTTON_CLASS}
+            >
+              <ExternalLink aria-hidden='true' className='h-4 w-4' />
+            </button>
+          )}
+          <DialogClose asChild>
+            <button
+              type='button'
+              aria-label='Close trailer'
+              aria-keyshortcuts='Escape'
+              title='Close (Esc)'
+              className={TRAILER_ICON_BUTTON_CLASS}
+            >
+              <X aria-hidden='true' className='h-4 w-4' />
+            </button>
+          </DialogClose>
         </div>
         <DialogDescription className='sr-only'>Trailer video for {title}.</DialogDescription>
         <div
@@ -218,17 +224,22 @@ export function DetailsTrailerDialog({
               role='status'
               className='pointer-events-none absolute inset-0 z-10 grid place-items-center'
             >
-              <div className='delayed-fade-in flex flex-col items-center gap-3 rounded-xl bg-black/80 p-4 text-center motion-reduce:animate-none'>
+              <div className='delayed-fade-in flex flex-col items-center gap-3 text-center motion-reduce:animate-none'>
                 <Loader2
                   aria-hidden='true'
-                  className='h-6 w-6 animate-spin text-zinc-300 motion-reduce:animate-none'
+                  className='h-6 w-6 animate-spin text-zinc-400 motion-reduce:animate-none'
                 />
                 {delayedFrameKey === frameKey ? (
                   <>
                     <p className='text-sm text-zinc-300'>Taking longer than expected</p>
-                    <p className='max-w-56 text-xs leading-relaxed text-zinc-400'>
-                      Try the reload or YouTube controls above.
-                    </p>
+                    <button
+                      type='button'
+                      onClick={() => setReloadAttempt((attempt) => attempt + 1)}
+                      className='pointer-events-auto inline-flex h-8 items-center gap-1.5 rounded-md bg-white/[0.08] px-3 text-xs font-medium text-zinc-200 transition-colors duration-150 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none'
+                    >
+                      <RotateCw aria-hidden='true' className='h-3.5 w-3.5' />
+                      Reload
+                    </button>
                   </>
                 ) : (
                   <span className='sr-only'>Loading trailer...</span>
@@ -242,6 +253,7 @@ export function DetailsTrailerDialog({
           {trailerUrl && (
             <iframe
               key={frameKey}
+              ref={setFrame}
               className='absolute inset-0 h-full w-full border-0'
               src={trailerUrl}
               onLoad={() => setLoadedFrameKey(frameKey)}
@@ -255,7 +267,7 @@ export function DetailsTrailerDialog({
           {/* eslint-enable react/iframe-missing-sandbox */}
         </div>
         {hasPicker && (
-          <div className='min-w-0 border-t border-white/[0.08] bg-white/[0.015] p-3'>
+          <div className='min-w-0 px-2 py-2'>
             <span id={`${tabId}-help`} className='sr-only'>
               Use arrow keys, Home or End to browse trailers. Press Enter or Space to play.
             </span>
@@ -268,11 +280,11 @@ export function DetailsTrailerDialog({
                 if (!event.currentTarget.contains(event.relatedTarget))
                   setFocusedTrailerId(selectedKey);
               }}
-              className='flex items-center gap-2 overflow-x-auto overscroll-x-contain p-1 scrollbar-hide'
+              className='flex items-center gap-1 overflow-x-auto overscroll-x-contain scrollbar-hide'
             >
               {trailers.map((trailer, index) => {
                 const isActive = trailer.id === selectedKey;
-                const label = trailer.name ?? `Trailer ${index + 1}`;
+                const label = labels[index];
                 return (
                   <button
                     key={trailer.id}
@@ -283,16 +295,15 @@ export function DetailsTrailerDialog({
                     id={`${tabId}-${index}`}
                     type='button'
                     role='tab'
-                    aria-label={label}
                     aria-selected={isActive}
                     aria-controls={panelId}
                     tabIndex={trailer.id === (focusedTrailerId ?? selectedKey) ? 0 : -1}
                     title={label}
                     className={cn(
-                      'nav-switch-item flex h-18 w-56 shrink-0 items-center gap-3 rounded-lg border p-2 text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-nav)/70 motion-reduce:transition-none',
+                      'nav-switch-item h-8 max-w-56 shrink-0 truncate rounded-md px-3 text-xs font-medium focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/70 motion-reduce:transition-none',
                       isActive
-                        ? 'border-(--accent-nav)/40 bg-(--accent-nav)/10 text-white'
-                        : 'border-white/[0.06] text-zinc-400 hover:border-white/15 hover:bg-white/[0.04] hover:text-zinc-200',
+                        ? 'accent-active'
+                        : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
                     )}
                     onFocus={(event) => {
                       setFocusedTrailerId(trailer.id);
@@ -302,38 +313,7 @@ export function DetailsTrailerDialog({
                     onClick={() => onSelectTrailer(trailer.id)}
                     onKeyDown={(event) => handleTrailerKeyDown(event, index)}
                   >
-                    <span
-                      aria-hidden='true'
-                      className='relative flex aspect-video w-20 shrink-0 items-center justify-center overflow-hidden rounded-md bg-zinc-800'
-                    >
-                      <Film className='h-5 w-5 text-zinc-500' />
-                      <RemoteImage
-                        src={`https://i.ytimg.com/vi/${encodeURIComponent(trailer.id)}/mqdefault.jpg`}
-                        alt=''
-                        loading='lazy'
-                        className='absolute inset-0 h-full w-full object-cover'
-                      />
-                      <span className='absolute inset-0 grid place-items-center bg-black/35'>
-                        <Play
-                          className={cn(
-                            'h-4 w-4 fill-current drop-shadow-sm',
-                            isActive ? 'text-white' : 'text-white/75',
-                          )}
-                        />
-                      </span>
-                    </span>
-                    <span className='min-w-0'>
-                      <span className='block truncate text-xs font-medium leading-5'>{label}</span>
-                      <span
-                        aria-hidden='true'
-                        className={cn(
-                          'mt-0.5 block text-[10px] font-medium tabular-nums',
-                          isActive ? 'text-(--accent-nav)' : 'text-zinc-500',
-                        )}
-                      >
-                        {isActive ? 'Now playing' : `Trailer ${index + 1}`}
-                      </span>
-                    </span>
+                    {label}
                   </button>
                 );
               })}

@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { Check, ChevronLeft, ChevronRight, Loader2, Pause, Play, Plus, Star } from 'lucide-react';
+import { ChevronLeft, ChevronRight, Loader2, Pause, Play, Star } from 'lucide-react';
 import {
   memo,
   type MouseEvent,
@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
-import { Button } from '@/components/ui/button';
+import { animateLibrarySave, Button, SaveIndicator } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   useLibraryMembership,
@@ -46,6 +46,8 @@ const HERO_ROTATION_INTERVAL_MS = 10_000;
 const HERO_TRANSITION_DURATION_MS = 180;
 const HERO_CONTAINER_CLASS =
   'relative w-full h-[78vh] min-h-[560px] max-h-[860px] -mt-8 overflow-hidden';
+const HERO_CONTENT_CLASS =
+  'absolute inset-0 flex items-end px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16';
 
 const ARROW_BUTTON_CLASS_NAME =
   'flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-white/60 transition-colors duration-150 hover:bg-white/10 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40';
@@ -69,8 +71,6 @@ function HeroCarouselIndicators({
     return null;
   }
 
-  const progressPercent = ((activeIndex + 1) / itemCount) * 100;
-
   return (
     <div
       role='group'
@@ -85,7 +85,7 @@ function HeroCarouselIndicators({
       >
         <ChevronLeft aria-hidden='true' className='h-3.5 w-3.5' />
       </button>
-      <span className='whitespace-nowrap text-[11px] font-medium tabular-nums tracking-[0.2em] text-white/65'>
+      <span className='whitespace-nowrap text-[13px] font-medium tabular-nums tracking-[0.12em] text-white/80'>
         {pad2(activeIndex + 1)} / {pad2(itemCount)}
       </span>
       <span
@@ -94,7 +94,7 @@ function HeroCarouselIndicators({
       >
         <span
           className='absolute inset-y-0 left-0 w-full origin-left rounded bg-(--accent-art) transition-transform duration-300 ease-out motion-reduce:transition-none'
-          style={{ transform: `scaleX(${progressPercent / 100})` }}
+          style={{ transform: `scaleX(${(activeIndex + 1) / itemCount})` }}
         />
       </span>
       <button
@@ -172,7 +172,7 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
 
   useEffect(() => cancelTransition, [cancelTransition]);
 
-  // One timer per slide: a manual step or resume restarts the full dwell time.
+  // One timer per slide: a manual step, resume, or regained window focus restarts the full dwell time.
   useEffect(() => {
     if (isPaused || itemCount <= 1) return;
 
@@ -181,16 +181,20 @@ function useHeroCarouselState({ isPaused = false, itemCount }: HeroCarouselState
     const syncRotation = () => {
       window.clearTimeout(timer);
       timer =
-        document.hidden || reducedMotion.matches
+        document.hidden || !document.hasFocus() || reducedMotion.matches
           ? undefined
           : window.setTimeout(advanceSlide, HERO_ROTATION_INTERVAL_MS);
     };
     syncRotation();
     document.addEventListener('visibilitychange', syncRotation);
+    window.addEventListener('focus', syncRotation);
+    window.addEventListener('blur', syncRotation);
     reducedMotion.addEventListener('change', syncRotation);
 
     return () => {
       document.removeEventListener('visibilitychange', syncRotation);
+      window.removeEventListener('focus', syncRotation);
+      window.removeEventListener('blur', syncRotation);
       reducedMotion.removeEventListener('change', syncRotation);
       window.clearTimeout(timer);
     };
@@ -230,7 +234,7 @@ function HeroTitle({
       <h1
         className={
           showText
-            ? 'line-clamp-3 text-4xl font-bold leading-[1.02] tracking-[-0.03em] text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.6)] animate-in fade-in duration-300 motion-reduce:animate-none md:text-6xl'
+            ? 'line-clamp-3 text-4xl font-bold leading-[1.02] tracking-[-0.03em] text-white drop-shadow-[0_10px_30px_rgba(0,0,0,0.6)] animate-in fade-in slide-in-from-bottom-1.5 duration-200 motion-reduce:animate-none md:text-6xl'
             : 'sr-only'
         }
       >
@@ -248,7 +252,7 @@ function HeroTitle({
           fetchPriority='high'
           onLoad={() => setLoadedLogoUrl(logoUrl)}
           onError={onLogoError}
-          className='absolute inset-0 h-full w-full object-contain object-[left_bottom] drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)]'
+          className='absolute inset-0 h-full w-full object-contain object-[left_bottom] drop-shadow-[0_16px_40px_rgba(0,0,0,0.65)] data-[loaded]:animate-in data-[loaded]:fade-in data-[loaded]:slide-in-from-bottom-1.5 data-[loaded]:duration-200 motion-reduce:data-[loaded]:animate-none'
         />
       )}
     </>
@@ -260,7 +264,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const isOnline = useOnlineStatus();
   const [isHovered, setIsHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
-  const [isWindowFocused, setIsWindowFocused] = useState(() => document.hasFocus());
   const [isOffscreen, setIsOffscreen] = useState(false);
   const [isRotationPaused, setIsRotationPaused] = useState(false);
   const from = currentPathWithSearch();
@@ -268,18 +271,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
   const { activeIndex, handleStep, isTransitioning } = useHeroCarouselState({
     itemCount: items.length,
     // Offscreen slides rotate state nobody can see; reduced-motion users get manual control only.
-    isPaused: isRotationPaused || isHovered || hasFocus || !isWindowFocused || isOffscreen,
+    isPaused: isRotationPaused || isHovered || hasFocus || isOffscreen,
   });
-
-  useEffect(() => {
-    const syncWindowFocus = () => setIsWindowFocused(document.hasFocus());
-    window.addEventListener('focus', syncWindowFocus);
-    window.addEventListener('blur', syncWindowFocus);
-    return () => {
-      window.removeEventListener('focus', syncWindowFocus);
-      window.removeEventListener('blur', syncWindowFocus);
-    };
-  }, []);
 
   // Don't advance or repaint the crossfade while the hero is scrolled off under the rails. The section mounts
   // only once items exist, so a cold load re-runs this when they land.
@@ -333,7 +326,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         });
         // Warm adjacent backdrops so rotation never flashes an empty frame — a plain Image probe, no React state.
         const backdrop = candidate.backdrop || candidate.poster;
-        if (backdrop && isHttpUrl(backdrop)) {
+        if (isHttpUrl(backdrop)) {
           const probe = new Image();
           probe.decoding = 'async';
           probe.referrerPolicy = 'no-referrer';
@@ -368,20 +361,36 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
           Loading featured titles…
         </span>
         <div className='absolute inset-0 bg-linear-to-t from-black via-black/50 to-transparent' />
-        <div
-          aria-hidden='true'
-          className='absolute inset-x-0 bottom-0 space-y-5 px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16'
-        >
-          <Skeleton className='h-12 w-80 max-w-full bg-white/[0.08] md:h-16' />
-          <Skeleton className='h-4 w-40 max-w-full bg-white/[0.06]' />
-          <div className='max-w-md space-y-2.5'>
-            <Skeleton className='h-3.5 w-full bg-white/[0.05]' />
-            <Skeleton className='h-3.5 w-4/5 bg-white/[0.05]' />
-          </div>
-          <div className='flex gap-2'>
-            <Skeleton className='h-11 w-28 rounded-md bg-white/[0.08]' />
-            <Skeleton className='h-11 w-11 rounded-md bg-white/[0.06]' />
-            <Skeleton className='hidden h-11 w-20 rounded-md bg-white/[0.05] sm:block' />
+        <div aria-hidden='true' className={HERO_CONTENT_CLASS}>
+          <div className='flex w-full items-end justify-between gap-10'>
+            <div className='flex min-w-0 max-w-2xl flex-1 flex-col items-start'>
+              <div className='mb-5 flex h-[150px] w-[440px] max-w-full items-end md:h-[185px]'>
+                <Skeleton className='h-16 w-80 max-w-full bg-white/[0.08] md:h-20' />
+              </div>
+              <div className='flex h-4 items-center gap-3'>
+                <Skeleton className='h-3 w-12 bg-white/[0.06]' />
+                <Skeleton className='h-3 w-10 bg-white/[0.06]' />
+                <Skeleton className='h-3 w-10 bg-white/[0.06]' />
+              </div>
+              <div className='mt-4 w-full max-w-xl space-y-2.5 lg:hidden'>
+                <Skeleton className='h-3.5 w-full bg-white/[0.05]' />
+                <Skeleton className='h-3.5 w-4/5 bg-white/[0.05]' />
+              </div>
+              <div className='mt-5 flex gap-2'>
+                <Skeleton className='h-11 w-[108px] rounded-md bg-white/[0.08]' />
+                <Skeleton className='h-11 w-11 rounded-md bg-white/[0.06]' />
+                <Skeleton className='hidden h-11 w-20 rounded-md bg-white/[0.05] sm:block' />
+              </div>
+            </div>
+            <div className='hidden w-[36%] max-w-md shrink-0 space-y-3 lg:block'>
+              <Skeleton className='ml-auto h-3.5 w-full bg-white/[0.05]' />
+              <Skeleton className='ml-auto h-3.5 w-full bg-white/[0.05]' />
+              <Skeleton className='ml-auto h-3.5 w-3/4 bg-white/[0.05]' />
+              <div className='flex justify-end gap-1.5 pt-1'>
+                <Skeleton className='h-7 w-16 rounded-md bg-white/[0.05]' />
+                <Skeleton className='h-7 w-20 rounded-md bg-white/[0.05]' />
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -436,7 +445,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
           slideTransitionClass,
         )}
       >
-        {backdropUrl && isHttpUrl(backdropUrl) && (
+        {isHttpUrl(backdropUrl) && (
           <>
             <RemoteImage
               key={item.id}
@@ -479,7 +488,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
           {/* Bottom-padded past the rail overlap (-mt-* on home rails) so actions never sit under the first cards. */}
           <div
             className={cn(
-              'absolute inset-0 flex items-end transition-opacity px-6 pl-[84px] pb-36 md:pl-24 md:pr-12 md:pb-44 lg:pl-28 lg:pr-16 motion-reduce:transition-none',
+              HERO_CONTENT_CLASS,
+              'transition-opacity motion-reduce:transition-none',
               slideTransitionClass,
             )}
           >
@@ -501,7 +511,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                   />
                 </Link>
 
-                <div className='flex items-center flex-wrap gap-x-3 gap-y-1.5 text-[12px] font-medium text-white/75'>
+                <div className='flex items-center flex-wrap gap-x-3 gap-y-1.5 text-[13px] font-medium text-white/85'>
                   {item.displayYear && <span>{item.displayYear}</span>}
                   <span>{typeLabel}</span>
                   {/* A late rating stays at the row's edge without shifting year/type. */}
@@ -532,7 +542,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     }
                     aria-busy={primaryPlayback.isResolvingPrimaryAction || undefined}
                     title={isOnline ? undefined : 'Reconnect to find streams'}
-                    className='h-11 min-w-[108px] gap-2 rounded-md bg-white px-4 text-[13px] font-semibold text-black shadow-none transition-colors duration-150 not-aria-disabled:hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80 motion-reduce:transition-none'
+                    className='h-11 min-w-[108px] gap-2 rounded-md bg-white px-4 text-sm font-semibold text-black shadow-none transition-colors duration-150 not-aria-disabled:hover:bg-zinc-200 focus-visible:ring-white/60 aria-disabled:cursor-default aria-disabled:opacity-80 motion-reduce:transition-none'
                   >
                     {primaryPlayback.showResolvingFeedback ? (
                       <Loader2
@@ -561,24 +571,13 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     )}
                     // Guard, not `disabled` — disabling the focused button blurs it, unpausing the carousel mid-click.
                     aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
-                    onClick={() => {
-                      if (libraryReady && !toggleLibrary.isPending) toggleLibrary.mutate();
+                    onClick={(event) => {
+                      if (!libraryReady || toggleLibrary.isPending) return;
+                      if (!isInLibrary) animateLibrarySave(event.currentTarget);
+                      toggleLibrary.mutate();
                     }}
                   >
-                    <span aria-hidden='true' className='relative size-4 shrink-0'>
-                      <Plus
-                        className={cn(
-                          'absolute inset-0 size-4 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                          isInLibrary ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
-                        )}
-                      />
-                      <Check
-                        className={cn(
-                          'absolute inset-0 size-4 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                          isInLibrary ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
-                        )}
-                      />
-                    </span>
+                    <SaveIndicator saved={isInLibrary} />
                   </Button>
                   <Link
                     to={detailsPath}
@@ -587,7 +586,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     onFocus={prefetchActiveDetails}
                     onPointerEnter={prefetchActiveDetails}
                     aria-label={`Details for ${item.title}`}
-                    className='hidden h-11 items-center gap-1 rounded-md px-3 text-[13px] font-medium text-white/65 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/60 motion-reduce:transition-none sm:inline-flex'
+                    className='hidden h-11 items-center gap-1 rounded-md px-3 text-sm font-medium text-white/80 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/60 motion-reduce:transition-none sm:inline-flex'
                   >
                     Details
                     <ChevronRight aria-hidden='true' className='h-3.5 w-3.5' />

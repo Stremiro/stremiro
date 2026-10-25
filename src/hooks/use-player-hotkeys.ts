@@ -36,6 +36,7 @@ interface UsePlayerHotkeysOptions {
   cycleAudioTrack: () => Promise<void>;
   cycleSubtitles: () => Promise<void>;
   durationRef: RefObject<number>;
+  expandPlayer: () => void;
   /** Volume steps — reads the live volume ref internally. */
   stepVolume: (delta: number) => Promise<void>;
   hasEpisodes: boolean;
@@ -46,6 +47,7 @@ interface UsePlayerHotkeysOptions {
   navigateBack: () => Promise<void>;
   nudgeSubtitleDelay: (direction: 1 | -1) => void;
   openStreamSelector: (() => void) | null;
+  playPreviousEpisode: () => void;
   playNextEpisode: () => void;
   seek: (seconds: number) => Promise<void>;
   seekRelative: (seconds: number) => Promise<void>;
@@ -71,6 +73,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     cycleAudioTrack,
     cycleSubtitles,
     durationRef,
+    expandPlayer,
     stepVolume,
     hasEpisodes,
     isExpanded,
@@ -80,6 +83,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     navigateBack,
     nudgeSubtitleDelay,
     openStreamSelector,
+    playPreviousEpisode,
     playNextEpisode,
     seek,
     seekRelative,
@@ -100,8 +104,13 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
   // Effect event: one permanent listener reading latest options.
   const handleKeyDown = useEffectEvent((e: KeyboardEvent) => {
     if (!mountedRef.current) return;
-    // Docked: the page owns keys — space/arrows must not control video.
-    if (!isExpanded) return;
+    // Docked: only the focused mini region owns media keys; the surrounding page keeps its shortcuts.
+    const isMini = !isExpanded;
+    if (
+      isMini &&
+      !(e.target instanceof HTMLElement && e.target.closest('[data-mini-player]:not([inert])'))
+    )
+      return;
     if (document.querySelector(OPEN_DIALOG_SELECTOR)) return;
     // Child-handled keys, IME composition, and modifier chords are never
     // media shortcuts.
@@ -111,7 +120,10 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
 
     // Check ownership before suppressing repeats — typing keys and control activation keys belong to controls.
     if (normalizedKey === 'escape') {
-      if (e.target instanceof HTMLElement && e.target.closest(RADIX_POPPER_CONTENT_SELECTOR)) {
+      if (
+        e.target instanceof HTMLElement &&
+        (e.target.closest(RADIX_POPPER_CONTENT_SELECTOR) || (isMini && isEditableTarget(e.target)))
+      ) {
         return;
       }
     } else if (shouldIgnorePlayerHotkeyTarget(e.target, normalizedKey)) {
@@ -120,12 +132,16 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
 
     const action = keymap.byKey.get(normalizedKey);
     const isDigit = /^[0-9]$/.test(normalizedKey);
+    const expandMiniWithEnter = isMini && normalizedKey === 'enter' && !action;
 
     // Discrete actions ignore auto-repeat (seek/volume/speed etc. keep ramping).
     // Digits are one-shot percent seeks — a held digit would storm identical seeks.
     if (
       e.repeat &&
-      (normalizedKey === 'escape' || isDigit || (action && !isRepeatablePlayerAction(action)))
+      (normalizedKey === 'escape' ||
+        isDigit ||
+        expandMiniWithEnter ||
+        (action && !isRepeatablePlayerAction(action)))
     ) {
       e.preventDefault();
       return;
@@ -147,6 +163,10 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
         closeEpisodesPanel();
         return;
       }
+      if (isMini) {
+        expandPlayer();
+        return;
+      }
       if (isFullscreen) {
         void toggleFullscreen().catch(() => undefined);
         return;
@@ -159,6 +179,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     // The episodes key must also close the panel from inside, so it intercepts ahead of the open gate.
     if (action === 'episodes' && hasEpisodes && !showStreamSelector && !showShortcuts) {
       e.preventDefault();
+      if (isMini) expandPlayer();
       toggleEpisodes();
       return;
     }
@@ -166,6 +187,7 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     // Help closes from anywhere, never opens over the modal selector.
     if (action === 'shortcuts' && !showStreamSelector) {
       e.preventDefault();
+      if (isMini) expandPlayer();
       toggleShortcuts();
       return;
     }
@@ -182,6 +204,11 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       return;
     }
 
+    if (expandMiniWithEnter) {
+      e.preventDefault();
+      expandPlayer();
+      return;
+    }
     if (!action) return;
     // Shift halves the seek step for fine scrubbing, matching Shift+wheel.
     const seekStep = e.shiftKey ? 5 : 10;
@@ -202,9 +229,11 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       case 'volumeDown':
         return run(() => void stepVolume(-5).catch(() => undefined));
       case 'toggleFullscreen':
-        return run(() => void toggleFullscreen().catch(() => undefined));
+        return run(isMini ? expandPlayer : () => void toggleFullscreen().catch(() => undefined));
       case 'toggleMute':
         return run(() => void toggleMute().catch(() => undefined));
+      case 'previousEpisode':
+        return run(playPreviousEpisode);
       case 'nextEpisode':
         return run(playNextEpisode);
       case 'cycleSubtitles':
@@ -212,11 +241,15 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
       case 'cycleAudio':
         return run(() => void cycleAudioTrack().catch(() => undefined));
       case 'streamSelector':
-        if (openStreamSelector) run(openStreamSelector);
+        if (openStreamSelector)
+          run(() => {
+            if (isMini) expandPlayer();
+            openStreamSelector();
+          });
         return;
       case 'dock':
         // Dock to the mini player — same destination as Back on a healthy session.
-        return run(() => void navigateBack().catch(() => undefined));
+        return run(isMini ? expandPlayer : () => void navigateBack().catch(() => undefined));
       case 'speedDown':
         return run(() => stepSpeed(-1));
       case 'speedUp':

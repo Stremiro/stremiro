@@ -1,5 +1,17 @@
 import { useQuery } from '@tanstack/react-query';
-import { Check, ChevronsUpDown, Search } from 'lucide-react';
+import {
+  Captions,
+  Check,
+  ChevronsUpDown,
+  Clapperboard,
+  Compass,
+  Languages,
+  Minus,
+  Plus,
+  RotateCcw,
+  Search,
+  Volume2,
+} from 'lucide-react';
 import { type KeyboardEvent, useId, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { RetryBanner } from '@/components/retry-banner';
@@ -10,8 +22,15 @@ import {
   supportedLanguagesQueryOptions,
   usePlaybackLanguagePreferences,
 } from '@/hooks/use-playback-language-preferences';
-import { type AppUiPreferences, getErrorMessage, type SupportedLanguage } from '@/lib/api';
-import { cn, queryNeedsRetry } from '@/lib/utils';
+import { SubtitleAppearanceControls } from '@/components/subtitle-appearance-controls';
+import {
+  type AppUiPreferences,
+  getErrorMessage,
+  hasSubtitleAppearance,
+  SUBTITLE_APPEARANCE_RESET,
+  type SupportedLanguage,
+} from '@/lib/api';
+import { clamp, cn, queryNeedsRetry } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
@@ -21,6 +40,7 @@ import {
   SettingsRow,
   SettingsSelect,
   SettingsSwitch,
+  settingsControlId,
 } from './chrome';
 
 type PlaybackUiPreferences = Pick<
@@ -33,26 +53,37 @@ type PlaybackUiPreferences = Pick<
   | 'trailerPreviews'
   | 'audioDelay'
   | 'nightMode'
+  | 'subtitleFont'
+  | 'subtitleColor'
+  | 'subtitleEdge'
+  | 'subtitleBold'
+  | 'subtitleItalic'
+  | 'autoLoadAddonSubtitles'
 >;
 
 const COUNTDOWN_SECONDS = [5, 8, 10, 15, 30];
 const CONTROLS_HIDE_SECONDS = [2, 3, 5, 8];
 
+const STEP_BUTTON_CLASS =
+  'flex size-8 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04] text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-(--accent-nav) aria-disabled:cursor-default aria-disabled:opacity-35 aria-disabled:hover:bg-white/[0.04] motion-reduce:transition-none';
+
 function SecondsSelect({
   label,
+  description,
   seconds,
   options,
   disabled,
   onChange,
 }: {
   label: string;
+  description?: string;
   seconds: number;
   options: readonly number[];
   disabled: boolean;
   onChange: (seconds: number) => void;
 }) {
   return (
-    <SettingsRow label={label}>
+    <SettingsRow label={label} description={description}>
       <SettingsSelect
         ariaLabel={label}
         valueLabel={`${seconds} seconds`}
@@ -74,6 +105,7 @@ function LanguageSelector({
   kind,
   options,
   disabled,
+  loading,
   onChange,
 }: {
   label: string;
@@ -81,6 +113,7 @@ function LanguageSelector({
   kind: 'audio' | 'subtitle';
   options: readonly SupportedLanguage[];
   disabled: boolean;
+  loading: boolean;
   onChange: (value: string) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -94,6 +127,7 @@ function LanguageSelector({
     ...options,
   ];
   const selected = choices.find((choice) => choice.code === value);
+  const valueLabel = loading ? 'Loading…' : (selected?.label ?? value);
   const needle = query.trim().toLowerCase();
   const matches = needle
     ? choices
@@ -138,16 +172,16 @@ function LanguageSelector({
         <PopoverTrigger asChild>
           <Button
             variant='outline'
-            aria-label={`${label}: ${selected?.label ?? value}`}
+            aria-label={`${label}: ${valueLabel}`}
             disabled={disabled}
             className={cn(
-              'h-9 w-52 justify-between gap-2 px-3 text-[13px] shadow-none',
+              'h-9 w-52 min-w-0 max-w-full justify-between gap-2 px-3 text-[13px] shadow-none',
               SETTINGS_OUTLINE_BUTTON_CLASS,
             )}
           >
-            <span className='truncate'>{selected?.label ?? value}</span>
+            <span className='truncate'>{valueLabel}</span>
             <span className='ml-auto flex shrink-0 items-center gap-2'>
-              {selected?.code && selected.code !== 'off' ? (
+              {!loading && selected?.code && selected.code !== 'off' ? (
                 <span className='font-mono text-[10.5px] uppercase text-zinc-500'>
                   {selected.code}
                 </span>
@@ -160,7 +194,7 @@ function LanguageSelector({
           align='end'
           sideOffset={6}
           onOpenAutoFocus={() => requestAnimationFrame(() => moveActive(activeIndex))}
-          className='w-64 overflow-hidden rounded-lg border-white/10 bg-zinc-950/95 p-0 shadow-[0_18px_48px_-12px_rgba(0,0,0,0.8)] backdrop-blur-xl'
+          className='w-64 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border-white/10 bg-zinc-950/95 p-0 shadow-[0_18px_48px_-12px_rgba(0,0,0,0.8)] backdrop-blur-xl'
         >
           <div className='flex items-center gap-2 border-b border-white/[0.07] px-3'>
             <Search aria-hidden='true' className='h-3.5 w-3.5 shrink-0 text-zinc-500' />
@@ -246,7 +280,6 @@ function PlaybackLanguageConfig() {
   const {
     globalPlaybackLanguagePreferences,
     globalPlaybackLanguagePreferencesQuery,
-    isLoadingGlobalPlaybackLanguagePreferences,
     saveGlobalPlaybackLanguagePreference,
   } = usePlaybackLanguagePreferences();
   // The closed set lives in Rust; the query is effectively static per run.
@@ -277,15 +310,17 @@ function PlaybackLanguageConfig() {
     );
   }
 
-  const disabled = isLoadingGlobalPlaybackLanguagePreferences || languageOptionsQuery.isLoading;
+  const loading =
+    globalPlaybackLanguagePreferences === undefined || languageOptionsQuery.data === undefined;
   return (
-    <div className='divide-y divide-white/[0.06]'>
+    <>
       <LanguageSelector
         label='Audio'
         value={globalPlaybackLanguagePreferences?.preferredAudioLanguage ?? ''}
         kind='audio'
         options={options}
-        disabled={disabled}
+        disabled={loading}
+        loading={loading}
         onChange={(value) => handleLanguageChange('audio', value)}
       />
       <LanguageSelector
@@ -293,10 +328,11 @@ function PlaybackLanguageConfig() {
         value={globalPlaybackLanguagePreferences?.preferredSubtitleLanguage ?? ''}
         kind='subtitle'
         options={options}
-        disabled={disabled}
+        disabled={loading}
+        loading={loading}
         onChange={(value) => handleLanguageChange('sub', value)}
       />
-    </div>
+    </>
   );
 }
 
@@ -307,7 +343,13 @@ function AppUiPreferenceToggle({
   description,
 }: {
   appUiPreferences: ReturnType<typeof useAppUiPreferences<PlaybackUiPreferences>>;
-  field: 'autoPlayNext' | 'autoSkipIntro' | 'spoilerProtection' | 'trailerPreviews' | 'nightMode';
+  field:
+    | 'autoPlayNext'
+    | 'autoSkipIntro'
+    | 'spoilerProtection'
+    | 'trailerPreviews'
+    | 'nightMode'
+    | 'autoLoadAddonSubtitles';
   label: string;
   description: string;
 }) {
@@ -339,6 +381,12 @@ export function PlaybackSettings() {
       autoSkipIntro,
       audioDelay,
       nightMode,
+      subtitleFont,
+      subtitleColor,
+      subtitleEdge,
+      subtitleBold,
+      subtitleItalic,
+      autoLoadAddonSubtitles,
     }) => ({
       spoilerProtection,
       trailerPreviews,
@@ -348,97 +396,198 @@ export function PlaybackSettings() {
       autoSkipIntro,
       audioDelay,
       nightMode,
+      subtitleFont,
+      subtitleColor,
+      subtitleEdge,
+      subtitleBold,
+      subtitleItalic,
+      autoLoadAddonSubtitles,
     }),
   );
   const { preferences, isHydrating, updatePreferences } = appUiPreferences;
+  const subtitleAppearanceChanged = hasSubtitleAppearance(preferences);
 
   return (
-    <SettingsGroup>
-      <SettingsGroupHeader
-        title='Playback'
-        description='Languages, sound and player behavior. Changes are saved automatically.'
+    <div className='@container/playback space-y-4'>
+      <SettingsQueryError
+        query={appUiPreferences.preferencesQuery}
+        message="Couldn't load your preferences."
       />
-      <SettingsBody>
-        <PlaybackLanguageConfig />
-      </SettingsBody>
-      <div className='border-t border-white/[0.06]'>
-        <SettingsQueryError
-          className='mx-5 mt-4'
-          query={appUiPreferences.preferencesQuery}
-          message="Couldn't load your preferences."
-        />
-        <SettingsBody rows>
-          <AppUiPreferenceToggle
-            appUiPreferences={appUiPreferences}
-            field='nightMode'
-            label='Night mode'
-            description='Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound.'
-          />
-          <SettingsRow
-            label='Audio sync'
-            description='Seconds, saved for all videos. Positive plays audio later; negative plays it earlier. Set to 0 to reset.'
-          >
-            <span className='flex items-center gap-3'>
-              <input
-                type='range'
-                aria-label='Audio sync delay in seconds'
-                aria-valuetext={`${preferences.audioDelay > 0 ? '+' : ''}${preferences.audioDelay.toFixed(1)} seconds`}
-                min={-5}
-                max={5}
-                step={0.1}
-                value={preferences.audioDelay}
-                disabled={isHydrating}
-                onChange={(event) =>
-                  updatePreferences({ audioDelay: event.currentTarget.valueAsNumber })
-                }
-                className='h-8 w-24 cursor-pointer accent-(--accent-nav) focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-(--accent-nav) disabled:opacity-35'
+      <div className='grid items-start gap-4 @min-[54rem]/playback:grid-cols-2'>
+        <div className='min-w-0 space-y-4'>
+          <SettingsGroup>
+            <SettingsGroupHeader
+              icon={Languages}
+              title='Languages'
+              description='Preferred tracks for every stream.'
+            />
+            <SettingsBody rows>
+              <PlaybackLanguageConfig />
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='autoLoadAddonSubtitles'
+                label='Load addon subtitles automatically'
+                description='Use a matching addon subtitle when the stream has none in your preferred language.'
               />
-              <output className='w-12 text-right text-sm tabular-nums text-zinc-200'>
-                {preferences.audioDelay > 0 ? '+' : ''}
-                {preferences.audioDelay.toFixed(1)}s
-              </output>
-            </span>
-          </SettingsRow>
-          <AppUiPreferenceToggle
-            appUiPreferences={appUiPreferences}
-            field='spoilerProtection'
-            label='Spoiler protection'
-            description='Blur unwatched episode thumbnails and descriptions.'
-          />
-          <AppUiPreferenceToggle
-            appUiPreferences={appUiPreferences}
-            field='trailerPreviews'
-            label='Trailer previews'
-            description='Play a muted trailer when hovering a title card.'
-          />
-          <AppUiPreferenceToggle
-            appUiPreferences={appUiPreferences}
-            field='autoPlayNext'
-            label='Auto-play next episode'
-            description='Count down and start the next episode automatically.'
-          />
-          <SecondsSelect
-            label='Next episode countdown'
-            seconds={preferences.nextEpisodeCountdownSecs}
-            options={COUNTDOWN_SECONDS}
-            disabled={isHydrating || !preferences.autoPlayNext}
-            onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
-          />
-          <SecondsSelect
-            label='Hide player controls after'
-            seconds={preferences.controlsHideDelayMs / 1000}
-            options={CONTROLS_HIDE_SECONDS}
-            disabled={isHydrating}
-            onChange={(seconds) => updatePreferences({ controlsHideDelayMs: seconds * 1000 })}
-          />
-          <AppUiPreferenceToggle
-            appUiPreferences={appUiPreferences}
-            field='autoSkipIntro'
-            label='Auto-skip intros & recaps'
-            description='Skip detected intros and recaps. Outros stay manual.'
-          />
-        </SettingsBody>
+            </SettingsBody>
+          </SettingsGroup>
+          <SettingsGroup>
+            <SettingsGroupHeader
+              icon={Volume2}
+              title='Sound'
+              description='Applied to all videos.'
+            />
+            <SettingsBody rows>
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='nightMode'
+                label='Night mode'
+                description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
+              />
+              <SettingsRow
+                label='Audio sync'
+                description='Positive delays audio; negative plays it earlier.'
+              >
+                <span className='flex max-w-full items-center gap-2.5'>
+                  <button
+                    type='button'
+                    aria-label='Play audio 0.1 seconds earlier'
+                    aria-disabled={isHydrating || preferences.audioDelay <= -5 || undefined}
+                    onClick={() => {
+                      if (!isHydrating && preferences.audioDelay > -5)
+                        updatePreferences({
+                          audioDelay:
+                            Math.round(clamp(preferences.audioDelay - 0.1, -5, 5) * 10) / 10,
+                        });
+                    }}
+                    className={STEP_BUTTON_CLASS}
+                  >
+                    <Minus aria-hidden='true' className='size-3.5' />
+                  </button>
+                  <output className='w-12 shrink-0 text-center text-[13px] font-medium tabular-nums text-zinc-100'>
+                    {preferences.audioDelay > 0 ? '+' : ''}
+                    {preferences.audioDelay.toFixed(1)}s
+                  </output>
+                  <button
+                    type='button'
+                    aria-label='Play audio 0.1 seconds later'
+                    aria-disabled={isHydrating || preferences.audioDelay >= 5 || undefined}
+                    onClick={() => {
+                      if (!isHydrating && preferences.audioDelay < 5)
+                        updatePreferences({
+                          audioDelay:
+                            Math.round(clamp(preferences.audioDelay + 0.1, -5, 5) * 10) / 10,
+                        });
+                    }}
+                    className={STEP_BUTTON_CLASS}
+                  >
+                    <Plus aria-hidden='true' className='size-3.5' />
+                  </button>
+                  <button
+                    type='button'
+                    aria-label='Reset audio sync'
+                    title='Reset audio sync'
+                    aria-disabled={isHydrating || preferences.audioDelay === 0 || undefined}
+                    onClick={() => {
+                      if (!isHydrating && preferences.audioDelay !== 0)
+                        updatePreferences({ audioDelay: 0 });
+                    }}
+                    className={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
+                  >
+                    <RotateCcw aria-hidden='true' className='size-3.5' />
+                  </button>
+                </span>
+              </SettingsRow>
+            </SettingsBody>
+          </SettingsGroup>
+          <SettingsGroup>
+            <SettingsGroupHeader icon={Compass} title='Browsing' />
+            <SettingsBody rows>
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='spoilerProtection'
+                label='Spoiler protection'
+                description='Blur unwatched episode thumbnails and descriptions.'
+              />
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='trailerPreviews'
+                label='Trailer previews'
+                description='Play a muted trailer when hovering a title card.'
+              />
+            </SettingsBody>
+          </SettingsGroup>
+        </div>
+        <div className='min-w-0 space-y-4'>
+          <SettingsGroup>
+            <SettingsGroupHeader
+              icon={Captions}
+              title='Subtitles'
+              description='Appearance for all videos.'
+              action={
+                <Button
+                  variant='ghost'
+                  aria-label='Reset subtitle appearance'
+                  aria-disabled={isHydrating || !subtitleAppearanceChanged || undefined}
+                  onClick={() => {
+                    if (!isHydrating && subtitleAppearanceChanged)
+                      updatePreferences(SUBTITLE_APPEARANCE_RESET);
+                  }}
+                  className='h-8 gap-1.5 px-2 text-xs text-zinc-400 hover:bg-white/[0.05] hover:text-white aria-disabled:opacity-35'
+                >
+                  <RotateCcw aria-hidden='true' className='size-3' />
+                  Reset
+                </Button>
+              }
+            />
+            <SettingsBody>
+              <div id={settingsControlId('Subtitle appearance')}>
+                <SubtitleAppearanceControls
+                  subtitleFont={preferences.subtitleFont}
+                  subtitleColor={preferences.subtitleColor}
+                  subtitleEdge={preferences.subtitleEdge}
+                  subtitleBold={preferences.subtitleBold}
+                  subtitleItalic={preferences.subtitleItalic}
+                  disabled={isHydrating}
+                  onPatch={updatePreferences}
+                />
+              </div>
+            </SettingsBody>
+          </SettingsGroup>
+          <SettingsGroup>
+            <SettingsGroupHeader icon={Clapperboard} title='While watching' />
+            <SettingsBody rows>
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='autoPlayNext'
+                label='Auto-play next episode'
+                description='Start the next episode after the countdown.'
+              />
+              <SecondsSelect
+                label='Next episode countdown'
+                seconds={preferences.nextEpisodeCountdownSecs}
+                options={COUNTDOWN_SECONDS}
+                disabled={isHydrating || !preferences.autoPlayNext}
+                onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
+              />
+              <SecondsSelect
+                label='Controls after keyboard input'
+                description='Mouse movement hides controls after 0.5 seconds of inactivity.'
+                seconds={preferences.controlsHideDelayMs / 1000}
+                options={CONTROLS_HIDE_SECONDS}
+                disabled={isHydrating}
+                onChange={(seconds) => updatePreferences({ controlsHideDelayMs: seconds * 1000 })}
+              />
+              <AppUiPreferenceToggle
+                appUiPreferences={appUiPreferences}
+                field='autoSkipIntro'
+                label='Auto-skip intros & recaps'
+                description='Skip detected intros and recaps. Outros stay manual.'
+              />
+            </SettingsBody>
+          </SettingsGroup>
+        </div>
       </div>
-    </SettingsGroup>
+    </div>
   );
 }

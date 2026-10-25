@@ -36,6 +36,7 @@ function ListEditorDialog(props: ListEditorDialogProps) {
     >
       <DialogContent
         ref={contentRef}
+        hideCloseButton={props.isPending}
         className='sm:max-w-md max-h-[90vh] overflow-y-auto rounded-xl bg-zinc-950 border-white/10 text-zinc-200'
         onOpenAutoFocus={(event) => {
           event.preventDefault();
@@ -113,7 +114,7 @@ export function CreateListDialog({
       onSubmit={(values) => createList.mutate(values)}
       open={open}
       returnFocusRef={returnFocusRef}
-      submitLabel='Create List'
+      submitLabel={createList.isPending ? 'Creating…' : 'Create List'}
       submitReady={({ trimmedName }) => Boolean(trimmedName)}
       title='Create New List'
     />
@@ -154,7 +155,7 @@ export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogP
       onOpenChange={onOpenChange}
       onSubmit={(values) => renameList.mutate(values)}
       open={open}
-      submitLabel='Save Changes'
+      submitLabel={renameList.isPending ? 'Saving…' : 'Save Changes'}
       submitReady={({ icon, trimmedName, rules }) =>
         Boolean(trimmedName) &&
         (trimmedName !== list.name ||

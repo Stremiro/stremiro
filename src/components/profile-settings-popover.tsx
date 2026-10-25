@@ -1,5 +1,5 @@
 import { Check, ChevronRight, Settings2, SlidersHorizontal } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import {
@@ -41,9 +41,7 @@ export function ProfileSettingsPopover({
   const openingGenerationRef = useRef(0);
   const mountedRef = useMountedRef();
 
-  useEffect(() => {
-    if (isHydrating) setOpen(false);
-  }, [isHydrating]);
+  if (isHydrating && open) setOpen(false);
 
   const handleOpenChange = (next: boolean) => {
     if (next) {
@@ -73,9 +71,7 @@ export function ProfileSettingsPopover({
         accentIntensity: previewIntensity,
       });
       toast.success('Profile saved');
-      if (mountedRef.current) {
-        if (generation === openingGenerationRef.current) setOpen(false);
-      }
+      if (mountedRef.current && generation === openingGenerationRef.current) setOpen(false);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to save profile');
     }
@@ -84,7 +80,7 @@ export function ProfileSettingsPopover({
   const active = previewAccentColor;
 
   return (
-    <Popover open={open && !isHydrating} onOpenChange={handleOpenChange}>
+    <Popover open={open} onOpenChange={handleOpenChange}>
       <PopoverTrigger asChild>
         <button
           type='button'

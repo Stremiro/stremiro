@@ -8,10 +8,6 @@ import { watchProgressItemKey } from '@/lib/history-playback';
 import { cn, pad2, queryNeedsRetry } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
 
-// The "aired in the last week" decision arrives on the row; only labels live here.
-const UP_NEXT_META_LINE = 'Up next';
-const NEW_EPISODE_META_LINE = 'New episode';
-
 // A stable empty keeps the rail's key-set diff from re-running while loading.
 const EMPTY_ENTRIES: ResumeRailEntry[] = [];
 
@@ -79,8 +75,10 @@ const ResumeCard = memo(function ResumeCard({ entry }: { entry: ResumeRailEntry 
     <WatchProgressCard
       item={item}
       onRemove={removeFromContinueWatching}
+      removeFrom='Continue Watching'
       playbackIntent={isUpNext ? 'next-episode' : 'resume'}
-      metaLine={isUpNext ? (isNewEpisode ? NEW_EPISODE_META_LINE : UP_NEXT_META_LINE) : undefined}
+      isNewEpisode={isNewEpisode === true}
+      metaLine={isUpNext ? 'Up next' : undefined}
       playErrorTitle={
         isUpNext ? 'Failed to open the next episode' : 'Failed to open continue watching item'
       }

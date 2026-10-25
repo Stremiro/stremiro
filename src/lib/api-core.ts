@@ -38,6 +38,11 @@ export function getWatchStatusErrorMessage(error: unknown): string | undefined {
   }
 }
 
+/** Rust `AddonResourceError`: no enabled addon serves the request, so Retry cannot help. */
+export function isNoCapableAddonError(error: unknown): boolean {
+  return getErrorKind(error) === 'no_capable_addon';
+}
+
 export function getBackupImportErrorMessage(error: unknown): string {
   switch (getErrorKind(error)) {
     case 'invalid_backup':

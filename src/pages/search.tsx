@@ -1,8 +1,9 @@
 import { useQueryClient } from '@tanstack/react-query';
 import {
-  ArrowUp,
   Check,
   ChevronDown,
+  History as HistoryIcon,
+  Layers3,
   RotateCcw,
   Search as SearchIcon,
   SearchX,
@@ -11,8 +12,14 @@ import {
   WifiOff,
   X,
 } from 'lucide-react';
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { useNavigationType } from 'react-router';
+import {
+  type MouseEvent as ReactMouseEvent,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from 'react';
+import { Link, useNavigationType } from 'react-router';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -27,16 +34,20 @@ import {
 } from '@/components/media-card';
 import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import { WindowVirtualizedGrid } from '@/components/window-virtualized-grid';
+import { ScrollToTop } from '@/components/scroll-to-top';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
+import { useRecentSearches } from '@/hooks/use-app-ui-preferences';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useOnlineStatus } from '@/hooks/use-online-status';
+import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
 import { useSearchResults } from '@/hooks/use-search-results';
 import { SLIDING_ACCENT_PILL_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
-import { getErrorMessage, type MediaItem } from '@/lib/api';
+import { getErrorMessage, isNoCapableAddonError, type MediaItem } from '@/lib/api';
 import { handleRadioGroupKeyDown, whenRowMounted } from '@/lib/dom';
-import { navigateAppBack } from '@/lib/navigation';
+import { navigateBack } from '@/lib/navigation';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import {
   sameSearchGenre,
@@ -44,7 +55,13 @@ import {
   type SearchFeed,
   type SearchMediaType,
 } from '@/lib/search-page-state';
-import { cn, queryNeedsRetry, scrollBehavior, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
+import {
+  cn,
+  pluralize,
+  queryNeedsRetry,
+  scrollBehavior,
+  SIDEBAR_PAGE_COLUMN_INSETS,
+} from '@/lib/utils';
 
 // Results fill every row edge to edge: auto-fill columns grow from the 170px
 // home minimum so wide screens fit a full row with no trailing empty slot.
@@ -101,6 +118,10 @@ const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 motion-reduce:transition-none hover:enabled:not-aria-disabled:bg-white/[0.08] hover:enabled:not-aria-disabled:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
   'nav-switch-item group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+const RECENT_SEARCH_ROW_BUTTON_CLASS =
+  'flex h-9 items-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+// Mouse picks keep focus in the field so the panel stays put and typing continues.
+const keepSearchInputFocus = (event: ReactMouseEvent) => event.preventDefault();
 const SEARCH_FACET_IDLE_CLASS =
   'border-white/[0.08] bg-white/[0.04] text-zinc-400 hover:bg-white/[0.07] hover:text-zinc-100 data-[state=open]:bg-white/[0.07] data-[state=open]:text-zinc-100';
 
@@ -132,7 +153,7 @@ function SearchPanel({
         {title}
       </p>
       {description ? (
-        <p className='w-full max-w-xs [overflow-wrap:anywhere] text-[13px] leading-relaxed text-zinc-500'>
+        <p className='w-full max-w-xs [overflow-wrap:anywhere] text-sm leading-relaxed text-zinc-400'>
           {description}
         </p>
       ) : null}
@@ -159,6 +180,7 @@ interface SearchResultsProps {
   onClearSearch: () => void;
   refetch: () => void;
   results: MediaItem[];
+  partial: boolean;
   showSkeleton: boolean;
   trimmedDebouncedQuery: string;
 }
@@ -181,12 +203,16 @@ function SearchResults({
   onClearSearch,
   refetch,
   results,
+  partial,
   showSkeleton,
   trimmedDebouncedQuery,
 }: SearchResultsProps) {
   // Sentinel observer; view-state deps re-attach it after offline/error/loading remounts.
   const loadMoreRef = useRef<HTMLDivElement>(null);
   const [pagingFocused, setPagingFocused] = useState(false);
+  const completionMessage = partial
+    ? "Some sources didn't respond — results may be incomplete"
+    : `All ${pluralize(results.length, 'title')} loaded`;
   useEffect(() => {
     const sentinel = loadMoreRef.current;
     // `isError` must gate observation: a failed next-page leaves the sentinel
@@ -275,18 +301,27 @@ function SearchResults({
           isRetryingInitialLoad ? 'Trying the request again.' : getErrorMessage(errorObj)
         }
         action={
-          <button
-            type='button'
-            // Keep the recovery button mounted and focusable while it retries.
-            aria-disabled={isFetching || isRefining || undefined}
-            aria-busy={isFetching || undefined}
-            onClick={() => {
-              if (!isFetching && !isRefining) void refetch();
-            }}
-            className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
-          >
-            Retry
-          </button>
+          !isRetryingInitialLoad && isNoCapableAddonError(errorObj) ? (
+            <Link
+              to='/settings?section=addons'
+              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
+            >
+              Manage addons
+            </Link>
+          ) : (
+            <button
+              type='button'
+              // Keep the recovery button mounted and focusable while it retries.
+              aria-disabled={isFetching || isRefining || undefined}
+              aria-busy={isFetching || undefined}
+              onClick={() => {
+                if (!isFetching && !isRefining) void refetch();
+              }}
+              className={cn(SEARCH_PILL_BUTTON_CLASS, 'mt-1 inline-flex items-center gap-2')}
+            >
+              Retry
+            </button>
+          )
         }
       />
     );
@@ -305,11 +340,13 @@ function SearchResults({
         }
         titleRole='status'
         description={
-          trimmedDebouncedQuery
-            ? 'Try a shorter title, check the spelling, or include the release year.'
-            : activeGenre
-              ? 'Try another genre or feed.'
-              : 'Try changing the category.'
+          partial
+            ? completionMessage
+            : trimmedDebouncedQuery
+              ? 'Try a shorter title, check the spelling, or include the release year.'
+              : activeGenre
+                ? 'Try another genre or feed.'
+                : 'Try changing the category.'
         }
         action={
           (hasActiveFilters || trimmedDebouncedQuery) && (
@@ -332,20 +369,19 @@ function SearchResults({
   }
 
   return (
-    // keepPreviousData leaves the old grid mounted; dim + aria-busy signal the
-    // refresh. It dims only while the previous facet's results stand in;
-    // background refreshes of the current facet stay full-opacity.
+    // Old results also stand in during the debounce/composition interval,
+    // before keepPreviousData takes over. Background refreshes stay full-opacity.
     <div
-      aria-busy={isFetching || undefined}
+      aria-busy={(isOnline && (isFetching || isRefining)) || undefined}
       className={cn(
         'transition-opacity duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-        isPlaceholderData && 'opacity-60',
+        isRefining && 'opacity-60',
       )}
     >
       {!isOnline && (
         <div
           role='status'
-          className='mb-5 flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[12.5px] text-zinc-400'
+          className='mb-5 flex items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-sm leading-relaxed text-zinc-300'
         >
           <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
           You&apos;re offline. Showing cached titles until you reconnect.
@@ -364,7 +400,10 @@ function SearchResults({
       {isOnline && (hasNextPage || isError || isFetchingNextPage || pagingFocused) && (
         <div className='mt-5 flex min-h-16 flex-col items-center justify-center gap-2 border-t border-white/[0.06] pt-5'>
           {isError && (
-            <p role='alert' className='max-w-lg text-center text-[12px] text-zinc-400'>
+            <p
+              role='alert'
+              className='max-w-lg text-center text-[13px] leading-relaxed text-zinc-300'
+            >
               {getErrorMessage(errorObj)}
             </p>
           )}
@@ -387,14 +426,16 @@ function SearchResults({
                   ? 'Retry'
                   : hasNextPage
                     ? 'Load more'
-                    : 'All titles loaded'}
+                    : partial
+                      ? completionMessage
+                      : 'All titles loaded'}
             </span>
           </button>
         </div>
       )}
       {isOnline && !hasNextPage && !isError && !isRefining && !isFetching && !pagingFocused && (
-        <p className='mt-5 border-t border-white/[0.06] pt-5 text-center text-[11px] text-zinc-500'>
-          All {results.length} {results.length === 1 ? 'title' : 'titles'} loaded
+        <p className='mt-5 border-t border-white/[0.06] pt-5 text-center text-[13px] leading-relaxed text-zinc-400'>
+          {completionMessage}
         </p>
       )}
     </div>
@@ -426,7 +467,7 @@ function FacetMenuItem({
         onSelect();
         resetScroll();
       }}
-      className='flex h-8 items-center justify-between gap-2 px-2.5 text-[12.5px]'
+      className='flex min-h-9 items-center justify-between gap-2 px-2.5 text-sm'
     >
       {children}
       {checked ? <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' /> : null}
@@ -478,6 +519,7 @@ export function Search() {
     isPlaceholderData,
     refetch,
     results,
+    partial,
   } = useSearchResults({
     query: trimmedDebouncedQuery,
     activeType,
@@ -538,6 +580,21 @@ export function Search() {
     resetScroll();
   };
 
+  const { recentSearches, recordRecentSearch, removeRecentSearch, clearRecentSearches } =
+    useRecentSearches();
+  const [searchFieldFocused, setSearchFieldFocused] = useState(false);
+  const showRecentSearches = searchFieldFocused && !query && recentSearches.length > 0;
+  // Only committed intent is remembered: Enter, opening a result, or a recent pick.
+  const recordQuery = () => {
+    if (trimmedQuery && !isComposing) recordRecentSearch(trimmedQuery);
+  };
+  const selectRecentSearch = (entry: string) => {
+    setQuery(entry);
+    recordRecentSearch(entry);
+    searchInputRef.current?.focus({ preventScroll: true });
+    resetScroll();
+  };
+
   const handleResetFilters = () => {
     if (!hasActiveFilters) return;
     resetFilters();
@@ -577,25 +634,8 @@ export function Search() {
 
   const headerEndRef = useRef<HTMLDivElement>(null);
   const compactHeaderRef = useRef<HTMLDivElement>(null);
-  const [headerPassed, setHeaderPassed] = useState(false);
-  useEffect(() => {
-    const sentinel = headerEndRef.current;
-    if (!sentinel) return;
-    const observer = new IntersectionObserver(
-      ([entry]) => {
-        if (!entry) return;
-        const passed =
-          !entry.isIntersecting && entry.boundingClientRect.bottom <= (entry.rootBounds?.top ?? 32);
-        if (!passed && compactHeaderRef.current?.contains(document.activeElement)) {
-          searchInputRef.current?.focus({ preventScroll: true });
-        }
-        setHeaderPassed(passed);
-      },
-      { rootMargin: '-32px 0px 0px 0px' },
-    );
-    observer.observe(sentinel);
-    return () => observer.disconnect();
-  }, []);
+  const headerPassed = useScrolledPastTitlebar(headerEndRef, compactHeaderRef, searchInputRef);
+
   const showCompactHeader =
     headerPassed && (!!trimmedQuery || hasActiveFilters || results.length > 0);
   const compactFilters = [
@@ -619,24 +659,60 @@ export function Search() {
       <div className={`mx-auto w-full max-w-[1800px] ${SIDEBAR_PAGE_COLUMN_INSETS} pb-16 pt-8`}>
         <div className='relative mx-auto w-full max-w-4xl'>
           <div className='mb-5 flex min-h-6 items-end justify-between gap-3'>
-            <h1 className='min-w-0 text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
-              {isBrowsing ? 'Discover' : 'Search'}
-            </h1>
-            {results.length > 0 || showUpdating ? (
-              // <output> is an implicit live region — silence it during page
-              // appends so fetches don't announce the growing count.
-              <output
-                aria-live={isRefining || isUpdating || isFetchingNextPage ? 'off' : 'polite'}
-                title='Titles loaded so far'
-                className='flex shrink-0 items-center gap-2 text-[12px] tabular-nums text-zinc-500'
-              >
-                {results.length > 0 && <span>{resultCountLabel}</span>}
-                {showUpdating && <span className='text-(--accent-nav)'>Updating…</span>}
-              </output>
-            ) : null}
+            <div className='flex min-w-0 items-center gap-3'>
+              <h1 className='min-w-0 text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
+                {isBrowsing ? 'Discover' : 'Search'}
+              </h1>
+              <TooltipProvider delayDuration={200}>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <button
+                      type='button'
+                      aria-label='About unified catalog results'
+                      className='inline-flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 text-[13px] text-zinc-400 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 motion-reduce:transition-none'
+                    >
+                      <Layers3 aria-hidden='true' className='h-3.5 w-3.5' />
+                      <span className='hidden sm:inline'>Unified results</span>
+                    </button>
+                  </TooltipTrigger>
+                  <TooltipContent className='max-w-64 leading-relaxed'>
+                    Matching title IDs and media types appear once across catalog addons. Different
+                    IDs stay separate. Catalog listings do not indicate stream availability.
+                  </TooltipContent>
+                </Tooltip>
+              </TooltipProvider>
+            </div>
+            {/* Keep the live region mounted; never label old-facet counts as new results. */}
+            <output
+              aria-live={isRefining || isUpdating || isFetchingNextPage ? 'off' : 'polite'}
+              aria-atomic='true'
+              title={
+                isRefining
+                  ? 'Previous results remain visible while updating'
+                  : 'Unique titles loaded so far'
+              }
+              className='flex shrink-0 items-center gap-2 text-[13px] tabular-nums text-zinc-400'
+            >
+              {results.length > 0 && <span>{isRefining ? 'Updating…' : resultCountLabel}</span>}
+              {showUpdating && (!isRefining || results.length === 0) && (
+                <span className='text-(--accent-nav)'>Updating…</span>
+              )}
+            </output>
           </div>
 
-          <div className='relative w-full'>
+          <div
+            className='relative w-full'
+            onFocus={() => setSearchFieldFocused(true)}
+            onBlur={(event) => {
+              if (
+                !(
+                  event.relatedTarget instanceof Node &&
+                  event.currentTarget.contains(event.relatedTarget)
+                )
+              )
+                setSearchFieldFocused(false);
+            }}
+          >
             {/* eslint-disable jsx-a11y/no-autofocus -- the field is this
                 page's purpose; focusing it on land is the intended UX. */}
             <Input
@@ -652,7 +728,7 @@ export function Search() {
               aria-describedby='search-keyboard-hint'
               data-search-input
               ref={searchInputRef}
-              className='h-11 w-full rounded-lg border-white/[0.08] bg-white/[0.04] pl-11 pr-20 text-[14px] text-zinc-100 placeholder:text-zinc-500 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15'
+              className='h-12 w-full rounded-lg border-white/[0.1] bg-white/[0.04] pl-11 pr-20 text-base text-zinc-100 placeholder:text-zinc-400 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15 md:text-base'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               onCompositionStart={() => setIsComposing(true)}
@@ -675,6 +751,7 @@ export function Search() {
                   if (event.repeat) return;
                   if (event.key === 'Enter') {
                     flushQuery();
+                    recordQuery();
                     resetScroll();
                   }
                   focusFirstResult();
@@ -688,7 +765,7 @@ export function Search() {
                 if (query) {
                   handleClearSearch();
                 } else {
-                  navigateAppBack();
+                  navigateBack();
                 }
               }}
             />
@@ -710,6 +787,70 @@ export function Search() {
                 </button>
               ) : null}
             </div>
+            {showRecentSearches && (
+              <section
+                aria-labelledby='recent-searches-heading'
+                className='absolute inset-x-0 top-full z-30 mt-2 rounded-lg border border-white/[0.09] bg-zinc-950/95 p-1.5 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md'
+              >
+                <div className='flex items-center justify-between gap-2 pb-1 pl-2.5'>
+                  <h2
+                    id='recent-searches-heading'
+                    className='text-[13px] font-medium text-zinc-400'
+                  >
+                    Recent searches
+                  </h2>
+                  <button
+                    type='button'
+                    onMouseDown={keepSearchInputFocus}
+                    onClick={() => {
+                      clearRecentSearches();
+                      searchInputRef.current?.focus({ preventScroll: true });
+                    }}
+                    className={cn(RECENT_SEARCH_ROW_BUTTON_CLASS, 'h-8 px-2 text-[13px]')}
+                  >
+                    Clear
+                  </button>
+                </div>
+                <ul>
+                  {recentSearches.map((entry) => (
+                    <li key={entry} className='flex items-center gap-1'>
+                      <button
+                        type='button'
+                        onMouseDown={keepSearchInputFocus}
+                        onClick={() => selectRecentSearch(entry)}
+                        className={cn(
+                          RECENT_SEARCH_ROW_BUTTON_CLASS,
+                          'min-w-0 flex-1 gap-2.5 px-2.5 text-left text-[13px] text-zinc-300',
+                        )}
+                      >
+                        <HistoryIcon
+                          aria-hidden='true'
+                          className='h-3.5 w-3.5 shrink-0 text-zinc-500'
+                        />
+                        <span className='truncate'>{entry}</span>
+                      </button>
+                      <button
+                        type='button'
+                        aria-label={`Remove ${entry} from recent searches`}
+                        title='Remove from recent searches'
+                        onMouseDown={keepSearchInputFocus}
+                        onClick={() => {
+                          removeRecentSearch(entry);
+                          // Keyboard removal unmounts the focused row.
+                          searchInputRef.current?.focus({ preventScroll: true });
+                        }}
+                        className={cn(
+                          RECENT_SEARCH_ROW_BUTTON_CLASS,
+                          'w-9 shrink-0 justify-center',
+                        )}
+                      >
+                        <X aria-hidden='true' className='h-3.5 w-3.5' />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            )}
           </div>
           <p id='search-keyboard-hint' className='sr-only'>
             Enter to search. Down arrow to focus the first result. Escape to clear.
@@ -743,12 +884,18 @@ export function Search() {
                   </FacetMenuItem>
                   <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
                   {!isOnline && !browseGenres ? (
-                    <p role='status' className='px-2.5 py-2 text-[12px] text-zinc-400'>
+                    <p
+                      role='status'
+                      className='px-2.5 py-2 text-[13px] leading-relaxed text-zinc-400'
+                    >
                       Connect to the internet to load genres.
                     </p>
                   ) : hasGenreError ? (
                     <>
-                      <p role='alert' className='px-2.5 pt-1 text-[12px] text-zinc-400'>
+                      <p
+                        role='alert'
+                        className='px-2.5 pt-1 text-[13px] leading-relaxed text-zinc-300'
+                      >
                         Couldn't load genres.
                       </p>
                       <DropdownMenuItem
@@ -759,7 +906,7 @@ export function Search() {
                             void browseGenresQuery.refetch();
                           }
                         }}
-                        className='h-8 px-2.5 text-[12.5px] aria-disabled:opacity-50'
+                        className='h-9 px-2.5 text-[13px] aria-disabled:opacity-50'
                       >
                         {browseGenresQuery.isFetching ? 'Retrying…' : 'Retry'}
                       </DropdownMenuItem>
@@ -930,10 +1077,25 @@ export function Search() {
           ref={resultsRef}
           aria-busy={(isOnline && (isRefining || isFetching)) || undefined}
           className='pt-5'
-          onClickCapture={flushQuery}
+          onClickCapture={(event) => {
+            flushQuery();
+            if (
+              !isRefining &&
+              event.target instanceof Element &&
+              event.target.closest('[data-search-result-index]')
+            )
+              recordQuery();
+          }}
           onKeyDownCapture={(event) => {
-            if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing)
+            if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing) {
               flushQuery();
+              if (
+                !isRefining &&
+                event.target instanceof Element &&
+                event.target.closest('[data-search-result-index]')
+              )
+                recordQuery();
+            }
             if (
               event.key === 'ArrowUp' &&
               !event.defaultPrevented &&
@@ -969,6 +1131,7 @@ export function Search() {
             onClearSearch={handleClearSearch}
             refetch={refetch}
             results={results}
+            partial={partial}
             showSkeleton={showSkeleton}
             trimmedDebouncedQuery={trimmedDebouncedQuery}
           />
@@ -1001,7 +1164,7 @@ export function Search() {
               className='flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-md px-3 text-left text-[13px] font-medium transition-colors duration-150 hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
             >
               <SearchIcon aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
-              <span className={cn('truncate', trimmedQuery ? 'text-zinc-100' : 'text-zinc-500')}>
+              <span className={cn('truncate', trimmedQuery ? 'text-zinc-100' : 'text-zinc-400')}>
                 {trimmedQuery || 'Search movies, shows, anime...'}
               </span>
             </button>
@@ -1011,7 +1174,7 @@ export function Search() {
                   <span
                     key={id}
                     title={label}
-                    className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-[5px] border px-2 py-[3px] text-[11px] font-medium'
+                    className='accent-lattice-soft max-w-36 shrink-0 truncate rounded-[5px] border px-2 py-1 text-[13px] font-medium'
                   >
                     {label}
                   </span>
@@ -1021,9 +1184,9 @@ export function Search() {
             {(results.length > 0 || showUpdating) && (
               <span
                 aria-hidden='true'
-                className='hidden shrink-0 px-2 text-[11.5px] tabular-nums text-zinc-500 sm:inline'
+                className='hidden shrink-0 px-2 text-[13px] tabular-nums text-zinc-400 sm:inline'
               >
-                {showUpdating ? 'Updating…' : resultCountLabel}
+                {isRefining || showUpdating ? 'Updating…' : resultCountLabel}
               </span>
             )}
             <span aria-hidden='true' className='mx-1 h-4 w-px shrink-0 bg-white/10' />
@@ -1032,24 +1195,16 @@ export function Search() {
                 type='button'
                 title='Reset all filters'
                 onClick={handleResetFilters}
-                className='flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+                className='flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2 text-[13px] font-medium text-zinc-300 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50'
               >
                 <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
                 Reset
               </button>
             )}
-            <button
-              type='button'
-              aria-label='Back to top'
-              title='Back to top'
-              onClick={returnToSearch}
-              className='flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
-            >
-              <ArrowUp aria-hidden='true' className='h-4 w-4' />
-            </button>
           </div>
         </div>
       </div>
+      <ScrollToTop />
     </div>
   );
 }

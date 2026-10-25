@@ -4,6 +4,8 @@ import { Copy, Loader2 } from 'lucide-react';
 import {
   useCallback,
   type MouseEvent,
+  type PointerEvent as ReactPointerEvent,
+  type SyntheticEvent,
   useEffect,
   useEffectEvent,
   useRef,
@@ -16,8 +18,12 @@ import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import { MiniPlayer } from '@/components/mini-player';
 import { PlayerActionOverlays } from '@/components/player-action-overlays';
 import { PlayerControlsRow, PlayerTopChrome, SPEED_OPTIONS } from '@/components/player-chrome';
+import {
+  CHROME_ENTER_TIMING_CLASS,
+  CHROME_EXIT_TIMING_CLASS,
+} from '@/components/player-chrome-styles';
 import { PlayerEpisodesPanel } from '@/components/player-episodes-panel';
-import { type PlayerOsdAction, PlayerOsdOverlay } from '@/components/player-osd-overlay';
+import { PlayerOsdOverlay } from '@/components/player-osd-overlay';
 import { PlayerEdgeProgress, PlayerProgressBar } from '@/components/player-progress-bar';
 import { PlayerPipChrome } from '@/components/player-pip-chrome';
 import { PlayerShortcutsOverlay } from '@/components/player-shortcuts-overlay';
@@ -70,11 +76,11 @@ import {
   api,
   type AppUiPreferences,
   type Episode,
+  getErrorMessage,
   type MediaDetails,
   type SkipSegment,
   type SkipTimesResult,
 } from '@/lib/api';
-import { RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { getCachedResultRefreshDelayMs } from '@/lib/api-cache';
 import {
   buildEpisodeStreamTarget,
@@ -88,7 +94,7 @@ import {
   MIN_RESUME_POSITION_SECS,
 } from '@/lib/history-playback';
 import { boundNavigate, currentPathWithSearch, navigateApp } from '@/lib/navigation';
-import { copyText } from '@/lib/notify';
+import { copyText, notifyAction } from '@/lib/notify';
 import {
   buildDetailsRoute,
   claimPlaybackLaunch,
@@ -112,7 +118,6 @@ import { trackDisplayLabel } from '@/lib/player-track-utils';
 import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
-  SKIP_TIMES_GC_TIME_MS,
   SKIP_TIMES_STALE_TIME_MS,
   skipTimesQueryKey,
 } from '@/lib/query-invalidation';
@@ -135,8 +140,11 @@ import {
 } from '@/lib/utils';
 
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
+const POINTER_CONTROLS_IDLE_MS = 500;
 // A cold addon resolve can take ~14s — past this the picker beats a blank loader.
 const NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS = 12_000;
+// Remaining seconds that count as credits when SkipDB has no tail segment.
+const CREDITS_NEXT_EPISODE_LEAD_SECS = 30;
 // Mini chrome lingers so the undock dissolve plays under the fading-in player.
 const MINI_EXIT_MS = 180;
 type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: number };
@@ -168,6 +176,7 @@ const selectPlayerPreferences = ({
   nextEpisodeCountdownSecs,
   controlsHideDelayMs,
   autoSkipIntro,
+  autoLoadAddonSubtitles,
   spoilerProtection,
 }: AppUiPreferences) => ({
   playerVolume,
@@ -179,6 +188,7 @@ const selectPlayerPreferences = ({
   nextEpisodeCountdownSecs,
   controlsHideDelayMs,
   autoSkipIntro,
+  autoLoadAddonSubtitles,
   spoilerProtection,
 });
 
@@ -196,7 +206,8 @@ function InnerPlayer() {
   const playerContainerRef = useRef<HTMLDivElement | null>(null);
   const topChromeRef = useRef<HTMLDivElement | null>(null);
   const bottomChromeRef = useRef<HTMLDivElement | null>(null);
-  const pointerOverControlsRef = useRef(false);
+  const capturedControlsPointerRef = useRef<{ target: Element; pointerId: number } | null>(null);
+  const windowActiveRef = useRef(document.hasFocus());
   const episodesPanelFrameRef = useRef<HTMLElement | null>(null);
   const miniVideoRectRef = useRef<MiniVideoRect | null>(null);
 
@@ -313,9 +324,6 @@ function InnerPlayer() {
   const miniExitTimerRef = useRef<TimerHandle | null>(null);
   const showErrorOverlay = !!error && !isResolving && !isLoading;
 
-  const [osdAction, setOsdAction] = useState<PlayerOsdAction | null>(null);
-  const [osdVisible, setOsdVisible] = useState(false);
-
   const restoreCursorVisibility = () => {
     restorePlayerCursor(playerContainerRef.current);
   };
@@ -344,10 +352,6 @@ function InnerPlayer() {
     onBeforeEnterFullscreen: handleBeforeEnterFullscreen,
     expanded: isExpanded,
   });
-
-  useEffect(() => {
-    pointerOverControlsRef.current = false;
-  }, [isPip]);
 
   // -- Refs --
   const forceShowTimeoutRef = useRef<TimerHandle | null>(null);
@@ -389,7 +393,7 @@ function InnerPlayer() {
   const selectorOpenRequestIdRef = useRef(0);
   /** Always-current playing state — used in closures to avoid stale captures. */
   const isPlayingRef = useRef(false);
-  const isBufferingRef = useRef(false);
+  const idleDismissedByClickRef = useRef(false);
   /** Timestamp (ms) when playback was first verified — used to suppress transient idle events. */
   const playbackVerifiedAtRef = useRef(0);
   /** mpv reported end-of-file for the current stream — Back may reopen the selector. */
@@ -407,14 +411,21 @@ function InnerPlayer() {
     setHasEnded(false);
     setDuration(0);
   });
-  const isPlayerChromeEngaged = () =>
-    !!topChromeRef.current?.matches(':hover, :focus-within') ||
-    !!bottomChromeRef.current?.querySelector(':focus-visible') ||
-    document.querySelector(RADIX_POPPER_CONTENT_SELECTOR) !== null;
+  const isPlayerChromeEngaged = () => {
+    const captured = capturedControlsPointerRef.current;
+    return (
+      windowActiveRef.current &&
+      document.visibilityState !== 'hidden' &&
+      ((captured !== null && captured.target.hasPointerCapture(captured.pointerId)) ||
+        document.querySelector('[data-player-popover][data-state="open"]') !== null)
+    );
+  };
   const {
     announce,
     clearControlsAutoHide,
     clearUiTimers: clearManagedUiTimers,
+    osdStore,
+    scheduleControlsAutoHide,
     showControlsWithAutoHide,
     triggerOsd,
   } = usePlayerUiTimers({
@@ -429,10 +440,8 @@ function InnerPlayer() {
       !showStreamSelector &&
       !showEpisodes &&
       !showShortcuts,
-    setOsdAction,
-    setOsdVisible,
     setShowControls,
-    shouldHoldControls: () => pointerOverControlsRef.current || isPlayerChromeEngaged(),
+    shouldHoldControls: isPlayerChromeEngaged,
   });
   const clearUiTimers = useCallback(() => {
     clearManagedUiTimers();
@@ -596,7 +605,6 @@ function InnerPlayer() {
       ),
     enabled: skipTimesEnabled,
     staleTime: SKIP_TIMES_STALE_TIME_MS,
-    gcTime: SKIP_TIMES_GC_TIME_MS,
     retry: 1,
   });
 
@@ -668,6 +676,10 @@ function InnerPlayer() {
     clock.subscribe,
     () => activeSkipSegment !== null && clock.getSnapshot() >= activeSkipSegment.start_time,
   );
+  const inCreditsWindow = useSyncExternalStore(clock.subscribe, () => {
+    const time = clock.getSnapshot();
+    return duration > 0 && time > 0 && duration - time <= CREDITS_NEXT_EPISODE_LEAD_SECS;
+  });
 
   // The frameless window hides document.title; it still feeds the OS taskbar tooltip.
   const currentEpisodeLabel = formatSeasonEpisode(resolvedAbsoluteSeason, resolvedAbsoluteEpisode);
@@ -686,6 +698,7 @@ function InnerPlayer() {
   );
 
   const {
+    addonSubtitleLanguage,
     applyResumeIfReady,
     audioTracks,
     cancelAutomaticResume,
@@ -760,7 +773,7 @@ function InnerPlayer() {
     addonSubtitlesError,
     addonSubtitlesFetching,
     addonSubtitlesLoading,
-    addonSubtitlesQueried,
+    addonSubtitlesAvailable,
     handleAddonSubtitleSelect,
     handleSubTrackSelect,
     handleSubtitleMenuOpenChange,
@@ -768,6 +781,7 @@ function InnerPlayer() {
   } = usePlayerAddonSubtitles({
     activeStreamLoadKey,
     announce,
+    autoLoadLanguage: appUiPreferences.autoLoadAddonSubtitles ? addonSubtitleLanguage : null,
     effectiveResolveMediaType,
     id,
     menuAvailable: isExpanded && !isPip,
@@ -1016,12 +1030,11 @@ function InnerPlayer() {
   // Overlays close too: any route change docks, and a stale flag would reopen them on expand.
   const wasExpandedRef = useRef(isExpanded);
   const [hasExpanded, setHasExpanded] = useState(isExpanded);
+  if (isExpanded && !hasExpanded) setHasExpanded(true);
   useEffect(() => {
-    if (isExpanded) setHasExpanded(true);
     const wasExpanded = wasExpandedRef.current;
     wasExpandedRef.current = isExpanded;
     if (wasExpanded && !isExpanded) {
-      pointerOverControlsRef.current = false;
       setShowEpisodes(false);
       setShowShortcuts(false);
       // Back abandons a pending next-episode resolve — its completion would navigate back into the expanded player.
@@ -1096,7 +1109,6 @@ function InnerPlayer() {
     mpvInitializedRef,
     isLoading,
     isPlayingRef,
-    isBufferingRef,
     clock,
     observedPositionRef,
     bufferedClock,
@@ -1465,14 +1477,16 @@ function InnerPlayer() {
   // A segment reaching file end is the episode tail — seeking into EOF parks on a dead frame.
   const tailSegmentActive =
     activeSkipSegment != null && isNearMediaEnd(activeSkipSegment.end_time, duration);
+  const nextEpisodeTailActive =
+    !!nextEpisode && (tailSegmentActive || (!activeSkipSegment && inCreditsWindow));
   useEffect(() => {
     if (!id || !nextEpisode || error) return;
     if (isLoading || isResolving || showStreamSelector || shouldWaitForResolvedLookupId) return;
     if (pausedByTrayHide || (!isPlaying && !hasEnded)) return;
-    if (!isExpanded && !hasEnded && !tailSegmentActive) return;
+    if (!isExpanded && !hasEnded && !nextEpisodeTailActive) return;
     if (
       !hasEnded &&
-      !tailSegmentActive &&
+      !nextEpisodeTailActive &&
       !(appUiPreferences.autoPlayNext && nextEpisodePrefetchDue)
     )
       return;
@@ -1501,7 +1515,7 @@ function InnerPlayer() {
     activeStreamLoadKey,
     appUiPreferences.autoPlayNext,
     canAutoPlayNext,
-    tailSegmentActive,
+    nextEpisodeTailActive,
     error,
     hasEnded,
     id,
@@ -1518,10 +1532,10 @@ function InnerPlayer() {
     streamLookupId,
   ]);
 
-  const skipAction = !activeSkipSegment
-    ? null
-    : tailSegmentActive && nextEpisode
-      ? { label: 'Next Episode', onSkip: playNextEpisode }
+  const skipAction = nextEpisodeTailActive
+    ? { label: 'Next episode', onSkip: playNextEpisode }
+    : !activeSkipSegment
+      ? null
       : {
           label: `Skip ${SKIP_SEGMENT_LABELS[activeSkipSegment.type]}`,
           onSkip: (source: 'user' | 'automatic' = 'user') => {
@@ -1532,7 +1546,11 @@ function InnerPlayer() {
         };
 
   // EOF and open panels own the action lane, even if mpv's last clock tick is inside an outro.
-  const canSkip = !hasEnded && playbackIntact && !panelsOwnSurface && !!activeSkipSegment;
+  const canSkip =
+    !hasEnded &&
+    playbackIntact &&
+    !panelsOwnSurface &&
+    (nextEpisodeTailActive || !!activeSkipSegment);
   const activeSkipAction = canSkip ? skipAction : null;
 
   // Auto-skip fires once per intro/recap segment, even after seeking back into it; the tail stays manual — that's `autoPlayNext`'s job.
@@ -1615,8 +1633,21 @@ function InnerPlayer() {
     setPlaybackSpeed(speed);
     appliedSpeedRef.current = speed;
     void updateAppUiPreferences({ playerSpeed: speed });
-    void setMpvProperty('speed', speed).catch(() => undefined);
-    announce(`Speed: ${speed}x`, 'gauge');
+    const epoch = playbackControlEpochRef.current;
+    const isStale = () =>
+      epoch !== playbackControlEpochRef.current || !mountedRef.current || isDestroyedRef.current;
+    void setMpvProperty('speed', speed).then(
+      () => {
+        if (!isStale()) announce(`Speed: ${speed}x`, 'gauge');
+      },
+      (err: unknown) => {
+        if (!isStale())
+          notifyAction("Couldn't apply playback speed", {
+            detail: getErrorMessage(err),
+            tone: 'error',
+          });
+      },
+    );
   };
 
   // `[`/`]` step the preset ladder; at the edge the press no-ops, so re-announce the current speed.
@@ -1659,6 +1690,7 @@ function InnerPlayer() {
     cycleAudioTrack,
     cycleSubtitles,
     durationRef,
+    expandPlayer,
     stepVolume,
     hasEpisodes,
     isExpanded,
@@ -1668,6 +1700,7 @@ function InnerPlayer() {
     navigateBack: isPip ? returnFromPip : navigateBack,
     nudgeSubtitleDelay,
     openStreamSelector: id ? openManualStreamFallback : null,
+    playPreviousEpisode,
     playNextEpisode,
     seek,
     seekRelative,
@@ -1711,23 +1744,70 @@ function InnerPlayer() {
     type,
   });
 
-  // Rate-limit the 3s auto-hide re-arm — a steady mousemove shouldn't churn a timer per event.
+  // Only visible, continuous motion is throttled; surface movement gets a 400–500ms idle tail.
   const lastControlsWakeAtRef = useRef(0);
-  const handleMouseMove = () => {
+  const handleMouseMove = (event: MouseEvent<HTMLDivElement>) => {
+    if (
+      !windowActiveRef.current ||
+      document.visibilityState === 'hidden' ||
+      (event.movementX === 0 && event.movementY === 0) ||
+      (event.target instanceof Element && event.target.closest('[data-player-navigation]'))
+    )
+      return;
     const now = performance.now();
-    // Throttle while hidden too — events between the wake's state write and commit would re-arm.
-    if (now - lastControlsWakeAtRef.current < 250) return;
+    if (showControls && now - lastControlsWakeAtRef.current < 100) return;
     lastControlsWakeAtRef.current = now;
-    showControlsWithAutoHide();
+    if (
+      event.target instanceof Node &&
+      (topChromeRef.current?.contains(event.target) ||
+        bottomChromeRef.current?.contains(event.target) ||
+        (event.target instanceof Element && event.target.closest('[data-player-pip-chrome]')))
+    ) {
+      showControlsWithAutoHide();
+    } else {
+      showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
+    }
   };
 
   const handleMouseLeave = () => {
-    if (!isPlaying) return;
+    if (!isPlayingRef.current) return;
     // Portaled popovers leave the container — a hide here would unmount chrome under an open menu.
-    if (isPlayerChromeEngaged()) return;
+    if (isPlayerChromeEngaged()) {
+      scheduleControlsAutoHide(POINTER_CONTROLS_IDLE_MS);
+      return;
+    }
     clearControlsAutoHide();
     setShowControls(false);
   };
+
+  const releaseInactiveControls = useEffectEvent(() => {
+    windowActiveRef.current = false;
+    handleMouseLeave();
+  });
+  const releaseOutsideControls = useEffectEvent(() => handleMouseLeave());
+  useEffect(() => {
+    const handleBlur = () => releaseInactiveControls();
+    const handleFocus = () => {
+      windowActiveRef.current = document.visibilityState !== 'hidden';
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'hidden') releaseInactiveControls();
+      else windowActiveRef.current = document.hasFocus();
+    };
+    const handlePointerOut = (event: PointerEvent) => {
+      if (event.relatedTarget === null) releaseOutsideControls();
+    };
+    window.addEventListener('blur', handleBlur);
+    window.addEventListener('focus', handleFocus);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    document.addEventListener('pointerout', handlePointerOut);
+    return () => {
+      window.removeEventListener('blur', handleBlur);
+      window.removeEventListener('focus', handleFocus);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+      document.removeEventListener('pointerout', handlePointerOut);
+    };
+  }, []);
 
   const [accumulateWheelSeek] = useState(createWheelSeekAccumulator);
   const handlePlayerWheel = (event: WheelEvent<HTMLElement>) => {
@@ -1763,6 +1843,8 @@ function InnerPlayer() {
   const handlePlayerClick = (event: MouseEvent<HTMLElement>) => {
     if (shouldIgnorePlayerSurfaceInteraction(event)) return;
 
+    const dismissedIdle = idleDismissedByClickRef.current;
+    idleDismissedByClickRef.current = false;
     blurActivePlayerControl();
 
     if (showEpisodes) {
@@ -1772,11 +1854,13 @@ function InnerPlayer() {
 
     // First click dismisses the idle card and wakes the chrome, not pause.
     if (idleOverlayVisible) {
+      idleDismissedByClickRef.current = event.detail === 1;
       wakePlayerIdle();
-      showControlsWithAutoHide();
+      showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
       return;
     }
 
+    if (event.detail === 2 && dismissedIdle) return;
     if (isLoading || isResolving || error) return;
 
     // Toggle immediately — the second click toggles back before dblclick fullscreen lands; no disambiguation delay.
@@ -1801,11 +1885,45 @@ function InnerPlayer() {
   const handleMiniVolumeChange = (next: number) => {
     void handleVolumeChange(next).catch(() => undefined);
   };
-  const handleVolumeStep = (delta: number) => {
-    void stepVolume(delta).catch(() => undefined);
+  // Keyboard focus and key presses on chrome wake it with the normal delay, never hold it:
+  // focus stays on a faded control, so a hold would outlive the interaction indefinitely.
+  const handleControlsKeyboardInput = (event: SyntheticEvent<HTMLDivElement>) => {
+    if (
+      windowActiveRef.current &&
+      document.hasFocus() &&
+      document.visibilityState !== 'hidden' &&
+      event.target instanceof Element &&
+      (topChromeRef.current?.contains(event.target) ||
+        bottomChromeRef.current?.contains(event.target) ||
+        event.target.closest('[data-player-pip-chrome]')) &&
+      event.target.matches(':focus-visible')
+    ) {
+      showControlsWithAutoHide();
+    }
   };
   const handleControlsHover = (hovered: boolean) => {
-    pointerOverControlsRef.current = hovered;
+    if (!windowActiveRef.current || document.visibilityState === 'hidden' || idleOverlayVisible)
+      return;
+    // A CSS-generated leave must never bring hidden chrome back.
+    if (hovered) showControlsWithAutoHide();
+    else scheduleControlsAutoHide(POINTER_CONTROLS_IDLE_MS);
+  };
+  const handleControlsPointerCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (!windowActiveRef.current || document.visibilityState === 'hidden') return;
+    if (
+      event.target instanceof Element &&
+      (topChromeRef.current?.contains(event.target) ||
+        bottomChromeRef.current?.contains(event.target) ||
+        event.target.closest('[data-player-pip-chrome], [data-player-popover]'))
+    ) {
+      capturedControlsPointerRef.current = { target: event.target, pointerId: event.pointerId };
+      showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
+    }
+  };
+  const handleControlsPointerRelease = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (capturedControlsPointerRef.current?.pointerId !== event.pointerId) return;
+    capturedControlsPointerRef.current = null;
+    scheduleControlsAutoHide(POINTER_CONTROLS_IDLE_MS);
   };
   const handleMiniSeek = (seconds: number) => {
     void seek(seconds).catch(() => undefined);
@@ -1966,6 +2084,7 @@ function InnerPlayer() {
   const miniEofOpen =
     hasEnded && playbackIntact && !showStreamSelector && !isLoadingEpisodeNavigation;
   const nextEpisodeThumbnail = nextEpisode?.thumbnail ?? backdrop ?? poster;
+  const canGoPrevious = !!previousEpisode && !isResolving;
   const canGoNext = !!nextEpisode && !isResolving;
   const miniPlayerUpNext =
     miniEofOpen && nextEpisode
@@ -1989,6 +2108,7 @@ function InnerPlayer() {
       error={showErrorOverlay ? error : null}
       clock={clock}
       duration={duration}
+      canGoPrevious={canGoPrevious}
       canGoNext={canGoNext}
       hasVideo={mpvSurfaceReady && !!activeStreamUrl && !isLoading && !showErrorOverlay}
       isMuted={isMuted}
@@ -2009,11 +2129,11 @@ function InnerPlayer() {
       onToggleMute={handleMiniToggleMute}
       onVolumeChange={handleMiniVolumeChange}
       onVolumeWheel={handleVolumeWheel}
-      onVolumeStep={handleVolumeStep}
       onSeek={handleMiniSeek}
       onSeekRelative={handleMiniSeekRelative}
       onExpand={expandPlayer}
       onClose={close}
+      onPreviousEpisode={playPreviousEpisode}
       onNextEpisode={playNextEpisode}
     />
   );
@@ -2036,13 +2156,17 @@ function InnerPlayer() {
   }
 
   const chromeVisible = !idleOverlayVisible && (showControls || !isPlaying);
+  const chromeFadeTimingClass = chromeVisible
+    ? cn(CHROME_ENTER_TIMING_CLASS, 'opacity-100')
+    : cn(CHROME_EXIT_TIMING_CLASS, 'opacity-0');
   const chromeFadeClass = cn(
-    'transition-opacity duration-150 ease-out motion-reduce:transition-none has-[:focus-visible]:opacity-100',
-    chromeVisible ? 'pointer-events-auto opacity-100' : 'pointer-events-none opacity-0',
+    'transition-[opacity,translate] motion-reduce:transition-none',
+    chromeFadeTimingClass,
+    chromeVisible ? 'pointer-events-auto' : 'pointer-events-none',
   );
   const chromeScrimClass = cn(
-    'absolute inset-x-0 transition-opacity duration-150 ease-out motion-reduce:transition-none',
-    chromeVisible ? 'opacity-100' : 'opacity-0',
+    'absolute inset-x-0 transition-opacity motion-reduce:transition-none',
+    chromeFadeTimingClass,
   );
 
   return (
@@ -2061,15 +2185,22 @@ function InnerPlayer() {
       )}
       onMouseMove={handleMouseMove}
       onMouseLeave={handleMouseLeave}
+      onFocusCapture={handleControlsKeyboardInput}
+      onKeyDownCapture={handleControlsKeyboardInput}
+      onGotPointerCaptureCapture={handleControlsPointerCapture}
+      onLostPointerCaptureCapture={handleControlsPointerRelease}
       onWheel={handlePlayerWheel}
       id='mpv-container'
     >
       <ContextMenu
         onOpenChange={(open) => {
-          if (!open) return;
+          if (!open) {
+            scheduleControlsAutoHide(POINTER_CONTROLS_IDLE_MS);
+            return;
+          }
           wakePlayerIdle();
           restoreCursorVisibility();
-          showControlsWithAutoHide();
+          showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
         }}
       >
         <ContextMenuTrigger asChild>
@@ -2083,7 +2214,7 @@ function InnerPlayer() {
             onDoubleClick={handlePlayerDoubleClick}
           />
         </ContextMenuTrigger>
-        <ContextMenuContent onKeyDown={(event) => event.stopPropagation()}>
+        <ContextMenuContent data-player-popover onKeyDown={(event) => event.stopPropagation()}>
           <ContextMenuItem disabled={!activeStreamUrl} onSelect={handleCopyStreamLink}>
             <Copy className='h-4 w-4' />
             Copy stream link
@@ -2091,12 +2222,22 @@ function InnerPlayer() {
         </ContextMenuContent>
       </ContextMenu>
       {!isFullscreen && !isPip && (
-        <DesktopTitlebar className='z-85 bg-linear-to-b from-black/70 via-black/35 to-transparent' />
+        <div
+          data-player-navigation
+          className='contents'
+          onPointerEnter={handleMouseLeave}
+          onMouseMove={(event) => event.stopPropagation()}
+        >
+          <DesktopTitlebar className='z-85 bg-linear-to-b from-black/70 via-black/35 to-transparent' />
+        </div>
       )}
       {!isFullscreen && !isPip && (
         <div
           data-player-interactive
+          data-player-navigation
           className='fixed left-0 top-0 z-70 h-screen pointer-events-auto'
+          onPointerEnter={handleMouseLeave}
+          onMouseMove={(event) => event.stopPropagation()}
         >
           <Sidebar className='flex' />
         </div>
@@ -2209,9 +2350,6 @@ function InnerPlayer() {
             isFullscreen && 'pt-6',
             isFullscreen ? 'px-8' : 'pl-[84px] pr-6',
           )}
-          onFocus={(event) => {
-            if (event.target.matches(':focus-visible')) showControlsWithAutoHide();
-          }}
         >
           <div
             aria-hidden='true'
@@ -2227,7 +2365,11 @@ function InnerPlayer() {
               'bottom-0 h-36 bg-linear-to-t from-black/70 via-black/25 to-transparent',
             )}
           />
-          <div className={chromeFadeClass}>
+          <div
+            className={cn(chromeFadeClass, !chromeVisible && 'motion-safe:-translate-y-1')}
+            onPointerEnter={() => handleControlsHover(true)}
+            onPointerLeave={() => handleControlsHover(false)}
+          >
             <PlayerTopChrome
               chromeRef={topChromeRef}
               title={title}
@@ -2278,7 +2420,7 @@ function InnerPlayer() {
                 />
               )}
             </div>
-            <div className={chromeFadeClass}>
+            <div className={cn(chromeFadeClass, !chromeVisible && 'motion-safe:translate-y-1')}>
               <PlayerProgressBar
                 active={chromeVisible}
                 duration={duration}
@@ -2310,7 +2452,7 @@ function InnerPlayer() {
                 canChooseStream={!!id}
                 streamSelectorOpen={showStreamSelector}
                 onOpenStreamSelector={openManualStreamFallback}
-                canGoPrevious={!!previousEpisode && !isResolving}
+                canGoPrevious={canGoPrevious}
                 onPreviousEpisode={playPreviousEpisode}
                 previousEpisodeLabel={previousEpisodeLabel}
                 canGoNext={canGoNext}
@@ -2328,7 +2470,7 @@ function InnerPlayer() {
                 addonSubtitlesFetching={addonSubtitlesFetching}
                 addonSubtitlesError={addonSubtitlesError}
                 onRetryAddonSubtitles={refetchAddonSubtitles}
-                addonSubtitlesQueried={addonSubtitlesQueried}
+                addonSubtitlesAvailable={addonSubtitlesAvailable}
                 activeAddonSubtitleId={activeAddonSubtitleId}
                 addonSubtitleLoadingId={addonSubtitleLoadingId}
                 onSubtitleMenuOpenChange={handleSubtitleMenuOpenChange}
@@ -2348,9 +2490,8 @@ function InnerPlayer() {
       )}
 
       <PlayerOsdOverlay
-        action={osdAction}
-        visible={
-          osdVisible &&
+        store={osdStore}
+        allowed={
           playbackIntact &&
           !loadingOverlay.mounted &&
           !panelsOwnSurface &&

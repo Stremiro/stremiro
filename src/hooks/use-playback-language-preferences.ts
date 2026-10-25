@@ -1,7 +1,12 @@
 import { type QueryClient, queryOptions, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useCallback } from 'react';
 
-import { api, type PlaybackLanguagePreferences, type TrackLanguageCandidate } from '@/lib/api';
+import {
+  api,
+  type PlaybackLanguagePreferences,
+  type SavedPlaybackLanguagePreference,
+  type TrackLanguageCandidate,
+} from '@/lib/api';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 import {
   effectivePlaybackLanguagePreferencesQueryKey,
@@ -34,8 +39,9 @@ export const supportedLanguagesQueryOptions = queryOptions({
 
 function enqueueSave(
   queryClient: QueryClient,
-  task: () => Promise<PlaybackLanguagePreferences>,
+  task: () => Promise<SavedPlaybackLanguagePreference>,
   patch?: PlaybackLanguagePreferences,
+  effectiveQueryKey?: ReturnType<typeof effectivePlaybackLanguagePreferencesQueryKey>,
 ) {
   if (patch) {
     pendingLanguagePatches.add(patch);
@@ -49,12 +55,18 @@ function enqueueSave(
     );
   }
   const queuedSave = saveQueue.enqueue(async () => {
+    let seededEffectiveQueryKey: typeof effectiveQueryKey;
     await queryClient.cancelQueries({
       queryKey: PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY,
       exact: true,
     });
     try {
-      const savedPreferences = await task();
+      const { preferences: savedPreferences, effective } = await task();
+      if (effective && effectiveQueryKey) {
+        await queryClient.cancelQueries({ queryKey: effectiveQueryKey, exact: true });
+        queryClient.setQueryData(effectiveQueryKey, effective);
+        seededEffectiveQueryKey = effectiveQueryKey;
+      }
       if (patch) pendingLanguagePatches.delete(patch);
       const currentPreferences = { ...savedPreferences };
       for (const pending of pendingLanguagePatches) {
@@ -70,7 +82,7 @@ function enqueueSave(
       });
       throw error;
     } finally {
-      await invalidatePlaybackLanguageQueries(queryClient);
+      await invalidatePlaybackLanguageQueries(queryClient, seededEffectiveQueryKey);
     }
   });
   return trackPendingAppWrite(queuedSave);
@@ -106,7 +118,10 @@ export function usePlaybackLanguagePreferences({
         preferenceKind === 'audio' ? 'preferredAudioLanguage' : 'preferredSubtitleLanguage';
       return enqueueSave(
         queryClient,
-        () => api.savePlaybackLanguagePreference(preferenceKind, language),
+        () =>
+          api
+            .savePlaybackLanguagePreference(preferenceKind, language)
+            .then((preferences) => ({ preferences })),
         { [field]: language },
       );
     },
@@ -119,23 +134,16 @@ export function usePlaybackLanguagePreferences({
       track?: TrackLanguageCandidate,
       options?: { subtitlesOff?: boolean },
     ) =>
-      enqueueSave(queryClient, () =>
-        api
-          .saveSelectedPlaybackLanguagePreference(preferenceKind, track, {
+      enqueueSave(
+        queryClient,
+        () =>
+          api.saveSelectedPlaybackLanguagePreference(preferenceKind, track, {
             subtitlesOff: options?.subtitlesOff,
             mediaType,
             mediaId,
-          })
-          .then((response) => {
-            // Seed the effective cache from the save response so consumers never see the pre-save snapshot.
-            if (response.effective) {
-              queryClient.setQueryData(
-                effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
-                response.effective,
-              );
-            }
-            return response.preferences;
           }),
+        undefined,
+        effectivePlaybackLanguagePreferencesQueryKey(mediaType, mediaId),
       ),
     [mediaId, mediaType, queryClient],
   );
@@ -144,7 +152,6 @@ export function usePlaybackLanguagePreferences({
     effectivePlaybackLanguagePreferences,
     globalPlaybackLanguagePreferences: globalPlaybackLanguagePreferencesQuery.data,
     globalPlaybackLanguagePreferencesQuery,
-    isLoadingGlobalPlaybackLanguagePreferences: globalPlaybackLanguagePreferencesQuery.isLoading,
     saveGlobalPlaybackLanguagePreference,
     saveGlobalPlaybackLanguagePreferenceSelection,
   };

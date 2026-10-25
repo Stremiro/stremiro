@@ -1,6 +1,6 @@
 import * as ContextMenuPrimitive from '@radix-ui/react-context-menu';
 import * as React from 'react';
-import { cn } from '@/lib/utils';
+import { cn, POPOVER_MOTION_CLASS } from '@/lib/utils';
 
 const ContextMenu = ContextMenuPrimitive.Root;
 
@@ -51,7 +51,8 @@ function ContextMenuContent({
       <ContextMenuPrimitive.Content
         data-player-interactive
         className={cn(
-          'z-80 min-w-[8rem] cursor-auto origin-(--radix-context-menu-content-transform-origin) overflow-hidden rounded-xl border border-white/5 bg-zinc-950/80 backdrop-blur-xl p-1 text-zinc-100 shadow-2xl data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2',
+          'z-80 min-w-[8rem] cursor-auto origin-(--radix-context-menu-content-transform-origin) overflow-hidden rounded-xl border border-white/5 bg-zinc-950/80 backdrop-blur-xl p-1 text-zinc-100 shadow-2xl',
+          POPOVER_MOTION_CLASS,
           className,
         )}
         {...props}

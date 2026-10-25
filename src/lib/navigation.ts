@@ -15,7 +15,7 @@ export function currentPathWithSearch(): string {
   return `${window.location.pathname}${window.location.search}`;
 }
 
-function navigateTo(to: To | number, options?: NavigateOptions): boolean {
+export function navigateApp(to: To | number, options?: NavigateOptions): boolean {
   if (navigateFn === null) return false;
   if (typeof to === 'number') {
     navigateFn(to);
@@ -24,8 +24,6 @@ function navigateTo(to: To | number, options?: NavigateOptions): boolean {
   }
   return true;
 }
-
-export const navigateApp = navigateTo;
 
 export const boundNavigate: NavigateFunction = (to: To | number, options?: NavigateOptions) => {
   navigateApp(to, options);
@@ -41,15 +39,13 @@ function canNavigateAppBack(): boolean {
 }
 
 // Deep links fall back to home when there is no previous app entry.
-export function navigateAppBack(): boolean {
+export function navigateBack(): boolean {
   if (!canNavigateAppBack()) return false;
-  return window.history.state?.idx === 0 ? navigateTo('/', { replace: true }) : navigateTo(-1);
+  return window.history.state?.idx === 0 ? navigateApp('/', { replace: true }) : navigateApp(-1);
 }
 
-export const navigateBack = navigateAppBack;
-
 export function navigateForward(): boolean {
-  return entryIndex < entryStack.length - 1 && navigateTo(1);
+  return entryIndex < entryStack.length - 1 && navigateApp(1);
 }
 
 // The root location effect feeds this bounded mirror, including forward entries.
@@ -149,7 +145,7 @@ export function navigateOnAnchorClick(
 ): boolean {
   if (!isAppAnchorClick(event)) return false;
   event.preventDefault();
-  return navigateTo(to, options);
+  return navigateApp(to, options);
 }
 
 const DETAILS_SOURCE_TRANSITION = 'details-source';
@@ -184,7 +180,7 @@ export function navigateToDetails(
     artwork.style.viewTransitionName = '';
     // Shell chrome is named only in the new state so its groups paint above the hero.
     document.documentElement.toggleAttribute('data-vt-pin', true);
-    navigateTo(to, options);
+    navigateApp(to, options);
     return new Promise<void>((resolve) => {
       const release = () => {
         window.clearTimeout(timer);

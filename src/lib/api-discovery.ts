@@ -89,31 +89,23 @@ export function createDiscoveryApi({ safeInvoke }: DiscoveryApiContext) {
   const searchTitles = (titles: string[], query: string) =>
     safeInvoke<number[]>('search_titles', { titles, query });
 
-  const detailsQueryOptions = (type: string, id: string | undefined, missingIdMessage?: string) =>
-    queryOptions({
-      queryKey: detailsQueryKey(type, id),
-      queryFn: () =>
-        missingIdMessage && !id
-          ? Promise.reject(new Error(missingIdMessage))
-          : getMediaDetails(type, id!),
-      staleTime: DETAILS_STALE_TIME_MS,
-      gcTime: DETAILS_GC_TIME_MS,
-    });
-
-  const cardDetailsQueryOptions = (
-    type: string,
-    id: string | undefined,
-    missingIdMessage?: string,
-  ) =>
-    queryOptions({
-      queryKey: detailsCardQueryKey(type, id),
-      queryFn: () =>
-        missingIdMessage && !id
-          ? Promise.reject(new Error(missingIdMessage))
-          : getMediaDetails(type, id!, false),
-      staleTime: DETAILS_STALE_TIME_MS,
-      gcTime: DETAILS_GC_TIME_MS,
-    });
+  const buildDetailsQueryOptions =
+    <TKey extends readonly unknown[]>(
+      queryKey: (type: string, id: string | undefined) => TKey,
+      includeEpisodes: boolean,
+    ) =>
+    (type: string, id: string | undefined, missingIdMessage?: string) =>
+      queryOptions({
+        queryKey: queryKey(type, id),
+        queryFn: () =>
+          missingIdMessage && !id
+            ? Promise.reject(new Error(missingIdMessage))
+            : getMediaDetails(type, id!, includeEpisodes),
+        staleTime: DETAILS_STALE_TIME_MS,
+        gcTime: DETAILS_GC_TIME_MS,
+      });
+  const detailsQueryOptions = buildDetailsQueryOptions(detailsQueryKey, true);
+  const cardDetailsQueryOptions = buildDetailsQueryOptions(detailsCardQueryKey, false);
 
   // One IPC for the details-route prefetch: card details + resume snapshot.
   const getDetailsPrefetchBundle = (type: string, id: string) =>

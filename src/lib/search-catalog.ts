@@ -65,7 +65,7 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
         ...data,
         pages: data.pages.map((page, index) =>
           index < data.pages.length - 1 && page.continuation
-            ? { items: page.items, exhausted: page.exhausted }
+            ? { items: page.items, exhausted: page.exhausted, partial: page.partial }
             : page,
         ),
         pageParams: data.pageParams.map((param, index) => (index === 0 ? param : undefined)),

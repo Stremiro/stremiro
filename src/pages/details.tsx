@@ -30,11 +30,13 @@ import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { SaveToCollectionPanel } from '@/components/list/save-to-collection';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
+import { ScrollToTop } from '@/components/scroll-to-top';
 import { StreamSelector } from '@/components/stream-selector';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SearchInput } from '@/components/ui/search-input';
 import { DetailsSkeleton, Skeleton } from '@/components/ui/skeleton';
+import { WatchStatusIcon } from '@/components/watch-status-icon';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
@@ -45,7 +47,6 @@ import { useDetailsTrailer } from '@/hooks/use-details-trailer';
 import { useDetailsWatchStatus } from '@/hooks/use-details-watch-status';
 import {
   useMarkSeasonWatched,
-  useListSummaries,
   useMediaCollectionActions,
   useTitleWatchProgress,
   useToggleEpisodeWatched,
@@ -54,10 +55,12 @@ import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import {
   api,
   type Episode,
+  getErrorMessage,
+  isNoCapableAddonError,
   type MediaDetails,
+  WATCH_STATUSES,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
-  type WatchStatus,
 } from '@/lib/api';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { claimDetailsHero } from '@/lib/navigation';
@@ -78,6 +81,7 @@ import {
   formatSeasonEpisode,
   GENRE_LINK_CLASS,
   mediaTypeLabel,
+  pluralize,
   queryNeedsRetry,
   scrollBehavior,
   SIDEBAR_PAGE_COLUMN_INSETS,
@@ -100,9 +104,7 @@ const DETAILS_COLUMN_CLASS = `mx-auto w-full max-w-6xl ${SIDEBAR_PAGE_COLUMN_INS
 const DETAILS_HERO_CLASS =
   'relative -mt-8 flex min-h-[70vh] w-full items-end pb-12 pt-24 lg:pb-16 lg:pt-28';
 const DETAILS_STATUS_STRIP_CLASS =
-  'inline-grid max-w-full grid-cols-2 gap-1 rounded-xl border border-white/15 bg-zinc-950 p-1 sm:inline-flex sm:flex-wrap';
-
-const WATCH_STATUS_ORDER: WatchStatus[] = ['plan_to_watch', 'watching', 'watched', 'dropped'];
+  'inline-grid max-w-full grid-cols-2 gap-1 rounded-xl border border-white/[0.08] bg-white/[0.02] p-1 sm:inline-flex sm:flex-wrap';
 
 function locationCoordinate(state: unknown, key: 'season' | 'episode'): number | null {
   const value = (state as Record<string, unknown> | null)?.[key];
@@ -190,7 +192,7 @@ export function Details() {
   const { type, id } = useParams<{ type: string; id: string }>();
 
   return (
-    <div className='min-h-screen bg-background'>
+    <div className='min-h-[calc(100vh-2rem)] bg-background'>
       <DetailsContent key={`${type}-${id}`} />
     </div>
   );
@@ -286,14 +288,7 @@ function DetailsContent() {
   const collectionActions = useMediaCollectionActions({ item, isInLibrary });
   const { toggleLibrary, addItemToNewList } = collectionActions;
   const libraryStatusBusy = toggleLibrary.isPending || watchStatusMutation.isPending;
-  const collectionItemId = item?.id ?? baseRouteId;
-  const listSummariesQuery = useListSummaries(collectionItemId, {
-    enabled: Boolean(collectionItemId),
-  });
-  const { data: listSummaries } = listSummariesQuery;
-  const isSaved = isInLibrary || (listSummaries?.some((list) => list.contains_item) ?? false);
-  const isSaveReady = isWatchStateReady && listSummariesQuery.isSuccess;
-  const collectionStateError = watchStateError || queryNeedsRetry(listSummariesQuery);
+  const savePendingLabel = watchStateError ? 'Saved state unavailable' : 'Loading saved state';
   const [saveOpen, setSaveOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
   const saveTriggerRef = useRef<HTMLButtonElement>(null);
@@ -479,6 +474,7 @@ function DetailsContent() {
   }
 
   const seasonWatchTargets: Episode[] = [];
+  const seasonUnwatchTargets: Episode[] = [];
   const seasonRail: { key: string; state: SeasonEpisodeState }[] = [];
   let seasonWatchedCount = 0;
   let seasonHasStarted = false;
@@ -486,6 +482,7 @@ function DetailsContent() {
     const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
     if (isEpisodeWatched(ep)) {
       seasonWatchedCount += 1;
+      seasonUnwatchTargets.push(ep);
       seasonRail.push({ key, state: 'watched' });
       continue;
     }
@@ -503,6 +500,12 @@ function DetailsContent() {
     });
     if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) seasonWatchTargets.push(ep);
   }
+  // Once every aired episode is watched the season action reverses; a pending
+  // mutation keeps its own direction so the label can't flip mid-write.
+  const seasonActionMarksWatched = markSeasonWatched.isPending
+    ? markSeasonWatched.variables?.watched !== false
+    : !airStatesReady || seasonWatchTargets.length > 0;
+  const seasonActionTargets = seasonActionMarksWatched ? seasonWatchTargets : seasonUnwatchTargets;
 
   const resumeEpisodeRef = useRef<HTMLButtonElement | null>(null);
   const episodeSearchInputRef = useRef<HTMLInputElement>(null);
@@ -728,6 +731,7 @@ function DetailsContent() {
   if (isLoading && errorUpdatedAt === 0 && !showOfflineDetails) return <DetailsSkeleton />;
 
   if ((showOfflineDetails || error || (isFetched && isLoading)) && !item) {
+    const missingAddon = !showOfflineDetails && isNoCapableAddonError(error);
     return (
       <div
         role='alert'
@@ -740,20 +744,28 @@ function DetailsContent() {
         <p className='text-sm text-zinc-500 max-w-sm leading-relaxed'>
           {showOfflineDetails
             ? 'Reconnect to load this title, or try again.'
-            : 'The details request failed — check your connection, then try again.'}
+            : missingAddon
+              ? getErrorMessage(error)
+              : 'The details request failed — check your connection, then try again.'}
         </p>
-        <Button
-          variant='outline'
-          onClick={handleRetryDetails}
-          aria-disabled={isFetching || undefined}
-          aria-busy={isFetching}
-          className='mt-1 h-9 rounded-md px-4 aria-disabled:cursor-wait aria-disabled:opacity-50'
-        >
-          <RotateCcw
-            className={cn('h-4 w-4', isFetching && 'animate-spin motion-reduce:animate-none')}
-          />
-          Retry
-        </Button>
+        {missingAddon ? (
+          <Button variant='outline' className='mt-1 h-9 rounded-md px-4' asChild>
+            <Link to='/settings?section=addons'>Manage addons</Link>
+          </Button>
+        ) : (
+          <Button
+            variant='outline'
+            onClick={handleRetryDetails}
+            aria-disabled={isFetching || undefined}
+            aria-busy={isFetching}
+            className='mt-1 h-9 rounded-md px-4 aria-disabled:cursor-wait aria-disabled:opacity-50'
+          >
+            <RotateCcw
+              className={cn('h-4 w-4', isFetching && 'animate-spin motion-reduce:animate-none')}
+            />
+            Retry
+          </Button>
+        )}
       </div>
     );
   }
@@ -776,6 +788,7 @@ function DetailsContent() {
 
   return (
     <div className='relative pb-20 page-enter'>
+      <ScrollToTop />
       <div className={DETAILS_HERO_CLASS}>
         <div
           ref={claimDetailsHero}
@@ -859,7 +872,7 @@ function DetailsContent() {
                       </span>
                     )}
                     {hasEpisodesSection && seasons.length > 0
-                      ? `${seasons.length} Season${seasons.length === 1 ? '' : 's'}`
+                      ? pluralize(seasons.length, 'Season')
                       : mediaTypeLabel(item.type)}
                   </span>
 
@@ -979,7 +992,7 @@ function DetailsContent() {
                   <Popover
                     open={saveOpen}
                     onOpenChange={(open) => {
-                      if (!open || isSaveReady) setSaveOpen(open);
+                      if (!open || isWatchStateReady) setSaveOpen(open);
                     }}
                   >
                     <PopoverTrigger asChild>
@@ -987,25 +1000,23 @@ function DetailsContent() {
                         ref={saveTriggerRef}
                         type='button'
                         aria-label={
-                          !isSaveReady
-                            ? collectionStateError
-                              ? 'Saved state unavailable'
-                              : 'Loading saved state'
-                            : isSaved
+                          !isWatchStateReady
+                            ? savePendingLabel
+                            : isInLibrary
                               ? 'Saved — manage library and lists'
                               : 'Save to library or list'
                         }
-                        aria-disabled={!isSaveReady || undefined}
+                        aria-disabled={!isWatchStateReady || undefined}
                         aria-busy={
-                          libraryStatusBusy || (!isSaveReady && !collectionStateError) || undefined
+                          libraryStatusBusy || (!isWatchStateReady && !watchStateError) || undefined
                         }
                         title={
-                          !isSaveReady ? 'Saved state unavailable' : isSaved ? 'Saved' : 'Save'
+                          !isWatchStateReady ? savePendingLabel : isInLibrary ? 'Saved' : 'Save'
                         }
                         className={cn(
                           ICON_ACTION_CLASS,
                           'w-auto min-w-24 gap-2 px-3',
-                          isSaved &&
+                          isInLibrary &&
                             'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                         )}
                       >
@@ -1013,18 +1024,18 @@ function DetailsContent() {
                           <Plus
                             className={cn(
                               'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                              isSaved ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
+                              isInLibrary ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
                             )}
                           />
                           <Check
                             className={cn(
                               'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                              isSaved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+                              isInLibrary ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
                             )}
                           />
                         </span>
                         <span className='min-w-9 text-left text-[13px] font-medium'>
-                          {isSaved ? 'Saved' : 'Save'}
+                          {isInLibrary ? 'Saved' : 'Save'}
                         </span>
                       </button>
                     </PopoverTrigger>
@@ -1057,7 +1068,7 @@ function DetailsContent() {
                     returnFocusRef={saveTriggerRef}
                   />
 
-                  {item.trailers && item.trailers.length > 0 && (
+                  {trailers.length > 0 && (
                     <button
                       ref={trailerTriggerRef}
                       type='button'
@@ -1109,14 +1120,12 @@ function DetailsContent() {
                 )}
               </div>
 
-              {collectionStateError && (
+              {watchStateError && (
                 <RetryBanner
                   className='max-w-xl px-3 py-2'
-                  message="Couldn't load library, lists or status."
-                  isRetrying={isFetchingWatchState || listSummariesQuery.isFetching}
-                  onRetry={() =>
-                    void Promise.all([retryWatchState(), listSummariesQuery.refetch()])
-                  }
+                  message="Couldn't load library or status."
+                  isRetrying={isFetchingWatchState}
+                  onRetry={() => void retryWatchState()}
                 />
               )}
               <div className='flex flex-col items-start gap-2 pt-5'>
@@ -1134,7 +1143,7 @@ function DetailsContent() {
                     libraryStatusBusy || (!isWatchStateReady && !watchStateError) || undefined
                   }
                 >
-                  {WATCH_STATUS_ORDER.map((status) => {
+                  {WATCH_STATUSES.map((status) => {
                     const isActive = detailsWatchStatus === status;
                     const colors = WATCH_STATUS_COLORS[status];
                     return (
@@ -1153,25 +1162,19 @@ function DetailsContent() {
                           }
                         }}
                         className={cn(
-                          'flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border px-3 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none',
+                          'flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border px-2.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none',
                           isActive
-                            ? 'border-white/25 bg-white/[0.12] text-white hover:bg-white/[0.16]'
-                            : 'border-transparent text-zinc-300 hover:bg-white/[0.06] hover:text-white',
+                            ? cn('text-white', colors.bg, colors.border)
+                            : 'border-transparent text-zinc-300 hover:bg-white/[0.05] hover:text-white',
                         )}
                       >
-                        <span
-                          aria-hidden='true'
+                        <WatchStatusIcon
+                          status={status}
                           className={cn(
-                            'flex h-3.5 w-3.5 shrink-0 items-center justify-center',
-                            colors.text,
+                            'size-4 transition-opacity duration-150',
+                            isActive || !detailsWatchStatus ? 'opacity-100' : 'opacity-70',
                           )}
-                        >
-                          {isActive ? (
-                            <Check className='h-3.5 w-3.5' strokeWidth={2.5} />
-                          ) : (
-                            <span className='h-1.5 w-1.5 rounded-full bg-current' />
-                          )}
-                        </span>
+                        />
                         {WATCH_STATUS_LABELS[status]}
                       </button>
                     );
@@ -1282,11 +1285,15 @@ function DetailsContent() {
                         className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
                       >
                         <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
-                        Jump to S{resumeEpisodeCoords.season}E{resumeEpisodeCoords.episode}
+                        Jump to{' '}
+                        {formatSeasonEpisode(
+                          resumeEpisodeCoords.season,
+                          resumeEpisodeCoords.episode,
+                        )}
                       </button>
                     )}
                   {!isLoadingWatchHistoryForItem &&
-                    (seasonWatchTargets.length > 1 || markSeasonWatched.isPending) && (
+                    (seasonActionTargets.length > 1 || markSeasonWatched.isPending) && (
                       <button
                         type='button'
                         aria-disabled={
@@ -1307,15 +1314,15 @@ function DetailsContent() {
                             holdEpisodeActionFocus(event.currentTarget, 'heading');
                             retainEpisodePosition();
                             markSeasonWatched.mutate({
-                              episodes: seasonWatchTargets,
-                              watched: true,
+                              episodes: seasonActionTargets,
+                              watched: seasonActionMarksWatched,
                             });
                           }
                         }}
                         className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
                       >
                         <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
-                        Mark season watched
+                        {seasonActionMarksWatched ? 'Mark season watched' : 'Mark season unwatched'}
                       </button>
                     )}
                 </div>

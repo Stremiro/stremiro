@@ -1,14 +1,11 @@
 import {
   ArrowLeft,
-  Check,
   Cloud,
-  Gauge,
   Maximize,
   Minimize,
   PictureInPicture2,
   RotateCcw,
   RotateCw,
-  SkipBack,
 } from 'lucide-react';
 import { memo, type Ref, useId, useState } from 'react';
 import {
@@ -24,6 +21,7 @@ import {
   PlayerMuteButton,
   PlayerNextButton,
   PlayerPlayButton,
+  PlayerPreviousButton,
 } from '@/components/player-control-buttons';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerTimeDisplay } from '@/components/player-progress-bar';
@@ -130,10 +128,10 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
             void onToggleFullscreen().catch(() => undefined);
           }}
           className={CHROME_ICON_BUTTON_CLASS}
-          aria-label={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen'}
+          aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
           aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
           title={withShortcutHint(
-            isFullscreen ? 'Exit Fullscreen' : 'Fullscreen',
+            isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
             keymap,
             'toggleFullscreen',
           )}
@@ -195,8 +193,8 @@ const SEEK_BUTTONS = [
 function SeekTenIcon({ forward }: { forward: boolean }) {
   const Icon = forward ? RotateCw : RotateCcw;
   return (
-    <span aria-hidden='true' className='relative h-6 w-6'>
-      <Icon className='h-6 w-6' strokeWidth={CHROME_ICON_STROKE} />
+    <span aria-hidden='true' className={cn('relative', CHROME_ICON_CLASS)}>
+      <Icon className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
       <span className='absolute inset-0 flex items-center justify-center pt-0.5 text-[8.5px] font-bold leading-none tabular-nums'>
         10
       </span>
@@ -250,19 +248,16 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
       <div className='flex min-w-0 max-w-full flex-wrap items-center gap-2'>
         <div className={CHROME_PILL_CLASS}>
           {hasEpisodes && (
-            <button
-              type='button'
-              aria-label={previousEpisodeLabel ?? 'Previous episode'}
-              title={previousEpisodeLabel ?? 'Previous episode'}
+            <PlayerPreviousButton
+              variant='full'
+              keymap={keymap}
+              label={previousEpisodeLabel ?? 'Previous episode'}
               disabled={!canGoPrevious}
               onClick={(e) => {
                 e.stopPropagation();
                 onPreviousEpisode();
               }}
-              className={CHROME_ICON_BUTTON_CLASS}
-            >
-              <SkipBack className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-            </button>
+            />
           )}
           <PlayerPlayButton
             variant='full'
@@ -312,13 +307,14 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
               aria-hidden='true'
               className={cn(
                 CHROME_VALUE_BUBBLE_CLASS,
-                'pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 opacity-0 transition-opacity group-hover/volume:opacity-100 group-focus-within/volume:opacity-100 group-has-[:active]/volume:opacity-100 motion-reduce:transition-none',
+                'pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 opacity-0 transition-opacity group-hover/volume:opacity-100 group-has-[[data-keyboard-focus]]/volume:opacity-100 group-has-[:active]/volume:opacity-100 motion-reduce:transition-none',
               )}
             >
               {displayedVolume}%
             </span>
             <PlayerSlider
               variant='bar'
+              active={active}
               value={[isMuted ? 0 : volume]}
               max={100}
               step={1}
@@ -346,7 +342,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
         </div>
       </div>
 
-      <div className={cn(CHROME_PILL_CLASS, 'ml-auto')}>
+      <div className={cn(CHROME_PILL_CLASS, 'ml-auto gap-1.5 px-1.5')}>
         {SEEK_BUTTONS.map(({ action, label, hint, delta }) => (
           <button
             key={action}
@@ -375,47 +371,46 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             <button
               type='button'
               aria-label={`Playback speed: ${playbackSpeed}x`}
+              aria-keyshortcuts={
+                [ariaKeyShortcuts(keymap, 'speedDown'), ariaKeyShortcuts(keymap, 'speedUp')]
+                  .filter(Boolean)
+                  .join(' ') || undefined
+              }
               title={
                 speedKeys.length > 0
                   ? `Playback speed (${speedKeys.join(' / ')})`
                   : 'Playback speed'
               }
-              className={cn(
-                CHROME_ICON_BUTTON_CLASS,
-                playbackSpeed !== 1 && 'w-auto gap-1.5 px-2.5',
-              )}
+              className={cn(CHROME_ICON_BUTTON_CLASS, playbackSpeed !== 1 && 'text-(--accent-nav)')}
               onClick={(event) => {
                 event.stopPropagation();
               }}
             >
-              <Gauge className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-              {playbackSpeed !== 1 && (
-                <span className='text-[11px] font-semibold tabular-nums text-[var(--accent-nav)]'>
-                  {playbackSpeed}x
-                </span>
-              )}
+              <span className='text-xs font-semibold tabular-nums'>{playbackSpeed}x</span>
             </button>
           </PopoverTrigger>
           <PopoverContent
+            data-player-popover
             side='top'
             sideOffset={10}
             aria-labelledby={speedHeadingId}
             className={cn(
               CHROME_POPOVER_CLASS,
-              'max-h-(--radix-popover-content-available-height) w-32 overflow-y-auto overscroll-contain p-1.5',
+              'max-h-(--radix-popover-content-available-height) w-64 max-w-[calc(100vw-1rem)] overflow-y-auto overscroll-contain p-2',
             )}
             onClick={(event) => {
               event.stopPropagation();
             }}
           >
-            <h4 id={speedHeadingId} className='px-2.5 py-2 text-xs font-semibold text-zinc-300'>
+            <h4 id={speedHeadingId} className='px-2 py-2 text-[13px] font-semibold text-zinc-200'>
               Speed
             </h4>
-            <div className='flex flex-col'>
+            <div className='grid grid-cols-4 gap-1'>
               {SPEED_OPTIONS.map((s) => (
                 <button
                   key={s}
                   type='button'
+                  aria-label={`Playback speed: ${s}x`}
                   aria-pressed={s === playbackSpeed}
                   onClick={() => {
                     onSpeedChange(s);
@@ -423,20 +418,13 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
                   }}
                   className={cn(
                     CHROME_MENU_ROW_FOCUS_CLASS,
-                    'flex h-9 items-center justify-between rounded-md px-2.5 text-left text-xs tabular-nums transition-colors hover:bg-white/[0.08]',
+                    'flex min-h-10 items-center justify-center rounded-md px-1 text-[13px] tabular-nums transition-colors hover:bg-white/[0.08]',
                     s === playbackSpeed
                       ? 'bg-white/[0.08] text-white font-semibold'
                       : 'text-white/60 hover:text-white',
                   )}
                 >
                   {s}x
-                  {s === playbackSpeed && (
-                    <Check
-                      aria-hidden='true'
-                      className='h-3.5 w-3.5'
-                      strokeWidth={CHROME_ICON_STROKE}
-                    />
-                  )}
                 </button>
               ))}
             </div>
@@ -450,7 +438,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
             aria-keyshortcuts={ariaKeyShortcuts(keymap, 'streamSelector')}
             aria-expanded={streamSelectorOpen}
             className={CHROME_ICON_BUTTON_CLASS}
-            title={withShortcutHint('Choose Stream / Quality', keymap, 'streamSelector')}
+            title={withShortcutHint('Choose stream / quality', keymap, 'streamSelector')}
             onClick={(e) => {
               e.stopPropagation();
               onOpenStreamSelector();

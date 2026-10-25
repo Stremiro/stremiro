@@ -128,9 +128,16 @@ export function useSubtitleAdjustments({
   };
 
   const resetSubtitleSettings = () => {
-    void applySubtitleDelay(0);
-    void applySubtitlePos(100);
-    void applySubtitleScale(1.0);
+    delayNudgeGenerationRef.current += 1;
+    if (settingsRef.current.delay !== 0 || pendingRef.current.has('delay')) {
+      void applySubtitleDelay(0);
+    }
+    if (settingsRef.current.pos !== 100 || pendingRef.current.has('pos')) {
+      void applySubtitlePos(100);
+    }
+    if (settingsRef.current.scale !== 1.0 || pendingRef.current.has('scale')) {
+      void applySubtitleScale(1.0);
+    }
   };
 
   return {

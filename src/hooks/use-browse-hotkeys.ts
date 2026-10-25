@@ -10,8 +10,8 @@ import {
 import { navigateApp, navigateBack, navigateForward } from '@/lib/navigation';
 import { lastSearchPath } from '@/lib/search-page-state';
 
-// A focused floating layer owns its keys — includes the docked mini player's [role="dialog"], whose keys belong to the player keymap.
-const OWNED_LAYER_SELECTOR = `[role="dialog"], ${RADIX_POPPER_CONTENT_SELECTOR}, [data-media-card-expanded]`;
+// Focused floating layers own their keys, including the nonmodal mini player.
+const OWNED_LAYER_SELECTOR = `[role="dialog"], ${RADIX_POPPER_CONTENT_SELECTOR}, [data-media-card-expanded], [data-mini-player]`;
 const QUICK_SECTION_PATHS = ['/', '/search', '/calendar', '/library', '/settings'] as const;
 
 function isInsideOwnedLayer(target: EventTarget | null): boolean {

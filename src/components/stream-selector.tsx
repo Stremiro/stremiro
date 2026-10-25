@@ -1001,7 +1001,9 @@ export function StreamSelector({
             />
           ) : !isOnline ? (
             <StreamListOfflineState />
-          ) : !isLoadingAddonConfigs && (!hasEnabledAddons || streamSourceCount === 0) ? (
+          ) : streams.length === 0 &&
+            !isLoadingAddonConfigs &&
+            (!hasEnabledAddons || streamSourceCount === 0) ? (
             <StreamListNoAddonsState
               metadataOnly={hasEnabledAddons}
               onManageAddons={handleManageAddons}

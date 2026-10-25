@@ -18,7 +18,7 @@ import {
 import { episodeProgressKey } from '@/lib/history-playback';
 import { streamSelectorQueryKey } from '@/lib/query-invalidation';
 import { playerStreamRankingOptions } from '@/lib/resolve-player-stream';
-import { buildStreamRankingCacheKey } from '@/lib/stream-ranking';
+import { buildStreamRankingCacheKey } from '@/lib/stream-ranking-cache-key';
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { createObjectIdentity, isSeriesLikeMediaType } from '@/lib/utils';
 
@@ -190,6 +190,7 @@ export function useStreamSelectorController({
     queryFn: () => {
       // The backend emits a merged+ranked snapshot per addon — cache each so rows appear progressively.
       const generation = ++selectorFetchGenerationRef.current;
+      let settled = false;
       const hasCachedStreams =
         !!queryClient.getQueryData<StreamSelectorData>(selectorQueryKey)?.streams.length;
       const onProgress = new Channel<StreamSelectorData>();
@@ -198,6 +199,7 @@ export function useStreamSelectorController({
       onProgress.onmessage = (snapshot) => {
         // Refresh atomically: partial source snapshots must not shrink an already populated list.
         if (
+          !settled &&
           !hasCachedStreams &&
           selectorOpenRef.current &&
           generation === selectorFetchGenerationRef.current
@@ -207,15 +209,19 @@ export function useStreamSelectorController({
           );
         }
       };
-      return api.getStreamSelectorData(
-        type,
-        lookupId,
-        season,
-        episode,
-        absoluteEpisode,
-        rankingOptions,
-        onProgress,
-      );
+      return api
+        .getStreamSelectorData(
+          type,
+          lookupId,
+          season,
+          episode,
+          absoluteEpisode,
+          rankingOptions,
+          onProgress,
+        )
+        .finally(() => {
+          settled = true;
+        });
     },
     structuralSharing: shareStreamSelectorData,
     enabled: open && !!lookupId?.trim() && isOnline,

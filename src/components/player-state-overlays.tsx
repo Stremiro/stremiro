@@ -65,13 +65,13 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
             onClick={onRetry}
             className='rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
           >
-            Try Again
+            Try again
           </button>
           <button type='button' onClick={onChooseStream} className={ERROR_SECONDARY_BUTTON_CLASS}>
-            Choose Stream
+            Choose stream
           </button>
           <button type='button' onClick={onBack} className={ERROR_SECONDARY_BUTTON_CLASS}>
-            Go Back
+            Go back
           </button>
         </div>
       </div>
@@ -242,7 +242,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
                 onClick={onChooseStream}
                 className='h-8 rounded-lg bg-white/[0.07] px-3 text-[12.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
               >
-                Choose Stream
+                Choose stream
               </button>
             )}
             {onBack && (
@@ -251,7 +251,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
                 onClick={onBack}
                 className='h-8 rounded-lg px-3 text-[12.5px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
               >
-                Go Back
+                Go back
               </button>
             )}
           </div>

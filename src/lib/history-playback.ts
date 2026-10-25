@@ -16,7 +16,7 @@ import {
   PLAYER_RESTART_START_TIME,
 } from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
-import { clamp, withTimeout } from '@/lib/utils';
+import { clamp, isSeriesLikeMediaType, withTimeout } from '@/lib/utils';
 
 export interface DetailsHistoryRouteState {
   // Optional: a self-referential `from` dead-ends the titlebar Back button.
@@ -38,15 +38,13 @@ export function getHistoryPlaybackFallbackNotice(mode: HistoryPlaybackFallbackNo
   title: string;
   description: string;
 } {
-  return mode === 'select-episode'
-    ? {
-        title: 'Episode context missing',
-        description: 'Select the episode below to continue watching.',
-      }
-    : {
-        title: 'Episode context missing',
-        description: 'Opening details so you can select the episode to continue.',
-      };
+  return {
+    title: 'Episode context missing',
+    description:
+      mode === 'select-episode'
+        ? 'Select the episode below to continue watching.'
+        : 'Opening details so you can select the episode to continue.',
+  };
 }
 
 /** An observed beginning suppresses history; only an unavailable clock falls back. */
@@ -69,16 +67,24 @@ export async function getLatestEpisodeResumeStartTime(
   episode?: number,
 ): Promise<number | undefined> {
   try {
-    // Bounded: a wedged store read must not hold "Choose Stream" hostage.
+    // Bounded: a wedged store read must not hold "Choose stream" hostage.
     const progress = await withTimeout(
       api.getWatchProgress(mediaId, mediaType, season, episode),
       RESUME_LOOKUP_TIMEOUT_MS,
-      () => null,
+      () => {
+        throw new Error('resume lookup timed out');
+      },
     );
-    return progress?.resume_start_time;
+    // A definite "no resume" skips the player's own history lookup.
+    return progress?.resume_start_time ?? PLAYER_RESTART_START_TIME;
   } catch {
     return undefined;
   }
+}
+
+// Series and anime routes share history rows and player sessions.
+export function isSameMediaKind(left?: string | null, right?: string | null): boolean {
+  return left === right || (isSeriesLikeMediaType(left) && isSeriesLikeMediaType(right));
 }
 
 // Shared row identity for Home's resume rail and Profile's grid/list views.

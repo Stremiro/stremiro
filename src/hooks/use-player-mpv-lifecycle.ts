@@ -13,7 +13,13 @@ import { listenEvents } from 'tauri-plugin-libmpv-api';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { SubtitleAdjustmentSettings } from '@/hooks/use-subtitle-adjustments';
-import { getErrorMessage, type PlaybackLanguagePreferences } from '@/lib/api';
+import {
+  getErrorMessage,
+  type PlaybackLanguagePreferences,
+  type SubtitleColor,
+  type SubtitleEdge,
+  type SubtitleFont,
+} from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { enqueuePlayerLifecycle } from '@/lib/player-lifecycle';
@@ -24,6 +30,7 @@ import {
   readPlaybackPositionProbe,
   setMpvAudioSettings,
   setMpvProperties,
+  setMpvSubtitleAppearance,
 } from '@/lib/player-mpv';
 import { isNearMediaEnd } from '@/lib/player-skip';
 import { usePlayerSession } from '@/lib/player-session';
@@ -71,7 +78,6 @@ interface UsePlayerMpvLifecycleArgs {
   mpvInitializedRef: RefObject<boolean>;
   isLoading: boolean;
   isPlayingRef: RefObject<boolean>;
-  isBufferingRef: RefObject<boolean>;
   clock: PlaybackClock;
   observedPositionRef: RefObject<number | null>;
   /** Buffered-ahead seconds store — feeds the seekbar band without player-tree renders. */
@@ -139,7 +145,6 @@ export function usePlayerMpvLifecycle({
   mpvInitializedRef,
   isLoading,
   isPlayingRef,
-  isBufferingRef,
   clock,
   observedPositionRef,
   bufferedClock,
@@ -163,10 +168,23 @@ export function usePlayerMpvLifecycle({
 }: UsePlayerMpvLifecycleArgs) {
   const { trayPause } = usePlayerSession();
   const {
-    preferences: { audioDelay, nightMode },
+    preferences: {
+      audioDelay,
+      nightMode,
+      subtitleFont,
+      subtitleColor,
+      subtitleEdge,
+      subtitleBold,
+      subtitleItalic,
+    },
   } = useAppUiPreferences((preferences) => ({
     audioDelay: preferences.audioDelay,
     nightMode: preferences.nightMode,
+    subtitleFont: preferences.subtitleFont,
+    subtitleColor: preferences.subtitleColor,
+    subtitleEdge: preferences.subtitleEdge,
+    subtitleBold: preferences.subtitleBold,
+    subtitleItalic: preferences.subtitleItalic,
   }));
   const {
     activeStreamUrl,
@@ -201,6 +219,7 @@ export function usePlayerMpvLifecycle({
   const isHistoryResumeNow = useEffectEvent(() => isHistoryResume);
   const isLoadingNow = useEffectEvent(() => isLoading);
   const [isBuffering, setIsBuffering] = useState(false);
+  const isBufferingRef = useRef(false);
   const [nextEpisodePrefetchDue, setNextEpisodePrefetchDue] = useState(false);
   const refreshPositionRef = useRef<(() => void) | null>(null);
   const requestPositionRefresh = useCallback(() => refreshPositionRef.current?.(), []);
@@ -226,6 +245,51 @@ export function usePlayerMpvLifecycle({
       void applyAudioSettings({ nightMode });
     }
   }, [nightMode, mpvInitializedRef, isDestroyedRef]);
+
+  const applySubtitleAppearance = useEffectEvent(
+    (
+      appearance: {
+        font: SubtitleFont;
+        color: SubtitleColor;
+        edge: SubtitleEdge;
+        bold: boolean;
+        italic: boolean;
+      } = {
+        font: subtitleFont,
+        color: subtitleColor,
+        edge: subtitleEdge,
+        bold: subtitleBold,
+        italic: subtitleItalic,
+      },
+    ) =>
+      setMpvSubtitleAppearance(appearance).catch((error: unknown) => {
+        if (!mountedRef.current || isDestroyedRef.current) return;
+        notifyAction("Couldn't apply subtitle appearance", {
+          detail: getErrorMessage(error),
+          tone: 'error',
+        });
+      }),
+  );
+
+  useEffect(() => {
+    if (mpvInitializedRef.current && !isDestroyedRef.current) {
+      void applySubtitleAppearance({
+        font: subtitleFont,
+        color: subtitleColor,
+        edge: subtitleEdge,
+        bold: subtitleBold,
+        italic: subtitleItalic,
+      });
+    }
+  }, [
+    subtitleFont,
+    subtitleColor,
+    subtitleEdge,
+    subtitleBold,
+    subtitleItalic,
+    mpvInitializedRef,
+    isDestroyedRef,
+  ]);
 
   useEffect(() => {
     const publishVisiblePosition = () => {
@@ -784,13 +848,17 @@ export function usePlayerMpvLifecycle({
         if (cancelled) return;
         await applyAudioSettings();
         if (cancelled) return;
+        await applySubtitleAppearance();
+        if (cancelled) return;
 
         // A tray hide during init may have paused an instance that did not exist yet.
         const startPaused = resumeStartPaused || trayPause.getSnapshot();
         isPlayingRef.current = !startPaused;
         setIsPlaying(!startPaused);
-        await setMpvProperties([['pause', startPaused]]);
-        if (cancelled) return;
+        if (startPaused !== shouldStartPaused) {
+          await setMpvProperties([['pause', startPaused]]);
+          if (cancelled) return;
+        }
         await mpvCommand('loadfile', [activeStreamUrl, 'replace']);
         loadfileSent = true;
         if (cancelled) return;

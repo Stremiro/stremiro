@@ -110,13 +110,16 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
       {/* Ambient accent tint. Radial gradients only — blur on viewport layers
           clips and quantizes into visible rings on WebView2. Alpha rides
-          var(--app-glow) so the settings slider previews live (always mounted). */}
+          var(--app-glow) so the settings slider previews live (always mounted).
+          Only the top-left wash: a second gradient anchored past the bottom
+          edge gets clipped by the viewport rect, which paints a hard square
+          outline in whatever color the user picked. */}
       <div
         aria-hidden='true'
         data-mini-mask
         className='pointer-events-none fixed inset-0 z-0'
         style={{
-          background: `radial-gradient(55% 42% at 12% 0%, rgb(var(--app-accent-rgb) / calc(0.09 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.045 * var(--app-glow))) 42%, transparent 70%), radial-gradient(36% 28% at 94% 112%, rgb(var(--app-accent-rgb) / calc(0.04 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.02 * var(--app-glow))) 45%, transparent 72%)`,
+          background: `radial-gradient(55% 42% at 12% 0%, rgb(var(--app-accent-rgb) / calc(0.09 * var(--app-glow))) 0%, rgb(var(--app-accent-rgb) / calc(0.045 * var(--app-glow))) 42%, transparent 70%)`,
         }}
       />
       {/* Dithering grain behind page content — dithers gradients through

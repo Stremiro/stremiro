@@ -12,10 +12,12 @@ import { MediaCard, type PlaybackIntent } from './media-card';
 interface WatchProgressCardProps {
   item: WatchProgress;
   playbackIntent?: PlaybackIntent;
+  isNewEpisode?: boolean;
   /** Overrides the "time left" line (e.g. up-next cards have no progress). */
   metaLine?: string;
   /** Remove mutation differs per surface (history vs. continue watching) — callers own it. */
   onRemove?: () => void;
+  removeFrom?: string;
   /** Toast title when the playback-plan lookup fails. */
   playErrorTitle: string;
 }
@@ -24,8 +26,10 @@ interface WatchProgressCardProps {
 export const WatchProgressCard = memo(function WatchProgressCard({
   item,
   playbackIntent,
+  isNewEpisode,
   metaLine: metaLineOverride,
   onRemove,
+  removeFrom,
   playErrorTitle,
 }: WatchProgressCardProps) {
   const { play, isPending } = useHistoryPlayback(item, playErrorTitle);
@@ -54,11 +58,13 @@ export const WatchProgressCard = memo(function WatchProgressCard({
     <MediaCard
       item={mediaItem}
       progress={progress}
+      isNewEpisode={isNewEpisode}
       metaLine={metaLine}
       onPlay={play}
       playbackIntent={playbackIntent ?? (item.is_watched ? 'replay' : 'resume')}
       isPlayPending={isPending}
       onRemoveFromContinue={onRemove ? handleRemove : undefined}
+      removeFrom={removeFrom}
       subtitle={subtitle}
     />
   );

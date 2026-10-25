@@ -1,4 +1,4 @@
-import { Pause, Play, RotateCcw, SkipForward } from 'lucide-react';
+import { Pause, Play, RotateCcw, SkipBack, SkipForward } from 'lucide-react';
 import type { MouseEventHandler, ReactNode, WheelEventHandler } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
@@ -43,7 +43,7 @@ function PlayerControlButton({
   className,
   ...props
 }: PlayerButtonProps & {
-  action: PlayerActionId;
+  action?: PlayerActionId;
   className?: string;
   children: ReactNode;
   onWheel?: WheelEventHandler<HTMLButtonElement>;
@@ -52,8 +52,8 @@ function PlayerControlButton({
     <button
       type='button'
       aria-label={label}
-      aria-keyshortcuts={ariaKeyShortcuts(keymap, action)}
-      title={title ?? withShortcutHint(label, keymap, action)}
+      aria-keyshortcuts={action && ariaKeyShortcuts(keymap, action)}
+      title={title ?? (action ? withShortcutHint(label, keymap, action) : label)}
       className={cn(
         variant === 'mini' ? MINI_ICON_BUTTON_CLASS : CHROME_ICON_BUTTON_CLASS,
         className,
@@ -111,6 +111,18 @@ export function PlayerMuteButton({
       <PlayerVolumeIcon
         muted={muted}
         volume={volume}
+        className={ICON_CLASS[variant]}
+        strokeWidth={CHROME_ICON_STROKE}
+      />
+    </PlayerControlButton>
+  );
+}
+
+export function PlayerPreviousButton({ variant, ...props }: PlayerButtonProps) {
+  return (
+    <PlayerControlButton variant={variant} action='previousEpisode' {...props}>
+      <SkipBack
+        aria-hidden='true'
         className={ICON_CLASS[variant]}
         strokeWidth={CHROME_ICON_STROKE}
       />

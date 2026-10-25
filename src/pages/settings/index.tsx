@@ -15,7 +15,6 @@ import {
   type ReactNode,
   lazy,
   Suspense,
-  useCallback,
   useDeferredValue,
   useEffect,
   useRef,
@@ -29,7 +28,12 @@ import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { PLAYER_ACTIONS } from '@/lib/player-keybindings';
-import { cn, scrollBehavior } from '@/lib/utils';
+import {
+  SUBTITLE_COLOR_OPTIONS,
+  SUBTITLE_EDGE_OPTIONS,
+  SUBTITLE_FONT_OPTIONS,
+} from '@/lib/player-track-utils';
+import { cn, pluralize, scrollBehavior } from '@/lib/utils';
 import { AppearanceSettings, TINT_TARGETS } from './appearance';
 import { settingsControlId, SettingsBody, SettingsGroup } from './chrome';
 import { DataSection } from './data';
@@ -38,8 +42,8 @@ import { PlaybackSettings } from './playback';
 import { FIXED_SHORTCUT_SECTIONS, ShortcutsSection } from './shortcuts';
 import { UpdatesSection } from './updates';
 
-const StreamingSources = lazy(() =>
-  import('./streaming').then((module) => ({ default: module.StreamingSources })),
+const AddonSettings = lazy(() =>
+  import('./streaming').then((module) => ({ default: module.AddonSettings })),
 );
 
 interface SearchControl {
@@ -83,7 +87,7 @@ const NAV_ITEMS = [
   },
   {
     id: 'addons',
-    component: StreamingSources,
+    component: AddonSettings,
     label: 'Addons',
     icon: Zap,
     description: 'Install, enable and reorder addons.',
@@ -118,6 +122,21 @@ const NAV_ITEMS = [
         label: 'Night mode',
         keywords:
           'Boost quiet audio and smooth volume changes for late-night watching. Saved for all videos; off keeps the original sound. volume normalization loud jumps listening',
+      },
+      {
+        label: 'Subtitle appearance',
+        keywords: `Plain-text subtitles saved for all videos. Styled ASS subtitles keep their own look. Reset font color edge bold italic captions ${[
+          ...SUBTITLE_FONT_OPTIONS,
+          ...SUBTITLE_COLOR_OPTIONS,
+          ...SUBTITLE_EDGE_OPTIONS,
+        ]
+          .map((option) => option.label)
+          .join(' ')}`,
+      },
+      {
+        label: 'Load addon subtitles automatically',
+        keywords:
+          'When a stream has no subtitles in your preferred language, load a matching one from your addons. auto captions language',
       },
       {
         label: 'Spoiler protection',
@@ -241,23 +260,40 @@ const NAV_ITEMS = [
         keywords:
           'Clear local records permanently Cancel Watching, Watched, Plan to Watch and Dropped labels.',
       },
+      {
+        label: 'Recent searches',
+        keywords:
+          'Clear local records permanently Cancel search history Queries offered when the search field is empty.',
+      },
     ],
   },
 ] as const satisfies readonly NavItem[];
 
+function searchItem(
+  section: (typeof NAV_ITEMS)[number],
+  label: string,
+  keywords: string,
+  target?: string,
+) {
+  return {
+    section,
+    label,
+    target,
+    labelText: label.toLowerCase(),
+    text: `${section.label} ${label} ${keywords}`.toLowerCase(),
+  };
+}
+
 const SEARCH_ITEMS = NAV_ITEMS.flatMap((section) => [
-  {
-    section,
-    label: section.label,
-    keywords: section.description,
-    target: undefined as string | undefined,
-  },
-  ...section.controls.map((control: SearchControl) => ({
-    section,
-    label: control.label,
-    keywords: control.keywords ?? '',
-    target: control.target ?? settingsControlId(control.label),
-  })),
+  searchItem(section, section.label, section.description),
+  ...section.controls.map((control: SearchControl) =>
+    searchItem(
+      section,
+      control.label,
+      control.keywords ?? '',
+      control.target ?? settingsControlId(control.label),
+    ),
+  ),
 ]);
 
 type SectionId = (typeof NAV_ITEMS)[number]['id'];
@@ -310,7 +346,7 @@ function SettingsSectionContent({
     <div
       ref={contentRef}
       tabIndex={-1}
-      className='outline-none [&_[data-setting-highlighted]]:rounded-lg [&_[data-setting-highlighted]]:bg-(--accent-nav)/10 [&_[data-setting-highlighted]]:outline-2 [&_[data-setting-highlighted]]:outline-offset-4 [&_[data-setting-highlighted]]:outline-(--accent-nav)/60'
+      className='outline-none [&_[id^=setting-]]:scroll-mt-48 lg:[&_[id^=setting-]]:scroll-mt-6 [&_[data-setting-highlighted]]:rounded-lg [&_[data-setting-highlighted]]:bg-(--accent-nav)/10 [&_[data-setting-highlighted]]:outline-2 [&_[data-setting-highlighted]]:outline-offset-4 [&_[data-setting-highlighted]]:outline-(--accent-nav)/60'
     >
       {children}
     </div>
@@ -334,15 +370,22 @@ export function Settings() {
   const indicator = useSlidingIndicator(active, navRef, navButtons);
   const searchText = query.trim().toLowerCase();
   const searchWords = searchText.split(/\s+/).filter(Boolean);
-  const matches = SEARCH_ITEMS.filter((item) => {
-    const text = `${item.section.label} ${item.label} ${item.keywords}`.toLowerCase();
-    return searchWords.every((word) => text.includes(word));
-  }).toSorted(
-    (a, b) =>
-      Number(b.label.toLowerCase().includes(searchText)) -
-      Number(a.label.toLowerCase().includes(searchText)),
-  );
+  const matches = searchWords.length
+    ? SEARCH_ITEMS.filter((item) => searchWords.every((word) => item.text.includes(word))).toSorted(
+        (a, b) =>
+          Number(b.labelText.includes(searchText)) - Number(a.labelText.includes(searchText)),
+      )
+    : [];
   useDocumentTitle('Settings');
+  useEffect(() => {
+    const nav = navRef.current;
+    if (!nav || !indicator) return;
+    nav.scrollTo({
+      left: Math.max(0, indicator.left - (nav.clientWidth - indicator.width) / 2),
+      top: Math.max(0, indicator.top - (nav.clientHeight - indicator.height) / 2),
+      behavior: scrollBehavior(),
+    });
+  }, [indicator]);
 
   // Ctrl/Cmd+F finds a setting instead of opening the WebView find bar.
   useEffect(() => {
@@ -364,29 +407,27 @@ export function Settings() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
-  const handleSectionChange = useCallback(
-    (sectionId: SectionId) => {
-      setQuery('');
-      setSearchTarget(null);
-      // Same-path replaces are skipped by the route scroll manager — land at top.
-      if (window.scrollY > 0) window.scrollTo(0, 0);
-      setSearchParams(
-        (currentParams) => {
-          const nextParams = new URLSearchParams(currentParams);
+  const handleSectionChange = (sectionId: SectionId) => {
+    setQuery('');
+    setSearchTarget(null);
+    // Same-path replaces are skipped by the route scroll manager — land at top.
+    sectionRef.current?.scrollTo({ top: 0 });
+    if (window.scrollY > 0) window.scrollTo(0, 0);
+    setSearchParams(
+      (currentParams) => {
+        const nextParams = new URLSearchParams(currentParams);
 
-          if (sectionId === DEFAULT_SECTION) {
-            nextParams.delete(SETTINGS_SECTION_QUERY_PARAM);
-          } else {
-            nextParams.set(SETTINGS_SECTION_QUERY_PARAM, sectionId);
-          }
+        if (sectionId === DEFAULT_SECTION) {
+          nextParams.delete(SETTINGS_SECTION_QUERY_PARAM);
+        } else {
+          nextParams.set(SETTINGS_SECTION_QUERY_PARAM, sectionId);
+        }
 
-          return nextParams;
-        },
-        { replace: true },
-      );
-    },
-    [setSearchParams],
-  );
+        return nextParams;
+      },
+      { replace: true },
+    );
+  };
 
   const handleNavKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     const step = (ARROW_STEPS as Record<string, number | undefined>)[event.key];
@@ -404,50 +445,48 @@ export function Settings() {
   };
 
   return (
-    // Window scroll, not an inner scroller — a toggling gutter would nudge the
-    // centered column on every section swap.
-    <div className='page-enter pl-[60px]'>
-      <div className='mx-auto w-full max-w-[1060px] px-5 pb-16 pt-7 sm:px-8'>
-        <header className='flex items-end justify-between gap-4 border-b border-white/[0.06] pb-5'>
-          <div>
-            <h1 className='text-[22px] font-semibold leading-none tracking-[-0.03em] text-white'>
-              Settings
-            </h1>
-            <p className='mt-2 max-w-xl text-[13px] leading-relaxed text-zinc-400'>
-              Playback, sources, and data for this device.
-            </p>
-          </div>
-          {currentVersion ? (
-            <span
-              data-selectable='true'
-              className='mb-0.5 shrink-0 font-mono text-[11px] tabular-nums text-zinc-500'
-            >
-              v{currentVersion}
-            </span>
-          ) : null}
-        </header>
-
-        <div className='mt-6 grid gap-6 lg:grid-cols-[192px_minmax(0,1fr)] lg:gap-8'>
-          <div className='min-w-0 space-y-5 lg:sticky lg:top-14 lg:self-start'>
+    // Desktop pins the shell to the viewport: the nav never moves on scroll or
+    // section swaps, and only the section column scrolls.
+    <div className='pl-[60px] lg:h-[calc(100dvh-2rem)] lg:overflow-hidden'>
+      <div className='mx-auto w-full max-w-[1480px] px-4 pb-12 pt-5 sm:px-6 lg:h-full lg:pt-7 xl:px-8'>
+        <div className='space-y-5 lg:grid lg:h-full lg:grid-cols-[180px_minmax(0,1fr)] lg:gap-7 lg:space-y-0 xl:gap-9'>
+          <div className='sticky top-8 z-30 -mx-4 min-w-0 space-y-3 border-b border-white/[0.07] bg-zinc-950/95 px-4 py-3 backdrop-blur-xl sm:-mx-6 sm:px-6 lg:static lg:mx-0 lg:flex lg:h-full lg:min-h-0 lg:flex-col lg:gap-5 lg:space-y-0 lg:border-0 lg:bg-transparent lg:px-0 lg:py-1 lg:backdrop-blur-none'>
+            <header className='flex shrink-0 items-baseline justify-between gap-3'>
+              <h1 className='text-[22px] font-semibold leading-none tracking-[-0.03em] text-white'>
+                Settings
+              </h1>
+              {currentVersion ? (
+                <span
+                  data-selectable='true'
+                  className='shrink-0 font-mono text-[11px] tabular-nums text-zinc-500 lg:hidden'
+                >
+                  v{currentVersion}
+                </span>
+              ) : null}
+            </header>
             <SearchInput
               value={query}
-              onValueChange={setQuery}
+              onValueChange={(value) => {
+                setQuery(value);
+                sectionRef.current?.scrollTo({ top: 0 });
+                if (window.scrollY > 0) window.scrollTo(0, 0);
+              }}
               inputRef={searchInputRef}
               onSubmit={() => {
                 const [first] = matches;
-                if (searchWords.length && first) openSearchResult(first);
+                if (first) openSearchResult(first);
               }}
               placeholder='Find a setting…'
               aria-label='Search settings'
               clearLabel='Clear settings search'
-              wrapperClassName='w-full max-w-64 lg:max-w-none'
+              wrapperClassName='w-full shrink-0'
               className='h-9 rounded-lg border-white/[0.08] bg-white/[0.03] text-[13px] text-white shadow-none placeholder:text-zinc-500 focus-visible:border-(--accent-nav)/35 focus-visible:ring-(--accent-nav)/25'
             />
 
             <nav
               ref={navRef}
               aria-label='Settings sections'
-              className='relative isolate scrollbar-hide -mx-1 flex gap-1 overflow-x-auto px-1 py-1 lg:mx-0 lg:flex-col lg:overflow-visible lg:px-0'
+              className='relative isolate scrollbar-hide -mx-1 flex gap-1 overflow-x-auto overscroll-x-contain px-1 py-1 lg:mx-0 lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-x-clip lg:overflow-y-auto lg:overscroll-contain lg:px-0'
             >
               {indicator && (
                 <>
@@ -489,7 +528,7 @@ export function Settings() {
                         : undefined
                     }
                     className={cn(
-                      'nav-switch-item group relative flex h-10 shrink-0 items-center gap-2.5 rounded-lg px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35 lg:w-full',
+                      'nav-switch-item group relative flex h-9 shrink-0 items-center gap-2.5 rounded-lg px-3 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/35 lg:w-full',
                       isActive ? 'text-white' : 'text-zinc-400 hover:text-zinc-100',
                     )}
                   >
@@ -514,6 +553,14 @@ export function Settings() {
                 );
               })}
             </nav>
+            {currentVersion ? (
+              <span
+                data-selectable='true'
+                className='hidden shrink-0 font-mono text-[11px] tabular-nums text-zinc-600 lg:block'
+              >
+                v{currentVersion}
+              </span>
+            ) : null}
           </div>
 
           {/* No enter animation: opacity fades strip subpixel AA from text in
@@ -523,12 +570,22 @@ export function Settings() {
             tabIndex={-1}
             aria-label={searchWords.length ? 'Settings search results' : `${active} settings`}
             role='region'
-            className='w-full min-w-0 max-w-[760px] rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25'
+            className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain'
           >
+            {!searchWords.length && (
+              <header className='mb-5 px-0.5'>
+                <h2 className='text-[20px] font-semibold leading-tight tracking-tight text-white'>
+                  {shownSection.label}
+                </h2>
+                <p className='mt-1.5 text-[13px] leading-relaxed text-zinc-400'>
+                  {shownSection.description}
+                </p>
+              </header>
+            )}
             {searchWords.length ? (
               <div className='space-y-3'>
                 <output className='block text-[12px] text-zinc-500'>
-                  {matches.length} {matches.length === 1 ? 'setting' : 'settings'} found
+                  {pluralize(matches.length, 'setting')} found
                   {matches.length > 0 ? ' · Enter opens the first' : ''}
                 </output>
                 {matches.map((item) => (

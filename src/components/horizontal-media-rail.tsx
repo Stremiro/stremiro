@@ -20,7 +20,7 @@ export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
   'pr-6 pl-[84px] md:px-12 md:pl-24 lg:px-14 lg:pl-28';
 
 const SCROLL_BUTTON_CLASS_NAME =
-  'h-9 w-9 rounded-md bg-transparent border border-white/[0.08] text-zinc-400 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-40 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
+  'h-9 w-9 rounded-md bg-white/[0.025] border border-white/10 text-zinc-300 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white transition-colors duration-150 aria-disabled:cursor-default aria-disabled:opacity-30 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none';
 const DEFAULT_ITEM_CLASS_NAME = `flex-none ${MEDIA_CARD_SLOT_CLASS_NAME} snap-start`;
 const DEFAULT_SCROLLER_CLASS_NAME =
   'flex overflow-x-auto gap-4 px-1 pt-1 pb-8 scrollbar-hide snap-x snap-proximity';
@@ -38,6 +38,7 @@ interface HorizontalMediaRailProps<T> {
   /** Concatenated, never `cn()`-merged — tailwind-merge would collapse `lg:pl-*`+`lg:px-*` pairs. */
   contentInsetsClassName?: string;
   getItemKey: (item: T, index: number) => Key;
+  headerActions?: ReactNode;
   headerContent?: ReactNode;
   isLoading: boolean;
   isPlaceholderData?: boolean;
@@ -56,6 +57,7 @@ interface HorizontalMediaRailProps<T> {
 export function HorizontalMediaRail<T>({
   contentInsetsClassName = HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
   getItemKey,
+  headerActions,
   headerContent,
   isLoading,
   isPlaceholderData = false,
@@ -226,19 +228,24 @@ export function HorizontalMediaRail<T>({
   return (
     <section
       aria-busy={isLoading || isPlaceholderData || undefined}
-      className={cn('py-4 relative group/section', sectionClassName)}
+      className={cn('relative py-5 md:py-6', sectionClassName)}
     >
-      <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
-        <div className='flex min-h-9 items-center justify-between gap-3 mb-3'>
+      <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-4'}`}>
+        <div className='flex min-h-10 flex-wrap items-center gap-x-6 gap-y-3'>
           <h2
             id={titleId}
-            className='min-w-0 text-[17px] font-semibold tracking-[-0.02em] text-white'
+            className='mr-auto min-w-0 text-xl font-semibold leading-7 tracking-[-0.025em] text-zinc-100'
           >
             {title}
           </h2>
 
+          {headerActions && (
+            <div className='order-last w-full md:order-none md:min-w-0 md:flex-1'>
+              {headerActions}
+            </div>
+          )}
           {!hasNotice && !isLoading && scrollState.hasOverflow && (
-            <div className='flex shrink-0 items-center gap-1.5 opacity-60 group-hover/section:opacity-100 group-focus-within/section:opacity-100 focus-within:opacity-100 transition-opacity duration-150 motion-reduce:transition-none'>
+            <div className='ml-auto flex shrink-0 items-center gap-2'>
               <Button
                 aria-label='Scroll rail left'
                 aria-describedby={titleId}
@@ -277,7 +284,7 @@ export function HorizontalMediaRail<T>({
 
       {hasNotice ? (
         <div
-          className={`${contentInsetsClassName} pt-4 flex flex-wrap items-center gap-3 text-[13px] text-zinc-400`}
+          className={`${contentInsetsClassName} pt-4 flex flex-wrap items-center gap-3 text-sm leading-relaxed text-zinc-300`}
         >
           {notice}
         </div>
