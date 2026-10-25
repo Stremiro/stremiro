@@ -5,7 +5,8 @@
 
 use super::config_store::{
     normalize_audio_delay, normalize_subtitle_delay, normalize_subtitle_pos,
-    normalize_subtitle_scale, PLAYER_SPEED_MAX, PLAYER_SPEED_MIN, PLAYER_VOLUME_MAX,
+    normalize_subtitle_scale, SubtitleColor, SubtitleEdge, SubtitleFont, PLAYER_SPEED_MAX,
+    PLAYER_SPEED_MIN, PLAYER_VOLUME_MAX,
 };
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
@@ -378,16 +379,6 @@ pub struct MpvSetError {
     subtitle_properties: Vec<(String, Value)>,
 }
 
-#[command]
-pub async fn player_mpv_set_property(
-    app: AppHandle,
-    window: Window,
-    name: String,
-    value: Value,
-) -> Result<Vec<(String, Value)>, MpvSetError> {
-    player_mpv_set_properties(app, window, vec![(name, value)]).await
-}
-
 fn normalize_mpv_subtitle_property(name: &str, value: &mut Value) -> bool {
     let normalize = match name {
         "sub-delay" => normalize_subtitle_delay,
@@ -498,6 +489,87 @@ pub async fn player_mpv_set_audio_settings(
 ) -> Result<(), String> {
     let properties = mpv_audio_properties(audio_delay, night_mode);
     run_mpv_op("audio settings", move || {
+        apply_mpv_properties(&properties, |name, value| {
+            set_native_mpv_property(&app, window.label(), name, value)
+        })
+    })
+    .await
+}
+
+fn mpv_subtitle_appearance_properties(
+    font: SubtitleFont,
+    color: SubtitleColor,
+    edge: SubtitleEdge,
+    bold: bool,
+    italic: bool,
+) -> Vec<(String, Value)> {
+    let font = match font {
+        SubtitleFont::Default => "sans-serif",
+        SubtitleFont::Modern => "Segoe UI Variable Text",
+        SubtitleFont::Grotesk => "Segoe UI Variable Display",
+        SubtitleFont::Humanist => "Corbel",
+        SubtitleFont::Classic => "Trebuchet MS",
+        SubtitleFont::Screen => "Franklin Gothic Medium",
+        SubtitleFont::Serif => "Cambria",
+        SubtitleFont::Book => "Palatino Linotype",
+        SubtitleFont::Rounded => "Candara",
+        SubtitleFont::Mono => "Cascadia Mono",
+    };
+    let color = match color {
+        SubtitleColor::White => "#FFFFFFFF",
+        SubtitleColor::Ivory => "#FFFFF4D6",
+        SubtitleColor::Lavender => "#FFE3D5FF",
+        SubtitleColor::Mint => "#FFC4F0D9",
+        SubtitleColor::Amber => "#FFFFD89B",
+        SubtitleColor::Gray => "#FFD4D4D4",
+        SubtitleColor::Yellow => "#FFFFE000",
+        SubtitleColor::Cyan => "#FF00E5FF",
+        SubtitleColor::Green => "#FF66FF66",
+        SubtitleColor::Red => "#FFFF5147",
+        SubtitleColor::Orange => "#FFFFA14D",
+        SubtitleColor::Blue => "#FF57A8FF",
+        SubtitleColor::Pink => "#FFFF7AC6",
+    };
+    // Verified against mpv 0.41: `sub-back-color` is both the shadow and the
+    // background-box color, and `sub-shadow-offset` doubles as the box margin.
+    // Outline restores the stock `config=no` values.
+    let (border_style, outline_size, shadow_offset, back_color) = match edge {
+        SubtitleEdge::Outline => ("outline-and-shadow", 1.65, 0.0, "#AF000000"),
+        SubtitleEdge::None => ("outline-and-shadow", 0.0, 0.0, "#AF000000"),
+        SubtitleEdge::Thick => ("outline-and-shadow", 3.0, 0.0, "#AF000000"),
+        SubtitleEdge::Shadow => ("outline-and-shadow", 0.6, 2.5, "#E6000000"),
+        SubtitleEdge::Box => ("background-box", 0.0, 4.0, "#B3000000"),
+    };
+    let yes_no = |enabled: bool| if enabled { "yes" } else { "no" };
+    // `scale` keeps ASS styling while plain-text subtitles take these values.
+    [
+        ("sub-ass-override", Value::from("scale")),
+        ("sub-font", Value::from(font)),
+        ("sub-color", Value::from(color)),
+        ("sub-bold", Value::from(yes_no(bold))),
+        ("sub-italic", Value::from(yes_no(italic))),
+        ("sub-border-style", Value::from(border_style)),
+        ("sub-outline-size", Value::from(outline_size)),
+        ("sub-shadow-offset", Value::from(shadow_offset)),
+        ("sub-back-color", Value::from(back_color)),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.to_string(), value))
+    .collect()
+}
+
+#[command]
+pub async fn player_mpv_set_subtitle_appearance(
+    app: AppHandle,
+    window: Window,
+    font: SubtitleFont,
+    color: SubtitleColor,
+    edge: SubtitleEdge,
+    bold: bool,
+    italic: bool,
+) -> Result<(), String> {
+    let properties = mpv_subtitle_appearance_properties(font, color, edge, bold, italic);
+    run_mpv_op("subtitle appearance", move || {
         apply_mpv_properties(&properties, |name, value| {
             set_native_mpv_property(&app, window.label(), name, value)
         })

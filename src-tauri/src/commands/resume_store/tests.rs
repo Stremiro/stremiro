@@ -113,6 +113,384 @@ fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
 }
 
 #[test]
+fn episode_prefilter_preserves_canonical_claims_raw_fallback_and_all_donors() {
+    use crate::commands::history_helpers::{choose_entry, resume_rows, HistoryEntryQuery};
+
+    let path = TempDbPath::new("episode-candidates");
+    let mut store = ResumeStore::open(&path).unwrap();
+    store.connection.execute_batch(
+        "INSERT INTO watch_progress
+         (history_key, media_id, media_type, season, episode, absolute_season, absolute_episode,
+          position, duration, last_watched, title, poster, backdrop)
+         VALUES
+         ('z-stub', 'tt1234567', 'series', 8, 102, 1, 2, 12, 2400, 600, 'stub', NULL, NULL),
+         ('donor-a', 'tt1234567', 'series', 7, 202, 1, 2, 1020, 2400, 500, 'donor', 'poster', NULL),
+         ('donor-b', 'tt1234567', 'series', 1, 302, NULL, 2, 1020, 2400, 500, 'donor', NULL, 'backdrop'),
+         ('raw-conflict', 'tt1234567', 'series', 1, 2, 2, 12, 1800, 2400, 700, 'raw', 'wrong', 'wrong'),
+         ('raw-fallback', 'tt1234567', 'series', 3, 4, 9, 14, 1000, 2400, 400, 'fallback', NULL, NULL),
+         ('other', 'tt1234567', 'series', 1, 99, 1, 99, 1000, 2400, 800, 'other', NULL, NULL);",
+    ).unwrap();
+    for (season, episode) in [(1, 2), (2, 12), (3, 4), (9, 14), (1, 302), (0, 0)] {
+        let choose = |entries| {
+            choose_entry(
+                resume_rows(entries),
+                HistoryEntryQuery::Exact {
+                    media_id: "tt1234567",
+                    media_type: "series",
+                    season: Some(season),
+                    episode: Some(episode),
+                },
+                None,
+            )
+        };
+        let full = choose(store.load_entries_for_title("series", "tt1234567").unwrap());
+        let filtered = choose(
+            store
+                .load_entries_for_episode("series", "tt1234567", season, episode)
+                .unwrap(),
+        );
+        assert_eq!(
+            serde_json::to_value(&filtered).unwrap(),
+            serde_json::to_value(&full).unwrap(),
+            "episode {season}:{episode}"
+        );
+        if (season, episode) == (1, 2) {
+            let chosen = filtered.unwrap();
+            assert_eq!((chosen.season, chosen.episode), (Some(8), Some(102)));
+            assert_eq!(chosen.position, 1020.0);
+            assert_eq!(chosen.poster.as_deref(), Some("poster"));
+            assert_eq!(chosen.backdrop.as_deref(), Some("backdrop"));
+        }
+    }
+}
+
+fn continue_watching_titles(store: &mut ResumeStore) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    store
+        .load_continue_watching_entries()
+        .unwrap()
+        .into_iter()
+        .map(|(_, row)| format!("{}:{}", row.type_, row.id))
+        .filter(|title| seen.insert(title.clone()))
+        .collect()
+}
+
+fn dismissal_rows(store: &ResumeStore) -> Vec<(String, String, i64)> {
+    let mut statement = store
+        .connection
+        .prepare(
+            "SELECT media_type, media_id, dismissed_through FROM continue_watching_dismissals
+             ORDER BY media_type, media_id",
+        )
+        .unwrap();
+    statement
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+        .and_then(|rows| rows.collect())
+        .unwrap()
+}
+
+#[test]
+fn continue_watching_dismissals_hide_titles_until_newer_progress_or_restore() {
+    let path = TempDbPath::new("cw-dismissals");
+    let mut store = ResumeStore::open(&path).unwrap();
+    let save = |store: &mut ResumeStore, type_: &str, id: &str, last_watched: u64| {
+        let (season, episode) = if type_ == "series" {
+            (Some(1), Some((last_watched / 100) as u32))
+        } else {
+            (None, None)
+        };
+        let key = super::super::history_helpers::build_history_key(type_, id, season, episode);
+        store
+            .upsert_progress(
+                &key,
+                &WatchProgress {
+                    id: id.into(),
+                    type_: type_.into(),
+                    season,
+                    episode,
+                    ..sample_progress(last_watched, 120.0)
+                },
+            )
+            .unwrap();
+        key
+    };
+    save(&mut store, "series", "tt1", 100);
+    save(&mut store, "series", "tt1", 200);
+    let movie_key = save(&mut store, "movie", "tt1", 150);
+    save(&mut store, "movie", "tt2", 120);
+
+    // (action, expected rail titles newest first, expected dismissal rows)
+    type Step<'a> = (&'a str, &'a [&'a str], &'a [(&'a str, &'a str, i64)]);
+    let steps: [Step; 7] = [
+        (
+            "dismiss series:tt1",
+            &["movie:tt1", "movie:tt2"],
+            &[("series", "tt1", 200)],
+        ),
+        (
+            "dismiss movie:missing",
+            &["movie:tt1", "movie:tt2"],
+            &[("series", "tt1", 200)],
+        ),
+        (
+            "reopen",
+            &["movie:tt1", "movie:tt2"],
+            &[("series", "tt1", 200)],
+        ),
+        (
+            "save series:tt1 300",
+            &["series:tt1", "movie:tt1", "movie:tt2"],
+            &[("series", "tt1", 200)],
+        ),
+        (
+            "dismiss movie:tt1",
+            &["series:tt1", "movie:tt2"],
+            &[("movie", "tt1", 150)],
+        ),
+        (
+            "restore movie:tt1",
+            &["series:tt1", "movie:tt1", "movie:tt2"],
+            &[],
+        ),
+        (
+            "dismiss then delete movie:tt1, dismiss movie:tt2",
+            &["series:tt1"],
+            &[("movie", "tt2", 120)],
+        ),
+    ];
+    for (action, titles, dismissals) in steps {
+        match action {
+            "reopen" => {
+                drop(store);
+                store = ResumeStore::open(&path).unwrap();
+            }
+            "save series:tt1 300" => {
+                save(&mut store, "series", "tt1", 300);
+            }
+            "dismiss then delete movie:tt1, dismiss movie:tt2" => {
+                store.dismiss_continue_watching("movie", "tt1").unwrap();
+                store.remove_keys(std::slice::from_ref(&movie_key)).unwrap();
+                store.dismiss_continue_watching("movie", "tt2").unwrap();
+            }
+            _ => {
+                let (verb, title) = action.split_once(' ').unwrap();
+                let (type_, id) = title.split_once(':').unwrap();
+                if verb == "dismiss" {
+                    store.dismiss_continue_watching(type_, id).unwrap();
+                } else {
+                    store.restore_continue_watching(type_, id).unwrap();
+                }
+            }
+        }
+        assert_eq!(continue_watching_titles(&mut store), titles, "{action}");
+        let expected: Vec<(String, String, i64)> = dismissals
+            .iter()
+            .map(|(type_, id, through)| (type_.to_string(), id.to_string(), *through))
+            .collect();
+        assert_eq!(dismissal_rows(&store), expected, "{action}");
+    }
+    // History itself never loses rows to a dismissal.
+    assert_eq!(store.load_entries().unwrap().len(), 4);
+    store.clear().unwrap();
+    assert!(dismissal_rows(&store).is_empty());
+
+    // A schema-3 database from before dismissals gains the table on open.
+    save(&mut store, "movie", "tt2", 130);
+    store
+        .connection
+        .execute_batch("DROP TABLE continue_watching_dismissals;")
+        .unwrap();
+    drop(store);
+    let mut store = ResumeStore::open(&path).unwrap();
+    store.dismiss_continue_watching("movie", "tt2").unwrap();
+    assert!(continue_watching_titles(&mut store).is_empty());
+    assert_eq!(user_version(&path), super::RESUME_DB_SCHEMA_VERSION);
+}
+
+#[test]
+fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility() {
+    use super::super::history_helpers::build_history_key;
+    let source_path = TempDbPath::new("backup-cw-source");
+    let mut source = ResumeStore::open(&source_path).unwrap();
+    for (type_, id) in [
+        ("movie", "shared"),
+        ("series", "shared"),
+        ("movie", "resumed"),
+        ("movie", "restored"),
+        ("movie", "local-hidden"),
+    ] {
+        let row = WatchProgress {
+            id: id.into(),
+            type_: type_.into(),
+            ..sample_progress(100, 120.0)
+        };
+        source
+            .upsert_progress(&build_history_key(type_, id, None, None), &row)
+            .unwrap();
+        if (type_, id) != ("movie", "shared") {
+            source.dismiss_continue_watching(type_, id).unwrap();
+        }
+    }
+    source
+        .upsert_progress(
+            "movie:resumed",
+            &WatchProgress {
+                id: "resumed".into(),
+                type_: "movie".into(),
+                ..sample_progress(200, 120.0)
+            },
+        )
+        .unwrap();
+    let entries = source.load_entries().unwrap();
+    let markers =
+        serde_json::to_value(source.load_continue_watching_dismissals().unwrap()).unwrap();
+    for fresh in [true, false] {
+        let path = TempDbPath::new("backup-cw-destination");
+        let mut destination = ResumeStore::open(&path).unwrap();
+        if !fresh {
+            for (id, last_watched) in [
+                ("shared", 300),
+                ("resumed", 300),
+                ("restored", 50),
+                ("local-hidden", 300),
+            ] {
+                destination
+                    .upsert_progress(
+                        &format!("movie:{id}"),
+                        &WatchProgress {
+                            id: id.into(),
+                            type_: "movie".into(),
+                            ..sample_progress(last_watched, 120.0)
+                        },
+                    )
+                    .unwrap();
+            }
+            destination
+                .dismiss_continue_watching("movie", "restored")
+                .unwrap();
+            destination
+                .restore_continue_watching("movie", "restored")
+                .unwrap();
+            destination
+                .dismiss_continue_watching("movie", "local-hidden")
+                .unwrap();
+        }
+        destination
+            .merge_entries(
+                entries.clone(),
+                true,
+                serde_json::from_value(markers.clone()).unwrap(),
+            )
+            .unwrap();
+        drop(destination);
+        let mut destination = ResumeStore::open(&path).unwrap();
+        let titles = continue_watching_titles(&mut destination);
+        assert!(titles.contains(&"movie:shared".into()));
+        assert!(titles.contains(&"movie:resumed".into()));
+        assert!(!titles.contains(&"series:shared".into()));
+        assert!(!titles.contains(&"movie:local-hidden".into()));
+        assert_eq!(titles.contains(&"movie:restored".into()), !fresh);
+        let expected = if fresh {
+            vec![
+                ("movie", "local-hidden", 100),
+                ("movie", "restored", 100),
+                ("movie", "resumed", 100),
+                ("series", "shared", 100),
+            ]
+        } else {
+            vec![("movie", "local-hidden", 300), ("series", "shared", 100)]
+        };
+        assert_eq!(
+            dismissal_rows(&destination),
+            expected
+                .into_iter()
+                .map(|(type_, id, through)| (type_.into(), id.into(), through))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn backup_continue_watching_rejects_invalid_orphans_and_keeps_local_marker_capacity() {
+    let path = TempDbPath::new("backup-cw-bound");
+    let mut store = ResumeStore::open(&path).unwrap();
+    store
+        .connection
+        .execute_batch(
+            "WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n < 499)
+         INSERT INTO watch_progress
+             (history_key, media_id, media_type, position, duration, last_watched, title)
+         SELECT 'movie:local' || n, 'local' || n, 'movie', 120, 3600, 10, 'Local' FROM ids;
+         INSERT INTO continue_watching_dismissals
+         SELECT media_type, media_id, last_watched FROM watch_progress;",
+        )
+        .unwrap();
+    let local_markers = dismissal_rows(&store);
+    let marker = |type_: &str, id: &str, through| super::ContinueWatchingDismissal {
+        media_type: type_.into(),
+        media_id: id.into(),
+        dismissed_through: through,
+    };
+    let entries = ["new", "overflow"]
+        .into_iter()
+        .map(|id| {
+            (
+                format!("movie:{id}"),
+                WatchProgress {
+                    id: id.into(),
+                    type_: "movie".into(),
+                    ..sample_progress(100, 120.0)
+                },
+            )
+        })
+        .collect();
+    store
+        .merge_entries(
+            entries,
+            true,
+            vec![
+                marker("movie", "orphan", 100),
+                marker("channel", "new", 100),
+                marker("movie", " ", 100),
+                marker("movie", "new", -1),
+                marker("movie", "new", i64::MAX),
+                marker("movie", "new", 100),
+                marker("movie", "overflow", 100),
+            ],
+        )
+        .unwrap();
+    let rows = dismissal_rows(&store);
+    assert_eq!(rows.len(), super::MAX_CONTINUE_WATCHING_DISMISSALS as usize);
+    assert!(local_markers.iter().all(|row| rows.contains(row)));
+    assert!(rows.contains(&("movie".into(), "new".into(), 100)));
+    assert_eq!(continue_watching_titles(&mut store), ["movie:overflow"]);
+}
+
+#[test]
+fn backup_continue_watching_marker_failure_rolls_back_history_and_dismissals() {
+    let path = TempDbPath::new("backup-cw-rollback");
+    let mut store = ResumeStore::open(&path).unwrap();
+    store
+        .connection
+        .execute_batch(
+            "CREATE TRIGGER fail_dismissal BEFORE INSERT ON continue_watching_dismissals
+         BEGIN SELECT RAISE(ABORT, 'fixture failure'); END;",
+        )
+        .unwrap();
+    let row = sample_progress(100, 120.0);
+    let marker = super::ContinueWatchingDismissal {
+        media_type: row.type_.clone(),
+        media_id: row.id.clone(),
+        dismissed_through: 100,
+    };
+    assert!(store
+        .merge_entries(vec![("movie:tt1234567".into(), row)], true, vec![marker])
+        .is_err());
+    assert!(store.load_entries().unwrap().is_empty());
+    assert!(dismissal_rows(&store).is_empty());
+}
+
+#[test]
 fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corrupt_rows() {
     let path = TempDbPath::new("title-identities");
     let mut store = ResumeStore::open(&path).unwrap();
@@ -188,6 +566,34 @@ fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corru
     );
     assert!(store.load_latest_title_identities(&[]).unwrap().is_empty());
     assert_eq!(store.count_entries().unwrap(), 11);
+}
+
+#[test]
+fn recent_titles_break_limit_ties_by_latest_rows_history_key() {
+    let path = TempDbPath::new("recent-title-ties");
+    let store = ResumeStore::open(&path).unwrap();
+    store
+        .connection
+        .execute_batch(
+            "INSERT INTO watch_progress
+         (history_key, media_id, media_type, position, duration, last_watched, title)
+         VALUES
+         ('z-first', 'shared', 'series', 120, 3600, 300, 'Title'),
+         ('y-second', 'shared', 'movie', 120, 3600, 300, 'Title'),
+         ('a', 'included', 'movie', 120, 3600, 200, 'Title'),
+         ('c', 'included', 'movie', 120, 3600, 200, 'Title'),
+         ('b', 'excluded', 'movie', 120, 3600, 200, 'Title'),
+         ('zz-old', 'excluded', 'movie', 120, 3600, 100, 'Title');",
+        )
+        .unwrap();
+    assert_eq!(
+        ResumeStore::load_recent_titles(&path).unwrap(),
+        [
+            ("series".to_string(), "shared".to_string()),
+            ("movie".to_string(), "shared".to_string()),
+            ("movie".to_string(), "included".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -375,7 +781,7 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
             episode: 15,
         },
     ];
-    let (writes, deletes) = prepare_episode_watch_changes(
+    let (writes, deletes, _) = prepare_episode_watch_changes(
         &item,
         &episodes,
         store.load_entries().expect("read rows"),
@@ -397,7 +803,9 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
         assert_eq!(row.backdrop, item.backdrop);
     }
     assert!(writes[0].1.last_watched < writes[1].1.last_watched);
-    store.merge_entries(writes, false).expect("mark watched");
+    store
+        .merge_entries(writes, false, Vec::new())
+        .expect("mark watched");
     assert_eq!(store.count_entries().expect("count rows"), 2);
     assert!(store
         .get_entry("series:tt1234567:1:14")
@@ -405,7 +813,7 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
         .is_none());
     assert_eq!(store.total_watch_time_secs().expect("watch time"), 3601);
 
-    let (writes, deletes) = prepare_episode_watch_changes(
+    let (writes, deletes, _) = prepare_episode_watch_changes(
         &item,
         &episodes[..1],
         store.load_entries().expect("read rows"),
@@ -418,6 +826,93 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
     store.remove_keys(&deletes).expect("mark unwatched");
     assert!(store.get_entry(key).expect("read removed key").is_none());
     assert_eq!(store.count_entries().expect("only episode 15 remains"), 1);
+}
+
+#[test]
+fn season_watch_undo_restores_every_raw_episode_donor() {
+    for watched in [false, true] {
+        let path = TempDbPath::new("season-donor-undo");
+        let mut store = ResumeStore::open(&path).expect("open db");
+        let item = crate::test_helpers::test_media_item("tt1234567", "series");
+        let episodes = [WatchedEpisode {
+            season: 1,
+            episode: 14,
+        }];
+        for episode in [4, 14, 15] {
+            let row = WatchProgress {
+                type_: "series".into(),
+                season: Some(1),
+                episode: Some(episode),
+                absolute_season: Some(1),
+                absolute_episode: Some(if episode == 4 { 14 } else { episode }),
+                last_stream_key: Some(format!("stream-{episode}")),
+                resume_start_time: Some(f64::from(episode)),
+                ..sample_progress(1_000 + u64::from(episode), f64::from(episode) * 10.0)
+            };
+            store
+                .upsert_progress(&format!("series:tt1234567:1:{episode}"), &row)
+                .expect("seed episode");
+        }
+        let before = store.load_entries().expect("read raw rows");
+        let progress =
+            crate::commands::watch_history_commands::build_title_watch_progress_with_priorities(
+                before.iter().map(|(_, row)| row.clone()).collect(),
+                None,
+            );
+        assert_eq!(progress.episode_progress.len(), 2);
+        let expected: Vec<_> = before
+            .iter()
+            .filter(|(_, row)| row.absolute_episode == Some(14))
+            .map(|(_, row)| row.clone())
+            .collect();
+        let (writes, deletes, previous_rows) =
+            prepare_episode_watch_changes(&item, &episodes, before.clone(), watched, 2_000)
+                .expect("prepare season change");
+        assert_eq!(previous_rows.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&previous_rows).unwrap(),
+            serde_json::to_value(expected).unwrap()
+        );
+        if watched {
+            store
+                .merge_entries(writes, false, Vec::new())
+                .expect("mark watched");
+            let (_, deletes, _) = prepare_episode_watch_changes(
+                &item,
+                &episodes,
+                store.load_entries().unwrap(),
+                false,
+                3_000,
+            )
+            .unwrap();
+            store.remove_keys(&deletes).expect("undo watched mark");
+        } else {
+            assert!(writes.is_empty());
+            assert_eq!(deletes.len(), 2);
+            store.remove_keys(&deletes).expect("mark unwatched");
+        }
+        validate_history_batch(previous_rows.iter()).expect("restore within row cap");
+        let restored = previous_rows
+            .into_iter()
+            .map(|row| {
+                let row = crate::commands::history_helpers::sanitize_watch_progress(row).unwrap();
+                let key = crate::commands::history_helpers::build_history_key(
+                    &row.type_,
+                    &row.id,
+                    row.season,
+                    row.episode,
+                );
+                (key, row)
+            })
+            .collect();
+        store
+            .merge_entries(restored, false, Vec::new())
+            .expect("undo restore");
+        assert_eq!(
+            serde_json::to_value(store.load_entries().unwrap()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
 }
 
 #[test]
@@ -435,14 +930,14 @@ fn undo_restores_more_than_500_rows_in_one_merge() {
         .collect();
     validate_history_batch(rows.iter().map(|(_, row)| row)).expect("single-title restore accepted");
     store
-        .merge_entries(rows.clone(), false)
+        .merge_entries(rows.clone(), false, Vec::new())
         .expect("seed title");
     store
         .remove_keys(&rows.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>())
         .expect("remove title");
     assert_eq!(store.count_entries().expect("empty history"), 0);
     store
-        .merge_entries(rows.clone(), false)
+        .merge_entries(rows.clone(), false, Vec::new())
         .expect("restore title");
     assert_eq!(store.count_entries().expect("restored history"), 501);
     // Bulk History Undo restores several titles in one batch.
@@ -664,7 +1159,7 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
             )
         })
         .collect();
-    store.merge_entries(rows, true).unwrap();
+    store.merge_entries(rows, true, Vec::new()).unwrap();
     let added = WatchProgress {
         id: "added".to_string(),
         type_: "movie".to_string(),
@@ -677,6 +1172,7 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
                 ("movie:added".to_string(), added),
             ],
             true,
+            Vec::new(),
         )
         .expect("duplicate incoming keys count once");
     let update = WatchProgress {
@@ -685,9 +1181,13 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
         ..sample_progress(3, 30.0)
     };
     store
-        .merge_entries(vec![("movie:tt0".to_string(), update.clone())], true)
+        .merge_entries(
+            vec![("movie:tt0".to_string(), update.clone())],
+            true,
+            Vec::new(),
+        )
         .expect("existing keys fit at capacity");
-    let (mut writes, _) = prepare_episode_watch_changes(
+    let (mut writes, _, _) = prepare_episode_watch_changes(
         &crate::test_helpers::test_media_item("tt1234567", "series"),
         &[WatchedEpisode {
             season: 1,
@@ -706,7 +1206,7 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
         },
     ));
     let error = store
-        .merge_entries(writes, true)
+        .merge_entries(writes, true, Vec::new())
         .expect_err("growth must not evict local history");
     assert!(String::from(error).contains("10000"));
     assert_eq!(
@@ -729,7 +1229,9 @@ fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
             ..sample_progress(1, 10.0)
         },
     );
-    store.merge_entries(vec![removed.clone()], false).unwrap();
+    store
+        .merge_entries(vec![removed.clone()], false, Vec::new())
+        .unwrap();
     store.remove_keys(std::slice::from_ref(&removed.0)).unwrap();
     let rows = (0..super::MAX_RESUME_TOTAL_ENTRIES)
         .map(|index| {
@@ -743,9 +1245,11 @@ fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
             )
         })
         .collect();
-    store.merge_entries(rows, false).unwrap();
+    store.merge_entries(rows, false, Vec::new()).unwrap();
     let before = store.load_entries().unwrap();
-    let error = store.merge_entries(vec![removed], false).unwrap_err();
+    let error = store
+        .merge_entries(vec![removed], false, Vec::new())
+        .unwrap_err();
     assert!(matches!(
         error,
         super::HistoryMergeError::CapacityExceeded(_)

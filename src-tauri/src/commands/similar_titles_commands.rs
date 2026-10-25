@@ -5,15 +5,12 @@ use super::media_normalization::normalize_media_item;
 use super::media_type::normalize_watch_progress_type;
 use super::playback_state::PLAYBACK_RESUME_STORE_FILE;
 use super::resume_store::ResumeStore;
-use super::search_commands::{
-    query_search_catalog_for_request, SearchCatalogPage, SearchCatalogRequest,
-};
+use super::search_commands::fetch_genre_catalog_pages;
 use super::store_helpers::load_watch_statuses_map;
 use crate::operational_log::{field, log_warn};
 use crate::providers::{
     addon_resource::AddonResourceClient, first_ascii_year_run, MediaDetails, MediaItem,
 };
-use futures_util::future::join_all;
 use futures_util::stream::{FuturesOrdered, StreamExt};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -281,14 +278,14 @@ fn rank_similar_titles(
 
 fn ranked_catalog_pages(
     source: &MediaItem,
-    pages: Vec<Result<SearchCatalogPage, String>>,
+    pages: Vec<Result<Vec<MediaItem>, String>>,
     watched: &HashSet<String>,
 ) -> Result<Vec<MediaItem>, String> {
     let mut lists = Vec::new();
     let mut first_error = None;
     for page in pages {
         match page {
-            Ok(page) => lists.push(page.items),
+            Ok(page) => lists.push(page),
             Err(error) => {
                 first_error.get_or_insert(error);
             }
@@ -436,13 +433,12 @@ pub async fn query_similar_titles(
         let status_store = super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)?;
         watched_title_ids(&resume_path?, &source_type, &status_store)
     }));
-    let mut pages = std::pin::pin!(join_all(seed_genres.into_iter().map(|genre| {
-        query_search_catalog_for_request(
-            &app,
-            &client,
-            SearchCatalogRequest::for_genre(media_type, genre),
-        )
-    })));
+    let mut pages = std::pin::pin!(fetch_genre_catalog_pages(
+        &addons,
+        &client,
+        media_type,
+        seed_genres
+    ));
     // Watched demotion is advisory: a busy store gate gets only a short window
     // past the catalogs instead of its full budget.
     let (pages, watched) = tokio::select! {
@@ -463,6 +459,7 @@ pub async fn query_similar_titles(
         );
         HashSet::new()
     });
+    let pages = pages?;
     tokio::task::spawn_blocking(move || ranked_catalog_pages(&source, pages, &watched))
         .await
         .map_err(|_| "Similar titles ranking task failed.".to_string())?
@@ -471,7 +468,9 @@ pub async fn query_similar_titles(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_helpers::{test_media_item, test_progress, test_store};
+    use crate::test_helpers::{
+        test_addon, test_media_item, test_progress, test_store, TestHttpServer,
+    };
 
     fn item(id: &str, genres: &[&str], year: Option<&str>) -> MediaItem {
         MediaItem {
@@ -491,6 +490,77 @@ mod tests {
     #[test]
     fn stopwords_stay_sorted_for_binary_search() {
         assert!(STOPWORDS.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[tokio::test]
+    async fn genre_pages_keep_anime_filters_and_per_genre_ranking_positions() {
+        let body = r#"{"metas":[
+            {"id":"live","name":"Match","type":"series","genres":["Mystery","Thriller"]},
+            {"id":"untitled","name":" ","type":"series","genres":["Animation","Mystery"]},
+            {"id":"m0","name":"Match","type":"series","genres":["Animation","Mystery"]},
+            {"id":"m1","name":"Match","type":"series","genres":["Animation","Mystery"]},
+            {"id":"t0","name":"Match","type":"series","genres":["Animation","Thriller"]},
+            {"id":"t1","name":"Match","type":"series","genres":["Animation","Thriller"]}
+        ]}"#;
+        let server = TestHttpServer::new(vec![(200, body, None); 4]);
+        let snapshot = [super::super::config_store::AddonConfig {
+            url: server.url.clone(),
+            ..test_addon("catalog", "Catalog")
+        }];
+        let client = AddonResourceClient::new();
+        let pages = fetch_genre_catalog_pages(
+            &snapshot,
+            &client,
+            "anime",
+            ["Mystery", "Thriller", "Crime"]
+                .map(str::to_string)
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+        let ids: Vec<Vec<_>> = pages
+            .iter()
+            .map(|page| {
+                page.as_ref()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item.id.as_str())
+                    .collect()
+            })
+            .collect();
+        assert_eq!(ids, [vec!["m0", "m1"], vec!["t0", "t1"], vec![]]);
+        let source = MediaItem {
+            title: "Match".into(),
+            ..item("source", &["Animation", "Mystery", "Thriller"], None)
+        };
+        let ranked = ranked_catalog_pages(&source, pages, &HashSet::new()).unwrap();
+        assert_eq!(
+            ranked
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m0", "t0", "m1", "t1"]
+        );
+        let fallback =
+            fetch_genre_catalog_pages(&snapshot, &client, "anime", vec!["Animation".into()])
+                .await
+                .unwrap();
+        assert_eq!(
+            fallback[0]
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["m0", "m1", "t0", "t1"]
+        );
+        let mut paths = server.finish();
+        paths.sort();
+        assert_eq!(
+            paths,
+            ["Animation", "Crime", "Mystery", "Thriller"]
+                .map(|genre| format!("/catalog/series/top/genre={genre}.json"))
+        );
     }
 
     #[test]
@@ -947,16 +1017,9 @@ mod tests {
     #[test]
     fn page_failures_keep_successful_pages_and_propagate_first_error_only_when_all_fail() {
         let source = item("source", &["Drama"], None);
-        let page = |items| {
-            Ok(SearchCatalogPage {
-                items,
-                continuation: Default::default(),
-                exhausted: true,
-            })
-        };
         assert!(ranked_catalog_pages(
             &source,
-            vec![Err("first".into()), page(vec![])],
+            vec![Err("first".into()), Ok(vec![])],
             &HashSet::new()
         )
         .unwrap()
@@ -974,7 +1037,7 @@ mod tests {
             &source,
             vec![
                 Err("first".into()),
-                page(vec![item("result", &["Drama"], None)]),
+                Ok(vec![item("result", &["Drama"], None)]),
             ],
             &HashSet::new(),
         )

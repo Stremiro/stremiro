@@ -530,7 +530,14 @@ async fn fetch_prepared_streams_for_addon(
         let generation = provider.cache_generation();
         let attempt = tokio::time::timeout(Duration::from_secs(timeout_secs), async {
             provider
-                .get_streams_fresh(effective_type, query_id, &addon.url, not_before)
+                .get_streams_fresh(
+                    effective_type,
+                    query_id,
+                    &addon.url,
+                    (source_name, &addon.id),
+                    not_before,
+                    prepare_addon_streams,
+                )
                 .await
         })
         .await;
@@ -550,9 +557,8 @@ async fn fetch_prepared_streams_for_addon(
             );
         };
         match attempt {
-            Ok(Ok(streams)) => {
+            Ok(Ok(mut prepared)) => {
                 any_succeeded = true;
-                let mut prepared = prepare_addon_streams(streams, source_name, &addon.id);
                 if let Some(eligibility) = episode_eligibility {
                     if let Some(exclusions) = eligibility.exclusions {
                         exclusions.retain(&mut prepared);
@@ -742,7 +748,6 @@ struct SelectorStoreInputs {
     is_final_season: bool,
 }
 
-#[derive(Clone)]
 struct SelectorStoreRead {
     app: AppHandle,
     service: PlaybackStateService,
@@ -844,7 +849,8 @@ async fn snapshot_selector_inputs(
         .await
         .unwrap_or_else(|error| Ok(selector_inputs_fallback(error)));
     }
-    let essentials = read.clone();
+    let read = std::sync::Arc::new(read);
+    let essentials = std::sync::Arc::clone(&read);
     let mut inputs = super::run_blocking_store_op(move || Ok(essentials.essentials()))
         .await
         .unwrap_or_else(|error| Ok(selector_inputs_fallback(error)))?;
@@ -1272,15 +1278,10 @@ async fn run_progressive_fetch(
         outcomes.insert(index, outcome);
         let outcome = &outcomes[&index];
         let settled = settle_on_stream_key.is_some_and(|key| {
-            outcome.streams.iter().any(|stream| {
-                stream.stream_key == key
-                    && is_probeable_stream(stream)
-                    && !stream_conflicts_with_episode_targets(
-                        stream.match_texts(),
-                        &ctx.episode_targets,
-                        final_season,
-                    )
-            })
+            outcome
+                .streams
+                .iter()
+                .any(|stream| stream.stream_key == key && is_probeable_stream(stream))
         });
         if let Some(channel) = progress {
             // A slow or failed store read must not stall the fan-out: it only costs this

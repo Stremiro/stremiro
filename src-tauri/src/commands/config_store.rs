@@ -1,7 +1,6 @@
 use super::DurableStore;
-use crate::providers::bound_optional;
+use crate::providers::{bound_optional, lenient_option};
 use serde::Deserialize;
-use serde_json::Value;
 
 mod addons;
 mod app_ui;
@@ -10,7 +9,10 @@ mod profile;
 mod stream_selector;
 
 pub use addons::{AddonConfig, AddonConfigView};
-pub use app_ui::{AppUiPreferences, AppUiPreferencesPatch, AppUiPreferencesView};
+pub use app_ui::{
+    AppUiPreferences, AppUiPreferencesPatch, AppUiPreferencesView, SubtitleColor, SubtitleEdge,
+    SubtitleFont,
+};
 pub use profile::{ProfilePreferences, ProfilePreferencesPatch};
 pub use stream_selector::StreamSelectorPreferences;
 
@@ -22,7 +24,7 @@ pub(super) use addons::{addon_display_url, is_pinned_default_addon_url};
 pub(crate) use app_ui::{
     apply_app_ui_preferences_patch, default_player_keybindings, load_app_ui_preferences,
     normalize_audio_delay, normalize_start_minimized, normalize_subtitle_delay,
-    normalize_subtitle_pos, normalize_subtitle_scale, parse_app_ui_preferences,
+    normalize_subtitle_pos, normalize_subtitle_scale, parse_app_ui_preferences, push_recent_search,
     save_app_ui_preferences_to_store, startup_route,
 };
 pub(crate) use keybindings::bind_player_key;
@@ -57,13 +59,11 @@ pub use profile::{AccentTargets, LocalProfile, ProfileViewMode};
 pub(crate) use stream_selector::sanitize_stream_selector_preferences;
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
-/// Default registry install URL, reused in user-facing "no catalog/meta addon" errors.
-pub(crate) const DEFAULT_CINEMETA_INSTALL_URL: &str =
-    "stremio://v3-cinemeta.strem.io/manifest.json";
+/// First pinned default. Order matters: index = pinned registry slot.
+const DEFAULT_CINEMETA_INSTALL_URL: &str = "stremio://v3-cinemeta.strem.io/manifest.json";
 const DEFAULT_CINEMETA_ADDON_NAME: &str = "Cinemeta";
-/// Second pinned default. Order matters: index = pinned registry slot.
-pub(crate) const DEFAULT_OPENSUBTITLES_INSTALL_URL: &str =
-    "stremio://opensubtitles-v3.strem.io/manifest.json";
+/// Second pinned default.
+const DEFAULT_OPENSUBTITLES_INSTALL_URL: &str = "stremio://opensubtitles-v3.strem.io/manifest.json";
 const DEFAULT_OPENSUBTITLES_ADDON_NAME: &str = "OpenSubtitles";
 
 const DEFAULT_ADDON_INSTALLS: [(&str, &str); 2] = [
@@ -103,17 +103,6 @@ const PROFILE_AVATAR_PREFIXES: [&str; 3] = [
     "data:image/jpeg;base64,",
 ];
 const STREAM_SELECTOR_ADDON_MAX_CHARS: usize = 4_096;
-
-/// Per-field tolerance on stored blobs: one malformed value drops to `None` instead
-/// of resetting every sibling preference to defaults on a single bad write.
-fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-    T: serde::de::DeserializeOwned,
-{
-    Ok(Option::<Value>::deserialize(deserializer)?
-        .and_then(|value| serde_json::from_value::<T>(value).ok()))
-}
 
 fn deserialize_nullable_patch<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
 where

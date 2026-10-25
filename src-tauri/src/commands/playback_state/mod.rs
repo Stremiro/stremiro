@@ -21,7 +21,9 @@ use self::stream_health::{
     PLAYBACK_STREAM_FAMILY_ITEM_PREFIX,
 };
 use super::history_helpers::should_skip_watch_progress_save;
-use super::resume_store::{HistoryMergeError, ProgressWrite, ResumeStore, ResumeTitleIdentity};
+use super::resume_store::{
+    ContinueWatchingDismissal, HistoryMergeError, ProgressWrite, ResumeStore, ResumeTitleIdentity,
+};
 use super::store_helpers::{clear_index_domain, decode_string_list};
 use super::{normalize_media_id, normalize_watch_progress_type, DurableStore, WatchProgress};
 use crate::providers::lock_or_recover;
@@ -317,6 +319,40 @@ impl PlaybackStateService {
         self.with_resume_store(app, |resume_store| resume_store.load_entries())
     }
 
+    pub(crate) fn load_continue_watching_entries(
+        &self,
+        app: &AppHandle,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_continue_watching_entries()
+        })
+    }
+
+    pub(crate) fn load_continue_watching_dismissals(
+        &self,
+        app: &AppHandle,
+    ) -> Result<Vec<ContinueWatchingDismissal>, String> {
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_continue_watching_dismissals()
+        })
+    }
+
+    pub(crate) fn set_continue_watching_dismissed(
+        &self,
+        app: &AppHandle,
+        media_type: &str,
+        media_id: &str,
+        dismissed: bool,
+    ) -> Result<(), String> {
+        self.with_resume_store(app, |resume_store| {
+            if dismissed {
+                resume_store.dismiss_continue_watching(media_type, media_id)
+            } else {
+                resume_store.restore_continue_watching(media_type, media_id)
+            }
+        })
+    }
+
     pub(crate) fn load_latest_resume_title_identities(
         &self,
         app: &AppHandle,
@@ -347,7 +383,13 @@ impl PlaybackStateService {
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
         ]
         .iter()
-        .any(|key| !load_advisory_index(&store, key).is_empty()))
+        .any(|key| {
+            store.with_value(key, |value| {
+                value
+                    .and_then(serde_json::Value::as_array)
+                    .is_some_and(|members| members.iter().any(serde_json::Value::is_string))
+            })
+        }))
     }
 
     pub(crate) fn total_watch_time_secs(&self, app: &AppHandle) -> Result<u64, String> {
@@ -375,6 +417,19 @@ impl PlaybackStateService {
         })
     }
 
+    pub(crate) fn load_resume_entries_for_episode(
+        &self,
+        app: &AppHandle,
+        media_type: &str,
+        media_id: &str,
+        season: u32,
+        episode: u32,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        self.with_resume_store(app, |resume_store| {
+            resume_store.load_entries_for_episode(media_type, media_id, season, episode)
+        })
+    }
+
     pub(crate) fn merge_history_entries(
         &self,
         app: &AppHandle,
@@ -389,9 +444,10 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,
+        dismissals: Vec<ContinueWatchingDismissal>,
     ) -> Result<usize, HistoryMergeError> {
         self.bump_history_reset_epoch();
-        self.merge_history_entries_checked(app, entries, true)
+        self.merge_history_entries_with_dismissals(app, entries, true, dismissals)
     }
 
     pub(crate) fn merge_history_entries_checked(
@@ -399,6 +455,16 @@ impl PlaybackStateService {
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,
         is_backup_import: bool,
+    ) -> Result<usize, HistoryMergeError> {
+        self.merge_history_entries_with_dismissals(app, entries, is_backup_import, Vec::new())
+    }
+
+    fn merge_history_entries_with_dismissals(
+        &self,
+        app: &AppHandle,
+        entries: Vec<(String, WatchProgress)>,
+        is_backup_import: bool,
+        dismissals: Vec<ContinueWatchingDismissal>,
     ) -> Result<usize, HistoryMergeError> {
         if entries.is_empty() {
             return Ok(0);
@@ -415,13 +481,13 @@ impl PlaybackStateService {
             if self.history_generation() != start_generation {
                 return Ok(Ok(0));
             }
-            Ok(resume_store.merge_entries(entries, is_backup_import).map(
-                |(imported_entries, pruned)| {
+            Ok(resume_store
+                .merge_entries(entries, is_backup_import, dismissals)
+                .map(|(imported_entries, pruned)| {
                     let imported = imported_entries.len();
                     self.mark_history_persisted(imported_entries, pruned, start_generation);
                     imported
-                },
-            ))
+                }))
         })??;
         // Post-merge bump runs after marking so the check above still sees
         // `start_generation`; it drops saves that started mid-merge.
@@ -513,30 +579,30 @@ fn prune_index_to_cap(
     cap: usize,
     updated_at: impl Fn(&DurableStore, &str) -> u64,
     item_key: impl Fn(&str) -> String,
-) {
+) -> HashSet<String> {
     let overflow = index.len().saturating_sub(cap);
     if overflow == 0 {
-        return;
+        return HashSet::new();
     }
     let scored: Vec<(String, u64, usize)> = index
         .iter()
         .enumerate()
         .map(|(ordinal, key)| (key.clone(), updated_at(store, key), ordinal))
         .collect();
-    evict_least_active(store, index, scored, overflow, item_key);
+    evict_least_active(store, index, scored, overflow, item_key)
 }
 
 /// Drop the `overflow` lowest-scored keys from `index`, deleting their store
-/// items. `scored` is `(key, recency, ordinal)` tuples over index members.
+/// items, and return them. `scored` is `(key, recency, ordinal)` tuples over index members.
 fn evict_least_active(
     store: &DurableStore,
     index: &mut Vec<String>,
     mut scored: Vec<(String, u64, usize)>,
     overflow: usize,
     item_key: impl Fn(&str) -> String,
-) {
+) -> HashSet<String> {
     if overflow == 0 {
-        return;
+        return HashSet::new();
     }
     if overflow < scored.len() {
         scored.select_nth_unstable_by(
@@ -555,6 +621,7 @@ fn evict_least_active(
         store.delete(item_key(key));
     }
     index.retain(|key| !evicted.contains(key));
+    evicted
 }
 
 fn insert_sorted_unique(index: &mut Vec<String>, value: &str) -> bool {

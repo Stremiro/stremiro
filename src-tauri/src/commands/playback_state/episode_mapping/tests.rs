@@ -1,4 +1,5 @@
 use super::*;
+use crate::test_helpers::test_episode;
 
 #[test]
 fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
@@ -42,17 +43,9 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         1
     ));
     let mut episodes = [Episode {
-        id: "tt2560140:1:1".to_string(),
-        title: None,
-        season: 1,
-        episode: 1,
-        released: None,
         release_date: None,
-        overview: None,
-        thumbnail: None,
         stream_lookup_id: None,
-        stream_season: None,
-        stream_episode: None,
+        ..test_episode("tt2560140:1:1", 1, 1)
     }];
     let snapshots = [build_episode_mapping_snapshot(
         "series",

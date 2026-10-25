@@ -14,7 +14,7 @@ use crate::commands::stream_coordinator::{
 };
 use crate::commands::{PlaybackLanguagePreferences, WatchProgress};
 use crate::providers::Episode;
-use crate::test_helpers::test_progress;
+use crate::test_helpers::{test_episode, test_progress};
 
 fn health(
     success: Option<u64>,
@@ -676,57 +676,49 @@ fn merged(
 }
 
 #[test]
-fn explicit_language_preferences_override_observed_tracks() {
-    let effective = merged(Some("en"), Some("off"), Some("ja"), None);
-
-    assert_eq!(effective.preferred_audio_language.as_deref(), Some("en"));
-    assert_eq!(
-        effective.preferred_subtitle_language.as_deref(),
-        Some("off")
-    );
-}
-
-#[test]
-fn explicit_language_preferences_win_over_scoped_snapshot_per_field() {
-    let effective = merged(Some("en"), Some("en"), Some("de"), Some("ja"));
-
-    assert_eq!(effective.preferred_audio_language.as_deref(), Some("en"));
-    assert_eq!(effective.preferred_subtitle_language.as_deref(), Some("en"));
-}
-
-#[test]
-fn observed_language_preferences_fill_unset_global_defaults() {
-    let effective = merged(None, None, Some("ja"), Some("off"));
-
-    assert_eq!(effective.preferred_audio_language.as_deref(), Some("ja"));
-    assert_eq!(
-        effective.preferred_subtitle_language.as_deref(),
-        Some("off")
-    );
-}
-
-#[test]
-fn invalid_global_language_preferences_fall_back_to_sanitized_scoped_aliases() {
-    let effective = merged(
-        Some("commentary"),
-        Some("commentary"),
-        Some("jpn"),
-        Some("eng"),
-    );
-
-    assert_eq!(effective.preferred_audio_language.as_deref(), Some("ja"));
-    assert_eq!(effective.preferred_subtitle_language.as_deref(), Some("en"));
-}
-
-#[test]
-fn explicit_subtitle_off_overrides_observed_track_language() {
-    let effective = merged(None, Some("off"), None, Some("en"));
-
-    assert_eq!(effective.preferred_audio_language, None);
-    assert_eq!(
-        effective.preferred_subtitle_language.as_deref(),
-        Some("off")
-    );
+fn language_preferences_merge_explicit_defaults_and_sanitized_observations_per_field() {
+    for (label, (audio, subtitle, observed_audio, observed_subtitle), expected) in [
+        (
+            "explicit",
+            (Some("en"), Some("off"), Some("ja"), None),
+            (Some("en"), Some("off")),
+        ),
+        (
+            "per field",
+            (Some("en"), Some("en"), Some("de"), Some("ja")),
+            (Some("en"), Some("en")),
+        ),
+        (
+            "unset",
+            (None, None, Some("ja"), Some("off")),
+            (Some("ja"), Some("off")),
+        ),
+        (
+            "invalid defaults",
+            (
+                Some("commentary"),
+                Some("commentary"),
+                Some("jpn"),
+                Some("eng"),
+            ),
+            (Some("ja"), Some("en")),
+        ),
+        (
+            "subtitle off",
+            (None, Some("off"), None, Some("en")),
+            (None, Some("off")),
+        ),
+    ] {
+        let effective = merged(audio, subtitle, observed_audio, observed_subtitle);
+        assert_eq!(
+            (
+                effective.preferred_audio_language.as_deref(),
+                effective.preferred_subtitle_language.as_deref()
+            ),
+            expected,
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -736,17 +728,12 @@ fn episode_mapping_snapshot_prefers_backend_normalized_episode_coordinates() {
         "kitsu:42",
         Some("tt-fallback"),
         &Episode {
-            id: "episode-1".to_string(),
             title: Some("Episode 1".to_string()),
-            season: 1,
-            episode: 1,
-            released: None,
             release_date: None,
-            overview: None,
-            thumbnail: None,
             stream_lookup_id: Some("tt-stream".to_string()),
             stream_season: Some(4),
             stream_episode: Some(12),
+            ..test_episode("episode-1", 1, 1)
         },
         123,
     );
@@ -759,17 +746,10 @@ fn episode_mapping_snapshot_prefers_backend_normalized_episode_coordinates() {
 #[test]
 fn episode_mappings_digest_tracks_every_snapshot_input() {
     let episode = |season: u32, ep: u32| Episode {
-        id: format!("episode-{season}-{ep}"),
         title: Some(format!("Episode {ep}")),
-        season,
-        episode: ep,
-        released: None,
         release_date: None,
-        overview: None,
-        thumbnail: None,
         stream_lookup_id: None,
-        stream_season: None,
-        stream_episode: None,
+        ..test_episode(&format!("episode-{season}-{ep}"), season, ep)
     };
     let episodes = vec![episode(1, 1), episode(1, 2)];
     let base = episode_mappings_digest("series", "tt1", Some("tt1"), &episodes);

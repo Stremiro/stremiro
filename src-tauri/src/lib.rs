@@ -54,6 +54,9 @@ pub fn run() {
             let handle = app.handle().clone();
             app.manage(PlaybackStateService::new());
             app.manage(PendingAppUpdate::default());
+            app.manage(AddonResourceClient::with_subtitle_cache_dir(
+                app.path().app_cache_dir().ok(),
+            ));
 
             commands::validate_startup_stores(&handle);
             if let Err(error) = commands::app_shell_commands::setup(&handle) {
@@ -83,7 +86,6 @@ pub fn run() {
 
             Ok(())
         })
-        .manage(AddonResourceClient::new())
         .manage(AddonTransport::new())
         .manage(SkipTimesProvider::new())
         .invoke_handler(tauri::generate_handler![
@@ -128,9 +130,11 @@ pub fn run() {
             commands::watch_history_commands::get_total_watch_time_secs,
             commands::watch_history_commands::remove_all_from_watch_history,
             commands::watch_history_commands::bulk_remove_from_watch_history,
+            commands::watch_history_commands::set_continue_watching_dismissed,
             commands::config_commands::get_addon_configs,
             commands::config_commands::get_addon_url,
             commands::config_commands::inspect_addon_url,
+            commands::config_commands::open_addon_configure_page,
             commands::config_commands::update_addon_configs,
             commands::playback_preferences_commands::save_playback_language_preference,
             commands::playback_preferences_commands::get_playback_language_preferences,
@@ -143,9 +147,9 @@ pub fn run() {
             commands::player_mpv_commands::player_mpv_command,
             commands::player_mpv_commands::player_mpv_destroy,
             commands::player_mpv_commands::player_mpv_set_video_margin_ratio,
-            commands::player_mpv_commands::player_mpv_set_property,
             commands::player_mpv_commands::player_mpv_set_properties,
             commands::player_mpv_commands::player_mpv_set_audio_settings,
+            commands::player_mpv_commands::player_mpv_set_subtitle_appearance,
             commands::player_mpv_commands::player_mpv_get_property,
             commands::player_mpv_commands::player_mpv_get_playback_position,
             commands::player_mpv_commands::player_mpv_init,
@@ -157,6 +161,7 @@ pub fn run() {
             commands::config_commands::bind_player_keybinding,
             commands::config_commands::get_bootstrap_snapshot,
             commands::config_commands::save_app_ui_preferences,
+            commands::config_commands::record_recent_search,
             commands::config_commands::save_last_notified_app_update_version,
             commands::config_commands::get_profile_preferences,
             commands::config_commands::save_profile_preferences,

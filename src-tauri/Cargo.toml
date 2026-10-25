@@ -43,6 +43,9 @@ tauri-plugin-single-instance = "2.5.1"
 tauri-plugin-autostart = "2.7.0"
 icu_normalizer = { version = "2.3.0", default-features = false, features = ["compiled_data"] }
 
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util"] }
+
 [target.'cfg(windows)'.dependencies]
 webview2-com = "=0.39.1"
 windows-core = "=0.62.2"

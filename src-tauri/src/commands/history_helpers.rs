@@ -4,7 +4,7 @@ use super::{
     WatchProgress, MEDIA_TITLE_MAX_CHARS,
 };
 use crate::providers::{bound_optional, non_blank, trim_to_max};
-use std::borrow::Cow;
+use std::borrow::{Borrow, Cow};
 use std::collections::HashMap;
 
 const WATCH_PROGRESS_POSITION_SAVE_DELTA_SECS: f64 = 4.0;
@@ -379,10 +379,11 @@ fn is_watched_progress(item: &WatchProgress) -> bool {
 }
 
 pub(super) fn continue_watching_candidates(
-    items: &[WatchProgress],
+    items: &[impl Borrow<WatchProgress>],
 ) -> impl Iterator<Item = &WatchProgress> {
+    let items = items.iter().map(Borrow::borrow);
     let mut completed = HashMap::new();
-    for row in items.iter().filter(|row| is_watched_progress(row)) {
+    for row in items.clone().filter(|row| is_watched_progress(row)) {
         if let Some((season, episode)) =
             watch_progress_absolute_season(row).zip(watch_progress_absolute_episode(row))
         {
@@ -392,7 +393,7 @@ pub(super) fn continue_watching_candidates(
                 .or_insert(row.last_watched);
         }
     }
-    items.iter().filter(move |row| {
+    items.filter(move |row| {
         is_continue_watching_candidate(row)
             && !watch_progress_absolute_season(row)
                 .zip(watch_progress_absolute_episode(row))
@@ -407,7 +408,7 @@ pub(super) fn continue_watching_candidates(
 /// Keeps latest title metadata/recency but advances from the furthest watched
 /// canonical episode so rewatches can't suggest an already-seen one.
 pub(crate) fn choose_up_next_source(
-    items: Vec<WatchProgress>,
+    items: Vec<Cow<'_, WatchProgress>>,
     source_health_priorities: &HashMap<String, u8>,
 ) -> Option<WatchProgress> {
     if continue_watching_candidates(&items).next().is_some() {
@@ -659,6 +660,7 @@ pub(crate) fn choose_entry(
     query: HistoryEntryQuery<'_>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> Option<WatchProgress> {
+    let items: Vec<_> = items.into_iter().map(Cow::Owned).collect();
     match query {
         HistoryEntryQuery::Latest => choose_latest_entry(items, source_health_priorities),
         HistoryEntryQuery::Exact {
@@ -695,7 +697,7 @@ pub(crate) fn choose_entry(
 }
 
 fn choose_latest_entry(
-    mut items: Vec<WatchProgress>,
+    mut items: Vec<Cow<'_, WatchProgress>>,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> Option<WatchProgress> {
     // `min_by_key` keeps stable-sort tie semantics (first wins) without the full ordering pass.
@@ -705,14 +707,14 @@ fn choose_latest_entry(
         .min_by_key(|(_, item)| std::cmp::Reverse(item.last_watched))?
         .0;
     if items.len() == 1 || !is_series_like_watch_progress(&items[chosen_index]) {
-        let mut chosen = items.swap_remove(chosen_index);
+        let mut chosen = items.swap_remove(chosen_index).into_owned();
         hydrate_watch_progress_lookup_id(&mut chosen);
         return Some(chosen);
     }
-    let chosen = items[chosen_index].clone();
+    let chosen = items[chosen_index].as_ref().clone();
     Some(merge_watch_progress_donors(
         chosen,
-        items.into_iter().map(Cow::Owned),
+        items,
         source_health_priorities,
     ))
 }

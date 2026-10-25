@@ -10,7 +10,9 @@ use super::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+
+const RECENT_SEARCHES_MAX: usize = 8;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -21,6 +23,61 @@ pub enum StartupPage {
     #[default]
     #[serde(other)]
     Home,
+}
+
+// Plain-text subtitle looks; styled (ASS) subtitles keep their own. Retired
+// tokens alias onto the nearest surviving face so stored preferences never reset.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SubtitleFont {
+    Modern,
+    Grotesk,
+    #[serde(alias = "verdana")]
+    Humanist,
+    #[serde(alias = "tahoma", alias = "trebuchet")]
+    Classic,
+    Screen,
+    Serif,
+    #[serde(alias = "palatino")]
+    Book,
+    #[serde(alias = "casual")]
+    Rounded,
+    Mono,
+    #[default]
+    #[serde(other)]
+    Default,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SubtitleColor {
+    Ivory,
+    Lavender,
+    Mint,
+    Amber,
+    Gray,
+    Yellow,
+    Cyan,
+    Green,
+    Red,
+    Orange,
+    Blue,
+    Pink,
+    #[default]
+    #[serde(other)]
+    White,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SubtitleEdge {
+    None,
+    Thick,
+    Shadow,
+    Box,
+    #[default]
+    #[serde(other)]
+    Outline,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -37,6 +94,19 @@ pub struct AppUiPreferences {
     pub subtitle_delay: f64,
     pub subtitle_pos: f64,
     pub subtitle_scale: f64,
+    #[serde(default)]
+    pub subtitle_font: SubtitleFont,
+    #[serde(default)]
+    pub subtitle_color: SubtitleColor,
+    #[serde(default)]
+    pub subtitle_edge: SubtitleEdge,
+    #[serde(default)]
+    pub subtitle_bold: bool,
+    #[serde(default)]
+    pub subtitle_italic: bool,
+    /// Loads a preferred-language addon subtitle when no embedded track matches.
+    #[serde(default = "enabled_by_default")]
+    pub auto_load_addon_subtitles: bool,
     /// Opt-in EOF auto-advance (Up Next countdown). Off by default — auto-advance is a surprise the user must choose.
     pub auto_play_next: bool,
     pub next_episode_countdown_secs: u32,
@@ -45,7 +115,7 @@ pub struct AppUiPreferences {
     pub trailer_previews: bool,
     /// Opt-in auto-skip of SkipDB intro/recap segments. Off by default — jumping content uninvited is a surprise.
     pub auto_skip_intro: bool,
-    #[serde(default = "automatic_update_checks_default")]
+    #[serde(default = "enabled_by_default")]
     pub automatic_update_checks: bool,
     pub close_to_tray: bool,
     pub minimize_to_tray: bool,
@@ -54,6 +124,9 @@ pub struct AppUiPreferences {
     pub last_location: Option<String>,
     /// Per-action overrides only (`[]` = unbound); absent actions use defaults.
     pub player_keybindings: BTreeMap<String, Vec<String>>,
+    /// Newest first; see `normalize_recent_searches`.
+    #[serde(default)]
+    pub recent_searches: Vec<String>,
 }
 
 impl Default for AppUiPreferences {
@@ -67,6 +140,12 @@ impl Default for AppUiPreferences {
             subtitle_delay: SUBTITLE_DELAY_DEFAULT,
             subtitle_pos: SUBTITLE_POS_DEFAULT,
             subtitle_scale: SUBTITLE_SCALE_DEFAULT,
+            subtitle_font: SubtitleFont::Default,
+            subtitle_color: SubtitleColor::White,
+            subtitle_edge: SubtitleEdge::Outline,
+            subtitle_bold: false,
+            subtitle_italic: false,
+            auto_load_addon_subtitles: true,
             auto_play_next: false,
             next_episode_countdown_secs: NEXT_EPISODE_COUNTDOWN_SECS_DEFAULT,
             controls_hide_delay_ms: CONTROLS_HIDE_DELAY_MS_DEFAULT,
@@ -79,6 +158,7 @@ impl Default for AppUiPreferences {
             startup_page: StartupPage::Home,
             last_location: None,
             player_keybindings: BTreeMap::new(),
+            recent_searches: Vec::new(),
         }
     }
 }
@@ -127,6 +207,12 @@ pub struct AppUiPreferencesPatch {
     pub subtitle_delay: Option<f64>,
     pub subtitle_pos: Option<f64>,
     pub subtitle_scale: Option<f64>,
+    pub subtitle_font: Option<SubtitleFont>,
+    pub subtitle_color: Option<SubtitleColor>,
+    pub subtitle_edge: Option<SubtitleEdge>,
+    pub subtitle_bold: Option<bool>,
+    pub subtitle_italic: Option<bool>,
+    pub auto_load_addon_subtitles: Option<bool>,
     pub auto_play_next: Option<bool>,
     pub next_episode_countdown_secs: Option<u32>,
     pub controls_hide_delay_ms: Option<u32>,
@@ -141,6 +227,8 @@ pub struct AppUiPreferencesPatch {
     pub last_location: Option<Option<String>>,
     /// Replaces the whole override map; `{}` restores every default.
     pub player_keybindings: Option<BTreeMap<String, Vec<String>>>,
+    /// Replaces the whole list (removal and clearing); recording uses `push_recent_search`.
+    pub recent_searches: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,6 +250,18 @@ pub(super) struct StoredAppUiPreferences {
     subtitle_pos: Option<f64>,
     #[serde(default, deserialize_with = "lenient_option")]
     subtitle_scale: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    subtitle_font: Option<SubtitleFont>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    subtitle_color: Option<SubtitleColor>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    subtitle_edge: Option<SubtitleEdge>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    subtitle_bold: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    subtitle_italic: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    auto_load_addon_subtitles: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     auto_play_next: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
@@ -186,9 +286,11 @@ pub(super) struct StoredAppUiPreferences {
     last_location: Option<String>,
     #[serde(default, deserialize_with = "lenient_option")]
     player_keybindings: Option<BTreeMap<String, Vec<String>>>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    recent_searches: Option<Vec<String>>,
 }
 
-fn automatic_update_checks_default() -> bool {
+fn enabled_by_default() -> bool {
     true
 }
 
@@ -218,10 +320,7 @@ fn normalize_controls_hide_delay_ms(value: Option<u32>) -> u32 {
 }
 
 pub(crate) fn normalize_audio_delay(value: Option<f64>) -> f64 {
-    value
-        .filter(|delay| delay.is_finite())
-        .map(|delay| (delay.clamp(-5.0, 5.0) * 10.0).round() / 10.0)
-        .unwrap_or(0.0)
+    normalize_subtitle_delay(value)
 }
 
 pub(crate) fn normalize_subtitle_delay(value: Option<f64>) -> f64 {
@@ -293,6 +392,26 @@ pub(crate) fn startup_route(
     }
 }
 
+/// Whitespace-collapsed, length-bounded like a submitted query, deduplicated
+/// case-insensitively (the newest spelling wins), and capped.
+fn normalize_recent_searches(searches: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    searches
+        .into_iter()
+        .filter_map(|query| {
+            super::super::normalize_query(&query.split_whitespace().collect::<Vec<_>>().join(" "))
+        })
+        .filter(|query| !query.chars().any(char::is_control) && seen.insert(query.to_lowercase()))
+        .take(RECENT_SEARCHES_MAX)
+        .collect()
+}
+
+pub(crate) fn push_recent_search(preferences: &mut AppUiPreferences, query: String) {
+    preferences.recent_searches = normalize_recent_searches(
+        std::iter::once(query).chain(std::mem::take(&mut preferences.recent_searches)),
+    );
+}
+
 pub(crate) fn normalize_start_minimized(preferences: &mut AppUiPreferences, launch_at_login: bool) {
     preferences.start_minimized &=
         launch_at_login || preferences.close_to_tray || preferences.minimize_to_tray;
@@ -314,6 +433,7 @@ pub(crate) fn sanitize_app_ui_preferences(preferences: AppUiPreferences) -> AppU
         )),
         last_location: normalize_last_location(preferences.last_location),
         player_keybindings: normalize_player_keybindings(preferences.player_keybindings),
+        recent_searches: normalize_recent_searches(preferences.recent_searches),
         ..preferences
     }
 }
@@ -333,6 +453,14 @@ pub(crate) fn apply_app_ui_preferences_patch(
         subtitle_delay: patch.subtitle_delay.unwrap_or(current.subtitle_delay),
         subtitle_pos: patch.subtitle_pos.unwrap_or(current.subtitle_pos),
         subtitle_scale: patch.subtitle_scale.unwrap_or(current.subtitle_scale),
+        subtitle_font: patch.subtitle_font.unwrap_or(current.subtitle_font),
+        subtitle_color: patch.subtitle_color.unwrap_or(current.subtitle_color),
+        subtitle_edge: patch.subtitle_edge.unwrap_or(current.subtitle_edge),
+        subtitle_bold: patch.subtitle_bold.unwrap_or(current.subtitle_bold),
+        subtitle_italic: patch.subtitle_italic.unwrap_or(current.subtitle_italic),
+        auto_load_addon_subtitles: patch
+            .auto_load_addon_subtitles
+            .unwrap_or(current.auto_load_addon_subtitles),
         auto_play_next: patch.auto_play_next.unwrap_or(current.auto_play_next),
         next_episode_countdown_secs: patch
             .next_episode_countdown_secs
@@ -353,6 +481,7 @@ pub(crate) fn apply_app_ui_preferences_patch(
         player_keybindings: patch
             .player_keybindings
             .unwrap_or(current.player_keybindings),
+        recent_searches: patch.recent_searches.unwrap_or(current.recent_searches),
     })
 }
 
@@ -368,6 +497,12 @@ pub(super) fn normalize_stored_app_ui_preferences(
         subtitle_delay: normalize_subtitle_delay(preferences.subtitle_delay),
         subtitle_pos: normalize_subtitle_pos(preferences.subtitle_pos),
         subtitle_scale: normalize_subtitle_scale(preferences.subtitle_scale),
+        subtitle_font: preferences.subtitle_font.unwrap_or_default(),
+        subtitle_color: preferences.subtitle_color.unwrap_or_default(),
+        subtitle_edge: preferences.subtitle_edge.unwrap_or_default(),
+        subtitle_bold: preferences.subtitle_bold.unwrap_or(false),
+        subtitle_italic: preferences.subtitle_italic.unwrap_or(false),
+        auto_load_addon_subtitles: preferences.auto_load_addon_subtitles.unwrap_or(true),
         auto_play_next: preferences.auto_play_next.unwrap_or(false),
         next_episode_countdown_secs: normalize_next_episode_countdown_secs(
             preferences.next_episode_countdown_secs,
@@ -388,6 +523,7 @@ pub(super) fn normalize_stored_app_ui_preferences(
         player_keybindings: normalize_player_keybindings(
             preferences.player_keybindings.unwrap_or_default(),
         ),
+        recent_searches: normalize_recent_searches(preferences.recent_searches.unwrap_or_default()),
     }
 }
 

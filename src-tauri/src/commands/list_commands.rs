@@ -412,7 +412,7 @@ pub async fn get_list_summaries(
     let item_id = item_id.as_deref().and_then(normalize_media_id);
     run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
-        let lists = read_lists_with(
+        let lists = read_and_repair_lists_with(
             &store,
             |store, key| {
                 let item = store
@@ -486,7 +486,7 @@ fn read_smart_list_sources<'a>(
 }
 
 pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>, String> {
-    read_lists_with(
+    read_and_repair_lists_with(
         store,
         |store, key| {
             let item = store
@@ -506,7 +506,7 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
 }
 
 pub(super) fn read_list_item_identities(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
-    read_lists_with(
+    read_and_repair_lists_with(
         store,
         |store, key| {
             let item = store
@@ -519,7 +519,7 @@ pub(super) fn read_list_item_identities(store: &DurableStore) -> Result<Vec<Medi
     .map(|lists| lists.into_iter().flatten().collect())
 }
 
-fn read_lists_with<T, R>(
+fn read_and_repair_lists_with<T, R>(
     store: &DurableStore,
     load_item: impl Fn(&DurableStore, &str) -> Option<(String, T)>,
     build: impl Fn(UserList, Vec<T>) -> R,

@@ -3,7 +3,8 @@ use super::store_helpers::{
     library_item_key, load_library_index, load_status_added_ids, load_watch_status_index,
     load_watch_statuses_map, mark_status_added, normalize_bulk_ids, normalize_library_item,
     normalize_watch_status, persist_index_map, read_library_snapshot, read_watch_status_snapshot,
-    retain_status_added_ids, watch_status_item_key, WATCH_STATUS_LAYOUT,
+    remove_index_ids, retain_status_added_ids, watch_status_item_key, LIBRARY_LAYOUT,
+    WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_typed_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
@@ -19,36 +20,18 @@ use tauri::{command, AppHandle};
 /// unbounded index makes every read/write linear in junk entries.
 pub(super) const MAX_WATCH_STATUS_ITEMS: usize = 10_000;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WatchStatusErrorKind {
     InvalidItem,
     InvalidStatus,
     StatusCapacity,
     LibraryCapacity,
+    #[default]
     Failed,
 }
 
-#[derive(Debug, Serialize)]
-pub struct WatchStatusError {
-    pub kind: WatchStatusErrorKind,
-    pub message: String,
-}
-
-impl WatchStatusError {
-    fn new(kind: WatchStatusErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<String> for WatchStatusError {
-    fn from(message: String) -> Self {
-        Self::new(WatchStatusErrorKind::Failed, message)
-    }
-}
+pub type WatchStatusError = super::CommandError<WatchStatusErrorKind>;
 
 impl From<LibraryWriteError> for WatchStatusError {
     fn from(error: LibraryWriteError) -> Self {
@@ -99,33 +82,26 @@ fn write_watch_status(
     let Some(value) = status else {
         // Validate the library before the status commits; statuses commit first
         // so a failed library save can't leave a status on a removed title.
-        let mut library_index = load_library_index(library_store)?;
+        let library_index = load_library_index(library_store)?;
         let status_added = load_status_added_ids(library_store).contains(&item_id);
-        let removed_item = store.delete(watch_status_item_key(&item_id));
-        let original_len = index.len();
-        index.retain(|id| id != &item_id);
-        if removed_item || index.len() != original_len {
-            store.set(WATCH_STATUS_INDEX_KEY, json!(index));
-        }
+        let ids = HashSet::from([item_id.as_str()]);
+        remove_index_ids(store, WATCH_STATUS_LAYOUT, index, &ids);
         store.save()?;
-        if !status_added {
+        if status_added {
+            remove_index_ids(library_store, LIBRARY_LAYOUT, library_index, &ids);
             library_store.save()?;
-            return Ok(library_index
-                .contains(&item_id)
-                .then(|| {
-                    library_store
-                        .get_typed(library_item_key(&item_id))
-                        .and_then(normalize_library_item)
-                        .filter(|item| item.id == item_id)
-                })
-                .flatten());
+            return Ok(None);
         }
-        library_store.delete(library_item_key(&item_id));
-        library_index.retain(|id| id != &item_id);
-        library_store.set(LIBRARY_INDEX_KEY, json!(library_index));
-        retain_status_added_ids(library_store, |id| id != item_id);
         library_store.save()?;
-        return Ok(None);
+        return Ok(library_index
+            .contains(&item_id)
+            .then(|| {
+                library_store
+                    .get_typed(library_item_key(&item_id))
+                    .and_then(normalize_library_item)
+                    .filter(|item| item.id == item_id)
+            })
+            .flatten());
     };
 
     let Some(canonical) = normalize_watch_status(&value) else {
@@ -195,17 +171,10 @@ fn clear_watch_status_items(
     library_store: &DurableStore,
     ids: &[String],
 ) -> Result<usize, WatchStatusError> {
-    let mut statuses = read_watch_status_snapshot(store)?;
-    let changed = ids
-        .iter()
-        .filter(|id| statuses.items.remove(*id).is_some())
-        .count();
-    if changed > 0 {
-        persist_index_map(store, WATCH_STATUS_LAYOUT, &statuses.index, &statuses.items)?;
-    } else {
-        store.save()?;
-    }
+    let index = load_watch_status_index(store)?;
     let cleared: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let changed = remove_index_ids(store, WATCH_STATUS_LAYOUT, index, &cleared);
+    store.save()?;
     retain_status_added_ids(library_store, |id| !cleared.contains(id));
     library_store.save()?;
     Ok(changed)

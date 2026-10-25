@@ -87,6 +87,8 @@ pub(crate) fn build_up_next_entries(
             source.absolute_episode = source.episode;
             source.position = 0.0;
             source.duration = 0.0;
+            source.is_watched = false;
+            source.has_started_watching = false;
             source.stream_season = None;
             source.stream_episode = None;
             source.last_stream_format = None;
@@ -190,7 +192,7 @@ pub async fn get_resume_rail(
     let service = playback_state.inner().clone();
     let store_app = app.clone();
     let (continue_watching, sources) = super::run_blocking_store_op(move || {
-        let rows = resume_rows(service.load_resume_entries(&store_app)?);
+        let rows = resume_rows(service.load_continue_watching_entries(&store_app)?);
         let continue_watching =
             annotate_watch_progress_list(build_continue_watching_entries(&rows));
         if let Ok(snapshot) = serde_json::to_string(
@@ -203,6 +205,9 @@ pub async fn get_resume_rail(
                 .collect::<Vec<_>>(),
         ) {
             let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
+        }
+        if !rows.iter().any(is_series_like_watch_progress) {
+            return Ok((continue_watching, Vec::new()));
         }
         let statuses = match super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)
             .and_then(|store| load_watch_statuses_map(&store))

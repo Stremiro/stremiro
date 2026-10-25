@@ -1,70 +1,26 @@
-//! Shared `#[cfg(test)]` fixtures. One canonical literal per wire/persisted
-//! struct: schema drift (new fields) is edited here once instead of across
-//! per-file copies. Tests override only the fields they assert on via struct
+//! Shared `#[cfg(test)]` fixtures with canonical defaults.
+//! Tests override only the fields they assert on via struct
 //! update syntax (`AddonStream { url: ..., ..test_stream() }`).
 
 use crate::commands::config_store::AddonConfig;
 use crate::commands::WatchProgress;
 use crate::providers::addon_manifest::{parse_addon_manifest, AddonManifest};
-use crate::providers::addons::{AddonStream, StreamPresentation};
-use crate::providers::MediaItem;
+use crate::providers::addons::AddonStream;
+use crate::providers::{Episode, MediaDetails, MediaItem};
 
 /// Canonical Cinemeta endpoint — the pinned default browsing addon.
 pub(crate) const CINEMETA_URL: &str = "https://v3-cinemeta.strem.io";
 
 pub(crate) fn test_stream() -> AddonStream {
-    AddonStream {
-        name: None,
-        title: None,
-        info_hash: None,
-        url: None,
-        file_idx: None,
-        behavior_hints: None,
-        sources: Vec::new(),
-        cached: false,
-        pool_fetched_at: None,
-        seeders: None,
-        size_bytes: None,
-        source_name: None,
-        source_id: None,
-        stream_family: None,
-        stream_key: String::new(),
-        recommendation_reasons: Vec::new(),
-        match_summary: None,
-        match_badge_kinds: Vec::new(),
-        match_tier: None,
-        show_pack_badge: false,
-        selection_priority: None,
-        presentation: StreamPresentation::default(),
-        match_text: std::sync::OnceLock::new(),
-    }
+    AddonStream::default()
 }
 
 pub(crate) fn test_progress() -> WatchProgress {
     WatchProgress {
         id: "tt123".to_string(),
         type_: "movie".to_string(),
-        season: None,
-        episode: None,
-        absolute_season: None,
-        absolute_episode: None,
-        stream_season: None,
-        stream_episode: None,
-        position: 0.0,
-        duration: 0.0,
-        last_watched: 0,
         title: "Test".to_string(),
-        poster: None,
-        backdrop: None,
-        last_stream_format: None,
-        last_stream_lookup_id: None,
-        last_stream_key: None,
-        source_name: None,
-        source_id: None,
-        stream_family: None,
-        resume_start_time: None,
-        is_watched: false,
-        has_started_watching: false,
+        ..WatchProgress::default()
     }
 }
 
@@ -85,15 +41,25 @@ pub(crate) fn test_media_item(id: &str, type_: &str) -> MediaItem {
     MediaItem {
         id: id.to_string(),
         title: id.to_string(),
-        poster: None,
-        backdrop: None,
-        logo: None,
-        description: None,
-        year: None,
-        primary_year: None,
-        display_year: None,
-        genres: None,
         type_: type_.to_string(),
+        ..MediaItem::default()
+    }
+}
+
+pub(crate) fn test_details(id: &str, type_: &str) -> MediaDetails {
+    MediaDetails {
+        id: id.to_string(),
+        type_: type_.to_string(),
+        ..MediaDetails::default()
+    }
+}
+
+pub(crate) fn test_episode(id: &str, season: u32, episode: u32) -> Episode {
+    Episode {
+        id: id.to_string(),
+        season,
+        episode,
+        ..Episode::default()
     }
 }
 
@@ -114,6 +80,93 @@ pub(crate) fn test_store() -> TestStore {
 impl Drop for TestStore {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// Ordered loopback responses; keep recording requests after the script runs out.
+pub(crate) struct TestHttpServer {
+    pub url: String,
+    stop: std::sync::mpsc::Sender<()>,
+    server: Option<std::thread::JoinHandle<Vec<String>>>,
+}
+
+impl TestHttpServer {
+    pub(crate) fn new(responses: Vec<(u16, &'static str, Option<&'static str>)>) -> Self {
+        use std::io::{BufRead, BufReader, Write};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        listener.set_nonblocking(true).unwrap();
+        let (stop, stopped) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut paths = Vec::new();
+            let started = Instant::now();
+            while matches!(stopped.try_recv(), Err(mpsc::TryRecvError::Empty))
+                && started.elapsed() < Duration::from_secs(10)
+            {
+                let (mut socket, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(1));
+                        continue;
+                    }
+                    Err(error) => panic!("{error}"),
+                };
+                socket.set_nonblocking(false).unwrap();
+                socket
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                socket
+                    .set_write_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut line = String::new();
+                let mut reader = BufReader::new(&mut socket);
+                reader.read_line(&mut line).unwrap();
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                }
+                let (status, body, location) = responses
+                    .get(paths.len())
+                    .copied()
+                    .unwrap_or((404, "{}", None));
+                paths.push(line.split_whitespace().nth(1).unwrap().to_string());
+                let location = location
+                    .map(|url| format!("Location: {url}\r\n"))
+                    .unwrap_or_default();
+                write!(
+                    socket,
+                    "HTTP/1.1 {status} Test\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+            paths
+        });
+        Self {
+            url,
+            stop,
+            server: Some(server),
+        }
+    }
+
+    pub(crate) fn finish(mut self) -> Vec<String> {
+        let _ = self.stop.send(());
+        self.server.take().unwrap().join().unwrap()
+    }
+}
+
+impl Drop for TestHttpServer {
+    fn drop(&mut self) {
+        let _ = self.stop.send(());
+        if let Some(server) = self.server.take() {
+            let _ = server.join();
+        }
     }
 }
 

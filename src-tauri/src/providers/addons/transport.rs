@@ -35,6 +35,20 @@ pub(super) fn config_cache_segment(config_url: &str) -> String {
     format!("cfg:{}", hash_segment(url))
 }
 
+/// Cached rows are prepared for one `(source_name, source_id)`, so the source is part of the key.
+pub(super) fn stream_cache_key(
+    type_: &str,
+    id: &str,
+    addon_key: &str,
+    (source_name, source_id): (&str, &str),
+) -> String {
+    format!(
+        "{type_}|{id}|{addon_key}|{}|{}",
+        hash_segment(source_id),
+        hash_segment(source_name)
+    )
+}
+
 #[derive(Debug, Deserialize, Default)]
 struct RawStreamResponse<'a> {
     #[serde(borrow, default)]
@@ -43,18 +57,23 @@ struct RawStreamResponse<'a> {
 
 /// Decode item-by-item so a malformed sibling can't discard valid streams; applies per-field truncation.
 pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, String> {
+    const INVALID_FORMAT: &str = "Invalid stream response format.";
     let body: RawStreamResponse<'_> =
-        serde_json::from_slice(bytes).map_err(|_| "Invalid stream response format.".to_string())?;
-    Ok(body
+        serde_json::from_slice(bytes).map_err(|_| INVALID_FORMAT.to_string())?;
+    let decoded: Vec<_> = body
         .streams
-        .into_iter()
+        .iter()
         .filter_map(|item| serde_json::from_str::<AddonStream>(item.get()).ok())
         .take(DECODED_STREAMS_MAX)
         .map(|mut stream| {
             truncate_stream_item(&mut stream);
             stream
         })
-        .collect())
+        .collect();
+    if decoded.is_empty() && !body.streams.is_empty() {
+        return Err(INVALID_FORMAT.to_string());
+    }
+    Ok(decoded)
 }
 
 fn truncate_field(value: &mut Option<String>, max_chars: usize) {
@@ -157,7 +176,7 @@ const STREAM_COOLDOWN_MESSAGE: &str =
 
 pub(crate) struct AddonTransport {
     client: Client,
-    /// Keyed `{type}|{id}|{addon_url_hash}`; hits clone the `Arc` handle once.
+    /// Prepared rows keyed by `stream_cache_key`; hits clone the `Arc` handle once.
     pub(super) cache: TtlCache<Arc<[AddonStream]>>,
     /// Bumped by `clear_cache`: in-flight fetches must not repopulate cleared entries.
     pub(super) generation: AtomicU64,
@@ -370,12 +389,16 @@ impl AddonTransport {
         }
     }
 
+    /// `source` is `(source_name, source_id)`. The command-owned `prepare` runs once per
+    /// fetch inside the decode task, never on a cache hit.
     pub(crate) async fn get_streams_fresh(
         &self,
         type_: &str,
         id: &str,
         addon_url: &str,
+        source: (&str, &str),
         not_before: Option<Instant>,
+        prepare: fn(Vec<AddonStream>, &str, &str) -> Vec<AddonStream>,
     ) -> Result<Vec<AddonStream>, String> {
         // Validate before the contract: an unbuildable URL never had a fetch to cache.
         let base_url = addon_url.trim();
@@ -385,7 +408,7 @@ impl AddonTransport {
         let url = build_resource_url(base_url, "stream", type_, id, &[])?;
 
         let addon_key = config_cache_segment(addon_url);
-        let cache_key = format!("{}|{}|{}", type_, id, addon_key);
+        let cache_key = stream_cache_key(type_, id, &addon_key, source);
         self.fetch_contract()
             .run_fresh(
                 &self.cache,
@@ -396,19 +419,25 @@ impl AddonTransport {
                 || async {
                     let origin =
                         Self::build_request_origin(base_url).map_err(FetchFailure::Fatal)?;
-                    self.fetch_streams_once(&url, &origin).await.map(Arc::from)
+                    let (source_name, source_id) = (source.0.to_string(), source.1.to_string());
+                    self.fetch_streams_once(&url, &origin, move |streams| {
+                        prepare(streams, &source_name, &source_id)
+                    })
+                    .await
+                    .map(Arc::from)
                 },
             )
             .await
             .map(|streams| streams.to_vec())
     }
 
-    /// One attempt: request → status gate → bounded body → decode → hydrate.
+    /// One attempt: request → status gate → bounded body → decode → hydrate → prepare.
     /// Dedupe/ranking live in the coordinator; transport order stays decode order.
     async fn fetch_streams_once(
         &self,
         url: &str,
         origin: &str,
+        prepare: impl FnOnce(Vec<AddonStream>) -> Vec<AddonStream> + Send + 'static,
     ) -> Result<Vec<AddonStream>, FetchFailure> {
         #[cfg(debug_assertions)]
         eprintln!("Addon stream origin: {}", origin);
@@ -439,7 +468,7 @@ impl AddonTransport {
             return Err(FetchFailure::from_http_status(
                 status,
                 format!(
-                    "Configured addon returned HTTP {}. Check the addon URL in Settings → Streaming.",
+                    "Configured addon returned HTTP {}. Check the addon URL in Settings → Addons.",
                     status.as_u16()
                 ),
             ));
@@ -473,7 +502,7 @@ impl AddonTransport {
             for stream in &mut streams {
                 stream.pool_fetched_at = Some(fetched_at);
             }
-            Ok(streams)
+            Ok(prepare(streams))
         })
         .await
         .map_err(|_| FetchFailure::Fatal("Stream response processing task failed.".to_string()))?
@@ -537,11 +566,6 @@ impl AddonTransport {
 
     fn parse_size_to_bytes(value: &str, unit: &str) -> Option<u64> {
         // Reject non-finite parses — NaN/inf would produce misleading rank inputs.
-        #![allow(
-            clippy::cast_precision_loss,
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss
-        )]
         let parsed = if let Some((whole, fraction)) = value.split_once(',') {
             let integer = whole.parse::<f64>().ok()?;
             let fractional = fraction.parse::<f64>().ok()?;
@@ -615,43 +639,38 @@ impl Default for AddonTransport {
 #[tokio::test]
 async fn fresh_stream_fetch_bypasses_seeded_values_but_keeps_negative_cache() {
     let provider = AddonTransport::new();
-    let addon_url = "https://addon.example";
-    let key = format!("movie|tt123|{}", config_cache_segment(addon_url));
+    let (addon_url, source) = ("https://addon.example", ("Addon", "addon"));
+    let key = stream_cache_key("movie", "tt123", &config_cache_segment(addon_url), source);
+    let fetch = |not_before| {
+        provider.get_streams_fresh(
+            "movie",
+            "tt123",
+            addon_url,
+            source,
+            not_before,
+            |streams, _, _| streams,
+        )
+    };
     for streams in [vec![crate::test_helpers::test_stream()], Vec::new()] {
-        provider.seed_stream_cache("movie", "tt123", addon_url, streams);
+        provider.seed_stream_cache("movie", "tt123", addon_url, source, streams);
         let not_before = Instant::now() + Duration::from_nanos(1);
         provider.fetch_contract().cache_failure(
             &key,
             "cached failure",
             provider.cache_generation(),
         );
-        assert!(provider
-            .get_streams_fresh("movie", "tt123", addon_url, None)
-            .await
-            .is_ok());
-        assert_eq!(
-            provider
-                .get_streams_fresh("movie", "tt123", addon_url, Some(not_before))
-                .await
-                .unwrap_err(),
-            "cached failure"
-        );
+        assert!(fetch(None).await.is_ok());
+        assert_eq!(fetch(Some(not_before)).await.unwrap_err(), "cached failure");
 
         let not_before = Instant::now();
         provider.seed_stream_cache(
             "movie",
             "tt123",
             addon_url,
+            source,
             vec![crate::test_helpers::test_stream()],
         );
-        assert_eq!(
-            provider
-                .get_streams_fresh("movie", "tt123", addon_url, Some(not_before))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        assert_eq!(fetch(Some(not_before)).await.unwrap().len(), 1);
     }
 }
 

@@ -117,6 +117,31 @@ pub(super) fn persist_index_map<T: serde::Serialize>(
     store.save()
 }
 
+/// Targeted removal for index+item domains: deletes the item rows of `ids` and
+/// drops them from the index without rewriting the rest of the domain. Stages
+/// only; returns how many item rows were deleted.
+pub(super) fn remove_index_ids(
+    store: &DurableStore,
+    layout: IndexStoreLayout,
+    mut index: Vec<String>,
+    ids: &HashSet<&str>,
+) -> usize {
+    let deleted = ids
+        .iter()
+        .filter(|id| store.delete((layout.item_key)(id)))
+        .count();
+    let len = index.len();
+    index.retain(|id| !ids.contains(id.as_str()));
+    if deleted > 0 || index.len() != len {
+        store.set(layout.index_key, json!(index));
+    }
+    if layout.index_key == LIBRARY_INDEX_KEY {
+        let kept: HashSet<&str> = index.iter().map(String::as_str).collect();
+        retain_status_added_ids(store, |id| kept.contains(id));
+    }
+    deleted
+}
+
 /// Shared prefix-sweep clear for index/item domains: deletes every key under
 /// `prefixes`, resets index/order keys, saves once. Prefix sweep, not index-driven
 /// enumeration — a corrupt index parses as empty and would orphan item rows.
@@ -129,8 +154,7 @@ pub(super) fn clear_index_domain(
     for index_key in index_keys {
         store.set(*index_key, json!(Vec::<String>::new()));
     }
-    store.save()?;
-    Ok(())
+    store.save()
 }
 
 /// Index/order arrays decode member-by-member — one corrupt entry must not

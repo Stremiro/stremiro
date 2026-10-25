@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 /// Rebindable actions and default keys, in conflict-priority order.
-pub(super) const PLAYER_KEYBINDING_ACTIONS: [(&str, &[&str]); 20] = [
+pub(super) const PLAYER_KEYBINDING_ACTIONS: [(&str, &[&str]); 21] = [
     ("togglePlay", &[" ", "k"]),
     ("seekBackward", &["arrowleft", "j"]),
     ("seekForward", &["arrowright", "l"]),
@@ -17,6 +17,7 @@ pub(super) const PLAYER_KEYBINDING_ACTIONS: [(&str, &[&str]); 20] = [
     ("subtitleEarlier", &["z"]),
     ("subtitleLater", &["x"]),
     ("skipSegment", &["s", "enter"]),
+    ("previousEpisode", &["p"]),
     ("nextEpisode", &["n"]),
     ("episodes", &["e"]),
     ("streamSelector", &["q"]),

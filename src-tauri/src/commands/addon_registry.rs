@@ -1,21 +1,16 @@
-use super::config_store::{
-    addon_configs_generation, load_addon_configs, AddonConfig, DEFAULT_CINEMETA_INSTALL_URL,
-    DEFAULT_OPENSUBTITLES_INSTALL_URL,
-};
+use super::config_store::{addon_configs_generation, load_addon_configs, AddonConfig};
 use super::media_normalization::{normalize_media_details, normalize_media_item};
 use super::{js_trim, SETTINGS_STORE_FILE};
+use crate::providers::addon_manifest::snapshot_supports_request;
 use crate::providers::addon_resource::{
-    catalog_declares_extra, snapshot_supports_catalog, snapshot_supports_meta,
-    snapshot_supports_subtitles, AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
+    catalog_declares_extra, snapshot_supports_catalog, AddonResourceClient, AddonSubtitle,
+    CatalogExtra, CatalogPage,
 };
+use crate::providers::ttl_cache::hash_segment;
 use crate::providers::{lock_or_recover, MediaDetails, MediaItem};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{
-    hash_map::{DefaultHasher, Entry},
-    HashMap, HashSet,
-};
-use std::hash::{Hash, Hasher};
+use std::collections::{hash_map::Entry, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -23,6 +18,7 @@ use tauri::AppHandle;
 
 const ADDON_RESOURCE_CONCURRENCY: usize = 4;
 pub(crate) const MAX_CATALOG_SOURCES: usize = 8;
+const MAX_METADATA_SOURCES: usize = 8;
 const MAX_SUBTITLE_SOURCES: usize = 8;
 const MAX_SUBTITLES_TOTAL: usize = 200;
 /// First-capable-source hedge for meta fetches: a routine details open is
@@ -46,6 +42,41 @@ const CLASSIFY_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
 /// `save_addon_configs_to_store` bumps the generation on every write, so a
 /// memo entry tagged with a superseded generation is never served.
 static ENABLED_ADDONS_MEMO: Mutex<Option<(u64, Arc<Vec<AddonConfig>>)>> = Mutex::new(None);
+
+/// Every "no enabled addon serves this" registry error starts with this, so
+/// command boundaries can tag it without the UI parsing messages.
+const NO_CAPABLE_ADDON_PREFIX: &str = "No enabled addon provides ";
+
+fn no_capable_addon_error(provides: &str, addon_kind: &str) -> String {
+    format!("{NO_CAPABLE_ADDON_PREFIX}{provides}. Add or enable a {addon_kind} addon in Settings → Addons.")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddonResourceErrorKind {
+    NoCapableAddon,
+    Failed,
+}
+
+/// Command error for addon-resource reads; `no_capable_addon` points the UI
+/// at Settings → Addons instead of a network retry.
+#[derive(Debug, Serialize)]
+pub struct AddonResourceError {
+    pub kind: AddonResourceErrorKind,
+    pub message: String,
+}
+
+impl From<String> for AddonResourceError {
+    fn from(message: String) -> Self {
+        let kind = if message.starts_with(NO_CAPABLE_ADDON_PREFIX) {
+            AddonResourceErrorKind::NoCapableAddon
+        } else {
+            AddonResourceErrorKind::Failed
+        };
+        Self { kind, message }
+    }
+}
+
 static CLASSIFY_RETRY_AT: Mutex<Option<Instant>> = Mutex::new(None);
 static CLASSIFY_IN_FLIGHT: AtomicBool = AtomicBool::new(false);
 
@@ -170,18 +201,11 @@ fn addon_allows_catalog(
     })
 }
 
-fn addon_allows_meta(addon: &AddonConfig, type_: &str, id: &str) -> bool {
+fn addon_allows_resource(addon: &AddonConfig, resource: &str, type_: &str, id: &str) -> bool {
     addon
         .capabilities
         .as_ref()
-        .is_none_or(|snapshot| snapshot_supports_meta(snapshot, type_, id))
-}
-
-fn addon_allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
-    addon
-        .capabilities
-        .as_ref()
-        .is_none_or(|snapshot| snapshot_supports_subtitles(snapshot, type_, id))
+        .is_none_or(|snapshot| snapshot_supports_request(snapshot, resource, type_, id))
 }
 
 fn searchable_catalog_ids<'a>(addon: &'a AddonConfig, type_: &str) -> Vec<(&'a str, bool)> {
@@ -223,6 +247,7 @@ pub(crate) struct SearchCatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub cursors: Vec<SearchSourceCursor>,
     pub claims: SearchCursorClaims,
+    pub partial: bool,
 }
 
 /// Stable identity shared by source merging and cross-page catalog deduplication.
@@ -336,8 +361,9 @@ pub(crate) fn select_catalog_targets(
         .collect();
 
     if targets.is_empty() {
-        return Err(format!(
-            "No enabled addon declares catalog support for {type_}/{catalog_id}. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another catalog addon is enabled in Settings → Streaming."
+        return Err(no_capable_addon_error(
+            &format!("the {type_}/{catalog_id} catalog"),
+            "catalog",
         ));
     }
 
@@ -522,9 +548,7 @@ fn search_source_key(
     media_type: &str,
     catalog_id: &str,
 ) -> String {
-    let mut hasher = DefaultHasher::new();
-    (genre, addon_url, media_type, catalog_id).hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    hash_segment(&(genre, addon_url, media_type, catalog_id))
 }
 
 fn select_search_catalog_work(
@@ -606,7 +630,10 @@ pub(crate) async fn search_catalog_pages_for_genres(
     let (work, sources) =
         select_search_catalog_work(&snapshot, query, media_types, genres, cursors);
     if work.is_empty() && cursors.is_none() {
-        return Err(format!("No enabled addon declares a searchable catalog for the requested type. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another catalog addon is enabled in Settings → Streaming."));
+        return Err(no_capable_addon_error(
+            "a searchable catalog for this type",
+            "catalog",
+        ));
     }
     merge_search_catalog_pages(
         sources,
@@ -632,6 +659,7 @@ fn merge_search_catalog_pages(
     let mut items = Vec::new();
     let mut claims = HashMap::new();
     let mut cursors = Vec::new();
+    let mut partial = false;
     let mut succeeded = false;
     let mut first_error = None;
     for (sources, bucket) in sources.into_iter().zip(outcomes) {
@@ -668,6 +696,8 @@ fn merge_search_catalog_pages(
                     if source.supports_skip && !cursor.retry {
                         cursor.retry = true;
                         cursors.push(cursor);
+                    } else {
+                        partial = true;
                     }
                 }
             }
@@ -680,6 +710,7 @@ fn merge_search_catalog_pages(
         items,
         cursors,
         claims,
+        partial,
     })
 }
 
@@ -718,18 +749,19 @@ async fn fetch_meta_details_from_addons(
 ) -> Result<Arc<MediaDetails>, String> {
     let targets: Vec<_> = snapshot
         .iter()
-        .filter(|addon| addon_allows_meta(addon, type_, id))
-        .take(MAX_CATALOG_SOURCES)
+        .filter(|addon| addon_allows_resource(addon, "meta", type_, id))
+        .take(MAX_METADATA_SOURCES)
         .collect();
 
     let Some(first) = targets.first() else {
-        return Err(format!(
-            "No enabled addon declares meta support for {type_}/{id}. Ensure Cinemeta ({DEFAULT_CINEMETA_INSTALL_URL}) or another metadata addon is enabled in Settings → Streaming."
+        return Err(no_capable_addon_error(
+            &format!("metadata for {type_}/{id}"),
+            "metadata",
         ));
     };
 
     let generation = client.cache_generation();
-    let mut recent_stragglers = [false; MAX_CATALOG_SOURCES];
+    let mut recent_stragglers = [false; MAX_METADATA_SOURCES];
     recent_stragglers[0] = client.meta_is_recent_straggler(&first.url, type_, id);
     let mut first_fetch = Box::pin(fetch_ranked_meta(client, &first.url, type_, id, 0));
     let hedge = tokio::time::sleep(if recent_stragglers[0] {
@@ -879,7 +911,7 @@ pub async fn fetch_addon_subtitles(
         .filter(|addon| {
             query_ids
                 .iter()
-                .any(|id| addon_allows_subtitles(addon, type_, id))
+                .any(|id| addon_allows_resource(addon, "subtitles", type_, id))
         })
         .take(MAX_SUBTITLE_SOURCES)
         .enumerate()
@@ -891,8 +923,9 @@ pub async fn fetch_addon_subtitles(
 
     if requests.is_empty() {
         let id = query_ids.first().map(String::as_str).unwrap_or_default();
-        return Err(format!(
-            "No enabled addon declares subtitle support for {type_}/{id}. Ensure OpenSubtitles ({DEFAULT_OPENSUBTITLES_INSTALL_URL}) or another subtitle addon is enabled in Settings → Streaming."
+        return Err(no_capable_addon_error(
+            &format!("subtitles for {type_}/{id}"),
+            "subtitle",
         ));
     }
 
@@ -944,7 +977,7 @@ async fn fetch_subtitles_for_addon(
     let mut last_error = None;
     for id in query_ids
         .iter()
-        .filter(|id| addon_allows_subtitles(addon, type_, id))
+        .filter(|id| addon_allows_resource(addon, "subtitles", type_, id))
     {
         match client.fetch_subtitles(&addon.url, type_, id).await {
             Ok(items) => {

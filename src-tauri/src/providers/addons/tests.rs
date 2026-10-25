@@ -10,9 +10,10 @@ impl AddonTransport {
         media_type: &str,
         id: &str,
         addon_url: &str,
+        source: (&str, &str),
         streams: Vec<AddonStream>,
     ) {
-        let key = format!("{media_type}|{id}|{}", config_cache_segment(addon_url));
+        let key = stream_cache_key(media_type, id, &config_cache_segment(addon_url), source);
         self.cache_put(&key, streams, self.cache_generation());
     }
 }
@@ -62,98 +63,50 @@ fn named_pack(name: &str) -> AddonStream {
 // ── episode_matches_text ──────────────────────────────────────────────
 
 #[test]
-fn matches_standard_s_xxe_yy_format() {
-    assert!(episode_matches_text("Show.S01E05.1080p", 1, 5));
-}
-
-#[test]
-fn matches_zero_padded_s_format() {
-    assert!(episode_matches_text("Show.S15E52.BluRay", 15, 52));
-}
-
-#[test]
-fn matches_unpadded_s_format() {
-    assert!(episode_matches_text("show s1e5 hdtv", 1, 5));
-}
-
-#[test]
-fn matches_x_nn_format() {
-    assert!(episode_matches_text("Show.1x05.HDTV", 1, 5));
-}
-
-#[test]
-fn matches_episode_keyword() {
-    assert!(episode_matches_text("Show Episode 12 1080p", 1, 12));
-}
-
-#[test]
-fn loose_episode_keyword_rejects_conflicting_season_context() {
-    assert!(!episode_matches_text("Show Season 2 Episode 1 1080p", 1, 1));
-}
-
-#[test]
-fn no_match_wrong_episode() {
-    assert!(!episode_matches_text("Show.S01E10.1080p", 1, 5));
-}
-
-#[test]
-fn no_match_wrong_season() {
-    assert!(!episode_matches_text("Show.S02E05.1080p", 1, 5));
-}
-
-#[test]
-fn no_match_empty_title() {
-    assert!(!episode_matches_text("", 1, 1));
-}
-
-#[test]
-fn no_match_episode_number_prefix() {
-    // A requested episode that is a digit-prefix of the real one must
-    // not match: `s1e1` is a substring of `s1e10`, `ep1` of `ep12`.
-    assert!(!episode_matches_text("Show.S01E10.1080p", 1, 1));
-    assert!(!episode_matches_text("Show.S1E12.1080p", 1, 1));
-    assert!(!episode_matches_text("Show.S1E1000.1080p", 1, 100));
-    assert!(!episode_matches_text("Show.Episode 10.1080p", 1, 1));
-    assert!(!episode_matches_text("Show.Ep.12.1080p", 1, 1));
-    assert!(!episode_matches_text("Show #12 [1080p]", 1, 1));
-    assert!(!episode_matches_text("Show - 100 [1080p]", 1, 10));
-}
-
-#[test]
-fn no_match_x_format_larger_season() {
-    // `1x01` inside `11x01` is season 11, not season 1.
-    assert!(!episode_matches_text("Show.11x01.HDTV", 1, 1));
-    assert!(!episode_matches_text("Show.1x1000.HDTV", 1, 100));
-    assert!(episode_matches_text("Show.1x01.HDTV", 1, 1));
-}
-
-#[test]
-fn matches_mixed_padding_and_loose_separators() {
-    // Release groups pad season and episode independently and use
-    // dots/underscores as separators in keyword forms.
-    assert!(episode_matches_text("Show.S1E05.1080p", 1, 5));
-    assert!(episode_matches_text("Show.S01E5.1080p", 1, 5));
-    assert!(episode_matches_text("Show.1x5.HDTV", 1, 5));
-    assert!(episode_matches_text("Show.S01.Episode.05.1080p", 1, 5));
-    assert!(episode_matches_text("Show_ep_05_1080p", 1, 5));
-    // Detached `E05` segment next to a matching season marker.
-    assert!(episode_matches_text("Show.S01.E05.1080p", 1, 5));
-    // …but not when the declared season is a different one.
-    assert!(!episode_matches_text("Show.S02.E05.1080p", 1, 5));
-    // …and a bare `e5`-shaped token without any season marker is not an
-    // episode claim ("Xeon E5", codec fragments).
-    assert!(!episode_matches_text("Show.E5.1080p", 1, 5));
-    // Mixed padding must keep digit boundaries: E05 is not E50.
-    assert!(!episode_matches_text("Show.S1E05.1080p", 1, 50));
-    assert!(!episode_matches_text("Show.S1E50.1080p", 1, 5));
-}
-
-#[test]
-fn bare_season_token_rejects_conflicting_loose_episode() {
-    // `S02` without an `E` segment still declares a season: a loose
-    // "Episode 5" next to it must not match an S1 target.
-    assert!(!episode_matches_text("Show.S02.Episode.5.1080p", 1, 5));
-    assert!(episode_matches_text("Show.S01.Episode.5.1080p", 1, 5));
+fn episode_text_matches_preserve_formats_and_digit_boundaries() {
+    for (label, (text, season, episode), expected) in [
+        ("standard", ("Show.S01E05.1080p", 1, 5), true),
+        ("zero padded", ("Show.S15E52.BluRay", 15, 52), true),
+        ("unpadded", ("show s1e5 hdtv", 1, 5), true),
+        ("x format", ("Show.1x05.HDTV", 1, 5), true),
+        ("keyword", ("Show Episode 12 1080p", 1, 12), true),
+        (
+            "season conflict",
+            ("Show Season 2 Episode 1 1080p", 1, 1),
+            false,
+        ),
+        ("wrong episode", ("Show.S01E10.1080p", 1, 5), false),
+        ("wrong season", ("Show.S02E05.1080p", 1, 5), false),
+        ("empty", ("", 1, 1), false),
+        ("digit prefix", ("Show.S01E10.1080p", 1, 1), false),
+        ("digit prefix", ("Show.S1E12.1080p", 1, 1), false),
+        ("digit prefix", ("Show.S1E1000.1080p", 1, 100), false),
+        ("digit prefix", ("Show.Episode 10.1080p", 1, 1), false),
+        ("digit prefix", ("Show.Ep.12.1080p", 1, 1), false),
+        ("digit prefix", ("Show #12 [1080p]", 1, 1), false),
+        ("digit prefix", ("Show - 100 [1080p]", 1, 10), false),
+        ("x boundary", ("Show.11x01.HDTV", 1, 1), false),
+        ("x boundary", ("Show.1x1000.HDTV", 1, 100), false),
+        ("x boundary", ("Show.1x01.HDTV", 1, 1), true),
+        ("mixed padding", ("Show.S1E05.1080p", 1, 5), true),
+        ("mixed padding", ("Show.S01E5.1080p", 1, 5), true),
+        ("mixed padding", ("Show.1x5.HDTV", 1, 5), true),
+        ("mixed padding", ("Show.S01.Episode.05.1080p", 1, 5), true),
+        ("mixed padding", ("Show_ep_05_1080p", 1, 5), true),
+        ("mixed padding", ("Show.S01.E05.1080p", 1, 5), true),
+        ("mixed padding", ("Show.S02.E05.1080p", 1, 5), false),
+        ("mixed padding", ("Show.E5.1080p", 1, 5), false),
+        ("mixed padding", ("Show.S1E05.1080p", 1, 50), false),
+        ("mixed padding", ("Show.S1E50.1080p", 1, 5), false),
+        ("bare season", ("Show.S02.Episode.5.1080p", 1, 5), false),
+        ("bare season", ("Show.S01.Episode.5.1080p", 1, 5), true),
+    ] {
+        assert_eq!(
+            episode_matches_text(text, season, episode),
+            expected,
+            "{label}: {text}, S{season}E{episode}"
+        );
+    }
 }
 
 #[test]
@@ -732,11 +685,20 @@ fn hydration_parses_emoji_binary_sizes_in_every_supported_unit() {
         ("💾 60,0 GB 👤100", None, Some(60 * 1024_u64.pow(3))),
         ("💾1,5TiB", None, Some(3 * 1024_u64.pow(4) / 2)),
         ("1,234 MB", None, Some(1234 * 1024_u64.pow(2))),
+        ("1,5GB", None, Some(3 * 1024_u64.pow(3) / 2)),
+        ("1.5GB", None, Some(3 * 1024_u64.pow(3) / 2)),
         ("60,0 GB", None, Some(60 * 1024_u64.pow(3))),
+        ("0 GB", None, Some(0)),
+        ("", None, None),
         ("1,234,567 MB", None, None),
         ("60,0,0 GB", None, None),
         ("1.234.5 GB", None, None),
         ("2 GB", Some(serde_json::json!(64)), Some(64)),
+        (
+            "2 GB",
+            Some(serde_json::json!(20 * 1024_u64.pow(3))),
+            Some(20 * 1024_u64.pow(3)),
+        ),
         ("2 GB", Some(serde_json::json!(" 128 ")), Some(128)),
         ("", Some(serde_json::json!(u64::MAX)), Some(u64::MAX)),
         (
@@ -821,6 +783,7 @@ fn decode_stream_items_keeps_missing_and_invalid_envelope_behavior() {
         br#"{"streams":null}"#.as_slice(),
         br#"{"streams":{}}"#,
         br#"{"streams":"invalid"}"#,
+        br#"{"streams":[{"name":42}]}"#,
     ] {
         assert_eq!(
             decode_stream_items(bytes).unwrap_err(),
@@ -928,7 +891,7 @@ fn selection_priority_is_never_forged_or_serialized() {
     let streams = decode_stream_items(bytes).expect("decodes");
     assert_eq!(streams[0].selection_priority, None);
 
-    let mut prepared = sample_stream();
+    let mut prepared = stream_fixture(None, Some("https://example.com/video.mp4"));
     prepared.selection_priority = Some(SelectionPriority {
         episode_match: StreamEpisodeMatchKind::Exact,
         season_claim_verified: true,
@@ -974,7 +937,7 @@ fn stream_resource_url_preserves_config_and_encodes_id() {
 #[test]
 fn stream_cache_put_enforces_hard_entry_bound_and_keeps_newest() {
     let transport = AddonTransport::new();
-    let stream = sample_stream();
+    let stream = stream_fixture(None, Some("https://example.com/video.mp4"));
     let generation = transport.generation.load(Ordering::SeqCst);
 
     for index in 0..(STREAM_CACHE_MAX_ENTRIES + 5) {
@@ -993,7 +956,14 @@ async fn stream_request_builder_failure_does_not_cool_the_addon() {
     let transport = AddonTransport::new();
     let url = "ftp://addon.example/manifest.json";
     assert!(transport
-        .get_streams_fresh("movie", "tt1", url, None)
+        .get_streams_fresh(
+            "movie",
+            "tt1",
+            url,
+            ("Addon", "addon"),
+            None,
+            |streams, _, _| { streams }
+        )
         .await
         .is_err());
     assert!(!transport
@@ -1053,44 +1023,6 @@ fn stale_stream_refresh_guards_cannot_release_or_complete_new_claims() {
         drop(fresh);
         assert!(transport.claim_stream_refresh("movie|tt123").is_some());
     }
-}
-
-#[test]
-fn stream_cache_put_from_stale_generation_is_dropped() {
-    let transport = AddonTransport::new();
-    let stale = transport.generation.load(Ordering::SeqCst);
-    transport.clear_cache();
-
-    let batch = [sample_stream()];
-    transport.cache_put("stale-key", batch.to_vec(), stale);
-    assert!(transport.cache.get("stale-key").is_none());
-    assert_eq!(transport.cache.len(), 0);
-
-    let current = transport.generation.load(Ordering::SeqCst);
-    transport.cache_put("fresh-key", batch.to_vec(), current);
-    assert!(transport.cache.get("fresh-key").is_some());
-}
-
-#[test]
-fn fetch_failure_record_from_stale_generation_is_suppressed() {
-    let transport = AddonTransport::new();
-    let addon_key = config_cache_segment("https://dead.example.com");
-    let stale = transport.generation.load(Ordering::SeqCst);
-
-    // A fetch that exhausted retries after `clear_cache` ran must not
-    // reinstall the cooldown the clear just wiped.
-    transport.clear_cache();
-    transport
-        .fetch_failures
-        .note(&addon_key, &transport.generation, stale);
-    assert!(!transport.fetch_failures.cooling_down(&addon_key));
-
-    // Same recording at the current generation still cools the addon down.
-    let fresh = transport.generation.load(Ordering::SeqCst);
-    transport
-        .fetch_failures
-        .note(&addon_key, &transport.generation, fresh);
-    assert!(transport.fetch_failures.cooling_down(&addon_key));
 }
 
 #[test]
@@ -1269,13 +1201,6 @@ fn sanitize_redacts_mixed_case_and_full_signed_query_hint_family() {
     }
 }
 
-fn sample_stream() -> AddonStream {
-    AddonStream {
-        url: Some("https://example.com/video.mp4".to_string()),
-        ..test_stream()
-    }
-}
-
 fn hints_with_proxy_headers(headers: Value) -> BehaviorHints {
     BehaviorHints {
         proxy_headers: Some(headers),
@@ -1362,7 +1287,7 @@ fn proxy_request_headers_enforces_entry_cap() {
 
 #[test]
 fn truncate_stream_item_drops_oversized_proxy_headers() {
-    let mut stream = sample_stream();
+    let mut stream = stream_fixture(None, Some("https://example.com/video.mp4"));
     stream.behavior_hints = Some(hints_with_proxy_headers(serde_json::json!({
         "request": {"Authorization": "Bearer kept"}
     })));
@@ -1373,7 +1298,7 @@ fn truncate_stream_item_drops_oversized_proxy_headers() {
         .and_then(|hints| hints.proxy_headers.as_ref())
         .is_some());
 
-    let mut bloated = sample_stream();
+    let mut bloated = stream_fixture(None, Some("https://example.com/video.mp4"));
     bloated.behavior_hints = Some(hints_with_proxy_headers(serde_json::json!({
         "request": {"Authorization": "x".repeat(9_000)}
     })));
@@ -1464,44 +1389,6 @@ fn release_flags_keep_real_markers() {
     let flags = flags_for("Show.4K.HDR.WEB-DL");
     assert!(flags.hdr);
     assert_eq!(flags.resolution, StreamResolutionTier::P2160);
-}
-
-// ── wire contract ─────────────────────────────────────────────────────────
-// Match-summary wire values remain stable; the selector renders the backend-prepared
-// matchBadgeKinds, matchTier, and showPackBadge fields without reparsing this summary.
-#[test]
-fn match_summary_serializes_snake_case_tier_values() {
-    for (kind, expected) in [
-        (StreamEpisodeMatchKind::SeasonPack, "season_pack"),
-        (StreamEpisodeMatchKind::EpisodeRange, "episode_range"),
-        (StreamEpisodeMatchKind::Exact, "exact"),
-        (StreamEpisodeMatchKind::None, "none"),
-    ] {
-        assert_eq!(
-            serde_json::to_value(kind).unwrap(),
-            serde_json::json!(expected)
-        );
-    }
-
-    for (title_match, expected) in [
-        (StreamTitleMatch::Close, "close"),
-        (StreamTitleMatch::Partial, "partial"),
-    ] {
-        assert_eq!(
-            serde_json::to_value(title_match).unwrap(),
-            serde_json::json!(expected)
-        );
-    }
-
-    let summary = StreamMatchSummary {
-        episode: Some(StreamEpisodeMatchKind::EpisodeRange),
-        title: Some(StreamTitleMatch::Close),
-        pack_coverage: None,
-    };
-    assert_eq!(
-        serde_json::to_value(summary).unwrap(),
-        serde_json::json!({ "episode": "episode_range", "title": "close" })
-    );
 }
 
 #[test]

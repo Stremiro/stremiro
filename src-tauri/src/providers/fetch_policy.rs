@@ -64,19 +64,10 @@ fn is_numeric_ip_candidate(host: &str) -> bool {
 /// One `inet_aton` part: `0x`-hex, leading-zero octal, or decimal; `None` on malformed.
 fn parse_numeric_part(part: &str) -> Option<u32> {
     if let Some(hex) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")) {
-        if hex.is_empty() || !hex.chars().all(|c| c.is_ascii_hexdigit()) {
-            return None;
-        }
         u32::from_str_radix(hex, 16).ok()
     } else if part.len() > 1 && part.starts_with('0') {
-        if !part.chars().all(|c| matches!(c, '0'..='7')) {
-            return None;
-        }
         u32::from_str_radix(part, 8).ok()
     } else {
-        if part.is_empty() || !part.chars().all(|c| c.is_ascii_digit()) {
-            return None;
-        }
         part.parse::<u32>().ok()
     }
 }
@@ -154,13 +145,20 @@ pub(crate) fn is_plain_http_url(parsed: &reqwest::Url) -> bool {
 }
 
 /// True when the redirect may be followed: http(s), no credentials; a hop onto
-/// a non-routable IP literal is allowed only back to the same host+port — a
+/// a non-routable IP literal or localhost name requires the same host+port — a
 /// loopback addon keeps working, a public addon can't redirect onto LAN/metadata IPs.
 pub(crate) fn redirect_target_allowed(initial: &reqwest::Url, next: &reqwest::Url) -> bool {
     if !is_plain_http_url(next) {
         return false;
     }
-    if !next.host_str().is_some_and(is_blocked_ip_literal) {
+    if !next.host_str().is_some_and(|host| {
+        is_blocked_ip_literal(host)
+            || host
+                .trim_end_matches('.')
+                .rsplit('.')
+                .next()
+                .is_some_and(|label| label.eq_ignore_ascii_case("localhost"))
+    }) {
         return true;
     }
     match (initial.host_str(), next.host_str()) {

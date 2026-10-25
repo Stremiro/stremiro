@@ -1,6 +1,8 @@
 use super::{lenient_option, DurableStore, ADDON_CONFIGS_KEY, DEFAULT_ADDON_INSTALLS};
 use crate::commands::normalize_non_empty;
-use crate::providers::addon_manifest::{snapshot_is_classified, AddonManifest};
+use crate::providers::addon_manifest::{
+    snapshot_is_classified, snapshot_resource_kinds, AddonManifest, AddonResourceKind,
+};
 use crate::providers::addons::sanitize_addon_log;
 use crate::providers::strip_manifest_suffix;
 use serde::{Deserialize, Serialize};
@@ -85,6 +87,16 @@ pub struct AddonConfigView {
     pub display_url: String,
     /// Pinned defaults occupy fixed registry slots and can only be toggled.
     pub pinned: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// `None` until classified: routing then treats the addon as serving every resource.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resources: Option<Vec<AddonResourceKind>>,
+    pub configurable: bool,
 }
 
 /// Readable masked URL: `https://` implied, redaction markers collapse to `•••`.
@@ -102,12 +114,23 @@ impl AddonConfigView {
     pub(crate) fn from_config(config: AddonConfig) -> Self {
         let display_url = addon_display_url(&config.url);
         let pinned = is_pinned_default_addon_url(&config.url);
+        let resources = config
+            .capabilities
+            .as_ref()
+            .filter(|snapshot| snapshot_is_classified(snapshot))
+            .map(snapshot_resource_kinds);
+        let manifest = config.capabilities.unwrap_or_default();
         Self {
             id: config.id,
             name: config.name,
             enabled: config.enabled,
             display_url,
             pinned,
+            logo: manifest.logo,
+            version: manifest.version,
+            description: manifest.description,
+            resources,
+            configurable: manifest.configurable,
         }
     }
 }

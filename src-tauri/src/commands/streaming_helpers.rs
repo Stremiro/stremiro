@@ -5,7 +5,7 @@ use crate::providers::addon_resource::is_magnet_url;
 use crate::providers::addons::{
     language_mention_is_audio, normalize_separators, stream_contains_batch_texts, AddonStream,
     StreamDeliveryKind, StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution,
-    StreamResolutionTier, STREAM_SIZE_REGEX,
+    StreamResolutionTier,
 };
 use crate::providers::{non_blank, push_unique};
 use regex::Regex;
@@ -451,32 +451,21 @@ fn get_display_lines(stream: &AddonStream) -> (&str, Cow<'_, str>) {
     )
 }
 
-pub(crate) fn format_stream_size_label(raw_text: &str, size_bytes: Option<u64>) -> Option<String> {
-    if let Some(captures) = STREAM_SIZE_REGEX.captures(raw_text) {
-        let amount = captures
-            .get(1)
-            .map(|capture| capture.as_str())
-            .unwrap_or_default();
-        let mut unit = captures
-            .get(2)
-            .map(|capture| capture.as_str())
-            .unwrap_or_default()
-            .to_ascii_uppercase();
-        unit.retain(|character| character != 'I');
-
-        return Some(format!("{}{}", amount, unit));
-    }
-
-    size_bytes.map(|size_bytes| {
-        // Display-only; precision loss past 2^53 only affects the fractional digit.
-        #[allow(clippy::cast_precision_loss)]
-        let gb = size_bytes as f64 / 1_073_741_824.0;
-        if gb >= 1.0 {
-            format!("{gb:.1}GB")
-        } else {
-            format!("{}MB", size_bytes / 1_048_576)
+fn format_stream_size_label(size_bytes: Option<u64>) -> Option<String> {
+    let size_bytes = size_bytes?;
+    for (unit, scale) in [
+        ("TB", 1_u64 << 40),
+        ("GB", 1_u64 << 30),
+        ("MB", 1_u64 << 20),
+        ("KB", 1_u64 << 10),
+    ] {
+        if size_bytes >= scale {
+            // Display-only; precision loss past 2^53 only affects the fractional digit.
+            let amount = format!("{:.1}", size_bytes as f64 / scale as f64);
+            return Some(format!("{}{unit}", amount.trim_end_matches(".0")));
         }
-    })
+    }
+    Some(format!("{size_bytes}B"))
 }
 
 /// Display-only cleanup: drops addon emoji decoration. Pictographs become spaces first
@@ -538,7 +527,6 @@ fn stream_audio_evidence(stream: &AddonStream, flags: StreamFlags) -> (bool, boo
 
 fn build_stream_presentation(
     stream: &AddonStream,
-    raw_text: &mut String,
     delivery_kind: StreamDeliveryKind,
 ) -> StreamPresentation {
     let (raw_source_name, raw_stream_title) = get_display_lines(stream);
@@ -549,10 +537,6 @@ fn build_stream_presentation(
         }
         cleaned => cleaned.into_owned(),
     };
-    raw_text.clear();
-    raw_text.push_str(stream.name.as_deref().unwrap_or(""));
-    raw_text.push(' ');
-    raw_text.push_str(stream.title.as_deref().unwrap_or(""));
     let texts = stream.match_texts();
     let flags = texts.flags;
 
@@ -613,7 +597,7 @@ fn build_stream_presentation(
         } else {
             None
         },
-        size_label: format_stream_size_label(raw_text, stream.size_bytes),
+        size_label: format_stream_size_label(stream.size_bytes),
         is_batch: stream_contains_batch_texts(texts),
     }
 }
@@ -624,7 +608,6 @@ pub(crate) fn prepare_addon_streams(
     source_id: &str,
 ) -> Vec<AddonStream> {
     let source_key = stream_family_source_key(source_id);
-    let mut raw_text = String::new();
 
     streams.retain_mut(|stream| {
         let http_url = stream.url.as_deref().and_then(parse_http_url);
@@ -648,7 +631,7 @@ pub(crate) fn prepare_addon_streams(
             .as_deref()
             .map(|source| derive_stream_family_normalized(stream, source, delivery_kind));
         stream.stream_key = dedup_key;
-        stream.presentation = build_stream_presentation(stream, &mut raw_text, delivery_kind);
+        stream.presentation = build_stream_presentation(stream, delivery_kind);
         true
     });
 
@@ -680,8 +663,8 @@ fn prepared_stream_key(
     Some(format!("s:{:x}", hasher.finalize()))
 }
 
-/// Prepared selector key (`s:{sha256}`) — the form fresh resume rows persist.
-pub(crate) fn is_prepared_stream_key(key: &str) -> bool {
+/// Prepared selector-key prefix (`s:`); the digest is validated by `normalize_stream_key`.
+pub(crate) fn has_prepared_stream_key_prefix(key: &str) -> bool {
     key.starts_with("s:")
 }
 
@@ -691,7 +674,7 @@ pub(crate) fn normalize_stream_key(input: &str) -> Option<String> {
         return None;
     }
     let key = input.trim();
-    if is_prepared_stream_key(key) {
+    if has_prepared_stream_key_prefix(key) {
         let digest = &key[2..];
         if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return None;
@@ -712,7 +695,7 @@ pub(crate) fn is_legacy_content_key(key: &str) -> bool {
 /// only — the legacy `u:` form embedded the raw URL and stays excluded. Single owner so
 /// producers and resume/probe consumers can't drift.
 pub(crate) fn is_persistable_stream_key(key: &str) -> bool {
-    is_prepared_stream_key(key) || is_legacy_content_key(key)
+    has_prepared_stream_key_prefix(key) || is_legacy_content_key(key)
 }
 
 /// Bounded per-source error aggregation shared by the fan-out merges: keep the first

@@ -5,15 +5,15 @@ use super::config_store::{
     default_stream_selector_preferences, is_pinned_default_addon_url, load_addon_configs,
     load_app_ui_preferences, load_last_notified_app_update_version, load_profile_preferences,
     load_stream_selector_preferences_state, normalize_addon_url, normalize_start_minimized,
-    resolve_addon_configs, save_addon_configs_to_store, save_app_ui_preferences_to_store,
-    save_last_notified_app_update_version_to_store, save_profile_preferences_to_store,
-    save_stream_selector_preferences_to_store, startup_route, AddonConfig, AddonConfigView,
-    AppUiPreferencesPatch, AppUiPreferencesView, ProfilePreferences, ProfilePreferencesPatch,
-    StreamSelectorPreferences, StreamSelectorPreferencesPatch,
+    push_recent_search, resolve_addon_configs, save_addon_configs_to_store,
+    save_app_ui_preferences_to_store, save_last_notified_app_update_version_to_store,
+    save_profile_preferences_to_store, save_stream_selector_preferences_to_store, startup_route,
+    AddonConfig, AddonConfigView, AppUiPreferencesPatch, AppUiPreferencesView, ProfilePreferences,
+    ProfilePreferencesPatch, StreamSelectorPreferences, StreamSelectorPreferencesPatch,
 };
 use super::DurableStore;
 use crate::providers::addon_manifest::{
-    fetch_addon_manifest_snapshot, snapshot_is_classified, AddonManifest,
+    build_configure_url, fetch_addon_manifest_snapshot, snapshot_is_classified,
     ADDON_CONFIGURATION_REQUIRED_MESSAGE,
 };
 use crate::providers::addon_resource::AddonResourceClient;
@@ -27,6 +27,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 use tauri::{command, AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
+use tauri_plugin_opener::OpenerExt;
 
 const ADDON_CLASSIFY_CONCURRENCY: usize = 4;
 /// Shared classify pool — reuses keep-alive/TLS sessions across settings opens
@@ -197,6 +198,26 @@ pub async fn save_app_ui_preferences(
     .await
 }
 
+/// Prepends a submitted query to the recent-search list in one store round-trip.
+#[command]
+pub async fn record_recent_search(
+    app: AppHandle,
+    query: String,
+) -> Result<AppUiPreferencesView, String> {
+    super::run_blocking_store_op(move || {
+        let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
+        let mut preferences = load_app_ui_preferences(&store);
+        let previous = preferences.recent_searches.clone();
+        push_recent_search(&mut preferences, query);
+        if preferences.recent_searches != previous {
+            save_app_ui_preferences_to_store(&store, &preferences);
+            store.save()?;
+        }
+        Ok(AppUiPreferencesView::from_preferences(preferences))
+    })
+    .await
+}
+
 pub(crate) async fn get_last_notified_app_update_version(
     app: AppHandle,
 ) -> Result<Option<String>, String> {
@@ -298,18 +319,8 @@ fn is_host_fallback_name(config: &AddonConfig) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn apply_manifest_snapshot(config: &mut AddonConfig, snapshot: AddonManifest) -> bool {
-    if snapshot_is_classified(&snapshot) {
-        if is_host_fallback_name(config) {
-            config.name = snapshot.name.clone();
-        }
-        config.capabilities = Some(snapshot);
-        return true;
-    }
-    false
-}
-
 // New installs must validate before success; background retries retain offline sources.
+// Only classified snapshots are kept; the commit-time merge owns the host-name rule.
 pub(super) async fn classify_missing_addon_capabilities(
     configs: Vec<AddonConfig>,
     require_valid_manifest: bool,
@@ -340,17 +351,14 @@ pub(super) async fn classify_missing_addon_capabilities(
 
     for (index, snapshot) in snapshots {
         match snapshot {
-            Ok(snapshot) => {
-                if !apply_manifest_snapshot(&mut classified[index], snapshot)
-                    && require_valid_manifest
-                {
-                    return Err(
-                        "Addon manifest does not declare any resources or catalogs.".to_string()
-                    );
-                }
+            Ok(snapshot) if snapshot_is_classified(&snapshot) => {
+                classified[index].capabilities = Some(snapshot);
+            }
+            Ok(_) if require_valid_manifest => {
+                return Err("Addon manifest does not declare any resources or catalogs.".to_string())
             }
             Err(error) if require_valid_manifest => return Err(error),
-            Err(_) => {}
+            Ok(_) | Err(_) => {}
         }
     }
 
@@ -372,7 +380,7 @@ async fn refresh_installed_addon_capabilities(
     Ok(classified)
 }
 
-fn merge_classified_capabilities(
+pub(super) fn merge_classified_capabilities(
     latest: &mut [AddonConfig],
     classified: Vec<AddonConfig>,
     new_install: bool,
@@ -406,26 +414,37 @@ fn merge_classified_capabilities(
 }
 
 pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Result<(), String> {
-    refresh_addon_capabilities(app.clone(), false).await?;
+    let fresh = refresh_addon_capabilities(app.clone(), false, &[]).await?;
     if STARTUP_CAPABILITY_REFRESH.swap(false, Ordering::SeqCst) {
         tokio::time::sleep(STARTUP_CAPABILITY_REFRESH_DELAY).await;
-        refresh_addon_capabilities(app, true).await?;
+        refresh_addon_capabilities(app, true, &fresh).await?;
     }
     Ok(())
 }
 
+/// Returns the `(id, url)` identities it just classified so a follow-up pass can skip them.
 async fn refresh_addon_capabilities(
     app: AppHandle,
     refresh_classified: bool,
-) -> Result<(), String> {
-    let current = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, |store| {
+    skip: &[(String, String)],
+) -> Result<Vec<(String, String)>, String> {
+    let mut current = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, |store| {
         Ok::<_, String>(load_addon_configs(&store))
     })
     .await?;
+    current.retain(|config| {
+        !skip
+            .iter()
+            .any(|(id, url)| *id == config.id && *url == config.url)
+    });
     let classified = refresh_installed_addon_capabilities(current, refresh_classified).await?;
     if classified.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
+    let identities = classified
+        .iter()
+        .map(|config| (config.id.clone(), config.url.clone()))
+        .collect();
 
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
@@ -440,18 +459,47 @@ async fn refresh_addon_capabilities(
         }
         Ok(())
     })
-    .await
+    .await?;
+    Ok(identities)
 }
 
 #[command]
 pub async fn get_addon_configs(app: AppHandle) -> Result<Vec<AddonConfigView>, String> {
+    // Full load: rows show manifest facts (logo, version, resource kinds) from the snapshots.
     super::with_store(app, super::SETTINGS_STORE_FILE, |store| {
-        Ok(AddonConfig::load_identities(&store)
+        Ok(load_addon_configs(&store)
             .into_iter()
             .map(AddonConfigView::from_config)
             .collect())
     })
     .await
+}
+
+fn load_addon_configure_url(store: &DurableStore, id: &str) -> Result<String, String> {
+    let addon = load_addon_configs(store)
+        .into_iter()
+        .find(|addon| addon.id == id)
+        .ok_or_else(|| "Addon not found.".to_string())?;
+    if !addon
+        .capabilities
+        .is_some_and(|snapshot| snapshot.configurable)
+    {
+        return Err("This addon has no configuration page.".to_string());
+    }
+    build_configure_url(&addon.url)
+}
+
+/// Opened from Rust so the webview's opener scope stays limited to its fixed hosts.
+#[command]
+pub async fn open_addon_configure_page(app: AppHandle, id: String) -> Result<(), String> {
+    let url = super::with_store(app.clone(), super::SETTINGS_STORE_FILE, move |store| {
+        load_addon_configure_url(&store, &id)
+    })
+    .await?;
+    // The opener error can echo the URL, which may carry addon credentials.
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "Could not open the addon's configuration page.".to_string())
 }
 
 fn load_addon_url(store: &DurableStore, id: &str) -> Result<String, String> {
@@ -730,6 +778,52 @@ mod tests {
             load_addon_url(&fixture.store, "missing").unwrap_err(),
             "Addon not found."
         );
+    }
+
+    #[test]
+    fn configure_url_requires_a_configurable_installed_addon() {
+        let fixture = crate::test_helpers::test_store();
+        let snapshot = |configurable| {
+            Some(crate::providers::addon_manifest::AddonManifest {
+                configurable,
+                ..crate::test_helpers::cinemeta_manifest()
+            })
+        };
+        save_addon_configs_to_store(
+            &fixture.store,
+            &[
+                AddonConfig {
+                    url: "https://addon.example/abc?key=1".to_string(),
+                    capabilities: snapshot(true),
+                    ..test_addon("configurable", "Configurable")
+                },
+                AddonConfig {
+                    url: "https://addon.example/plain".to_string(),
+                    capabilities: snapshot(false),
+                    ..test_addon("plain", "Plain")
+                },
+                AddonConfig {
+                    url: "https://addon.example/unclassified".to_string(),
+                    ..test_addon("unclassified", "Unclassified")
+                },
+            ],
+        );
+
+        for (id, expected) in [
+            (
+                "configurable",
+                Ok("https://addon.example/abc/configure?key=1"),
+            ),
+            ("plain", Err("This addon has no configuration page.")),
+            ("unclassified", Err("This addon has no configuration page.")),
+            ("missing", Err("Addon not found.")),
+        ] {
+            assert_eq!(
+                load_addon_configure_url(&fixture.store, id).as_deref(),
+                expected.map_err(str::to_string).as_deref(),
+                "{id}"
+            );
+        }
     }
 
     #[test]

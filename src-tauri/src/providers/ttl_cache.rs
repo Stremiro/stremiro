@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// Hash a possibly credential-bearing URL into a key segment: secrets never reach cache keys or logs.
-pub(crate) fn hash_segment(value: &str) -> String {
+pub(crate) fn hash_segment(value: &(impl Hash + ?Sized)) -> String {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     format!("{:016x}", hasher.finish())

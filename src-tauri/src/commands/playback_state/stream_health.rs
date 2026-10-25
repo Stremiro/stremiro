@@ -151,11 +151,22 @@ pub(super) fn preferred_title_source_id_from_success(
     scope_key: &str,
     now_ms: u64,
 ) -> Option<String> {
-    let stream_family_index = load_advisory_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY);
+    // Collect only this scope's keys: snapshot loads re-lock the store, so they
+    // cannot run inside `with_value`.
+    let scope_snapshot_keys: Vec<String> =
+        store.with_value(PLAYBACK_STREAM_FAMILY_INDEX_KEY, |value| {
+            value
+                .and_then(serde_json::Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(serde_json::Value::as_str)
+                .filter(|snapshot_key| playback_snapshot_belongs_to_scope(snapshot_key, scope_key))
+                .map(str::to_string)
+                .collect()
+        });
 
-    stream_family_index
+    scope_snapshot_keys
         .into_iter()
-        .filter(|snapshot_key| playback_snapshot_belongs_to_scope(snapshot_key, scope_key))
         .filter_map(|snapshot_key| {
             let snapshot = load_playback_stream_family_snapshot(store, &snapshot_key)?;
             // A `|` in the media id can fool the prefix check; the body-written

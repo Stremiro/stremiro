@@ -1,6 +1,6 @@
 use super::*;
 use crate::providers::addon_manifest::{parse_addon_manifest, snapshot_is_classified};
-use crate::test_helpers::cinemeta_manifest;
+use crate::test_helpers::{cinemeta_manifest, TestHttpServer};
 
 fn snapshot() -> AddonManifest {
     cinemeta_manifest()
@@ -19,6 +19,10 @@ fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
 
 fn subtitle_item(value: serde_json::Value) -> Option<AddonSubtitle> {
     parse_subtitle_item(serde_json::from_value(value).ok()?)
+}
+
+fn parse_meta_item(value: serde_json::Value) -> Option<MediaDetails> {
+    super::parse_meta_item(&serde_json::value::to_raw_value(&value).ok()?)
 }
 
 #[test]
@@ -82,7 +86,14 @@ async fn request_errors_omit_urls_with_short_credentials() {
             .await
             .unwrap_err();
     let stream_error = transport
-        .get_streams_fresh("movie", "tt1", base, None)
+        .get_streams_fresh(
+            "movie",
+            "tt1",
+            base,
+            ("Addon", "addon"),
+            None,
+            |streams, _, _| streams,
+        )
         .await
         .unwrap_err();
     for error in [resource_error, manifest_error, stream_error] {
@@ -97,40 +108,8 @@ async fn request_errors_omit_urls_with_short_credentials() {
 
 #[tokio::test]
 async fn redirect_policy_failures_are_negative_cached_without_addon_cooldown() {
-    use std::io::{BufRead, BufReader, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    listener.set_nonblocking(true).unwrap();
-    let server = std::thread::spawn(move || {
-        let started = std::time::Instant::now();
-        let mut socket = loop {
-            match listener.accept() {
-                Ok((socket, _)) => break socket,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    assert!(started.elapsed() < Duration::from_secs(10));
-                    std::thread::sleep(Duration::from_millis(1));
-                }
-                Err(error) => panic!("{error}"),
-            }
-        };
-        socket.set_nonblocking(false).unwrap();
-        socket
-            .set_read_timeout(Some(Duration::from_secs(2)))
-            .unwrap();
-        let mut reader = BufReader::new(&mut socket);
-        loop {
-            let mut line = String::new();
-            reader.read_line(&mut line).unwrap();
-            if line == "\r\n" || line.is_empty() {
-                break;
-            }
-        }
-        write!(
-            socket,
-            "HTTP/1.1 302 Found\r\nLocation: http://169.254.169.254/blocked\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-        )
-        .unwrap();
-    });
+    let server = TestHttpServer::new(vec![(302, "", Some("http://169.254.169.254/blocked"))]);
+    let url = server.url.clone();
     let mut client = AddonResourceClient::new();
     client.client = Client::builder()
         .no_proxy()
@@ -141,7 +120,6 @@ async fn redirect_policy_failures_are_negative_cached_without_addon_cooldown() {
         .fetch_catalog(&url, "movie", "top", &[], |item| item)
         .await
         .unwrap_err();
-    server.join().unwrap();
     assert!(error.contains("redirect"));
     assert!(!client.fetch_failures.cooling_down(&hash_segment(&url)));
     let resource_url = build_resource_url(&url, "catalog", "movie", "top", &[]).unwrap();
@@ -158,6 +136,7 @@ async fn redirect_policy_failures_are_negative_cached_without_addon_cooldown() {
             .unwrap_err(),
         error
     );
+    assert_eq!(server.finish(), ["/catalog/movie/top.json"]);
 }
 
 #[tokio::test]
@@ -217,51 +196,19 @@ async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic()
 #[tokio::test(flavor = "current_thread")]
 async fn uncached_resources_normalize_off_async_worker_and_join_failures_stay_request_local() {
     use std::cell::Cell;
-    use std::io::{BufRead, BufReader, Write};
 
     thread_local! {
         static ON_ASYNC_WORKER: Cell<bool> = const { Cell::new(false) };
     }
     ON_ASYNC_WORKER.set(true);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let base = format!("http://{}", listener.local_addr().unwrap());
-    listener.set_nonblocking(true).unwrap();
-    let server = std::thread::spawn(move || {
-        let catalog = r#"{"metas":[{"id":"tt1","name":"Catalog title","type":"movie"}]}"#;
-        let meta = r#"{"meta":{"id":"tt1","name":"Metadata title","type":"series"}}"#;
-        for body in [catalog, meta, catalog, meta] {
-            let started = std::time::Instant::now();
-            let mut socket = loop {
-                match listener.accept() {
-                    Ok((socket, _)) => break socket,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(started.elapsed() < Duration::from_secs(10));
-                        std::thread::sleep(Duration::from_millis(1));
-                    }
-                    Err(error) => panic!("{error}"),
-                }
-            };
-            socket.set_nonblocking(false).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(2)))
-                .unwrap();
-            let mut reader = BufReader::new(&mut socket);
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                if line == "\r\n" || line.is_empty() {
-                    break;
-                }
-            }
-            write!(
-                socket,
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                body.len(),
-                body
-            )
-            .unwrap();
-        }
-    });
+    let catalog = r#"{"metas":[{"id":"tt1","name":"Catalog title","type":"movie"}]}"#;
+    let meta = r#"{"meta":{"id":"tt1","name":"Metadata title","type":"series"}}"#;
+    let server = TestHttpServer::new(
+        [catalog, meta, catalog, meta]
+            .map(|body| (200, body, None))
+            .to_vec(),
+    );
+    let base = server.url.clone();
     let mut client = AddonResourceClient::new();
     client.client = Client::builder().no_proxy().build().unwrap();
     let catalog = client
@@ -294,7 +241,15 @@ async fn uncached_resources_normalize_off_async_worker_and_join_failures_stay_re
         })
         .await
         .unwrap_err();
-    server.join().unwrap();
+    assert_eq!(
+        server.finish(),
+        [
+            "/catalog/movie/top.json",
+            "/meta/series/tt1.json",
+            "/catalog/movie/panic.json",
+            "/meta/series/panic.json",
+        ]
+    );
     for (resource, type_, error, expected) in [
         (
             "catalog",
@@ -553,56 +508,40 @@ fn parse_subtitles_caps_first_valid_rows_in_source_order() {
 }
 
 #[test]
-fn parse_catalog_ignores_full_meta_payload_fields() {
-    let item = catalog_item(serde_json::json!({
-            "id": "tt5607616",
-            "name": "Re:Zero",
-            "type": "series",
-            "poster": "poster",
-            "cast": ["Actor One", "Actor Two"],
-            "trailers": [{"source": "abc", "type": "Trailer"}],
-            "links": [{"name": "share", "url": "https://example.test"}],
-            "behaviorHints": {"hasScheduledVideos": true},
-            "genre": ["Animation", "Adventure", "Drama"]
-    }))
-    .expect("item");
-    assert_eq!(item.id, "tt5607616");
-    assert_eq!(
-        item.genres,
-        Some(vec![
-            "Animation".to_string(),
-            "Adventure".to_string(),
-            "Drama".to_string()
-        ])
-    );
-}
-
-#[test]
-fn parse_catalog_reads_declared_genres() {
-    let item = catalog_item(serde_json::json!({
-            "id": "tt5607616",
-            "name": "Re:Zero",
-            "type": "series",
-            "genre": ["Animation", "Adventure", "Drama"]
-    }))
-    .expect("item");
-    assert_eq!(
-        item.genres,
-        Some(vec![
-            "Animation".to_string(),
-            "Adventure".to_string(),
-            "Drama".to_string()
-        ])
-    );
-
-    let string_genre = catalog_item(serde_json::json!({
-            "id": "tt2",
-            "name": "String Genre",
-            "type": "series",
-            "genre": "Animation"
-    }))
-    .expect("item");
-    assert_eq!(string_genre.genres, Some(vec!["Animation".to_string()]));
+fn parse_catalog_reads_declared_genres_and_ignores_full_meta_fields() {
+    for (label, input, (id, genres)) in [
+        (
+            "full meta",
+            serde_json::json!({
+                "id": "tt5607616", "name": "Re:Zero", "type": "series", "poster": "poster",
+                "cast": ["Actor One", "Actor Two"],
+                "trailers": [{"source": "abc", "type": "Trailer"}],
+                "links": [{"name": "share", "url": "https://example.test"}],
+                "behaviorHints": {"hasScheduledVideos": true},
+                "genre": ["Animation", "Adventure", "Drama"]
+            }),
+            ("tt5607616", &["Animation", "Adventure", "Drama"][..]),
+        ),
+        (
+            "genre array",
+            serde_json::json!({
+                "id": "tt5607616", "name": "Re:Zero", "type": "series",
+                "genre": ["Animation", "Adventure", "Drama"]
+            }),
+            ("tt5607616", &["Animation", "Adventure", "Drama"][..]),
+        ),
+        (
+            "genre string",
+            serde_json::json!({
+                "id": "tt2", "name": "String Genre", "type": "series", "genre": "Animation"
+            }),
+            ("tt2", &["Animation"][..]),
+        ),
+    ] {
+        let item = catalog_item(input).expect(label);
+        assert_eq!(item.id, id, "{label}");
+        assert_eq!(item.genres.expect(label), genres, "{label}");
+    }
 }
 
 #[test]
@@ -613,6 +552,7 @@ fn parse_meta_skips_malformed_episode_siblings() {
         "type": "series",
         "videos": [
             {"id": "tt1:1:1", "name": "Pilot", "season": 1, "episode": 1},
+            null, 42, [], {"id": false}, {"id": " "},
             {"name": "missing-id"},
             {"id": "tt1:1:2", "title": "Next", "season": 1, "number": 2}
         ]
@@ -621,6 +561,52 @@ fn parse_meta_skips_malformed_episode_siblings() {
     let episodes = details.episodes.expect("episodes");
     assert_eq!(episodes.len(), 2);
     assert_eq!(episodes[1].episode, 2);
+    for videos in serde_json::json!([null, 42, {}, "bad", []])
+        .as_array()
+        .unwrap()
+    {
+        let details = parse_meta_item(serde_json::json!({
+            "id": "tt1", "name": "Show", "type": "series", "videos": videos
+        }))
+        .unwrap();
+        assert!(details.episodes.is_none());
+        assert!(details.seasons.is_none());
+    }
+}
+
+#[test]
+fn meta_decode_caps_valid_episodes_before_sorting_and_rejects_invalid_tail_json() {
+    let videos: Vec<_> = (0..=MAX_EPISODES)
+        .flat_map(|index| {
+            [
+                serde_json::json!({"id": false}),
+                serde_json::json!({
+                    "id": index, "season": if index == MAX_EPISODES { 0 } else { 1 },
+                    "episode": MAX_EPISODES - index
+                }),
+            ]
+        })
+        .collect();
+    let bytes = serde_json::to_vec(&serde_json::json!({
+        "meta": {"id": "tt1", "name": "Show", "type": "series", "videos": videos}
+    }))
+    .unwrap();
+    let response: MetaResponse<'_> = serde_json::from_slice(&bytes).unwrap();
+    let details = response.meta.and_then(super::parse_meta_item).unwrap();
+    let episodes = details.episodes.unwrap();
+    assert_eq!(episodes.len(), MAX_EPISODES);
+    assert_eq!(episodes.first().unwrap().id, (MAX_EPISODES - 1).to_string());
+    assert_eq!(episodes.last().unwrap().id, "0");
+    let seasons = details.seasons.unwrap();
+    assert_eq!(seasons.len(), 1);
+    assert_eq!(
+        (seasons[0].number, seasons[0].episode_count),
+        (1, MAX_EPISODES as u32)
+    );
+    let invalid = String::from_utf8(bytes)
+        .unwrap()
+        .replace(&format!(r#""id":{MAX_EPISODES}"#), r#""id":"#);
+    assert!(serde_json::from_str::<MetaResponse<'_>>(&invalid).is_err());
 }
 
 #[test]
@@ -974,17 +960,6 @@ fn resource_cache_clear_empties_all_entries() {
 }
 
 #[test]
-fn resource_cache_drops_superseded_puts() {
-    let cache = TtlCache::new(8, RESOURCE_CACHE_TTL, RESOURCE_CACHE_EMPTY_TTL);
-    // A clear_cache mid-fetch revokes the write — the freshness closure runs
-    // under the entries lock so the stale value can never be stored.
-    cache.put("stale", 1, false, || false);
-    assert_eq!(cache.get("stale"), None);
-    cache.put("fresh", 2, false, || true);
-    assert_eq!(cache.get("fresh"), Some(2));
-}
-
-#[test]
 fn resource_cache_key_is_stable_distinct_and_credential_free() {
     let key_a = resource_cache_key("meta", "https://user:pass@addon.test/meta/series/tt1.json");
     let key_b = resource_cache_key("meta", "https://addon.test/meta/series/tt1.json");
@@ -1130,4 +1105,254 @@ fn deterministic_failures_negative_cache_until_clear() {
     assert_eq!(client.failure_cache.get("meta:x"), None);
     client.fetch_contract().cache_failure("meta:x", "boom", 0);
     assert_eq!(client.failure_cache.get("meta:x"), None);
+}
+
+struct SubtitleDiskTest(PathBuf);
+
+impl SubtitleDiskTest {
+    fn new() -> Self {
+        let path =
+            std::env::temp_dir().join(format!("stremiro-subtitles-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&path).unwrap();
+        Self(path)
+    }
+
+    fn client(&self) -> AddonResourceClient {
+        let mut client = AddonResourceClient::with_subtitle_cache_dir(Some(self.0.clone()));
+        client.client = Client::builder().no_proxy().build().unwrap();
+        client
+    }
+
+    fn file(&self, base: &str, type_: &str, id: &str) -> PathBuf {
+        let url = build_resource_url(base, "subtitles", type_, id, &[]).unwrap();
+        self.0.join("subtitles-v1").join(format!(
+            "{}.json",
+            hash_segment(&resource_cache_key("subtitles", &url))
+        ))
+    }
+}
+
+impl Drop for SubtitleDiskTest {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+const DISK_SUBTITLE_RESPONSE: &str =
+    r#"{"subtitles":[{"id":"en","url":"https://subs.test/en.srt?token=signed","lang":"eng"}]}"#;
+
+#[tokio::test]
+async fn subtitle_disk_cache_reuses_positive_response_after_restart_without_rewriting_expiration() {
+    let disk = SubtitleDiskTest::new();
+    let baseline = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None); 2]);
+    for _ in 0..2 {
+        let mut client = disk.client();
+        client.subtitle_disk_dir = None;
+        client
+            .fetch_subtitles(&baseline.url, "series", "tt1:1:2")
+            .await
+            .unwrap();
+    }
+    assert_eq!(baseline.finish().len(), 2, "memory-only clients each fetch");
+    let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None)]);
+    let first = disk
+        .client()
+        .fetch_subtitles(&server.url, "series", "tt1:1:2")
+        .await
+        .unwrap();
+    let path = disk.file(&server.url, "series", "tt1:1:2");
+    let original = std::fs::read(&path).unwrap();
+    let restarted = disk.client();
+    for _ in 0..2 {
+        assert_eq!(
+            restarted
+                .fetch_subtitles(&server.url, "series", "tt1:1:2")
+                .await
+                .unwrap(),
+            first
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+    assert_eq!(server.finish(), ["/subtitles/series/tt1%3A1%3A2.json"]);
+}
+
+#[tokio::test]
+async fn subtitle_disk_cache_isolates_configured_source_type_and_episode() {
+    let disk = SubtitleDiskTest::new();
+    let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None); 4]);
+    let configured = format!("{}?lang=fra&hash=different", server.url);
+    for (base, type_, id) in [
+        (server.url.as_str(), "series", "tt1:1:2"),
+        (configured.as_str(), "series", "tt1:1:2"),
+        (server.url.as_str(), "movie", "tt1:1:2"),
+        (server.url.as_str(), "series", "tt1:1:3"),
+    ] {
+        for _ in 0..2 {
+            assert_eq!(
+                disk.client()
+                    .fetch_subtitles(base, type_, id)
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
+        }
+    }
+    assert_eq!(
+        server.finish(),
+        [
+            "/subtitles/series/tt1%3A1%3A2.json",
+            "/subtitles/series/tt1%3A1%3A2.json?lang=fra&hash=different",
+            "/subtitles/movie/tt1%3A1%3A2.json",
+            "/subtitles/series/tt1%3A1%3A3.json",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn subtitle_disk_hits_do_not_extend_signed_url_lifetime_in_memory() {
+    let disk = SubtitleDiskTest::new();
+    let fresh = r#"{"subtitles":[{"id":"en","url":"https://subs.test/en.srt?token=fresh"}]}"#;
+    let server = TestHttpServer::new(vec![
+        (200, DISK_SUBTITLE_RESPONSE, None),
+        (200, fresh, None),
+    ]);
+    disk.client()
+        .fetch_subtitles(&server.url, "movie", "tt1")
+        .await
+        .unwrap();
+    let path = disk.file(&server.url, "movie", "tt1");
+    let mut entry: SubtitleDiskEntry =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    entry.expires_at = SystemTime::now() + Duration::from_millis(500);
+    std::fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
+    let restarted = disk.client();
+    assert!(restarted
+        .fetch_subtitles(&server.url, "movie", "tt1")
+        .await
+        .unwrap()[0]
+        .url
+        .ends_with("token=signed"));
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    assert!(restarted
+        .fetch_subtitles(&server.url, "movie", "tt1")
+        .await
+        .unwrap()[0]
+        .url
+        .ends_with("token=fresh"));
+    assert_eq!(server.finish().len(), 2);
+}
+
+#[tokio::test]
+async fn subtitle_disk_corruption_oversize_and_unsafe_urls_fall_back_to_http() {
+    let disk = SubtitleDiskTest::new();
+    let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None); 5]);
+    disk.client()
+        .fetch_subtitles(&server.url, "movie", "tt1")
+        .await
+        .unwrap();
+    let path = disk.file(&server.url, "movie", "tt1");
+    let unsafe_entry = serde_json::to_vec(&SubtitleDiskEntry {
+        expires_at: SystemTime::now() + RESOURCE_CACHE_TTL,
+        response: serde_json::from_str(
+            r#"{"subtitles":[{"id":"en","url":"http://127.0.0.1/private"}]}"#,
+        )
+        .unwrap(),
+    })
+    .unwrap();
+    let future_entry = serde_json::to_vec(&SubtitleDiskEntry {
+        expires_at: SystemTime::now() + RESOURCE_CACHE_TTL * 2,
+        response: serde_json::from_str(DISK_SUBTITLE_RESPONSE).unwrap(),
+    })
+    .unwrap();
+    for bytes in [
+        b"broken json".to_vec(),
+        vec![b' '; SUBTITLE_DISK_MAX_BYTES + 1],
+        unsafe_entry,
+        future_entry,
+    ] {
+        std::fs::write(&path, bytes).unwrap();
+        assert_eq!(
+            disk.client()
+                .fetch_subtitles(&server.url, "movie", "tt1")
+                .await
+                .unwrap()[0]
+                .url,
+            "https://subs.test/en.srt?token=signed"
+        );
+    }
+    assert_eq!(server.finish().len(), 5);
+}
+
+#[tokio::test]
+async fn subtitle_disk_cache_does_not_persist_empty_or_failed_responses_and_write_errors_are_optional(
+) {
+    let disk = SubtitleDiskTest::new();
+    let server = TestHttpServer::new(vec![
+        (200, r#"{"subtitles":[]}"#, None),
+        (404, "{}", None),
+        (200, "broken json", None),
+        (200, DISK_SUBTITLE_RESPONSE, None),
+        (200, DISK_SUBTITLE_RESPONSE, None),
+    ]);
+    for attempt in 0..3 {
+        let result = disk
+            .client()
+            .fetch_subtitles(&server.url, "movie", "tt1")
+            .await;
+        if attempt == 0 {
+            assert!(result.unwrap().is_empty());
+        } else {
+            assert!(result.is_err());
+        }
+        assert!(!disk.file(&server.url, "movie", "tt1").exists());
+    }
+    let blocked = disk.0.join("blocked");
+    std::fs::write(&blocked, "not a directory").unwrap();
+    for _ in 0..2 {
+        let mut client = disk.client();
+        client.subtitle_disk_dir = Some(blocked.join("subtitles-v1"));
+        assert_eq!(
+            client
+                .fetch_subtitles(&server.url, "movie", "tt1")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    assert_eq!(server.finish().len(), 5);
+}
+
+#[tokio::test]
+async fn subtitle_disk_cache_bounds_files_under_concurrent_writers() {
+    use futures_util::StreamExt;
+
+    let disk = SubtitleDiskTest::new();
+    let count = SUBTITLE_CACHE_MAX_ENTRIES + 4;
+    let server = TestHttpServer::new(vec![(200, DISK_SUBTITLE_RESPONSE, None); count]);
+    let client = disk.client();
+    futures_util::stream::iter(0..count)
+        .map(|index| {
+            let client = &client;
+            let base = &server.url;
+            async move {
+                client
+                    .fetch_subtitles(base, "movie", &format!("tt{index}"))
+                    .await
+                    .unwrap()
+            }
+        })
+        .buffer_unordered(8)
+        .collect::<Vec<_>>()
+        .await;
+    let files: Vec<_> = std::fs::read_dir(disk.0.join("subtitles-v1"))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(files.len(), SUBTITLE_CACHE_MAX_ENTRIES);
+    assert!(files
+        .iter()
+        .all(|file| file.metadata().unwrap().len() <= SUBTITLE_DISK_MAX_BYTES as u64));
+    assert_eq!(server.finish().len(), count);
 }

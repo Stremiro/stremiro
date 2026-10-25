@@ -7,6 +7,7 @@ use super::{
     StreamRankingScope, StreamSelectorData, StreamSelectorSnapshot, StreamSelectorStats,
     StreamSourceStatus, StreamSourceSummary, ACTIVE_SOURCE_COOLDOWN_PRIORITY,
 };
+use crate::commands::config_store::AddonConfig;
 use crate::commands::probe_pool::{is_probeable_stream, StreamExclusions};
 use crate::commands::stream_coordinator::{
     sort_streams_by_recommendation, StreamRecommendationInputs, StreamSignalCache,
@@ -19,6 +20,24 @@ use crate::providers::addons::{
 };
 use crate::test_helpers::{test_addon, test_stream};
 use std::collections::{BTreeMap, HashMap};
+
+/// The transport caches prepared rows, exactly as a real fetch stores them.
+fn seed_prepared(
+    provider: &AddonTransport,
+    media_type: &str,
+    id: &str,
+    addon: &AddonConfig,
+    streams: Vec<AddonStream>,
+) {
+    let prepared = prepare_addon_streams(streams, &addon.name, &addon.id);
+    provider.seed_stream_cache(
+        media_type,
+        id,
+        &addon.url,
+        (&addon.name, &addon.id),
+        prepared,
+    );
+}
 
 #[test]
 fn resolve_prefilter_preserves_selector_rows_and_all_p2p_vs_empty() {
@@ -188,7 +207,7 @@ async fn stream_link_lookup_keeps_searching_after_errors_and_distinguishes_missi
                     .stream_key
                     .clone();
                 }
-                provider.seed_stream_cache("movie", &query_ids[0], &addon.url, streams);
+                seed_prepared(&provider, "movie", &query_ids[0], addon, streams);
             }
             let result = fetch_stream_for_link_from_addons(
                 &provider,
@@ -374,7 +393,7 @@ async fn video_id_queries_preserve_primary_fallbacks_and_source_episode_eligibil
             } else {
                 Vec::new()
             };
-            provider.seed_stream_cache("series", id, &addon.url, streams);
+            seed_prepared(&provider, "series", id, &addon, streams);
         }
         let outcome = fetch_addon_stream_outcome(
             &provider,
@@ -416,7 +435,7 @@ async fn stream_capabilities_route_query_ids_and_gate_each_attempt() {
                 types: vec!["series".to_string()],
                 id_prefixes: vec![prefix.to_string()],
             }],
-            catalogs: Vec::new(),
+            ..Default::default()
         });
         let query_ids = build_stream_query_ids(media_type, id, Some(2), Some(3), Some(27));
         assert_eq!(
@@ -431,7 +450,7 @@ async fn stream_capabilities_route_query_ids_and_gate_each_attempt() {
             } else {
                 vec![episode_stream(names[index])]
             };
-            provider.seed_stream_cache("series", query_id, &addon.url, streams);
+            seed_prepared(&provider, "series", query_id, &addon, streams);
         }
 
         for eligibility in [
@@ -483,6 +502,8 @@ async fn first_supported_stream_query_gets_the_primary_timeout() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let url = format!("http://{}", listener.local_addr().unwrap());
     listener.set_nonblocking(true).unwrap();
+    let (requested, request_received) = tokio::sync::oneshot::channel();
+    let (respond, response_ready) = std::sync::mpsc::channel();
     let server = std::thread::spawn(move || {
         let started = Instant::now();
         let mut socket = loop {
@@ -509,7 +530,8 @@ async fn first_supported_stream_query_gets_the_primary_timeout() {
                 break;
             }
         }
-        std::thread::sleep(Duration::from_secs(6));
+        requested.send(()).unwrap();
+        response_ready.recv_timeout(Duration::from_secs(2)).unwrap();
         let body = r#"{"streams":[{"url":"https://cdn.example/video.mkv"}]}"#;
         let _ = write!(
             socket,
@@ -526,12 +548,28 @@ async fn first_supported_stream_query_gets_the_primary_timeout() {
             types: vec!["series".to_string()],
             id_prefixes: vec!["kitsu:123:3".to_string()],
         }],
-        catalogs: Vec::new(),
+        ..Default::default()
     });
     let ids = build_stream_query_ids("anime", "kitsu:123", Some(2), Some(3), Some(27));
-    let outcome =
-        fetch_addon_stream_outcome(&AddonTransport::new(), "series", &ids, &addon, None, None)
-            .await;
+    let provider = AddonTransport::new();
+    let outcome = fetch_addon_stream_outcome(&provider, "series", &ids, &addon, None, None);
+    tokio::pin!(outcome);
+    tokio::select! {
+        ready = request_received => ready.unwrap(),
+        _ = &mut outcome => panic!("query completed before the delayed response"),
+    }
+    // Pause only after the real request arrives; resume before response I/O so
+    // an idle runtime cannot auto-advance through reqwest's socket deadlines.
+    tokio::time::pause();
+    tokio::select! {
+        _ = tokio::time::sleep(Duration::from_secs(6)) => {}
+        _ = &mut outcome => {
+            panic!("the first supported query must outlive the five-second fallback timeout");
+        }
+    }
+    tokio::time::resume();
+    respond.send(()).unwrap();
+    let outcome = outcome.await;
     let request = server.join().unwrap();
     assert!(request.contains(&urlencoding::encode(&ids[1]).into_owned()));
     assert!(
@@ -562,16 +600,18 @@ async fn resolve_uses_fallback_when_primary_only_has_conflicting_episodes() {
     };
     let targets = query.episode_targets(&ranking);
     let query_ids = ["tt123:2:3".to_string(), "tt123:1:27".to_string()];
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[0],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.S02E28")],
     );
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[1],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.S01E27")],
     );
 
@@ -605,7 +645,7 @@ async fn stream_audit_recovery_uses_supported_fallback_after_excluded_primary() 
             types: vec!["series".to_string()],
             id_prefixes: vec!["tt123:2:3".to_string(), "tt123:1:27".to_string()],
         }],
-        catalogs: Vec::new(),
+        ..Default::default()
     });
     let query_ids = [
         "tt123:2:3".to_string(),
@@ -621,8 +661,8 @@ async fn stream_audit_recovery_uses_supported_fallback_after_excluded_primary() 
         .into_iter()
         .map(|stream| stream.stream_key)
         .collect::<Vec<_>>();
-    provider.seed_stream_cache("series", &query_ids[0], &addon.url, vec![primary]);
-    provider.seed_stream_cache("series", &query_ids[2], &addon.url, vec![fallback]);
+    seed_prepared(&provider, "series", &query_ids[0], &addon, vec![primary]);
+    seed_prepared(&provider, "series", &query_ids[2], &addon, vec![fallback]);
     let exclusions = StreamExclusions::new(&excluded_keys, None, None);
     let streams = fetch_prepared_streams_for_addon(
         &provider,
@@ -665,8 +705,8 @@ async fn stream_audit_late_request_alias_reopens_only_its_addon_fallback() {
         (&failed_addon, failed, Vec::new()),
         (&alias_addon, alias, vec![fallback]),
     ] {
-        provider.seed_stream_cache("series", &ids[0], &addon.url, vec![primary]);
-        provider.seed_stream_cache("series", &ids[1], &addon.url, secondary);
+        seed_prepared(&provider, "series", &ids[0], addon, vec![primary]);
+        seed_prepared(&provider, "series", &ids[1], addon, secondary);
     }
     let exclusions = StreamExclusions::new(&[], Some(&failed_key), None);
     let eligibility = Some(EpisodeEligibility {
@@ -703,16 +743,18 @@ async fn resolve_stops_at_primary_when_any_episode_candidate_survives() {
     let provider = AddonTransport::new();
     let addon = test_addon("https://addon.example", "Example Addon");
     let query_ids = ["tt123:2:3".to_string(), "tt123:1:27".to_string()];
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[0],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.S02E28"), episode_stream("Show.S02E03")],
     );
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[1],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.S01E27")],
     );
 
@@ -740,16 +782,18 @@ async fn selector_and_link_fetches_keep_primary_pack_rows_without_eligibility() 
     let provider = AddonTransport::new();
     let addon = test_addon("https://addon.example", "Example Addon");
     let query_ids = ["tt123:2:3".to_string(), "tt123:1:27".to_string()];
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[0],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.Season.1.Complete")],
     );
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "series",
         &query_ids[1],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.S02E03")],
     );
 
@@ -778,10 +822,11 @@ async fn movie_fetches_bypass_episode_eligibility_with_no_targets() {
     let provider = AddonTransport::new();
     let addon = test_addon("https://addon.example", "Example Addon");
     let query_ids = ["tt123".to_string()];
-    provider.seed_stream_cache(
+    seed_prepared(
+        &provider,
         "movie",
         &query_ids[0],
-        &addon.url,
+        &addon,
         vec![episode_stream("Show.Season.1.Complete")],
     );
 

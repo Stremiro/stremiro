@@ -8,7 +8,7 @@ use super::stream_resolver::{
     ResolveStreamErrorKind, ResolvedStream,
 };
 use super::streaming_helpers::{
-    canonicalize_header_identity, is_legacy_content_key, is_prepared_stream_key,
+    canonicalize_header_identity, has_prepared_stream_key_prefix, is_legacy_content_key,
     normalize_source_id, normalize_source_key, push_bounded_error, stream_dedup_key,
 };
 use super::{js_trim, normalize_media_id, normalize_non_empty, normalize_stream_media_type};
@@ -28,6 +28,9 @@ pub(crate) const BEST_STREAM_CANDIDATE_TIMEOUT_SECS: u64 = 10;
 pub(crate) const BEST_STREAM_MAX_CANDIDATES: usize = 24;
 const BEST_STREAM_PROBE_CONCURRENCY: usize = 8;
 const SAME_HOST_PROBE_SPACING: Duration = Duration::from_millis(150);
+/// How long a landed lower-ranked winner waits on still-pending higher ranks; a hung
+/// top candidate would otherwise hold playback start until the probe deadline.
+const RANKED_WINNER_GRACE: Duration = Duration::from_millis(2500);
 
 /// Normalized stream-command inputs: validated media identity plus the resolved
 /// ranking scope — the one path shared by all three stream commands
@@ -147,6 +150,15 @@ impl ProbeRequestIdentity {
         canonicalize_header_identity(&mut headers);
         Some(Self { url, headers })
     }
+
+    fn from_candidate(candidate: &StreamResolveCandidateInput) -> Self {
+        let mut headers = candidate.request_headers.clone();
+        canonicalize_header_identity(&mut headers);
+        Self {
+            url: candidate.direct_url.clone(),
+            headers,
+        }
+    }
 }
 
 /// Owned probe inputs — no borrowed selector state crosses the concurrency boundary.
@@ -211,7 +223,7 @@ async fn probe_candidate(
         if !delay.is_zero() {
             tokio::time::sleep(delay).await;
         }
-        resolve_stream_inner(candidate.direct_url.as_str(), &candidate.request_headers).await
+        resolve_stream_inner(&candidate.direct_url, &candidate.request_headers).await
     })
     .await;
 
@@ -264,7 +276,9 @@ impl<'a> StreamExclusions<'a> {
             has_legacy_keys: keys.iter().any(|key| is_legacy_content_key(key)),
             keys,
             resolved_url: resolved_url
-                .filter(|_| failed_key.is_none_or(|key| !is_prepared_stream_key(key.trim())))
+                .filter(|_| {
+                    failed_key.is_none_or(|key| !has_prepared_stream_key_prefix(key.trim()))
+                })
                 .and_then(crate::providers::addon_resource::parse_fetchable_http_url),
             requests: Mutex::new(Vec::new()),
         }
@@ -457,19 +471,15 @@ where
     F: Future<Output = CandidateProbeResult>,
 {
     let started = Instant::now();
-    let excluded_resolved_url = excluded_resolved_url
-        .filter(|_| excluded_stream_key.is_none_or(|key| !is_prepared_stream_key(key.trim())));
+    let excluded_resolved_url = excluded_resolved_url.filter(|_| {
+        excluded_stream_key.is_none_or(|key| !has_prepared_stream_key_prefix(key.trim()))
+    });
     let mut inputs = inputs
         .into_iter()
         .enumerate()
         .map(move |(rank, (candidate, delay))| {
             if let Some(requests) = started_requests.as_deref_mut() {
-                let mut headers = candidate.request_headers.clone();
-                canonicalize_header_identity(&mut headers);
-                requests.push(ProbeRequestIdentity {
-                    url: candidate.direct_url.clone(),
-                    headers,
-                });
+                requests.push(ProbeRequestIdentity::from_candidate(&candidate));
             }
             let probe = probe(candidate, delay.saturating_sub(started.elapsed()), deadline);
             async move { (rank, probe.await) }
@@ -477,19 +487,33 @@ where
     let mut pending = FuturesUnordered::new();
     pending.extend(inputs.by_ref().take(BEST_STREAM_PROBE_CONCURRENCY));
     let candidates = stream::unfold(
-        (pending, inputs, BTreeMap::new(), 0, false),
-        move |(mut pending, mut inputs, mut completed, mut next_rank, mut has_winner)| async move {
+        (pending, inputs, BTreeMap::new(), 0, None),
+        move |(mut pending, mut inputs, mut completed, mut next_rank, mut winner_at)| async move {
             loop {
                 if let Some(result) = completed.remove(&next_rank) {
                     next_rank += 1;
-                    return Some((result, (pending, inputs, completed, next_rank, has_winner)));
+                    return Some((result, (pending, inputs, completed, next_rank, winner_at)));
                 }
-                let (rank, result) = pending.next().await?;
+                let next = match winner_at {
+                    Some(landed) => {
+                        match tokio::time::timeout_at(landed + RANKED_WINNER_GRACE, pending.next())
+                            .await
+                        {
+                            Ok(next) => next,
+                            Err(_) => {
+                                next_rank = *completed.keys().next()?;
+                                continue;
+                            }
+                        }
+                    }
+                    None => pending.next().await,
+                };
+                let (rank, result) = next?;
                 if matches!(&result.1, Ok(Ok(resolved)) if excluded_resolved_url.is_none_or(|url| {
                     probe_url_identity(url) != probe_url_identity(&resolved.url)
                 })) {
-                    has_winner = true;
-                } else if !has_winner && Instant::now() < deadline {
+                    winner_at.get_or_insert_with(Instant::now);
+                } else if winner_at.is_none() && Instant::now() < deadline {
                     if let Some(next) = inputs.next() {
                         pending.push(next);
                     }
@@ -521,12 +545,7 @@ fn build_probe_candidates(
     let mut identities = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
     let mut host_counts = HashMap::<String, u32>::new();
     for candidate in streams.into_iter().filter_map(build_candidate_input) {
-        let mut headers = candidate.request_headers.clone();
-        canonicalize_header_identity(&mut headers);
-        let identity = ProbeRequestIdentity {
-            url: candidate.direct_url.clone(),
-            headers,
-        };
+        let identity = ProbeRequestIdentity::from_candidate(&candidate);
         // Equivalent requests share a probe; different auth headers stay separate even on the same URL.
         if identities.contains(&identity) {
             continue;
@@ -547,8 +566,9 @@ fn build_probe_candidates(
     candidates
 }
 
-/// Stagger same-host requests within one probe deadline, retaining rank order
-/// and cancelling outstanding probes as soon as the first ranked winner lands.
+/// Stagger same-host requests within one probe deadline. Winners settle in rank order,
+/// but a landed winner waits at most `RANKED_WINNER_GRACE` on pending higher ranks;
+/// outstanding probes are cancelled once a winner settles.
 pub(crate) async fn resolve_ranked_best_stream_candidate(
     streams: Vec<AddonStream>,
     excluded_stream_key: Option<&str>,

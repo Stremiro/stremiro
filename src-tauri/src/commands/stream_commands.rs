@@ -17,7 +17,7 @@ use super::{
     stream_resolver::{
         BestResolvedStream, ResolveStreamError, ResolveStreamErrorKind, MISSING_DIRECT_URL_MESSAGE,
     },
-    streaming_helpers::{is_prepared_stream_key, normalize_stream_key},
+    streaming_helpers::{has_prepared_stream_key_prefix, normalize_stream_key},
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::addon_resource::{
@@ -319,7 +319,7 @@ pub async fn get_stream_link(
         "stream lookup",
     )?;
     let stream_key = normalize_stream_key(&stream_key)
-        .filter(|key| is_prepared_stream_key(key))
+        .filter(|key| has_prepared_stream_key_prefix(key))
         .ok_or_else(|| STREAM_LINK_CHANGED_MESSAGE.to_string())?;
     let stream = fetch_stream_for_link(
         &app,
@@ -855,11 +855,13 @@ async fn recover_playback_stream_work(
                 deadline,
             )
             .await;
-        if let Some(claim) = refresh_claim {
-            claim.complete();
-        }
         let mut streams = match fetched {
-            Ok(streams) => streams,
+            Ok(streams) => {
+                if let Some(claim) = refresh_claim {
+                    claim.complete();
+                }
+                streams
+            }
             Err(error) => {
                 // Contract stays Ok(None) for compat; observability only.
                 warn_recovery("fetch-failed", &error);

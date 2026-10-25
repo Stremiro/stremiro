@@ -25,7 +25,8 @@ fn configuration_required_blocks_only_new_installations_without_changing_snapsho
         serde_json::json!({
             "name": "Needs setup",
             "resources": [{"name": "stream", "types": ["movie"], "idPrefixes": []}],
-            "catalogs": []
+            "catalogs": [],
+            "configurable": true
         })
     );
 }
@@ -182,96 +183,45 @@ fn parse_cinemeta_like_manifest_classifies_catalog_and_meta() {
 }
 
 #[test]
-fn object_resource_without_prefixes_inherits_manifest_prefixes() {
-    let snapshot = parse(
-        r#"{
-                "name": "Streams",
-                "resources": [
-                    {"name": "stream", "types": ["movie"]}
-                ],
-                "types": ["movie", "series"],
-                "idPrefixes": ["tt"],
-                "catalogs": []
-            }"#,
-    );
-
-    assert!(snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "tt0944947"
-    ));
-    assert!(!snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "kitsu:48316"
-    ));
-    assert!(!snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "series",
-        "tt0944947"
-    ));
-}
-
-#[test]
-fn object_resource_null_types_and_prefixes_inherit_from_manifest() {
-    let snapshot = parse(
-        r#"{
-                "name": "Nulls",
-                "resources": [
-                    {"name": "stream", "types": null, "idPrefixes": null}
-                ],
-                "types": ["movie"],
-                "idPrefixes": ["tt"],
-                "catalogs": []
-            }"#,
-    );
-
-    // `null` behaves like an absent key: `types` inherits (the resource
-    // stays alive) and `idPrefixes` inherits rather than opting out.
-    assert_eq!(snapshot.resources[0].types, vec!["movie"]);
-    assert!(snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "tt0944947"
-    ));
-    assert!(!snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "kitsu:48316"
-    ));
-}
-
-#[test]
-fn object_resource_explicit_empty_prefixes_matches_all_ids() {
-    let snapshot = parse(
-        r#"{
-                "name": "Local",
-                "resources": [
-                    {"name": "stream", "types": ["movie"], "idPrefixes": []}
-                ],
-                "types": ["movie"],
-                "idPrefixes": ["tt"],
-                "catalogs": []
-            }"#,
-    );
-
-    assert!(snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "file://movie"
-    ));
-    assert!(snapshot_supports_request(
-        &snapshot,
-        "stream",
-        "movie",
-        "kitsu:48316"
-    ));
+fn object_resource_unrestricted_prefixes_preserve_type_scope() {
+    for (label, resource, inherited_types) in [
+        (
+            "absent",
+            serde_json::json!({"name": "stream", "types": ["movie"]}),
+            vec!["movie", "series"],
+        ),
+        (
+            "null",
+            serde_json::json!({"name": "stream", "types": null, "idPrefixes": null}),
+            vec!["movie"],
+        ),
+        (
+            "empty",
+            serde_json::json!({"name": "stream", "types": ["movie"], "idPrefixes": []}),
+            vec!["movie"],
+        ),
+    ] {
+        let snapshot = parse(
+            &serde_json::json!({
+                "name": label, "resources": [resource], "types": inherited_types,
+                "idPrefixes": ["tt"], "catalogs": []
+            })
+            .to_string(),
+        );
+        assert_eq!(snapshot.resources[0].types, ["movie"], "{label}");
+        for (media_type, id, expected) in [
+            ("movie", "tt0944947", true),
+            ("movie", "kitsu:48316", true),
+            ("movie", "file://movie", true),
+            ("series", "tt0944947", false),
+        ] {
+            assert_eq!(
+                snapshot_supports_request(&snapshot, "stream", media_type, id),
+                expected,
+                "{label}: {media_type}, {id}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -425,4 +375,109 @@ fn catalog_matching_is_case_insensitive() {
         "MOVIE",
         "TT0944947"
     ));
+}
+
+#[test]
+fn display_facts_are_bounded_sanitized_and_never_fail_the_manifest() {
+    let long_description = "d".repeat(MAX_DESCRIPTION_CHARS + 20);
+    for (fields, logo, version, description, configurable) in [
+        (
+            serde_json::json!({
+                "logo": "https://addon.example/logo.png",
+                "version": " 1.2.3 ",
+                "description": "Streams from somewhere.",
+                "behaviorHints": {"configurable": true}
+            }),
+            Some("https://addon.example/logo.png"),
+            Some("1.2.3"),
+            Some("Streams from somewhere."),
+            true,
+        ),
+        (
+            serde_json::json!({
+                "logo": "javascript:alert(1)",
+                "version": 3,
+                "description": long_description,
+                "behaviorHints": {"configurable": "yes"}
+            }),
+            None,
+            None,
+            Some(&long_description[..MAX_DESCRIPTION_CHARS]),
+            false,
+        ),
+        (
+            serde_json::json!({"logo": {"src": "x"}, "description": "  "}),
+            None,
+            None,
+            None,
+            false,
+        ),
+    ] {
+        let mut value = serde_json::json!({"name": "Addon", "resources": ["stream"]});
+        for (key, field) in fields.as_object().unwrap() {
+            value[key] = field.clone();
+        }
+        let snapshot = parse(&value.to_string());
+        assert_eq!(snapshot.logo.as_deref(), logo);
+        assert_eq!(snapshot.version.as_deref(), version);
+        assert_eq!(snapshot.description.as_deref(), description);
+        assert_eq!(snapshot.configurable, configurable);
+    }
+}
+
+#[test]
+fn stored_snapshots_without_display_facts_still_decode() {
+    let stored = serde_json::json!({
+        "name": "Legacy",
+        "resources": [{"name": "stream", "types": ["movie"], "idPrefixes": []}],
+        "catalogs": []
+    });
+    let snapshot = AddonManifest::deserialize(&stored).expect("legacy snapshot");
+    assert!(snapshot.logo.is_none() && !snapshot.configurable);
+    assert_eq!(serde_json::to_value(&snapshot).unwrap(), stored);
+}
+
+#[test]
+fn resource_kinds_follow_routing_rules() {
+    use AddonResourceKind::{Catalog, Meta, Stream, Subtitles};
+    for (json, expected) in [
+        (
+            crate::test_helpers::cinemeta_manifest_json(),
+            vec![Catalog, Meta],
+        ),
+        (
+            r#"{"name":"S","resources":["subtitles","stream"],"types":["movie"]}"#,
+            vec![Stream, Subtitles],
+        ),
+        (r#"{"name":"Typeless","resources":["stream"]}"#, vec![]),
+        (
+            r#"{"name":"Catalogs","catalogs":[{"type":"movie","id":"top"}]}"#,
+            vec![Catalog],
+        ),
+    ] {
+        assert_eq!(snapshot_resource_kinds(&parse(json)), expected, "{json}");
+    }
+}
+
+#[test]
+fn configure_url_replaces_the_manifest_segment_and_keeps_the_query() {
+    for (base, expected) in [
+        ("https://addon.example", "https://addon.example/configure"),
+        ("https://addon.example/", "https://addon.example/configure"),
+        (
+            "https://addon.example/abc%7C123",
+            "https://addon.example/abc%7C123/configure",
+        ),
+        (
+            "http://addon.example/abc?key=1",
+            "http://addon.example/abc/configure?key=1",
+        ),
+        (
+            "https://addon.example/abc/Manifest.json",
+            "https://addon.example/abc/configure",
+        ),
+    ] {
+        assert_eq!(build_configure_url(base).unwrap(), expected);
+    }
+    assert!(build_configure_url("not a url").is_err());
 }

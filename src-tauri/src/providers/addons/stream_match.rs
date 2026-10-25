@@ -141,10 +141,7 @@ static ORDINAL_SEASON_WORD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     .expect("valid ordinal season word regex")
 });
 
-// Tier values serialize snake_case while carrier fields stay camelCase —
-// the selector's badges/tier map key on that contract.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq, PartialOrd, Ord)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) enum StreamEpisodeMatchKind {
     None,
     SeasonPack,
@@ -154,8 +151,7 @@ pub(crate) enum StreamEpisodeMatchKind {
 
 /// Title-overlap tier derived from the coordinator's relevance score:
 /// `Close` is a full reference-token overlap, `Partial` a strong one.
-#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum StreamTitleMatch {
     Partial,
     Close,
@@ -166,9 +162,9 @@ pub(crate) enum StreamTitleMatch {
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct StreamMatchSummary {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub episode: Option<StreamEpisodeMatchKind>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing)]
     pub title: Option<StreamTitleMatch>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pack_coverage: Option<StreamPackCoverage>,
@@ -235,18 +231,13 @@ fn has_episode_range(text: &str) -> bool {
 }
 
 fn ordinal_season_word_number(word: &str) -> Option<u32> {
-    match word.to_ascii_lowercase().as_str() {
-        "first" => Some(1),
-        "second" => Some(2),
-        "third" => Some(3),
-        "fourth" => Some(4),
-        "fifth" => Some(5),
-        "sixth" => Some(6),
-        "seventh" => Some(7),
-        "eighth" => Some(8),
-        "ninth" => Some(9),
-        _ => None,
-    }
+    const ORDINALS: [&str; 9] = [
+        "first", "second", "third", "fourth", "fifth", "sixth", "seventh", "eighth", "ninth",
+    ];
+    ORDINALS
+        .iter()
+        .position(|ordinal| ordinal.eq_ignore_ascii_case(word))
+        .map(|index| index as u32 + 1)
 }
 
 fn explicit_season_ranges(text: &str) -> impl Iterator<Item = (u32, u32)> + '_ {
@@ -323,18 +314,16 @@ fn strip_episode_ranges(text: &str) -> Cow<'_, str> {
         &*X_SEASON_EPISODE_RANGE_REGEX,
         &*EPISODE_RANGE_REGEX,
     ] {
-        let replaced = match regex.replace_all(&stripped, |captures: &regex::Captures<'_>| {
-            let matched = captures.get(0).expect("range match");
-            if bare_episode_suffix_is_metadata(&stripped[matched.end()..]) {
-                &stripped[matched.start()..matched.end()]
-            } else {
-                " "
-            }
-        }) {
-            Cow::Owned(replaced) => Some(replaced),
-            Cow::Borrowed(_) => None,
-        };
-        if let Some(replaced) = replaced {
+        if let Cow::Owned(replaced) =
+            regex.replace_all(&stripped, |captures: &regex::Captures<'_>| {
+                let matched = captures.get(0).expect("range match");
+                if bare_episode_suffix_is_metadata(&stripped[matched.end()..]) {
+                    &stripped[matched.start()..matched.end()]
+                } else {
+                    " "
+                }
+            })
+        {
             stripped = Cow::Owned(replaced);
         }
     }

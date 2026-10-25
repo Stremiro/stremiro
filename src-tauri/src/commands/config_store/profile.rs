@@ -270,8 +270,8 @@ pub(crate) fn load_profile_preferences(
     avatars: &DurableStore,
 ) -> ProfilePreferences {
     let mut preferences = settings
-        .get(PROFILE_PREFERENCES_KEY)
-        .and_then(parse_profile_preferences)
+        .get_typed::<StoredProfilePreferences>(PROFILE_PREFERENCES_KEY)
+        .map(normalize_stored_profile_preferences)
         .unwrap_or_default();
     let Some(legacy) = preferences.profile.avatar.take() else {
         preferences.profile.avatar =
@@ -291,8 +291,16 @@ pub(crate) fn load_profile_preferences(
     preferences.profile.avatar = Some(stored.unwrap_or(legacy));
     if migrated {
         // A failed save leaves settings dirty for the exit flush; the avatar is already durable.
-        let _ = save_profile_preferences_to_store(settings, avatars, &preferences)
-            .and_then(|()| settings.save());
+        if let Err(error) = save_profile_preferences_to_store(settings, avatars, &preferences)
+            .and_then(|()| settings.save())
+        {
+            crate::operational_log::log_warn(
+                "store",
+                "profile-avatar-migration",
+                "cleanup-failed",
+                &[crate::operational_log::field("error", error)],
+            );
+        }
     } else {
         crate::operational_log::log_warn("store", "profile-avatar-migration", "deferred", &[]);
     }
@@ -306,23 +314,27 @@ pub(crate) fn save_profile_preferences_to_store(
     preferences: &ProfilePreferences,
 ) -> Result<(), String> {
     let mut value = serde_json::json!(preferences);
-    let previous_avatar = avatars.get(PROFILE_AVATAR_KEY);
-    match value
+    let avatar = value
         .get_mut("profile")
         .and_then(Value::as_object_mut)
-        .and_then(|profile| profile.remove("avatar"))
-    {
+        .and_then(|profile| profile.remove("avatar"));
+    // Rollback snapshot only when the avatar changes; it can be hundreds of KiB.
+    let rollback = avatars.with_value(PROFILE_AVATAR_KEY, |stored| {
+        (stored != avatar.as_ref()).then(|| stored.cloned())
+    });
+    match avatar {
         Some(avatar) => avatars.set(PROFILE_AVATAR_KEY, avatar),
         None => {
             avatars.delete(PROFILE_AVATAR_KEY);
         }
     }
     if let Err(error) = avatars.save() {
-        match previous_avatar {
-            Some(previous) => avatars.set(PROFILE_AVATAR_KEY, previous),
-            None => {
+        match rollback {
+            Some(Some(previous)) => avatars.set(PROFILE_AVATAR_KEY, previous),
+            Some(None) => {
                 avatars.delete(PROFILE_AVATAR_KEY);
             }
+            None => {}
         }
         return Err(error);
     }

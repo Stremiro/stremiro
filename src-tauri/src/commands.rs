@@ -49,6 +49,27 @@ pub(crate) mod watch_status_commands;
 use list_helpers::{load_lists_order, LISTS_ORDER_KEY, LIST_ITEM_KEY_PREFIX, LIST_META_KEY_PREFIX};
 use playback_state::PlaybackStateService;
 
+#[derive(Debug, Serialize)]
+pub struct CommandError<K> {
+    pub kind: K,
+    pub message: String,
+}
+
+impl<K> CommandError<K> {
+    pub(crate) fn new(kind: K, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+impl<K: Default> From<String> for CommandError<K> {
+    fn from(message: String) -> Self {
+        Self::new(K::default(), message)
+    }
+}
+
 /// Serializes blocking store work — interleaved load→mutate→save would let a stale
 /// snapshot silently drop the other's write. One lock covers every store; ops are
 /// milliseconds and a single lock cannot deadlock.
@@ -255,12 +276,7 @@ pub(crate) fn normalize_opaque_field(input: &str) -> Option<String> {
 }
 
 fn normalize_query(input: &str) -> Option<String> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    Some(trimmed.chars().take(MAX_SEARCH_QUERY_CHARS).collect())
+    crate::providers::trim_to_max(input, MAX_SEARCH_QUERY_CHARS)
 }
 
 /// Pre-tokenization normalization shared by coordinator/language/search paths:

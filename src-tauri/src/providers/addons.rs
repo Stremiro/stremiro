@@ -15,9 +15,7 @@ pub(crate) use stream_match::{
 // Only test code calls this directly; production reads `StreamMatchText::flags`.
 #[cfg(test)]
 pub(crate) use stream_match::detect_stream_flags;
-pub(crate) use transport::{
-    remaining_stream_cache_ttl_ms, sanitize_addon_log, AddonTransport, STREAM_SIZE_REGEX,
-};
+pub(crate) use transport::{remaining_stream_cache_ttl_ms, sanitize_addon_log, AddonTransport};
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum StreamResolution {
@@ -106,6 +104,7 @@ pub(crate) enum StreamMatchTier {
 
 /// Canonical Stremio stream object from any addon declaring `stream`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddonStream {
     // Raw fields stay Rust-side (hints can carry proxy secrets); resolution runs by `stream_key`.
@@ -277,26 +276,8 @@ pub(crate) const MAX_PROXY_HEADERS_BYTES: usize = 8 * 1024;
 
 fn is_http_token(name: &str) -> bool {
     // RFC 7230 token: alphanumerics plus `!#$%&'*+-.^_`|~`.
-    name.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'!' | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-    })
+    name.bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&byte))
 }
 
 /// Transport-owned headers an addon hint must not override — they'd collide
@@ -357,16 +338,11 @@ impl BehaviorHints {
         else {
             return Vec::new();
         };
-        let mut headers = Vec::new();
-        for (name, value) in request {
-            if headers.len() >= MAX_PROXY_REQUEST_HEADERS {
-                break;
-            }
-            if let Some(header) = proxy_request_header(name, value) {
-                headers.push(header);
-            }
-        }
-        headers
+        request
+            .iter()
+            .filter_map(|(name, value)| proxy_request_header(name, value))
+            .take(MAX_PROXY_REQUEST_HEADERS)
+            .collect()
     }
 }
 

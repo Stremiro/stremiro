@@ -4,20 +4,14 @@ use super::{
     UnairedEpisodesRequest,
 };
 use crate::providers::Episode;
+use crate::test_helpers::test_episode;
 
 fn episode(season: u32, episode: u32) -> Episode {
     Episode {
-        id: format!("{}:{}", season, episode),
         title: Some(format!("Episode {}", episode)),
-        season,
-        episode,
-        released: None,
         release_date: None,
-        overview: None,
-        thumbnail: None,
         stream_lookup_id: None,
-        stream_season: None,
-        stream_episode: None,
+        ..test_episode(&format!("{}:{}", season, episode), season, episode)
     }
 }
 

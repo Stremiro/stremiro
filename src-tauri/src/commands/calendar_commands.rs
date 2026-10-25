@@ -10,7 +10,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{command, ipc::Channel, AppHandle, State};
 
 // List members usually overlap the library; one full list of headroom keeps
@@ -53,7 +53,7 @@ impl CalendarScheduleCache {
         app: &AppHandle,
         client: &AddonResourceClient,
         requests: Vec<MediaScheduleRequest>,
-        on_cached: impl FnOnce(&[Arc<MediaSchedule>]),
+        mut on_cached: impl FnMut(&[Arc<MediaSchedule>]),
     ) -> Result<Vec<Arc<MediaSchedule>>, String> {
         let generation = self.generation.load(Ordering::SeqCst);
         // Registry generation identifies the source URLs, order and capabilities.
@@ -83,20 +83,32 @@ impl CalendarScheduleCache {
             if !cached.is_empty() {
                 on_cached(&cached);
             }
-            match fetch_media_schedules(app, client, missing).await {
-                Ok(fetched) => {
-                    for schedule in fetched {
-                        let key = format!("{source_generation}:{}:{}", schedule.type_, schedule.id);
-                        let schedule = Arc::new(schedule);
-                        self.entries.put(&key, schedule.clone(), false, || {
-                            self.generation.load(Ordering::SeqCst) == generation
-                                && addon_configs_generation() == source_generation
-                        });
-                        schedules.insert(key, schedule);
-                    }
+            let mut last_publish: Option<Instant> = None;
+            if let Err(error) = fetch_media_schedules(app, client, missing, |fetched| {
+                for schedule in fetched {
+                    let key = format!("{source_generation}:{}:{}", schedule.type_, schedule.id);
+                    let schedule = Arc::new(schedule);
+                    self.entries.put(&key, schedule.clone(), false, || {
+                        self.generation.load(Ordering::SeqCst) == generation
+                            && addon_configs_generation() == source_generation
+                    });
+                    schedules.insert(key, schedule);
                 }
-                Err(error) if schedules.is_empty() => return Err(error),
-                Err(_) => {}
+                if last_publish.is_some_and(|last| last.elapsed() < Duration::from_millis(250)) {
+                    return;
+                }
+                let snapshot: Vec<_> = keys
+                    .iter()
+                    .filter_map(|key| schedules.get(key).cloned())
+                    .collect();
+                on_cached(&snapshot);
+                last_publish = Some(Instant::now());
+            })
+            .await
+            {
+                if schedules.is_empty() {
+                    return Err(error);
+                }
             }
         }
         Ok(keys

@@ -75,18 +75,22 @@ fn non_standard_loopback_and_private_numerics_are_blocked() {
 #[test]
 fn public_to_private_redirect_is_blocked() {
     let initial = url("https://evil-addon.test/manifest.json");
-    assert!(!redirect_target_allowed(
-        &initial,
-        &url("http://127.0.0.1:11470/admin")
-    ));
-    assert!(!redirect_target_allowed(
-        &initial,
-        &url("http://169.254.169.254/latest/meta-data/")
-    ));
-    assert!(!redirect_target_allowed(
-        &initial,
-        &url("http://192.168.1.1/")
-    ));
+    for target in [
+        "http://127.0.0.1:11470/admin",
+        "http://169.254.169.254/latest/meta-data/",
+        "http://192.168.1.1/",
+        "http://localhost:11470/admin",
+        "http://LOCALHOST:11470/admin",
+        "http://localhost.:11470/admin",
+        "http://LOCALHOST.:11470/admin",
+        "http://x.localhost:11470/admin",
+        "http://a.b.LocalHost.:11470/admin",
+    ] {
+        assert!(
+            !redirect_target_allowed(&initial, &url(target)),
+            "{target} must be blocked"
+        );
+    }
 }
 
 #[test]
@@ -143,14 +147,17 @@ fn public_to_numeric_private_redirect_is_blocked() {
 #[test]
 fn public_to_public_and_non_http_targets() {
     let initial = url("https://evil-addon.test/manifest.json");
-    assert!(redirect_target_allowed(
-        &initial,
-        &url("https://cdn.test/streams.json")
-    ));
-    assert!(redirect_target_allowed(
-        &initial,
-        &url("https://[2606:4700:4700::1111]/streams.json")
-    ));
+    for target in [
+        "https://cdn.test/streams.json",
+        "https://[2606:4700:4700::1111]/streams.json",
+        "https://notlocalhost.com/streams.json",
+        "https://localhost.example.com/streams.json",
+    ] {
+        assert!(
+            redirect_target_allowed(&initial, &url(target)),
+            "{target} must pass"
+        );
+    }
     assert!(!redirect_target_allowed(
         &initial,
         &url("file:///etc/passwd")
@@ -183,6 +190,21 @@ fn local_addon_same_host_redirect_stays_allowed() {
         &initial,
         &url("http://[::1]:9999/admin")
     ));
+    for host in ["localhost", "LOCALHOST.", "x.localhost", "a.b.LocalHost."] {
+        let initial = url(&format!("http://{host}:11470/manifest.json"));
+        assert!(
+            crate::providers::addon_resource::parse_fetchable_http_url(initial.as_str()).is_some(),
+            "{host} must remain directly fetchable"
+        );
+        assert!(
+            redirect_target_allowed(&initial, &url(&format!("http://{host}:11470/stream.json"))),
+            "{host} must allow the same host and port"
+        );
+        assert!(
+            !redirect_target_allowed(&initial, &url(&format!("http://{host}:9999/admin"))),
+            "{host} must block a different port"
+        );
+    }
 }
 
 #[test]

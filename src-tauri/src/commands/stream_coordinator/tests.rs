@@ -287,26 +287,6 @@ fn tied_priorities() -> (
     )
 }
 
-fn recommendation_inputs<'a>(
-    addon_priorities: &'a HashMap<String, u32>,
-    source_health: &'a HashMap<String, u8>,
-    stream_family_priorities: &'a HashMap<String, u8>,
-    preferred_title_source_id: Option<&'a str>,
-    match_context: StreamMatchContext<'a>,
-    preferred_audio_language: Option<&'a str>,
-    preferred_subtitle_language: Option<&'a str>,
-) -> StreamRecommendationInputs<'a> {
-    StreamRecommendationInputs {
-        addon_source_priorities: addon_priorities,
-        source_health_priorities: source_health,
-        stream_family_priorities,
-        preferred_title_source_id,
-        match_context,
-        preferred_audio_language,
-        preferred_subtitle_language,
-    }
-}
-
 struct RecommendationFixture {
     addon_priorities: HashMap<String, u32>,
     source_health: HashMap<String, u8>,
@@ -334,15 +314,15 @@ impl Default for RecommendationFixture {
 
 impl RecommendationFixture {
     fn inputs(&self) -> StreamRecommendationInputs<'_> {
-        recommendation_inputs(
-            &self.addon_priorities,
-            &self.source_health,
-            &self.family_priorities,
-            self.title_affinity,
-            self.match_context,
-            self.audio_language,
-            self.subtitle_language,
-        )
+        StreamRecommendationInputs {
+            addon_source_priorities: &self.addon_priorities,
+            source_health_priorities: &self.source_health,
+            stream_family_priorities: &self.family_priorities,
+            preferred_title_source_id: self.title_affinity,
+            match_context: self.match_context,
+            preferred_audio_language: self.audio_language,
+            preferred_subtitle_language: self.subtitle_language,
+        }
     }
 }
 
@@ -571,25 +551,22 @@ fn language_priority_tracks_independent_memberships_without_double_counting() {
 
 #[test]
 fn ranking_language_evidence_excludes_reference_title_words() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
     for (title, language, marker) in [
         ("It Follows", "it", "italian audio"),
         ("La Casa de Papel", "de", "german audio"),
     ] {
         let mut plain = sort_stream("alpha");
         plain.name = Some(format!("{title} 1080p"));
-        let inputs = recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            StreamMatchContext {
+        let fixture = RecommendationFixture {
+            match_context: StreamMatchContext {
                 title: Some(title),
                 ..no_match_context()
             },
-            Some(language),
-            Some(language),
-        );
+            audio_language: Some(language),
+            subtitle_language: Some(language),
+            ..RecommendationFixture::default()
+        };
+        let inputs = fixture.inputs();
         for (stream, expected) in [
             (plain.clone(), 0),
             (
@@ -667,23 +644,16 @@ fn title_initialism_keeps_partial_relevance_without_overlap() {
 
 #[test]
 fn recommendation_reasons_include_title_source_and_language_context() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
-    let title_affinity = Some("alpha");
+    let fixture = RecommendationFixture {
+        title_affinity: Some("alpha"),
+        audio_language: Some("ja"),
+        subtitle_language: Some("off"),
+        ..RecommendationFixture::default()
+    };
     let mut stream = sort_stream("alpha");
     stream.name = Some("[JA] Dual Audio 1080p".to_string());
 
-    let reasons = recommendation_reasons(
-        &stream,
-        &recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            title_affinity,
-            no_match_context(),
-            Some("ja"),
-            Some("off"),
-        ),
-    );
+    let reasons = recommendation_reasons(&stream, &fixture.inputs());
 
     assert!(reasons.contains(&StreamRecommendationReason::TitleAffinity));
     assert!(
@@ -782,18 +752,13 @@ fn recommendation_reasons_preserve_order_cap_and_fallback() {
 /// otherwise identical smaller one in the same resolution tier.
 fn sorts_at_limit_size_before_oversize_same_tier() {
     const GIB: u64 = 1024 * 1024 * 1024;
-    let empty_priorities = HashMap::new();
-    let empty_health = HashMap::new();
-    let empty_families = HashMap::new();
-    let inputs = recommendation_inputs(
-        &empty_priorities,
-        &empty_health,
-        &empty_families,
-        None,
-        no_match_context(),
-        None,
-        None,
-    );
+    let fixture = RecommendationFixture {
+        addon_priorities: HashMap::new(),
+        source_health: HashMap::new(),
+        family_priorities: HashMap::new(),
+        ..RecommendationFixture::default()
+    };
+    let inputs = fixture.inputs();
 
     // 1080p tier (15 GiB limit): identical metadata except size.
     let mut small = build_stream(
@@ -902,7 +867,10 @@ fn final_season_claim_scopes_to_the_canonical_season() {
 /// episode battery and title score run once per fetch — while the
 /// still-growing family map is re-read on every pass.
 fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
-    let (addon_priorities, source_health, mut family_priorities) = tied_priorities();
+    let mut fixture = RecommendationFixture {
+        match_context: episode_match_context("One Piece", &[(1, 8)]),
+        ..RecommendationFixture::default()
+    };
 
     // Identical match text: every fixed signal ties — only the family
     // lookup can split the order.
@@ -923,25 +891,15 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
     for (pass, expected_source) in ["alpha", "beta", "beta"].into_iter().enumerate() {
         if pass == 1 {
             // Only the growing family priority changes the tied order.
-            family_priorities.insert("beta|release:test".to_string(), 4);
+            fixture
+                .family_priorities
+                .insert("beta|release:test".to_string(), 4);
         } else if pass == 2 {
             // A recompute would lose beta's family edge and size tiebreak.
             streams[0].stream_family = None;
             streams[0].size_bytes = Some(1);
         }
-        sort_streams_by_recommendation(
-            &mut streams,
-            recommendation_inputs(
-                &addon_priorities,
-                &source_health,
-                &family_priorities,
-                None,
-                episode_match_context("One Piece", &[(1, 8)]),
-                None,
-                None,
-            ),
-            &mut signals,
-        );
+        sort_streams_by_recommendation(&mut streams, fixture.inputs(), &mut signals);
         assert_eq!(streams[0].source_name.as_deref(), Some(expected_source));
         assert_eq!(streams.capacity(), capacity);
     }
@@ -949,16 +907,13 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
 
 #[test]
 fn resort_reuses_fetch_context_and_owned_pack_coverage() {
-    let (addon_priorities, source_health, family_priorities) = tied_priorities();
-    let inputs = recommendation_inputs(
-        &addon_priorities,
-        &source_health,
-        &family_priorities,
-        None,
-        episode_match_context("Show", &[(1, 8)]),
-        Some("en"),
-        Some("en"),
-    );
+    let fixture = RecommendationFixture {
+        match_context: episode_match_context("Show", &[(1, 8)]),
+        audio_language: Some("en"),
+        subtitle_language: Some("en"),
+        ..RecommendationFixture::default()
+    };
+    let inputs = fixture.inputs();
     let mut pack = sort_stream("alpha");
     pack.stream_key = "s:pack".to_string();
     pack.name = Some("Show S01E01-E12 English 1080p [Batch]".to_string());
@@ -1031,16 +986,8 @@ fn resort_reuses_fetch_context_and_owned_pack_coverage() {
 
 #[test]
 fn borrowed_preview_ranking_keeps_final_declaration_ties_and_row_allocations() {
-    let (addon_priorities, source_health, family_priorities) = tied_priorities();
-    let inputs = recommendation_inputs(
-        &addon_priorities,
-        &source_health,
-        &family_priorities,
-        None,
-        no_match_context(),
-        None,
-        None,
-    );
+    let fixture = RecommendationFixture::default();
+    let inputs = fixture.inputs();
     let mut streams = vec![sort_stream("alpha"), sort_stream("beta")];
     for stream in &mut streams {
         stream.stream_key = format!("s:{}", stream.source_id.as_deref().unwrap());
@@ -1081,7 +1028,12 @@ fn borrowed_preview_ranking_keeps_final_declaration_ties_and_row_allocations() {
 
 #[test]
 fn sort_assigns_selection_priority_from_key() {
-    let (addon_priorities, source_health, stream_family_priorities) = tied_priorities();
+    let fixture = RecommendationFixture {
+        match_context: episode_match_context("Show", &[(1, 5)]),
+        audio_language: Some("en"),
+        subtitle_language: Some("en"),
+        ..RecommendationFixture::default()
+    };
     let mut exact = sort_stream("alpha");
     exact.name = Some("Show S01E05 English 1080p".to_string());
     let mut other = sort_stream("beta");
@@ -1090,15 +1042,7 @@ fn sort_assigns_selection_priority_from_key() {
     let mut streams = vec![other, exact];
     sort_streams_by_recommendation(
         &mut streams,
-        recommendation_inputs(
-            &addon_priorities,
-            &source_health,
-            &stream_family_priorities,
-            None,
-            episode_match_context("Show", &[(1, 5)]),
-            Some("en"),
-            Some("en"),
-        ),
+        fixture.inputs(),
         &mut StreamSignalCache::default(),
     );
 

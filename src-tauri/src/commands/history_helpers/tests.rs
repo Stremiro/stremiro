@@ -2,6 +2,7 @@ use super::{compare_continue_watching, sanitize_watch_progress, with_progress_an
 use crate::commands::now_unix_millis;
 use crate::commands::WatchProgress;
 use crate::test_helpers::test_progress;
+use std::borrow::Cow::Borrowed;
 
 fn sample_progress() -> WatchProgress {
     WatchProgress {
@@ -30,7 +31,7 @@ fn live_progress_requires_explicit_completion_for_unknown_runtime() {
     let annotated = with_progress_annotations(ordinary.clone());
     assert!(!annotated.is_watched);
     assert_eq!(annotated.resume_start_time, Some(120.0));
-    assert!(super::choose_up_next_source(vec![ordinary.clone()], &Default::default()).is_none());
+    assert!(super::choose_up_next_source(vec![Borrowed(&ordinary)], &Default::default()).is_none());
 
     let completed = super::prepare_live_watch_progress(progress, true)
         .unwrap()
@@ -48,7 +49,9 @@ fn live_progress_requires_explicit_completion_for_unknown_runtime() {
     alias.last_watched += 1;
     let rows = vec![completed.clone(), alias];
     assert_eq!(super::continue_watching_candidates(&rows).count(), 1);
-    assert!(super::choose_up_next_source(vec![completed], &Default::default()).is_some());
+    assert!(
+        super::choose_up_next_source(vec![Borrowed(&completed)], &Default::default()).is_some()
+    );
 
     for position in [0.0, 2.0, 120.0] {
         let completed = super::prepare_live_watch_progress(

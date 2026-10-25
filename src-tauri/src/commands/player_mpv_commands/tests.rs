@@ -421,6 +421,169 @@ fn property_batch_preserves_order_and_continues_after_native_failure() {
             vec![("af".to_string(), json!(filter))]
         );
     }
+    let stock = mpv_subtitle_appearance_properties(
+        SubtitleFont::Default,
+        SubtitleColor::White,
+        SubtitleEdge::Outline,
+        false,
+        false,
+    );
+    assert_eq!(
+        stock,
+        [
+            ("sub-ass-override", json!("scale")),
+            ("sub-font", json!("sans-serif")),
+            ("sub-color", json!("#FFFFFFFF")),
+            ("sub-bold", json!("no")),
+            ("sub-italic", json!("no")),
+            ("sub-border-style", json!("outline-and-shadow")),
+            ("sub-outline-size", json!(1.65)),
+            ("sub-shadow-offset", json!(0.0)),
+            ("sub-back-color", json!("#AF000000")),
+        ]
+        .map(|(name, value)| (name.to_string(), value))
+    );
+    for (font, stored, family) in [
+        (SubtitleFont::Modern, "modern", "Segoe UI Variable Text"),
+        (
+            SubtitleFont::Grotesk,
+            "grotesk",
+            "Segoe UI Variable Display",
+        ),
+        (SubtitleFont::Humanist, "humanist", "Corbel"),
+        (SubtitleFont::Classic, "classic", "Trebuchet MS"),
+        (SubtitleFont::Screen, "screen", "Franklin Gothic Medium"),
+        (SubtitleFont::Serif, "serif", "Cambria"),
+        (SubtitleFont::Book, "book", "Palatino Linotype"),
+        (SubtitleFont::Rounded, "rounded", "Candara"),
+        (SubtitleFont::Mono, "mono", "Cascadia Mono"),
+    ] {
+        assert_eq!(serde_json::to_value(font).unwrap(), json!(stored));
+        assert_eq!(
+            serde_json::from_value::<SubtitleFont>(json!(stored)).unwrap(),
+            font
+        );
+        let properties = mpv_subtitle_appearance_properties(
+            font,
+            SubtitleColor::White,
+            SubtitleEdge::Outline,
+            false,
+            false,
+        );
+        assert_eq!(properties[1], ("sub-font".to_string(), json!(family)));
+    }
+    // Retired tokens alias onto a surviving face instead of resetting to Default.
+    for (retired, expected) in [
+        ("verdana", SubtitleFont::Humanist),
+        ("tahoma", SubtitleFont::Classic),
+        ("trebuchet", SubtitleFont::Classic),
+        ("palatino", SubtitleFont::Book),
+        ("casual", SubtitleFont::Rounded),
+        ("not-a-font", SubtitleFont::Default),
+    ] {
+        assert_eq!(
+            serde_json::from_value::<SubtitleFont>(json!(retired)).unwrap(),
+            expected
+        );
+    }
+    for (color, stored, hex) in [
+        (SubtitleColor::Ivory, "ivory", "#FFFFF4D6"),
+        (SubtitleColor::Lavender, "lavender", "#FFE3D5FF"),
+        (SubtitleColor::Mint, "mint", "#FFC4F0D9"),
+        (SubtitleColor::Amber, "amber", "#FFFFD89B"),
+    ] {
+        assert_eq!(serde_json::to_value(color).unwrap(), json!(stored));
+        assert_eq!(
+            serde_json::from_value::<SubtitleColor>(json!(stored)).unwrap(),
+            color
+        );
+        let properties = mpv_subtitle_appearance_properties(
+            SubtitleFont::Default,
+            color,
+            SubtitleEdge::Outline,
+            false,
+            false,
+        );
+        assert_eq!(properties[2], ("sub-color".to_string(), json!(hex)));
+    }
+    for ((font, color, edge, bold, italic), changed) in [
+        (
+            (
+                SubtitleFont::Mono,
+                SubtitleColor::Yellow,
+                SubtitleEdge::Outline,
+                false,
+                false,
+            ),
+            ["sub-font", "sub-color"].as_slice(),
+        ),
+        (
+            (
+                SubtitleFont::Rounded,
+                SubtitleColor::Red,
+                SubtitleEdge::Outline,
+                true,
+                true,
+            ),
+            &["sub-font", "sub-color", "sub-bold", "sub-italic"],
+        ),
+        (
+            (
+                SubtitleFont::Classic,
+                SubtitleColor::Pink,
+                SubtitleEdge::Outline,
+                false,
+                false,
+            ),
+            &["sub-font", "sub-color"],
+        ),
+        (
+            (
+                SubtitleFont::Default,
+                SubtitleColor::White,
+                SubtitleEdge::None,
+                false,
+                false,
+            ),
+            &["sub-outline-size"],
+        ),
+        (
+            (
+                SubtitleFont::Default,
+                SubtitleColor::White,
+                SubtitleEdge::Shadow,
+                false,
+                false,
+            ),
+            &["sub-outline-size", "sub-shadow-offset", "sub-back-color"],
+        ),
+        (
+            (
+                SubtitleFont::Serif,
+                SubtitleColor::White,
+                SubtitleEdge::Box,
+                false,
+                false,
+            ),
+            &[
+                "sub-font",
+                "sub-border-style",
+                "sub-outline-size",
+                "sub-shadow-offset",
+                "sub-back-color",
+            ],
+        ),
+    ] {
+        let properties = mpv_subtitle_appearance_properties(font, color, edge, bold, italic);
+        let differing = properties
+            .iter()
+            .zip(&stock)
+            .filter(|(property, stock)| property != stock)
+            .map(|((name, _), _)| name.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(differing, changed);
+        assert!(validate_mpv_properties(&properties).is_err());
+    }
     assert!(
         validate_mpv_properties(&[("af".to_string(), json!("lavfi=[amovie=secret]"))]).is_err()
     );

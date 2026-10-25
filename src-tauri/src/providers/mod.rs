@@ -3,6 +3,16 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+/// Per-field tolerance: one malformed value drops to `None` without losing siblings.
+pub(crate) fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
+{
+    Ok(Option::<serde_json::Value>::deserialize(deserializer)?
+        .and_then(|value| serde_json::from_value::<T>(value).ok()))
+}
+
 /// Saturating `usize` → `u64` widening for response-size budget comparisons.
 pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
     u64::try_from(value).unwrap_or(u64::MAX)
@@ -129,6 +139,7 @@ pub(crate) async fn read_bounded_body(
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct MediaItem {
     pub id: String,
     pub title: String,
@@ -162,6 +173,7 @@ pub(crate) struct MediaItem {
 // Serialize-only: meta payloads are parsed field-by-field (`parse_meta_item`),
 // never serde-decoded — untrusted input can't reach `release_date`.
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct MediaDetails {
     pub id: String,
     #[serde(rename = "imdbId", default, skip_serializing_if = "Option::is_none")]
@@ -225,6 +237,7 @@ pub(crate) struct Trailer {
 }
 
 #[derive(Debug, Serialize, Clone)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct Episode {
     pub id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

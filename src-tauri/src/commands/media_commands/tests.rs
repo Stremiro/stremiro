@@ -6,6 +6,7 @@ use super::{
 use crate::commands::media_normalization::{normalize_media_details, normalize_media_item};
 use crate::commands::watch_history_commands::TitleWatchProgress;
 use crate::providers::{Episode, MediaDetails, MediaSeason};
+use crate::test_helpers::{test_details, test_episode};
 
 fn search_episode(
     season: u32,
@@ -251,17 +252,11 @@ fn subtitle_lookup_preserves_composed_ipc_trimming() {
 
 fn episode(id: &str, season: u32, episode: u32, release_date: Option<&str>) -> Episode {
     Episode {
-        id: id.to_string(),
         title: Some(format!("Episode {episode}")),
-        season,
-        episode,
         released: release_date.map(|value| value.to_string()),
         release_date: crate::commands::media_normalization::build_release_date(release_date),
-        overview: None,
-        thumbnail: None,
         stream_lookup_id: None,
-        stream_season: None,
-        stream_episode: None,
+        ..test_episode(id, season, episode)
     }
 }
 
@@ -316,24 +311,16 @@ fn episode_targets_keep_successful_mapping_snapshots() {
 #[test]
 fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_shared_payload() {
     let details = MediaDetails {
-        id: "tt1".into(),
         imdb_id: Some("tt1".into()),
         title: " \u{feff}A\t title ".into(),
         poster: Some("https://cdn.test".into()),
-        backdrop: None,
-        logo: None,
         year: Some(format!("2024{} tail", "y".repeat(27))),
         display_year: None,
         release_date: Some("2024-02-30".into()),
-        type_: "series".into(),
         description: Some(format!("{} tail", "d".repeat(4095))),
         rating: Some(format!("{} tail", "r".repeat(63))),
-        rating_percent: None,
-        runtime: None,
         cast: Some(vec![format!("{} tail", "c".repeat(127))]),
-        directors: None,
         genres: Some(vec![format!("{} tail", "g".repeat(63))]),
-        trailers: None,
         episodes: Some(vec![Episode {
             id: format!("{} tail", "i".repeat(255)),
             overview: Some(format!("{} tail", "o".repeat(4095))),
@@ -344,6 +331,7 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
             number: 1,
             episode_count: 1,
         }]),
+        ..test_details("tt1", "series")
     };
     let once = normalize_media_details(details, "tt1");
     let twice = normalize_media_details(once.clone(), "tt1");
@@ -378,24 +366,11 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
 #[test]
 fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
     let details = MediaDetails {
-        id: "tt123".to_string(),
-        imdb_id: None,
         title: "Test Show".to_string(),
         poster: Some("poster".to_string()),
-        backdrop: None,
-        logo: None,
         year: Some("2025".to_string()),
         display_year: None,
         release_date: Some("2025-01-01".to_string()),
-        type_: "series".to_string(),
-        description: None,
-        rating: None,
-        rating_percent: None,
-        runtime: None,
-        cast: None,
-        directors: None,
-        genres: None,
-        trailers: None,
         episodes: Some(vec![
             Episode {
                 thumbnail: Some("https://img.test/ep-2.jpg".to_string()),
@@ -416,6 +391,7 @@ fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
             number: 1,
             episode_count: 5,
         }]),
+        ..test_details("tt123", "series")
     };
     let original = serde_json::to_value(&details).unwrap();
     let schedule = build_media_schedule(&details, "kitsu:123", true);
@@ -444,26 +420,14 @@ fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
 #[test]
 fn build_media_schedule_keeps_movie_release_date_without_episode_payload() {
     let details = MediaDetails {
-        id: "tt999".to_string(),
         imdb_id: Some("tt999".to_string()),
         title: "Test Movie".to_string(),
         poster: Some("poster".to_string()),
-        backdrop: None,
-        logo: None,
         year: Some("2024".to_string()),
         display_year: Some("2024".to_string()),
         release_date: Some("2024-01-01".to_string()),
-        type_: "movie".to_string(),
-        description: None,
-        rating: None,
-        rating_percent: None,
-        runtime: None,
-        cast: None,
-        directors: None,
-        genres: None,
-        trailers: None,
         episodes: Some(vec![episode("unexpected", 1, 1, Some("2024-01-01"))]),
-        seasons: None,
+        ..test_details("tt999", "movie")
     };
     let schedule = build_media_schedule(&details, "requested-movie", false);
 

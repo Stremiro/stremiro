@@ -6,6 +6,7 @@ use crate::commands::WatchProgress;
 use rusqlite::{
     params, Connection, ErrorCode, OpenFlags, OptionalExtension, Row, Statement, Transaction,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::Path;
 use std::time::Duration;
@@ -60,6 +61,13 @@ pub(crate) struct ResumeTitleIdentity {
     pub last_watched: u64,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub(crate) struct ContinueWatchingDismissal {
+    pub media_type: String,
+    pub media_id: String,
+    pub dismissed_through: i64,
+}
+
 impl ResumeStore {
     pub(crate) fn open(path: &Path) -> Result<Self, String> {
         Self::reject_unsupported_schema_file(path)?;
@@ -89,6 +97,9 @@ impl ResumeStore {
 
         // Only 0 (init below) or `RESUME_DB_SCHEMA_VERSION` reaches here.
         Self::initialize_schema(&connection, version)?;
+        connection
+            .execute_batch(CONTINUE_WATCHING_DISMISSALS_SQL)
+            .map_err(|error| format!("Failed to initialize playback resume database: {error}"))?;
 
         Ok(Self { connection })
     }
@@ -185,7 +196,12 @@ impl ResumeStore {
         wal_target.push("-wal");
         if let Err(error) = std::fs::rename(&wal, &wal_target) {
             if error.kind() != std::io::ErrorKind::NotFound {
-                let _ = std::fs::rename(&quarantined, path);
+                if let Err(rollback_error) = std::fs::rename(&quarantined, path) {
+                    return Err(format!(
+                        "Failed to quarantine unreadable playback resume database WAL: {error}; failed to restore database from {}: {rollback_error}",
+                        quarantined.display()
+                    ));
+                }
                 return Err(format!(
                     "Failed to quarantine unreadable playback resume database WAL: {error}"
                 ));
@@ -320,6 +336,110 @@ impl ResumeStore {
         )
     }
 
+    pub(crate) fn load_continue_watching_dismissals(
+        &mut self,
+    ) -> Result<Vec<ContinueWatchingDismissal>, String> {
+        self.connection
+            .prepare(
+                "SELECT media_type, media_id, dismissed_through FROM continue_watching_dismissals
+                 ORDER BY media_type, media_id",
+            )
+            .and_then(|mut statement| {
+                statement
+                    .query_map([], |row| {
+                        Ok(ContinueWatchingDismissal {
+                            media_type: row.get(0)?,
+                            media_id: row.get(1)?,
+                            dismissed_through: row.get(2)?,
+                        })
+                    })?
+                    .collect()
+            })
+            .map_err(|error| format!("Failed to read Continue Watching dismissals: {error}"))
+    }
+
+    /// `load_entries` minus titles dismissed from Continue Watching.
+    pub(crate) fn load_continue_watching_entries(
+        &mut self,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        query_progress_rows(
+            &self.connection,
+            &format!(
+                "WHERE NOT EXISTS (
+                    SELECT 1 FROM continue_watching_dismissals AS d
+                    WHERE d.media_type = watch_progress.media_type
+                      AND d.media_id = watch_progress.media_id
+                      AND ({EFFECTIVE_DISMISSAL})
+                 )
+                 ORDER BY last_watched DESC, history_key DESC"
+            ),
+            [],
+            "",
+        )
+    }
+
+    /// Hides a title from Continue Watching and Up Next until it gains a row newer
+    /// than its latest one now; history itself is untouched. No-op without history.
+    pub(crate) fn dismiss_continue_watching(
+        &mut self,
+        media_type: &str,
+        media_id: &str,
+    ) -> Result<(), String> {
+        let transaction = self.connection.transaction().map_err(|error| {
+            format!("Failed to open Continue Watching dismissal transaction: {error}")
+        })?;
+        let inserted = transaction
+            .execute(
+                "INSERT INTO continue_watching_dismissals (media_type, media_id, dismissed_through)
+                 SELECT media_type, media_id, MAX(last_watched) FROM watch_progress
+                 WHERE media_type = ?1 AND media_id = ?2
+                 GROUP BY media_type, media_id
+                 ON CONFLICT(media_type, media_id)
+                 DO UPDATE SET dismissed_through = excluded.dismissed_through",
+                params![media_type, media_id],
+            )
+            .map_err(|error| format!("Failed to save Continue Watching dismissal: {error}"))?;
+        if inserted > 0 {
+            transaction
+                .execute(
+                    &format!(
+                        "DELETE FROM continue_watching_dismissals AS d WHERE NOT ({EFFECTIVE_DISMISSAL})"
+                    ),
+                    [],
+                )
+                .and_then(|_| {
+                    transaction.execute(
+                        "DELETE FROM continue_watching_dismissals WHERE rowid NOT IN (
+                            SELECT rowid FROM continue_watching_dismissals
+                            ORDER BY (media_type = ?2 AND media_id = ?3) DESC, dismissed_through DESC
+                            LIMIT ?1
+                        )",
+                        params![MAX_CONTINUE_WATCHING_DISMISSALS, media_type, media_id],
+                    )
+                })
+                .map_err(|error| {
+                    format!("Failed to prune Continue Watching dismissals: {error}")
+                })?;
+        }
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to commit Continue Watching dismissal: {error}"))
+    }
+
+    pub(crate) fn restore_continue_watching(
+        &mut self,
+        media_type: &str,
+        media_id: &str,
+    ) -> Result<(), String> {
+        self.connection
+            .execute(
+                "DELETE FROM continue_watching_dismissals WHERE media_type = ?1 AND media_id = ?2",
+                params![media_type, media_id],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("Failed to restore Continue Watching title: {error}"))
+    }
+
     pub(crate) fn load_latest_title_identities(
         &mut self,
         media_ids: &[&str],
@@ -376,15 +496,13 @@ impl ResumeStore {
         };
         let mut statement = connection
             .prepare(
-                "SELECT media_type, media_id FROM (
-                    SELECT media_type, media_id, last_watched, history_key,
-                           ROW_NUMBER() OVER (
-                               PARTITION BY media_type, media_id
-                               ORDER BY last_watched DESC, history_key DESC
-                           ) AS title_rank
-                    FROM watch_progress
-                 ) WHERE title_rank = 1
-                 ORDER BY last_watched DESC, history_key DESC LIMIT 3",
+                "SELECT media_type, media_id FROM watch_progress AS w
+                 GROUP BY media_type, media_id
+                 ORDER BY MAX(last_watched) DESC, (
+                     SELECT history_key FROM watch_progress AS latest
+                     WHERE latest.media_type = w.media_type AND latest.media_id = w.media_id
+                     ORDER BY last_watched DESC, history_key DESC LIMIT 1
+                 ) DESC LIMIT 3",
             )
             .map_err(|error| format!("Failed to read recent playback resume titles: {error}"))?;
         statement
@@ -490,6 +608,26 @@ impl ResumeStore {
         )
     }
 
+    /// Superset of canonical and raw-coordinate matches, including every possible donor.
+    /// `choose_entry` still resolves conflicting aliases; retain its newest-first tie order.
+    pub(crate) fn load_entries_for_episode(
+        &mut self,
+        media_type: &str,
+        media_id: &str,
+        season: u32,
+        episode: u32,
+    ) -> Result<Vec<(String, WatchProgress)>, String> {
+        query_progress_rows(
+            &self.connection,
+            "WHERE media_type = ?1 AND media_id = ?2
+               AND (season = ?3 OR absolute_season = ?3)
+               AND (episode = ?4 OR absolute_episode = ?4)
+             ORDER BY last_watched DESC, history_key DESC",
+            params![media_type, media_id, season, episode],
+            " episode",
+        )
+    }
+
     /// Returns the rows the recency guard admitted, plus whether cap pruning
     /// then deleted any rows (possibly some of those just admitted).
     /// Imports and restores reject growth rather than evicting durable history.
@@ -497,6 +635,7 @@ impl ResumeStore {
         &mut self,
         entries: Vec<(String, WatchProgress)>,
         is_backup_import: bool,
+        dismissals: Vec<ContinueWatchingDismissal>,
     ) -> Result<(Vec<(String, WatchProgress)>, bool), HistoryMergeError> {
         if entries.is_empty() {
             return Ok((Vec::new(), false));
@@ -534,6 +673,41 @@ impl ResumeStore {
                 )));
             }
         }
+        // Decide against the destination before any history writes: even a locally
+        // restored title must not be hidden again by an imported marker.
+        let mut new_title_dismissals = Vec::new();
+        if !dismissals.is_empty() {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT EXISTS(SELECT 1 FROM watch_progress
+                     WHERE media_type = ?1 AND media_id = ?2)",
+                )
+                .map_err(|error| format!("Failed to read playback resume titles: {error}"))?;
+            let latest_allowed =
+                super::now_unix_millis().saturating_add(WATCH_PROGRESS_FUTURE_SKEW_MS);
+            for mut dismissal in dismissals {
+                let Some(media_type) = super::normalize_watch_progress_type(&dismissal.media_type)
+                else {
+                    continue;
+                };
+                let Some(media_id) = super::normalize_media_id(&dismissal.media_id) else {
+                    continue;
+                };
+                if dismissal.dismissed_through < 0
+                    || dismissal.dismissed_through as u64 > latest_allowed
+                {
+                    continue;
+                }
+                let exists: bool = statement
+                    .query_row(params![media_type, media_id], |row| row.get(0))
+                    .map_err(|error| format!("Failed to read playback resume titles: {error}"))?;
+                if !exists {
+                    dismissal.media_type = media_type.to_string();
+                    dismissal.media_id = media_id;
+                    new_title_dismissals.push(dismissal);
+                }
+            }
+        }
         let mut imported = Vec::new();
 
         {
@@ -560,6 +734,29 @@ impl ResumeStore {
         let mut pruned = false;
         for (media_type, media_id) in &pruned_titles {
             pruned |= prune_title_history_tx(&transaction, media_type, media_id)?;
+        }
+
+        for dismissal in new_title_dismissals {
+            // Keep the original cutoff, not MAX(merged history): newer imported
+            // progress must remain visible. Existing local markers always win.
+            transaction
+                .execute(
+                    "INSERT OR IGNORE INTO continue_watching_dismissals
+                     (media_type, media_id, dismissed_through)
+                     SELECT ?1, ?2, ?3
+                     WHERE EXISTS(SELECT 1 FROM watch_progress
+                         WHERE media_type = ?1 AND media_id = ?2)
+                       AND (SELECT COUNT(*) FROM continue_watching_dismissals) < ?4",
+                    params![
+                        dismissal.media_type,
+                        dismissal.media_id,
+                        dismissal.dismissed_through,
+                        MAX_CONTINUE_WATCHING_DISMISSALS
+                    ],
+                )
+                .map_err(|error| {
+                    format!("Failed to import Continue Watching dismissal: {error}")
+                })?;
         }
 
         transaction
@@ -608,15 +805,42 @@ impl ResumeStore {
     }
 
     pub(crate) fn clear(&mut self) -> Result<(), String> {
-        // Single DELETE is atomic under auto-commit. No VACUUM: it rewrites the whole
-        // file (2x disk) while holding the shared connection; freed pages get reused anyway.
-        self.connection
-            .execute("DELETE FROM watch_progress", [])
+        // No VACUUM: it rewrites the whole file (2x disk) while holding the shared
+        // connection; freed pages get reused anyway.
+        let transaction = self
+            .connection
+            .transaction()
             .map_err(|error| format!("Failed to clear playback resume database: {}", error))?;
-
-        Ok(())
+        transaction
+            .execute_batch(
+                "DELETE FROM watch_progress;
+                 DELETE FROM continue_watching_dismissals;",
+            )
+            .map_err(|error| format!("Failed to clear playback resume database: {}", error))?;
+        transaction
+            .commit()
+            .map_err(|error| format!("Failed to clear playback resume database: {}", error))
     }
 }
+
+/// Added alongside schema 3 without a version bump: older builds ignore the table.
+/// `dismissed_through` is the title's newest `last_watched` when dismissed.
+const CONTINUE_WATCHING_DISMISSALS_SQL: &str = "
+    CREATE TABLE IF NOT EXISTS continue_watching_dismissals (
+        media_type TEXT NOT NULL,
+        media_id TEXT NOT NULL,
+        dismissed_through INTEGER NOT NULL,
+        PRIMARY KEY (media_type, media_id)
+    );";
+
+/// A dismissal `d` holds while its title has history and nothing newer than it.
+const EFFECTIVE_DISMISSAL: &str = "
+    IFNULL((
+        SELECT MAX(w.last_watched) FROM watch_progress AS w
+        WHERE w.media_type = d.media_type AND w.media_id = d.media_id
+    ), d.dismissed_through + 1) <= d.dismissed_through";
+
+pub(super) const MAX_CONTINUE_WATCHING_DISMISSALS: i64 = 500;
 
 const UPSERT_PROGRESS_SQL: &str = "
     INSERT INTO watch_progress (

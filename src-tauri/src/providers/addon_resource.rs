@@ -2,17 +2,19 @@ use super::ttl_cache::{
     hash_segment, FetchContract, FetchFailure, FetchFailureCooldown, InFlight, TtlCache,
 };
 use super::{
-    addon_manifest::{snapshot_supports_request, AddonCatalogCapability, AddonManifest},
+    addon_manifest::{AddonCatalogCapability, AddonManifest},
     bound_optional, build_provider_http_client, normalize_media_year, strip_manifest_suffix,
     trim_to_max, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime};
 use urlencoding::encode;
 
 /// 2MiB bound, ~3x headroom over measured catalog pages (decompressed,
@@ -46,6 +48,9 @@ const RESOURCE_CACHE_EMPTY_TTL: Duration = Duration::from_secs(30);
 const META_CACHE_MAX_ENTRIES: usize = 48;
 const CATALOG_CACHE_MAX_ENTRIES: usize = 48;
 const SUBTITLE_CACHE_MAX_ENTRIES: usize = 64;
+const SUBTITLE_DISK_MAX_BYTES: usize = SUBTITLE_MAX_BYTES + 128;
+// All filesystem work runs on blocking workers; one gate bounds writers across clients.
+static SUBTITLE_DISK_GATE: Mutex<()> = Mutex::new(());
 /// A dropped fetch future never releases its key; inserts sweep orphans past this bound.
 const RESOURCE_IN_FLIGHT_SWEEP_AT: usize = 64;
 /// Per-addon transport-failure cooldown: a host that failed to answer is
@@ -58,6 +63,80 @@ const RESOURCE_FAILURE_CACHE_MAX_ENTRIES: usize = 64;
 /// The request URL embeds the (possibly credential-bearing) addon base, so cache keys keep only a hash segment.
 fn resource_cache_key(resource: &str, url: &str) -> String {
     format!("{resource}:{}", hash_segment(url))
+}
+
+#[derive(Serialize, Deserialize)]
+struct SubtitleDiskEntry {
+    expires_at: SystemTime,
+    response: Box<RawValue>,
+}
+
+fn read_subtitle_disk(path: &Path) -> Option<Arc<[AddonSubtitle]>> {
+    let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take((SUBTITLE_DISK_MAX_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > SUBTITLE_DISK_MAX_BYTES {
+        return None;
+    }
+    let entry: SubtitleDiskEntry = serde_json::from_slice(&bytes).ok()?;
+    let remaining = entry.expires_at.duration_since(SystemTime::now()).ok()?;
+    if remaining > RESOURCE_CACHE_TTL {
+        return None;
+    }
+    // Disk is untrusted too: reapply the URL, item-count and field validation.
+    let response = serde_json::from_str(entry.response.get()).ok()?;
+    let subtitles = parse_subtitle_items(response);
+    (!subtitles.is_empty() && SystemTime::now() < entry.expires_at).then_some(subtitles)
+}
+
+fn write_subtitle_disk(
+    path: &Path,
+    bytes: &[u8],
+    expires_at: SystemTime,
+    generation: &AtomicU64,
+    expected: u64,
+) -> Option<()> {
+    let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
+    if generation.load(Ordering::SeqCst) != expected || SystemTime::now() >= expires_at {
+        return None;
+    }
+    let bytes = serde_json::to_vec(&SubtitleDiskEntry {
+        expires_at,
+        response: serde_json::from_slice(bytes).ok()?,
+    })
+    .ok()?;
+    if bytes.len() > SUBTITLE_DISK_MAX_BYTES {
+        return None;
+    }
+    let directory = path.parent()?;
+    std::fs::create_dir_all(directory).ok()?;
+    let mut files: Vec<_> = std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter(|entry| {
+            entry.path() != path && entry.path().extension().is_some_and(|ext| ext == "json")
+        })
+        .map(|entry| {
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            (modified, entry.path())
+        })
+        .collect();
+    files.sort_unstable();
+    for (_, victim) in files
+        .iter()
+        .take(files.len().saturating_sub(SUBTITLE_CACHE_MAX_ENTRIES - 1))
+    {
+        std::fs::remove_file(victim).ok()?;
+    }
+    // A torn write is just a cache miss, never a playback failure.
+    std::fs::write(path, bytes).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,8 +178,9 @@ struct CatalogResponse<'a> {
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct MetaResponse {
-    meta: Option<Value>,
+struct MetaResponse<'a> {
+    #[serde(borrow)]
+    meta: Option<&'a RawValue>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -161,6 +241,7 @@ pub(crate) struct AddonResourceClient {
     meta_stragglers: TtlCache<()>,
     catalog_cache: TtlCache<Arc<CatalogPage>>,
     subtitle_cache: TtlCache<Arc<[AddonSubtitle]>>,
+    subtitle_disk_dir: Option<PathBuf>,
     /// Per-addon cooldown keyed by base-URL hash — same contract as the transport's `fetch_failures`.
     fetch_failures: FetchFailureCooldown,
     /// Short-TTL negative cache — a deterministic failure (status, size cap,
@@ -170,7 +251,7 @@ pub(crate) struct AddonResourceClient {
     /// leader and re-read the cache.
     in_flight: InFlight,
     /// Bumped by `clear_cache`: in-flight fetches must not repopulate cleared entries.
-    generation: AtomicU64,
+    generation: Arc<AtomicU64>,
 }
 
 /// Lite shape rebuilt field-by-field so a card hit never copies the discarded
@@ -227,6 +308,7 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_TTL,
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
+            subtitle_disk_dir: None,
             fetch_failures: FetchFailureCooldown::new(RESOURCE_FETCH_FAILURE_TTL),
             // Failures take the short empty TTL: a fixed addon recovers fast.
             failure_cache: TtlCache::new(
@@ -235,12 +317,20 @@ impl AddonResourceClient {
                 RESOURCE_CACHE_EMPTY_TTL,
             ),
             in_flight: InFlight::new(RESOURCE_IN_FLIGHT_SWEEP_AT),
-            generation: AtomicU64::new(0),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
-    /// Clear all resource caches (e.g. addon set changed): bump the generation
+    pub(crate) fn with_subtitle_cache_dir(cache_dir: Option<PathBuf>) -> Self {
+        Self {
+            subtitle_disk_dir: cache_dir.map(|directory| directory.join("subtitles-v1")),
+            ..Self::new()
+        }
+    }
+
+    /// Clear in-memory resource caches (e.g. addon set changed): bump the generation
     /// first so in-flight fetches can't repopulate; cooldowns clear too.
+    /// Disk responses retain their exact source-URL key and original expiration.
     pub(crate) fn clear_cache(&self) {
         self.generation.fetch_add(1, Ordering::SeqCst);
         self.meta_cache.clear();
@@ -363,7 +453,7 @@ impl AddonResourceClient {
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, META_MAX_BYTES).await?;
                     tokio::task::spawn_blocking(move || {
-                        let response: MetaResponse =
+                        let response: MetaResponse<'_> =
                             serde_json::from_slice(&bytes).map_err(|_| {
                                 FetchFailure::Fatal("Invalid metadata response format.".to_string())
                             })?;
@@ -392,6 +482,27 @@ impl AddonResourceClient {
         let url = build_resource_url(base_url, "subtitles", type_, id, &[])?;
         let cache_key = resource_cache_key("subtitles", &url);
         let addon_key = hash_segment(base_url);
+        if let Some(subtitles) = self.subtitle_cache.get(&cache_key) {
+            return Ok(subtitles.to_vec());
+        }
+        let generation = self.cache_generation();
+        let disk_path = self
+            .subtitle_disk_dir
+            .as_ref()
+            .map(|directory| directory.join(format!("{}.json", hash_segment(&cache_key))));
+        if let Some(path) = disk_path.clone() {
+            let cached = tokio::task::spawn_blocking(move || read_subtitle_disk(&path))
+                .await
+                .ok()
+                .flatten();
+            if self.cache_generation() != generation {
+                return Err("Addon request was superseded. Please try again.".to_string());
+            }
+            if let Some(subtitles) = cached {
+                // Never promote disk hits into a fresh 180s memory window or rewrite them.
+                return Ok(subtitles.to_vec());
+            }
+        }
         let subtitles = self
             .fetch_contract()
             .run(
@@ -403,12 +514,27 @@ impl AddonResourceClient {
                     let what = format!("subtitles {type_}/{id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, SUBTITLE_MAX_BYTES).await?;
+                    let expires_at = SystemTime::now() + RESOURCE_CACHE_TTL;
+                    let disk_path = disk_path.clone();
+                    let cache_generation = self.generation.clone();
                     tokio::task::spawn_blocking(move || {
                         let response: SubtitleResponse<'_> = serde_json::from_slice(&bytes)
                             .map_err(|_| {
                                 FetchFailure::Fatal("Invalid subtitle response format.".to_string())
                             })?;
-                        Ok(parse_subtitle_items(response))
+                        let subtitles = parse_subtitle_items(response);
+                        if !subtitles.is_empty() {
+                            if let Some(path) = disk_path {
+                                let _ = write_subtitle_disk(
+                                    &path,
+                                    &bytes,
+                                    expires_at,
+                                    &cache_generation,
+                                    generation,
+                                );
+                            }
+                        }
+                        Ok(subtitles)
                     })
                     .await
                     .map_err(|_| {
@@ -475,14 +601,6 @@ pub(crate) fn snapshot_supports_catalog<'a>(
     }
 
     Ok(catalog)
-}
-
-pub(crate) fn snapshot_supports_meta(snapshot: &AddonManifest, type_: &str, id: &str) -> bool {
-    snapshot_supports_request(snapshot, "meta", type_, id)
-}
-
-pub(crate) fn snapshot_supports_subtitles(snapshot: &AddonManifest, type_: &str, id: &str) -> bool {
-    snapshot_supports_request(snapshot, "subtitles", type_, id)
 }
 
 fn json_string(value: &Value) -> Option<String> {
@@ -583,13 +701,26 @@ fn parse_catalog_item(value: CatalogItemJson) -> Option<MediaItem> {
     })
 }
 
-fn parse_meta_item(value: Value) -> Option<MediaDetails> {
-    let id = json_string(value.get("id")?)?;
+fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
+    // Borrow field values without allocating the unbounded videos tree.
+    let mut fields: BTreeMap<String, &RawValue> = serde_json::from_str(raw.get()).ok()?;
+    let videos = fields.remove("videos");
+    let value = Value::Object(
+        fields
+            .into_iter()
+            .map(|(key, raw)| serde_json::from_str(raw.get()).map(|value| (key, value)))
+            .collect::<Result<_, _>>()
+            .ok()?,
+    );
+    let id: String = json_string(value.get("id")?)?
+        .chars()
+        .take(MAX_ID_CHARS)
+        .collect();
     let title = json_string(value.get("name")?)?;
     let type_ = json_string(value.get("type")?)?;
     // `imdb_id` is a lookup id embedded in stream query paths — it shares `id`'s bound.
     let imdb_id = if id.starts_with("tt") {
-        Some(id.chars().take(MAX_ID_CHARS).collect())
+        Some(id.clone())
     } else {
         json_string_field(&value, "imdb_id")
             .or_else(|| json_string_field(&value, "imdbId"))
@@ -597,11 +728,11 @@ fn parse_meta_item(value: Value) -> Option<MediaDetails> {
     };
 
     // `seasons` is populated iff `episodes` is, so the lite shape drops both together.
-    let episodes = parse_episodes(value.get("videos"));
+    let episodes = parse_episodes(videos);
     let seasons = episodes.as_deref().map(media_seasons_from_episodes);
 
     Some(MediaDetails {
-        id: id.chars().take(MAX_ID_CHARS).collect(),
+        id,
         imdb_id,
         title,
         poster: sanitize_image_url(value.get("poster")),
@@ -737,33 +868,53 @@ fn parse_trailers(value: Option<&Value>, streams: Option<&Value>) -> Option<Vec<
     (!trailers.is_empty()).then_some(trailers)
 }
 
-fn parse_episodes(value: Option<&Value>) -> Option<Vec<Episode>> {
-    let Value::Array(items) = value? else {
-        return None;
-    };
+fn parse_episodes(value: Option<&RawValue>) -> Option<Vec<Episode>> {
+    struct Episodes;
 
-    let mut episodes: Vec<Episode> = items
-        .iter()
-        .filter_map(|item| {
-            let id = json_string_field(item, "id")?;
-            Some(Episode {
-                id,
-                title: json_string_field(item, "name").or_else(|| json_string_field(item, "title")),
-                season: json_u32(item.get("season")).unwrap_or(0),
-                episode: json_u32(item.get("episode"))
-                    .or_else(|| json_u32(item.get("number")))
-                    .unwrap_or(0),
-                released: json_string_field(item, "released"),
-                release_date: None,
-                overview: json_string_field(item, "overview"),
-                thumbnail: sanitize_image_url(item.get("thumbnail")),
-                stream_lookup_id: None,
-                stream_season: None,
-                stream_episode: None,
-            })
-        })
-        .take(MAX_EPISODES)
-        .collect();
+    impl<'de> serde::de::Visitor<'de> for Episodes {
+        type Value = Vec<Episode>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an episode array")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut episodes = Vec::new();
+            while episodes.len() < MAX_EPISODES {
+                let Some(item) = sequence.next_element::<Value>()? else {
+                    break;
+                };
+                let Some(id) = json_string_field(&item, "id") else {
+                    continue;
+                };
+                episodes.push(Episode {
+                    id,
+                    title: json_string_field(&item, "name")
+                        .or_else(|| json_string_field(&item, "title")),
+                    season: json_u32(item.get("season")).unwrap_or(0),
+                    episode: json_u32(item.get("episode"))
+                        .or_else(|| json_u32(item.get("number")))
+                        .unwrap_or(0),
+                    released: json_string_field(&item, "released"),
+                    release_date: None,
+                    overview: json_string_field(&item, "overview"),
+                    thumbnail: sanitize_image_url(item.get("thumbnail")),
+                    stream_lookup_id: None,
+                    stream_season: None,
+                    stream_episode: None,
+                });
+            }
+            // Validate the rest without allocating discarded rows or a pointer per source entry.
+            while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            Ok(episodes)
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(value?.get());
+    let mut episodes = serde::Deserializer::deserialize_seq(&mut deserializer, Episodes).ok()?;
 
     // Sort after the cap; ties keep addon order. Consumers read this cached order over IPC.
     episodes.sort_by_key(|episode| (episode.season, episode.episode));

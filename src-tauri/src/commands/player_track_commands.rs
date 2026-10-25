@@ -10,20 +10,10 @@ use tauri_plugin_libmpv::MpvExt;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum PlayerTrackType {
-    Audio,
-    Sub,
-    Video,
-}
-
-impl PlayerTrackType {
     // Audio/sub first so the pickers render in selection order; video last.
-    fn sort_order(self) -> u8 {
-        match self {
-            Self::Audio => 0,
-            Self::Sub => 1,
-            Self::Video => 2,
-        }
-    }
+    Audio = 0,
+    Sub = 1,
+    Video = 2,
 }
 
 /// One `track-list` row, already normalized: `selected` comes from
@@ -186,7 +176,7 @@ fn read_track_list(
             }
         }
 
-        match index_by_key.entry((track_type.sort_order(), id)) {
+        match index_by_key.entry((track_type as u8, id)) {
             Entry::Occupied(existing) => merge_track_variants(&mut tracks[*existing.get()], track),
             Entry::Vacant(entry) => {
                 entry.insert(tracks.len());
@@ -195,7 +185,7 @@ fn read_track_list(
         }
     }
 
-    tracks.sort_unstable_by_key(|track| (track.r#type.sort_order(), track.id));
+    tracks.sort_unstable_by_key(|track| (track.r#type as u8, track.id));
     let mut label_counts = [HashMap::new(), HashMap::new(), HashMap::new()];
     for track in &mut tracks {
         let lang = track
@@ -218,13 +208,13 @@ fn read_track_list(
         if track.hearing_impaired {
             label.push_str(" · SDH");
         }
-        *label_counts[track.r#type.sort_order() as usize]
+        *label_counts[track.r#type as usize]
             .entry(label.clone())
             .or_insert(0) += 1;
         track.display_label = label;
     }
     for track in &mut tracks {
-        if label_counts[track.r#type.sort_order() as usize][&track.display_label] > 1 {
+        if label_counts[track.r#type as usize][&track.display_label] > 1 {
             track.display_label.push_str(&format!(" #{}", track.id));
         }
     }

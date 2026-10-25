@@ -250,14 +250,6 @@ fn language_aliases(canonical: &str) -> &'static [&'static str] {
         .unwrap_or(&[])
 }
 
-fn exact_language_aliases(canonical: &str) -> &'static [&'static str] {
-    SUPPORTED_LANGUAGES
-        .iter()
-        .find(|language| language.code == canonical)
-        .map(|language| language.exact_aliases)
-        .unwrap_or(&[])
-}
-
 pub(crate) fn canonicalize_language_value(value: &str) -> Option<&'static str> {
     let value = value.trim();
     canonicalize_language_token(value)
@@ -413,9 +405,10 @@ pub(crate) fn normalize_track_language_candidate(
 fn mpv_language_priority_list(preferred: Option<&str>) -> Option<String> {
     let normalized = normalize_language_token(preferred, false)?;
     let mut aliases = vec![normalized.as_str()];
-    for alias in language_aliases(&normalized)
+    for alias in SUPPORTED_LANGUAGES
         .iter()
-        .chain(exact_language_aliases(&normalized))
+        .filter(|language| language.code == normalized)
+        .flat_map(|language| language.aliases.iter().chain(language.exact_aliases))
     {
         if !aliases.contains(alias) {
             aliases.push(alias);
@@ -481,12 +474,8 @@ pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
     candidates
 }
 
-fn contains_token(tokens: &[&str], needle: &str) -> bool {
-    tokens.contains(&needle)
-}
-
 fn contains_any_token(tokens: &[&str], needles: &[&str]) -> bool {
-    needles.iter().any(|needle| contains_token(tokens, needle))
+    needles.iter().any(|needle| tokens.contains(needle))
 }
 
 fn contains_phrase(tokens: &[&str], phrase: &[&str]) -> bool {
@@ -552,7 +541,7 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
         score += 20;
     }
 
-    if track.forced || contains_token(&combined_tokens, "forced") {
+    if track.forced || combined_tokens.contains(&"forced") {
         score -= 45;
     }
 
@@ -563,7 +552,7 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
         score -= 35;
     }
 
-    if contains_token(&combined_tokens, "commentary") {
+    if combined_tokens.contains(&"commentary") {
         score -= 60;
     }
 

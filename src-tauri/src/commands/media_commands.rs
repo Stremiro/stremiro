@@ -315,7 +315,7 @@ pub async fn get_media_details(
     media_type: String,
     id: String,
     include_episodes: Option<bool>,
-) -> Result<MediaDetails, String> {
+) -> Result<MediaDetails, super::addon_registry::AddonResourceError> {
     let (media_type, id) = normalize_details_lookup(&media_type, &id)?;
     let include_episodes = include_episodes.unwrap_or(true);
 
@@ -422,12 +422,29 @@ fn subtitle_lookup_ids(
     Ok((effective_type, query_ids))
 }
 
+fn append_media_schedule_echoes(
+    schedules: &mut Vec<MediaSchedule>,
+    mut schedule: MediaSchedule,
+    mut request_types: Vec<String>,
+) {
+    if let Some(last_type) = request_types.pop() {
+        for request_type in request_types {
+            let mut echo = schedule.clone();
+            echo.type_ = request_type;
+            schedules.push(echo);
+        }
+        schedule.type_ = last_type;
+        schedules.push(schedule);
+    }
+}
+
 pub(crate) async fn fetch_media_schedules(
     app: &AppHandle,
     client: &AddonResourceClient,
     items: Vec<MediaScheduleRequest>,
+    on_progress: impl FnMut(Vec<MediaSchedule>),
 ) -> Result<Vec<MediaSchedule>, String> {
-    fetch_media_schedules_with_response_timeout(app, client, items, None).await
+    fetch_media_schedules_inner(app, client, items, None, Some(on_progress)).await
 }
 
 pub(crate) async fn fetch_media_schedules_with_response_timeout(
@@ -435,6 +452,23 @@ pub(crate) async fn fetch_media_schedules_with_response_timeout(
     client: &AddonResourceClient,
     items: Vec<MediaScheduleRequest>,
     response_timeout: Option<Duration>,
+) -> Result<Vec<MediaSchedule>, String> {
+    fetch_media_schedules_inner(
+        app,
+        client,
+        items,
+        response_timeout,
+        None::<fn(Vec<MediaSchedule>)>,
+    )
+    .await
+}
+
+async fn fetch_media_schedules_inner(
+    app: &AppHandle,
+    client: &AddonResourceClient,
+    items: Vec<MediaScheduleRequest>,
+    response_timeout: Option<Duration>,
+    mut on_progress: Option<impl FnMut(Vec<MediaSchedule>)>,
 ) -> Result<Vec<MediaSchedule>, String> {
     // Dedupe fetches on the canonical key, but remember every caller's raw type —
     // the frontend indexes by its own request pair and a `series`+kitsu request
@@ -471,6 +505,7 @@ pub(crate) async fn fetch_media_schedules_with_response_timeout(
     }
 
     let mut schedules = Vec::new();
+    let mut has_progress = false;
     let mut errors = Vec::new();
     let deadline_at =
         tokio::time::Instant::now() + response_timeout.unwrap_or(MEDIA_SCHEDULE_FETCH_DEADLINE);
@@ -506,7 +541,8 @@ pub(crate) async fn fetch_media_schedules_with_response_timeout(
                 (index, request_types, outcome)
             },
         ))
-        .buffer_unordered(MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT);
+        .buffer_unordered(MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT)
+        .ready_chunks(MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT);
 
         let mut outcomes = Vec::new();
         loop {
@@ -520,26 +556,34 @@ pub(crate) async fn fetch_media_schedules_with_response_timeout(
                     break;
                 },
                 next = pending.next() => {
-                    let Some(outcome) = next else { break };
-                    outcomes.push(outcome);
+                    let Some(batch) = next else { break };
+                    if let Some(on_progress) = on_progress.as_mut() {
+                        let mut completed = Vec::new();
+                        for (_, request_types, outcome) in batch {
+                            match outcome {
+                                Ok(schedule) => {
+                                    append_media_schedule_echoes(&mut completed, schedule, request_types);
+                                }
+                                Err(error) => push_bounded_error(&mut errors, error),
+                            }
+                        }
+                        if !completed.is_empty() {
+                            has_progress = true;
+                            on_progress(completed);
+                        }
+                    } else {
+                        outcomes.extend(batch);
+                    }
                 }
             }
         }
         outcomes.sort_by_key(|(index, _, _)| *index);
 
-        for (_, mut request_types, outcome) in outcomes {
+        for (_, request_types, outcome) in outcomes {
             match outcome {
-                Ok(mut schedule) => {
+                Ok(schedule) => {
                     // Echo each caller's raw type, not the normalized fetch type.
-                    if let Some(last_type) = request_types.pop() {
-                        for request_type in request_types {
-                            let mut echo = schedule.clone();
-                            echo.type_ = request_type;
-                            schedules.push(echo);
-                        }
-                        schedule.type_ = last_type;
-                        schedules.push(schedule);
-                    }
+                    append_media_schedule_echoes(&mut schedules, schedule, request_types);
                 }
                 Err(error) => {
                     push_bounded_error(&mut errors, error);
@@ -548,7 +592,7 @@ pub(crate) async fn fetch_media_schedules_with_response_timeout(
         }
     }
 
-    if schedules.is_empty() && !errors.is_empty() {
+    if !has_progress && schedules.is_empty() && !errors.is_empty() {
         return Err(errors.join(" | "));
     }
 
@@ -592,14 +636,9 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
         return Ok(Some(mapping));
     }
 
-    let mut details = fetch_media_details_inner(&app, client, media_type, &id, true).await?;
+    let details = fetch_media_details_shared_inner(&app, client, media_type, &id).await?;
 
-    if let Some(episodes) = details.episodes.take() {
-        let fallback_lookup_id = details
-            .imdb_id
-            .as_deref()
-            .unwrap_or(id.as_str())
-            .to_string();
+    if details.episodes.is_some() {
         let app_owned = app.clone();
         let service = playback_state.clone();
         let id_owned = id.clone();
@@ -608,8 +647,8 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
                 &app_owned,
                 media_type,
                 &id_owned,
-                Some(fallback_lookup_id.as_str()),
-                &episodes,
+                Some(details.imdb_id.as_deref().unwrap_or(id_owned.as_str())),
+                details.episodes.as_deref().unwrap_or_default(),
             )
         })
         .await?;

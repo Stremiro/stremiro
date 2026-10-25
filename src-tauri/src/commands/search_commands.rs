@@ -31,6 +31,7 @@ pub struct SearchCatalogPage {
     pub items: Vec<MediaItem>,
     pub continuation: SearchCatalogContinuation,
     pub exhausted: bool,
+    pub partial: bool,
 }
 
 #[derive(Debug, Default, Deserialize, Serialize)]
@@ -203,23 +204,13 @@ impl SearchCatalogRequest {
 
 fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
     let mut seen = HashSet::new();
-    let mut normalized = Vec::new();
-
-    for genre in genres.unwrap_or_default() {
-        if normalized.len() >= MAX_GENRE_FILTERS {
-            break;
-        }
-
-        let Some(genre) = normalize_query(&genre) else {
-            continue;
-        };
-
-        if seen.insert(genre.to_ascii_lowercase()) {
-            normalized.push(genre);
-        }
-    }
-
-    normalized
+    genres
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|genre| normalize_query(&genre))
+        .filter(|genre| seen.insert(genre.to_ascii_lowercase()))
+        .take(MAX_GENRE_FILTERS)
+        .collect()
 }
 
 fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogCriteria, String> {
@@ -553,13 +544,16 @@ async fn fetch_query_results(
         retain_titled_catalog_items(page.items),
         &required_genres,
     );
-    Ok(finish_catalog_page(
+    let mut result = finish_catalog_page(
         rank_search_results(query, items, criteria.year_range),
         criteria.continuation,
         None,
         None,
-        Some((page.cursors, page.claims)),
-    ))
+        Some(page.cursors),
+        page.claims,
+    );
+    result.partial = page.partial;
+    Ok(result)
 }
 
 fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
@@ -623,6 +617,78 @@ fn browse_year_catalog(
     }
 }
 
+async fn fetch_registry_browse_pages(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    media_type: SearchMediaType,
+    catalog_id: &str,
+    genres: &[Option<&str>],
+    skip: u32,
+) -> Vec<Result<CatalogFetchPage, String>> {
+    let media_type = media_type.catalog_type();
+    let groups = genres
+        .iter()
+        .map(|genre| {
+            let extras = catalog_browse_extras(*genre, skip);
+            super::addon_registry::select_catalog_targets(snapshot, media_type, catalog_id, &extras)
+                .map(|targets| (targets, extras))
+        })
+        .collect();
+    super::addon_registry::fetch_catalog_pages_for_target_groups(client, media_type, groups).await
+}
+
+/// One first page per seed genre, sharing the captured registry and one fetch pool.
+/// Keep pages separate: recommendation ranking uses each filtered page's positions.
+pub(super) async fn fetch_genre_catalog_pages(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    media_type: &str,
+    genres: Vec<String>,
+) -> Result<Vec<Result<Vec<MediaItem>, String>>, String> {
+    let criteria = genres
+        .into_iter()
+        .map(|genre| build_search_criteria(SearchCatalogRequest::for_genre(media_type, genre)))
+        .collect::<Result<Vec<_>, _>>()?;
+    let Some(first) = criteria.first() else {
+        return Ok(Vec::new());
+    };
+    let media_type = first
+        .media_type
+        .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
+    let fetch_genres: Vec<_> = criteria
+        .iter()
+        .map(|criteria| catalog_fetch_genres(media_type, &criteria.genres))
+        .collect();
+    // A single-genre request routes to one catalog, including anime's Animation fallback.
+    let genres: Vec<_> = fetch_genres
+        .iter()
+        .map(|genres| genres.first().map(String::as_str))
+        .collect();
+    Ok(fetch_registry_browse_pages(
+        snapshot,
+        client,
+        media_type,
+        first.feed.cinemeta_catalog(),
+        &genres,
+        0,
+    )
+    .await
+    .into_iter()
+    .zip(criteria)
+    .zip(fetch_genres)
+    .map(|((page, criteria), fetch_genres)| {
+        page.map(|page| {
+            apply_browse_filters(
+                retain_titled_catalog_items(page.items),
+                media_type,
+                &fetch_genres,
+                criteria.year_range,
+            )
+        })
+    })
+    .collect())
+}
+
 async fn fetch_registry_browse_page(
     snapshot: &[AddonConfig],
     client: &AddonResourceClient,
@@ -630,21 +696,21 @@ async fn fetch_registry_browse_page(
     catalog_id: &str,
     genres: &[String],
     skip: u32,
-) -> Result<super::addon_registry::CatalogFetchPage, String> {
-    let media_type = media_type.catalog_type();
-    let groups = genres
+) -> Result<CatalogFetchPage, String> {
+    let genre_groups: Vec<_> = genres
         .iter()
-        .map(Some)
+        .map(|genre| Some(genre.as_str()))
         .chain(genres.is_empty().then_some(None))
-        .map(|genre| {
-            let extras = catalog_browse_extras(genre.map(String::as_str), skip);
-            super::addon_registry::select_catalog_targets(snapshot, media_type, catalog_id, &extras)
-                .map(|targets| (targets, extras))
-        })
         .collect();
-    let pages =
-        super::addon_registry::fetch_catalog_pages_for_target_groups(client, media_type, groups)
-            .await;
+    let pages = fetch_registry_browse_pages(
+        snapshot,
+        client,
+        media_type,
+        catalog_id,
+        &genre_groups,
+        skip,
+    )
+    .await;
     if genres.len() > 1 {
         super::addon_registry::merge_catalog_pages(pages, "Failed to load catalog.")
     } else {
@@ -661,7 +727,7 @@ async fn fetch_browse_page(
     criteria: &SearchCatalogCriteria,
     media_type: SearchMediaType,
     mut skip: u32,
-) -> Result<CatalogFetchPage, String> {
+) -> Result<(CatalogFetchPage, SearchCursorClaims), String> {
     let feed = criteria.feed;
     let fetch_genres = catalog_fetch_genres(media_type, &criteria.genres);
     // Prefer the provider `year` catalog for a single pinned year; when no enabled
@@ -694,6 +760,7 @@ async fn fetch_browse_page(
     let mut fetches = 0;
     let mut items = Vec::new();
     let mut seen = HashSet::new();
+    let mut claims = HashMap::new();
     let mut next_skip = None;
 
     loop {
@@ -715,6 +782,12 @@ async fn fetch_browse_page(
             Err(_) => break,
         };
         next_skip = page.next_skip;
+        claims.extend(page.items.iter().map(|item| {
+            (
+                catalog_dedup_key(&item.type_, &item.id),
+                Some(usize::from(media_type != SearchMediaType::Movie)),
+            )
+        }));
 
         let batch = apply_browse_filters(
             retain_titled_catalog_items(page.items),
@@ -744,17 +817,18 @@ async fn fetch_browse_page(
         }
     }
 
-    Ok(CatalogFetchPage { items, next_skip })
+    Ok((CatalogFetchPage { items, next_skip }, claims))
 }
 
 fn merge_all_browse_pages(
     continuation: SearchCatalogContinuation,
-    movie: Option<Result<CatalogFetchPage, String>>,
-    series: Option<Result<CatalogFetchPage, String>>,
+    movie: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
+    series: Option<Result<(CatalogFetchPage, SearchCursorClaims), String>>,
 ) -> Result<SearchCatalogPage, String> {
     let cursors = continuation.all_cursors.unwrap_or_default();
     let mut next = AllBrowseCursors::default();
     let mut pages = [Vec::new(), Vec::new()];
+    let mut claims = HashMap::new();
     let mut succeeded = false;
     let mut first_error = None;
     for (index, skip, outcome) in [(0, cursors.movie, movie), (1, cursors.series, series)] {
@@ -767,10 +841,11 @@ fn merge_all_browse_pages(
             &mut next.series
         };
         match outcome {
-            Ok(page) => {
+            Ok((page, page_claims)) => {
                 succeeded = true;
                 *cursor = page.next_skip.filter(|next_skip| *next_skip > skip);
                 pages[index] = page.items;
+                claims.extend(page_claims);
             }
             Err(error) => {
                 // Preserve a failed branch's cursor so the next page retries it.
@@ -801,6 +876,7 @@ fn merge_all_browse_pages(
         None,
         Some(next),
         None,
+        claims,
     ))
 }
 
@@ -809,20 +885,20 @@ fn finish_catalog_page(
     previous: SearchCatalogContinuation,
     next_skip: Option<u32>,
     all_cursors: Option<AllBrowseCursors>,
-    search_cursors: Option<(Vec<SearchSourceCursor>, SearchCursorClaims)>,
+    search_cursors: Option<Vec<SearchSourceCursor>>,
+    claims: SearchCursorClaims,
 ) -> SearchCatalogPage {
     let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
-    let mut added_movie = false;
-    let mut added_series = false;
-    let (search_cursors, claims) = search_cursors.unzip();
-    let mut search_progress = vec![false; search_cursors.as_ref().map_or(0, Vec::len)];
+    let mut progress = vec![false; search_cursors.as_ref().map_or(2, Vec::len)];
     // Claims cover the page before genre/year filtering, so a source whose new titles
     // were all filtered out still advanced.
-    for (key, claimant) in claims.iter().flatten() {
-        if let Some(progress) = claimant.and_then(|index| search_progress.get_mut(index)) {
+    for (key, claimant) in &claims {
+        if let Some(progress) = claimant.and_then(|index| progress.get_mut(index)) {
             *progress |= !seen.contains(key);
         }
     }
+    let mut added_movie = search_cursors.is_none() && progress[0];
+    let mut added_series = search_cursors.is_none() && progress[1];
     let items: Vec<_> = items
         .into_iter()
         .filter(|item| {
@@ -838,15 +914,17 @@ fn finish_catalog_page(
         .collect();
     // Filtered-out titles are remembered too, or an addon that ignores `skip` would
     // replay them as progress forever.
-    for key in claims.into_iter().flat_map(HashMap::into_keys) {
+    for key in claims.into_keys() {
         if seen.len() >= MAX_CATALOG_SEEN_KEYS {
             break;
         }
         seen.insert(key);
     }
     let continuation = SearchCatalogContinuation {
-        skip: next_skip
-            .filter(|next| !items.is_empty() && previous.skip.is_some_and(|skip| *next > skip)),
+        skip: next_skip.filter(|next| {
+            (!items.is_empty() || added_movie || added_series)
+                && previous.skip.is_some_and(|skip| *next > skip)
+        }),
         all_cursors: all_cursors.map(|cursors| {
             let previous = previous.all_cursors.unwrap_or_default();
             AllBrowseCursors {
@@ -863,7 +941,7 @@ fn finish_catalog_page(
         search_cursors: search_cursors.map(|cursors| {
             cursors
                 .into_iter()
-                .zip(search_progress)
+                .zip(progress)
                 .filter_map(|(cursor, progress)| (cursor.retry || progress).then_some(cursor))
                 .collect()
         }),
@@ -873,6 +951,7 @@ fn finish_catalog_page(
         exhausted: continuation.is_exhausted(),
         items,
         continuation,
+        partial: false,
     }
 }
 
@@ -881,8 +960,8 @@ pub async fn query_search_catalog(
     app: AppHandle,
     client: State<'_, AddonResourceClient>,
     request: SearchCatalogRequest,
-) -> Result<SearchCatalogPage, String> {
-    query_search_catalog_for_request(&app, &client, request).await
+) -> Result<SearchCatalogPage, super::addon_registry::AddonResourceError> {
+    Ok(query_search_catalog_for_request(&app, &client, request).await?)
 }
 
 pub(crate) async fn query_search_catalog_for_request(
@@ -897,6 +976,7 @@ pub(crate) async fn query_search_catalog_for_request(
             items: Vec::new(),
             continuation: criteria.continuation,
             exhausted: true,
+            partial: false,
         });
     }
 
@@ -925,13 +1005,14 @@ pub(crate) async fn query_search_catalog_for_request(
     let media_type = criteria
         .media_type
         .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
-    let page = fetch_browse_page(&snapshot, client, &criteria, media_type, skip).await?;
+    let (page, claims) = fetch_browse_page(&snapshot, client, &criteria, media_type, skip).await?;
     Ok(finish_catalog_page(
         page.items,
         criteria.continuation,
         page.next_skip,
         None,
         None,
+        claims,
     ))
 }
 

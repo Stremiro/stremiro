@@ -22,17 +22,20 @@ pub(crate) fn normalize_stream_media_type(
     match media_type.trim().to_ascii_lowercase().as_str() {
         "movie" => Some("movie"),
         "anime" => Some("anime"),
-        "series" => Some(
-            if media_id
-                .map(str::trim)
-                .is_some_and(|value| value.to_ascii_lowercase().starts_with("kitsu:"))
-            {
-                "anime"
-            } else {
-                "series"
-            },
-        ),
+        "series" => Some(series_stream_type(media_id)),
         _ => None,
+    }
+}
+
+fn series_stream_type(media_id: Option<&str>) -> &'static str {
+    let is_kitsu = media_id
+        .map(str::trim)
+        .and_then(|value| value.get(..6))
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("kitsu:"));
+    if is_kitsu {
+        "anime"
+    } else {
+        "series"
     }
 }
 
@@ -49,11 +52,6 @@ pub(crate) fn addon_episode_lookup_type(media_type: &str) -> &str {
 /// History-row canonicalization: the stream namespace with an infallible fallback —
 /// unknown persisted types fold to `series`, still honoring kitsu-id promotion.
 pub(crate) fn normalize_history_row_media_type(media_type: &str, media_id: &str) -> &'static str {
-    normalize_stream_media_type(media_type, Some(media_id)).unwrap_or_else(|| {
-        if media_id.trim().to_ascii_lowercase().starts_with("kitsu:") {
-            "anime"
-        } else {
-            "series"
-        }
-    })
+    normalize_stream_media_type(media_type, Some(media_id))
+        .unwrap_or_else(|| series_stream_type(Some(media_id)))
 }

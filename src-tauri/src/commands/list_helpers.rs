@@ -5,7 +5,7 @@ use crate::providers::{bound_optional, trim_to_max, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ListErrorKind {
     ListNameRequired,
@@ -14,29 +14,11 @@ pub enum ListErrorKind {
     ListFull,
     InvalidRules,
     SmartListReadOnly,
+    #[default]
     Failed,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ListError {
-    pub kind: ListErrorKind,
-    pub message: String,
-}
-
-impl ListError {
-    pub(super) fn new(kind: ListErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<String> for ListError {
-    fn from(message: String) -> Self {
-        Self::new(ListErrorKind::Failed, message)
-    }
-}
+pub type ListError = super::CommandError<ListErrorKind>;
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]

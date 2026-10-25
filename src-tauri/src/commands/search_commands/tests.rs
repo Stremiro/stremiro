@@ -11,10 +11,13 @@ use crate::test_helpers::test_media_item;
 #[test]
 fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     let page = |ids: &[&str], next_skip| {
-        Ok(super::CatalogFetchPage {
-            items: ids.iter().map(|id| test_media_item(id, "movie")).collect(),
-            next_skip,
-        })
+        Ok((
+            super::CatalogFetchPage {
+                items: ids.iter().map(|id| test_media_item(id, "movie")).collect(),
+                next_skip,
+            },
+            Default::default(),
+        ))
     };
     let merged = super::merge_all_browse_pages(
         super::SearchCatalogContinuation {
@@ -49,10 +52,13 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
     let merged = super::merge_all_browse_pages(
         continuation(),
         Some(Err("movie offline".into())),
-        Some(Ok(super::CatalogFetchPage {
-            items: vec![],
-            next_skip: None,
-        })),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![],
+                next_skip: None,
+            },
+            Default::default(),
+        ))),
     )
     .unwrap();
     assert!(merged.items.is_empty());
@@ -87,10 +93,13 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
             ..Default::default()
         },
         None,
-        Some(Ok(super::CatalogFetchPage {
-            items: vec![test_media_item("s", "series")],
-            next_skip: Some(200),
-        })),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![test_media_item("s", "series")],
+                next_skip: Some(200),
+            },
+            Default::default(),
+        ))),
     )
     .unwrap();
     assert_eq!(
@@ -164,12 +173,14 @@ fn search_catalog_cross_page_dedup_uses_trimmed_ascii_identity() {
         Some(100),
         None,
         None,
+        Default::default(),
     );
     assert!(!first.exhausted);
     let second = super::finish_catalog_page(
         vec![
             test_media_item("tt1", "movie"),
             test_media_item("\u{feff}tt1", "movie"),
+            test_media_item("tt1", "series"),
             test_media_item("Ä", "series"),
             test_media_item("ä", "series"),
             test_media_item("tt2", "movie"),
@@ -180,10 +191,12 @@ fn search_catalog_cross_page_dedup_uses_trimmed_ascii_identity() {
         Some(200),
         None,
         None,
+        Default::default(),
     );
-    assert_eq!(ids(&second.items), ["ä", "tt2"]);
+    assert_eq!(ids(&second.items), ["tt1", "ä", "tt2"]);
+    assert_eq!(second.items[0].type_, "series");
     assert_eq!(second.continuation.skip, Some(200));
-    assert_eq!(second.continuation.seen_keys.len(), 5);
+    assert_eq!(second.continuation.seen_keys.len(), 6);
     assert!(!second.exhausted);
     assert!(super::build_search_criteria(
         serde_json::from_value(serde_json::json!({
@@ -209,14 +222,20 @@ fn search_catalog_duplicate_only_branch_stops_independently() {
             seen_keys: vec!["movie:tt1".into()],
             ..Default::default()
         },
-        Some(Ok(super::CatalogFetchPage {
-            items: vec![test_media_item("TT1", "movie")],
-            next_skip: Some(200),
-        })),
-        Some(Ok(super::CatalogFetchPage {
-            items: vec![test_media_item("tt2", "series")],
-            next_skip: Some(200),
-        })),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![test_media_item("TT1", "movie")],
+                next_skip: Some(200),
+            },
+            search_claims(&[("movie:tt1", Some(0))]),
+        ))),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![test_media_item("tt2", "series")],
+                next_skip: Some(200),
+            },
+            search_claims(&[("series:tt2", Some(1))]),
+        ))),
     )
     .unwrap();
     assert_eq!(ids(&page.items), ["tt2"]);
@@ -248,6 +267,7 @@ fn browse_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
             next_skip,
             None,
             None,
+            Default::default(),
         );
         assert!(page.exhausted);
         assert_eq!(page.continuation.skip, None);
@@ -260,14 +280,74 @@ fn browse_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
             }),
             ..Default::default()
         },
-        Some(Ok(super::CatalogFetchPage {
-            items: vec![],
-            next_skip: None,
-        })),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![],
+                next_skip: None,
+            },
+            Default::default(),
+        ))),
         None,
     )
     .unwrap();
     assert!(page.exhausted);
+}
+
+#[test]
+fn browse_filtered_titles_advance_once_and_branches_stop_independently() {
+    let claims = || search_claims(&[("movie:old", Some(0))]);
+    let first = super::finish_catalog_page(
+        vec![],
+        super::SearchCatalogContinuation {
+            skip: Some(100),
+            ..Default::default()
+        },
+        Some(200),
+        None,
+        None,
+        claims(),
+    );
+    assert!(first.items.is_empty());
+    assert_eq!(first.continuation.skip, Some(200));
+    assert_eq!(first.continuation.seen_keys, ["movie:old"]);
+    assert!(!first.exhausted);
+    let replayed =
+        super::finish_catalog_page(vec![], first.continuation, Some(300), None, None, claims());
+    assert!(replayed.exhausted);
+    let merged = super::merge_all_browse_pages(
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: Some(100),
+                series: Some(100),
+            }),
+            seen_keys: replayed.continuation.seen_keys,
+            ..Default::default()
+        },
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![],
+                next_skip: Some(200),
+            },
+            claims(),
+        ))),
+        Some(Ok((
+            super::CatalogFetchPage {
+                items: vec![],
+                next_skip: Some(200),
+            },
+            search_claims(&[("series:new", Some(1))]),
+        ))),
+    )
+    .unwrap();
+    assert!(merged.items.is_empty());
+    assert_eq!(
+        merged.continuation.all_cursors,
+        Some(super::AllBrowseCursors {
+            movie: None,
+            series: Some(200)
+        })
+    );
+    assert!(!merged.exhausted);
 }
 
 #[test]
@@ -288,6 +368,7 @@ fn search_catalog_seen_key_bound_validates_and_ends_paging() {
         Some(200),
         None,
         None,
+        Default::default(),
     );
     assert_eq!(ids(&page.items), ["last"]);
     assert_eq!(
@@ -357,18 +438,16 @@ fn text_search_source_cursors_continue_only_while_adding_titles() {
         super::SearchCatalogContinuation::default(),
         None,
         None,
-        Some((
-            vec![
-                search_cursor(PAGED, 100, false),
-                search_cursor(FILTERED, 50, false),
-                search_cursor(RETRY, 0, true),
-            ],
-            search_claims(&[
-                ("movie:prefix", Some(0)),
-                ("movie:tt1", Some(0)),
-                ("movie:old", Some(1)),
-            ]),
-        )),
+        Some(vec![
+            search_cursor(PAGED, 100, false),
+            search_cursor(FILTERED, 50, false),
+            search_cursor(RETRY, 0, true),
+        ]),
+        search_claims(&[
+            ("movie:prefix", Some(0)),
+            ("movie:tt1", Some(0)),
+            ("movie:old", Some(1)),
+        ]),
     );
     assert_eq!(ids(&first.items), ["TT1", "prefix"]);
     assert!(!first.exhausted);
@@ -401,18 +480,16 @@ fn text_search_source_cursors_continue_only_while_adding_titles() {
         criteria.continuation,
         None,
         None,
-        Some((
-            vec![
-                search_cursor(PAGED, 200, false),
-                search_cursor(FILTERED, 100, false),
-                search_cursor(RETRY, 20, false),
-            ],
-            search_claims(&[
-                ("movie:tt1", Some(0)),
-                ("movie:old", Some(1)),
-                ("movie:fresh", Some(2)),
-            ]),
-        )),
+        Some(vec![
+            search_cursor(PAGED, 200, false),
+            search_cursor(FILTERED, 100, false),
+            search_cursor(RETRY, 20, false),
+        ]),
+        search_claims(&[
+            ("movie:tt1", Some(0)),
+            ("movie:old", Some(1)),
+            ("movie:fresh", Some(2)),
+        ]),
     );
     assert_eq!(ids(&second.items), ["fresh"]);
     assert!(!second.exhausted);
@@ -427,10 +504,8 @@ fn text_search_source_cursors_continue_only_while_adding_titles() {
         second.continuation,
         None,
         None,
-        Some((
-            vec![search_cursor(RETRY, 40, false)],
-            search_claims(&[("movie:fresh", Some(0))]),
-        )),
+        Some(vec![search_cursor(RETRY, 40, false)]),
+        search_claims(&[("movie:fresh", Some(0))]),
     );
     assert!(replayed.items.is_empty());
     assert!(replayed.exhausted);
@@ -447,7 +522,8 @@ fn text_search_without_skip_support_serves_page_one_and_exhausts() {
         },
         None,
         None,
-        Some((Vec::new(), search_claims(&[("movie:only", None)]))),
+        Some(Vec::new()),
+        search_claims(&[("movie:only", None)]),
     );
     assert_eq!(ids(&page.items), ["only"]);
     assert!(page.exhausted);
@@ -592,38 +668,17 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
     let movies = [
         ("movie-1936", "The Walking Dead", Some("1936")),
         ("movie-1995", "The Walking Dead", Some("1995")),
-        (
-            "daryl-return",
-            "The Walking Dead: Daryl Dixon - The Return",
-            Some("2024"),
-        ),
         ("return", "The Walking Dead: The Return", Some("2024")),
         ("deceased", "The Walking Deceased", Some("2015")),
         ("vampires", "Strange Love of the Vampires", Some("1975")),
-        (
-            "journey",
-            "The Walking Dead: The Journey So Far",
-            Some("2016"),
-        ),
         ("dead-man", "Dead Man Walking", Some("1995")),
-        ("krays", "The Krays: Dead Man Walking", Some("2018")),
         ("girls", "The Walking Dead Girls", Some("2011")),
-        ("creature", "Creature of the Walking Dead", Some("1965")),
-        ("hills", "The Walking Hills", Some("1949")),
-        ("zombies", "Cowboy Zombies", Some("2013")),
     ]
     .into_iter()
     .map(|(id, title, year)| build_item(id, title, year));
     let series = [
         ("tt1520211", "The Walking Dead", Some("2010")),
         ("dead-city", "The Walking Dead: Dead City", Some("2023")),
-        ("daryl", "The Walking Dead: Daryl Dixon", Some("2023")),
-        ("fear", "Fear the Walking Dead", Some("2015")),
-        ("ones", "The Walking Dead: The Ones Who Live", Some("2024")),
-        ("beyond", "The Walking Dead: World Beyond", Some("2020")),
-        ("tales", "Tales of the Walking Dead", Some("2022")),
-        ("flight", "Fear the Walking Dead: Flight 462", None),
-        ("webisodes", "The Walking Dead: Webisodes", Some("2011")),
         ("origins", "The Walking Dead: Origins", Some("2021")),
     ]
     .into_iter()

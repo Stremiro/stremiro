@@ -38,12 +38,12 @@ fn sanitize_language_pref_for_save(
     value: Option<String>,
     allow_off: bool,
 ) -> Result<Option<String>, String> {
-    match value {
-        Some(raw) => sanitize_language_pref(Some(raw), allow_off)
-            .map(Some)
-            .ok_or_else(|| "Invalid language preference.".to_string()),
-        None => Ok(None),
-    }
+    value
+        .map(|raw| {
+            sanitize_language_pref(Some(raw), allow_off)
+                .ok_or_else(|| "Invalid language preference.".to_string())
+        })
+        .transpose()
 }
 
 pub(crate) fn read_playback_language_preferences_from_store(

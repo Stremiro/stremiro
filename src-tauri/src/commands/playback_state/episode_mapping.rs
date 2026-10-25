@@ -259,21 +259,21 @@ pub(super) fn prune_episode_mapping_index(
         return (false, false);
     }
 
-    let pre_prune = episode_mapping_index.clone();
-    let mut scope_seen_at = HashMap::new();
-    for scope in pre_prune
+    let mut scope_seen_at: HashMap<String, u64> = HashMap::new();
+    for scope in episode_mapping_index
         .iter()
         .filter_map(|key| episode_mapping_scope_key(key))
     {
-        scope_seen_at.entry(scope).or_insert_with(|| {
-            store
+        if !scope_seen_at.contains_key(scope) {
+            let seen_at = store
                 .get(playback_episode_mapping_digest_item_key(scope))
                 .and_then(read_episode_mapping_digest)
                 .map(|(_, seen_at)| seen_at)
-                .unwrap_or(0)
-        });
+                .unwrap_or(0);
+            scope_seen_at.insert(scope.to_string(), seen_at);
+        }
     }
-    prune_index_to_cap(
+    let evicted = prune_index_to_cap(
         store,
         episode_mapping_index,
         PLAYBACK_EPISODE_MAPPING_MAX_ENTRIES,
@@ -292,17 +292,13 @@ pub(super) fn prune_episode_mapping_index(
         playback_episode_mapping_item_key,
     );
     // A scope that lost any indexed item loses its digest.
-    let mut invalidated_scopes = HashSet::new();
-    for key in &pre_prune {
-        if episode_mapping_index.binary_search(key).is_err() {
-            if let Some(scope) = episode_mapping_scope_key(key) {
-                invalidated_scopes.insert(scope.to_string());
-            }
-        }
-    }
+    let invalidated_scopes: HashSet<&str> = evicted
+        .iter()
+        .filter_map(|key| episode_mapping_scope_key(key))
+        .collect();
     let digest_invalidated = invalidated_scopes.contains(own_scope_key);
     for scope in invalidated_scopes {
-        store.delete(playback_episode_mapping_digest_item_key(&scope));
+        store.delete(playback_episode_mapping_digest_item_key(scope));
     }
     (true, digest_invalidated)
 }

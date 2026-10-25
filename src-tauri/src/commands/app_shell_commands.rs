@@ -218,7 +218,7 @@ fn handle_main_window_minimized(app: &AppHandle) {
                 .get_webview_window("main")
                 .is_some_and(|window| window.is_minimized().unwrap_or(false))
         {
-            set_webview_memory_target(&app, true);
+            release_background_memory(&app);
         }
     });
 }
@@ -312,6 +312,13 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     state.initial_reveal_pending.store(false, Ordering::Relaxed);
     state.quit_pending.store(false, Ordering::Relaxed);
     window.hide().map_err(|error| error.to_string())?;
+    release_background_memory(app);
+    Ok(())
+}
+
+/// Hidden or minimized while idle: lower the WebView2 target and drop expired provider
+/// payloads, which otherwise stay resident until the next insert into each cache.
+fn release_background_memory(app: &AppHandle) {
     set_webview_memory_target(app, true);
     if let Some(transport) = app.try_state::<AddonTransport>() {
         transport.purge_expired_caches();
@@ -322,5 +329,4 @@ fn hide_main_window(app: &AppHandle) -> Result<(), String> {
     if let Some(cache) = app.try_state::<super::calendar_commands::CalendarScheduleCache>() {
         cache.purge_expired();
     }
-    Ok(())
 }

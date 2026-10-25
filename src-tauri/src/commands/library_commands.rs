@@ -2,12 +2,12 @@ use super::list_helpers::normalize_smart_list_genre;
 use super::store_helpers::{
     library_item_key, load_library_index, load_library_map, load_watch_status_index,
     merge_library_item, normalize_bulk_ids, normalize_library_item, normalize_watch_status,
-    persist_index_map, read_library_snapshot, read_watch_status_snapshot, retain_status_added_ids,
-    watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
+    read_library_snapshot, read_watch_status_snapshot, remove_index_ids, retain_status_added_ids,
+    LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
     js_trim, normalize_media_id, run_blocking_store_op, with_store, DurableStore,
-    LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE, WATCH_STATUS_INDEX_KEY, WATCH_STATUS_STORE_FILE,
+    LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE, WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
@@ -115,75 +115,31 @@ pub async fn add_to_library(app: AppHandle, item: MediaItem) -> Result<MediaItem
 
 #[command]
 pub async fn remove_from_library(app: AppHandle, id: String) -> Result<(), String> {
+    let id = normalize_media_id(&id).ok_or_else(|| "Invalid media id for library.".to_string())?;
     run_blocking_store_op(move || {
         let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        let id =
-            normalize_media_id(&id).ok_or_else(|| "Invalid media id for library.".to_string())?;
-
-        let mut index = load_library_index(&store)?;
-
-        // Watch status is a library attribute — clear it in the same blocking op so
-        // a removed title can't leave an invisible status row. Both stores/indexes
-        // are validated before any mutation, so a corrupt status index fails first.
-        // Statuses commit first: a leftover status (resurrectable by the details
-        // self-heal) is the harmful half; a library row without a status is benign.
         let status_store = super::open_store(&app, WATCH_STATUS_STORE_FILE)?;
-        let mut status_index = load_watch_status_index(&status_store)?;
-
-        let removed_status = status_store.delete(watch_status_item_key(&id));
-        let original_status_len = status_index.len();
-        status_index.retain(|entry| entry != &id);
-        if removed_status || status_index.len() != original_status_len {
-            status_store.set(WATCH_STATUS_INDEX_KEY, json!(status_index));
-        }
-        status_store.save()?;
-
-        let deleted_item = store.delete(library_item_key(&id));
-        let original_len = index.len();
-        index.retain(|entry| entry != &id);
-
-        if deleted_item || index.len() != original_len {
-            store.set(LIBRARY_INDEX_KEY, json!(index));
-        }
-        retain_status_added_ids(&store, |entry| entry != id);
-        store.save()?;
-
-        Ok(())
+        remove_library_items(&store, &status_store, &[id]).map(drop)
     })
     .await
 }
 
+/// Watch status is a library attribute, so a removed title can't keep an invisible
+/// status row. Both indexes are validated before any mutation, and statuses commit
+/// first: a leftover status (resurrectable by the details self-heal) is the
+/// harmful half; a library row without a status is benign.
 fn remove_library_items(
     store: &DurableStore,
     status_store: &DurableStore,
     ids: &[String],
 ) -> Result<usize, String> {
-    let mut library = read_library_snapshot(store)?;
-    let mut statuses = read_watch_status_snapshot(status_store)?;
-    let mut removed = 0usize;
-    let mut status_changed = false;
-    for id in ids {
-        removed += usize::from(library.items.remove(id).is_some());
-        status_changed |= statuses.items.remove(id).is_some();
-    }
-    // Same status-before-library durability ordering as single removal.
-    if status_changed {
-        persist_index_map(
-            status_store,
-            WATCH_STATUS_LAYOUT,
-            &statuses.index,
-            &statuses.items,
-        )?;
-    } else {
-        status_store.save()?;
-    }
-    let removed_ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
-    retain_status_added_ids(store, |id| !removed_ids.contains(id));
-    if removed > 0 {
-        persist_index_map(store, LIBRARY_LAYOUT, &library.index, &library.items)?;
-    } else {
-        store.save()?;
-    }
+    let index = load_library_index(store)?;
+    let status_index = load_watch_status_index(status_store)?;
+    let ids: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    remove_index_ids(status_store, WATCH_STATUS_LAYOUT, status_index, &ids);
+    status_store.save()?;
+    let removed = remove_index_ids(store, LIBRARY_LAYOUT, index, &ids);
+    store.save()?;
     Ok(removed)
 }
 
@@ -394,6 +350,8 @@ fn read_profile_library(
 
 #[cfg(test)]
 mod tests {
+    use super::super::store_helpers::watch_status_item_key;
+    use super::super::WATCH_STATUS_INDEX_KEY;
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
 

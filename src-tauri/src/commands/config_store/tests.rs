@@ -253,8 +253,10 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
         enabled: true,
         capabilities: Some(crate::providers::addon_manifest::AddonManifest {
             name: "My Addon".to_string(),
-            resources: Vec::new(),
-            catalogs: Vec::new(),
+            logo: Some("https://addon.example/logo.png".to_string()),
+            version: Some("1.0.0".to_string()),
+            configurable: true,
+            ..Default::default()
         }),
     });
 
@@ -262,6 +264,12 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     assert_eq!(value["id"], "a1");
     assert_eq!(value["enabled"], true);
     assert_eq!(value["pinned"], false);
+    assert_eq!(value["logo"], "https://addon.example/logo.png");
+    assert_eq!(value["version"], "1.0.0");
+    assert_eq!(value["configurable"], true);
+    // A name-only snapshot is unclassified, so it must not read as "serves nothing".
+    assert!(value.get("resources").is_none());
+    assert!(value.get("description").is_none());
     assert!(value.get("url").is_none());
     assert!(value.get("capabilities").is_none());
     let display = value["displayUrl"].as_str().expect("displayUrl present");
@@ -381,6 +389,9 @@ fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_s
         .cloned()
         .map(AddonConfigView::from_config)
         .collect();
+    use crate::providers::addon_manifest::AddonResourceKind::{Catalog, Meta};
+    assert_eq!(full_views[0].resources, Some(vec![Catalog, Meta]));
+    assert_eq!(full_views[1].resources, None);
     let expected: Vec<_> = full
         .into_iter()
         .map(|mut config| {
@@ -400,13 +411,28 @@ fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_s
     assert_eq!(projected[3].id, "https://other.example");
     assert_eq!(projected[3].name, "other.example");
     assert_eq!(projected.len(), 5);
+    // Identities feed URL lookups only; rows keep the snapshot-derived facts.
     let projected_views: Vec<_> = projected
         .into_iter()
         .map(AddonConfigView::from_config)
         .collect();
+    let identity_fields = |views: Vec<AddonConfigView>| {
+        views
+            .into_iter()
+            .map(|view| {
+                (
+                    view.id,
+                    view.name,
+                    view.enabled,
+                    view.display_url,
+                    view.pinned,
+                )
+            })
+            .collect::<Vec<_>>()
+    };
     assert_eq!(
-        serde_json::to_value(projected_views).unwrap(),
-        serde_json::to_value(full_views).unwrap()
+        identity_fields(projected_views),
+        identity_fields(full_views)
     );
     assert_eq!(fixture.store.get(super::ADDON_CONFIGS_KEY), Some(stored));
 }
@@ -633,6 +659,88 @@ fn stored_app_ui_preferences_drops_only_malformed_fields() {
 }
 
 #[test]
+fn recent_searches_record_newest_first_deduplicated_and_bounded() {
+    let long = "x".repeat(200);
+    let full: Vec<String> = (1..=8).map(|index| format!("q{index}")).collect();
+    let cases: [(&str, Vec<String>, String, Vec<String>); 6] = [
+        (
+            "prepends",
+            vec!["dune".into()],
+            "  The   Office ".into(),
+            vec!["The Office".into(), "dune".into()],
+        ),
+        (
+            "newest spelling wins",
+            vec!["a".into(), "dune".into()],
+            "DUNE".into(),
+            vec!["DUNE".into(), "a".into()],
+        ),
+        (
+            "blank is ignored",
+            vec!["dune".into()],
+            " \t ".into(),
+            vec!["dune".into()],
+        ),
+        (
+            "control chars are ignored",
+            vec!["dune".into()],
+            "du\u{7}ne".into(),
+            vec!["dune".into()],
+        ),
+        (
+            "long queries truncate like search",
+            Vec::new(),
+            long.clone(),
+            vec![long[..120].to_string()],
+        ),
+        (
+            "capped at eight",
+            full.clone(),
+            "new".into(),
+            std::iter::once("new".to_string())
+                .chain(full[..7].iter().cloned())
+                .collect(),
+        ),
+    ];
+    for (name, current, query, expected) in cases {
+        let mut preferences = AppUiPreferences {
+            recent_searches: current,
+            ..Default::default()
+        };
+        super::push_recent_search(&mut preferences, query);
+        assert_eq!(preferences.recent_searches, expected, "{name}");
+    }
+
+    let patched = super::apply_app_ui_preferences_patch(
+        AppUiPreferences {
+            recent_searches: vec!["dune".into()],
+            ..Default::default()
+        },
+        serde_json::from_value(serde_json::json!({"recentSearches": ["a", " A ", ""]})).unwrap(),
+    );
+    assert_eq!(patched.recent_searches, vec!["a".to_string()]);
+    let cleared = super::apply_app_ui_preferences_patch(
+        patched,
+        serde_json::from_value(serde_json::json!({"recentSearches": []})).unwrap(),
+    );
+    assert!(cleared.recent_searches.is_empty());
+
+    for (stored, expected) in [
+        (serde_json::json!({}), Vec::<String>::new()),
+        (serde_json::json!({"recentSearches": "dune"}), Vec::new()),
+        (
+            serde_json::json!({"recentSearches": ["Dune", "dune", " x "]}),
+            vec!["Dune".to_string(), "x".to_string()],
+        ),
+    ] {
+        let parsed = serde_json::from_value::<super::StoredAppUiPreferences>(stored)
+            .map(super::normalize_stored_app_ui_preferences)
+            .unwrap();
+        assert_eq!(parsed.recent_searches, expected);
+    }
+}
+
+#[test]
 fn sanitize_stream_selector_preferences_canonicalizes_addon_token() {
     let preferences = sanitize_stream_selector_preferences(StreamSelectorPreferences {
         quality: StreamSelectorQuality::P1080,
@@ -781,7 +889,10 @@ fn sanitize_app_ui_preferences_clamps_runtime_values() {
 fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     // Stores written before subtitle tuning shipped carry none of the keys.
     let parsed = serde_json::from_value::<super::StoredAppUiPreferences>(serde_json::json!({
-        "playerVolume": 80
+        "playerVolume": 80,
+        "subtitleFont": "comic",
+        "subtitleEdge": 3,
+        "autoLoadAddonSubtitles": "yes"
     }))
     .map(super::normalize_stored_app_ui_preferences)
     .expect("legacy payload parses");
@@ -792,6 +903,10 @@ fn stored_app_ui_preferences_defaults_missing_subtitle_tuning() {
     assert_eq!(parsed.subtitle_delay, 0.0);
     assert_eq!(parsed.subtitle_pos, 100.0);
     assert_eq!(parsed.subtitle_scale, 1.0);
+    assert_eq!(parsed.subtitle_font, super::SubtitleFont::Default);
+    assert_eq!(parsed.subtitle_color, super::SubtitleColor::White);
+    assert_eq!(parsed.subtitle_edge, super::SubtitleEdge::Outline);
+    assert!(parsed.auto_load_addon_subtitles);
     // Stores written before the toggle shipped keep previews on.
     assert!(parsed.trailer_previews);
     // Opt-in: stores written before auto-skip shipped keep it off.
@@ -811,6 +926,9 @@ fn app_ui_preferences_patch_quantizes_subtitle_tuning() {
             audio_delay: Some(0.26),
             night_mode: Some(true),
             subtitle_scale: Some(1.33),
+            subtitle_color: Some(super::SubtitleColor::Yellow),
+            subtitle_edge: Some(super::SubtitleEdge::Box),
+            auto_load_addon_subtitles: Some(false),
             ..Default::default()
         },
     );
@@ -820,6 +938,10 @@ fn app_ui_preferences_patch_quantizes_subtitle_tuning() {
     assert_eq!(patched.audio_delay, 0.3);
     assert!(patched.night_mode);
     assert_eq!(patched.subtitle_scale, 1.35);
+    assert_eq!(patched.subtitle_font, super::SubtitleFont::Default);
+    assert_eq!(patched.subtitle_color, super::SubtitleColor::Yellow);
+    assert_eq!(patched.subtitle_edge, super::SubtitleEdge::Box);
+    assert!(!patched.auto_load_addon_subtitles);
     assert_eq!(
         super::parse_app_ui_preferences(serde_json::to_value(&patched).unwrap()),
         Some(patched)
@@ -1097,7 +1219,7 @@ fn player_keybindings_resolution_keeps_empty_overrides_until_reset() {
         view.effective_player_keybindings,
         view.default_player_keybindings
     );
-    assert_eq!(view.effective_player_keybindings.len(), 20);
+    assert_eq!(view.effective_player_keybindings.len(), 21);
 }
 
 #[test]
@@ -1242,8 +1364,7 @@ fn resolve_addon_configs_drops_unclassified_stored_snapshots() {
     nameless.name = " \t".into();
     let display_only = crate::providers::addon_manifest::AddonManifest {
         name: "Cinemeta".into(),
-        resources: Vec::new(),
-        catalogs: Vec::new(),
+        ..Default::default()
     };
     for snapshot in [nameless, display_only] {
         let resolved = super::resolve_addon_configs(Some(vec![AddonConfig {

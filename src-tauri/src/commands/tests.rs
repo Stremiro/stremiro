@@ -2,7 +2,7 @@ use super::backup_commands::{
     normalize_backup_path, prepare_import_lists, validate_backup_size, validate_import_capacity,
     MAX_BACKUP_PATH_LEN, MAX_IMPORT_BYTES,
 };
-use super::config_commands::{apply_manifest_snapshot, classify_missing_addon_capabilities};
+use super::config_commands::{classify_missing_addon_capabilities, merge_classified_capabilities};
 use super::config_store::{normalize_addon_url, resolve_addon_configs, AddonConfig};
 use super::history_helpers::{
     choose_entry, is_continue_watching_candidate, sanitize_watch_progress, HistoryEntryQuery,
@@ -349,6 +349,8 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
     source.stream_episode = Some(100);
     source.stream_family = Some("preferred-family".into());
     source.resume_start_time = Some(1_100.0);
+    source.is_watched = true;
+    source.has_started_watching = true;
     let entries = build_up_next_entries(
         vec![source],
         vec![up_next_schedule(&[
@@ -372,6 +374,8 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
         (Some(2), Some(13))
     );
     assert_eq!((entry.row.position, entry.row.duration), (0.0, 0.0));
+    assert!(!entry.row.is_watched);
+    assert!(!entry.row.has_started_watching);
     assert_eq!(entry.row.last_stream_key, None);
     assert_eq!(entry.row.last_stream_lookup_id, None);
     assert_eq!(entry.row.stream_season, None);
@@ -384,6 +388,8 @@ fn up_next_returns_only_successor_and_resets_watched_episode_identity() {
     assert!(wire.get("episodes").is_none());
     assert!(wire.get("releaseDate").is_none());
     assert_eq!(wire["isNewEpisode"], true);
+    assert!(wire["row"].get("is_watched").is_none());
+    assert!(wire["row"].get("has_started_watching").is_none());
 }
 
 #[test]
@@ -834,13 +840,14 @@ fn prepare_addon_streams_filters_labels_and_merge_dedupes() {
 
 #[test]
 fn prepare_addon_streams_populates_stream_presentation() {
-    let stream = mk_stream(
+    let mut stream = mk_stream(
         Some("Show Complete Season Pack"),
         Some("2160p HDR10+ AV1 Dual Audio 1.4 GB"),
         Some("https://example.com/video.mkv"),
         None,
         Some("Show.S01E01-E12.2160p.HDR10+.mkv"),
     );
+    stream.size_bytes = Some(1_503_238_554); // Hydrated 1.4 GB; preparation never reparses text.
 
     let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
     assert_eq!(prepared.len(), 1);
@@ -1006,26 +1013,85 @@ fn capture_quality_loses_to_clean_releases_one_resolution_tier_lower() {
     }
 }
 
-#[test]
-fn stream_size_labels_accept_all_transport_units() {
-    for (raw, expected) in [
-        ("💾21GiB", Some("21GB")),
-        ("💾1.5TiB", Some("1.5TB")),
-        ("💾10KiB", Some("10KB")),
-        ("💾2MiB", Some("2MB")),
-        ("💾21gib", Some("21GB")),
-        ("💾2TB", Some("2TB")),
-        ("💾 60,0 GB 👤100", Some("60,0GB")),
-        ("1,234 MB", Some("1,234MB")),
-        ("60,0 GB", Some("60,0GB")),
-        ("1,234,567 MB", None),
-        ("60,0,0 GB", None),
-        ("1.234.5 GB", None),
-    ] {
+#[tokio::test]
+async fn stream_size_labels_and_ranking_share_hydrated_bytes() {
+    let server = crate::test_helpers::TestHttpServer::new(vec![(
+        200,
+        r#"{"streams":[
+            {"name":"Release 1080p","title":"2 GB","url":"https://example.com/large.mkv","behaviorHints":{"videoSize":21474836480}},
+            {"name":"Release 1080p","title":"2 GB","url":"https://example.com/small.mkv","behaviorHints":{"videoSize":64}},
+            {"name":"Release 1080p","title":"1,234 MB","url":"https://example.com/grouped.mkv"},
+            {"title":"💾21GiB","url":"https://example.com/gib.mkv"},
+            {"title":"💾1.5TiB","url":"https://example.com/tib.mkv"},
+            {"title":"💾10KiB","url":"https://example.com/kib.mkv"},
+            {"title":"💾2MiB","url":"https://example.com/mib.mkv"},
+            {"name":"💾21gib","url":"https://example.com/lower.mkv"},
+            {"title":"💾2TB","url":"https://example.com/tb.mkv"},
+            {"title":"💾 60,0 GB 👤100","url":"https://example.com/comma.mkv"},
+            {"title":"1,5GB","url":"https://example.com/decimal-comma.mkv"},
+            {"title":"1.5GB","url":"https://example.com/decimal-dot.mkv"},
+            {"title":"1,234,567 MB","url":"https://example.com/invalid-groups.mkv"},
+            {"title":"60,0,0 GB","url":"https://example.com/invalid-comma.mkv"},
+            {"title":"1.234.5 GB","url":"https://example.com/invalid-dot.mkv"},
+            {"title":"0 GB","url":"https://example.com/zero.mkv"},
+            {"url":"https://example.com/missing.mkv"},
+            {"url":"https://example.com/max.mkv","behaviorHints":{"videoSize":18446744073709551615}},
+            {"name":"Release 4k","title":"2 GB","url":"https://example.com/uhd.mkv","behaviorHints":{"videoSize":21474836480}},
+            {"title":"15 GB","url":"https://example.com/limit.mkv"},
+            {"title":"1.5MB","url":"https://example.com/fractional-mb.mkv"},
+            {"title":"0.5KB","url":"https://example.com/sub-kb.mkv"}
+        ]}"#,
+        None,
+    )]);
+    let streams = crate::providers::addons::AddonTransport::new()
+        .get_streams_fresh(
+            "movie",
+            "tt1",
+            &server.url,
+            ("TestSource", "addon-testsource"),
+            None,
+            prepare_addon_streams,
+        )
+        .await
+        .expect("hydrated and prepared streams");
+    assert_eq!(server.finish(), ["/stream/movie/tt1.json"]);
+    let expected = [
+        (Some(20 * 1024_u64.pow(3)), Some("20GB"), true),
+        (Some(64), Some("64B"), false),
+        (Some(1234 * 1024_u64.pow(2)), Some("1.2GB"), false),
+        (Some(21 * 1024_u64.pow(3)), Some("21GB"), true),
+        (Some(3 * 1024_u64.pow(4) / 2), Some("1.5TB"), true),
+        (Some(10 * 1024), Some("10KB"), false),
+        (Some(2 * 1024_u64.pow(2)), Some("2MB"), false),
+        (Some(21 * 1024_u64.pow(3)), Some("21GB"), true),
+        (Some(2 * 1024_u64.pow(4)), Some("2TB"), true),
+        (Some(60 * 1024_u64.pow(3)), Some("60GB"), true),
+        (Some(3 * 1024_u64.pow(3) / 2), Some("1.5GB"), false),
+        (Some(3 * 1024_u64.pow(3) / 2), Some("1.5GB"), false),
+        (None, None, false),
+        (None, None, false),
+        (None, None, false),
+        (Some(0), Some("0B"), false),
+        (None, None, false),
+        (Some(u64::MAX), Some("16777216TB"), true),
+        (Some(20 * 1024_u64.pow(3)), Some("20GB"), false),
+        (Some(15 * 1024_u64.pow(3)), Some("15GB"), false),
+        (Some(3 * 1024_u64.pow(2) / 2), Some("1.5MB"), false),
+        (Some(512), Some("512B"), false),
+    ];
+    assert_eq!(streams.len(), expected.len());
+    for (stream, (bytes, badge, oversize)) in streams.iter().zip(expected) {
+        let priority = stream_resolution_priority(stream, stream.match_texts().flags);
         assert_eq!(
-            streaming_helpers::format_stream_size_label(raw, None).as_deref(),
-            expected,
-            "{raw}"
+            (
+                stream.size_bytes,
+                stream.presentation.size_label.as_deref(),
+                priority.size_bytes,
+                priority.oversize,
+            ),
+            (bytes, badge, bytes.unwrap_or(0), oversize),
+            "{:?}",
+            stream.title,
         );
     }
 }
@@ -1036,66 +1102,102 @@ fn stream_resolution_score_and_badge_share_one_tier_classifier() {
     // resolution tier: the duplicated literal lists this replaced scored
     // `480p` above SD while badging it "sd", and `4k`/`2160p` had to be
     // hand-kept in step on both sides.
-    for (name, resolution, quality, viability) in [
-        ("Show 2160p", StreamResolution::P2160, 400, 3),
-        ("Show 4k", StreamResolution::P2160, 400, 3),
-        ("Show 1080p", StreamResolution::P1080, 300, 3),
-        ("Show 720p", StreamResolution::P720, 200, 3),
-        ("Show 480p", StreamResolution::Sd, 100, 3),
-        ("Show", StreamResolution::Sd, 0, 3),
+    for (name, title, resolution, quality, viability) in [
+        ("Show 2160p", None, StreamResolution::P2160, 400, 3),
+        ("Show 4k", None, StreamResolution::P2160, 400, 3),
+        ("Show 1080p", None, StreamResolution::P1080, 300, 3),
+        ("Show 720p", None, StreamResolution::P720, 200, 3),
+        ("Show 480p", None, StreamResolution::Sd, 100, 3),
+        ("Show", None, StreamResolution::Sd, 0, 3),
         (
             "Show.S01E05.2160p.Sample.mkv",
+            None,
             StreamResolution::P2160,
             400,
             0,
         ),
         (
             "Show.S01E05.2160p.Trailer.mkv",
+            None,
             StreamResolution::P2160,
             400,
             0,
         ),
         (
             "Show.S01E05.2160p.Teaser.mkv",
+            None,
             StreamResolution::P2160,
             400,
             0,
         ),
-        ("Show.Sample.mkv", StreamResolution::Sd, 0, 0),
+        ("Show.Sample.mkv", None, StreamResolution::Sd, 0, 0),
         (
             "The.Sample.S01E05.2160p.mkv",
+            None,
             StreamResolution::P2160,
             400,
             3,
         ),
-        ("The.Sample.2024.2160p.mkv", StreamResolution::P2160, 400, 3),
+        (
+            "The.Sample.2024.2160p.mkv",
+            None,
+            StreamResolution::P2160,
+            400,
+            3,
+        ),
         (
             "Trailer.Park.Boys.S01E05.2160p.mkv",
+            None,
             StreamResolution::P2160,
             400,
             3,
         ),
         (
             "Show.S01E05.2160p.Sampler.mkv",
+            None,
             StreamResolution::P2160,
             400,
             3,
         ),
+        (
+            "Release 1080p",
+            Some("feature"),
+            StreamResolution::P1080,
+            300,
+            3,
+        ),
+        ("release", Some("720p"), StreamResolution::P720, 200, 3),
+        (
+            "Release 2160p",
+            Some("feature"),
+            StreamResolution::P2160,
+            400,
+            3,
+        ),
+        ("release", Some("2160p"), StreamResolution::P2160, 400, 3),
     ] {
         let stream = mk_stream(
             Some(name),
-            None,
+            title,
             Some("https://example.com/video.mkv"),
             None,
             None,
         );
+        assert_eq!(
+            stream_quality_score(stream.match_texts().flags),
+            quality,
+            "{name}/{title:?}"
+        );
         let prepared = prepare_addon_streams(vec![stream], "TestSource", "addon-testsource");
-        assert_eq!(prepared.len(), 1, "{name}");
+        assert_eq!(prepared.len(), 1, "{name}/{title:?}");
         let stream = &prepared[0];
-        assert_eq!(stream.presentation.resolution, resolution, "{name}");
+        assert_eq!(
+            stream.presentation.resolution, resolution,
+            "{name}/{title:?}"
+        );
         let priority = stream_resolution_priority(stream, stream.match_texts().flags);
-        assert_eq!(priority.quality, quality, "{name}");
-        assert_eq!(priority.viability, viability, "{name}");
+        assert_eq!(priority.quality, quality, "{name}/{title:?}");
+        assert_eq!(priority.viability, viability, "{name}/{title:?}");
     }
 }
 
@@ -1462,7 +1564,7 @@ fn title_episode_progress_uses_only_canonical_coordinates_and_keeps_legacy_rows(
     assert!(!progress.episode_progress.contains_key("tt7654321:1:4"));
 
     let stored_key = "series:tt7654321:1:4".to_string();
-    let (writes, deletes) = watch_history_commands::prepare_episode_watch_changes(
+    let (writes, deletes, _) = watch_history_commands::prepare_episode_watch_changes(
         &test_media_item("tt7654321", "series"),
         &[watch_history_commands::WatchedEpisode {
             season: 1,
@@ -1738,85 +1840,73 @@ fn merge_unique_streams_preserves_source_transport_variants() {
     }
 }
 
-/// Table-driven `build_stream_query_ids` cases: each row expands to its own
-/// named `#[test]` so a failure still pins the input shape, and the produced
-/// ids are echoed in assert messages for diagnosability.
-macro_rules! query_ids_tests {
-    ($($name:ident: ($media:expr, $id:expr, $season:expr, $episode:expr, $absolute:expr) => $check:expr;)*) => {
-        $(
-            #[test]
-            fn $name() {
-                let ids =
-                    build_stream_query_ids($media, $id, $season, $episode, $absolute);
-                let check: fn(&[String]) = $check;
-                check(&ids);
-            }
-        )*
-    };
-}
-
-query_ids_tests! {
-    query_ids_movie_returns_single_id:
-        ("movie", "tt1234567", None, None, None)
-        => |ids: &[String]| assert_eq!(ids, ["tt1234567"], "{ids:?}");
-    query_ids_movie_ignores_saved_episode_coordinates:
-        ("movie", "tt1234567", Some(2), Some(5), Some(30))
-        => |ids: &[String]| assert_eq!(ids, ["tt1234567"], "{ids:?}");
-    query_ids_movie_preserves_opaque_id_with_zero_coordinates:
-        ("movie", "catalog:42", Some(0), Some(0), Some(0))
-        => |ids: &[String]| assert_eq!(ids, ["catalog:42"], "{ids:?}");
-    query_ids_series_no_anime_no_fallback:
-        ("series", "tt9998887", Some(2), Some(5), None)
-        => |ids: &[String]| assert_eq!(ids, ["tt9998887:2:5"], "{ids:?}");
-    query_ids_anime_imdb_adds_season_zero_and_season_one_fallbacks:
-        ("anime", "tt1111111", Some(2), Some(10), None)
-        => |ids: &[String]| {
-            for expected in ["tt1111111:2:10", "tt1111111:1:10", "tt1111111:0:10"] {
-                assert!(
-                    ids.iter().any(|id| id == expected),
-                    "{expected} missing from {ids:?}"
-                );
-            }
-        };
-    query_ids_anime_season_one_no_duplicate_season_one:
-        ("anime", "tt2222222", Some(1), Some(3), None)
-        => |ids: &[String]| assert_eq!(
-            ids.iter().filter(|s| s.as_str() == "tt2222222:1:3").count(),
-            1,
-            "canonical id should appear exactly once: {ids:?}"
-        );
-    query_ids_anime_adds_absolute_episode_fallback_when_different:
-        ("anime", "tt0388629", Some(21), Some(5), Some(1000))
-        => |ids: &[String]| {
-            for expected in [
+#[test]
+fn query_ids_preserve_movie_identity_and_episode_fallbacks() {
+    for (label, (media, id, season, episode, absolute), expected) in [
+        (
+            "movie",
+            ("movie", "tt1234567", None, None, None),
+            &["tt1234567"][..],
+        ),
+        (
+            "movie coords",
+            ("movie", "tt1234567", Some(2), Some(5), Some(30)),
+            &["tt1234567"],
+        ),
+        (
+            "opaque zero",
+            ("movie", "catalog:42", Some(0), Some(0), Some(0)),
+            &["catalog:42"],
+        ),
+        (
+            "series",
+            ("series", "tt9998887", Some(2), Some(5), None),
+            &["tt9998887:2:5"],
+        ),
+        (
+            "anime imdb",
+            ("anime", "tt1111111", Some(2), Some(10), None),
+            &["tt1111111:2:10", "tt1111111:1:10", "tt1111111:0:10"],
+        ),
+        (
+            "dedup season 1",
+            ("anime", "tt2222222", Some(1), Some(3), None),
+            &["tt2222222:1:3", "tt2222222:0:3"],
+        ),
+        (
+            "absolute imdb",
+            ("anime", "tt0388629", Some(21), Some(5), Some(1000)),
+            &[
                 "tt0388629:21:5",
                 "tt0388629:1:5",
+                "tt0388629:21:1000",
                 "tt0388629:1:1000",
                 "tt0388629:0:5",
-            ] {
-                assert!(
-                    ids.iter().any(|id| id == expected),
-                    "{expected} missing from {ids:?}"
-                );
-            }
-        };
-    // Kitsu-space addons index episodes flat (`kitsu:{id}:{episode}`); the
-    // canonical season form stays first and the flat form is the fallback.
-    query_ids_anime_namespaced_id_adds_flat_episode_fallback:
-        ("anime", "kitsu:12345", Some(1), Some(7), Some(7))
-        => |ids: &[String]| assert_eq!(ids, ["kitsu:12345:1:7", "kitsu:12345:7"], "{ids:?}");
-    query_ids_anime_namespaced_id_adds_absolute_fallback_when_different:
-        ("anime", "kitsu:42", Some(1), Some(12), Some(30))
-        => |ids: &[String]| assert_eq!(
-            ids,
-            ["kitsu:42:1:12", "kitsu:42:12", "kitsu:42:30"],
-            "{ids:?}"
+            ],
+        ),
+        // Namespaced anime adds flat probes; ordinary series does not.
+        (
+            "flat anime",
+            ("anime", "kitsu:12345", Some(1), Some(7), Some(7)),
+            &["kitsu:12345:1:7", "kitsu:12345:7"],
+        ),
+        (
+            "absolute flat",
+            ("anime", "kitsu:42", Some(1), Some(12), Some(30)),
+            &["kitsu:42:1:12", "kitsu:42:12", "kitsu:42:30"],
+        ),
+        (
+            "namespaced series",
+            ("series", "tmdb:9", Some(1), Some(5), Some(5)),
+            &["tmdb:9:1:5"],
+        ),
+    ] {
+        assert_eq!(
+            build_stream_query_ids(media, id, season, episode, absolute),
+            expected,
+            "{label}"
         );
-    // The flat-episode widening is anime-only: namespaced series ids
-    // (tmdb:, …) get no extra probes.
-    query_ids_series_namespaced_id_keeps_canonical_only:
-        ("series", "tmdb:9", Some(1), Some(5), Some(5))
-        => |ids: &[String]| assert_eq!(ids, ["tmdb:9:1:5"], "{ids:?}");
+    }
 }
 
 #[test]
@@ -1906,61 +1996,75 @@ fn resolve_addon_configs_preserves_stored_capability_snapshot() {
 }
 
 #[test]
-fn apply_manifest_snapshot_fills_only_the_host_fallback_name() {
-    let mut unnamed = resolve_addon_configs(Some(vec![AddonConfig {
+fn new_install_capabilities_fill_only_the_host_fallback_name() {
+    let unnamed = resolve_addon_configs(Some(vec![AddonConfig {
         name: String::new(),
         ..cinemeta_addon()
     }]))
     .remove(0);
     assert_eq!(unnamed.name, "v3-cinemeta.strem.io");
-    assert!(apply_manifest_snapshot(&mut unnamed, cinemeta_manifest()));
-    assert_eq!(unnamed.name, "Cinemeta");
-
-    // The add flow seeds the URL host as a placeholder label: a classified
-    // snapshot replaces it with the manifest's own name.
-    let mut addon = AddonConfig {
-        name: "v3-cinemeta.strem.io".to_string(),
-        ..cinemeta_addon()
-    };
-    assert!(apply_manifest_snapshot(&mut addon, cinemeta_manifest()));
-    assert_eq!(addon.name, "Cinemeta");
-    assert_eq!(addon.capabilities, Some(cinemeta_manifest()));
-
-    // JS `URL.host` keeps a non-default port, so the seeded fallback can be
-    // `host:port` — the same placeholder rule must recognize it.
-    let mut ported = AddonConfig {
-        url: "https://example.com:8443".to_string(),
-        name: "example.com:8443".to_string(),
-        ..cinemeta_addon()
-    };
-    assert!(apply_manifest_snapshot(&mut ported, cinemeta_manifest()));
-    assert_eq!(ported.name, "Cinemeta");
-
-    // An explicit custom name is preserved.
-    let mut custom = AddonConfig {
-        name: "My Addon".to_string(),
-        ..cinemeta_addon()
-    };
-    assert!(apply_manifest_snapshot(&mut custom, cinemeta_manifest()));
-    assert_eq!(custom.name, "My Addon");
-    assert!(custom.capabilities.is_some());
+    // The add flow seeds the URL host as a placeholder label; JS `URL.host` keeps a
+    // non-default port, so `host:port` is the same placeholder. Custom names stay.
+    for (addon, expected) in [
+        (unnamed, "Cinemeta"),
+        (
+            AddonConfig {
+                url: "https://example.com:8443".to_string(),
+                name: "example.com:8443".to_string(),
+                ..cinemeta_addon()
+            },
+            "Cinemeta",
+        ),
+        (
+            AddonConfig {
+                name: "My Addon".to_string(),
+                ..cinemeta_addon()
+            },
+            "My Addon",
+        ),
+    ] {
+        let classified = AddonConfig {
+            capabilities: Some(cinemeta_manifest()),
+            ..addon.clone()
+        };
+        let mut installed = vec![addon.clone()];
+        assert!(merge_classified_capabilities(
+            &mut installed,
+            vec![classified.clone()],
+            true
+        ));
+        assert_eq!(installed[0].name, expected);
+        assert_eq!(installed[0].capabilities, Some(cinemeta_manifest()));
+        let mut refreshed = vec![addon.clone()];
+        assert!(merge_classified_capabilities(
+            &mut refreshed,
+            vec![classified],
+            false
+        ));
+        assert_eq!(refreshed[0].name, addon.name);
+    }
 }
 
 #[test]
-fn apply_manifest_snapshot_rejects_unclassified_without_touching_name() {
-    let mut addon = AddonConfig {
+fn unclassified_snapshots_leave_the_name_and_capabilities_untouched() {
+    let addon = AddonConfig {
         name: "v3-cinemeta.strem.io".to_string(),
         ..cinemeta_addon()
     };
     let display_only = crate::providers::addon_manifest::AddonManifest {
         name: "Pretty Name".to_string(),
-        resources: Vec::new(),
-        catalogs: Vec::new(),
+        ..Default::default()
     };
-
-    assert!(!apply_manifest_snapshot(&mut addon, display_only));
-    assert_eq!(addon.name, "v3-cinemeta.strem.io");
-    assert!(addon.capabilities.is_none());
+    let mut installed = vec![addon.clone()];
+    assert!(!merge_classified_capabilities(
+        &mut installed,
+        vec![AddonConfig {
+            capabilities: Some(display_only),
+            ..addon.clone()
+        }],
+        true
+    ));
+    assert_eq!(installed, vec![addon]);
 }
 
 #[tokio::test]
@@ -2565,49 +2669,6 @@ fn sanitize_watch_progress_rejects_invalid_type() {
     let progress = mk_watch_progress("bad:1", "unsupported", 10);
 
     assert!(sanitize_watch_progress(progress).is_none());
-}
-
-#[test]
-fn quality_score_reads_resolution_from_name_or_title() {
-    let name_only_1080 = mk_stream(
-        Some("Release 1080p"),
-        Some("feature"),
-        Some("https://example.com/a.mp4"),
-        None,
-        None,
-    );
-    let title_only_720 = mk_stream(
-        Some("release"),
-        Some("720p"),
-        Some("https://example.com/b.mp4"),
-        None,
-        None,
-    );
-
-    assert!(
-        stream_quality_score(name_only_1080.match_texts().flags)
-            > stream_quality_score(title_only_720.match_texts().flags)
-    );
-
-    let name_2160 = mk_stream(
-        Some("Release 2160p"),
-        Some("feature"),
-        Some("https://example.com/c.mp4"),
-        None,
-        None,
-    );
-    let title_2160 = mk_stream(
-        Some("release"),
-        Some("2160p"),
-        Some("https://example.com/d.mp4"),
-        None,
-        None,
-    );
-
-    assert_eq!(
-        stream_quality_score(name_2160.match_texts().flags),
-        stream_quality_score(title_2160.match_texts().flags)
-    );
 }
 
 #[test]

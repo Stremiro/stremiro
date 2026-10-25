@@ -1,4 +1,8 @@
-use super::{bound_optional, has_manifest_suffix, non_blank, trim_to_max, MANIFEST_JSON_SUFFIX};
+use super::addon_resource::normalize_image_url;
+use super::{
+    bound_optional, has_manifest_suffix, lenient_option, non_blank, strip_manifest_suffix,
+    trim_to_max, MANIFEST_JSON_SUFFIX,
+};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -8,6 +12,8 @@ const MANIFEST_TOO_LARGE_ERROR: &str = "Addon manifest exceeds the 512 KiB size 
 pub(crate) const ADDON_CONFIGURATION_REQUIRED_MESSAGE: &str =
     "This is a configure page — open it, finish setup, then paste the generated manifest URL.";
 const MAX_NAME_CHARS: usize = 128;
+const MAX_VERSION_CHARS: usize = 32;
+const MAX_DESCRIPTION_CHARS: usize = 280;
 const MAX_RESOURCE_CHARS: usize = 64;
 const MAX_TYPE_CHARS: usize = 64;
 const MAX_PREFIX_CHARS: usize = 64;
@@ -48,7 +54,7 @@ pub(crate) struct AddonCatalogCapability {
     pub extras: Vec<AddonCatalogExtra>,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AddonManifest {
     pub name: String,
@@ -57,6 +63,24 @@ pub(crate) struct AddonManifest {
     // Manifest-level `types`/`idPrefixes` are inheritance inputs — consumers read the resource-level copies.
     #[serde(default)]
     pub catalogs: Vec<AddonCatalogCapability>,
+    // Display facts; snapshots stored before these existed backfill on the next refresh.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub configurable: bool,
+}
+
+#[derive(Debug, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum AddonResourceKind {
+    Catalog,
+    Meta,
+    Stream,
+    Subtitles,
 }
 
 fn item_list_from_value<T: DeserializeOwned>(value: serde_json::Value) -> Vec<T> {
@@ -79,8 +103,8 @@ where
         .unwrap_or_default())
 }
 
-/// `Some` only for a real list: explicit `null` behaves like an absent key
-/// (inherit), unlike a declared-empty list ("serve nothing" for `types`, "any id" for `idPrefixes`).
+/// `null` behaves like an absent key: `types` inherits, `idPrefixes` accepts any id.
+/// An explicit empty `types` list serves nothing.
 fn deserialize_optional_string_list<'de, D>(
     deserializer: D,
 ) -> Result<Option<Vec<String>>, D::Error>
@@ -107,6 +131,12 @@ struct RawManifest {
     catalogs: Vec<RawCatalog>,
     #[serde(default, rename = "behaviorHints")]
     behavior_hints: serde_json::Value,
+    #[serde(default, deserialize_with = "lenient_option")]
+    logo: Option<String>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    version: Option<String>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    description: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -161,23 +191,13 @@ fn normalize_opaque_list(
     max_chars: usize,
     max_items: usize,
 ) -> Vec<String> {
-    let mut normalized = Vec::new();
     let mut seen = std::collections::HashSet::new();
-
-    for value in values {
-        let Some(item) = bound_optional(Some(value), max_chars) else {
-            continue;
-        };
-        if !seen.insert(item.clone()) {
-            continue;
-        }
-        normalized.push(item);
-        if normalized.len() >= max_items {
-            break;
-        }
-    }
-
-    normalized
+    values
+        .into_iter()
+        .filter_map(|value| bound_optional(Some(value), max_chars))
+        .filter(|item| seen.insert(item.clone()))
+        .take(max_items.max(1))
+        .collect()
 }
 
 fn normalize_resource_name(value: &str) -> Option<String> {
@@ -243,23 +263,13 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
 }
 
 fn normalize_catalogs(raw_catalogs: Vec<RawCatalog>) -> Vec<AddonCatalogCapability> {
-    let mut catalogs = Vec::new();
     let mut seen = std::collections::HashSet::new();
-
-    for raw in raw_catalogs {
-        let Some(catalog) = normalize_catalog(raw) else {
-            continue;
-        };
-        if !seen.insert(catalog_identity_key(&catalog.type_, &catalog.id)) {
-            continue;
-        }
-        catalogs.push(catalog);
-        if catalogs.len() >= MAX_CATALOGS {
-            break;
-        }
-    }
-
-    catalogs
+    raw_catalogs
+        .into_iter()
+        .filter_map(normalize_catalog)
+        .filter(|catalog| seen.insert(catalog_identity_key(&catalog.type_, &catalog.id)))
+        .take(MAX_CATALOGS)
+        .collect()
 }
 
 fn normalize_resource(
@@ -282,11 +292,10 @@ fn normalize_resource(
             types: types
                 .map(|values| normalize_opaque_list(values, MAX_TYPE_CHARS, MAX_TYPES))
                 .unwrap_or_else(|| manifest_types.to_vec()),
-            // Absent `idPrefixes` inherits the manifest's like `types` — else a
-            // `tt` addon gets queried for `kitsu:`/`local:` ids. Explicit empty = "any id".
+            // Stremio object resources use only their own prefixes; absent or empty accepts any id.
             id_prefixes: id_prefixes
                 .map(|values| normalize_opaque_list(values, MAX_PREFIX_CHARS, MAX_PREFIXES))
-                .unwrap_or_else(|| manifest_prefixes.to_vec()),
+                .unwrap_or_default(),
         }),
     }
 }
@@ -307,15 +316,16 @@ fn parse_addon_manifest_checked(
     let raw: RawManifest =
         serde_json::from_slice(bytes).map_err(|_| "Invalid addon manifest format.".to_string())?;
 
-    if require_configured
-        && raw
-            .behavior_hints
-            .get("configurationRequired")
+    let behavior_hint = |name: &str| {
+        raw.behavior_hints
+            .get(name)
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false)
-    {
+    };
+    if require_configured && behavior_hint("configurationRequired") {
         return Err(ADDON_CONFIGURATION_REQUIRED_MESSAGE.to_string());
     }
+    let configurable = behavior_hint("configurable");
 
     let types = normalize_opaque_list(raw.types, MAX_TYPE_CHARS, MAX_TYPES);
     let id_prefixes = normalize_opaque_list(raw.id_prefixes, MAX_PREFIX_CHARS, MAX_PREFIXES);
@@ -341,6 +351,10 @@ fn parse_addon_manifest_checked(
         name,
         resources,
         catalogs: normalize_catalogs(raw.catalogs),
+        logo: raw.logo.as_deref().and_then(normalize_image_url),
+        version: bound_optional(raw.version, MAX_VERSION_CHARS),
+        description: bound_optional(raw.description, MAX_DESCRIPTION_CHARS),
+        configurable,
     })
 }
 
@@ -359,6 +373,36 @@ pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String
     };
     parsed.set_path(&manifest_path);
     Ok(parsed.into())
+}
+
+/// Stremio convention: the configure page sits where `manifest.json` would, query kept.
+pub(crate) fn build_configure_url(normalized_base: &str) -> Result<String, String> {
+    let mut parsed = reqwest::Url::parse(normalized_base).map_err(|_| {
+        "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
+    })?;
+    let configure_path = format!("{}/configure", strip_manifest_suffix(parsed.path()));
+    parsed.set_path(&configure_path);
+    Ok(parsed.into())
+}
+
+/// Resource kinds a snapshot serves, in display order. `catalogs[]` is
+/// authoritative for catalogs; a resource declaring no types serves nothing.
+pub(crate) fn snapshot_resource_kinds(snapshot: &AddonManifest) -> Vec<AddonResourceKind> {
+    let serves = |name: &str| {
+        snapshot
+            .resources
+            .iter()
+            .any(|resource| resource.name == name && !resource.types.is_empty())
+    };
+    [
+        (AddonResourceKind::Catalog, !snapshot.catalogs.is_empty()),
+        (AddonResourceKind::Meta, serves("meta")),
+        (AddonResourceKind::Stream, serves("stream")),
+        (AddonResourceKind::Subtitles, serves("subtitles")),
+    ]
+    .into_iter()
+    .filter_map(|(kind, served)| served.then_some(kind))
+    .collect()
 }
 
 pub(crate) fn snapshot_supports_request(

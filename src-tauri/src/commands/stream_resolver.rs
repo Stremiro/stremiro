@@ -46,36 +46,18 @@ pub struct BestResolvedStream {
 }
 
 /// Why `resolve_best_stream` produced no winner — the frontend picks guidance from `kind`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResolveStreamErrorKind {
     NoStreams,
     NoDirectUrl,
     RateLimited,
+    #[default]
     Failed,
     Cancelled,
 }
 
-#[derive(Debug, Serialize)]
-pub struct ResolveStreamError {
-    pub kind: ResolveStreamErrorKind,
-    pub message: String,
-}
-
-impl ResolveStreamError {
-    pub(crate) fn new(kind: ResolveStreamErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<String> for ResolveStreamError {
-    fn from(message: String) -> Self {
-        Self::new(ResolveStreamErrorKind::Failed, message)
-    }
-}
+pub type ResolveStreamError = super::CommandError<ResolveStreamErrorKind>;
 
 /// One candidate probe failure. `rate_limited` comes from the HTTP status so callers never sniff message text.
 #[derive(Debug)]
@@ -224,24 +206,21 @@ async fn follow_redirect_hop(
 }
 
 async fn resolve_final_direct_url(
-    direct_url: &str,
+    direct_url: &reqwest::Url,
     request_headers: &[(String, String)],
 ) -> Result<String, ProbeError> {
-    // Gate before any network probe — same check as subtitles/external URLs.
-    let initial = crate::providers::addon_resource::parse_fetchable_http_url(direct_url)
-        .ok_or_else(|| "Direct stream URL is blocked by fetch policy.".to_string())?;
     let client = &*REDIRECT_CLIENT;
     // Header-gated CDNs answer probes only with their required headers — the same entries libmpv will send.
     let headers = proxy_header_map(request_headers);
     // Hop-by-hop HEAD walk — only a HEAD transport failure falls through to the range probe.
     let head_error = match client
-        .head(direct_url)
+        .head(direct_url.clone())
         .headers(headers.clone())
         .send()
         .await
     {
         Ok(resp) if resp.status().is_redirection() => {
-            return match follow_redirect_hop(&initial, resp, &headers).await? {
+            return match follow_redirect_hop(direct_url, resp, &headers).await? {
                 ProbeLanding::Landed(landed) => Ok(landed),
                 ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
                     Ok(direct_url.to_string())
@@ -258,7 +237,7 @@ async fn resolve_final_direct_url(
         // Some servers report a default type on HEAD only; the range GET decides.
         Ok(resp) if resp.status().is_success() => match validate_probe_content_type(resp.headers())
         {
-            Ok(()) => return Ok(initial.into()),
+            Ok(()) => return Ok(direct_url.to_string()),
             Err(message) => message.into(),
         },
         // HEAD-only advisory or hard status: the range GET still runs; its error context starts here.
@@ -273,14 +252,14 @@ async fn resolve_final_direct_url(
     let head_error = head_error.message;
 
     match client
-        .get(direct_url)
+        .get(direct_url.clone())
         .headers(headers.clone())
         .header(reqwest::header::RANGE, "bytes=0-0")
         .send()
         .await
     {
         Ok(resp) if resp.status().is_redirection() => {
-            match follow_redirect_hop(&initial, resp, &headers).await? {
+            match follow_redirect_hop(direct_url, resp, &headers).await? {
                 ProbeLanding::Landed(landed) => Ok(landed),
                 // Advisory terminal status: pass the original URL to libmpv like a direct advisory.
                 ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
@@ -298,7 +277,7 @@ async fn resolve_final_direct_url(
         }
         Ok(resp) if resp.status().is_success() => {
             validate_probe_content_type(resp.headers())?;
-            Ok(initial.into())
+            Ok(direct_url.to_string())
         }
         // Only the GET's own advisory statuses pass — a HEAD-only advisory never overrides a hard GET failure.
         Ok(resp) if is_advisory_probe_status(resp.status().as_u16()) => Ok(direct_url.to_string()),
@@ -358,7 +337,7 @@ pub(crate) const MISSING_DIRECT_URL_MESSAGE: &str = "This stream has no direct p
 
 /// Resolve an addon direct stream URL to its playable landing URL, following redirects under the fetch policy.
 pub(crate) async fn resolve_stream_inner(
-    url: &str,
+    url: &reqwest::Url,
     request_headers: &[(String, String)],
 ) -> Result<ResolvedStream, ProbeError> {
     let final_url = resolve_final_direct_url(url, request_headers)
@@ -368,7 +347,7 @@ pub(crate) async fn resolve_stream_inner(
             rate_limited: error.rate_limited,
         })?;
 
-    build_resolved_direct_stream(url, final_url, request_headers).map_err(ProbeError::from)
+    build_resolved_direct_stream(url.as_str(), final_url, request_headers).map_err(ProbeError::from)
 }
 
 #[cfg(test)]

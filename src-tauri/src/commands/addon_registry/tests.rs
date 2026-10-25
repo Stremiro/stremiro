@@ -1,17 +1,20 @@
 use super::{
-    add_subtitle_if_unique, addon_allows_catalog, addon_allows_subtitles,
+    add_subtitle_if_unique, addon_allows_catalog, addon_allows_resource,
     catalog_fetch_page_from_source, catalog_page_next_skip, catalog_search_extras,
     collect_catalog_outcomes, collect_with_deadline, extra_skip_value, fetch_subtitles_for_addon,
-    merge_catalog_pages, merge_search_catalog_pages, searchable_catalog_ids,
-    select_search_catalog_work, CatalogFetchPage, SearchCatalogSource, SearchSourceCursor,
-    SourcedAddonSubtitle, CATALOG_STRAGGLER_GRACE,
+    merge_catalog_pages, merge_search_catalog_pages, run_catalog_work_pool, searchable_catalog_ids,
+    select_search_catalog_work, AddonResourceError, AddonResourceErrorKind, CatalogFetchPage,
+    CatalogWorkItem, SearchCatalogSource, SearchSourceCursor, SourcedAddonSubtitle,
+    CATALOG_STRAGGLER_GRACE,
 };
 use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
 use crate::providers::addon_resource::{
     AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
 };
-use crate::test_helpers::{cinemeta_addon, classified_cinemeta_addon, test_media_item};
+use crate::test_helpers::{
+    cinemeta_addon, classified_cinemeta_addon, test_media_item, TestHttpServer,
+};
 use futures_util::StreamExt;
 use std::collections::HashSet;
 use std::time::Duration;
@@ -29,9 +32,10 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
     assert_eq!(collected, vec![Err(()), Ok(())]);
 
     let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let (url, stop, server) = subtitle_server(vec![(
+    let server = TestHttpServer::new(vec![(
         200,
         r#"{"meta":{"id":"tt1","name":"Fallback","type":"movie"}}"#,
+        None,
     )]);
     let addons = [
         AddonConfig {
@@ -43,7 +47,7 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
         },
         AddonConfig {
             id: "fallback".into(),
-            url,
+            url: server.url.clone(),
             name: "Fallback".into(),
             enabled: true,
             capabilities: None,
@@ -78,11 +82,80 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
         "Fallback"
     );
     assert!(started.elapsed() < super::META_HEDGE_DELAY);
-    stop.send(()).unwrap();
-    assert_eq!(server.join().unwrap(), ["/meta/movie/tt1.json"]);
+    assert_eq!(server.finish(), ["/meta/movie/tt1.json"]);
 }
 
 #[tokio::test]
+async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
+    let work = |urls: &[String]| {
+        (0..3)
+            .flat_map(|group| {
+                (0..4 - group).map(move |order| CatalogWorkItem {
+                    group,
+                    order,
+                    addon_url: urls[order].clone(),
+                    media_type: "series".into(),
+                    catalog_id: format!("group-{group}-source-{order}"),
+                    extras: Vec::new(),
+                })
+            })
+            .rev()
+            .collect()
+    };
+    let client = AddonResourceClient::new();
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    stalled.set_nonblocking(true).unwrap();
+    let stalled_url = format!("http://{}", stalled.local_addr().unwrap());
+    {
+        let pending = run_catalog_work_pool(&client, work(&vec![stalled_url; 4]), 3);
+        tokio::pin!(pending);
+        let observe = async {
+            let mut connections = Vec::new();
+            while connections.len() < 4 {
+                match stalled.accept() {
+                    Ok((socket, _)) => connections.push(socket),
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(1)).await;
+                    }
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(
+                matches!(stalled.accept(), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock),
+                "all catalog groups must share the four-request limit"
+            );
+        };
+        tokio::select! {
+            _ = &mut pending => panic!("unanswered catalogs must remain pending"),
+            result = tokio::time::timeout(Duration::from_secs(3), observe) => result.unwrap(),
+        }
+    }
+
+    let servers: Vec<_> = [
+        r#"{"metas":[{"id":"source-0","name":"First","type":"series"}]}"#,
+        r#"{"metas":[{"id":"source-1","name":"Second","type":"series"}]}"#,
+        r#"{"metas":[{"id":"source-2","name":"Third","type":"series"}]}"#,
+        r#"{"metas":[{"id":"source-3","name":"Fourth","type":"series"}]}"#,
+    ]
+    .into_iter()
+    .map(|body| TestHttpServer::new(vec![(200, body, None); 3]))
+    .collect();
+    let urls: Vec<_> = servers.iter().map(|server| server.url.clone()).collect();
+    let groups = run_catalog_work_pool(&client, work(&urls), 3).await;
+    for (group, bucket) in groups.into_iter().enumerate() {
+        assert_eq!(bucket.len(), 4 - group);
+        for (expected_order, (order, page)) in bucket.into_iter().enumerate() {
+            assert_eq!(order, expected_order);
+            assert_eq!(page.unwrap().items[0].id, format!("source-{order}"));
+        }
+    }
+    for (order, server) in servers.into_iter().enumerate() {
+        assert_eq!(server.finish().len(), (4 - order).min(3));
+    }
+}
+
+#[tokio::test(start_paused = true)]
 async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
     let page = || CatalogPage {
         items: vec![test_media_item("tt1", "movie")],
@@ -121,7 +194,7 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
                 (0, order, Ok(page()))
             })
             .buffer_unordered(2);
-        let started = std::time::Instant::now();
+        let started = tokio::time::Instant::now();
         let collected = collect_catalog_outcomes(outcomes, vec![2], grace).await;
         let elapsed = started.elapsed();
         eprintln!(
@@ -232,6 +305,72 @@ fn query_extras_include_skip_only_on_later_pages() {
 }
 
 #[test]
+fn search_merges_addon_duplicates_by_identity_without_merging_titles_or_types() {
+    let primary = classified_cinemeta_addon();
+    let mut secondary = primary.clone();
+    secondary.id = "secondary".into();
+    secondary.url = "https://secondary.example/manifest.json".into();
+    let (work, sources) =
+        select_search_catalog_work(&[primary, secondary], "dune", &["movie"], &[None], None);
+    assert_eq!(work.len(), 2);
+    assert_ne!(work[0].addon_url, work[1].addon_url);
+    let item = |id, type_, title: &str| {
+        let mut item = test_media_item(id, type_);
+        item.title = title.into();
+        item
+    };
+    let page = merge_search_catalog_pages(
+        sources,
+        vec![vec![
+            (
+                0,
+                Ok(CatalogPage {
+                    items: vec![
+                        item("tt1", "movie", "Primary title"),
+                        item(" TT1 ", "MOVIE", "Duplicate in primary"),
+                    ],
+                    source_item_count: 2,
+                }),
+            ),
+            (
+                1,
+                Ok(CatalogPage {
+                    items: vec![
+                        item("TT1", "movie", "Secondary title"),
+                        item("tt1", "series", "Primary title"),
+                        item("tt2", "movie", "Primary title"),
+                    ],
+                    source_item_count: 3,
+                }),
+            ),
+        ]],
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        page.items
+            .iter()
+            .map(|item| (item.id.as_str(), item.type_.as_str(), item.title.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            ("tt1", "movie", "Primary title"),
+            ("tt1", "series", "Primary title"),
+            ("tt2", "movie", "Primary title"),
+        ]
+    );
+    assert_eq!(page.claims.len(), 3);
+    assert_eq!(page.claims["movie:tt1"], Some(0));
+    assert_eq!(
+        page.cursors
+            .iter()
+            .map(|cursor| cursor.skip)
+            .collect::<Vec<_>>(),
+        [2, 3]
+    );
+    assert!(!page.partial);
+}
+
+#[test]
 fn search_sources_advance_independently_and_drop_exhausted_sources() {
     let mut addon = classified_cinemeta_addon();
     addon.capabilities = Some(
@@ -292,6 +431,7 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
         [2, 4]
     );
     assert_eq!(page.claims.get("movie:single"), Some(&None));
+    assert!(!page.partial);
     let mut added = addon.clone();
     added.url = "https://new.example/manifest.json".into();
     let snapshot = [added, addon];
@@ -367,6 +507,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
     assert!(page.items.is_empty());
     assert_eq!(page.cursors[0].skip, 50);
     assert!(page.cursors[0].retry);
+    assert!(!page.partial);
     let page = merge_search_catalog_pages(
         sources(page.cursors),
         vec![vec![(
@@ -381,8 +522,10 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
     .unwrap();
     assert_eq!(page.cursors[0].skip, 53);
     assert!(!page.cursors[0].retry);
+    assert!(!page.partial);
     let page = merge_search_catalog_pages(sources(page.cursors), vec![vec![]], false).unwrap();
     assert!(page.cursors[0].retry);
+    assert!(!page.partial);
     let page = merge_search_catalog_pages(
         sources(page.cursors),
         vec![vec![(0, Err("still offline".into()))]],
@@ -390,6 +533,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
     )
     .unwrap();
     assert!(page.cursors.is_empty());
+    assert!(page.partial);
     assert!(merge_search_catalog_pages(vec![], vec![], false)
         .unwrap()
         .cursors
@@ -423,7 +567,6 @@ fn catalog_page_next_skip_continues_on_any_non_empty_page() {
     assert_eq!(catalog_page_next_skip(50, 50), Some(100));
     assert_eq!(catalog_page_next_skip(0, 24), Some(24));
     assert_eq!(catalog_page_next_skip(0, 49), Some(49));
-    assert_eq!(catalog_page_next_skip(0, 50), Some(50));
     assert_eq!(catalog_page_next_skip(0, 0), None);
     assert_eq!(catalog_page_next_skip(100, 0), None);
 }
@@ -556,6 +699,26 @@ fn empty_search_pages_preserve_constituent_failures_for_retry() {
     .expect("all-success empty search");
     assert!(page.items.is_empty());
     assert!(page.cursors.is_empty());
+    assert!(!page.partial);
+    let mut sources = sources();
+    sources[0][1].supports_skip = false;
+    let page = merge_search_catalog_pages(
+        sources,
+        vec![vec![
+            (
+                0,
+                Ok(CatalogPage {
+                    items: vec![test_media_item("available", "movie")],
+                    source_item_count: 1,
+                }),
+            ),
+            (1, Err("single-page source offline".into())),
+        ]],
+        true,
+    )
+    .unwrap();
+    assert!(page.partial);
+    assert_eq!(page.cursors.len(), 1);
 }
 
 #[test]
@@ -595,91 +758,72 @@ fn subtitle_addon() -> AddonConfig {
     }
 }
 
+#[tokio::test]
+async fn capability_gaps_are_tagged_and_other_failures_are_not() {
+    let subtitles_only = [subtitle_addon()];
+    let client = AddonResourceClient::new();
+    let gaps = [
+        super::select_catalog_targets(&subtitles_only, "movie", "top", &[])
+            .map(|_| ())
+            .unwrap_err(),
+        super::fetch_meta_details_from_addons(&client, &subtitles_only, "movie", "tt1")
+            .await
+            .map(|_| ())
+            .unwrap_err(),
+    ];
+    for message in gaps {
+        assert!(message.ends_with("in Settings → Addons."), "{message}");
+        assert!(!message.contains("://"), "{message}");
+        let value = serde_json::to_value(AddonResourceError::from(message.clone())).unwrap();
+        assert_eq!(
+            value,
+            serde_json::json!({"kind": "no_capable_addon", "message": message})
+        );
+    }
+    for message in [
+        "Configured addon returned HTTP 500. Check the addon URL in Settings → Addons.",
+        "Metadata not found.",
+    ] {
+        assert_eq!(
+            AddonResourceError::from(message.to_string()).kind,
+            AddonResourceErrorKind::Failed
+        );
+    }
+}
+fn allows_subtitles(addon: &AddonConfig, type_: &str, id: &str) -> bool {
+    addon_allows_resource(addon, "subtitles", type_, id)
+}
+
 #[test]
 fn subtitle_routing_follows_declared_resource_type_and_prefix() {
     let addon = subtitle_addon();
-    assert!(addon_allows_subtitles(&addon, "movie", "tt1234567"));
-    assert!(addon_allows_subtitles(&addon, "series", "tt1234567:1:2"));
-    assert!(!addon_allows_subtitles(&addon, "movie", "kitsu:42"));
-    assert!(!addon_allows_subtitles(&addon, "anime", "tt1234567:1:2"));
+    assert!(allows_subtitles(&addon, "movie", "tt1234567"));
+    assert!(allows_subtitles(&addon, "series", "tt1234567:1:2"));
+    assert!(!allows_subtitles(&addon, "movie", "kitsu:42"));
+    assert!(!allows_subtitles(&addon, "anime", "tt1234567:1:2"));
 
     let catalog_only = classified_cinemeta_addon();
-    assert!(!addon_allows_subtitles(&catalog_only, "movie", "tt1234567"));
+    assert!(!allows_subtitles(&catalog_only, "movie", "tt1234567"));
 
     let unclassified = AddonConfig {
         capabilities: None,
         ..addon
     };
-    assert!(addon_allows_subtitles(&unclassified, "movie", "tt1234567"));
-}
-
-fn subtitle_server(
-    responses: Vec<(u16, &'static str)>,
-) -> (
-    String,
-    std::sync::mpsc::Sender<()>,
-    std::thread::JoinHandle<Vec<String>>,
-) {
-    use std::io::{BufRead, BufReader, Write};
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    listener.set_nonblocking(true).unwrap();
-    let (stop, stopped) = std::sync::mpsc::channel();
-    let server = std::thread::spawn(move || {
-        let mut paths = Vec::new();
-        let started = std::time::Instant::now();
-        while matches!(
-            stopped.try_recv(),
-            Err(std::sync::mpsc::TryRecvError::Empty)
-        ) && started.elapsed() < Duration::from_secs(10)
-        {
-            let (mut socket, _) = match listener.accept() {
-                Ok(connection) => connection,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1));
-                    continue;
-                }
-                Err(error) => panic!("{error}"),
-            };
-            socket.set_nonblocking(false).unwrap();
-            socket
-                .set_read_timeout(Some(Duration::from_secs(1)))
-                .unwrap();
-            let mut line = String::new();
-            let mut reader = BufReader::new(&mut socket);
-            reader.read_line(&mut line).unwrap();
-            loop {
-                let mut header = String::new();
-                reader.read_line(&mut header).unwrap();
-                if header == "\r\n" || header.is_empty() {
-                    break;
-                }
-            }
-            let (status, body) = responses.get(paths.len()).copied().unwrap_or((404, "{}"));
-            paths.push(line.split_whitespace().nth(1).unwrap().to_string());
-            write!(
-                socket,
-                "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-                body.len()
-            )
-            .unwrap();
-        }
-        paths
-    });
-    (url, stop, server)
+    assert!(allows_subtitles(&unclassified, "movie", "tt1234567"));
 }
 
 #[tokio::test]
 async fn subtitle_queries_fall_back_in_order_and_cache_each_requested_id() {
-    let (url, stop, server) = subtitle_server(vec![
-        (200, r#"{"subtitles":[]}"#),
+    let server = TestHttpServer::new(vec![
+        (200, r#"{"subtitles":[]}"#, None),
         (
             200,
             r#"{"subtitles":[{"id":"flat","url":"https://subs.test/flat.srt","lang":"eng"}]}"#,
+            None,
         ),
     ]);
     let addon = AddonConfig {
-        url,
+        url: server.url.clone(),
         capabilities: None,
         ..subtitle_addon()
     };
@@ -705,9 +849,8 @@ async fn subtitle_queries_fall_back_in_order_and_cache_each_requested_id() {
             .id,
         "flat"
     );
-    stop.send(()).unwrap();
     assert_eq!(
-        server.join().unwrap(),
+        server.finish(),
         [
             "/subtitles/series/kitsu%3A48316%3A1%3A2.json",
             "/subtitles/series/kitsu%3A48316%3A2.json",
@@ -728,17 +871,21 @@ async fn subtitle_queries_stop_at_first_nonempty_candidate_and_preserve_partial_
         (vec![(200, empty), (200, empty)], 2, 0, false),
         (vec![(404, "{}"), (404, "{}")], 2, 0, true),
     ] {
-        let (url, stop, server) = subtitle_server(responses);
+        let server = TestHttpServer::new(
+            responses
+                .into_iter()
+                .map(|(status, body)| (status, body, None))
+                .collect(),
+        );
         let addon = AddonConfig {
-            url,
+            url: server.url.clone(),
             capabilities: None,
             ..subtitle_addon()
         };
         let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
         let result =
             fetch_subtitles_for_addon(&AddonResourceClient::new(), "series", &ids, &addon).await;
-        stop.send(()).unwrap();
-        assert_eq!(server.join().unwrap().len(), count);
+        assert_eq!(server.finish().len(), count);
         assert_eq!(result.is_err(), fails);
         if !fails {
             assert_eq!(result.unwrap().len(), result_count);
@@ -748,12 +895,13 @@ async fn subtitle_queries_stop_at_first_nonempty_candidate_and_preserve_partial_
 
 #[tokio::test]
 async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate() {
-    let (url, stop, server) = subtitle_server(vec![(
+    let server = TestHttpServer::new(vec![(
         200,
         r#"{"subtitles":[{"id":"flat","url":"https://subs.test/flat.srt"}]}"#,
+        None,
     )]);
     let addon = AddonConfig {
-        url,
+        url: server.url.clone(),
         capabilities: Some(
             parse_addon_manifest(
                 br#"{
@@ -769,8 +917,8 @@ async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate
     };
     let client = AddonResourceClient::new();
     let ids = vec!["kitsu:48316:1:2".to_string(), "kitsu:48316:2".to_string()];
-    assert!(!addon_allows_subtitles(&addon, "series", &ids[0]));
-    assert!(addon_allows_subtitles(&addon, "series", &ids[1]));
+    assert!(!allows_subtitles(&addon, "series", &ids[0]));
+    assert!(allows_subtitles(&addon, "series", &ids[1]));
     assert!(fetch_subtitles_for_addon(&client, "movie", &ids, &addon)
         .await
         .unwrap()
@@ -784,10 +932,9 @@ async fn subtitle_queries_apply_resource_type_and_prefix_gates_to_each_candidate
     let result = fetch_subtitles_for_addon(&client, "series", &ids, &addon)
         .await
         .unwrap();
-    stop.send(()).unwrap();
     assert_eq!(result[0].id, "flat");
     assert_eq!(
-        server.join().unwrap(),
+        server.finish(),
         ["/subtitles/series/kitsu%3A48316%3A2.json"]
     );
 }

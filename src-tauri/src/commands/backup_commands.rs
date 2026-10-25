@@ -19,18 +19,21 @@ use super::playback_preferences_commands::{
     write_playback_language_preferences,
 };
 use super::playback_state::{PlaybackLanguagePreferencesSnapshot, PlaybackStateService};
-use super::resume_store::HistoryMergeError;
+use super::resume_store::{
+    ContinueWatchingDismissal, HistoryMergeError, MAX_CONTINUE_WATCHING_DISMISSALS,
+};
 use super::store_helpers::{
-    load_library_map, load_watch_statuses_map, normalize_library_item, normalize_watch_status,
-    persist_index_map, read_library_snapshot, read_watch_status_snapshot, LIBRARY_LAYOUT,
-    WATCH_STATUS_LAYOUT,
+    load_library_map, load_status_added_ids, load_watch_statuses_map, normalize_library_item,
+    normalize_watch_status, persist_index_map, read_library_snapshot, read_watch_status_snapshot,
+    LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::watch_status_commands::MAX_WATCH_STATUS_ITEMS;
 use super::{
     normalize_media_id, normalize_non_empty, now_unix_millis, run_blocking_op, run_store_op_at,
     streaming_helpers::is_persistable_stream_key, PlaybackLanguagePreferences, WatchProgress,
-    BLOCKING_OP_TIMEOUT, LIBRARY_STORE_FILE, LISTS_STORE_FILE, PERSISTENCE_TIMEOUT_MESSAGE,
-    PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE, WATCH_STATUS_STORE_FILE,
+    BLOCKING_OP_TIMEOUT, LIBRARY_STATUS_ADDED_KEY, LIBRARY_STORE_FILE, LISTS_STORE_FILE,
+    PERSISTENCE_TIMEOUT_MESSAGE, PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE,
+    WATCH_STATUS_STORE_FILE,
 };
 use crate::providers::{usize_to_u64_saturating, MediaItem};
 use serde::{Deserialize, Serialize};
@@ -50,36 +53,18 @@ const MAX_IMPORT_TITLE_LANGUAGES: usize = 10_000;
 /// Native dialog selections must still be bounded, absolute `.json` paths.
 pub(super) const MAX_BACKUP_PATH_LEN: usize = 1024;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BackupErrorKind {
     InvalidBackup,
     UnsupportedVersion,
     TooLarge,
     CapacityExceeded,
+    #[default]
     Failed,
 }
 
-#[derive(Debug, Serialize)]
-pub struct BackupError {
-    pub kind: BackupErrorKind,
-    pub message: String,
-}
-
-impl BackupError {
-    fn new(kind: BackupErrorKind, message: impl Into<String>) -> Self {
-        Self {
-            kind,
-            message: message.into(),
-        }
-    }
-}
-
-impl From<String> for BackupError {
-    fn from(message: String) -> Self {
-        Self::new(BackupErrorKind::Failed, message)
-    }
-}
+pub type BackupError = super::CommandError<BackupErrorKind>;
 
 impl From<HistoryMergeError> for BackupError {
     fn from(error: HistoryMergeError) -> Self {
@@ -200,12 +185,16 @@ fn serialize_backup(export: &impl Serialize) -> Result<String, BackupError> {
 /// Full data snapshot used for backup export.
 #[derive(Debug, Serialize)]
 pub struct AppDataExport {
-    /// Schema version (`1`); `settings` is additive so pre-settings backups still import.
+    /// Schema version (`1`); settings and ownership/dismissal markers are additive.
     pub version: u32,
     /// Unix timestamp (milliseconds) when the backup was created.
     pub exported_at: u64,
     pub history: Vec<WatchProgress>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub(crate) continue_watching_dismissals: Vec<ContinueWatchingDismissal>,
     pub library: Vec<MediaItem>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub library_status_added: Vec<String>,
     pub lists: Vec<UserListWithItems>,
     pub watch_statuses: HashMap<String, String>,
     pub settings: AppSettingsExport,
@@ -234,7 +223,11 @@ struct AppDataImportPayload {
     #[serde(default)]
     history: Vec<Value>,
     #[serde(default)]
+    continue_watching_dismissals: Vec<Value>,
+    #[serde(default)]
     library: Vec<Value>,
+    #[serde(default)]
+    library_status_added: Vec<Value>,
     #[serde(default)]
     lists: Vec<Value>,
     #[serde(default)]
@@ -500,7 +493,9 @@ async fn export_app_data(
                 version: 1,
                 exported_at: now_unix_millis(),
                 history,
+                continue_watching_dismissals: service.load_continue_watching_dismissals(&app)?,
                 library,
+                library_status_added: load_status_added_ids(&lib_store),
                 lists,
                 watch_statuses,
                 settings: export_settings(&app, &service)?,
@@ -534,6 +529,8 @@ fn parse_backup_payload(data: &str) -> Result<AppDataImportPayload, BackupError>
     })?;
     if export.history.len() > MAX_IMPORT_HISTORY
         || export.library.len() > MAX_IMPORT_LIBRARY
+        || export.continue_watching_dismissals.len() > MAX_CONTINUE_WATCHING_DISMISSALS as usize
+        || export.library_status_added.len() > MAX_IMPORT_LIBRARY
         || export.lists.len() > MAX_IMPORT_LISTS
         || export.watch_statuses.len() > MAX_IMPORT_STATUSES
         || export.settings.title_language_preferences.len() > MAX_IMPORT_TITLE_LANGUAGES
@@ -601,6 +598,34 @@ fn prepare_import_watch_statuses(raw_statuses: BTreeMap<String, Value>) -> HashM
     statuses
 }
 
+fn import_library_status_added(
+    store: &super::DurableStore,
+    records: Vec<Value>,
+    new_library_ids: &HashSet<String>,
+    imported_status_ids: &HashSet<String>,
+) -> Result<(), String> {
+    let mut ids = load_status_added_ids(store);
+    let mut known: HashSet<String> = ids.iter().cloned().collect();
+    let previous_count = ids.len();
+    for id in records
+        .iter()
+        .filter_map(Value::as_str)
+        .filter_map(normalize_media_id)
+    {
+        if new_library_ids.contains(&id)
+            && imported_status_ids.contains(&id)
+            && known.insert(id.clone())
+        {
+            ids.push(id);
+        }
+    }
+    if ids.len() != previous_count {
+        store.set(LIBRARY_STATUS_ADDED_KEY, json!(ids));
+        store.save()?;
+    }
+    Ok(())
+}
+
 /// Synchronous backup-merge body. Runs inside `run_store_op_at`.
 fn import_app_data_entries(
     app: &AppHandle,
@@ -662,12 +687,23 @@ fn import_app_data_entries(
         );
         history_entries.push((key, sanitized));
     }
-    let history_imported = service.import_history_entries(app, history_entries)?;
+    let dismissals = export
+        .continue_watching_dismissals
+        .into_iter()
+        .filter_map(|record| serde_json::from_value::<ContinueWatchingDismissal>(record).ok())
+        .collect();
+    let history_imported = service.import_history_entries(app, history_entries, dismissals)?;
 
     let mut lib_map = library_snapshot.items;
     let previous_library_count = lib_map.len();
+    let mut new_library_ids = HashSet::new();
     for normalized in incoming_library {
-        lib_map.entry(normalized.id.clone()).or_insert(normalized);
+        if let std::collections::hash_map::Entry::Vacant(entry) =
+            lib_map.entry(normalized.id.clone())
+        {
+            new_library_ids.insert(normalized.id.clone());
+            entry.insert(normalized);
+        }
     }
     let library_imported = lib_map.len() - previous_library_count;
 
@@ -705,8 +741,12 @@ fn import_app_data_entries(
 
     let mut statuses = status_snapshot.items;
     let previous_status_count = statuses.len();
+    let mut imported_status_ids = HashSet::new();
     for (clean_id, clean_status) in incoming_statuses {
-        statuses.entry(clean_id).or_insert(clean_status);
+        if let std::collections::hash_map::Entry::Vacant(entry) = statuses.entry(clean_id.clone()) {
+            imported_status_ids.insert(clean_id);
+            entry.insert(clean_status);
+        }
     }
     let statuses_imported = statuses.len() - previous_status_count;
 
@@ -715,6 +755,15 @@ fn import_app_data_entries(
         WATCH_STATUS_LAYOUT,
         &status_snapshot.index,
         &statuses,
+    )?;
+
+    // Statuses must reach disk before ownership: a failed status save must never
+    // make a newly restored Library item removable by a later single-status clear.
+    import_library_status_added(
+        &lib_store,
+        export.library_status_added,
+        &new_library_ids,
+        &imported_status_ids,
     )?;
 
     let (addons_imported, settings_restored) = import_settings(app, service, export.settings)?;
@@ -934,10 +983,128 @@ mod tests {
     }
 
     #[test]
+    fn backup_ownership_sections_are_additive_and_drop_malformed_records_independently() {
+        let legacy = parse_backup_payload(r#"{"version":1}"#).unwrap();
+        assert!(legacy.continue_watching_dismissals.is_empty());
+        assert!(legacy.library_status_added.is_empty());
+        let library = crate::test_helpers::test_store();
+        let snapshot = AppDataExport {
+            version: 1,
+            exported_at: 200,
+            history: Vec::new(),
+            continue_watching_dismissals: vec![ContinueWatchingDismissal {
+                media_type: "movie".into(),
+                media_id: "valid".into(),
+                dismissed_through: 100,
+            }],
+            library: vec![crate::test_helpers::test_media_item("valid", "movie")],
+            library_status_added: vec!["valid".into()],
+            lists: Vec::new(),
+            watch_statuses: HashMap::from([("valid".into(), "watching".into())]),
+            settings: AppSettingsExport {
+                addon_configs: Vec::new(),
+                app_ui_preferences: load_app_ui_preferences(&library.store),
+                profile_preferences: load_profile_preferences(&library.store, &library.store),
+                stream_selector_preferences: None,
+                playback_language_preferences: PlaybackLanguagePreferences::default(),
+                title_language_preferences: BTreeMap::new(),
+            },
+        };
+        let mut payload: Value =
+            serde_json::from_str(&serialize_backup(&snapshot).unwrap()).unwrap();
+        payload["continue_watching_dismissals"]
+            .as_array_mut()
+            .unwrap()
+            .extend([
+                Value::Null,
+                json!({"media_type":"movie","media_id":"wrong-time","dismissed_through":"100"}),
+                json!({"media_type":"movie","media_id":"fraction","dismissed_through":100.5}),
+                json!({"media_type":"movie","media_id":"missing-time"}),
+                json!({"media_type":"movie","media_id":"null-time","dismissed_through":null}),
+            ]);
+        payload["library_status_added"]
+            .as_array_mut()
+            .unwrap()
+            .extend([Value::Null, json!(12), json!({})]);
+        let restored = parse_backup_payload(&serialize_backup(&payload).unwrap()).unwrap();
+        assert_eq!(restored.version, 1);
+        let markers: Vec<_> = restored
+            .continue_watching_dismissals
+            .into_iter()
+            .filter_map(|record| serde_json::from_value::<ContinueWatchingDismissal>(record).ok())
+            .collect();
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].media_id, "valid");
+        assert_eq!(markers[0].dismissed_through, 100);
+        let new_ids = HashSet::from(["valid".into()]);
+        import_library_status_added(
+            &library.store,
+            restored.library_status_added,
+            &new_ids,
+            &new_ids,
+        )
+        .unwrap();
+        assert_eq!(load_status_added_ids(&library.store), ["valid"]);
+    }
+
+    #[test]
+    fn backup_library_ownership_requires_new_items_and_imported_statuses() {
+        let library = crate::test_helpers::test_store();
+        library
+            .store
+            .set(LIBRARY_STATUS_ADDED_KEY, json!(["local-owned"]));
+        library.store.save().unwrap();
+        let records = json!([
+            " new-owned ",
+            "new-owned",
+            "manual-local",
+            "missing-status",
+            "local-status",
+            "orphan",
+            "local-owned",
+            null,
+            false,
+            {},
+            "null",
+            ""
+        ])
+        .as_array()
+        .unwrap()
+        .clone();
+        import_library_status_added(
+            &library.store,
+            records,
+            &HashSet::from([
+                "new-owned".into(),
+                "missing-status".into(),
+                "local-status".into(),
+            ]),
+            &HashSet::from(["new-owned".into(), "manual-local".into(), "orphan".into()]),
+        )
+        .unwrap();
+        let reopened = super::super::DurableStoreRegistry::default()
+            .open_path(library.path.clone())
+            .unwrap();
+        assert_eq!(
+            load_status_added_ids(&reopened),
+            ["local-owned", "new-owned"]
+        );
+        let before = std::fs::read(&library.path).unwrap();
+        import_library_status_added(&library.store, Vec::new(), &HashSet::new(), &HashSet::new())
+            .unwrap();
+        assert_eq!(std::fs::read(&library.path).unwrap(), before);
+    }
+
+    #[test]
     fn backup_envelope_rejects_each_record_cap_before_version_validation() {
         for (section, limit) in [
             ("history", MAX_IMPORT_HISTORY),
             ("library", MAX_IMPORT_LIBRARY),
+            ("library_status_added", MAX_IMPORT_LIBRARY),
+            (
+                "continue_watching_dismissals",
+                MAX_CONTINUE_WATCHING_DISMISSALS as usize,
+            ),
             ("lists", MAX_IMPORT_LISTS),
             ("watch_statuses", MAX_IMPORT_STATUSES),
             ("title_language_preferences", MAX_IMPORT_TITLE_LANGUAGES),
