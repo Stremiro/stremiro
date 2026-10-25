@@ -26,15 +26,17 @@ Requires [Bun](https://bun.sh) and the pinned Rust toolchain
 ```sh
 bun install
 bun run tauri dev      # run the app
-bun run check          # format + lint + typecheck + clippy
+bun run check          # format + lint + typecheck + UI tests + release-version validation + clippy
 bun run test:rust      # Rust test suite
 ```
 
 ## Building
 
-The app embeds a verified libmpv pair that is not committed to the repo —
+The app embeds a libmpv pair that is not committed to the repo —
 place `libmpv-2.dll` and `libmpv-wrapper.dll` in `src-tauri/lib/` (see
 `src-tauri/lib/PROVENANCE.txt` for versions and hashes) before packaging.
+Packaging confirms the staged and development DLL copies match; upstream
+provenance is not independently verified.
 
 ```powershell
 bun run tauri:build            # signed NSIS installer + updater artifacts

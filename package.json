@@ -8,7 +8,8 @@
     "bun": ">=1.4.2"
   },
   "overrides": {
-    "@tauri-apps/api": "^2.12.4"
+    "@tauri-apps/api": "^2.12.4",
+    "source-map-js": "^1.2.2"
   },
   "scripts": {
     "dev": "vite",
@@ -25,7 +26,8 @@
     "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
-    "check": "bun run format:check && bun run lint && bun run typecheck && bun run release:version:check && bun run fmt:rust && bun run clippy",
+    "test:ui": "bun test ./scripts/page-render.test.tsx",
+    "check": "bun run format:check && bun run lint && bun run typecheck && bun run test:ui && bun run release:version:check && bun run fmt:rust && bun run clippy",
     "release:version:check": "bun ./scripts/release-version.mjs check",
     "release:version:set": "bun ./scripts/release-version.mjs set",
     "release:manifest": "bun ./scripts/release-github.mjs manifest",
@@ -72,6 +74,6 @@
     "tailwindcss": "^4.3.3",
     "tailwindcss-animate": "^1.0.7",
     "typescript": "~7.0.2",
-    "vite": "^8.3.1"
+    "vite": "^8.3.5"
   }
 }
