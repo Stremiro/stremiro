@@ -1,6 +1,12 @@
+
 <p align="center">
-  <img width="800" height="322" alt="Iroh / Stremiro banner" src="https://github.com/user-attachments/assets/5de94e39-880b-430a-afaf-e6eb3b506fcd" />
+  <img
+    src="https://github.com/user-attachments/assets/5de94e39-880b-430a-afaf-e6eb3b506fcd"
+    width="800"
+    alt="Stremiro banner"
+  />
 </p>
+
 
 <h1 align="center">⛩️ Iroh / Stremiro</h1>
 
