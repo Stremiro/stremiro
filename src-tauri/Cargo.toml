@@ -1,6 +1,6 @@
 [package]
 name = "stremiro"
-version = "0.8.5-alpha"
+version = "0.8.6-alpha"
 description = "Lightweight addon-compatible desktop client"
 authors = ["Stremiro contributors"]
 edition = "2021"
