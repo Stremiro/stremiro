@@ -11,39 +11,26 @@ type TabsContextValue = {
 const TabsContext = React.createContext<TabsContextValue | null>(null);
 
 type TabsProps = React.HTMLAttributes<HTMLDivElement> & {
-  defaultValue?: string;
-  value?: string;
-  onValueChange?: (value: string) => void;
+  value: string;
+  onValueChange: (value: string) => void;
 };
 
-function Tabs({ className, defaultValue, value, onValueChange, ...props }: TabsProps) {
-  const [internalValue, setInternalValue] = React.useState(defaultValue ?? '');
+function Tabs({ className, value, onValueChange, ...props }: TabsProps) {
   const baseId = React.useId();
-  const isControlled = value !== undefined;
-  const currentValue = isControlled ? value : internalValue;
-
-  const setValue = React.useCallback(
-    (next: string) => {
-      if (!isControlled) setInternalValue(next);
-      onValueChange?.(next);
-    },
-    [isControlled, onValueChange],
-  );
-
-  const contextValue = React.useMemo<TabsContextValue>(
-    () => ({ baseId, value: currentValue, setValue }),
-    [baseId, currentValue, setValue],
+  const contextValue = React.useMemo(
+    () => ({ baseId, value, setValue: onValueChange }),
+    [baseId, value, onValueChange],
   );
 
   return (
-    <TabsContext.Provider value={contextValue}>
+    <TabsContext value={contextValue}>
       <div className={cn('w-full', className)} {...props} />
-    </TabsContext.Provider>
+    </TabsContext>
   );
 }
 
 function useTabsContext() {
-  const ctx = React.useContext(TabsContext);
+  const ctx = React.use(TabsContext);
   if (!ctx) throw new Error('Tabs components must be used within <Tabs />');
   return ctx;
 }
@@ -86,7 +73,7 @@ function TabsTrigger({ className, onClick, onKeyDown, value, ...props }: TabsTri
       id={triggerId}
       aria-controls={panelId}
       className={cn(
-        'inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-all focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
+        'inline-flex items-center justify-center whitespace-nowrap rounded-sm px-3 py-1.5 text-sm font-medium ring-offset-background transition-[color,background-color,box-shadow,opacity] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 disabled:pointer-events-none disabled:opacity-50',
         isActive && 'bg-background text-foreground shadow-xs',
         className,
       )}

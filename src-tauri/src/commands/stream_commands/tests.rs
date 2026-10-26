@@ -1,6 +1,6 @@
 use super::{
     get_stream_pack_rows, normalize_recovery_url, preferred_probe_error, retain_unprobed_streams,
-    stream_link, validated_info_hash, PackEpisodeCoordinates, ProbeRequestIdentity,
+    stream_link, validated_content_hash, PackEpisodeCoordinates, ProbeRequestIdentity,
     ResolveStreamError, ResolveStreamErrorKind, StreamLinkKind, StreamPackCoverage, StreamPackRow,
     StreamRequestRegistry, PACK_COVERAGE_CLAIMS_MAX, PACK_EPISODES_MAX, STREAM_EARLY_CANCELS_MAX,
     STREAM_REQUESTS_MAX,
@@ -380,10 +380,10 @@ fn pack_coverage_rejects_oversized_episode_and_claim_payloads() {
 #[test]
 fn stream_link_validates_hash_formats() {
     let hex = "ABCDEF0123456789ABCDEF0123456789ABCDEF01";
-    assert_eq!(validated_info_hash(hex), Some(hex.to_ascii_lowercase()));
+    assert_eq!(validated_content_hash(hex), Some(hex.to_ascii_lowercase()));
     let base32 = "abcdefghijklmnopqrstuvwxyz234567";
     assert_eq!(
-        validated_info_hash(base32),
+        validated_content_hash(base32),
         Some(base32.to_ascii_uppercase())
     );
     for invalid in [
@@ -393,14 +393,14 @@ fn stream_link_validates_hash_formats() {
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ234568",
         " ABCDEF0123456789ABCDEF0123456789ABCDEF01",
     ] {
-        assert!(validated_info_hash(invalid).is_none());
+        assert!(validated_content_hash(invalid).is_none());
     }
 }
 
 #[test]
 fn stream_link_builds_encoded_magnet_with_filename_and_trackers() {
     let mut stream = test_stream();
-    stream.info_hash = Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string());
+    stream.content_hash = Some("ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_string());
     stream.title = Some("Release & name\n1080p".to_string());
     stream.sources = vec![
         "tracker:udp://tracker.example:80/announce".to_string(),
@@ -420,7 +420,7 @@ fn stream_link_builds_encoded_magnet_with_filename_and_trackers() {
         .expect("filename")
         .url
         .contains("&dn=chosen%20file.mkv&tr="));
-    stream.info_hash = Some("bad-hash".to_string());
+    stream.content_hash = Some("bad-hash".to_string());
     assert!(stream_link(&stream).is_err());
 }
 

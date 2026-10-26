@@ -5,8 +5,8 @@ use super::language_preferences::{
 use super::playback_title_scope_key;
 use super::stream_health::{
     accepts_outcome, load_source_health_snapshot, recent_successful_source,
-    score_source_health_priority, score_stream_family_priority, update_verified_family_source_id,
-    upsert_source_health_snapshot, PlaybackSourceHealthSnapshot, PlaybackStreamFamilySnapshot,
+    score_source_health_priority, score_stream_family_priority, upsert_source_health_snapshot,
+    PlaybackSourceHealthSnapshot, PlaybackStreamFamilySnapshot,
 };
 use super::{PlaybackStateService, PlaybackStreamOutcomeKind};
 use crate::commands::stream_coordinator::{
@@ -60,27 +60,18 @@ fn least_active_eviction_preserves_original_order_for_recency_ties() {
 }
 
 #[test]
-fn source_health_priority_penalizes_active_cooldown() {
-    let now_ms = 10_000;
-    let snapshot = health(Some(5_000), Some(9_000), 3, Some(20_000));
-
-    assert_eq!(score_source_health_priority(Some(&snapshot), now_ms), 0);
-}
-
-#[test]
-fn source_health_priority_penalizes_recent_repeat_failures() {
-    let now_ms = 60_000;
-    let snapshot = health(None, Some(55_000), 2, None);
-
-    assert_eq!(score_source_health_priority(Some(&snapshot), now_ms), 1);
-}
-
-#[test]
-fn source_health_priority_rewards_recent_success() {
-    let now_ms = 60_000;
-    let snapshot = health(Some(58_000), None, 0, None);
-
-    assert_eq!(score_source_health_priority(Some(&snapshot), now_ms), 3);
+fn source_health_priority_scores_cooldown_failures_and_success() {
+    for (snapshot, now_ms, expected) in [
+        (health(Some(5_000), Some(9_000), 3, Some(20_000)), 10_000, 0),
+        (health(None, Some(55_000), 2, None), 60_000, 1),
+        (health(Some(58_000), None, 0, None), 60_000, 3),
+    ] {
+        assert_eq!(
+            score_source_health_priority(Some(&snapshot), now_ms),
+            expected,
+            "now={now_ms}, snapshot={snapshot:?}"
+        );
+    }
 }
 
 #[test]
@@ -226,16 +217,9 @@ fn reputation_scoring_bounds_cooldowns_and_future_failures() {
 fn stream_family_priority_rewards_recent_nearby_success() {
     let now_ms = 100_000;
     let snapshot = PlaybackStreamFamilySnapshot {
-        scope_key: None,
-        source_id: None,
-        last_success_at: Some(99_000),
         last_success_season: Some(1),
         last_success_episode: Some(4),
-        last_failure_at: None,
-        last_failure_season: None,
-        last_failure_episode: None,
-        consecutive_failures: 0,
-        cooldown_until: None,
+        ..stream_family_snapshot(None, Some(99_000), None)
     };
 
     assert_eq!(
@@ -248,16 +232,11 @@ fn stream_family_priority_rewards_recent_nearby_success() {
 fn stream_family_priority_penalizes_recent_nearby_failure() {
     let now_ms = 100_000;
     let snapshot = PlaybackStreamFamilySnapshot {
-        scope_key: None,
-        source_id: None,
-        last_success_at: None,
-        last_success_season: None,
-        last_success_episode: None,
-        last_failure_at: Some(99_500),
         last_failure_season: Some(1),
         last_failure_episode: Some(5),
         consecutive_failures: 1,
         cooldown_until: Some(110_000),
+        ..stream_family_snapshot(None, None, Some(99_500))
     };
 
     assert_eq!(
@@ -529,80 +508,75 @@ fn movie_stream_family_priority_rewards_success_and_penalizes_failure_within_tit
 
 #[test]
 fn stream_family_source_id_only_moves_on_verified_outcomes() {
-    let mut snapshot =
-        stream_family_snapshot(Some("https://addon-a/manifest.json"), Some(50_000), None);
-
-    update_verified_family_source_id(
-        &mut snapshot,
-        Some("https://addon-b/manifest.json".to_string()),
-        PlaybackStreamOutcomeKind::LoadFailed,
-    );
-    assert_eq!(
-        snapshot.source_id.as_deref(),
-        Some("https://addon-a/manifest.json")
-    );
-
-    update_verified_family_source_id(
-        &mut snapshot,
-        Some("https://addon-b/manifest.json".to_string()),
-        PlaybackStreamOutcomeKind::Verified,
-    );
-    assert_eq!(
-        snapshot.source_id.as_deref(),
-        Some("https://addon-b/manifest.json")
-    );
+    use super::stream_health::{
+        load_playback_stream_family_snapshot, playback_stream_family_item_key,
+        playback_stream_family_snapshot_key, upsert_stream_family_snapshot, StreamOutcomeReport,
+    };
+    use crate::commands::streaming_helpers::normalize_source_id;
+    use PlaybackStreamOutcomeKind::{LoadFailed, Verified};
+    let fixture = crate::test_helpers::test_store();
+    let (scope, family) = ("movie:tt1", "release");
+    let key = playback_stream_family_snapshot_key(scope, family);
+    let old = "https://addon-a/manifest.json";
+    let replacement = "https://addon-b/manifest.json";
+    for (outcome, source, expected) in [
+        (LoadFailed, Some(replacement), Some(old)),
+        (Verified, Some(replacement), Some(replacement)),
+        (Verified, None, None),
+        (Verified, Some("   "), None),
+    ] {
+        fixture.store.set(
+            playback_stream_family_item_key(&key),
+            serde_json::json!(stream_family_snapshot(Some(old), Some(50_000), None)),
+        );
+        let report = StreamOutcomeReport {
+            media_id: "tt1".to_string(),
+            media_type: "movie",
+            season: None,
+            episode: None,
+            source_id: source.map(str::to_string),
+            stream_family: Some(family.to_string()),
+            outcome,
+            timestamp_ms: 60_000,
+        };
+        upsert_stream_family_snapshot(
+            &fixture.store,
+            scope,
+            family,
+            source.and_then(normalize_source_id).map(str::to_string),
+            &report,
+            false,
+        );
+        let updated = load_playback_stream_family_snapshot(&fixture.store, &key).unwrap();
+        assert_eq!(
+            updated.source_id.as_deref(),
+            expected,
+            "{outcome:?}: {source:?}"
+        );
+    }
 }
 
 #[test]
-fn verified_outcome_without_resolvable_source_clears_family_attribution() {
-    let mut snapshot =
-        stream_family_snapshot(Some("https://addon-a/manifest.json"), Some(50_000), None);
-
-    update_verified_family_source_id(&mut snapshot, None, PlaybackStreamOutcomeKind::Verified);
-    assert_eq!(snapshot.source_id, None);
-
-    snapshot.source_id = Some("https://addon-a/manifest.json".to_string());
-    update_verified_family_source_id(
-        &mut snapshot,
-        Some("   ".to_string()),
-        PlaybackStreamOutcomeKind::Verified,
-    );
-    assert_eq!(snapshot.source_id, None);
-}
-
-#[test]
-fn recent_successful_source_rejects_family_whose_latest_activity_failed() {
-    let polluted = stream_family_snapshot(
-        Some("https://addon-b/manifest.json"),
-        Some(50_000),
-        Some(60_000),
-    );
-    assert_eq!(recent_successful_source(polluted, 100_000), None);
-}
-
-#[test]
-fn recent_successful_source_recovers_after_new_verified_success() {
-    let recovered = stream_family_snapshot(
-        Some("https://addon-b/manifest.json"),
-        Some(90_000),
-        Some(60_000),
-    );
-    assert_eq!(
-        recent_successful_source(recovered, 100_000),
-        Some(("https://addon-b/manifest.json".to_string(), 90_000))
-    );
-}
-
-#[test]
-fn recent_successful_source_ignores_future_and_expired_successes() {
-    let future = stream_family_snapshot(Some("https://addon-a/manifest.json"), Some(200_000), None);
-    assert_eq!(recent_successful_source(future, 100_000), None);
-
-    let expired = stream_family_snapshot(Some("https://addon-a/manifest.json"), Some(1_000), None);
-    assert_eq!(
-        recent_successful_source(expired, 1_000 + 1000 * 60 * 60 * 24 * 7 + 1),
-        None
-    );
+fn recent_successful_source_requires_recent_verified_latest_activity() {
+    let a = "https://addon-a/manifest.json";
+    let b = "https://addon-b/manifest.json";
+    let now = 100_000;
+    let failure = Some(60_000);
+    let recovered = Some((b, 90_000));
+    let expired_at = 1_000 + 1000 * 60 * 60 * 24 * 7 + 1;
+    for (label, source, success, failure, now, expected) in [
+        ("failure newer", b, 50_000, failure, now, None),
+        ("verified success", b, 90_000, failure, now, recovered),
+        ("future success", a, 200_000, None, now, None),
+        ("expired by 1 ms", a, 1_000, None, expired_at, None),
+    ] {
+        let snapshot = stream_family_snapshot(Some(source), Some(success), failure);
+        assert_eq!(
+            recent_successful_source(snapshot, now),
+            expected.map(|(source, timestamp)| (source.to_string(), timestamp)),
+            "{label}"
+        );
+    }
 }
 
 #[test]
@@ -729,7 +703,6 @@ fn episode_mapping_snapshot_prefers_backend_normalized_episode_coordinates() {
         Some("tt-fallback"),
         &Episode {
             title: Some("Episode 1".to_string()),
-            release_date: None,
             stream_lookup_id: Some("tt-stream".to_string()),
             stream_season: Some(4),
             stream_episode: Some(12),
@@ -747,8 +720,6 @@ fn episode_mapping_snapshot_prefers_backend_normalized_episode_coordinates() {
 fn episode_mappings_digest_tracks_every_snapshot_input() {
     let episode = |season: u32, ep: u32| Episode {
         title: Some(format!("Episode {ep}")),
-        release_date: None,
-        stream_lookup_id: None,
         ..test_episode(&format!("episode-{season}-{ep}"), season, ep)
     };
     let episodes = vec![episode(1, 1), episode(1, 2)];
@@ -775,7 +746,7 @@ fn episode_mappings_digest_tracks_every_snapshot_input() {
         base,
         episode_mappings_digest("movie", "tt1", Some("tt1"), &episodes)
     );
-    let mut extra = episodes.clone();
+    let mut extra = episodes;
     extra.push(episode(1, 3));
     assert_ne!(
         base,

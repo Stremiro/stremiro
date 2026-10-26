@@ -149,7 +149,6 @@ fn details_prefetch_bundle_serializes_nullable_details_and_camel_case_progress()
             up_next_source: None,
             latest_series_entry: None,
             latest_movie_entry: None,
-            latest_entry: None,
         },
     };
 
@@ -255,7 +254,6 @@ fn episode(id: &str, season: u32, episode: u32, release_date: Option<&str>) -> E
         title: Some(format!("Episode {episode}")),
         released: release_date.map(|value| value.to_string()),
         release_date: crate::commands::media_normalization::build_release_date(release_date),
-        stream_lookup_id: None,
         ..test_episode(id, season, episode)
     }
 }
@@ -315,7 +313,6 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
         title: " \u{feff}A\t title ".into(),
         poster: Some("https://cdn.test".into()),
         year: Some(format!("2024{} tail", "y".repeat(27))),
-        display_year: None,
         release_date: Some("2024-02-30".into()),
         description: Some(format!("{} tail", "d".repeat(4095))),
         rating: Some(format!("{} tail", "r".repeat(63))),
@@ -333,8 +330,8 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
         }]),
         ..test_details("tt1", "series")
     };
-    let once = normalize_media_details(details, "tt1");
-    let twice = normalize_media_details(once.clone(), "tt1");
+    let once = normalize_media_details(details);
+    let twice = normalize_media_details(once.clone());
     assert_eq!(
         serde_json::to_value(&once).unwrap(),
         serde_json::to_value(twice).unwrap()
@@ -359,7 +356,7 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
     assert_eq!(item.primary_year, Some(2024));
     assert_eq!(
         serde_json::to_value(&item).unwrap(),
-        serde_json::to_value(normalize_media_item(item.clone())).unwrap()
+        serde_json::to_value(normalize_media_item(item)).unwrap()
     );
 }
 
@@ -369,7 +366,6 @@ fn build_media_schedule_sorts_dated_episodes_first_and_keeps_undated_ones() {
         title: "Test Show".to_string(),
         poster: Some("poster".to_string()),
         year: Some("2025".to_string()),
-        display_year: None,
         release_date: Some("2025-01-01".to_string()),
         episodes: Some(vec![
             Episode {

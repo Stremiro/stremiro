@@ -3,19 +3,19 @@ import { settlePendingAppWrites, trackPendingAppWrite } from '@/lib/pending-app-
 
 interface RunOptimisticQueryMutationOptions<TData, TVariables> {
   mutate: (variables: TVariables) => Promise<TData>;
-  optimisticData: TData;
+  optimisticData?: TData;
   queryClient: QueryClient;
   queryKey: QueryKey;
   variables: TVariables;
 }
 
-export function restoreQueryArrayEntry<T extends { id: string }>(
+export function restoreQueryArrayEntry(
   queryClient: QueryClient,
   queryKey: QueryKey,
   itemId: string,
-  previousEntry: T | null | undefined,
+  previousEntry: { id: string } | null | undefined,
 ): void {
-  queryClient.setQueryData<T[]>(queryKey, (current) => {
+  queryClient.setQueryData<{ id: string }[]>(queryKey, (current) => {
     if (!previousEntry) return current?.filter((entry) => entry.id !== itemId);
     return current?.some((entry) => entry.id === itemId)
       ? current.map((entry) => (entry.id === itemId ? previousEntry : entry))
@@ -98,7 +98,7 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
   variables,
 }: RunOptimisticQueryMutationOptions<TData, TVariables>): Promise<TData> {
   void queryClient.cancelQueries({ queryKey, exact: true });
-  queryClient.setQueryData<TData>(queryKey, optimisticData);
+  if (optimisticData !== undefined) queryClient.setQueryData<TData>(queryKey, optimisticData);
 
   const queueId = JSON.stringify(queryKey);
   const generation = bumpWriteGeneration(queryKey);

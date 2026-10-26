@@ -64,19 +64,24 @@ pub(super) fn merge_playback_language_preferences(
     // was hand-edited or corrupt — re-sanitize on merge so a raw token can never
     // surface as an effective preference.
     PlaybackLanguagePreferences {
-        preferred_audio_language: sanitize_language_pref(preferred_audio_language, false).or_else(
-            || {
-                scoped.and_then(|snapshot| {
-                    sanitize_language_pref(snapshot.preferred_audio_language.clone(), false)
-                })
-            },
-        ),
-        preferred_subtitle_language: sanitize_language_pref(preferred_subtitle_language, true)
-            .or_else(|| {
-                scoped.and_then(|snapshot| {
-                    sanitize_language_pref(snapshot.preferred_subtitle_language.clone(), true)
-                })
-            }),
+        preferred_audio_language: sanitize_language_pref(
+            preferred_audio_language.as_deref(),
+            false,
+        )
+        .or_else(|| {
+            scoped.and_then(|snapshot| {
+                sanitize_language_pref(snapshot.preferred_audio_language.as_deref(), false)
+            })
+        }),
+        preferred_subtitle_language: sanitize_language_pref(
+            preferred_subtitle_language.as_deref(),
+            true,
+        )
+        .or_else(|| {
+            scoped.and_then(|snapshot| {
+                sanitize_language_pref(snapshot.preferred_subtitle_language.as_deref(), true)
+            })
+        }),
     }
 }
 
@@ -125,8 +130,10 @@ impl PlaybackStateService {
         let store = self.open_state_store(app)?;
         // `off` is only a subtitle value; the audio sanitize must match the
         // global-preferences path or a stray "off" would persist as a pref.
-        let preferred_audio_language = sanitize_language_pref(preferred_audio_language, false);
-        let preferred_subtitle_language = sanitize_language_pref(preferred_subtitle_language, true);
+        let preferred_audio_language =
+            sanitize_language_pref(preferred_audio_language.as_deref(), false);
+        let preferred_subtitle_language =
+            sanitize_language_pref(preferred_subtitle_language.as_deref(), true);
 
         let _state_file_guard = self.lock_state_file_write();
         // Same resurrection hazard as `record_stream_outcome`: a history clear
@@ -149,36 +156,30 @@ impl PlaybackStateService {
             }
             store.delete(playback_language_preferences_item_key(&scope_key));
             preferences_index.retain(|entry| entry != &scope_key);
+        } else {
+            insert_sorted_unique(&mut preferences_index, &scope_key);
+
+            // Item written before pruning: a new key ranks `updated_at = 0`, so pruning
+            // first would evict the pick being recorded and orphan its item.
             store.set(
-                PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
-                json!(preferences_index),
+                playback_language_preferences_item_key(&scope_key),
+                json!(PlaybackLanguagePreferencesSnapshot {
+                    preferred_audio_language,
+                    preferred_subtitle_language,
+                    updated_at: timestamp_ms,
+                }),
             );
-            // Debounced like the sibling outcome writer — a track-cycling burst must not pay a whole-file save per selection.
-            self.schedule_state_file_save(app);
-            return Ok(());
+
+            // `prune_index_to_cap` early-returns under the cap; the item write
+            // above must still land first so the new pick can't evict itself.
+            prune_language_preferences_index(&store, &mut preferences_index);
         }
-
-        insert_sorted_unique(&mut preferences_index, &scope_key);
-
-        // Item written before pruning: a new key ranks `updated_at = 0`, so pruning
-        // first would evict the pick being recorded and orphan its item.
-        store.set(
-            playback_language_preferences_item_key(&scope_key),
-            json!(PlaybackLanguagePreferencesSnapshot {
-                preferred_audio_language,
-                preferred_subtitle_language,
-                updated_at: timestamp_ms,
-            }),
-        );
-
-        // `prune_index_to_cap` early-returns under the cap; the item write
-        // above must still land first so the new pick can't evict itself.
-        prune_language_preferences_index(&store, &mut preferences_index);
 
         store.set(
             PLAYBACK_LANGUAGE_PREFERENCES_INDEX_KEY,
             json!(preferences_index),
         );
+        // Debounced like the sibling outcome writer — a track-cycling burst must not pay a whole-file save per selection.
         self.schedule_state_file_save(app);
 
         Ok(())
@@ -232,9 +233,9 @@ impl PlaybackStateService {
                 continue;
             };
             let preferred_audio_language =
-                sanitize_language_pref(snapshot.preferred_audio_language, false);
+                sanitize_language_pref(snapshot.preferred_audio_language.as_deref(), false);
             let preferred_subtitle_language =
-                sanitize_language_pref(snapshot.preferred_subtitle_language, true);
+                sanitize_language_pref(snapshot.preferred_subtitle_language.as_deref(), true);
             if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
                 continue;
             }

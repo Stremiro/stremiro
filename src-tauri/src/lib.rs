@@ -13,7 +13,8 @@ use tauri::Manager;
 
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+        .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
+            commands::app_shell_commands::accept_app_link(app, argv);
             commands::app_shell_commands::reveal_main_window(app);
         }))
         .on_page_load(|webview, payload| {
@@ -59,6 +60,10 @@ pub fn run() {
             ));
 
             commands::validate_startup_stores(&handle);
+            commands::app_shell_commands::accept_app_link(
+                &handle,
+                std::env::args_os().filter_map(|arg| arg.into_string().ok()),
+            );
             if let Err(error) = commands::app_shell_commands::setup(&handle) {
                 operational_log::log_warn(
                     "startup",
@@ -94,6 +99,8 @@ pub fn run() {
             commands::app_shell_commands::hide_main_window_to_tray,
             commands::app_shell_commands::close_main_window_to_tray,
             commands::app_shell_commands::mark_frontend_quit_ready,
+            commands::app_shell_commands::take_pending_app_link,
+            commands::app_links::resolve_app_link,
             commands::app_update_commands::get_current_app_version,
             commands::app_update_commands::get_app_release_notes,
             commands::app_update_commands::check_for_app_update,
@@ -132,7 +139,7 @@ pub fn run() {
             commands::watch_history_commands::bulk_remove_from_watch_history,
             commands::watch_history_commands::set_continue_watching_dismissed,
             commands::config_commands::get_addon_configs,
-            commands::config_commands::get_addon_url,
+            commands::config_commands::get_addon_share_link,
             commands::config_commands::inspect_addon_url,
             commands::config_commands::open_addon_configure_page,
             commands::config_commands::update_addon_configs,
@@ -201,7 +208,24 @@ pub fn run() {
             commands::backup_commands::import_app_data_from_file,
         ])
         .build(tauri::generate_context!())
-        .expect("error while building tauri application")
+        .unwrap_or_else(|error| {
+            let message = format!("Failed to start Stremiro:\n{error}");
+            eprintln!("{message}");
+            #[cfg(windows)]
+            // SAFETY: HSTRING and w! provide valid NUL-terminated UTF-16 strings that stay
+            // alive through the synchronous MessageBoxW call; no owner window is supplied.
+            unsafe {
+                use windows::core::{w, HSTRING};
+                use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+                let _ = MessageBoxW(
+                    None,
+                    &HSTRING::from(message),
+                    w!("Stremiro"),
+                    MB_OK | MB_ICONERROR,
+                );
+            }
+            std::process::exit(1);
+        })
         .run(|app, event| {
             if matches!(
                 event,

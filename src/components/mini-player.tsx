@@ -1,4 +1,4 @@
-import { Loader2, Maximize2, Move, Pause, Play, TriangleAlert, VolumeX, X } from 'lucide-react';
+import { Loader2, Maximize2, Pause, Play, TriangleAlert, VolumeX, X } from 'lucide-react';
 import {
   useCallback,
   memo,
@@ -139,21 +139,6 @@ function MiniExpandButton({ keymap, onClick }: { keymap: PlayerKeymap; onClick: 
       className={MINI_ICON_BUTTON_CLASS}
     >
       <Maximize2 aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
-    </button>
-  );
-}
-
-// Dragging is pointer-only — this button is the keyboard path; each press glides to the next corner.
-function MiniSnapButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type='button'
-      aria-label='Move mini player to another corner'
-      title='Move to another corner'
-      onClick={onClick}
-      className={MINI_ICON_BUTTON_CLASS}
-    >
-      <Move aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
     </button>
   );
 }
@@ -476,7 +461,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     if (reportFrameRef.current !== null) return;
     reportFrameRef.current = window.requestAnimationFrame(() => {
       reportFrameRef.current = null;
-      reportVideoRect();
+      void reportVideoRect();
     });
   }, [reportVideoRect]);
 
@@ -577,7 +562,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       const start = positionRef.current;
       if (prefersReducedMotion()) {
         const landed = applyPosition(target);
-        reportVideoRect();
+        void reportVideoRect();
         endMotion();
         onPositionChange(landed);
         return;
@@ -615,7 +600,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   useEffect(() => {
     if (isDocking) return;
     onPositionChange(applyPosition(positionRef.current));
-    reportVideoRect();
+    void reportVideoRect();
   }, [applyPosition, reportVideoRect, isDocking, onPositionChange]);
 
   // Dock entrance: a WAAPI flight scales the frame from the expanded rect — no per-frame rect reports or margin
@@ -703,7 +688,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       cancelFrame(reportFrameRef);
       cancelSnap();
       clearTimer(flashTimerRef);
-      rectOpsRef.current.onVideoRectChange(null);
+      void rectOpsRef.current.onVideoRectChange(null);
     };
   }, [cancelSnap]);
 
@@ -731,9 +716,9 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   // Nearest snap anchor within the magnet radius — drives the release glide and the drag ghost outline.
   const findSnapAnchorIndex = useCallback(
-    (position: MiniPlayerPosition, radius = SNAP_RADIUS_PX): number | null => {
+    (position: MiniPlayerPosition): number | null => {
       let bestIndex: number | null = null;
-      let bestDistance = radius;
+      let bestDistance = SNAP_RADIUS_PX;
       anchors.forEach((anchor, index) => {
         const distance = Math.hypot(anchor.x - position.x, anchor.y - position.y);
         if (distance < bestDistance) {
@@ -745,15 +730,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     },
     [anchors],
   );
-
-  // Keyboard path to moving: hop to the next corner with the same eased glide and cover a drag-snap produces.
-  const snapToNextAnchor = () => {
-    // The cycle advances even from a free-floating position outside the drag magnet's radius.
-    const nearest = findSnapAnchorIndex(positionRef.current, Infinity);
-    if (nearest === null) return;
-    setIsMoving(true);
-    animateTo(anchors[(nearest + 1) % anchors.length] as MiniPlayerPosition);
-  };
 
   const handlePointerMove = (event: React.PointerEvent<HTMLDivElement>) => {
     const drag = dragStateRef.current;
@@ -787,7 +763,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     (event: React.PointerEvent<HTMLDivElement>) => {
       const drag = releaseDrag(event);
       if (!drag) return;
-      reportVideoRect();
+      void reportVideoRect();
 
       const position = positionRef.current;
       if (drag.moved) {
@@ -836,7 +812,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     if (!drag) return;
     if (drag.moved) {
       // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
-      reportVideoRect();
+      void reportVideoRect();
       endMotion();
       onPositionChange(positionRef.current);
     } else {
@@ -914,9 +890,7 @@ export const MiniPlayer = memo(function MiniPlayer({
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
-      onPointerEnter={() =>
-        setHovered(document.hasFocus() && document.visibilityState !== 'hidden')
-      }
+      onPointerEnter={() => setHovered(document.visibilityState !== 'hidden')}
       onPointerLeave={() => setHovered(false)}
       onPointerDownCapture={() => setHasFocus(false)}
       onFocusCapture={(event) =>
@@ -1065,7 +1039,6 @@ export const MiniPlayer = memo(function MiniPlayer({
                 )}
               >
                 <MiniExpandButton keymap={keymap} onClick={onExpand} />
-                <MiniSnapButton onClick={snapToNextAnchor} />
                 <p
                   className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'
                   title={title}
@@ -1212,7 +1185,6 @@ export const MiniPlayer = memo(function MiniPlayer({
               <div className='absolute inset-x-0 top-0 z-10 flex items-center justify-between p-1.5'>
                 <div className='flex items-center gap-1'>
                   <MiniExpandButton keymap={keymap} onClick={onExpand} />
-                  <MiniSnapButton onClick={snapToNextAnchor} />
                 </div>
                 <MiniCloseButton onClick={onClose} />
               </div>

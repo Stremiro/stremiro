@@ -315,13 +315,17 @@ fn same_source_watch_progress(left: &WatchProgress, right: &WatchProgress) -> bo
 }
 
 fn replace_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
-    target.last_stream_lookup_id = donor.last_stream_lookup_id.clone();
-    target.last_stream_key = donor.last_stream_key.clone();
-    target.source_name = donor.source_name.clone();
-    target.source_id = donor.source_id.clone();
-    target.stream_family = donor.stream_family.clone();
+    target
+        .last_stream_lookup_id
+        .clone_from(&donor.last_stream_lookup_id);
+    target.last_stream_key.clone_from(&donor.last_stream_key);
+    target.source_name.clone_from(&donor.source_name);
+    target.source_id.clone_from(&donor.source_id);
+    target.stream_family.clone_from(&donor.stream_family);
     // Donor URLs are never copied — merge results stay free of credential-bearing URLs.
-    target.last_stream_format = donor.last_stream_format.clone();
+    target
+        .last_stream_format
+        .clone_from(&donor.last_stream_format);
 }
 
 fn merge_missing_source_metadata_from_donor(target: &mut WatchProgress, donor: &WatchProgress) {
@@ -564,29 +568,14 @@ fn watch_progress_quality_score(
     candidate: &WatchProgress,
     source_health_priorities: Option<&HashMap<String, u8>>,
 ) -> u32 {
-    let mut score = watch_progress_episode_affinity(reference, candidate);
-
-    if has_episode_context_watch_progress(candidate) {
-        score += 20;
-    }
-    if has_usable_resume_lookup_id(candidate) {
-        score += 20;
-    }
-    if has_meaningful_resume_position(candidate) {
-        score += 16;
-    }
-    if candidate.duration > 0.0 {
-        score += 12;
-    }
-    if has_stream_key_watch_progress(candidate) {
-        score += 6;
-    }
-    if has_source_identity_watch_progress(candidate) {
-        score += 4;
-    }
-    if has_stream_family_watch_progress(candidate) {
-        score += 4;
-    }
+    let mut score = watch_progress_episode_affinity(reference, candidate)
+        + 20 * u32::from(has_episode_context_watch_progress(candidate))
+        + 20 * u32::from(has_usable_resume_lookup_id(candidate))
+        + 16 * u32::from(has_meaningful_resume_position(candidate))
+        + 12 * u32::from(candidate.duration > 0.0)
+        + 6 * u32::from(has_stream_key_watch_progress(candidate))
+        + 4 * u32::from(has_source_identity_watch_progress(candidate))
+        + 4 * u32::from(has_stream_family_watch_progress(candidate));
 
     match watch_progress_source_priority(candidate, source_health_priorities) {
         0 => score = score.saturating_sub(24),
@@ -711,7 +700,7 @@ fn choose_latest_entry(
         hydrate_watch_progress_lookup_id(&mut chosen);
         return Some(chosen);
     }
-    let chosen = items[chosen_index].as_ref().clone();
+    let chosen = items.remove(chosen_index).into_owned();
     Some(merge_watch_progress_donors(
         chosen,
         items,

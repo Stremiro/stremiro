@@ -7,6 +7,7 @@ use super::{
     StreamRecommendationInputs, StreamRecommendationKey, StreamSignalCache,
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
 };
+use crate::commands::streaming_helpers::prepare_addon_streams;
 use crate::providers::addons::{
     detect_stream_flags, AddonStream, SelectionPriority, StreamEpisodeMatchKind,
     StreamMatchBadgeKind, StreamMatchSummary, StreamMatchTier, StreamPackCoverage,
@@ -182,9 +183,10 @@ fn build_stream(
     size_bytes: u64,
 ) -> AddonStream {
     AddonStream {
+        stream_key: format!("s:{source_name}:{url:?}:{size_bytes}"),
         name: Some("1080p Release".to_string()),
         title: Some("2.0 GB".to_string()),
-        info_hash: if url.is_none() {
+        content_hash: if url.is_none() {
             Some("abc123".to_string())
         } else {
             None
@@ -751,6 +753,7 @@ fn recommendation_reasons_preserve_order_cap_and_fallback() {
 /// Oversize demotion must actually rank an over-limit stream below an
 /// otherwise identical smaller one in the same resolution tier.
 fn sorts_at_limit_size_before_oversize_same_tier() {
+    use StreamResolution::{P1080, P2160};
     const GIB: u64 = 1024 * 1024 * 1024;
     let fixture = RecommendationFixture {
         addon_priorities: HashMap::new(),
@@ -760,61 +763,45 @@ fn sorts_at_limit_size_before_oversize_same_tier() {
     };
     let inputs = fixture.inputs();
 
-    // 1080p tier (15 GiB limit): identical metadata except size.
-    let mut small = build_stream(
-        "alpha",
-        true,
-        Some("https://alpha.example/small.m3u8"),
-        2 * GIB,
-    );
-    small.presentation.resolution = StreamResolution::P1080;
-    let mut large = build_stream(
-        "alpha",
-        true,
-        Some("https://alpha.example/large.m3u8"),
-        16 * GIB,
-    );
-    large.presentation.resolution = StreamResolution::P1080;
-
-    let mut streams = vec![large, small];
-    sort_streams_by_recommendation(&mut streams, inputs, &mut StreamSignalCache::default());
-    assert_eq!(
-        streams
-            .iter()
-            .map(|stream| stream.size_bytes)
-            .collect::<Vec<_>>(),
-        vec![Some(2 * GIB), Some(16 * GIB)]
-    );
-
-    // 4K tier (20 GiB limit, strict `>`): the at-limit stream must rank
-    // ahead of the over-limit one even though it is smaller — without the
-    // demotion the larger `size_bytes` tiebreak would invert them.
-    let mut at_limit = build_stream(
-        "alpha",
-        true,
-        Some("https://alpha.example/at-limit.m3u8"),
-        20 * GIB,
-    );
-    at_limit.name = Some("2160p Release".to_string());
-    at_limit.presentation.resolution = StreamResolution::P2160;
-    let mut over = build_stream(
-        "alpha",
-        true,
-        Some("https://alpha.example/over.m3u8"),
-        21 * GIB,
-    );
-    over.name = Some("2160p Release".to_string());
-    over.presentation.resolution = StreamResolution::P2160;
-
-    let mut streams = vec![over, at_limit];
-    sort_streams_by_recommendation(&mut streams, inputs, &mut StreamSignalCache::default());
-    assert_eq!(
-        streams
-            .iter()
-            .map(|stream| stream.size_bytes)
-            .collect::<Vec<_>>(),
-        vec![Some(20 * GIB), Some(21 * GIB)]
-    );
+    for (label, resolution, name, sizes, urls) in [
+        (
+            "1080p: 15 GiB limit",
+            P1080,
+            "1080p Release",
+            [2, 16],
+            [
+                "https://alpha.example/small.m3u8",
+                "https://alpha.example/large.m3u8",
+            ],
+        ),
+        (
+            "2160p: strict > 20 GiB boundary",
+            P2160,
+            "2160p Release",
+            [20, 21],
+            [
+                "https://alpha.example/at-limit.m3u8",
+                "https://alpha.example/over.m3u8",
+            ],
+        ),
+    ] {
+        let mut streams = Vec::from([0, 1].map(|index| {
+            let mut stream = build_stream("alpha", true, Some(urls[index]), sizes[index] * GIB);
+            stream.name = Some(name.to_string());
+            stream.presentation.resolution = resolution;
+            stream
+        }));
+        streams.reverse();
+        sort_streams_by_recommendation(&mut streams, inputs, &mut StreamSignalCache::default());
+        assert_eq!(
+            streams
+                .iter()
+                .map(|stream| stream.size_bytes)
+                .collect::<Vec<_>>(),
+            sizes.map(|size| Some(size * GIB)),
+            "{label}"
+        );
+    }
 }
 
 recommendation_sort_tests! {
@@ -895,8 +882,6 @@ fn resort_memoizes_fixed_signals_but_rereads_family_priority() {
                 .family_priorities
                 .insert("beta|release:test".to_string(), 4);
         } else if pass == 2 {
-            // A recompute would lose beta's family edge and size tiebreak.
-            streams[0].stream_family = None;
             streams[0].size_bytes = Some(1);
         }
         sort_streams_by_recommendation(&mut streams, fixture.inputs(), &mut signals);
@@ -1199,10 +1184,14 @@ recommendation_sort_tests! {
     };
     stream_priority_prefers_multi_audio_when_other_signals_match: |_fixture| {
         ["Dual Audio Release", "Multi Audio Release"].map(|title| {
-            let mut preferred = sort_stream("alpha");
-            preferred.title = Some(title.into());
-            let mut standard = sort_stream("beta");
-            standard.title = Some("Standard Release".into());
+            let [preferred, standard] = [("alpha", title), ("beta", "Standard Release")]
+                .map(|(source, title)| {
+                    let mut stream = sort_stream(source);
+                    stream.title = Some(title.into());
+                    prepare_addon_streams(vec![stream], source, source)
+                        .pop()
+                        .unwrap()
+                });
             (preferred, standard)
         })
     };

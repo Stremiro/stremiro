@@ -1,22 +1,22 @@
 import type { QueryClient } from '@tanstack/react-query';
 import type { NavigateFunction } from 'react-router';
 import { toast } from 'sonner';
-import {
-  api,
-  type HistoryPlaybackPlan,
-  type HistoryPlaybackPlanReason,
-  type MediaItem,
-  type WatchProgress,
-} from '@/lib/api';
+import { api, type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchFullDetailsData } from '@/lib/details-prefetch';
-import { warmPlayerChunk } from '@/lib/player-session';
+import { warmPlayerChunk } from '@/lib/route-chunks';
 import {
   claimPlaybackLaunch,
   isCurrentPlaybackLaunch,
   PLAYER_RESTART_START_TIME,
 } from '@/lib/player-navigation';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
-import { clamp, isSeriesLikeMediaType, withTimeout } from '@/lib/utils';
+import {
+  clamp,
+  formatSeasonEpisode,
+  formatTime,
+  isSeriesLikeMediaType,
+  withTimeout,
+} from '@/lib/utils';
 
 export interface DetailsHistoryRouteState {
   // Optional: a self-referential `from` dead-ends the titlebar Back button.
@@ -56,6 +56,19 @@ export function playableResumePosition(
     livePosition !== undefined && Number.isFinite(livePosition) ? livePosition : routeStartTime;
   if (position === undefined || !Number.isFinite(position) || position < 0) return undefined;
   return position >= MIN_RESUME_POSITION_SECS ? position : PLAYER_RESTART_START_TIME;
+}
+
+/** "S2:E4 · From 23:14": where playback will land, for the loading card. */
+export function formatPlaybackLanding(
+  season: number | undefined,
+  episode: number | undefined,
+  startTime: number | undefined,
+): string | undefined {
+  const resumeAt =
+    startTime !== undefined && startTime >= MIN_RESUME_POSITION_SECS
+      ? `From ${formatTime(startTime)}`
+      : '';
+  return [formatSeasonEpisode(season, episode), resumeAt].filter(Boolean).join(' · ') || undefined;
 }
 
 const RESUME_LOOKUP_TIMEOUT_MS = 6_000;
@@ -108,13 +121,7 @@ export function watchProgressMediaItem(item: WatchProgress): MediaItem {
 }
 
 function isValidProgressTiming(position: number, duration: number): boolean {
-  return (
-    typeof position === 'number' &&
-    typeof duration === 'number' &&
-    Number.isFinite(position) &&
-    Number.isFinite(duration) &&
-    duration > 0
-  );
+  return Number.isFinite(position) && Number.isFinite(duration) && duration > 0;
 }
 
 // Shared progress percent; invalid inputs render as 0.
@@ -137,42 +144,9 @@ export function formatWatchRemaining(position: number, duration: number): string
 }
 interface HistoryPlaybackOptions {
   launchGeneration?: number;
-  onSelectEpisode?: ((reason: HistoryPlaybackPlanReason) => void | Promise<void>) | null;
+  onSelectEpisode?: (() => void | Promise<void>) | null;
   /** Ignore late completion after the launch owner unmounts. */
   isCancelled?: () => boolean;
-}
-
-// Player plans warm the resolve and navigate; details plans surface the notice,
-// then pick in-page or navigate.
-async function applyHistoryPlaybackPlan(
-  navigate: NavigateFunction,
-  plan: HistoryPlaybackPlan,
-  options?: HistoryPlaybackOptions,
-): Promise<void> {
-  if (options?.isCancelled?.()) {
-    return;
-  }
-  if (plan.kind === 'player') {
-    // Fan-out starts now, overlapped with navigation and mpv init.
-    if (plan.warmResolveRequest) {
-      void resolvePlayerStream(plan.warmResolveRequest).catch(() => undefined);
-    }
-    navigate(plan.target, { state: plan.state });
-    return;
-  }
-
-  const onSelectEpisode = options?.onSelectEpisode;
-  const notice = getHistoryPlaybackFallbackNotice(
-    onSelectEpisode ? 'select-episode' : 'open-details',
-  );
-  toast.info(notice.title, { description: notice.description });
-
-  if (onSelectEpisode) {
-    await onSelectEpisode(plan.reason ?? 'missing-episode-context');
-    return;
-  }
-
-  navigate(plan.target, { state: plan.state });
 }
 
 // Builds the Rust playback plan; details redirects surface a notice.
@@ -198,7 +172,30 @@ export async function openHistoryPlaybackPlan(
       prefetchFullDetailsData(queryClient, { mediaId: item.id, mediaType: item.type_ });
     }
     const plan = await api.buildHistoryPlaybackPlan(item, from);
-    await applyHistoryPlaybackPlan(navigate, plan, launchOptions);
+    if (launchOptions.isCancelled()) return;
+    // Player plans warm the resolve and navigate; details plans surface the notice,
+    // then pick in-page or navigate.
+    if (plan.kind === 'player') {
+      // Fan-out starts now, overlapped with navigation and mpv init.
+      if (plan.warmResolveRequest) {
+        void resolvePlayerStream(plan.warmResolveRequest).catch(() => undefined);
+      }
+      void navigate(plan.target, { state: plan.state });
+      return;
+    }
+
+    const onSelectEpisode = launchOptions.onSelectEpisode;
+    const notice = getHistoryPlaybackFallbackNotice(
+      onSelectEpisode ? 'select-episode' : 'open-details',
+    );
+    toast.info(notice.title, { description: notice.description });
+
+    if (onSelectEpisode) {
+      await onSelectEpisode();
+      return;
+    }
+
+    void navigate(plan.target, { state: plan.state });
   } catch (error) {
     if (launchOptions.isCancelled()) return;
     toast.error(errorTitle, {

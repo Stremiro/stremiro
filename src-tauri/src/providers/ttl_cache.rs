@@ -381,9 +381,6 @@ impl FetchContract<'_> {
     /// caches. `run` owns failure writes; sibling-provider tests reach this.
     pub(super) fn cache_failure(&self, key: &str, error: &str, generation: u64) {
         let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
-        if !still_fresh() {
-            return;
-        }
         self.failure_cache
             .put(key, error.to_string(), true, still_fresh);
     }

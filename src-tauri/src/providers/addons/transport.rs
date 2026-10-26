@@ -23,8 +23,8 @@ pub(crate) static STREAM_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         .expect("valid stream size regex")
 });
 
-/// `infoHash` persists inside `last_stream_key` (128-char cap) — unbounded would break the saved-stream round-trip.
-const INFO_HASH_MAX_CHARS: usize = 112;
+/// Content hashes persist inside `last_stream_key` (128-char cap) — unbounded would break the saved-stream round-trip.
+const CONTENT_HASH_MAX_CHARS: usize = 112;
 
 /// Deterministic segment from the addon config URL — different addons never share an entry.
 pub(super) fn config_cache_segment(config_url: &str) -> String {
@@ -95,11 +95,11 @@ pub(super) fn truncate_stream_item(stream: &mut AddonStream) {
     truncate_field(&mut stream.name, 2_048);
     truncate_field(&mut stream.title, 2_048);
     if stream
-        .info_hash
+        .content_hash
         .as_deref()
-        .is_some_and(|hash| hash.chars().nth(INFO_HASH_MAX_CHARS).is_some() || !non_blank(hash))
+        .is_some_and(|hash| hash.chars().nth(CONTENT_HASH_MAX_CHARS).is_some() || !non_blank(hash))
     {
-        stream.info_hash = None;
+        stream.content_hash = None;
     }
     // Strip non-fetchable URLs at ingress so they can't pollute selector rows/dedup keys.
     let url_blocked = stream.url.as_deref().is_some_and(|url| {
@@ -238,41 +238,27 @@ impl AddonTransport {
 
     pub(crate) fn new() -> Self {
         // Browser-like headers for CDN/anti-bot compatibility.
-        let mut headers = header::HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            header::HeaderValue::from_static("application/json, text/plain, */*"),
-        );
-        headers.insert(
-            header::ACCEPT_LANGUAGE,
-            header::HeaderValue::from_static("en-US,en;q=0.9"),
-        );
-        headers.insert(
-            header::ACCEPT_ENCODING,
-            header::HeaderValue::from_static("gzip, deflate, br"),
-        );
-        headers.insert(
-            header::CONNECTION,
-            header::HeaderValue::from_static("keep-alive"),
-        );
-        headers.insert(
-            header::CACHE_CONTROL,
-            header::HeaderValue::from_static("no-cache"),
-        );
-        // Legacy Stremio header kept for addon compatibility.
-        headers.insert(
-            header::HeaderName::from_static("stremio-addon-transport"),
-            header::HeaderValue::from_static("network/http"),
-        );
+        let headers = [
+            (header::ACCEPT, "application/json, text/plain, */*"),
+            (header::ACCEPT_LANGUAGE, "en-US,en;q=0.9"),
+            (header::ACCEPT_ENCODING, "gzip, deflate, br"),
+            (header::CONNECTION, "keep-alive"),
+            (header::CACHE_CONTROL, "no-cache"),
+        ]
+        .into_iter()
+        .map(|(name, value)| (name, header::HeaderValue::from_static(value)))
+        .collect::<header::HeaderMap>();
 
         Self {
             client: {
                 ensure_rustls_crypto_provider();
-                // Own identity (Stremio headers + own Chrome version), not `build_provider_http_client`.
+                // Stream-specific browser identity, separate from `build_provider_http_client`.
                 Client::builder()
                 .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36")
                 .default_headers(headers)
                 .redirect(fetch_policy::ssrf_redirect_policy())
+                // Auto-Referer would carry credential-bearing addon paths/queries to redirect targets.
+                .referer(false)
                 .connect_timeout(Duration::from_secs(12))
                 .timeout(Duration::from_secs(STREAM_REQUEST_TIMEOUT_SECS))
                 .pool_idle_timeout(Duration::from_secs(90))
@@ -559,9 +545,6 @@ impl AddonTransport {
 
         // The lightning marker is a cached-availability hint; the down arrow opts out.
         stream.cached = combined.contains('\u{26A1}') && !combined.contains('\u{2B07}');
-
-        // Warm the match-text memo while the fields are final.
-        stream.match_texts();
     }
 
     fn parse_size_to_bytes(value: &str, unit: &str) -> Option<u64> {

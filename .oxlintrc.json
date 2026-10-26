@@ -7,6 +7,15 @@
     "perf": "warn"
   },
   "rules": {
+    "typescript/no-misused-promises": "error",
+    // Validated IPC/cache boundaries deliberately narrow unknown values with assertions.
+    "typescript/no-unsafe-type-assertion": "off",
+    // Effects and event handlers legitimately return early without a cleanup or value.
+    "typescript/consistent-return": "off",
+    // Code-point spreads match Rust chars() limits and single-key detection, not graphemes.
+    "typescript/no-misused-spread": "off",
+    // Arbitrary errors and preview arguments intentionally retain fallback string coercion.
+    "typescript/no-base-to-string": "off",
     "react/exhaustive-deps": "error",
     // React Compiler lint variants — the compiler runs in the Vite build and
     // bails out on these deliberate patterns; the lint rules would only warn.

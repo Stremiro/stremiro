@@ -1,7 +1,12 @@
 import { useState } from 'react';
+import { preconnect, preload } from 'react-dom';
 
 import type { MediaDetails } from '@/lib/api';
-import { buildYouTubeEmbedUrl } from '@/lib/youtube-player';
+import {
+  buildYouTubeEmbedUrl,
+  YOUTUBE_EMBED_ORIGIN,
+  youTubeThumbnailUrl,
+} from '@/lib/youtube-player';
 
 // Trailer dialog state for the details hero. The URL is derived, not staged:
 // `DialogContent` only mounts while open, so autoplay can't run hidden.
@@ -19,6 +24,13 @@ export function useDetailsTrailer(item: MediaDetails | undefined) {
       })
     : null;
 
+  // Hover/focus intent opens the embed connection and fetches the poster frame before the click.
+  const warmTrailer = () => {
+    if (!selectedTrailerId) return;
+    preconnect(YOUTUBE_EMBED_ORIGIN);
+    preload(youTubeThumbnailUrl(selectedTrailerId), { as: 'image', fetchPriority: 'low' });
+  };
+
   const openTrailer = () => {
     if (trailerUrl) setTrailerOpen(true);
   };
@@ -30,6 +42,7 @@ export function useDetailsTrailer(item: MediaDetails | undefined) {
     selectedTrailerId,
     selectTrailer,
     openTrailer,
+    warmTrailer,
     onTrailerOpenChange: setTrailerOpen,
   };
 }

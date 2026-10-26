@@ -42,7 +42,7 @@ export const ADDON_CONFIGS_QUERY_KEY = ['addonConfigs'] as const;
 export const ADDON_CONFIGS_STALE_TIME_MS = 1000 * 60 * 5;
 /** Installed ids track registry membership for duplicate verdicts. */
 export function addonUrlInspectionQueryKey(url: string, installedIds: readonly string[]) {
-  return ['addonUrlInspection', url, installedIds] as const;
+  return ['addonUrlInspection', url, installedIds.toSorted()] as const;
 }
 // Derived from the addon registry's manifests; refreshed with discovery.
 export const BROWSE_GENRES_QUERY_KEY = ['browseGenres'] as const;
@@ -63,7 +63,7 @@ export function effectivePlaybackLanguagePreferencesQueryKey(mediaType?: string,
   return [...EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY, mediaType, mediaId] as const;
 }
 
-async function invalidateQuery(
+export async function invalidateQuery(
   queryClient: QueryClient,
   queryKey: readonly unknown[],
   cancelType: 'all' | 'inactive' = 'all',
@@ -108,30 +108,10 @@ export const DETAILS_STALE_TIME_MS = 1000 * 60 * 30;
 export const DETAILS_GC_TIME_MS = 1000 * 60 * 10;
 
 // Skip data changes rarely; one lookup per episode and stream duration per session. Rust keeps
-// the bounded 12 h cache, so unused query entries take the default in-memory retention.
+// the bounded 12 h cache (1 h for "no segments yet"), so unused query entries take the default
+// in-memory retention.
 export const SKIP_TIMES_STALE_TIME_MS = 1000 * 60 * 60 * 12;
-
-// SkipDB shifts segments to fit the reported duration, so the key buckets by it.
-export function skipTimesQueryKey(
-  mediaType: string | undefined,
-  id: string | undefined,
-  season: number | undefined,
-  episode: number | undefined,
-  imdbId: string | undefined,
-  streamLookupId: string | undefined,
-  durationSecs: number | undefined,
-) {
-  return [
-    'skip-times',
-    mediaType,
-    id,
-    season,
-    episode,
-    imdbId ?? '',
-    streamLookupId ?? '',
-    durationSecs ?? 0,
-  ] as const;
-}
+export const SKIP_TIMES_EMPTY_STALE_TIME_MS = 1000 * 60 * 60;
 
 // Shared by MediaRow's default and parents keying the same row (e.g. home hero).
 export const MEDIA_ROW_STALE_TIME_MS = 1000 * 60 * 10;
@@ -179,8 +159,9 @@ async function invalidateHistoryCollections(
   queryClient: QueryClient,
   itemId?: string,
   refetchTitleProgress = true,
+  refreshSimilar = true,
 ) {
-  void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
+  if (refreshSimilar) void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
     invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
     refetchTitleProgress
@@ -197,16 +178,10 @@ async function invalidateHistoryCollections(
   ]);
 }
 
-export async function invalidatePlaybackHistoryQueries(queryClient: QueryClient) {
-  refreshScheduleQueries(queryClient);
-  await invalidateHistoryCollections(queryClient);
-}
-
-// Title-scoped variant for single-title removes/restores and player flushes —
-// a prefix sweep would refetch every cached title entry.
-export async function invalidatePlaybackHistoryQueriesForTitle(
+// A title scope avoids refetching every cached title on single-title writes.
+export async function invalidatePlaybackHistoryQueries(
   queryClient: QueryClient,
-  itemId: string | undefined,
+  itemId?: string,
   { refetchTitleProgress = true }: { refetchTitleProgress?: boolean } = {},
 ) {
   refreshScheduleQueries(queryClient);
@@ -220,12 +195,15 @@ export async function invalidateListMetadataQueries(queryClient: QueryClient) {
   ]);
 }
 
-export async function invalidateListQueries(queryClient: QueryClient) {
+export async function invalidateListQueries(
+  queryClient: QueryClient,
+  { membershipOnly = false }: { membershipOnly?: boolean } = {},
+) {
   // Calendar tracks list members; lists_count lives inside the stats payload.
   void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
   await Promise.all([
     invalidateListMetadataQueries(queryClient),
-    invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
+    !membershipOnly && invalidateQuery(queryClient, DATA_STATS_QUERY_KEY),
   ]);
 }
 
@@ -279,7 +257,7 @@ export function getDiscoveryEpoch() {
   return discoveryEpoch;
 }
 
-export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
+export async function invalidateDiscoveryQueries(queryClient: QueryClient, refreshSeed = true) {
   discoveryEpoch += 1;
   // Drop abandoned fetches, but keep mounted selectors attached to a refreshed query.
   queryClient.removeQueries({ queryKey: STREAMS_QUERY_KEY, type: 'inactive' });
@@ -293,19 +271,25 @@ export async function invalidateDiscoveryQueries(queryClient: QueryClient) {
       CALENDAR_EVENTS_QUERY_KEY,
       TRENDING_QUERY_KEY,
       BROWSE_GENRES_QUERY_KEY,
-      RECENT_WATCH_SEED_QUERY_KEY,
+      ...(refreshSeed ? [RECENT_WATCH_SEED_QUERY_KEY] : []),
     ].map((queryKey) => invalidateQuery(queryClient, queryKey)),
   ]);
 }
 
 // Background manifest refreshes can change catalog routing; active streams stay attached.
-export async function invalidateAddonCapabilityQueries(queryClient: QueryClient) {
-  await Promise.all([
-    invalidateQuery(queryClient, ADDON_CONFIGS_QUERY_KEY),
-    invalidateQuery(queryClient, BROWSE_GENRES_QUERY_KEY),
-    invalidateQuery(queryClient, SEARCH_CATALOG_QUERY_KEY),
-    invalidateQuery(queryClient, TRENDING_QUERY_KEY),
-  ]);
+// Display-only changes (logo, version) leave loaded catalogs and their in-flight fetches alone.
+export async function invalidateAddonCapabilityQueries(
+  queryClient: QueryClient,
+  routingChanged: boolean,
+) {
+  const routingKeys = routingChanged
+    ? [BROWSE_GENRES_QUERY_KEY, SEARCH_CATALOG_QUERY_KEY, TRENDING_QUERY_KEY]
+    : [];
+  await Promise.all(
+    [ADDON_CONFIGS_QUERY_KEY, ...routingKeys].map((queryKey) =>
+      invalidateQuery(queryClient, queryKey),
+    ),
+  );
 }
 
 export async function invalidatePlaybackLanguageQueries(
@@ -325,15 +309,6 @@ export async function invalidatePlaybackLanguageQueries(
   ]);
 }
 
-// The restore flow already resets the profile/selector/language/addon snapshots itself — this covers the rest.
-async function invalidateSettingsQueries(queryClient: QueryClient) {
-  await Promise.all([
-    invalidateQuery(queryClient, APP_UI_PREFERENCES_QUERY_KEY),
-    invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
-    invalidateDiscoveryQueries(queryClient),
-  ]);
-}
-
 export async function invalidateStoredDataQueries(
   queryClient: QueryClient,
   restoreSettings = false,
@@ -342,12 +317,17 @@ export async function invalidateStoredDataQueries(
   // data-only imports keep the usual nonblocking schedule refresh.
   if (!restoreSettings) refreshScheduleQueries(queryClient);
   await Promise.all([
-    invalidateHistoryCollections(queryClient),
+    invalidateHistoryCollections(queryClient, undefined, true, !restoreSettings),
     invalidateQuery(queryClient, LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
-    restoreSettings && invalidateSettingsQueries(queryClient),
+    restoreSettings &&
+      Promise.all([
+        invalidateQuery(queryClient, APP_UI_PREFERENCES_QUERY_KEY),
+        invalidateQuery(queryClient, EFFECTIVE_PLAYBACK_LANGUAGE_PREFERENCES_QUERY_KEY),
+        invalidateDiscoveryQueries(queryClient, false),
+      ]),
   ]);
 }

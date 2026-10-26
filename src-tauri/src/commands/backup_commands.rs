@@ -35,6 +35,7 @@ use super::{
     PERSISTENCE_TIMEOUT_MESSAGE, PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE,
     WATCH_STATUS_STORE_FILE,
 };
+use crate::operational_log::{field, log_warn};
 use crate::providers::{usize_to_u64_saturating, MediaItem};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -173,13 +174,13 @@ impl std::io::Write for BackupWriter {
     }
 }
 
-fn serialize_backup(export: &impl Serialize) -> Result<String, BackupError> {
+fn serialize_backup(export: &impl Serialize) -> Result<Vec<u8>, BackupError> {
     let mut writer = BackupWriter::default();
     if let Err(error) = serde_json::to_writer_pretty(&mut writer, export) {
         validate_backup_size(writer.len)?;
         return Err(error.to_string().into());
     }
-    String::from_utf8(writer.bytes).map_err(|error| error.to_string().into())
+    Ok(writer.bytes)
 }
 
 /// Full data snapshot used for backup export.
@@ -428,11 +429,11 @@ fn import_settings(
             &store,
             &PlaybackLanguagePreferences {
                 preferred_audio_language: sanitize_language_pref(
-                    preferences.preferred_audio_language,
+                    preferences.preferred_audio_language.as_deref(),
                     false,
                 ),
                 preferred_subtitle_language: sanitize_language_pref(
-                    preferences.preferred_subtitle_language,
+                    preferences.preferred_subtitle_language.as_deref(),
                     true,
                 ),
             },
@@ -462,7 +463,7 @@ fn import_settings(
 async fn export_app_data(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
-) -> Result<String, BackupError> {
+) -> Result<Vec<u8>, BackupError> {
     let deadline = tokio::time::Instant::now() + BLOCKING_OP_TIMEOUT;
     let export = run_store_op_at(deadline, {
         let service = playback_state.inner().clone();
@@ -840,7 +841,7 @@ pub async fn export_app_data_to_file(
         "Backup export timed out.",
         move || {
             validate_backup_export_path(&target_path, &store_path)?;
-            super::write_atomic_file(&target_path, payload.as_bytes(), false)
+            super::write_atomic_file(&target_path, &payload, false)
         },
     )
     .await?;
@@ -889,11 +890,26 @@ pub async fn import_app_data_from_file(
 
 fn read_backup_file(source_path: &str) -> Result<String, BackupError> {
     use std::io::Read as _;
+    let path = std::path::Path::new(source_path);
     let limit = usize_to_u64_saturating(MAX_IMPORT_BYTES);
-    let file = std::fs::File::open(source_path).map_err(|e| e.to_string())?;
+    let file = std::fs::File::open(path).map_err(|error| {
+        log_warn(
+            "backup",
+            "open-file",
+            "failed",
+            &[field("path", path.display()), field("error", &error)],
+        );
+        error.to_string()
+    })?;
     let mut limited = file.take(limit.saturating_add(1));
     let mut bytes = Vec::new();
     std::io::Read::read_to_end(&mut limited, &mut bytes).map_err(|e| {
+        log_warn(
+            "backup",
+            "read-file",
+            "failed",
+            &[field("path", path.display()), field("error", &e)],
+        );
         let kind = if e.kind() == std::io::ErrorKind::InvalidData {
             BackupErrorKind::InvalidBackup
         } else {
@@ -924,7 +940,7 @@ mod tests {
         });
         assert_eq!(
             serialize_backup(&value).unwrap(),
-            serde_json::to_string_pretty(&value).unwrap()
+            serde_json::to_string_pretty(&value).unwrap().into_bytes()
         );
     }
 
@@ -933,7 +949,7 @@ mod tests {
         let mut text = "a".repeat(MAX_IMPORT_BYTES - 2);
         let payload = serialize_backup(&text).unwrap();
         assert_eq!(payload.len(), MAX_IMPORT_BYTES);
-        assert_eq!(payload, serde_json::to_string_pretty(&text).unwrap());
+        assert_eq!(payload, serde_json::to_vec_pretty(&text).unwrap());
 
         text.push('a');
         let error = serialize_backup(&text).unwrap_err();
@@ -1011,7 +1027,7 @@ mod tests {
             },
         };
         let mut payload: Value =
-            serde_json::from_str(&serialize_backup(&snapshot).unwrap()).unwrap();
+            serde_json::from_slice(&serialize_backup(&snapshot).unwrap()).unwrap();
         payload["continue_watching_dismissals"]
             .as_array_mut()
             .unwrap()
@@ -1026,7 +1042,8 @@ mod tests {
             .as_array_mut()
             .unwrap()
             .extend([Value::Null, json!(12), json!({})]);
-        let restored = parse_backup_payload(&serialize_backup(&payload).unwrap()).unwrap();
+        let payload = serialize_backup(&payload).unwrap();
+        let restored = parse_backup_payload(std::str::from_utf8(&payload).unwrap()).unwrap();
         assert_eq!(restored.version, 1);
         let markers: Vec<_> = restored
             .continue_watching_dismissals

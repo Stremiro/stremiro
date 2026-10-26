@@ -266,7 +266,7 @@ fn extra_skip_value(extras: &[CatalogExtra]) -> u32 {
         .unwrap_or(0)
 }
 
-/// Continuation follows the Stremio catalog contract, not the `hasMore`
+/// Continuation follows the addon catalog contract, not the `hasMore`
 /// hint: live Cinemeta pages (e.g. series `top` page 1) return full pages
 /// with `hasMore: false` while deeper `skip` pages still hold titles, and
 /// `hasMore: true` is set on later pages of the same catalog. The only
@@ -330,6 +330,7 @@ pub(crate) fn merge_catalog_pages(
 pub(crate) struct CatalogTarget {
     url: String,
     catalog_id: String,
+    catalog_genre: Option<String>,
 }
 
 pub(crate) fn select_catalog_targets(
@@ -341,23 +342,29 @@ pub(crate) fn select_catalog_targets(
     let targets: Vec<CatalogTarget> = snapshot
         .iter()
         .filter_map(|addon| {
-            let catalog_id = match addon.capabilities.as_ref() {
+            let catalog = match addon.capabilities.as_ref() {
                 Some(snapshot) => {
-                    &snapshot_supports_catalog(snapshot, type_, catalog_id, extras)
-                        .ok()?
-                        .id
+                    Some(snapshot_supports_catalog(snapshot, type_, catalog_id, extras).ok()?)
                 }
-                None => catalog_id,
+                None => None,
             };
-            Some((addon, catalog_id))
+            Some(CatalogTarget {
+                url: addon.url.clone(),
+                // Use the manifest's canonical id even for a case-insensitive match.
+                catalog_id: catalog
+                    .map_or(catalog_id, |catalog| catalog.id.as_str())
+                    .to_string(),
+                catalog_genre: catalog
+                    .filter(|catalog| catalog_declares_extra(catalog, "genre"))
+                    .and_then(|_| {
+                        extras
+                            .iter()
+                            .find(|extra| extra.name.eq_ignore_ascii_case("genre"))
+                    })
+                    .map(|extra| extra.value.clone()),
+            })
         })
         .take(MAX_CATALOG_SOURCES)
-        .map(|(addon, catalog_id)| CatalogTarget {
-            url: addon.url.clone(),
-            // Fetch with the manifest's canonical catalog id so a
-            // case-insensitive routing match never emits a miscased URL path.
-            catalog_id: catalog_id.to_string(),
-        })
         .collect();
 
     if targets.is_empty() {
@@ -383,6 +390,7 @@ struct CatalogWorkItem {
     media_type: String,
     catalog_id: String,
     extras: Vec<CatalogExtra>,
+    catalog_genre: Option<String>,
 }
 
 /// Arm once usable outcomes exist for the request. Fast errors or cached
@@ -464,7 +472,13 @@ async fn run_catalog_work_pool(
                     &item.extras,
                     normalize_media_item,
                 )
-                .await;
+                .await
+                .map(|mut page| {
+                    for media_item in &mut page.items {
+                        media_item.catalog_genre.clone_from(&item.catalog_genre);
+                    }
+                    page
+                });
             (item.group, item.order, result)
         }))
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
@@ -510,6 +524,7 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
                         media_type: type_.to_string(),
                         catalog_id: target.catalog_id,
                         extras: extras.clone(),
+                        catalog_genre: target.catalog_genre,
                     });
                 }
             }
@@ -601,6 +616,7 @@ fn select_search_catalog_work(
                         media_type: (*media_type).to_string(),
                         catalog_id: catalog_id.to_string(),
                         extras,
+                        catalog_genre: None,
                     });
                     group_sources.push(SearchCatalogSource {
                         cursor,
@@ -732,11 +748,7 @@ async fn fetch_ranked_meta(
     rank: usize,
 ) -> (usize, Result<Arc<MediaDetails>, String>) {
     let result = client
-        .fetch_meta(url, type_, id, |details| {
-            // Keep the addon's identity in the shared payload; request aliases are applied after it.
-            let addon_id = details.id.clone();
-            normalize_media_details(details, &addon_id)
-        })
+        .fetch_meta(url, type_, id, normalize_media_details)
         .await;
     (rank, result)
 }
@@ -875,8 +887,7 @@ async fn fetch_meta_details_from_addons(
     Err(errors
         .into_iter()
         .min_by_key(|(index, _)| *index)
-        .map(|(_, error)| error)
-        .unwrap_or_else(|| "Metadata not found.".to_string()))
+        .map_or_else(|| "Metadata not found.".to_string(), |(_, error)| error))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1010,11 +1021,9 @@ fn add_subtitle_if_unique(
         return;
     }
 
+    let label = item.label.as_deref().map(js_trim);
     subtitles.push(SourcedAddonSubtitle {
-        detail: item
-            .label
-            .as_deref()
-            .map(js_trim)
+        detail: label
             .map(|label| {
                 let detail = label
                     .rsplit_once('.')
@@ -1028,10 +1037,7 @@ fn add_subtitle_if_unique(
             })
             .filter(|detail| !detail.is_empty())
             .map(str::to_string),
-        mpv_title: item
-            .label
-            .as_deref()
-            .map(js_trim)
+        mpv_title: label
             .filter(|label| !label.is_empty())
             .unwrap_or(&item.id)
             .to_string(),

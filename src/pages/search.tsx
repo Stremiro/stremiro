@@ -1,25 +1,29 @@
-import { useQueryClient } from '@tanstack/react-query';
+import { keepPreviousData, useInfiniteQuery, useQueryClient } from '@tanstack/react-query';
 import {
   Check,
   ChevronDown,
+  Clock3,
+  Flame,
   History as HistoryIcon,
   Layers3,
   RotateCcw,
   Search as SearchIcon,
   SearchX,
   Shapes,
-  TrendingUp,
+  Sparkles,
+  Trash2,
   WifiOff,
   X,
 } from 'lucide-react';
 import {
+  type KeyboardEvent as ReactKeyboardEvent,
   type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useEffect,
   useRef,
   useState,
 } from 'react';
-import { Link, useNavigationType } from 'react-router';
+import { Link, NavigationType, useNavigationType } from 'react-router';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -40,23 +44,20 @@ import { ScrollToTop } from '@/components/scroll-to-top';
 import { useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useRecentSearches } from '@/hooks/use-app-ui-preferences';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { useLocalDay } from '@/hooks/use-local-day';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
 import { useSearchPageState } from '@/hooks/use-search-page-state';
-import { useSearchResults } from '@/hooks/use-search-results';
 import { SLIDING_ACCENT_PILL_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { getErrorMessage, isNoCapableAddonError, type MediaItem } from '@/lib/api';
+import { isAppLinkText, openAppLinkText } from '@/lib/app-links';
 import { handleRadioGroupKeyDown, whenRowMounted } from '@/lib/dom';
 import { navigateBack } from '@/lib/navigation';
-import { prefetchSearchCatalog } from '@/lib/search-catalog';
-import {
-  sameSearchGenre,
-  searchGenreOptions,
-  type SearchFeed,
-  type SearchMediaType,
-} from '@/lib/search-page-state';
+import { prefetchSearchCatalog, searchCatalogQueryOptions } from '@/lib/search-catalog';
+import { sameSearchGenre, type SearchFeed, type SearchMediaType } from '@/lib/search-page-state';
 import {
   cn,
+  createObjectIdentity,
   pluralize,
   queryNeedsRetry,
   scrollBehavior,
@@ -96,11 +97,18 @@ const SEARCH_TYPE_OPTIONS: ReadonlyArray<{ id: SearchMediaType; label: string }>
   { id: 'anime', label: 'Anime' },
 ];
 
-const SEARCH_FEED_OPTIONS: ReadonlyArray<{ id: SearchFeed; label: string }> = [
-  { id: 'popular', label: 'Trending' },
-  { id: 'featured', label: 'Featured' },
-  { id: 'new', label: 'New' },
+const SEARCH_FEED_OPTIONS: ReadonlyArray<{
+  id: SearchFeed;
+  label: string;
+  icon: typeof Flame;
+  tint: string;
+}> = [
+  { id: 'popular', label: 'Trending', icon: Flame, tint: 'text-orange-300' },
+  { id: 'featured', label: 'Featured', icon: Sparkles, tint: 'text-amber-200' },
+  { id: 'new', label: 'New', icon: Clock3, tint: 'text-sky-300' },
 ];
+
+const getResultPageId = createObjectIdentity();
 
 const SEARCH_SKELETON_COUNT = 21;
 const SEARCH_SKELETON_KEYS = Array.from(
@@ -117,9 +125,11 @@ const estimateSearchItemHeight = (itemWidth: number) =>
 const SEARCH_PILL_BUTTON_CLASS =
   'h-9 rounded-md border border-white/[0.08] bg-white/[0.04] px-3.5 text-[13px] font-medium text-zinc-300 transition-colors duration-150 motion-reduce:transition-none hover:enabled:not-aria-disabled:bg-white/[0.08] hover:enabled:not-aria-disabled:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-default aria-disabled:opacity-50';
 const SEARCH_FACET_BUTTON_CLASS =
-  'nav-switch-item group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'nav-switch-item group flex h-[38px] items-center gap-1.5 rounded-lg border px-3 text-[13px] font-medium shadow-[inset_0_1px_0_rgb(255_255_255/0.04)] not-aria-disabled:hover:border-white/[0.18] not-aria-disabled:active:bg-white/[0.1] data-[state=open]:border-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+const FACET_ICON_CLASS =
+  'h-3.5 w-3.5 shrink-0 opacity-75 transition-opacity duration-150 group-not-aria-disabled:group-hover:opacity-100 group-data-[state=open]:opacity-100 motion-reduce:transition-none';
 const RECENT_SEARCH_ROW_BUTTON_CLASS =
-  'flex h-9 items-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25';
+  'flex h-9 items-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.06] hover:text-zinc-100 focus-visible:bg-white/[0.08] focus-visible:text-zinc-100 focus-visible:outline-none';
 // Mouse picks keep focus in the field so the panel stays put and typing continues.
 const keepSearchInputFocus = (event: ReactMouseEvent) => event.preventDefault();
 const SEARCH_FACET_IDLE_CLASS =
@@ -165,7 +175,7 @@ function SearchPanel({
 interface SearchResultsProps {
   activeGenre?: string;
   errorObj: unknown;
-  fetchNextPage: () => void;
+  fetchNextPage: () => Promise<unknown>;
   hasActiveFilters: boolean;
   hasNextPage: boolean;
   isError: boolean;
@@ -178,8 +188,9 @@ interface SearchResultsProps {
   isRetryingInitialLoad: boolean;
   onResetFilters: () => void;
   onClearSearch: () => void;
-  refetch: () => void;
+  refetch: () => Promise<unknown>;
   results: MediaItem[];
+  resultSetKey: number;
   partial: boolean;
   showSkeleton: boolean;
   trimmedDebouncedQuery: string;
@@ -203,6 +214,7 @@ function SearchResults({
   onClearSearch,
   refetch,
   results,
+  resultSetKey,
   partial,
   showSkeleton,
   trimmedDebouncedQuery,
@@ -387,15 +399,20 @@ function SearchResults({
           You&apos;re offline. Showing cached titles until you reconnect.
         </div>
       )}
-      <WindowVirtualizedGrid
-        items={results}
-        getItemKey={mediaCardRailKey}
-        renderItem={renderSearchResult}
-        estimateItemHeight={estimateSearchItemHeight}
-        getColumnCount={getSearchGridColumnCount}
-        gap={SEARCH_GRID_GAP_PX}
-        rowGap={SEARCH_GRID_ROW_GAP_PX}
-      />
+      <div
+        key={resultSetKey}
+        className='animate-in fade-in-0 slide-in-from-bottom-1 duration-300 ease-out motion-reduce:animate-none'
+      >
+        <WindowVirtualizedGrid
+          items={results}
+          getItemKey={mediaCardRailKey}
+          renderItem={renderSearchResult}
+          estimateItemHeight={estimateSearchItemHeight}
+          getColumnCount={getSearchGridColumnCount}
+          gap={SEARCH_GRID_GAP_PX}
+          rowGap={SEARCH_GRID_ROW_GAP_PX}
+        />
+      </div>
       <div ref={loadMoreRef} aria-hidden='true' className='h-1' />
       {isOnline && (hasNextPage || isError || isFetchingNextPage || pagingFocused) && (
         <div className='mt-5 flex min-h-16 flex-col items-center justify-center gap-2 border-t border-white/[0.06] pt-5'>
@@ -467,7 +484,7 @@ function FacetMenuItem({
         onSelect();
         resetScroll();
       }}
-      className='flex min-h-9 items-center justify-between gap-2 px-2.5 text-sm'
+      className='flex min-h-9 items-center justify-between gap-2 px-2.5 text-sm text-zinc-300 aria-checked:font-medium aria-checked:text-white'
     >
       {children}
       {checked ? <Check className='h-3.5 w-3.5 shrink-0 text-(--accent-nav)' /> : null}
@@ -506,8 +523,12 @@ export function Search() {
   const genreTriggerRef = useRef<HTMLButtonElement>(null);
   const typeButtons = useRef(new Map<SearchMediaType, HTMLButtonElement>());
   const typeIndicator = useSlidingIndicator(activeType, typeGroupRef, typeButtons);
+  // The `new` feed is the provider `year` catalog. `useLocalDay` re-keys after
+  // a midnight rollover; a one-time `getFullYear()` would pin the mount day.
+  const localDay = useLocalDay();
   const {
-    errorObj,
+    data,
+    error: errorObj,
     fetchNextPage,
     hasNextPage,
     isError,
@@ -518,15 +539,25 @@ export function Search() {
     isLoading,
     isPlaceholderData,
     refetch,
-    results,
-    partial,
-  } = useSearchResults({
-    query: trimmedDebouncedQuery,
-    activeType,
-    activeFeed,
-    activeGenre,
-    isOnline,
+  } = useInfiniteQuery({
+    ...searchCatalogQueryOptions(
+      {
+        query: trimmedDebouncedQuery,
+        type: activeType,
+        feed: activeFeed,
+        genre: activeGenre,
+      },
+      localDay.getFullYear(),
+    ),
+    // Keep previous facet results visible during switches; offline switches
+    // must not show them as cached results.
+    placeholderData: isOnline ? keepPreviousData : undefined,
+    enabled: isOnline,
   });
+  const results = data?.pages.flatMap((page) => page.items) ?? [];
+  // Paging keeps the first page's identity, so only a new result set replays the entrance.
+  const firstPage = data?.pages[0];
+  const partial = data?.pages.some((page) => page.partial) ?? false;
 
   // Manifest-driven union of `genre` extra options the enabled addons declare
   // for the active catalog type (Cinemeta first), computed in Rust.
@@ -534,7 +565,7 @@ export function Search() {
   const { data: browseGenres } = browseGenresQuery;
   const hasGenreError = queryNeedsRetry(browseGenresQuery);
   // `all` unions the movie and series genre sets.
-  const genreOptions = searchGenreOptions(browseGenres, activeType);
+  const genreOptions = browseGenres?.[activeType] ?? [];
   // A deep-linked genre the manifests don't enumerate still gets an entry.
   const menuGenres =
     activeGenre && !includesGenre(genreOptions, activeGenre)
@@ -546,7 +577,7 @@ export function Search() {
     !activeGenre ||
     !browseGenres ||
     nextType === activeType ||
-    includesGenre(searchGenreOptions(browseGenres, nextType), activeGenre);
+    includesGenre(browseGenres[nextType], activeGenre);
 
   const selectType = (nextType: SearchMediaType) => {
     handleTypeChange(nextType, !isGenreCompatible(nextType));
@@ -568,7 +599,7 @@ export function Search() {
 
   const searchInputRef = useRef<HTMLInputElement>(null);
   const [autoFocusSearch] = useState(
-    () => navigationType !== 'POP' || (!trimmedQuery && results.length === 0),
+    () => navigationType !== NavigationType.Pop || (!trimmedQuery && results.length === 0),
   );
   useEffect(() => {
     const input = searchInputRef.current;
@@ -583,7 +614,28 @@ export function Search() {
   const { recentSearches, recordRecentSearch, removeRecentSearch, clearRecentSearches } =
     useRecentSearches();
   const [searchFieldFocused, setSearchFieldFocused] = useState(false);
-  const showRecentSearches = searchFieldFocused && !query && recentSearches.length > 0;
+  // Landing autofocus shouldn't drop the panel over the grid; the first click or key opens it.
+  const [recentDismissed, setRecentDismissed] = useState(autoFocusSearch);
+  const showRecentSearches =
+    searchFieldFocused && !recentDismissed && !query && recentSearches.length > 0;
+  const recentListRef = useRef<HTMLUListElement>(null);
+  const dismissRecentOnEscape = (event: ReactKeyboardEvent) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    setRecentDismissed(true);
+    searchInputRef.current?.focus({ preventScroll: true });
+  };
+  const focusRecentEntry = (index: number) => {
+    const entries =
+      recentListRef.current?.querySelectorAll<HTMLButtonElement>('[data-recent-entry]');
+    if (!entries?.length) return;
+    if (index < 0) searchInputRef.current?.focus({ preventScroll: true });
+    else {
+      const entry = entries[Math.min(index, entries.length - 1)];
+      entry?.focus({ preventScroll: true });
+      entry?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    }
+  };
   // Only committed intent is remembered: Enter, opening a result, or a recent pick.
   const recordQuery = () => {
     if (trimmedQuery && !isComposing) recordRecentSearch(trimmedQuery);
@@ -617,8 +669,9 @@ export function Search() {
     return () => window.clearTimeout(timer);
   }, [isUpdating]);
   const showUpdating = isUpdating && updatingRevealed;
-  const activeFeedLabel =
-    SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed)?.label ?? 'Trending';
+  const activeFeedOption =
+    SEARCH_FEED_OPTIONS.find((option) => option.id === activeFeed) ?? SEARCH_FEED_OPTIONS[0];
+  const activeFeedLabel = activeFeedOption.label;
   const resultCountLabel = `${results.length}${hasNextPage ? '+' : ''} ${isBrowsing ? 'title' : 'result'}${results.length === 1 && !hasNextPage ? '' : 's'}`;
 
   const resultsRef = useRef<HTMLDivElement>(null);
@@ -663,21 +716,27 @@ export function Search() {
               <h1 className='min-w-0 text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
                 {isBrowsing ? 'Discover' : 'Search'}
               </h1>
-              <TooltipProvider delayDuration={200}>
+              <TooltipProvider delayDuration={120}>
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
                       type='button'
                       aria-label='About unified catalog results'
-                      className='inline-flex shrink-0 items-center gap-1.5 rounded-md px-1 py-1 text-[13px] text-zinc-400 transition-colors hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 motion-reduce:transition-none'
+                      className='group inline-flex shrink-0 cursor-help items-center gap-1.5 rounded-md border border-transparent px-2 py-1 text-[13px] text-zinc-400 transition-colors duration-150 hover:border-white/[0.08] hover:bg-white/[0.05] hover:text-zinc-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/50 data-[state=delayed-open]:text-zinc-100 motion-reduce:transition-none'
                     >
-                      <Layers3 aria-hidden='true' className='h-3.5 w-3.5' />
+                      <Layers3
+                        aria-hidden='true'
+                        className='h-3.5 w-3.5 transition-transform duration-200 ease-out group-hover:-translate-y-px motion-reduce:transition-none'
+                      />
                       <span className='hidden sm:inline'>Unified results</span>
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent className='max-w-64 leading-relaxed'>
-                    Matching title IDs and media types appear once across catalog addons. Different
-                    IDs stay separate. Catalog listings do not indicate stream availability.
+                  <TooltipContent side='bottom' align='start' className='max-w-72 space-y-1'>
+                    <p className='font-medium text-white'>One card per title</p>
+                    <p className='text-zinc-300'>
+                      When several addons list the same title, it shows once. A listing doesn't
+                      guarantee a stream is available.
+                    </p>
                   </TooltipContent>
                 </Tooltip>
               </TooltipProvider>
@@ -731,6 +790,13 @@ export function Search() {
               className='h-12 w-full rounded-lg border-white/[0.1] bg-white/[0.04] pl-11 pr-20 text-base text-zinc-100 placeholder:text-zinc-400 hover:bg-white/[0.06] focus-visible:border-(--accent-nav) focus-visible:bg-white/[0.06] focus-visible:ring-2 focus-visible:ring-(--accent-nav)/15 md:text-base'
               value={query}
               onChange={(event) => setQuery(event.target.value)}
+              onPaste={(event) => {
+                const pasted = event.clipboardData.getData('text');
+                if (!isAppLinkText(pasted)) return;
+                event.preventDefault();
+                void openAppLinkText(pasted);
+              }}
+              onPointerDown={() => setRecentDismissed(false)}
               onCompositionStart={() => setIsComposing(true)}
               onCompositionEnd={(event) => {
                 setQuery(event.currentTarget.value);
@@ -746,9 +812,26 @@ export function Search() {
                   event.metaKey
                 )
                   return;
+                if (event.key !== 'Escape') setRecentDismissed(false);
+                if (
+                  (event.key === 'ArrowDown' || event.key === 'ArrowUp') &&
+                  !query &&
+                  recentSearches.length > 0
+                ) {
+                  event.preventDefault();
+                  const target = event.key === 'ArrowDown' ? 0 : recentSearches.length - 1;
+                  requestAnimationFrame(() => focusRecentEntry(target));
+                  return;
+                }
                 if (event.key === 'Enter' || event.key === 'ArrowDown') {
                   event.preventDefault();
                   if (event.repeat) return;
+                  if (event.key === 'Enter' && isAppLinkText(query)) {
+                    // Links never reach catalog search: addon links can carry API keys.
+                    setQuery('');
+                    void openAppLinkText(query);
+                    return;
+                  }
                   if (event.key === 'Enter') {
                     flushQuery();
                     recordQuery();
@@ -764,6 +847,8 @@ export function Search() {
                 if (event.repeat) return;
                 if (query) {
                   handleClearSearch();
+                } else if (showRecentSearches) {
+                  setRecentDismissed(true);
                 } else {
                   navigateBack();
                 }
@@ -773,7 +858,9 @@ export function Search() {
             <SearchIcon className='pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-zinc-500' />
             <div className='absolute right-3 top-1/2 flex -translate-y-1/2 items-center gap-1.5'>
               <span aria-hidden='true' className='flex h-4 w-4 items-center justify-center'>
-                {showUpdating && <span className='h-1.5 w-1.5 rounded-full bg-(--accent-nav)' />}
+                {showUpdating && (
+                  <span className='h-1.5 w-1.5 animate-pulse rounded-full bg-(--accent-nav) motion-reduce:animate-none' />
+                )}
               </span>
               {query ? (
                 <button
@@ -785,39 +872,48 @@ export function Search() {
                 >
                   <X className='h-3.5 w-3.5' />
                 </button>
+              ) : showRecentSearches ? (
+                <button
+                  type='button'
+                  aria-label='Clear recent searches'
+                  title='Clear recent searches'
+                  onMouseDown={keepSearchInputFocus}
+                  onKeyDown={dismissRecentOnEscape}
+                  onClick={() => {
+                    void clearRecentSearches();
+                    searchInputRef.current?.focus({ preventScroll: true });
+                  }}
+                  className={cn(RECENT_SEARCH_ROW_BUTTON_CLASS, 'h-8 w-8 justify-center')}
+                >
+                  <Trash2 aria-hidden='true' className='size-3.5' />
+                </button>
               ) : null}
             </div>
             {showRecentSearches && (
               <section
-                aria-labelledby='recent-searches-heading'
-                className='absolute inset-x-0 top-full z-30 mt-2 rounded-lg border border-white/[0.09] bg-zinc-950/95 p-1.5 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] backdrop-blur-md'
+                data-key-capture
+                aria-label='Recent searches'
+                className='absolute inset-x-0 top-full z-30 mt-2 rounded-lg border border-white/[0.09] bg-zinc-950/98 p-1.5 shadow-[0_12px_32px_-14px_rgb(0_0_0/0.9),inset_0_1px_0_rgb(255_255_255/0.05)] animate-in fade-in-0 slide-in-from-top-0.5 duration-150 ease-out motion-reduce:animate-none'
               >
-                <div className='flex items-center justify-between gap-2 pb-1 pl-2.5'>
-                  <h2
-                    id='recent-searches-heading'
-                    className='text-[13px] font-medium text-zinc-400'
-                  >
-                    Recent searches
-                  </h2>
-                  <button
-                    type='button'
-                    onMouseDown={keepSearchInputFocus}
-                    onClick={() => {
-                      clearRecentSearches();
-                      searchInputRef.current?.focus({ preventScroll: true });
-                    }}
-                    className={cn(RECENT_SEARCH_ROW_BUTTON_CLASS, 'h-8 px-2 text-[13px]')}
-                  >
-                    Clear
-                  </button>
-                </div>
-                <ul>
-                  {recentSearches.map((entry) => (
+                <ul
+                  ref={recentListRef}
+                  className='max-h-[min(216px,38vh)] overflow-y-auto overscroll-contain'
+                >
+                  {recentSearches.map((entry, index) => (
                     <li key={entry} className='flex items-center gap-1'>
                       <button
                         type='button'
                         onMouseDown={keepSearchInputFocus}
+                        data-recent-entry
                         onClick={() => selectRecentSearch(entry)}
+                        onKeyDown={(event) => {
+                          dismissRecentOnEscape(event);
+                          if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return;
+                          event.preventDefault();
+                          if (event.key === 'ArrowDown' && index === recentSearches.length - 1)
+                            focusFirstResult();
+                          else focusRecentEntry(index + (event.key === 'ArrowDown' ? 1 : -1));
+                        }}
                         className={cn(
                           RECENT_SEARCH_ROW_BUTTON_CLASS,
                           'min-w-0 flex-1 gap-2.5 px-2.5 text-left text-[13px] text-zinc-300',
@@ -834,8 +930,9 @@ export function Search() {
                         aria-label={`Remove ${entry} from recent searches`}
                         title='Remove from recent searches'
                         onMouseDown={keepSearchInputFocus}
+                        onKeyDown={dismissRecentOnEscape}
                         onClick={() => {
-                          removeRecentSearch(entry);
+                          void removeRecentSearch(entry);
                           // Keyboard removal unmounts the focused row.
                           searchInputRef.current?.focus({ preventScroll: true });
                         }}
@@ -869,9 +966,15 @@ export function Search() {
                       activeGenre ? 'accent-lattice-soft' : SEARCH_FACET_IDLE_CLASS,
                     )}
                   >
-                    <Shapes className='h-3.5 w-3.5 opacity-70' />
+                    <Shapes
+                      aria-hidden='true'
+                      className={cn(FACET_ICON_CLASS, 'text-violet-300')}
+                    />
                     <span className='max-w-[120px] truncate'>{activeGenre ?? 'Genre'}</span>
-                    <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
+                    <ChevronDown
+                      aria-hidden='true'
+                      className='h-3.5 w-3.5 opacity-60 transition-[transform,opacity] duration-150 group-hover:opacity-100 group-data-[state=open]:rotate-180 motion-reduce:transition-none'
+                    />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
@@ -946,7 +1049,7 @@ export function Search() {
                   className={cn(
                     SEARCH_FACET_BUTTON_CLASS,
                     SEARCH_FACET_IDLE_CLASS,
-                    'w-[38px] justify-center px-0',
+                    'w-[38px] justify-center px-0 animate-in fade-in-0 zoom-in-90 duration-150 motion-reduce:animate-none',
                   )}
                 >
                   <X aria-hidden='true' className='h-3.5 w-3.5' />
@@ -1032,9 +1135,28 @@ export function Search() {
                           : SEARCH_FACET_IDLE_CLASS,
                     )}
                   >
-                    <TrendingUp className='h-3.5 w-3.5 opacity-70' />
-                    <span className='min-w-[52px] text-left'>{activeFeedLabel}</span>
-                    <ChevronDown className='h-3.5 w-3.5 opacity-60 transition-transform duration-150 group-data-[state=open]:rotate-180' />
+                    <activeFeedOption.icon
+                      aria-hidden='true'
+                      className={cn(FACET_ICON_CLASS, activeFeedOption.tint)}
+                    />
+                    {/* Every label occupies one cell so the trigger keeps the widest width. */}
+                    <span className='grid text-left'>
+                      {SEARCH_FEED_OPTIONS.map((option) => (
+                        <span
+                          key={option.id}
+                          className={cn(
+                            'col-start-1 row-start-1',
+                            option.id !== activeFeed && 'invisible',
+                          )}
+                        >
+                          {option.label}
+                        </span>
+                      ))}
+                    </span>
+                    <ChevronDown
+                      aria-hidden='true'
+                      className='h-3.5 w-3.5 opacity-60 transition-[transform,opacity] duration-150 group-not-aria-disabled:group-hover:opacity-100 group-data-[state=open]:rotate-180 motion-reduce:transition-none'
+                    />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent align='end' sideOffset={6} className='w-44'>
@@ -1044,7 +1166,13 @@ export function Search() {
                       checked={activeFeed === option.id}
                       onSelect={() => handleFeedChange(option.id)}
                     >
-                      {option.label}
+                      <span className='flex items-center gap-2'>
+                        <option.icon
+                          aria-hidden='true'
+                          className={cn('h-3.5 w-3.5', option.tint)}
+                        />
+                        {option.label}
+                      </span>
                     </FacetMenuItem>
                   ))}
                 </DropdownMenuContent>
@@ -1064,7 +1192,7 @@ export function Search() {
                     : 'cursor-default opacity-40',
                 )}
               >
-                <RotateCcw className='h-3.5 w-3.5' />
+                <RotateCcw aria-hidden='true' className={FACET_ICON_CLASS} />
                 Reset
               </button>
             </div>
@@ -1087,15 +1215,6 @@ export function Search() {
               recordQuery();
           }}
           onKeyDownCapture={(event) => {
-            if ((event.key === 'Enter' || event.key === ' ') && !event.nativeEvent.isComposing) {
-              flushQuery();
-              if (
-                !isRefining &&
-                event.target instanceof Element &&
-                event.target.closest('[data-search-result-index]')
-              )
-                recordQuery();
-            }
             if (
               event.key === 'ArrowUp' &&
               !event.defaultPrevented &&
@@ -1131,6 +1250,7 @@ export function Search() {
             onClearSearch={handleClearSearch}
             refetch={refetch}
             results={results}
+            resultSetKey={firstPage ? getResultPageId(firstPage) : 0}
             partial={partial}
             showSkeleton={showSkeleton}
             trimmedDebouncedQuery={trimmedDebouncedQuery}

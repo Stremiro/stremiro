@@ -11,7 +11,7 @@ import {
 } from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
-import { animateLibrarySave, Button, SaveIndicator } from '@/components/ui/button';
+import { Button, SaveIndicator } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   useLibraryMembership,
@@ -329,6 +329,7 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
         if (isHttpUrl(backdrop)) {
           const probe = new Image();
           probe.decoding = 'async';
+          probe.fetchPriority = 'low';
           probe.referrerPolicy = 'no-referrer';
           probe.src = backdrop;
         }
@@ -571,9 +572,8 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     )}
                     // Guard, not `disabled` — disabling the focused button blurs it, unpausing the carousel mid-click.
                     aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
-                    onClick={(event) => {
+                    onClick={() => {
                       if (!libraryReady || toggleLibrary.isPending) return;
-                      if (!isInLibrary) animateLibrarySave(event.currentTarget);
                       toggleLibrary.mutate();
                     }}
                   >

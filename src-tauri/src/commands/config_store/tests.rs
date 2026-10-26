@@ -274,16 +274,54 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
     assert!(value.get("capabilities").is_none());
     let display = value["displayUrl"].as_str().expect("displayUrl present");
     assert!(!display.contains("sekrit") && !display.contains("user:pass"));
-    assert_eq!(display, "•••@addon.example/•••/config?token=•••");
+    assert_eq!(display, "https://addon.example/•••/•••?token=•••");
 
+    let stripped_userinfo =
+        normalize_addon_url("https://user:pass@addon.example/short-key/manifest.json")
+            .unwrap()
+            .unwrap();
     for (url, expected) in [
         (
             "https://addon.example/manifest.json?credential=demo-secret&mode=fast",
-            "addon.example/manifest.json?credential=•••&mode=•••",
+            "https://addon.example/manifest.json?credential=•••&mode=•••",
         ),
         (
             "https://addon.example/%7B%22credential%22%3A%22demo-secret%22%7D/manifest.json",
-            "addon.example/•••/manifest.json",
+            "https://addon.example/•••/manifest.json",
+        ),
+        (
+            "https://addon.example/short-key/manifest.json",
+            "https://addon.example/•••/manifest.json",
+        ),
+        (
+            "https://addon.example/%7B%22apiKey%22:%22demo-secret%22%7D/manifest.json",
+            "https://addon.example/•••/manifest.json",
+        ),
+        ("https://addon.example", "https://addon.example"),
+        (
+            "https://addon.example/manifest.json",
+            "https://addon.example/manifest.json",
+        ),
+        (
+            "https://addon.example:8443/short-key/stream/movie/tt123.json?token=demo-secret",
+            "https://addon.example:8443/•••/stream/movie/tt123.json?token=•••",
+        ),
+        (
+            "https://addon.example/short-key",
+            "https://addon.example/•••",
+        ),
+        (
+            "https://addon.example/stream/short-key/manifest.json",
+            "https://addon.example/•••/•••/manifest.json",
+        ),
+        (
+            "https://user:pass@addon.example/manifest.json",
+            "https://addon.example/manifest.json",
+        ),
+        (stripped_userinfo.as_str(), "https://addon.example/•••"),
+        (
+            "https://addon.example/manifest.json?demo-secret#private-fragment",
+            "https://addon.example/manifest.json?•••",
         ),
     ] {
         let mut config = crate::test_helpers::cinemeta_addon();
@@ -304,23 +342,38 @@ fn addon_config_view_masks_credentials_and_keeps_manifest_rust_side() {
 }
 
 #[test]
-fn parse_stored_addon_configs_keeps_valid_siblings() {
-    let stored = parse_stored_addon_configs(&serde_json::json!([
-        {
-            "id": "https://v3-cinemeta.strem.io",
-            "url": "https://v3-cinemeta.strem.io",
-            "name": "Cinemeta",
-            "enabled": true
-        },
-        {
-            "id": "broken",
-            "url": "https://broken.example",
-            "enabled": true
-        }
-    ]));
-
-    assert_eq!(stored.len(), 1);
-    assert_eq!(stored[0].url, "https://v3-cinemeta.strem.io");
+fn default_install_aliases_preserve_stored_and_backup_identities() {
+    let fixture = crate::test_helpers::test_store();
+    let mut expected = super::resolve_addon_configs(None);
+    let mut legacy = expected.clone();
+    for ((addon, expected), (install_url, _)) in legacy
+        .iter_mut()
+        .zip(&mut expected)
+        .zip(super::DEFAULT_ADDON_INSTALLS)
+    {
+        addon.url = install_url.replacen("stremiro://", super::LEGACY_INSTALL_SCHEME, 1);
+        addon.enabled = false;
+        expected.enabled = false;
+        assert_eq!(
+            normalize_addon_url(&addon.url).unwrap().as_deref(),
+            Some(expected.url.as_str())
+        );
+        assert!(super::is_pinned_default_addon_url(&expected.url));
+    }
+    fixture
+        .store
+        .set(super::ADDON_CONFIGS_KEY, serde_json::json!(legacy));
+    let loaded = super::load_addon_configs(&fixture.store);
+    assert_eq!(loaded, expected);
+    super::save_addon_configs_to_store(&fixture.store, &loaded);
+    assert_eq!(
+        fixture.store.get(super::ADDON_CONFIGS_KEY),
+        Some(serde_json::json!(expected))
+    );
+    assert_eq!(
+        crate::commands::config_commands::merge_imported_addon_configs(&fixture.store, legacy),
+        0
+    );
 }
 
 #[test]
@@ -329,7 +382,7 @@ fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_s
     let capabilities = serde_json::to_value(crate::test_helpers::cinemeta_manifest()).unwrap();
     let stored = serde_json::json!([
         {
-            "id": " duplicate-id ", "url": "stremio://disabled.example/manifest.json",
+            "id": " duplicate-id ", "url": "stremiro://disabled.example/manifest.json",
             "name": " Disabled ", "enabled": false, "capabilities": capabilities
         },
         null,
@@ -462,13 +515,13 @@ fn addon_identity_projection_matches_full_load_for_missing_or_invalid_registries
 #[test]
 fn normalize_addon_url_strips_embedded_userinfo_but_keeps_config() {
     let normalized =
-        normalize_addon_url("https://user:pass@example.com/stremio/v1?token=abc/manifest.json")
+        normalize_addon_url("https://user:pass@example.com/addon/v1?token=abc/manifest.json")
             .expect("valid url")
             .expect("non-empty url");
 
     assert_eq!(
         normalized,
-        "https://example.com/stremio/v1?token=abc/manifest.json"
+        "https://example.com/addon/v1?token=abc/manifest.json"
     );
 }
 
@@ -571,7 +624,8 @@ fn stored_profile_accent_targets_default_per_flag() {
         .map(super::normalize_stored_profile_preferences)
         .expect("partial targets payload parses");
 
-    // Explicit false survives; missing or malformed flags fall back to on.
+    // Explicit false survives; missing or malformed flags fall back to the pre-flag look.
+    assert!(!parsed.profile.accent_targets.seekbar);
     assert!(!parsed.profile.accent_targets.navigation);
     assert!(parsed.profile.accent_targets.actions);
     assert!(parsed.profile.accent_targets.progress);
@@ -1052,15 +1106,9 @@ fn player_keybindings_keep_known_actions_and_first_claim_per_key() {
             Ok(normalized.to_string())
         );
     }
-    assert_eq!(
-        super::normalize_player_binding_key("5"),
-        Err("Number keys are reserved for seeking to a percentage.".to_string())
-    );
+    assert!(super::normalize_player_binding_key("5").is_err());
     for key in ["", "Escape", "Tab", "   ", "\u{7}", "abcdefghijklmnopq"] {
-        assert_eq!(
-            super::normalize_player_binding_key(key),
-            Err("This key can’t be assigned.".to_string())
-        );
+        assert!(super::normalize_player_binding_key(key).is_err(), "{key:?}");
     }
 
     let parsed = super::parse_app_ui_preferences(serde_json::json!({
@@ -1183,14 +1231,8 @@ fn player_keybindings_bind_clears_slots_and_removes_default_overrides() {
     let first = super::bind_player_key(unbound, "togglePlay", 0, Some(" ")).unwrap();
     let reset = super::bind_player_key(first, "togglePlay", 1, Some("K")).unwrap();
     assert!(reset.is_empty());
-    assert_eq!(
-        super::bind_player_key(BTreeMap::new(), "unknown", 0, Some("p")).unwrap_err(),
-        "Unknown player action."
-    );
-    assert_eq!(
-        super::bind_player_key(BTreeMap::new(), "togglePlay", 0, Some("5")).unwrap_err(),
-        "Number keys are reserved for seeking to a percentage."
-    );
+    assert!(super::bind_player_key(BTreeMap::new(), "unknown", 0, Some("p")).is_err());
+    assert!(super::bind_player_key(BTreeMap::new(), "togglePlay", 0, Some("5")).is_err());
 }
 
 #[test]

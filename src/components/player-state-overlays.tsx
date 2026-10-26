@@ -1,5 +1,5 @@
 import { ArrowLeft, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
-import { memo, useEffect, useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useFailedSrc } from '@/hooks/use-failed-src';
@@ -8,8 +8,6 @@ import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/play
 import type { SubscribableStore } from '@/lib/subscribable-store';
 import { clamp, cn, formatEpisodeHeading, isHttpUrl } from '@/lib/utils';
 
-// Presentational player states, memoized like PlayerActionOverlays — unchanged overlays skip the commit.
-
 const ERROR_SECONDARY_BUTTON_CLASS =
   'rounded-lg border border-white/20 bg-white/5 px-4 py-2 text-sm font-medium text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
 /** The expanded player's action lane owns placement above its measured chrome. */
@@ -17,8 +15,6 @@ const EOF_CARD_SLOT_CLASS =
   'pointer-events-auto flex min-w-0 max-w-full items-center animate-in fade-in duration-150 motion-reduce:animate-none';
 const EOF_GLASS_CLASS = 'border border-white/10 bg-zinc-950/85 shadow-2xl shadow-black/60';
 const EOF_EYEBROW_CLASS = 'text-[11px] font-medium leading-none text-white/65';
-let visibleLoadingOverlays = 0;
-let loadingOverlayVisibleUntil = 0;
 
 function EofCardThumbnail({ src }: { src: string }) {
   return (
@@ -80,26 +76,29 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
 });
 
 const PLAYER_LOADING_STAGES = [
+  { id: 'starting', label: 'Starting player' },
   { id: 'finding', label: 'Finding source' },
   { id: 'connecting', label: 'Connecting' },
   { id: 'buffering', label: 'Buffering' },
 ] as const;
 
-interface PlayerLoadingOverlayProps {
+export interface PlayerLoadingOverlayProps {
   headline: string;
   detail?: string;
-  /** Index into the finding → connecting → buffering ladder. */
+  /** Index into the starting → finding → connecting → buffering ladder. */
   stageIndex?: number;
   /** Title logo carried on the route state — brands the card while the resolve/buffer pipeline runs. */
   logo?: string;
+  /** Details that may still supply a logo are loading — hold the logo slot instead of flashing the plain title. */
+  logoPending?: boolean;
   /** Plain-text fallback when no logo is known, so the card always says what is opening. */
   title?: string;
   /** Short "S2:E4 · From 23:14" line naming where playback will land. */
   context?: string;
   /** Parent holds the mount briefly after the flag clears so the card dissolves out instead of popping off. */
   exiting?: boolean;
-  onChooseStream?: () => void;
-  onBack?: () => void;
+  onChooseStream: () => void;
+  onBack: () => void;
 }
 
 export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
@@ -107,6 +106,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   detail,
   stageIndex = 0,
   logo,
+  logoPending,
   title,
   context,
   exiting,
@@ -114,61 +114,42 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
   onBack,
 }: PlayerLoadingOverlayProps) {
   const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
-  const [reveal, setReveal] = useState<'pending' | 'enter' | 'handoff'>(() =>
-    visibleLoadingOverlays > 0 || performance.now() < loadingOverlayVisibleUntil
-      ? 'handoff'
-      : 'pending',
-  );
-  const [wasExiting, setWasExiting] = useState(exiting);
-  if (wasExiting !== exiting) {
-    setWasExiting(exiting);
-    // A visible card that restarts mid-exit fades straight back in instead of vanishing for the debounce.
-    if (!exiting && reveal !== 'pending') setReveal('enter');
-  }
+  // The session host keeps one instance for the whole launch, so the reveal never restarts mid-load.
+  const [revealed, setRevealed] = useState(false);
   useEffect(() => {
-    if (exiting || reveal !== 'pending') return;
+    if (exiting || revealed) return;
     // A CSS exit animation would paint a warm load that never finished its delayed entrance.
-    const timer = window.setTimeout(() => setReveal('enter'), 250);
+    const timer = window.setTimeout(() => setRevealed(true), 250);
     return () => window.clearTimeout(timer);
-  }, [exiting, reveal]);
-  useLayoutEffect(() => {
-    if (reveal === 'pending') return;
-    visibleLoadingOverlays += 1;
-    return () => {
-      // Suspense replaces the route card without an exit; retain its reveal across that commit.
-      visibleLoadingOverlays -= 1;
-      if (visibleLoadingOverlays === 0) {
-        loadingOverlayVisibleUntil = exiting ? 0 : performance.now() + 100;
-      }
-    };
-  }, [exiting, reveal]);
-  if (reveal === 'pending') return null;
+  }, [exiting, revealed]);
+  if (!revealed) return null;
 
   return (
-    <div className='pointer-events-none absolute inset-0 z-50 flex items-center justify-center'>
+    <div className='pointer-events-none fixed inset-0 z-50 flex items-center justify-center'>
       <div
         inert={exiting}
         className={cn(
           'relative mx-4 w-full max-w-[22.5rem] overflow-hidden rounded-[14px] border border-white/[0.08] bg-zinc-950/80 px-5 pb-4 pt-5 shadow-2xl shadow-black/60 backdrop-blur-2xl motion-reduce:animate-none',
           exiting
             ? 'animate-out fade-out zoom-out-[0.98] duration-150 ease-in fill-mode-forwards'
-            : reveal === 'enter' &&
-                'animate-in fade-in zoom-in-[0.97] slide-in-from-bottom-1.5 duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
+            : 'animate-in fade-in zoom-in-[0.97] slide-in-from-bottom-1.5 duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]',
         )}
       >
-        {(logoSrc || title || context) && (
+        {(logoSrc || logoPending || title || context) && (
           <div className='mb-4 border-b border-white/[0.06] pb-4'>
             {logoSrc ? (
               <RemoteImage
                 src={logoSrc}
                 alt={title ?? ''}
-                loading='lazy'
+                fadeIn
                 onError={onLogoError}
                 className='h-9 max-w-52 object-contain object-left'
               />
+            ) : logoPending ? (
+              <div aria-hidden='true' className='h-9' />
             ) : (
               title && (
-                <p className='truncate text-[17px] font-semibold leading-tight tracking-tight text-white'>
+                <p className='truncate text-[17px] font-semibold leading-9 tracking-tight text-white'>
                   {title}
                 </p>
               )
@@ -197,7 +178,7 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
             </span>
             <span
               key={stageIndex}
-              className='min-w-0 truncate text-[14px] font-semibold leading-none text-white animate-in fade-in slide-in-from-bottom-1 duration-150 motion-reduce:animate-none'
+              className='min-w-0 truncate text-[14px] font-semibold leading-5 text-white animate-in fade-in slide-in-from-bottom-1 duration-150 motion-reduce:animate-none'
             >
               {PLAYER_LOADING_STAGES[stageIndex].label}
             </span>
@@ -234,28 +215,22 @@ export const PlayerLoadingOverlay = memo(function PlayerLoadingOverlay({
           {[headline, detail].filter(Boolean).join(' · ')}
         </p>
 
-        {(onChooseStream || onBack) && (
-          <div className='mt-4 flex items-center gap-1.5 pointer-events-auto'>
-            {onChooseStream && (
-              <button
-                type='button'
-                onClick={onChooseStream}
-                className='h-8 rounded-lg bg-white/[0.07] px-3 text-[12.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
-              >
-                Choose stream
-              </button>
-            )}
-            {onBack && (
-              <button
-                type='button'
-                onClick={onBack}
-                className='h-8 rounded-lg px-3 text-[12.5px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
-              >
-                Go back
-              </button>
-            )}
-          </div>
-        )}
+        <div className='mt-4 flex items-center gap-1.5 pointer-events-auto'>
+          <button
+            type='button'
+            onClick={onChooseStream}
+            className='h-8 rounded-lg bg-white/[0.07] px-3 text-[12.5px] font-medium text-white/85 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+          >
+            Choose stream
+          </button>
+          <button
+            type='button'
+            onClick={onBack}
+            className='h-8 rounded-lg px-3 text-[12.5px] font-medium text-white/50 transition-colors hover:bg-white/[0.06] hover:text-white/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+          >
+            Go back
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -2,6 +2,7 @@ import * as DialogPrimitive from '@radix-ui/react-dialog';
 import { X } from 'lucide-react';
 import * as React from 'react';
 
+import { Button } from '@/components/ui/button';
 import { cn } from '@/lib/utils';
 
 const Dialog = DialogPrimitive.Root;
@@ -118,7 +119,82 @@ function DialogDescription({
   );
 }
 
+const CONFIRM_CONTENT_PROPS = { className: 'border-white/10 bg-zinc-950 sm:max-w-md' };
+const CONFIRM_BUTTON_PROPS = {
+  className: 'border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25',
+};
+
+function ConfirmDialog({
+  open,
+  onOpenChange,
+  pending = false,
+  title,
+  description,
+  confirmLabel,
+  confirmDisabled = false,
+  onConfirm,
+  triggerRef,
+  fallbackRef,
+  contentProps = CONFIRM_CONTENT_PROPS,
+  footerClassName,
+  cancelProps,
+  confirmProps = CONFIRM_BUTTON_PROPS,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  pending?: boolean;
+  title: string;
+  description: React.ReactNode;
+  confirmLabel: string;
+  confirmDisabled?: boolean;
+  onConfirm: () => void;
+  triggerRef?: React.RefObject<HTMLButtonElement | null>;
+  fallbackRef?: React.RefObject<HTMLElement | null>;
+  contentProps?: DialogContentProps;
+  footerClassName?: string;
+  cancelProps?: React.ComponentProps<typeof Button>;
+  confirmProps?: React.ComponentProps<typeof Button>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
+      <DialogContent
+        {...contentProps}
+        onEscapeKeyDown={(event) => pending && event.preventDefault()}
+        onPointerDownOutside={(event) => pending && event.preventDefault()}
+        onCloseAutoFocus={(event) => {
+          contentProps.onCloseAutoFocus?.(event);
+          if (!triggerRef) return;
+          event.preventDefault();
+          const trigger = triggerRef.current;
+          (trigger && !trigger.disabled ? trigger : fallbackRef?.current)?.focus({
+            preventScroll: true,
+          });
+        }}
+      >
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          <DialogDescription>{description}</DialogDescription>
+        </DialogHeader>
+        <DialogFooter className={footerClassName}>
+          <Button
+            variant='outline'
+            {...cancelProps}
+            disabled={pending}
+            onClick={() => onOpenChange(false)}
+          >
+            Cancel
+          </Button>
+          <Button {...confirmProps} disabled={confirmDisabled || pending} onClick={onConfirm}>
+            {pending ? 'Removing…' : confirmLabel}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
 export {
+  ConfirmDialog,
   Dialog,
   DialogClose,
   DialogContent,

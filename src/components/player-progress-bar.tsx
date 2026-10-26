@@ -129,7 +129,7 @@ export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
       )}
     >
       <div
-        className='absolute inset-0 origin-left bg-white'
+        className='absolute inset-0 origin-left bg-(--accent-seek)'
         style={{ transform: `scaleX(${progress})` }}
       />
     </div>
@@ -535,14 +535,7 @@ export function PlayerProgressBar({
         </div>
       )}
 
-      <div
-        className={cn(
-          'relative w-full h-[10px] transition-transform duration-150 motion-reduce:transition-none rounded-[3px] overflow-hidden bg-white/[0.16]',
-          hoverPct !== null || keyboardFocused || seekPreviewTime !== null
-            ? 'scale-y-100'
-            : 'scale-y-80',
-        )}
-      >
+      <div className='relative h-2 w-full overflow-hidden rounded-[3px] bg-white/[0.16]'>
         {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
             className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
@@ -553,7 +546,7 @@ export function PlayerProgressBar({
         )}
 
         <div
-          className='absolute inset-0 origin-left bg-white pointer-events-none z-0'
+          className='absolute inset-0 origin-left bg-(--accent-seek) pointer-events-none z-0'
           style={{ transform: `scaleX(${progressPct / 100})` }}
         />
 
@@ -574,7 +567,7 @@ export function PlayerProgressBar({
             className='absolute inset-0 pointer-events-none z-30'
             style={{ transform: `translateX(${progressPct}%)` }}
           >
-            <div className='absolute inset-y-0 left-0 w-[2px] -translate-x-1/2 bg-white' />
+            <div className='absolute inset-y-0 left-0 w-[2px] -translate-x-1/2 bg-(--accent-seek)' />
           </div>
         )}
       </div>

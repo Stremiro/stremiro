@@ -1,9 +1,10 @@
 import { formatRelativeTime } from '@/lib/schedule-dates';
-import { Check, Loader2, Play, X } from 'lucide-react';
+import { Loader2, Play, X } from 'lucide-react';
 import { memo } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
+import { SelectionCheck } from '@/components/watch-status-icon';
 import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import {
@@ -97,17 +98,13 @@ const LibraryListRow = memo(function LibraryListRow({
       }}
     >
       {selectionMode && (
-        <span
-          aria-hidden='true'
+        <SelectionCheck
+          selected={isSelected}
           className={cn(
-            'flex h-5 w-5 shrink-0 items-center justify-center rounded-md border transition-colors',
-            isSelected
-              ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav)'
-              : 'border-white/25 bg-black/30 text-transparent group-hover:border-white/50',
+            'transition-colors',
+            !isSelected && 'bg-black/30 group-hover:border-white/50',
           )}
-        >
-          <Check className='h-3 w-3' strokeWidth={3} />
-        </span>
+        />
       )}
       <PosterThumb poster={item.poster} title={item.title} mediaType={item.type} />
 
@@ -226,19 +223,7 @@ const HistoryListRow = memo(function HistoryListRow({
         onFocus={selectionMode ? undefined : prefetchDetails}
         className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left hover:bg-white/[0.06] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
       >
-        {selectionMode && (
-          <span
-            aria-hidden='true'
-            className={cn(
-              'flex h-5 w-5 shrink-0 items-center justify-center rounded-md border',
-              isSelected
-                ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav)'
-                : 'border-white/25 text-transparent',
-            )}
-          >
-            <Check className='h-3 w-3' strokeWidth={3} />
-          </span>
-        )}
+        {selectionMode && <SelectionCheck selected={isSelected} />}
         <PosterThumb
           poster={item.poster}
           title={item.title}

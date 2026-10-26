@@ -366,12 +366,8 @@ impl PlaybackStateService {
         })
     }
 
-    pub(crate) fn count_resume_entries(&self, app: &AppHandle) -> Result<usize, String> {
-        self.with_resume_store(app, |resume_store| resume_store.count_entries())
-    }
-
-    pub(crate) fn count_resume_titles(&self, app: &AppHandle) -> Result<usize, String> {
-        self.with_resume_store(app, |resume_store| resume_store.count_titles())
+    pub(crate) fn resume_counts(&self, app: &AppHandle) -> Result<(usize, usize), String> {
+        self.with_resume_store(app, |resume_store| resume_store.counts())
     }
 
     pub(crate) fn has_learned_playback_data(&self, app: &AppHandle) -> Result<bool, String> {
@@ -430,16 +426,6 @@ impl PlaybackStateService {
         })
     }
 
-    pub(crate) fn merge_history_entries(
-        &self,
-        app: &AppHandle,
-        entries: Vec<(String, WatchProgress)>,
-        is_backup_import: bool,
-    ) -> Result<usize, String> {
-        self.merge_history_entries_checked(app, entries, is_backup_import)
-            .map_err(String::from)
-    }
-
     pub(crate) fn import_history_entries(
         &self,
         app: &AppHandle,
@@ -447,19 +433,10 @@ impl PlaybackStateService {
         dismissals: Vec<ContinueWatchingDismissal>,
     ) -> Result<usize, HistoryMergeError> {
         self.bump_history_reset_epoch();
-        self.merge_history_entries_with_dismissals(app, entries, true, dismissals)
+        self.merge_history_entries(app, entries, true, dismissals)
     }
 
-    pub(crate) fn merge_history_entries_checked(
-        &self,
-        app: &AppHandle,
-        entries: Vec<(String, WatchProgress)>,
-        is_backup_import: bool,
-    ) -> Result<usize, HistoryMergeError> {
-        self.merge_history_entries_with_dismissals(app, entries, is_backup_import, Vec::new())
-    }
-
-    fn merge_history_entries_with_dismissals(
+    pub(crate) fn merge_history_entries(
         &self,
         app: &AppHandle,
         entries: Vec<(String, WatchProgress)>,

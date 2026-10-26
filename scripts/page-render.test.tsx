@@ -1,5 +1,5 @@
 import { expect, mock, spyOn, test } from 'bun:test';
-import type { ComponentProps, ComponentType } from 'react';
+import type { ComponentProps, ComponentType, DependencyList, EffectCallback } from 'react';
 import type { StreamSelectorData } from '../src/lib/api';
 
 // Bun's navigator has no connectivity snapshot; render the pages as online.
@@ -7,10 +7,16 @@ Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
 
 const react = await import('react');
 const readStore = react.useSyncExternalStore;
+const runEffect = react.useEffect;
+let capturedEffects: EffectCallback[] | null = null;
 
 // Desktop stores omit SSR snapshots; use their real client snapshots for this smoke test.
 mock.module('react', () => ({
   ...react,
+  useEffect(effect: EffectCallback, deps?: DependencyList) {
+    capturedEffects?.push(effect);
+    runEffect(effect, deps);
+  },
   useSyncExternalStore<T>(
     subscribe: (onChange: () => void) => () => void,
     getSnapshot: () => T,
@@ -50,6 +56,143 @@ const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-c
 const { StreamSelector } = await import('../src/components/stream-selector');
 const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
+const playerMpv = await import('../src/lib/player-mpv');
+const { createPlaybackClock } = await import('../src/lib/player-clock');
+const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
+const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
+const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
+
+test('Startup seeks leave pending resume and the playback clock untouched until mpv is ready', async () => {
+  const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
+  const nativeCommand = spyOn(playerMpv, 'mpvCommand').mockResolvedValue();
+  const onUserSeek = mock(() => {});
+  const clock = createPlaybackClock();
+  clock.publish(900);
+  const durationRef = { current: 0 };
+  const mpvInitializedRef = { current: false };
+  const controller = Promise.withResolvers<ReturnType<typeof useOptimisticSeek>>();
+  function SeekFixture() {
+    controller.resolve(
+      useOptimisticSeek({
+        clock,
+        durationRef,
+        mpvInitializedRef,
+        onUserSeek,
+        triggerOsd: () => {},
+      }),
+    );
+    return null;
+  }
+  try {
+    renderToStaticMarkup(<SeekFixture />);
+    const seeking = await controller.promise;
+    const ignoredSeeks = (
+      [
+        [false, 3600],
+        [true, 0],
+        [false, 0],
+      ] as const
+    ).flatMap(([initialized, duration]) => {
+      mpvInitializedRef.current = initialized;
+      durationRef.current = duration;
+      return [seeking.seek(910), seeking.seekRelative(10)];
+    });
+    await Promise.all(ignoredSeeks);
+    expect(onUserSeek).not.toHaveBeenCalled();
+    expect(nativeSeek).not.toHaveBeenCalled();
+    expect(nativeCommand).not.toHaveBeenCalled();
+    expect(clock.getSnapshot()).toBe(900);
+    expect(seeking.isSeekPending()).toBe(false);
+    mpvInitializedRef.current = true;
+    durationRef.current = 3600;
+    await seeking.seekRelative(10);
+    await seeking.seek(950);
+    expect(nativeCommand).toHaveBeenCalledWith('seek', ['10', 'relative']);
+    expect(nativeSeek).toHaveBeenCalledWith(950);
+    expect(onUserSeek).toHaveBeenCalledTimes(2);
+    expect(clock.getSnapshot()).toBe(950);
+  } finally {
+    for (const spy of [nativeSeek, nativeCommand]) spy.mockRestore();
+  }
+});
+
+test.each([false, true])(
+  'Accepted resume seeks wait for settlement before retrying (tray paused=%s)',
+  async (trayPaused) => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
+    const pauseWrite = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+    const now = spyOn(performance, 'now').mockReturnValue(0);
+    const currentTimeRef = { current: 0 };
+    const durationRef = { current: 0 };
+    const effects: EffectCallback[] = [];
+    const cleanups: ReturnType<EffectCallback>[] = [];
+    const controller = Promise.withResolvers<ReturnType<typeof usePlayerResumeController>>();
+    function ResumeFixture() {
+      usePlayerSession().trayPause.publish(trayPaused);
+      controller.resolve(
+        usePlayerResumeController({
+          mediaId: 'resume-startup-test',
+          mediaType: 'movie',
+          activeStreamUrl: 'https://example.com/video',
+          activeStreamLoadKey: 'resume-startup-test',
+          startTime: 900,
+          isHistoryResume: true,
+          suspended: false,
+          mountedRef: { current: true },
+          isDestroyedRef: { current: false },
+          currentTimeRef,
+          durationRef,
+          failoverResumePositionRef: { current: 0 },
+          onResumeMessage: () => {},
+        }),
+      );
+      return null;
+    }
+    try {
+      capturedEffects = effects;
+      renderToStaticMarkup(
+        <MemoryRouter>
+          <PlayerSessionProvider>
+            <ResumeFixture />
+          </PlayerSessionProvider>
+        </MemoryRouter>,
+      );
+      capturedEffects = null;
+      const resume = await controller.promise;
+      for (const effect of effects) cleanups.push(effect());
+      expect(resume.prepareForStreamLoad()).toBe(true);
+      durationRef.current = 3600;
+      await resume.applyResumeIfReady();
+      await Promise.all(
+        [220, 360, 1499].map((time) => {
+          now.mockReturnValue(time);
+          return resume.applyResumeIfReady();
+        }),
+      );
+      expect(nativeSeek).toHaveBeenCalledTimes(1);
+      expect(nativeSeek).toHaveBeenCalledWith(900);
+      expect(pauseWrite).not.toHaveBeenCalled();
+      expect(resume.isResumePending()).toBe(true);
+      now.mockReturnValue(1500);
+      await resume.applyResumeIfReady();
+      expect(nativeSeek).toHaveBeenCalledTimes(2);
+      expect(pauseWrite).not.toHaveBeenCalled();
+      currentTimeRef.current = 899;
+      await resume.applyResumeIfReady();
+      expect(resume.isResumePending()).toBe(false);
+      expect(pauseWrite).toHaveBeenCalledTimes(trayPaused ? 0 : 1);
+      if (!trayPaused) expect(pauseWrite).toHaveBeenCalledWith('pause', false);
+    } finally {
+      capturedEffects = null;
+      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      for (const spy of [nativeSeek, pauseWrite, now]) spy.mockRestore();
+      if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor);
+      else Reflect.deleteProperty(globalThis, 'window');
+    }
+  },
+);
 
 test('Recent-search clear waits for a pending record and leaves cache and storage empty', async () => {
   const client = new QueryClient();
@@ -154,27 +297,28 @@ test.each([false, true])(
 );
 
 test.each([
-  { available: true, configFailed: true },
-  { available: false, configFailed: true },
-  { available: false, configFailed: false },
+  { available: true, selectorFailed: true, hasEnabledAddons: true },
+  { available: false, selectorFailed: true, hasEnabledAddons: true },
+  { available: false, selectorFailed: false, hasEnabledAddons: false },
+  { available: false, selectorFailed: false, hasEnabledAddons: true },
 ])(
   'Stream selector preserves its available/error/no-addons state (%j)',
-  async ({ available, configFailed }) => {
+  async ({ available, selectorFailed, hasEnabledAddons }) => {
     const client = new QueryClient({
       defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
     });
     const target = { type: 'movie' as const, id: 'selector-test' };
-    const failure = new Error('Addon configuration unavailable');
+    const failure = new Error('Stream source unavailable');
     try {
-      // Reject a cold config query: no previously successful addon list can mask the failure.
       await client.prefetchQuery({
         ...api.addonConfigsQueryOptions(),
         queryFn: () => {
-          if (configFailed) throw failure;
-          return [];
+          throw new Error('Addon configuration unavailable');
         },
       });
       const data: StreamSelectorData = {
+        hasEnabledAddons,
+        fatalErrorMessage: selectorFailed ? failure.message : undefined,
         streams: available
           ? [
               {
@@ -234,10 +378,16 @@ test.each([
         client,
       );
       expect(markup.includes('Search streams by release, codec or keyword')).toBe(available);
-      expect(markup.includes(failure.message)).toBe(!available && configFailed);
-      expect(markup.includes('Retry</button>')).toBe(!available && configFailed);
-      expect(markup.includes('No enabled stream sources.')).toBe(!available && !configFailed);
-      expect(markup.includes('Manage addons')).toBe(!available && !configFailed);
+      expect(markup).not.toContain('Addon configuration unavailable');
+      expect(markup.includes(failure.message)).toBe(!available && selectorFailed);
+      expect(markup.includes('Retry</button>')).toBe(!available && selectorFailed);
+      expect(markup.includes('No enabled stream sources.')).toBe(
+        !available && !selectorFailed && !hasEnabledAddons,
+      );
+      expect(markup.includes('No stream-capable addons enabled.')).toBe(
+        !available && !selectorFailed && hasEnabledAddons,
+      );
+      expect(markup.includes('Manage addons')).toBe(!available && !selectorFailed);
     } finally {
       renderSelectorPortal = false;
       client.clear();

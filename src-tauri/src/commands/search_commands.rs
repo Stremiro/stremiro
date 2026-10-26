@@ -170,7 +170,6 @@ struct SearchCatalogCriteria {
     genres: Vec<String>,
     year_range: SearchYearRange,
     continuation: SearchCatalogContinuation,
-    max_browse_fetches: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -183,23 +182,6 @@ pub struct SearchCatalogRequest {
     year_from: Option<u32>,
     year_to: Option<u32>,
     continuation: Option<SearchCatalogContinuation>,
-    #[serde(skip)]
-    single_page: bool,
-}
-
-impl SearchCatalogRequest {
-    pub(crate) fn for_genre(media_type: &str, genre: String) -> Self {
-        Self {
-            query: None,
-            media_type: Some(media_type.to_string()),
-            feed: None,
-            genres: Some(vec![genre]),
-            year_from: None,
-            year_to: None,
-            continuation: None,
-            single_page: true,
-        }
-    }
 }
 
 fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
@@ -282,15 +264,10 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         genres: normalize_genres(request.genres),
         year_range: SearchYearRange::resolve(request.year_from, request.year_to),
         continuation,
-        max_browse_fetches: if request.single_page {
-            1
-        } else {
-            MAX_BROWSE_SOURCE_FETCHES
-        },
     })
 }
 
-fn normalize_search_text(value: &str) -> String {
+pub(crate) fn normalize_search_text(value: &str) -> String {
     let mut normalized = String::with_capacity(value.len());
     let mut separator_pending = false;
     // NFD splits marks such as kana voicing off their letters; they must not split words.
@@ -384,7 +361,10 @@ fn rank_search_results(
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
     if year_range.is_active() {
-        items.retain(|item| year_range.contains(item.primary_year.unwrap_or(0)));
+        items.retain(|item| {
+            item.primary_year
+                .is_some_and(|year| year_range.contains(year))
+        });
     }
     let normalized_query = normalize_search_text(query);
     if normalized_query.is_empty() {
@@ -410,6 +390,7 @@ fn rank_search_results(
             tier = tier.max(search_tier(&title, title_without_article, query));
         }
         (
+            std::cmp::Reverse(item.matches_search_credit),
             std::cmp::Reverse(tier),
             *provider_rank,
             std::cmp::Reverse(item.primary_year.unwrap_or(0)),
@@ -419,9 +400,15 @@ fn rank_search_results(
 }
 
 fn item_has_genre(item: &MediaItem, genre: &str) -> bool {
-    item.genres
-        .as_ref()
-        .is_some_and(|genres| genres.iter().any(|value| value.eq_ignore_ascii_case(genre)))
+    let genre = genre.trim();
+    item.genres.as_ref().is_some_and(|genres| {
+        genres.iter().any(|value| {
+            value.trim().eq_ignore_ascii_case(genre)
+                || value
+                    .split(" & ")
+                    .any(|part| part.trim().eq_ignore_ascii_case(genre))
+        })
+    })
 }
 
 fn is_animation_genre(genre: &str) -> bool {
@@ -472,9 +459,8 @@ fn apply_browse_filters(
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
     let filter_year = year_range.is_active();
-    // Anime needs Animation even when the requested extras omit it.
-    let require_animation = matches!(media_type, SearchMediaType::Anime)
-        && !fetch_genres.iter().any(|genre| is_animation_genre(genre));
+    // Anime's category marker stays local even when the provider filtered Animation.
+    let require_animation = matches!(media_type, SearchMediaType::Anime);
     if !filter_year && fetch_genres.is_empty() && !require_animation {
         return items;
     }
@@ -484,7 +470,12 @@ fn apply_browse_filters(
             || item
                 .primary_year
                 .is_some_and(|year| year_range.contains(year)))
-            && fetch_genres.iter().all(|genre| item_has_genre(item, genre))
+            && fetch_genres.iter().all(|genre| {
+                item.catalog_genre
+                    .as_deref()
+                    .is_some_and(|sent| sent.eq_ignore_ascii_case(genre))
+                    || item_has_genre(item, genre)
+            })
             && (!require_animation || item_has_genre(item, CINEMETA_ANIME_GENRE))
     });
     items
@@ -494,13 +485,8 @@ fn apply_browse_filters(
 /// sparse intersections (e.g. anime + Crime) keep only a few titles per page.
 const MIN_BROWSE_FILL_ITEMS: usize = 24;
 
-fn should_continue_browse_fetch(
-    item_count: usize,
-    next_skip: Option<u32>,
-    fetches: usize,
-    max_fetches: usize,
-) -> bool {
-    item_count < MIN_BROWSE_FILL_ITEMS && next_skip.is_some() && fetches < max_fetches
+fn should_continue_browse_fetch(item_count: usize, next_skip: Option<u32>, fetches: usize) -> bool {
+    item_count < MIN_BROWSE_FILL_ITEMS && next_skip.is_some() && fetches < MAX_BROWSE_SOURCE_FETCHES
 }
 
 async fn fetch_query_results(
@@ -645,19 +631,14 @@ pub(super) async fn fetch_genre_catalog_pages(
     media_type: &str,
     genres: Vec<String>,
 ) -> Result<Vec<Result<Vec<MediaItem>, String>>, String> {
-    let criteria = genres
-        .into_iter()
-        .map(|genre| build_search_criteria(SearchCatalogRequest::for_genre(media_type, genre)))
-        .collect::<Result<Vec<_>, _>>()?;
-    let Some(first) = criteria.first() else {
+    if genres.is_empty() {
         return Ok(Vec::new());
-    };
-    let media_type = first
-        .media_type
+    }
+    let media_type = SearchMediaType::parse(Some(media_type))
         .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
-    let fetch_genres: Vec<_> = criteria
-        .iter()
-        .map(|criteria| catalog_fetch_genres(media_type, &criteria.genres))
+    let fetch_genres: Vec<_> = genres
+        .into_iter()
+        .map(|genre| catalog_fetch_genres(media_type, &normalize_genres(Some(vec![genre]))))
         .collect();
     // A single-genre request routes to one catalog, including anime's Animation fallback.
     let genres: Vec<_> = fetch_genres
@@ -668,21 +649,20 @@ pub(super) async fn fetch_genre_catalog_pages(
         snapshot,
         client,
         media_type,
-        first.feed.cinemeta_catalog(),
+        SearchFeed::Popular.cinemeta_catalog(),
         &genres,
         0,
     )
     .await
     .into_iter()
-    .zip(criteria)
     .zip(fetch_genres)
-    .map(|((page, criteria), fetch_genres)| {
+    .map(|(page, fetch_genres)| {
         page.map(|page| {
             apply_browse_filters(
                 retain_titled_catalog_items(page.items),
                 media_type,
                 &fetch_genres,
-                criteria.year_range,
+                SearchYearRange::resolve(None, None),
             )
         })
     })
@@ -804,12 +784,7 @@ async fn fetch_browse_page(
 
         match next_skip {
             Some(continue_skip)
-                if should_continue_browse_fetch(
-                    items.len(),
-                    next_skip,
-                    fetches,
-                    criteria.max_browse_fetches,
-                ) =>
+                if should_continue_browse_fetch(items.len(), next_skip, fetches) =>
             {
                 skip = continue_skip;
             }

@@ -24,6 +24,7 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { bumpWatchProgressEpoch, getWatchProgressEpoch } from '@/lib/api-cache';
+import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
 import { notifyAction } from '@/lib/notify';
 import { reinsertSnapshotRows, restoreQueryArrayEntry } from '@/lib/optimistic-query';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
@@ -31,7 +32,6 @@ import {
   invalidateLibraryQueries,
   invalidateListQueries,
   invalidatePlaybackHistoryQueries,
-  invalidatePlaybackHistoryQueriesForTitle,
   LIBRARY_QUERY_KEY,
   LISTS_QUERY_KEY,
   LIST_SUMMARIES_QUERY_KEY,
@@ -48,7 +48,7 @@ import {
   WATCH_HISTORY_STALE_TIME_MS,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { formatEpisodeHeading, isSeriesLikeMediaType, pluralize } from '@/lib/utils';
+import { formatEpisodeHeading, isSeriesLikeMediaType, pluralize, withFinally } from '@/lib/utils';
 
 const LIBRARY_STALE_TIME = 1000 * 60 * 5;
 const WATCH_STATUSES_STALE_TIME = 1000 * 60 * 5;
@@ -293,7 +293,7 @@ export function useProfileLibrary(filters: LibraryFilters, options?: { enabled?:
     staleTime: LIBRARY_STALE_TIME,
     gcTime: isDefault ? LIBRARY_STALE_TIME : 60_000,
     placeholderData: (previousData, previousQuery) => {
-      const previousFilters = previousQuery?.queryKey[1] as LibraryFilters | undefined;
+      const previousFilters = previousQuery?.queryKey[1];
       // A previous status/type result must never masquerade as the newly selected filter.
       return previousFilters?.status === filters.status && previousFilters?.type === filters.type
         ? previousData
@@ -391,23 +391,29 @@ export function useListSummaries(itemId: string | undefined, options?: { enabled
 }
 
 /// Shared key/fn for the per-title resume query so `select` variants never fork the cache.
-function titleWatchProgressQuery(itemId: string | undefined, enabled: boolean) {
+function titleWatchProgressQuery(
+  itemId?: string,
+  mediaType?: string,
+  options?: SharedCollectionQueryOptions,
+) {
   return {
     queryKey: titleWatchProgressQueryKey(itemId),
-    queryFn: () =>
-      itemId
+    queryFn: async () =>
+      (await pendingDetailsPrefetch(mediaType, itemId ?? ''))?.progress ??
+      (itemId
         ? api.getTitleWatchProgress(itemId)
-        : Promise.reject(new Error('Item ID is required to read title progress.')),
-    enabled: enabled && Boolean(itemId),
+        : Promise.reject(new Error('Item ID is required to read title progress.'))),
+    enabled: (options?.enabled ?? true) && Boolean(itemId),
+    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
   };
 }
 
 /// Per-title resume snapshot — one indexed read instead of full-history scans.
-export function useTitleWatchProgress(itemId?: string, options?: SharedCollectionQueryOptions) {
-  return useQuery({
-    ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
-    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
-  });
+export function useTitleWatchProgress(
+  itemId?: string,
+  options?: SharedCollectionQueryOptions & { mediaType?: string },
+) {
+  return useQuery(titleWatchProgressQuery(itemId, options?.mediaType, options));
 }
 
 export function useIsItemInLibrary(itemId?: string, options?: SharedCollectionQueryOptions) {
@@ -452,8 +458,7 @@ export function useMediaResumeEntry(
   options?: SharedCollectionQueryOptions,
 ) {
   return useQuery({
-    ...titleWatchProgressQuery(itemId, options?.enabled ?? true),
-    staleTime: options?.staleTime ?? WATCH_HISTORY_STALE_TIME_MS,
+    ...titleWatchProgressQuery(itemId, mediaType, options),
     select: (progress: TitleWatchProgress) =>
       resolvePlayerRouteMediaType(mediaType) === 'movie'
         ? progress.movieResumeEntry
@@ -850,12 +855,12 @@ export function useBulkRemoveFromList() {
         `Removed ${pluralize(entries.length, 'title')} from list`,
         entries.length > 0,
         async () => {
-          await api
-            .restoreListItems(listId, entries)
-            .catch((error: unknown) => {
+          await withFinally(
+            api.restoreListItems(listId, entries).catch((error: unknown) => {
               toast.error(getListErrorMessage(error) ?? 'Could not restore list titles');
-            })
-            .finally(() => invalidateListQueries(queryClient));
+            }),
+            () => invalidateListQueries(queryClient, { membershipOnly: true }),
+          );
         },
       );
     },
@@ -886,22 +891,17 @@ export function useBulkRemoveFromWatchHistory() {
   });
 }
 
-interface UseRemoveTitleWatchHistoryOptions extends UseRemoveFromContinueWatchingOptions {
-  errorTitle: string;
-}
-
 function resumeRailEntryKey({ row }: ResumeRailEntry): string {
   return `${watchTitleKey(row)}:${row.season ?? ''}:${row.episode ?? ''}`;
 }
 
 // Whole-title history delete: collapsed surfaces render one row per title —
 // deleting only the displayed row lets it resurface under a different episode.
-function useRemoveTitleWatchHistory({
+export function useRemoveFromWatchHistory({
   itemId,
   itemTitle,
   mediaType,
-  errorTitle,
-}: UseRemoveTitleWatchHistoryOptions) {
+}: UseRemoveFromContinueWatchingOptions) {
   const queryClient = useQueryClient();
   const normalizedMediaType = mediaType?.trim();
   const matchesTitle = (entry: WatchProgress) =>
@@ -923,16 +923,16 @@ function useRemoveTitleWatchHistory({
         removedRows.length > 0,
         () =>
           restoreWatchProgressRows(removedRows, () =>
-            invalidatePlaybackHistoryQueriesForTitle(queryClient, itemId),
+            invalidatePlaybackHistoryQueries(queryClient, itemId),
           ),
         itemTitle,
       );
     },
     onError: (error, _variables, context) => {
       restoreCachedWatchHistory(queryClient, context);
-      toast.error(error instanceof Error ? error.message : errorTitle);
+      toast.error(error instanceof Error ? error.message : 'Failed to remove from history');
     },
-    onSettled: () => invalidatePlaybackHistoryQueriesForTitle(queryClient, itemId),
+    onSettled: () => invalidatePlaybackHistoryQueries(queryClient, itemId),
   });
 }
 
@@ -979,14 +979,6 @@ export function useRemoveFromContinueWatching({
       );
     },
     onSettled: refreshRail,
-  });
-}
-
-// Per-title delete for the profile tabs; deletes every row of the title.
-export function useRemoveFromWatchHistory(options: UseRemoveFromContinueWatchingOptions) {
-  return useRemoveTitleWatchHistory({
-    ...options,
-    errorTitle: 'Failed to remove from history',
   });
 }
 
@@ -1046,7 +1038,6 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
           movieResumeEntry: keepResumeEntry(old.movieResumeEntry),
           latestSeriesEntry: keepHistoryEntry(old.latestSeriesEntry),
           latestMovieEntry: keepHistoryEntry(old.latestMovieEntry),
-          latestEntry: keepHistoryEntry(old.latestEntry),
         };
       });
       return { previous };
@@ -1059,7 +1050,7 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
           true,
           () =>
             revertEpisodesWatched(item, episodes, watched, previousRows, () =>
-              invalidatePlaybackHistoryQueriesForTitle(queryClient, item.id),
+              invalidatePlaybackHistoryQueries(queryClient, item.id),
             ),
           pluralize(episodes.length, 'episode'),
         );
@@ -1081,7 +1072,7 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
       });
     },
     onSettled: (_progress, error) =>
-      invalidatePlaybackHistoryQueriesForTitle(queryClient, item?.id, {
+      invalidatePlaybackHistoryQueries(queryClient, item?.id, {
         refetchTitleProgress: error != null,
       }),
   });
@@ -1138,7 +1129,7 @@ export function reconcileCollectionQueries(
               queryClient.getQueryData(LIBRARY_QUERY_KEY) === undefined ||
               queryClient.getQueryState(LIBRARY_QUERY_KEY)?.isInvalidated,
           })
-        : invalidateListQueries(queryClient));
+        : invalidateListQueries(queryClient, { membershipOnly: true }));
     }, 0),
   };
   collectionReconciliationTimers.set(queryClient, pending);

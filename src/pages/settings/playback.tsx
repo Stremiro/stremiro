@@ -104,7 +104,6 @@ function LanguageSelector({
   value,
   kind,
   options,
-  disabled,
   loading,
   onChange,
 }: {
@@ -112,7 +111,6 @@ function LanguageSelector({
   value: string;
   kind: 'audio' | 'subtitle';
   options: readonly SupportedLanguage[];
-  disabled: boolean;
   loading: boolean;
   onChange: (value: string) => void;
 }) {
@@ -160,7 +158,10 @@ function LanguageSelector({
   };
 
   return (
-    <SettingsRow label={label}>
+    <SettingsRow
+      label={label}
+      description="Auto reuses this title's remembered choice, or lets the player choose."
+    >
       <Popover
         open={open}
         onOpenChange={(next) => {
@@ -173,7 +174,7 @@ function LanguageSelector({
           <Button
             variant='outline'
             aria-label={`${label}: ${valueLabel}`}
-            disabled={disabled}
+            disabled={loading}
             className={cn(
               'h-9 w-52 min-w-0 max-w-full justify-between gap-2 px-3 text-[13px] shadow-none',
               SETTINGS_OUTLINE_BUTTON_CLASS,
@@ -319,7 +320,6 @@ function PlaybackLanguageConfig() {
         value={globalPlaybackLanguagePreferences?.preferredAudioLanguage ?? ''}
         kind='audio'
         options={options}
-        disabled={loading}
         loading={loading}
         onChange={(value) => handleLanguageChange('audio', value)}
       />
@@ -328,7 +328,6 @@ function PlaybackLanguageConfig() {
         value={globalPlaybackLanguagePreferences?.preferredSubtitleLanguage ?? ''}
         kind='subtitle'
         options={options}
-        disabled={loading}
         loading={loading}
         onChange={(value) => handleLanguageChange('sub', value)}
       />
@@ -572,7 +571,7 @@ export function PlaybackSettings() {
               />
               <SecondsSelect
                 label='Controls after keyboard input'
-                description='Mouse movement hides controls after 0.5 seconds of inactivity.'
+                description='Mouse movement hides controls after 1.2 seconds of inactivity.'
                 seconds={preferences.controlsHideDelayMs / 1000}
                 options={CONTROLS_HIDE_SECONDS}
                 disabled={isHydrating}

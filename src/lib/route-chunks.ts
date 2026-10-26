@@ -6,3 +6,8 @@ export const routeChunks = {
   calendar: () => import('@/pages/calendar'),
   player: () => import('@/pages/player'),
 };
+
+/** Kick the player chunk fetch early so launch is an instant Suspense hit. */
+export function warmPlayerChunk() {
+  void routeChunks.player().catch(() => undefined);
+}

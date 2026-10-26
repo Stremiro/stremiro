@@ -8,12 +8,11 @@ import {
   ListVideo,
   Loader2,
   Play,
-  Plus,
   RotateCcw,
   Star,
 } from 'lucide-react';
-import { useEffect, useLayoutEffect, useRef, useState } from 'react';
-import { Link, useLocation, useNavigationType, useParams } from 'react-router';
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { Link, NavigationType, useLocation, useNavigationType, useParams } from 'react-router';
 import {
   EpisodeCard,
   type EpisodeEmphasis,
@@ -32,7 +31,7 @@ import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
 import { ScrollToTop } from '@/components/scroll-to-top';
 import { StreamSelector } from '@/components/stream-selector';
-import { Button } from '@/components/ui/button';
+import { Button, CopyButton, SaveIndicator } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { SearchInput } from '@/components/ui/search-input';
 import { DetailsSkeleton, Skeleton } from '@/components/ui/skeleton';
@@ -62,8 +61,10 @@ import {
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
 } from '@/lib/api';
+import { buildTitleShareLink } from '@/lib/app-links';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { claimDetailsHero } from '@/lib/navigation';
+import { copyText } from '@/lib/notify';
 import {
   episodeProgressKey,
   formatWatchRemaining,
@@ -95,7 +96,7 @@ const EPISODE_SKELETON_TILES = [1, 2, 3, 4, 5, 6, 7, 8, 9].map((index) => (
 ));
 
 const ICON_ACTION_CLASS =
-  'flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.12] bg-white/[0.06] text-white/70 transition-colors duration-150 hover:border-white/[0.2] hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-default';
+  'group/action flex h-11 w-11 shrink-0 items-center justify-center rounded-lg border border-white/[0.1] bg-white/[0.06] text-white/75 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] transition-[background-color,border-color,color] duration-150 ease-out hover:border-white/[0.18] hover:bg-white/[0.1] hover:text-white not-aria-disabled:active:bg-white/[0.14] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/50 aria-disabled:cursor-default motion-reduce:transition-none';
 
 const EPISODE_PAGE_BUTTON_CLASS =
   'flex h-9 w-9 items-center justify-center rounded-md border border-white/[0.08] bg-white/[0.03] text-zinc-300 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.08] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default aria-disabled:opacity-35';
@@ -114,6 +115,18 @@ function locationCoordinate(state: unknown, key: 'season' | 'episode'): number |
 const EMPTY_CREDIT_NAMES: string[] = [];
 const getEpisodeListId = createObjectIdentity();
 
+function CreditLink({ name }: { name: string }) {
+  return (
+    <Link
+      to={`/search?q=${encodeURIComponent(name)}`}
+      title={`Search for ${name}`}
+      className='rounded-sm text-white/80 decoration-white/30 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+    >
+      {name}
+    </Link>
+  );
+}
+
 function DetailsCredits({
   cast = EMPTY_CREDIT_NAMES,
   directors = EMPTY_CREDIT_NAMES,
@@ -121,69 +134,76 @@ function DetailsCredits({
   if (!cast.length && !directors.length) return null;
 
   return (
-    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-4 gap-y-1.5 text-[13px] leading-5'>
-      {cast.length > 0 && (
-        <>
-          <dt className='text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'>
-            Starring
-          </dt>
-          <dd className='flex min-w-0 items-baseline gap-2 text-white/80'>
-            <span className='min-w-0 truncate' title={cast.join(' · ')}>
-              {cast.slice(0, 4).join(' · ')}
-            </span>
-            {cast.length > 4 && (
-              <Popover>
-                <PopoverTrigger asChild>
-                  <button
-                    type='button'
-                    aria-label='Full cast'
-                    className='inline-flex min-h-6 shrink-0 items-center rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[11px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-                  >
-                    +{cast.length - 4}
-                  </button>
-                </PopoverTrigger>
-                <PopoverContent
-                  align='start'
-                  sideOffset={8}
-                  tabIndex={0}
-                  aria-labelledby='details-full-cast-heading'
-                  className='max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
-                >
-                  <h2
-                    id='details-full-cast-heading'
-                    className='mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'
-                  >
-                    Full cast
-                  </h2>
-                  <ul
-                    aria-labelledby='details-full-cast-heading'
-                    className='grid grid-cols-2 gap-x-4 gap-y-2'
-                  >
-                    {cast.map((name) => (
-                      <li
-                        key={name}
-                        className='min-w-0 wrap-break-word text-[13px] leading-5 text-white/80'
-                      >
-                        {name}
-                      </li>
-                    ))}
-                  </ul>
-                </PopoverContent>
-              </Popover>
+    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2 text-[13px] leading-6 sm:gap-x-4'>
+      {[cast, directors].map((names, groupIndex) => {
+        if (!names.length) return null;
+        const isCast = groupIndex === 0;
+        const links = (isCast ? names.slice(0, 4) : names).map((name, index) => (
+          <span key={name}>
+            {index > 0 && (
+              <span aria-hidden='true' className='text-zinc-500'>
+                {' '}
+                ·{' '}
+              </span>
             )}
-          </dd>
-        </>
-      )}
-      {directors.length > 0 && (
-        <>
-          <dt className='text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'>
-            {directors.length === 1 ? 'Director' : 'Directors'}
-          </dt>
-          <dd className='min-w-0 truncate text-white/80' title={directors.join(' · ')}>
-            {directors.join(' · ')}
-          </dd>
-        </>
-      )}
+            <CreditLink name={name} />
+          </span>
+        ));
+        return (
+          <Fragment key={isCast ? 'cast' : 'directors'}>
+            <dt className='text-[12px] font-medium text-zinc-400'>
+              {isCast ? 'Starring' : names.length === 1 ? 'Director' : 'Directors'}
+            </dt>
+            <dd
+              className={
+                isCast ? 'flex min-w-0 items-baseline gap-2 text-white/80' : 'min-w-0 break-words'
+              }
+            >
+              {isCast ? <span className='min-w-0 break-words'>{links}</span> : links}
+              {isCast && names.length > 4 && (
+                <Popover>
+                  <PopoverTrigger asChild>
+                    <button
+                      type='button'
+                      aria-label='Full cast'
+                      className='inline-flex min-h-6 shrink-0 items-center rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[11px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+                    >
+                      +{names.length - 4}
+                    </button>
+                  </PopoverTrigger>
+                  <PopoverContent
+                    align='start'
+                    sideOffset={8}
+                    tabIndex={0}
+                    aria-labelledby='details-full-cast-heading'
+                    className='max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
+                  >
+                    <h2
+                      id='details-full-cast-heading'
+                      className='mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'
+                    >
+                      Full cast
+                    </h2>
+                    <ul
+                      aria-labelledby='details-full-cast-heading'
+                      className='grid grid-cols-2 gap-x-4 gap-y-2'
+                    >
+                      {names.map((name) => (
+                        <li
+                          key={name}
+                          className='min-w-0 wrap-break-word text-[13px] leading-5 text-white/80'
+                        >
+                          <CreditLink name={name} />
+                        </li>
+                      ))}
+                    </ul>
+                  </PopoverContent>
+                </Popover>
+              )}
+            </dd>
+          </Fragment>
+        );
+      })}
     </dl>
   );
 }
@@ -245,6 +265,7 @@ function DetailsContent() {
 
   // The route id lets history load without waiting for addon metadata.
   const titleProgressQuery = useTitleWatchProgress(baseRouteId, {
+    mediaType: baseRouteType,
     staleTime: WATCH_HISTORY_VIEW_STALE_TIME_MS,
   });
   const {
@@ -306,6 +327,7 @@ function DetailsContent() {
     selectedTrailerId,
     selectTrailer,
     openTrailer,
+    warmTrailer,
     onTrailerOpenChange,
   } = useDetailsTrailer(item);
   const heroBackdropSrc = item?.backdrop || item?.poster;
@@ -503,7 +525,7 @@ function DetailsContent() {
   // Once every aired episode is watched the season action reverses; a pending
   // mutation keeps its own direction so the label can't flip mid-write.
   const seasonActionMarksWatched = markSeasonWatched.isPending
-    ? markSeasonWatched.variables?.watched !== false
+    ? markSeasonWatched.variables.watched
     : !airStatesReady || seasonWatchTargets.length > 0;
   const seasonActionTargets = seasonActionMarksWatched ? seasonWatchTargets : seasonUnwatchTargets;
 
@@ -548,7 +570,6 @@ function DetailsContent() {
     streamTarget,
     handleWatchMovie,
     openEpisodeStreamSelector,
-    openEpisodeSelectorForCoordinates,
     handleSelectorClose,
     handleSelectorClosed,
     getStreamTargetStartTime,
@@ -641,22 +662,6 @@ function DetailsContent() {
   const upNextTarget = hasNoSeriesResume ? upNextEpisode : null;
   const primaryActionSelectsEpisode = hasNoSeriesResume && !upNextTarget && !upNextPending;
 
-  // "Start over" replays the resume target from the beginning: `startTime: 1`
-  // rides the player contract — under MIN_RESUME_POSITION_SECS means no seek.
-  const handleStartOver = () => {
-    if (!item || !primaryPlaybackHistoryEntry) return;
-    const startTime = 1;
-
-    if (item.type === 'movie') {
-      handleWatchMovie(startTime);
-      return;
-    }
-
-    const { absolute_season: season, absolute_episode: episode } = primaryPlaybackHistoryEntry;
-    if (season == null || episode == null) return;
-    openEpisodeSelectorForCoordinates(season, episode, startTime);
-  };
-
   const handleRetryDetails = async () => {
     if (!baseRouteId || isFetching) return;
     const filters = { queryKey: detailsQueryKey(baseRouteType, baseRouteId) };
@@ -671,13 +676,14 @@ function DetailsContent() {
     const landing = autoCenterNavigationRef.current;
     if (landing.key !== location.key) {
       // The player's POP handoff clears route state with a same-page REPLACE.
-      if (navigationType !== 'REPLACE') {
+      if (navigationType !== NavigationType.Replace) {
         landing.type = navigationType;
         centeredEpisodeLandingRef.current = null;
       }
       landing.key = location.key;
     }
-    if (landing.type === 'POP' || locationSeason === null || locationEpisode === null) return;
+    if (landing.type === NavigationType.Pop || locationSeason === null || locationEpisode === null)
+      return;
     if (selectedSeason !== locationSeason) return;
     if (isPlaceholderData || episodeSearch.trim()) return;
     const episodeButton = document.querySelector<HTMLButtonElement>(
@@ -755,7 +761,7 @@ function DetailsContent() {
         ) : (
           <Button
             variant='outline'
-            onClick={handleRetryDetails}
+            onClick={() => void handleRetryDetails()}
             aria-disabled={isFetching || undefined}
             aria-busy={isFetching}
             className='mt-1 h-9 rounded-md px-4 aria-disabled:cursor-wait aria-disabled:opacity-50'
@@ -825,7 +831,7 @@ function DetailsContent() {
                     ? "You're offline. Reconnect to load the rest of this title."
                     : "Couldn't refresh this title. Showing the saved details."
                 }
-                onRetry={handleRetryDetails}
+                onRetry={() => void handleRetryDetails()}
                 isRetrying={isFetching}
               />
             )}
@@ -924,7 +930,7 @@ function DetailsContent() {
                   id='details-description'
                   ref={descriptionRef}
                   className={cn(
-                    'text-[14px] md:text-[15px] text-white/75 max-w-2xl leading-relaxed font-normal',
+                    'max-w-2xl text-pretty break-words text-[14px] font-normal leading-6 text-zinc-300 md:text-[15px] md:leading-[1.7]',
                     !descriptionExpanded && 'line-clamp-3 md:line-clamp-4',
                   )}
                 >
@@ -961,7 +967,7 @@ function DetailsContent() {
                     else void primaryPlayback.handlePrimaryAction();
                   }}
                 >
-                  <span className='flex h-11 min-w-40 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black transition-[background-color,opacity] duration-150 group-hover:bg-zinc-200 group-aria-disabled:opacity-80'>
+                  <span className='flex h-11 min-w-40 items-center justify-center gap-2 rounded-lg bg-white px-5 text-black shadow-[0_1px_2px_rgb(0_0_0/0.35),0_6px_18px_-10px_rgb(255_255_255/0.16),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] transition-[background-color,box-shadow,opacity] duration-200 ease-out group-hover:bg-zinc-100 group-hover:shadow-[0_1px_2px_rgb(0_0_0/0.35),0_8px_22px_-10px_rgb(255_255_255/0.22),inset_0_1px_0_rgb(255_255_255/0.9),inset_0_-1px_0_rgb(0_0_0/0.08)] group-not-aria-disabled:group-active:bg-zinc-200 group-not-aria-disabled:group-active:shadow-[0_1px_1px_rgb(0_0_0/0.3),inset_0_1px_2px_rgb(0_0_0/0.08)] group-aria-disabled:opacity-80 motion-reduce:transition-none'>
                     {primaryPlayback.showResolvingFeedback ? (
                       <Loader2
                         aria-hidden='true'
@@ -972,7 +978,10 @@ function DetailsContent() {
                     ) : primaryActionSelectsEpisode ? (
                       <ListVideo aria-hidden='true' className='w-5 h-5' />
                     ) : (
-                      <Play aria-hidden='true' className='w-5 h-5 fill-current' />
+                      <Play
+                        aria-hidden='true'
+                        className='w-5 h-5 fill-current transition-transform duration-200 ease-out group-hover:translate-x-0.5 motion-reduce:transition-none'
+                      />
                     )}
                     <span className='text-sm font-semibold tracking-tight'>
                       {historyUnavailable
@@ -1020,20 +1029,7 @@ function DetailsContent() {
                             'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                         )}
                       >
-                        <span aria-hidden='true' className='relative size-5 shrink-0'>
-                          <Plus
-                            className={cn(
-                              'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                              isInLibrary ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
-                            )}
-                          />
-                          <Check
-                            className={cn(
-                              'absolute inset-0 size-5 transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-                              isInLibrary ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
-                            )}
-                          />
-                        </span>
+                        <SaveIndicator saved={isInLibrary} className='size-5' />
                         <span className='min-w-9 text-left text-[13px] font-medium'>
                           {isInLibrary ? 'Saved' : 'Save'}
                         </span>
@@ -1077,32 +1073,31 @@ function DetailsContent() {
                       aria-expanded={trailerOpen}
                       title='Trailer'
                       className={cn(ICON_ACTION_CLASS, 'w-auto gap-2 px-3')}
+                      onPointerEnter={warmTrailer}
+                      onFocus={warmTrailer}
                       onClick={openTrailer}
                     >
-                      <Clapperboard className='w-5 h-5' />
+                      <Clapperboard
+                        aria-hidden='true'
+                        className='w-5 h-5 origin-bottom-left transition-transform duration-200 ease-out group-hover/action:-rotate-12 motion-reduce:transition-none'
+                      />
                       <span className='text-[13px] font-medium'>Trailer</span>
                     </button>
                   )}
 
-                  {/* History resolves over IPC after first paint — the trailing
-                      slot keeps its late arrival from shoving the other buttons. */}
-                  {primaryPlaybackHistoryEntry && (
-                    <button
-                      type='button'
-                      aria-label='Start over from the beginning'
-                      aria-disabled={primaryActionPending || undefined}
-                      title='Start over'
-                      className={cn(
-                        ICON_ACTION_CLASS,
-                        'animate-in fade-in duration-200 motion-reduce:animate-none',
-                      )}
-                      onClick={() => {
-                        if (!primaryActionPending) handleStartOver();
-                      }}
-                    >
-                      <RotateCcw className='w-5 h-5' />
-                    </button>
-                  )}
+                  <CopyButton
+                    key={`${baseRouteType}:${baseRouteId}`}
+                    aria-label='Copy link to this title'
+                    title='Copy link'
+                    className={cn(ICON_ACTION_CLASS, '[&>span]:size-5')}
+                    onCopy={() =>
+                      copyText(
+                        buildTitleShareLink(baseRouteType, baseRouteId),
+                        'Title link copied',
+                        'Could not copy title link',
+                      )
+                    }
+                  />
                 </div>
 
                 {resumeRemaining && (
@@ -1134,6 +1129,14 @@ function DetailsContent() {
                   className='text-[13px] font-semibold text-zinc-200'
                 >
                   My status
+                  {watchStatusMutation.isPending && (
+                    <span
+                      role='status'
+                      className='delayed-fade-in ml-2 text-[11px] font-normal text-zinc-400 motion-reduce:animate-none'
+                    >
+                      Saving…
+                    </span>
+                  )}
                 </span>
                 <div
                   className={DETAILS_STATUS_STRIP_CLASS}
@@ -1162,20 +1165,28 @@ function DetailsContent() {
                           }
                         }}
                         className={cn(
-                          'flex h-9 shrink-0 items-center gap-2 whitespace-nowrap rounded-lg border px-2.5 text-[13px] font-medium transition-colors duration-150 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none',
+                          'group/status flex min-h-9 min-w-0 shrink-0 items-center gap-1.5 rounded-lg border px-2 py-1.5 text-[12px] font-medium transition-[background-color,border-color,color,transform] duration-150 ease-out not-aria-disabled:active:scale-[0.98] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 aria-disabled:cursor-default sm:gap-2 sm:px-2.5 sm:text-[13px] motion-reduce:transition-none motion-reduce:active:scale-100',
                           isActive
-                            ? cn('text-white', colors.bg, colors.border)
-                            : 'border-transparent text-zinc-300 hover:bg-white/[0.05] hover:text-white',
+                            ? cn(
+                                'text-white shadow-[inset_0_1px_0_rgb(255_255_255/0.07)]',
+                                colors.bg,
+                                colors.border,
+                              )
+                            : 'border-transparent text-zinc-300 not-aria-disabled:hover:border-white/10 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white',
                         )}
                       >
                         <WatchStatusIcon
                           status={status}
                           className={cn(
-                            'size-4 transition-opacity duration-150',
-                            isActive || !detailsWatchStatus ? 'opacity-100' : 'opacity-70',
+                            'size-4 transition-opacity duration-150 motion-reduce:transition-none',
+                            isActive || !detailsWatchStatus
+                              ? 'opacity-100'
+                              : 'opacity-70 group-not-aria-disabled/status:group-hover/status:opacity-100',
                           )}
                         />
-                        {WATCH_STATUS_LABELS[status]}
+                        <span className='min-w-0 whitespace-normal text-left leading-4 sm:whitespace-nowrap'>
+                          {WATCH_STATUS_LABELS[status]}
+                        </span>
                       </button>
                     );
                   })}

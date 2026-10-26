@@ -1,8 +1,7 @@
-import { safeInvoke } from '@/lib/api-core';
-import { createDiscoveryApi } from '@/lib/api-discovery';
-import { createPlaybackApi } from '@/lib/api-playback';
-import { createStoreApi } from '@/lib/api-store';
-import type { PlayerRouteState } from '@/lib/player-navigation';
+import { discoveryApi } from '@/lib/api-discovery';
+import { playbackApi } from '@/lib/api-playback';
+import { storeApi } from '@/lib/api-store';
+import type { PlayerRouteMediaType, PlayerRouteState } from '@/lib/player-navigation';
 import type { PlayerStreamRequest, PreferredStreamIdentity } from '@/lib/resolve-player-stream';
 import type { StreamRankingOptions } from '@/lib/stream-ranking-cache-key';
 
@@ -283,6 +282,7 @@ export interface StreamSelectorStats {
 }
 
 export interface StreamSelectorData {
+  hasEnabledAddons: boolean;
   streams: AddonStream[];
   stats: StreamSelectorStats;
   sourceSummaries: StreamSourceSummary[];
@@ -379,6 +379,17 @@ export interface AddonUrlInspection {
   duplicateOf?: string;
 }
 
+export interface AddonShareLink {
+  link: string;
+  /** The URL carries per-user addon setup, which can include API keys. */
+  includesConfig: boolean;
+}
+
+/** A `stremiro://` link Rust validated: it opens a title or prefills the addon add box. */
+export type AppLink =
+  | { kind: 'addon'; url: string }
+  | { kind: 'title'; mediaType: PlayerRouteMediaType; mediaId: string };
+
 export type AddonResourceKind = 'catalog' | 'meta' | 'stream' | 'subtitles';
 
 /** User-configured addon source. `displayUrl` is Rust's credential-masked URL. */
@@ -422,6 +433,7 @@ export interface AccentTargets {
   progress: boolean;
   artwork: boolean;
   skip: boolean;
+  seekbar: boolean;
 }
 
 export interface LocalProfile {
@@ -666,11 +678,9 @@ export interface HistoryPlaybackPlan {
 }
 
 export const api = {
-  ...createDiscoveryApi({
-    safeInvoke,
-  }),
-  ...createPlaybackApi({ safeInvoke }),
-  ...createStoreApi({ safeInvoke }),
+  ...discoveryApi,
+  ...playbackApi,
+  ...storeApi,
 };
 
 export interface DataStats {
@@ -735,10 +745,9 @@ export interface TitleWatchProgress {
   movieResumeEntry?: WatchProgress;
   /** Set only when nothing is resumable; carries the furthest watched episode (Home's Up Next anchor). */
   upNextSource?: WatchProgress;
-  /** Latest per-kind history heads and latest overall (`last_watched` DESC). */
+  /** Latest per-kind history heads (`last_watched` DESC). */
   latestSeriesEntry?: WatchProgress;
   latestMovieEntry?: WatchProgress;
-  latestEntry?: WatchProgress;
 }
 
 /** Details-route prefetch in one IPC; `details` is the card shape (no episodes), null on fetch failure. */
@@ -765,4 +774,6 @@ export interface SkipSegment {
 /** SkipDB lookup payload for a title or episode. */
 export interface SkipTimesResult {
   segments: SkipSegment[];
+  /** Seconds a manual "skip intro ~Xs" jumps when the episode has no usable intro. */
+  intro_estimate_secs?: number;
 }

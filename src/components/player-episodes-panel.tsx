@@ -38,6 +38,7 @@ import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
 import { useDebounce } from '@/hooks/use-debounce';
 import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
+import { useLocalDay } from '@/hooks/use-local-day';
 import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
@@ -100,7 +101,7 @@ interface PlayerEpisodesPanelProps {
 const EPISODE_ROW_ESTIMATE_PX = 84;
 const EPISODE_ROW_GAP_PX = 2;
 const SEASON_STEP_CLASS =
-  'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 disabled:cursor-default disabled:text-zinc-700 motion-reduce:transition-none';
+  'flex h-full w-7 cursor-pointer items-center justify-center text-zinc-400 outline-hidden transition-colors duration-120 not-aria-disabled:hover:text-white focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:text-zinc-700 motion-reduce:transition-none';
 const EPISODE_LIST_VIRTUALIZE_THRESHOLD = 40;
 
 // Memoized so playback ticks never re-render the episode list while the panel sits closed off-screen.
@@ -121,6 +122,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   onEpisodeSelect,
   onClose,
 }: PlayerEpisodesPanelProps) {
+  const localDay = useLocalDay();
   const spoilerProtection = useSpoilerProtection();
   const seasonEpisodes = useMemo(
     () => episodes.filter((ep) => ep.season === selectedSeason),
@@ -131,8 +133,8 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   // can't see or clear. The text is kept so it returns with the field on a searchable season.
   const searchVisible = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const {
-    effectiveEpisodeSearch,
-    filteredEpisodes: visibleEpisodes,
+    effectiveSearch: effectiveEpisodeSearch,
+    filteredItems: visibleEpisodes,
     isSearchPending,
     searchError,
     isSearchFetching,
@@ -239,7 +241,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   const renderEpisode = useCallback(
     (ep: Episode) => {
       const isCurrent = episodeMatchesCoordinates(ep, currentSeason, currentEpisode);
-      const airDate = formatAirDate(ep.releaseDate);
+      const airDate = formatAirDate(ep.releaseDate, localDay);
       // The Continue target gets Resume, never the already-marked Now playing row.
       const watchEntry = episodeProgressFor?.(ep);
       const isWatched = watchEntry?.is_watched === true;
@@ -354,6 +356,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
       currentSeason,
       episodeProgressFor,
       handleRowKeyDown,
+      localDay,
       onEpisodeSelect,
       resumeTarget,
       spoilerProtection,
@@ -421,8 +424,10 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 <button
                   type='button'
                   aria-label='Previous season'
-                  disabled={seasonIndex <= 0}
-                  onClick={() => onSeasonChange(seasons[seasonIndex - 1].number)}
+                  aria-disabled={seasonIndex <= 0 || undefined}
+                  onClick={() => {
+                    if (seasonIndex > 0) onSeasonChange(seasons[seasonIndex - 1].number);
+                  }}
                   className={SEASON_STEP_CLASS}
                 >
                   <ChevronLeft aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />
@@ -485,8 +490,11 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 <button
                   type='button'
                   aria-label='Next season'
-                  disabled={seasonIndex < 0 || seasonIndex >= seasons.length - 1}
-                  onClick={() => onSeasonChange(seasons[seasonIndex + 1].number)}
+                  aria-disabled={seasonIndex < 0 || seasonIndex >= seasons.length - 1 || undefined}
+                  onClick={() => {
+                    if (seasonIndex >= 0 && seasonIndex < seasons.length - 1)
+                      onSeasonChange(seasons[seasonIndex + 1].number);
+                  }}
                   className={SEASON_STEP_CLASS}
                 >
                   <ChevronRight aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.25} />

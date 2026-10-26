@@ -34,10 +34,13 @@ pub struct TrackLanguageSelectionResolution {
 }
 
 /// Settings, exact language tags, safe metadata tokens and mpv options share one table.
-struct SupportedLanguage {
+#[derive(Debug, Serialize)]
+pub struct SupportedLanguage {
     code: &'static str,
     label: &'static str,
+    #[serde(skip)]
     aliases: &'static [&'static str],
+    #[serde(skip)]
     exact_aliases: &'static [&'static str],
 }
 
@@ -212,21 +215,8 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
     },
 ];
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SupportedLanguageOption {
-    pub code: &'static str,
-    pub label: &'static str,
-}
-
-pub(crate) fn supported_language_options() -> Vec<SupportedLanguageOption> {
+pub(crate) fn supported_language_options() -> &'static [SupportedLanguage] {
     SUPPORTED_LANGUAGES
-        .iter()
-        .map(|language| SupportedLanguageOption {
-            code: language.code,
-            label: language.label,
-        })
-        .collect()
 }
 
 pub(crate) fn canonicalize_language_token(value: &str) -> Option<&'static str> {
@@ -618,21 +608,17 @@ fn find_track_by_language(
         return None;
     }
 
-    let mut best_track_id = None;
-    let mut best_score = -1;
-
-    for track in tracks {
-        let score = track_language_score(track, &candidates);
-
-        if score > 0
-            && (score > best_score || (score == best_score && Some(track.id) == selected_track_id))
-        {
-            best_score = score;
-            best_track_id = Some(track.id);
-        }
-    }
-
-    best_track_id
+    tracks
+        .iter()
+        .map(|track| (track, track_language_score(track, &candidates)))
+        .filter(|(_, score)| *score > 0)
+        .min_by_key(|(track, score)| {
+            (
+                std::cmp::Reverse(*score),
+                Some(track.id) != selected_track_id,
+            )
+        })
+        .map(|(track, _)| track.id)
 }
 
 pub(crate) fn resolve_preferred_track_selection(

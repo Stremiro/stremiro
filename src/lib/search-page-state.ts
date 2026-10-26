@@ -1,5 +1,4 @@
 import { foldAsciiCase } from '@/lib/api-cache';
-import type { BrowseGenres } from '@/lib/api';
 import { nonBlank } from '@/lib/utils';
 
 // `all` is a frontend-only facet: it browses the movie and series catalogs in
@@ -12,16 +11,6 @@ export type SearchFeed = 'popular' | 'featured' | 'new';
 
 function resolveSearchUrlType(value: string | null): SearchMediaType {
   return value === 'movie' || value === 'series' || value === 'anime' ? value : 'all';
-}
-
-/** Genre menu options per type tab. The `all` union is computed in the
-    backend payload (movie then series, first spelling wins) so the menu
-    never re-folds here. */
-export function searchGenreOptions(
-  browseGenres: BrowseGenres | undefined,
-  mediaType: SearchMediaType,
-): readonly string[] {
-  return browseGenres ? browseGenres[mediaType] : [];
 }
 
 function resolveSearchUrlFeed(value: string | null): SearchFeed {

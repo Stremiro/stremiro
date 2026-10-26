@@ -7,6 +7,7 @@ import { clearTimer, formatTime, isLocalMediaId } from '@/lib/utils';
 
 const RESUME_SEEK_MAX_ATTEMPTS = 6;
 const RESUME_SEEK_RETRY_DELAY_MS = 220;
+const RESUME_SEEK_SETTLE_TIMEOUT_MS = 1500;
 const RESUME_SEEK_SETTLE_TOLERANCE_SECS = 2;
 // Anti-flap hysteresis: fetched candidates only upgrade, never downgrade.
 const RESUME_FETCH_UPGRADE_MIN_DELTA_SECS = 8;
@@ -79,6 +80,7 @@ export function usePlayerResumeController({
   const automaticResumeCancelledRef = useRef(false);
   const resumeSeekAttemptsRef = useRef(0);
   const resumeSeekInFlightRef = useRef(false);
+  const resumeSeekSettleUntilRef = useRef(0);
   const resumeSeekRetryTimerRef = useRef<number | null>(null);
   const resumePausePendingRef = useRef(false);
   const resumeOsdShownRef = useRef(false);
@@ -128,6 +130,7 @@ export function usePlayerResumeController({
     async (resumeTime: number, didSeek: boolean) => {
       resumeAppliedRef.current = true;
       resumeSeekInFlightRef.current = false;
+      resumeSeekSettleUntilRef.current = 0;
       resumeSeekAttemptsRef.current = 0;
       clearResumeRetryTimer();
 
@@ -206,6 +209,11 @@ export function usePlayerResumeController({
     if (resumeSeekInFlightRef.current) {
       return;
     }
+    const settleRemaining = resumeSeekSettleUntilRef.current - performance.now();
+    if (settleRemaining > 0) {
+      scheduleResumeRetry(settleRemaining);
+      return;
+    }
 
     if (resumeSeekAttemptsRef.current >= RESUME_SEEK_MAX_ATTEMPTS) {
       await finalizeResume(resumeTime, false);
@@ -219,6 +227,9 @@ export function usePlayerResumeController({
     await (async () => {
       try {
         await seekAbsoluteSeconds(resumeTime);
+        if (resumeSessionEpochRef.current === seekEpoch) {
+          resumeSeekSettleUntilRef.current = performance.now() + RESUME_SEEK_SETTLE_TIMEOUT_MS;
+        }
       } catch {
         // MPV may reject early seeks before metadata is ready.
         if (import.meta.env.DEV) console.warn('[player] resume seek deferred');
@@ -245,7 +256,12 @@ export function usePlayerResumeController({
       return;
     }
 
-    scheduleResumeRetry(durationValue > 0 ? 140 : RESUME_SEEK_RETRY_DELAY_MS);
+    scheduleResumeRetry(
+      Math.max(
+        durationValue > 0 ? 140 : RESUME_SEEK_RETRY_DELAY_MS,
+        resumeSeekSettleUntilRef.current - performance.now(),
+      ),
+    );
   }, [
     clearResumeRetryTimer,
     currentTimeRef,
@@ -323,6 +339,7 @@ export function usePlayerResumeController({
     resumeAppliedRef.current = false;
     resumeSeekAttemptsRef.current = 0;
     resumeSeekInFlightRef.current = false;
+    resumeSeekSettleUntilRef.current = 0;
     resumePausePendingRef.current = false;
     resumeOsdShownRef.current = false;
     clearResumeRetryTimer();

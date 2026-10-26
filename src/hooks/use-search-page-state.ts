@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useLocation, useSearchParams } from 'react-router';
 
+import { isAppLinkText } from '@/lib/app-links';
 import {
   readSearchFacets,
   rememberSearchParams,
@@ -23,6 +24,7 @@ export function useSearchPageState() {
   const [reflectedQuery, setReflectedQuery] = useState<string | null>(null);
   const [isComposing, setIsComposing] = useState(false);
   const { query } = input;
+  const isLinkDraft = isAppLinkText(query);
 
   // Navigation is already committed input; don't debounce it or render the old query.
   if (input.urlQuery !== urlQuery) {
@@ -49,34 +51,36 @@ export function useSearchPageState() {
     [searchParams, setSearchParams],
   );
   const flushQuery = useCallback(() => {
-    if (isComposing || window.location.pathname !== pathname) return;
+    if (isComposing || isLinkDraft || window.location.pathname !== pathname) return;
     setReflectedQuery(trimmedQuery);
     updateSearchParams((params) => {
       if (trimmedQuery) params.set('q', trimmedQuery);
       else params.delete('q');
     });
-  }, [isComposing, pathname, trimmedQuery, updateSearchParams]);
+  }, [isComposing, isLinkDraft, pathname, trimmedQuery, updateSearchParams]);
 
   // Remember drafts immediately; commit typing without adding history.
   useEffect(() => {
     const rememberedParams = new URLSearchParams(searchParams);
-    if (query) rememberedParams.set('q', query);
-    else rememberedParams.delete('q');
+    if (!isLinkDraft) {
+      if (query) rememberedParams.set('q', query);
+      else rememberedParams.delete('q');
+    }
     rememberSearchParams(rememberedParams);
 
-    if (isComposing || trimmedQuery === urlQuery) return;
+    if (isComposing || isLinkDraft || trimmedQuery === urlQuery) return;
     if (!trimmedQuery) {
       flushQuery();
       return;
     }
     const timer = window.setTimeout(flushQuery, 180);
     return () => window.clearTimeout(timer);
-  }, [flushQuery, isComposing, query, searchParams, trimmedQuery, urlQuery]);
+  }, [flushQuery, isComposing, isLinkDraft, query, searchParams, trimmedQuery, urlQuery]);
 
   const handleTypeChange = (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
-    if (!isComposing) setReflectedQuery(trimmedQuery);
+    if (!isComposing && !isLinkDraft) setReflectedQuery(trimmedQuery);
     updateSearchParams((params) => {
-      if (!isComposing) {
+      if (!isComposing && !isLinkDraft) {
         if (trimmedQuery) params.set('q', trimmedQuery);
         else params.delete('q');
       }

@@ -131,35 +131,7 @@ pub struct AppUiPreferences {
 
 impl Default for AppUiPreferences {
     fn default() -> Self {
-        Self {
-            player_volume: PLAYER_VOLUME_DEFAULT,
-            player_speed: PLAYER_SPEED_DEFAULT,
-            audio_delay: 0.0,
-            night_mode: false,
-            spoiler_protection: false,
-            subtitle_delay: SUBTITLE_DELAY_DEFAULT,
-            subtitle_pos: SUBTITLE_POS_DEFAULT,
-            subtitle_scale: SUBTITLE_SCALE_DEFAULT,
-            subtitle_font: SubtitleFont::Default,
-            subtitle_color: SubtitleColor::White,
-            subtitle_edge: SubtitleEdge::Outline,
-            subtitle_bold: false,
-            subtitle_italic: false,
-            auto_load_addon_subtitles: true,
-            auto_play_next: false,
-            next_episode_countdown_secs: NEXT_EPISODE_COUNTDOWN_SECS_DEFAULT,
-            controls_hide_delay_ms: CONTROLS_HIDE_DELAY_MS_DEFAULT,
-            trailer_previews: true,
-            auto_skip_intro: false,
-            automatic_update_checks: true,
-            close_to_tray: false,
-            minimize_to_tray: false,
-            start_minimized: false,
-            startup_page: StartupPage::Home,
-            last_location: None,
-            player_keybindings: BTreeMap::new(),
-            recent_searches: Vec::new(),
-        }
+        normalize_stored_app_ui_preferences(StoredAppUiPreferences::default())
     }
 }
 
@@ -231,7 +203,7 @@ pub struct AppUiPreferencesPatch {
     pub recent_searches: Option<Vec<String>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct StoredAppUiPreferences {
     #[serde(default, deserialize_with = "lenient_option")]

@@ -17,7 +17,6 @@ import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query';
 import {
   ChevronRight,
-  Check,
   CheckSquare,
   GripVertical,
   ListPlus,
@@ -42,20 +41,14 @@ import {
   ViewToggle,
 } from '@/components/profile-library-controls';
 import { RetryBanner } from '@/components/retry-banner';
+import { SelectionCheck } from '@/components/watch-status-icon';
 import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
 import { useTitleSearch } from '@/hooks/use-item-search';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import {
   api,
@@ -316,18 +309,13 @@ const SortableItemRow = memo(function SortableItemRow({
             : 'border-white/5 bg-white/[0.02] hover:bg-white/5',
         )}
       >
-        <span
-          aria-hidden='true'
+        <SelectionCheck
+          selected={isSelected}
           className={cn(
-            'flex h-5 w-5 shrink-0 items-center justify-center rounded-md border',
             viewMode === 'grid' && 'absolute top-2 left-2 z-10',
-            isSelected
-              ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav)'
-              : 'border-white/25 bg-black/60 text-transparent',
+            !isSelected && 'bg-black/60',
           )}
-        >
-          <Check className='h-3 w-3' strokeWidth={3} />
-        </span>
+        />
         <PosterThumb
           poster={item.poster}
           title={item.title}
@@ -1165,44 +1153,34 @@ export function ListsManager() {
         />
       )}
 
-      <Dialog
+      <ConfirmDialog
         open={!!deleteTarget}
         onOpenChange={(open) => {
           if (!open) setDeleteTarget(null);
         }}
-      >
-        <DialogContent
-          ref={deleteDialogRef}
-          className='sm:max-w-sm'
-          onCloseAutoFocus={(event) => {
+        contentProps={{
+          ref: deleteDialogRef,
+          className: 'sm:max-w-sm',
+          onCloseAutoFocus: (event) => {
             if (restoreDeletedListFocus(true)) event.preventDefault();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Delete list</DialogTitle>
-            <DialogDescription>
-              {deleteTarget &&
-                `"${deleteTarget.name}"${deleteTarget.rules ? ' and its rules' : ''} will be deleted. Titles in your Library won't be removed. This can't be undone.`}
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter className='gap-2 sm:space-x-0'>
-            <Button variant='ghost' onClick={() => setDeleteTarget(null)}>
-              Cancel
-            </Button>
-            <Button
-              variant='destructive'
-              disabled={!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)}
-              onClick={() => {
-                if (!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)) return;
-                startDelete(deleteTarget.id);
-                setDeleteTarget(null);
-              }}
-            >
-              Delete
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          },
+        }}
+        title='Delete list'
+        description={
+          deleteTarget &&
+          `"${deleteTarget.name}"${deleteTarget.rules ? ' and its rules' : ''} will be deleted. Titles in your Library won't be removed. This can't be undone.`
+        }
+        footerClassName='gap-2 sm:space-x-0'
+        cancelProps={{ variant: 'ghost' }}
+        confirmProps={{ variant: 'destructive' }}
+        confirmLabel='Delete'
+        confirmDisabled={!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)}
+        onConfirm={() => {
+          if (!deleteTarget || pendingDeleteIds.includes(deleteTarget.id)) return;
+          startDelete(deleteTarget.id);
+          setDeleteTarget(null);
+        }}
+      />
     </div>
   );
 }

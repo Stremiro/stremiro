@@ -24,7 +24,7 @@ export function canonicalizeSearchText(value: string | undefined): string | unde
     end += character.length;
     if (++characters === SEARCH_QUERY_MAX_CHARS) break;
   }
-  return trimmed.slice(0, end);
+  return trimmed.slice(0, end).trimEnd();
 }
 
 // ASCII-only fold matching the backend's `to_ascii_lowercase`/`eq_ignore_ascii_case`.
@@ -32,55 +32,27 @@ export function foldAsciiCase(value: string): string {
   return value.replace(/[A-Z]/g, (character) => character.toLowerCase());
 }
 
-type TimedCacheEntry<T> = { value: T; expiresAt: number };
+const bestStreamValues = new Map<string, { value: BestResolvedStream; expiresAt: number }>();
+const bestStreamInFlight = new Map<string, Promise<BestResolvedStream>>();
 
-interface RequestCache<T> {
-  values: Map<string, TimedCacheEntry<T>>;
-  inFlight: Map<string, Promise<T>>;
-  clear: () => void;
-}
-
-function createRequestCache<T>(): RequestCache<T> {
-  const values = new Map<string, TimedCacheEntry<T>>();
-  const inFlight = new Map<string, Promise<T>>();
-
-  const cache: RequestCache<T> = {
-    values,
-    inFlight,
-    clear: () => {
-      // Dropping in-flight ownership stops late responses from repopulating.
-      values.clear();
-      inFlight.clear();
-    },
-  };
-
-  return cache;
-}
-
-export const bestStreamCache = createRequestCache<BestResolvedStream>();
-
-function pruneTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>) {
+function pruneTimedCache() {
   const now = performance.now();
 
-  for (const [key, entry] of cache) {
-    if (entry.expiresAt <= now) cache.delete(key);
+  for (const [key, entry] of bestStreamValues) {
+    if (entry.expiresAt <= now) bestStreamValues.delete(key);
   }
 
-  while (cache.size > API_CACHE_MAX_ENTRIES) {
-    const oldestKey = cache.keys().next().value as string | undefined;
+  while (bestStreamValues.size > API_CACHE_MAX_ENTRIES) {
+    const oldestKey = bestStreamValues.keys().next().value;
     if (!oldestKey) break;
-    cache.delete(oldestKey);
+    bestStreamValues.delete(oldestKey);
   }
 }
 
-function setTimedCache<T extends CacheLifetime>(
-  cache: Map<string, TimedCacheEntry<T>>,
-  key: string,
-  value: T,
-) {
+function setTimedCache(key: string, value: BestResolvedStream) {
   const ttlMs = value.cacheTtlMs;
   if (!Number.isFinite(ttlMs) || ttlMs <= 0) {
-    cache.delete(key);
+    bestStreamValues.delete(key);
     return;
   }
   // Reusing a resolved result must not restart its remaining pool lifetime.
@@ -90,17 +62,16 @@ function setTimedCache<T extends CacheLifetime>(
     expiration = { expiresAt, refreshAt: expiresAt };
     resultExpirations.set(value, expiration);
   }
-  cache.set(key, { value, expiresAt: expiration.expiresAt });
-  pruneTimedCache(cache);
+  bestStreamValues.set(key, { value, expiresAt: expiration.expiresAt });
+  pruneTimedCache();
 }
 
-// Miss is `undefined`, not falsy — valid falsy payloads (false, 0, '') still serve from cache.
-function getTimedCache<T>(cache: Map<string, TimedCacheEntry<T>>, key: string): T | undefined {
+function getTimedCache(key: string): BestResolvedStream | undefined {
   const now = performance.now();
-  const cached = cache.get(key);
+  const cached = bestStreamValues.get(key);
   if (!cached) return undefined;
   if (cached.expiresAt <= now) {
-    cache.delete(key);
+    bestStreamValues.delete(key);
     return undefined;
   }
 
@@ -129,19 +100,18 @@ const abortableInFlight = new WeakMap<Promise<unknown>, AbortableInFlight>();
  * Shares one in-flight load per key. With `abort`, the backend work is cancelled
  * once every caller that joined has aborted; any caller without a signal pins it.
  */
-export function runCachedRequest<T extends CacheLifetime>(
-  cache: RequestCache<T>,
+export function runBestStreamRequest(
   cacheKey: string,
-  load: (requestId?: string) => Promise<T>,
+  load: (requestId?: string) => Promise<BestResolvedStream>,
   abort?: CachedRequestAbort,
-): Promise<T> {
+): Promise<BestResolvedStream> {
   if (abort?.signal.aborted) return Promise.reject(abort.signal.reason);
-  const cached = getTimedCache(cache.values, cacheKey);
+  const cached = getTimedCache(cacheKey);
   if (cached !== undefined) {
     return Promise.resolve(cached);
   }
 
-  let request = cache.inFlight.get(cacheKey);
+  let request = bestStreamInFlight.get(cacheKey);
   if (!request) {
     const abortable: AbortableInFlight | undefined = abort && {
       requestId: crypto.randomUUID(),
@@ -161,18 +131,18 @@ export function runCachedRequest<T extends CacheLifetime>(
           });
         }
         // Only the key's current owner publishes — a clear/prime since request start revokes it.
-        if (cache.inFlight.get(cacheKey) === started) {
-          setTimedCache(cache.values, cacheKey, result);
+        if (bestStreamInFlight.get(cacheKey) === started) {
+          setTimedCache(cacheKey, result);
         }
         return result;
       })
       .finally(() => {
         if (abortable) abortable.done = true;
-        if (cache.inFlight.get(cacheKey) === started) {
-          cache.inFlight.delete(cacheKey);
+        if (bestStreamInFlight.get(cacheKey) === started) {
+          bestStreamInFlight.delete(cacheKey);
         }
       });
-    cache.inFlight.set(cacheKey, started);
+    bestStreamInFlight.set(cacheKey, started);
     if (abortable) abortableInFlight.set(started, abortable);
     request = started;
   }
@@ -182,18 +152,17 @@ export function runCachedRequest<T extends CacheLifetime>(
     if (abortable) abortable.pinned = true;
     return request;
   }
-  return joinAbortable(cache, cacheKey, request, abortable, abort);
+  return joinAbortable(cacheKey, request, abortable, abort);
 }
 
-function joinAbortable<T>(
-  cache: RequestCache<T>,
+function joinAbortable(
   cacheKey: string,
-  request: Promise<T>,
+  request: Promise<BestResolvedStream>,
   abortable: AbortableInFlight | undefined,
   { signal, cancel }: CachedRequestAbort,
-): Promise<T> {
+): Promise<BestResolvedStream> {
   if (abortable) abortable.waiting += 1;
-  return new Promise<T>((resolve, reject) => {
+  return new Promise<BestResolvedStream>((resolve, reject) => {
     const onAbort = () => {
       reject(signal.reason);
       if (!abortable) return;
@@ -202,7 +171,7 @@ function joinAbortable<T>(
       queueMicrotask(() => {
         if (abortable.waiting > 0 || abortable.pinned || abortable.done) return;
         abortable.done = true;
-        if (cache.inFlight.get(cacheKey) === request) cache.inFlight.delete(cacheKey);
+        if (bestStreamInFlight.get(cacheKey) === request) bestStreamInFlight.delete(cacheKey);
         cancel(abortable.requestId);
       });
     };
@@ -221,13 +190,9 @@ function joinAbortable<T>(
 }
 
 /** Seeds a known result and revokes any older in-flight publisher for the key. */
-export function primeCachedRequest<T extends CacheLifetime>(
-  cache: RequestCache<T>,
-  cacheKey: string,
-  value: T,
-): void {
-  cache.inFlight.delete(cacheKey);
-  setTimedCache(cache.values, cacheKey, value);
+export function primeBestStreamRequest(cacheKey: string, value: BestResolvedStream): void {
+  bestStreamInFlight.delete(cacheKey);
+  setTimedCache(cacheKey, value);
 }
 
 // Streaming writes always clear the best-stream cache — server re-ranks/cooldowns must not be re-served from TTL.
@@ -236,7 +201,9 @@ export function withStreamingCacheClear<T>(request: Promise<T>): Promise<T> {
 }
 
 export function clearProviderDataCaches() {
-  bestStreamCache.clear();
+  // Dropping in-flight ownership stops late responses from repopulating.
+  bestStreamValues.clear();
+  bestStreamInFlight.clear();
 }
 
 export function buildStreamCacheKey(

@@ -4,7 +4,11 @@ import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import { api, type WatchProgressSave } from '@/lib/api';
 import { getWatchProgressEpoch } from '@/lib/api-cache';
 import { registerPendingAppWriteFlusher, trackPendingAppWrite } from '@/lib/pending-app-writes';
-import { titleWatchProgressQueryKey } from '@/lib/query-invalidation';
+import {
+  invalidateQuery,
+  RESUME_RAIL_QUERY_KEY,
+  titleWatchProgressQueryKey,
+} from '@/lib/query-invalidation';
 import { isLocalMediaId } from '@/lib/utils';
 
 interface UsePlaybackProgressPersistenceArgs {
@@ -48,7 +52,11 @@ export function usePlaybackProgressPersistence({
   } = stream;
   const lastPlayingStateRef = useRef(isPlaying);
   const saveQueueRef = useRef<Promise<void>>(Promise.resolve());
-  const pendingSaveRef = useRef<{ fingerprint: string; operation: Promise<void> } | null>(null);
+  const pendingSaveRef = useRef<{
+    fingerprint: string;
+    operation: Promise<void>;
+    refreshRail: boolean;
+  } | null>(null);
   const lastSavedFingerprintRef = useRef<string | null>(null);
   const completedRef = useRef(false);
 
@@ -129,6 +137,7 @@ export function usePlaybackProgressPersistence({
         return saveQueueRef.current;
       }
       if (pendingSaveRef.current?.fingerprint === fingerprint) {
+        if (!skipUnchanged) pendingSaveRef.current.refreshRail = true;
         return pendingSaveRef.current.operation;
       }
       const operation = saveQueueRef.current.then(async () => {
@@ -147,8 +156,11 @@ export function usePlaybackProgressPersistence({
           predicate: (query) => query.state.data === undefined,
         });
         lastSavedFingerprintRef.current = fingerprint;
+        clearPendingSave();
+        if (pendingSave.refreshRail) void invalidateQuery(queryClient, [RESUME_RAIL_QUERY_KEY]);
       });
-      pendingSaveRef.current = { fingerprint, operation };
+      const pendingSave = { fingerprint, operation, refreshRail: !skipUnchanged };
+      pendingSaveRef.current = pendingSave;
       const clearPendingSave = () => {
         if (pendingSaveRef.current?.operation === operation) pendingSaveRef.current = null;
       };

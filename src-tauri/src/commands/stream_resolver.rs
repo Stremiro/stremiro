@@ -104,7 +104,6 @@ fn validate_probe_content_type(headers: &reqwest::header::HeaderMap) -> Result<(
     if media_type.eq_ignore_ascii_case(b"text/html")
         || media_type.eq_ignore_ascii_case(b"application/xhtml+xml")
         || media_type.eq_ignore_ascii_case(b"application/json")
-        || media_type.eq_ignore_ascii_case(b"application/x-bittorrent")
     {
         return Err("Direct stream probe returned HTML or JSON instead of media.".to_string());
     }
@@ -313,16 +312,14 @@ fn format_mpv_http_header_fields(headers: &[(String, String)]) -> String {
 }
 
 fn build_resolved_direct_stream(
-    direct_url: &str,
+    initial: &reqwest::Url,
     final_url: String,
     request_headers: &[(String, String)],
 ) -> Result<ResolvedStream, String> {
-    let initial =
-        reqwest::Url::parse(direct_url).map_err(|_| "Invalid direct stream URL.".to_string())?;
     let landed = parse_playback_url(&final_url)
         .ok_or_else(|| "Invalid or oversized resolved stream URL.".to_string())?;
     let request_headers =
-        if crate::providers::fetch_policy::same_origin_for_proxy_headers(&initial, &landed) {
+        if crate::providers::fetch_policy::same_origin_for_proxy_headers(initial, &landed) {
             request_headers
         } else {
             &[]
@@ -347,7 +344,7 @@ pub(crate) async fn resolve_stream_inner(
             rate_limited: error.rate_limited,
         })?;
 
-    build_resolved_direct_stream(url.as_str(), final_url, request_headers).map_err(ProbeError::from)
+    build_resolved_direct_stream(url, final_url, request_headers).map_err(ProbeError::from)
 }
 
 #[cfg(test)]

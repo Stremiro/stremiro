@@ -46,6 +46,11 @@ export const TINT_TARGETS: ReadonlyArray<{
     description: 'Continue-watching and episode progress.',
   },
   {
+    field: 'seekbar',
+    label: 'Player seekbar',
+    description: 'Played bar and playhead in the player. Off stays white.',
+  },
+  {
     field: 'artwork',
     label: 'Artwork tints',
     description: 'Hero and backdrop gradients.',

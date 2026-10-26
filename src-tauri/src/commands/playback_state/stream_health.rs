@@ -12,7 +12,7 @@ use crate::commands::streaming_helpers::{
 use crate::commands::{now_unix_millis, DurableStore};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use tauri::AppHandle;
 
 pub(super) const PLAYBACK_SOURCE_HEALTH_INDEX_KEY: &str = "playback_source_health_index";
@@ -394,20 +394,6 @@ pub(super) fn upsert_source_health_snapshot(
     )
 }
 
-/// Failed outcomes keep the family's verified attribution; a verified outcome with no resolvable instance clears it.
-pub(super) fn update_verified_family_source_id(
-    snapshot: &mut PlaybackStreamFamilySnapshot,
-    resolved_source_id: Option<String>,
-    outcome: PlaybackStreamOutcomeKind,
-) {
-    if matches!(outcome, PlaybackStreamOutcomeKind::Verified) {
-        snapshot.source_id = resolved_source_id
-            .as_deref()
-            .and_then(normalize_source_id)
-            .map(str::to_string);
-    }
-}
-
 /// `stream_family` and `resolved_source_id` arrive normalized by the caller;
 /// remaining raw fields come straight off the report.
 pub(super) fn upsert_stream_family_snapshot(
@@ -429,10 +415,10 @@ pub(super) fn upsert_stream_family_snapshot(
         |snapshot| {
             // `|` is legal inside a media id, so the body records the owning scope — key-prefix checks can't prove title.
             snapshot.scope_key = Some(scope_key.to_string());
-            update_verified_family_source_id(snapshot, resolved_source_id, report.outcome);
 
             match report.outcome {
                 PlaybackStreamOutcomeKind::Verified => {
+                    snapshot.source_id = resolved_source_id;
                     snapshot.last_success_at = Some(report.timestamp_ms);
                     snapshot.last_success_season = report.season;
                     snapshot.last_success_episode = report.episode;
@@ -566,25 +552,6 @@ fn prune_stale_stream_family_entries(store: &DurableStore, stream_family_index: 
     );
 }
 
-/// Batch score lookup shared by both read paths: normalize, dedupe (map = seen-set),
-/// then one snapshot load + score per unique key under a single store handle.
-fn scored_priorities<'a>(
-    items: impl IntoIterator<Item = Option<&'a str>>,
-    normalize: impl Fn(&'a str) -> Option<String>,
-    load_and_score: impl Fn(&str) -> u8,
-) -> HashMap<String, u8> {
-    let mut priorities = HashMap::new();
-    for item in items {
-        let Some(key) = item.and_then(&normalize) else {
-            continue;
-        };
-        priorities
-            .entry(key)
-            .or_insert_with_key(|key| load_and_score(key));
-    }
-    priorities
-}
-
 impl PlaybackStateService {
     /// Records an outcome against the source-health and stream-family reputations.
     /// The caller captures the generation at IPC entry so a racing clear/remove
@@ -659,20 +626,18 @@ impl PlaybackStateService {
         &self,
         app: &AppHandle,
         source_ids: impl IntoIterator<Item = Option<&'a str>>,
-    ) -> Result<HashMap<String, u8>, String> {
-        let mut seen = HashSet::new();
+    ) -> HashMap<String, u8> {
         let mut priorities: HashMap<String, u8> = source_ids
             .into_iter()
             .flatten()
-            .filter(|source_id| seen.insert(*source_id))
             .filter_map(normalize_source_id)
             .map(|source_id| (source_id.to_string(), DEFAULT_SOURCE_HEALTH_PRIORITY))
             .collect();
         if priorities.is_empty() {
-            return Ok(priorities);
+            return priorities;
         }
         let Some(store) = self.open_advisory_store(app, "source-health-priorities") else {
-            return Ok(priorities);
+            return priorities;
         };
         let now_ms = now_unix_millis();
 
@@ -680,7 +645,7 @@ impl PlaybackStateService {
             let snapshot = load_source_health_snapshot(&store, &source_health_key(source_id));
             *priority = score_source_health_priority(snapshot.as_ref(), now_ms);
         }
-        Ok(priorities)
+        priorities
     }
 
     /// Single-open batch variant for stream families — one store handle serves every unique family in the title scope.
@@ -699,20 +664,23 @@ impl PlaybackStateService {
         let store = self.open_advisory_store(app, "stream-family-priorities");
         let now_ms = now_unix_millis();
 
-        scored_priorities(
-            stream_families.into_iter().map(Some),
-            normalize_source_key,
-            |stream_family| {
-                store
-                    .as_ref()
-                    .map_or(DEFAULT_STREAM_FAMILY_PRIORITY, |store| {
-                        let snapshot_key =
-                            playback_stream_family_snapshot_key(&scope_key, stream_family);
-                        let snapshot = load_playback_stream_family_snapshot(store, &snapshot_key);
-                        score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
-                    })
-            },
-        )
+        let mut priorities = HashMap::new();
+        for family in stream_families.into_iter().filter_map(normalize_source_key) {
+            priorities
+                .entry(family)
+                .or_insert_with_key(|stream_family| {
+                    store
+                        .as_ref()
+                        .map_or(DEFAULT_STREAM_FAMILY_PRIORITY, |store| {
+                            let snapshot_key =
+                                playback_stream_family_snapshot_key(&scope_key, stream_family);
+                            let snapshot =
+                                load_playback_stream_family_snapshot(store, &snapshot_key);
+                            score_stream_family_priority(snapshot.as_ref(), season, episode, now_ms)
+                        })
+                });
+        }
+        priorities
     }
 
     /// Single-open read of the title scope's preferred source: the last addon

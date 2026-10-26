@@ -1,5 +1,5 @@
 import { type MouseEvent as ReactMouseEvent, useSyncExternalStore } from 'react';
-import type { NavigateFunction, NavigateOptions, NavigationType, To } from 'react-router';
+import { type NavigateFunction, type NavigateOptions, NavigationType, type To } from 'react-router';
 import { createSubscribableStore } from '@/lib/subscribable-store';
 
 // Root binding avoids per-card router subscriptions during search URL updates.
@@ -18,9 +18,9 @@ export function currentPathWithSearch(): string {
 export function navigateApp(to: To | number, options?: NavigateOptions): boolean {
   if (navigateFn === null) return false;
   if (typeof to === 'number') {
-    navigateFn(to);
+    void navigateFn(to);
   } else {
-    navigateFn(to, options);
+    void navigateFn(to, options);
   }
   return true;
 }
@@ -75,7 +75,7 @@ export function useNavigationHistoryState(): {
 }
 
 export function recordLocationEntry(key: string, path: string, action: NavigationType): void {
-  if (action === 'POP') {
+  if (action === NavigationType.Pop) {
     const index = entryStack.findIndex((entry) => entry.key === key);
     // Unseen entries have no provable predecessor.
     if (index >= 0) {
@@ -85,7 +85,7 @@ export function recordLocationEntry(key: string, path: string, action: Navigatio
       entryStack.push({ key, path });
       entryIndex = 0;
     }
-  } else if (action === 'REPLACE' && entryIndex >= 0) {
+  } else if (action === NavigationType.Replace && entryIndex >= 0) {
     entryStack[entryIndex] = { key, path };
   } else {
     entryStack.length = entryIndex + 1;
@@ -154,7 +154,7 @@ const DETAILS_HERO_TRANSITION = 'details-hero';
 const DETAILS_HERO_WAIT_MS = 150;
 let releaseDetailsHero: (() => void) | null = null;
 let detailsHeroTarget: HTMLElement | null = null;
-let activeDetailsTransition: ViewTransition | null = null;
+let activeDetailsTransition: Pick<ViewTransition, 'finished'> | null = null;
 
 // The docked mini player's native surface sits under the webview, so no snapshot crossfades over it.
 function canMorphToDetails(): boolean {

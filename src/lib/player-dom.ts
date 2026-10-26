@@ -1,4 +1,4 @@
-// Player-surface DOM utilities: hit-testing plus document-level cursor/background mutations while expanded.
+// Player-surface DOM utilities: hit-testing plus document-level background mutations while expanded.
 
 import type { MouseEvent } from 'react';
 
@@ -40,6 +40,10 @@ export function blurActivePlayerControl(): void {
   }
 }
 
+export function preserveOpenPlayerMenuFocus(event: Event): void {
+  if (document.querySelector('[data-player-popover][data-state="open"]')) event.preventDefault();
+}
+
 // All three need the color — a partial write leaves the page background bleeding through mpv's transparent frame.
 function setSurfaceBackground(value: string): void {
   document.body.style.backgroundColor = value;
@@ -54,10 +58,4 @@ export function setPlayerDocumentBackground(transparent: boolean): void {
 
 export function restorePlayerBackground(): void {
   setSurfaceBackground('');
-}
-
-export function restorePlayerCursor(container: HTMLElement | null): void {
-  if (container) container.style.cursor = '';
-  document.body.style.cursor = '';
-  document.documentElement.style.cursor = '';
 }

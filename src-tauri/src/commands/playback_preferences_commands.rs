@@ -5,7 +5,7 @@ use super::{
         normalize_language_token as normalize_backend_language_token,
         normalize_track_language_candidate,
         resolve_preferred_track_selection as resolve_track_language_selection,
-        supported_language_options, SupportedLanguageOption, TrackLanguageCandidate,
+        supported_language_options, SupportedLanguage, TrackLanguageCandidate,
         TrackLanguageSelectionResolution,
     },
     normalize_media_id, normalize_stream_media_type, now_unix_millis,
@@ -28,8 +28,8 @@ pub enum PlaybackLanguagePreferenceKind {
 const PREFERRED_AUDIO_LANGUAGE_STORE_KEY: &str = "preferred_audio_language";
 const PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY: &str = "preferred_subtitle_language";
 
-pub(crate) fn sanitize_language_pref(value: Option<String>, allow_off: bool) -> Option<String> {
-    normalize_backend_language_token(value.as_deref(), allow_off)
+pub(crate) fn sanitize_language_pref(value: Option<&str>, allow_off: bool) -> Option<String> {
+    normalize_backend_language_token(value, allow_off)
 }
 
 /// Save-boundary variant: `None` clears, but a supplied value failing normalization
@@ -40,7 +40,7 @@ fn sanitize_language_pref_for_save(
 ) -> Result<Option<String>, String> {
     value
         .map(|raw| {
-            sanitize_language_pref(Some(raw), allow_off)
+            sanitize_language_pref(Some(&raw), allow_off)
                 .ok_or_else(|| "Invalid language preference.".to_string())
         })
         .transpose()
@@ -51,11 +51,11 @@ pub(crate) fn read_playback_language_preferences_from_store(
 ) -> PlaybackLanguagePreferences {
     PlaybackLanguagePreferences {
         preferred_audio_language: sanitize_language_pref(
-            get_trimmed_store_string(store, PREFERRED_AUDIO_LANGUAGE_STORE_KEY),
+            get_trimmed_store_string(store, PREFERRED_AUDIO_LANGUAGE_STORE_KEY).as_deref(),
             false,
         ),
         preferred_subtitle_language: sanitize_language_pref(
-            get_trimmed_store_string(store, PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY),
+            get_trimmed_store_string(store, PREFERRED_SUBTITLE_LANGUAGE_STORE_KEY).as_deref(),
             true,
         ),
     }
@@ -339,7 +339,7 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
 /// The closed language set, exposed once so the settings UI never carries a
 /// second hardcoded table that can drift from the sanitizer.
 #[command]
-pub async fn get_supported_languages() -> Result<Vec<SupportedLanguageOption>, String> {
+pub async fn get_supported_languages() -> Result<&'static [SupportedLanguage], String> {
     Ok(supported_language_options())
 }
 

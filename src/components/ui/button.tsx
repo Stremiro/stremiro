@@ -1,16 +1,15 @@
 import { Slot } from '@radix-ui/react-slot';
-import { Check, Plus } from 'lucide-react';
+import { Check, Link2, Plus } from 'lucide-react';
 import * as React from 'react';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 
-import { cn, prefersReducedMotion } from '@/lib/utils';
+import { cn } from '@/lib/utils';
 
 const BUTTON_VARIANTS = {
   default: 'bg-primary text-primary-foreground shadow-sm hover:bg-primary/90',
-  accent: 'accent-lattice hover:brightness-110',
   destructive: 'bg-destructive text-destructive-foreground shadow-xs hover:bg-destructive/90',
   outline:
     'border border-input bg-background shadow-xs hover:bg-accent hover:text-accent-foreground',
-  secondary: 'bg-secondary text-secondary-foreground shadow-xs hover:bg-secondary/80',
   ghost: 'hover:bg-accent hover:text-accent-foreground',
 };
 
@@ -47,53 +46,84 @@ function Button({
   );
 }
 
-/** Library membership only; list membership keeps its own bookmark vocabulary. */
+/** Membership feedback keeps the control's dimensions fixed. */
 function SaveIndicator({ saved, className }: { saved: boolean; className?: string }) {
   return (
-    <span
-      aria-hidden='true'
-      data-save-indicator
-      className={cn('relative size-4 shrink-0', className)}
-    >
-      <span
-        data-save-ring
-        className='pointer-events-none absolute -inset-1 rounded-full border border-(--accent-act) opacity-0'
-      />
+    <span aria-hidden='true' className={cn('relative size-4 shrink-0', className)}>
       <Plus
         className={cn(
-          'absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-          saved ? 'scale-75 opacity-0' : 'scale-100 opacity-100',
+          'absolute inset-0 size-full transition-opacity duration-150 motion-reduce:transition-none',
+          saved ? 'opacity-0' : 'opacity-100',
         )}
       />
       <Check
         className={cn(
           'absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-          saved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
+          saved ? 'translate-y-0 opacity-100' : 'translate-y-0.5 opacity-0',
         )}
       />
     </span>
   );
 }
 
-/** Call only after accepting a user add — query hydration must never pulse. */
-function animateLibrarySave(control: HTMLElement) {
-  if (prefersReducedMotion()) return;
-  const indicator = control.querySelector<HTMLElement>('[data-save-indicator]');
-  indicator?.animate(
-    [
-      { transform: 'scale(1)' },
-      { transform: 'scale(1.25)', offset: 0.45 },
-      { transform: 'scale(1)' },
-    ],
-    { duration: 220, easing: 'ease-out' },
-  );
-  indicator?.querySelector<HTMLElement>('[data-save-ring]')?.animate(
-    [
-      { transform: 'scale(0.9)', opacity: 0.45 },
-      { transform: 'scale(1.5)', opacity: 0 },
-    ],
-    { duration: 220, easing: 'ease-out' },
+function CopyButton({
+  onCopy,
+  className,
+  title,
+  ...props
+}: Omit<React.ComponentProps<'button'>, 'onClick' | 'children'> & {
+  onCopy: () => Promise<boolean>;
+}) {
+  const [state, setState] = React.useState<'idle' | 'copying' | 'copied'>('idle');
+  const mountedRef = useMountedRef();
+  const copied = state === 'copied';
+  React.useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setState('idle'), 1600);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  return (
+    <button
+      type='button'
+      {...props}
+      title={copied ? 'Copied' : title}
+      aria-busy={state === 'copying' || undefined}
+      aria-disabled={state !== 'idle' || undefined}
+      data-copied={copied}
+      className={cn(
+        'copy-button transition-[background-color,border-color,color] duration-150 data-[copied=true]:border-(--accent-act)/20 data-[copied=true]:bg-(--accent-act)/10 data-[copied=true]:text-(--accent-act) motion-reduce:transition-none',
+        className,
+      )}
+      onClick={() => {
+        if (state !== 'idle') return;
+        setState('copying');
+        void onCopy().then(
+          (success) => {
+            if (mountedRef.current) setState(success ? 'copied' : 'idle');
+          },
+          () => {
+            if (mountedRef.current) setState('idle');
+          },
+        );
+      }}
+    >
+      <span aria-hidden='true' className='relative size-4 shrink-0'>
+        <Link2
+          className={cn(
+            'absolute inset-0 size-full transition-opacity duration-150 motion-reduce:transition-none',
+            copied ? 'opacity-0' : 'opacity-100',
+          )}
+        />
+        <Check
+          className={cn(
+            'copy-check absolute inset-0 size-full transition-opacity duration-150 motion-reduce:transition-none',
+            copied ? 'opacity-100' : 'opacity-0',
+          )}
+        />
+      </span>
+    </button>
   );
 }
 
-export { Button, SaveIndicator, animateLibrarySave };
+export { Button, CopyButton, SaveIndicator };

@@ -8,7 +8,6 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Check,
   GripVertical,
   Link2,
   Loader2,
@@ -18,18 +17,12 @@ import {
   Trash2,
 } from 'lucide-react';
 import { type ReactNode, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useLocation, useNavigate } from 'react-router';
 import { toast } from 'sonner';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
-import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { Button, CopyButton } from '@/components/ui/button';
+import { ConfirmDialog } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import { type AddonConfig, type AddonResourceKind, api, getErrorMessage } from '@/lib/api';
 import { copyText } from '@/lib/notify';
@@ -41,7 +34,6 @@ import {
 import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useFailedSrc } from '@/hooks/use-failed-src';
-import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { cn, queryNeedsRetry } from '@/lib/utils';
 import {
@@ -55,14 +47,13 @@ import {
 
 // Long enough to skip per-keystroke IPC, short enough to read as live.
 const ADDON_URL_INSPECT_DEBOUNCE_MS = 150;
-const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremio:// addon URL.';
+const ADDON_URL_INVALID_MESSAGE = 'Enter a valid http(s) or stremiro:// addon URL.';
 
 interface AddonRowProps {
   addon: AddonConfig;
   isWorking: boolean;
   /** Left-edge grip: sortable rows get a drag handle, pinned rows a muted grip. */
   handle: ReactNode;
-  pinned?: boolean;
   onToggle: (id: string) => void;
   /** Only unpinned rows render a remove affordance. */
   onRemove?: (id: string) => void;
@@ -70,7 +61,6 @@ interface AddonRowProps {
 
 const ADDON_ICON_BUTTON_CLASS =
   'flex h-8 w-8 items-center justify-center rounded-lg transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-nav)/35';
-const ADDON_COPIED_FEEDBACK_MS = 1600;
 
 const ADDON_RESOURCE_LABELS: Record<AddonResourceKind, string> = {
   catalog: 'Catalog',
@@ -83,35 +73,32 @@ function addonMonogram(name: string) {
   return name.match(/[\p{L}\p{N}]/u)?.[0]?.toUpperCase() ?? '?';
 }
 
-function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: AddonRowProps) {
+async function copyAddonShareLink(addonId: string): Promise<boolean> {
+  try {
+    const { link, includesConfig } = await api.getAddonShareLink(addonId);
+    return await copyText(
+      link,
+      'Addon link copied',
+      'Could not copy addon link',
+      includesConfig ? 'Includes your addon setup. Share with care.' : undefined,
+    );
+  } catch {
+    toast.error('Could not copy addon link');
+    return false;
+  }
+}
+
+function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProps) {
   const [addonLogoSrc, onAddonLogoError] = useFailedSrc(addon.logo);
-  const [copied, setCopied] = useState(false);
   const [removeOpen, setRemoveOpen] = useState(false);
   const removeConfirmedRef = useRef(false);
-  const mountedRef = useMountedRef();
-  useEffect(() => {
-    if (!copied) return;
-    const timer = window.setTimeout(() => setCopied(false), ADDON_COPIED_FEEDBACK_MS);
-    return () => window.clearTimeout(timer);
-  }, [copied]);
 
-  const handleCopyLink = async () => {
-    try {
-      const url = await api.getAddonUrl(addon.id);
-      const didCopy = await copyText(url, 'Addon link copied', 'Could not copy addon link');
-      if (didCopy) {
-        if (mountedRef.current) setCopied(true);
-      }
-    } catch {
-      toast.error('Could not copy addon link');
-    }
-  };
-
-  const handleConfigure = () => {
-    api.openAddonConfigurePage(addon.id).catch((error: unknown) => {
+  const configureMutation = useMutation({
+    mutationFn: () => api.openAddonConfigurePage(addon.id),
+    onError: (error: unknown) => {
       toast.error('Could not open addon configuration', { description: getErrorMessage(error) });
-    });
-  };
+    },
+  });
 
   return (
     <>
@@ -149,7 +136,9 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
                 v{addon.version}
               </span>
             ) : null}
-            {pinned ? <span className='shrink-0 text-[11.5px] text-zinc-500'>Default</span> : null}
+            {addon.pinned ? (
+              <span className='shrink-0 text-[11.5px] text-zinc-500'>Default</span>
+            ) : null}
           </div>
           {addon.description ? (
             <p
@@ -189,10 +178,14 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
             data-addon-control='configure'
             title='Configure'
             aria-label={`Configure ${addon.name}`}
-            onClick={handleConfigure}
+            aria-busy={configureMutation.isPending || undefined}
+            aria-disabled={configureMutation.isPending || undefined}
+            onClick={() => {
+              if (!configureMutation.isPending) configureMutation.mutate();
+            }}
             className={cn(
               ADDON_ICON_BUTTON_CLASS,
-              'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+              'text-zinc-400 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40',
             )}
           >
             <SlidersHorizontal aria-hidden='true' className='h-4 w-4' />
@@ -200,24 +193,17 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
         ) : (
           <span aria-hidden='true' className='h-8 w-8' />
         )}
-        <button
-          type='button'
+        <CopyButton
           data-addon-control='copy'
-          title={copied ? 'Copied' : 'Copy addon link'}
+          title='Copy addon link'
           aria-label={`Copy ${addon.name} addon link`}
-          onClick={() => void handleCopyLink()}
+          onCopy={() => copyAddonShareLink(addon.id)}
           className={cn(
             ADDON_ICON_BUTTON_CLASS,
-            copied ? 'text-(--accent-act)' : 'text-zinc-400 hover:bg-white/[0.06] hover:text-white',
+            'border border-transparent text-zinc-400 hover:border-white/10 hover:bg-white/[0.06] hover:text-white',
           )}
-        >
-          {copied ? (
-            <Check aria-hidden='true' className='h-4 w-4' />
-          ) : (
-            <Link2 aria-hidden='true' className='h-4 w-4' />
-          )}
-        </button>
-        {!pinned && onRemove ? (
+        />
+        {!addon.pinned && onRemove ? (
           <button
             type='button'
             data-addon-control='remove'
@@ -245,39 +231,28 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
           onChange={() => onToggle(addon.id)}
         />
       </div>
-      <Dialog open={removeOpen} onOpenChange={setRemoveOpen}>
-        <DialogContent
-          className='border-white/10 bg-zinc-950 sm:max-w-md'
-          onCloseAutoFocus={() => {
+      <ConfirmDialog
+        open={removeOpen}
+        onOpenChange={setRemoveOpen}
+        contentProps={{
+          className: 'border-white/10 bg-zinc-950 sm:max-w-md',
+          onCloseAutoFocus: () => {
             // Close first so the existing row-removal focus handoff still applies.
             if (!removeConfirmedRef.current) return;
             removeConfirmedRef.current = false;
             onRemove?.(addon.id);
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Remove addon?</DialogTitle>
-            <DialogDescription>
-              Remove {addon.name} and its configuration? You can add it again using its addon URL.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant='outline' onClick={() => setRemoveOpen(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant='destructive'
-              disabled={isWorking}
-              onClick={() => {
-                removeConfirmedRef.current = true;
-                setRemoveOpen(false);
-              }}
-            >
-              Remove
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          },
+        }}
+        title='Remove addon?'
+        description={`Remove ${addon.name} and its configuration? You can add it again using its addon URL.`}
+        confirmProps={{ variant: 'destructive' }}
+        confirmDisabled={isWorking}
+        confirmLabel='Remove'
+        onConfirm={() => {
+          removeConfirmedRef.current = true;
+          setRemoveOpen(false);
+        }}
+      />
     </>
   );
 }
@@ -285,7 +260,7 @@ function AddonRow({ addon, handle, isWorking, pinned, onToggle, onRemove }: Addo
 const ADDON_ROW_CLASS =
   'group/row grid grid-cols-[24px_minmax(0,1fr)] items-center gap-x-3 gap-y-2 px-4 py-3.5 transition-colors hover:bg-white/[0.02] sm:flex sm:gap-3 sm:px-5';
 
-function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
+function SortableAddonRow(props: Omit<AddonRowProps, 'handle'>) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: props.addon.id,
     disabled: props.isWorking,
@@ -321,12 +296,11 @@ function SortableAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
 }
 
 // Pinned rows live outside DndContext — a plain row, no sortable wiring.
-function PinnedAddonRow(props: Omit<AddonRowProps, 'handle' | 'pinned'>) {
+function PinnedAddonRow(props: Omit<AddonRowProps, 'handle'>) {
   return (
     <div data-addon-row={props.addon.id} className={ADDON_ROW_CLASS}>
       <AddonRow
         {...props}
-        pinned
         handle={
           <span
             className='-ml-2 flex h-8 w-8 shrink-0 items-center justify-center cursor-default text-zinc-600'
@@ -351,6 +325,16 @@ export function AddonSettings() {
     control: string;
     candidates: string[];
   } | null>(null);
+
+  const location = useLocation();
+  const navigate = useNavigate();
+  const linkedInstallUrl: unknown = location.state?.addonInstallUrl;
+  useEffect(() => {
+    if (typeof linkedInstallUrl !== 'string') return;
+    setNewUrl(linkedInstallUrl);
+    newUrlInputRef.current?.focus({ preventScroll: true });
+    void navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+  }, [linkedInstallUrl, location.pathname, location.search, navigate]);
 
   const addonsQuery = useAddonConfigs();
   const {
@@ -476,6 +460,16 @@ export function AddonSettings() {
   const isConfigureCandidate = !!inspection?.configurePage;
   const duplicateAddonName = inspection?.duplicateOf;
   const isWorking = isLoading || isLoadingError || saveMutation.isPending;
+  useLayoutEffect(() => {
+    if (
+      !isWorking &&
+      saveMutation.isError &&
+      saveMutation.variables?.kind === 'add' &&
+      document.activeElement === document.body
+    ) {
+      newUrlInputRef.current?.focus({ preventScroll: true });
+    }
+  }, [isWorking, saveMutation.isError, saveMutation.variables]);
   const canSubmitNewAddon = isValidNewUrl && !duplicateAddonName && !isWorking;
   const addonHintTone = !inspection
     ? 'text-zinc-500'
@@ -532,7 +526,7 @@ export function AddonSettings() {
       { kind: 'add', url: trimmedNewUrl },
       {
         onSuccess: (savedConfigs) => {
-          setNewUrl('');
+          setNewUrl((current) => (current === newUrl ? '' : current));
           requestAnimationFrame(() => newUrlInputRef.current?.focus());
           const added = savedConfigs.find((addon) => !knownIds.has(addon.id));
           toast.success(`Added ${added?.name ?? 'Addon'}`);
@@ -614,13 +608,13 @@ export function AddonSettings() {
           </p>
         ) : (
           <p id='addon-url-hint' className='mt-2.5 text-[12px] leading-relaxed text-zinc-400'>
-            Paste a Stremio{' '}
+            Paste an addon{' '}
             <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
               manifest.json
             </code>{' '}
             or{' '}
             <code className='rounded bg-white/[0.05] px-1 py-0.5 font-mono text-[11px] text-zinc-500'>
-              stremio://
+              stremiro://
             </code>{' '}
             URL to add an addon.
           </p>

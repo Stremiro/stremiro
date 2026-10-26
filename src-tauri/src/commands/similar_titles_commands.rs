@@ -96,11 +96,7 @@ fn weighted_jaccard(
         .union(candidate)
         .map(|term| weights.weight(term))
         .sum();
-    if union > 0.0 {
-        shared / union
-    } else {
-        0.0
-    }
+    shared / union
 }
 
 fn weighted_norm_squared(terms: &BTreeSet<String>, weights: &IdfWeights<'_>) -> f64 {
@@ -354,6 +350,8 @@ fn watch_seed(details: MediaDetails) -> Option<MediaItem> {
         description: details.description,
         primary_year: None,
         display_year: None,
+        matches_search_credit: false,
+        catalog_genre: None,
     });
     (!seed.title.is_empty()
         && seed
@@ -462,7 +460,15 @@ pub async fn query_similar_titles(
     let pages = pages?;
     tokio::task::spawn_blocking(move || ranked_catalog_pages(&source, pages, &watched))
         .await
-        .map_err(|_| "Similar titles ranking task failed.".to_string())?
+        .map_err(|error| {
+            log_warn(
+                "similar-titles",
+                "query_similar_titles",
+                "ranking-task-failed",
+                &[field("error", error)],
+            );
+            "Similar titles ranking task failed.".to_string()
+        })?
 }
 
 #[cfg(test)]
@@ -869,7 +875,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["unwatched", "explicit"]
         );
-        assert_eq!(history.count_entries().unwrap(), 2);
+        assert_eq!(history.counts().unwrap().0, 2);
         assert_eq!(
             ResumeStore::load_recent_titles(&resume_path).unwrap().len(),
             2
@@ -984,26 +990,10 @@ mod tests {
     #[test]
     fn watch_seed_requires_usable_genres_and_preserves_bounded_description() {
         let mut details = MediaDetails {
-            id: "source".into(),
-            imdb_id: None,
-            type_: "series".into(),
             title: "Source".into(),
-            year: None,
             genres: Some(vec![" ".into()]),
-            poster: None,
-            backdrop: None,
-            logo: None,
             description: Some("x".repeat(5_000)),
-            display_year: None,
-            release_date: None,
-            rating: None,
-            rating_percent: None,
-            runtime: None,
-            cast: None,
-            directors: None,
-            trailers: None,
-            episodes: None,
-            seasons: None,
+            ..crate::test_helpers::test_details("source", "series")
         };
         assert!(watch_seed(details.clone()).is_none());
         details.genres = Some(vec!["Mystery".into()]);

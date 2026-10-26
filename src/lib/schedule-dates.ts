@@ -38,10 +38,10 @@ export function parseLocalScheduleDate(value?: string | null): Date | null {
 }
 
 /** Air-date line: absolute for aired ("Apr 7, 2013"), compact countdown ("in 3d") for unaired. */
-export function formatAirDate(value?: string | null): string | null {
+export function formatAirDate(value: string | null | undefined, today: Date): string | null {
   const day = parseScheduleDay(value);
   if (!day) return null;
-  const daysAhead = Temporal.Now.plainDateISO().until(day).days;
+  const daysAhead = toLocalDate(today).until(day).days;
   if (daysAhead <= 0) return DATE_FORMATTER.format(day);
   if (daysAhead === 1) return 'Tomorrow';
   if (daysAhead < 14) return `in ${daysAhead}d`;

@@ -1,3 +1,4 @@
+import { replaceEqualDeep } from '@tanstack/react-query';
 import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
@@ -13,7 +14,6 @@ import {
   setMpvProperty,
 } from '@/lib/player-mpv';
 import {
-  areTrackListsEqual,
   buildTrackAutoApplyFingerprint,
   buildTrackLanguageCandidateFingerprint,
   doesTrackSelectionMatch,
@@ -161,22 +161,19 @@ export function usePlayerTrackController({
   const subtitlesOff = subTracks.length > 0 && !activeSubTrack;
 
   const applyTrackList = useCallback((nextTracks: Track[]) => {
-    if (areTrackListsEqual(trackListRef.current, nextTracks)) {
-      return trackListRef.current;
+    const tracks = replaceEqualDeep(trackListRef.current, nextTracks);
+    if (tracks === trackListRef.current) {
+      return tracks;
     }
 
-    trackListRef.current = nextTracks;
-    const nextAudioTracks = nextTracks.filter((track) => track.type === 'audio');
-    const nextSubTracks = nextTracks.filter((track) => track.type === 'sub');
+    trackListRef.current = tracks;
+    const nextAudioTracks = tracks.filter((track) => track.type === 'audio');
+    const nextSubTracks = tracks.filter((track) => track.type === 'sub');
 
-    setAudioTracks((previousTracks) =>
-      areTrackListsEqual(previousTracks, nextAudioTracks) ? previousTracks : nextAudioTracks,
-    );
-    setSubTracks((previousTracks) =>
-      areTrackListsEqual(previousTracks, nextSubTracks) ? previousTracks : nextSubTracks,
-    );
+    setAudioTracks((previousTracks) => replaceEqualDeep(previousTracks, nextAudioTracks));
+    setSubTracks((previousTracks) => replaceEqualDeep(previousTracks, nextSubTracks));
 
-    return nextTracks;
+    return tracks;
   }, []);
 
   const refreshTracksImmediate = useCallback(async () => {
@@ -343,10 +340,6 @@ export function usePlayerTrackController({
     autoApplyAttemptStateRef.current[type] = { fingerprint: null, count: 0 };
   }, []);
 
-  const markApplied = useCallback((type: TrackType, fingerprint: string) => {
-    autoAppliedTrackPrefsRef.current[type] = fingerprint;
-  }, []);
-
   const persistTrackSelection = useCallback(
     (type: TrackType, id: number | 'no', explicitTrack?: Track) => {
       manualTrackSelectionEpochRef.current[type] += 1;
@@ -365,12 +358,9 @@ export function usePlayerTrackController({
         (type === 'audio'
           ? playbackLanguagePreferences.preferredAudioLanguage
           : playbackLanguagePreferences.preferredSubtitleLanguage) ?? '';
-      markApplied(
-        type,
-        buildTrackAutoApplyFingerprint(
-          storedPreference,
-          trackListRef.current.filter((track) => track.type === type),
-        ),
+      autoAppliedTrackPrefsRef.current[type] = buildTrackAutoApplyFingerprint(
+        storedPreference,
+        trackListRef.current.filter((track) => track.type === type),
       );
       void saveGlobalPlaybackLanguagePreferenceSelection(
         type,
@@ -407,7 +397,7 @@ export function usePlayerTrackController({
             setPreferenceSaveEpoch((epoch) => ({ ...epoch, [type]: epoch[type] + 1 }));
         });
     },
-    [markApplied, saveGlobalPlaybackLanguagePreferenceSelection, playbackLanguagePreferences],
+    [saveGlobalPlaybackLanguagePreferenceSelection, playbackLanguagePreferences],
   );
 
   // Single switch path: write → confirm → persist; failures toast unless `silent`.
@@ -643,12 +633,9 @@ export function usePlayerTrackController({
         manual?.language === nextPreferences[type] &&
         doesTrackSelectionMatch(trackListRef.current, type, manual.id)
       ) {
-        markApplied(
-          type,
-          buildTrackAutoApplyFingerprint(
-            nextPreferences[type],
-            trackListRef.current.filter((track) => track.type === type),
-          ),
+        autoAppliedTrackPrefsRef.current[type] = buildTrackAutoApplyFingerprint(
+          nextPreferences[type],
+          trackListRef.current.filter((track) => track.type === type),
         );
       } else if (previous[type] !== nextPreferences[type]) {
         manualTrackPreferencesRef.current[type] = null;
@@ -661,7 +648,6 @@ export function usePlayerTrackController({
     playbackLanguagePreferences.preferredSubtitleLanguage,
     preferenceSaveEpoch.audio,
     preferenceSaveEpoch.sub,
-    markApplied,
     resetAutoApplyState,
   ]);
 
@@ -688,7 +674,7 @@ export function usePlayerTrackController({
         return;
 
       if (resolution.selectedMatches) {
-        markApplied(kind, fingerprint);
+        autoAppliedTrackPrefsRef.current[kind] = fingerprint;
         return;
       }
       if (typeof resolution.matchedTrackId !== 'number') {
@@ -703,10 +689,10 @@ export function usePlayerTrackController({
         manualSelectionEpoch === manualTrackSelectionEpochRef.current[kind] &&
         switched
       ) {
-        markApplied(kind, fingerprint);
+        autoAppliedTrackPrefsRef.current[kind] = fingerprint;
       }
     },
-    [markApplied, resetKey, setTrack],
+    [resetKey, setTrack],
   );
 
   const launchPreferredTrackAutoApply = useCallback(
@@ -789,14 +775,14 @@ export function usePlayerTrackController({
     if (preferredSubtitleLanguage === 'off') {
       const hasSelectedSubtitle = subTracks.some((track) => !!track.selected);
       if (!hasSelectedSubtitle) {
-        markApplied('sub', fingerprint);
+        autoAppliedTrackPrefsRef.current.sub = fingerprint;
         return;
       }
 
       return launchPreferredTrackAutoApply('sub', fingerprint, async (isCancelled) => {
         const switched = await setTrack('sub', 'no', { silent: true });
         if (!isCancelled() && switched) {
-          markApplied('sub', fingerprint);
+          autoAppliedTrackPrefsRef.current.sub = fingerprint;
         }
       });
     }
@@ -822,7 +808,6 @@ export function usePlayerTrackController({
     isAutoApplyHandled,
     isLoading,
     launchPreferredTrackAutoApply,
-    markApplied,
     playbackLanguagePreferences.preferredSubtitleLanguage,
     preferenceSaveEpoch.sub,
     setTrack,

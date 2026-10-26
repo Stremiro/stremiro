@@ -1,6 +1,6 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { Calendar, Home, type LucideIcon, Search, Settings, User } from 'lucide-react';
-import { memo, type MouseEvent, type ReactNode, useRef } from 'react';
+import { memo, type MouseEvent, type ReactNode, useEffect, useRef } from 'react';
 import { Link, useLocation } from 'react-router';
 import { ProfileAvatar } from '@/components/profile-avatar';
 import { Button } from '@/components/ui/button';
@@ -123,6 +123,14 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
     SECONDARY_NAV_ITEMS,
     pathname,
   );
+  // Discover is the usual second stop: warm its chunk once launch work goes idle.
+  useEffect(() => {
+    if (!('requestIdleCallback' in window)) return;
+    const handle = window.requestIdleCallback(() => warmRouteChunk(SEARCH_HREF), {
+      timeout: 5_000,
+    });
+    return () => window.cancelIdleCallback(handle);
+  }, []);
 
   const renderItem = (
     item: SidebarNavItem,
@@ -155,7 +163,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
             void queryClient.prefetchQuery(supportedLanguagesQueryOptions);
           }
           if (isSearch && navigator.onLine) {
-            prefetchSearchCatalog(queryClient, lastSearchFacets());
+            void prefetchSearchCatalog(queryClient, lastSearchFacets());
           }
         }}
         onClick={

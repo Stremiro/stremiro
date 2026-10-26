@@ -23,6 +23,7 @@ interface UseOptimisticSeekArgs {
   clock: PlaybackClock;
   /** Mirrors every `setDuration` write so the seek chain keeps one identity all session. */
   durationRef: RefObject<number>;
+  mpvInitializedRef: RefObject<boolean>;
   /** Stream-scoped reset — a swap abandons in-flight seeks, so pending targets must not swallow new-stream ticks. */
   resetKey?: string;
   onUserSeek: () => void;
@@ -32,6 +33,7 @@ interface UseOptimisticSeekArgs {
 export function useOptimisticSeek({
   clock,
   durationRef,
+  mpvInitializedRef,
   resetKey,
   onUserSeek,
   triggerOsd,
@@ -107,6 +109,7 @@ export function useOptimisticSeek({
       source: 'user' | 'automatic' = 'user',
       onComplete?: () => void,
     ) => {
+      if (!mpvInitializedRef.current || !(durationRef.current > 0)) return;
       if (source !== 'automatic') onUserSeek();
       const previousTime = currentTimeRef.current;
       const boundedTarget = primeOptimisticSeek(targetTime);
@@ -134,7 +137,16 @@ export function useOptimisticSeek({
         onComplete?.();
       }
     },
-    [clearOptimisticSeek, clock, currentTimeRef, onUserSeek, primeOptimisticSeek, triggerOsd],
+    [
+      clearOptimisticSeek,
+      clock,
+      currentTimeRef,
+      durationRef,
+      mpvInitializedRef,
+      onUserSeek,
+      primeOptimisticSeek,
+      triggerOsd,
+    ],
   );
 
   const seek = useCallback(

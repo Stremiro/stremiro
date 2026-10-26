@@ -3,7 +3,7 @@ import React, { useState } from 'react';
 import { cn } from '@/lib/utils';
 
 interface PlayerSliderProps extends React.ComponentPropsWithRef<typeof SliderPrimitive.Root> {
-  /** 'bar' (volume): seek-bar style line that thickens on hover, no thumb. 'pill': hairline track, slim nub shown on hover/focus/scrub. 'track' (mini seek): the bar alone, no thumb or hover change. */
+  /** Fixed tracks: volume bar, hairline with a focus/hover nub, or mini seek without a thumb. */
   variant?: 'pill' | 'bar' | 'track';
   active?: boolean;
 }
@@ -54,12 +54,11 @@ export function PlayerSlider({
         className={cn(
           'relative w-full grow overflow-hidden',
           variant === 'bar'
-            ? 'h-2 scale-y-75 rounded-[3px] bg-white/[0.16] transition-transform duration-150 group-hover/slider:scale-y-100 group-active/slider:scale-y-100 group-data-[keyboard-focus]/slider:scale-y-100 group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60 motion-reduce:transition-none'
+            ? 'h-1.5 rounded-[3px] bg-white/[0.16] group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60'
             : 'rounded-full bg-white/20',
           variant === 'track' &&
             'h-1 group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60',
-          variant === 'pill' &&
-            'h-[5px] scale-y-60 transition-transform duration-150 group-hover/slider:scale-y-100 group-active/slider:scale-y-100 group-data-[keyboard-focus]/slider:scale-y-100 motion-reduce:transition-none',
+          variant === 'pill' && 'h-[3px]',
         )}
       >
         <SliderPrimitive.Range className='absolute h-full bg-white' />

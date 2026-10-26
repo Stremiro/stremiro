@@ -1,9 +1,11 @@
+use super::app_links::{find_app_link, AppLink};
 use super::config_store::{
     load_app_ui_preferences, normalize_start_minimized, save_app_ui_preferences_to_store,
     AppUiPreferences,
 };
 use crate::providers::{addon_resource::AddonResourceClient, addons::AddonTransport};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, PoisonError};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Emitter, Manager};
@@ -19,6 +21,7 @@ pub(crate) struct AppShellState {
     quit_pending: AtomicBool,
     frontend_quit_ready: AtomicBool,
     webview_memory_low: AtomicBool,
+    pending_app_link: Mutex<Option<AppLink>>,
 }
 
 impl AppShellState {
@@ -39,7 +42,7 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
         .store(preferences.is_ok(), Ordering::Relaxed);
     let preferences = preferences.unwrap_or_default();
     let start_hidden =
-        std::env::args().any(|arg| arg == "--autostart") && preferences.start_minimized;
+        std::env::args_os().any(|arg| arg == "--autostart") && preferences.start_minimized;
     state.set_preferences(&preferences);
     state.initial_reveal_pending.store(true, Ordering::Relaxed);
 
@@ -168,19 +171,23 @@ fn apply_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
     };
     use windows_core::Interface;
 
-    let _ = window.with_webview(move |webview| unsafe {
-        let Ok(core) = webview.controller().CoreWebView2() else {
-            return;
-        };
-        let Ok(core) = core.cast::<ICoreWebView2_19>() else {
-            return;
-        };
-        let level = if low {
-            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
-        } else {
-            COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
-        };
-        let _ = core.SetMemoryUsageTargetLevel(level);
+    let _ = window.with_webview(move |webview| {
+        // SAFETY: with_webview runs on the WebView's owning thread with a live controller.
+        // The COM interfaces remain in this callback, and level is a valid WebView2 enum value.
+        unsafe {
+            let Ok(core) = webview.controller().CoreWebView2() else {
+                return;
+            };
+            let Ok(core) = core.cast::<ICoreWebView2_19>() else {
+                return;
+            };
+            let level = if low {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW
+            } else {
+                COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_NORMAL
+            };
+            let _ = core.SetMemoryUsageTargetLevel(level);
+        }
     });
 }
 
@@ -221,6 +228,27 @@ fn handle_main_window_minimized(app: &AppHandle) {
             release_background_memory(&app);
         }
     });
+}
+
+/// Queues a validated link for the renderer; the payload stays in Rust until the renderer asks.
+pub(crate) fn accept_app_link(app: &AppHandle, args: impl IntoIterator<Item = String>) {
+    let Some(link) = find_app_link(args) else {
+        return;
+    };
+    *app.state::<AppShellState>()
+        .pending_app_link
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner) = Some(link);
+    let _ = app.emit("app://link", ());
+}
+
+#[tauri::command]
+pub(crate) fn take_pending_app_link(app: AppHandle) -> Option<AppLink> {
+    app.state::<AppShellState>()
+        .pending_app_link
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .take()
 }
 
 pub(crate) fn reveal_on_startup(app: &AppHandle) {

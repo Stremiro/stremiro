@@ -18,7 +18,7 @@ export default defineConfig(async () => ({
   build: {
     // WebView2-only runtime: evergreen Chromium, no legacy-browser transpile.
     target: 'esnext',
-    rollupOptions: {
+    rolldownOptions: {
       output: {
         codeSplitting: {
           groups: [

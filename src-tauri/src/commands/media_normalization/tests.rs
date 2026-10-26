@@ -1,8 +1,9 @@
 use super::{
-    build_display_year, build_release_date, extract_primary_year, normalize_episode_metadata_list,
+    build_display_year, build_release_date, extract_primary_year, normalize_episode_metadata,
     normalize_media_details, normalize_media_item, normalize_rating, normalize_runtime,
     normalize_title,
 };
+use crate::providers::addon_resource::normalize_image_url;
 use crate::providers::{Episode, MediaDetails, MediaItem, MediaSeason};
 use crate::test_helpers::{test_details, test_episode, test_media_item};
 
@@ -63,8 +64,6 @@ fn normalize_media_item_sets_display_year() {
     let item = normalize_media_item(MediaItem {
         title: "Demo".to_string(),
         year: Some("2024-10-01".to_string()),
-        primary_year: None,
-        display_year: None,
         ..test_media_item("tt1", "movie")
     });
 
@@ -102,8 +101,6 @@ fn normalize_media_details_normalizes_years_and_episodes() {
         imdb_id: Some("tt123".to_string()),
         title: "Attack on Titan".to_string(),
         year: Some("2013-04-07".to_string()),
-        display_year: None,
-        release_date: None,
         rating: Some(" 8.30 ".into()),
         runtime: Some("142 min".into()),
         cast: Some(vec![" Actor ".into(), "actor".into(), "Other".into()]),
@@ -113,15 +110,11 @@ fn normalize_media_details_normalizes_years_and_episodes() {
             Episode {
                 title: Some("Episode 1".to_string()),
                 released: Some("2013-04-07".to_string()),
-                release_date: None,
-                stream_lookup_id: None,
                 ..test_episode("ep-1", 1, 1)
             },
             Episode {
                 title: Some("Episode 2".to_string()),
                 released: Some("2014-01-05".to_string()),
-                release_date: None,
-                stream_lookup_id: None,
                 ..test_episode("ep-2", 1, 2)
             },
         ]),
@@ -132,9 +125,9 @@ fn normalize_media_details_normalizes_years_and_episodes() {
         ..test_details("tt123", "series")
     };
 
-    let normalized = normalize_media_details(details, "kitsu:123");
+    let normalized = normalize_media_details(details);
 
-    assert_eq!(normalized.id, "kitsu:123");
+    assert_eq!(normalized.id, "tt123");
     assert_eq!(normalized.imdb_id.as_deref(), Some("tt123"));
     assert_eq!(normalized.rating.as_deref(), Some("8.30"));
     assert_eq!(normalized.runtime.as_deref(), Some("2h 22m"));
@@ -182,18 +175,14 @@ fn build_release_date_prefers_explicit_date_and_falls_back_to_year_start() {
 }
 
 #[test]
-fn normalize_episode_metadata_list_sets_episode_release_dates() {
+fn normalize_episode_metadata_sets_episode_release_dates() {
     let episode = |id: &str, released: &str| Episode {
         title: Some("Episode 1".to_string()),
         released: Some(released.to_string()),
-        release_date: None,
-        stream_lookup_id: None,
         ..test_episode(id, 1, 1)
     };
-    let episodes = normalize_episode_metadata_list(vec![
-        episode("ep-1", "2024"),
-        episode("ep-2", "2024-13-40"),
-    ]);
+    let episodes =
+        [episode("ep-1", "2024"), episode("ep-2", "2024-13-40")].map(normalize_episode_metadata);
 
     assert_eq!(episodes[0].release_date.as_deref(), Some("2024-01-01"));
     assert_eq!(episodes[1].release_date, None);
@@ -204,7 +193,6 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
     let details = |release_date: Option<&str>| MediaDetails {
         title: "Movie".to_string(),
         year: Some("2024".to_string()),
-        display_year: None,
         release_date: release_date.map(|value| value.to_string()),
         ..test_details("tt1", "movie")
     };
@@ -212,13 +200,13 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
     // A full `released` stamp keeps its exact day; without it the year-only
     // fallback still produces a schedulable Jan 1 date.
     assert_eq!(
-        normalize_media_details(details(Some("2024-07-18T00:00:00.000Z")), "tt1")
+        normalize_media_details(details(Some("2024-07-18T00:00:00.000Z")))
             .release_date
             .as_deref(),
         Some("2024-07-18")
     );
     assert_eq!(
-        normalize_media_details(details(None), "tt1")
+        normalize_media_details(details(None))
             .release_date
             .as_deref(),
         Some("2024-01-01")
@@ -233,9 +221,7 @@ fn normalize_media_details_prefers_full_release_date_over_year() {
         let mut input = details(Some(released));
         input.year = None;
         assert_eq!(
-            normalize_media_details(input, "tt1")
-                .display_year
-                .as_deref(),
+            normalize_media_details(input).display_year.as_deref(),
             expected,
             "{released}"
         );
@@ -324,8 +310,6 @@ fn normalize_media_item_bounds_text_and_gates_images() {
         backdrop: Some("https://cdn.test/back.jpg".to_string()),
         description: Some("d".repeat(9_999)),
         year: Some("2024".to_string()),
-        primary_year: None,
-        display_year: None,
         genres: Some(
             (0..40)
                 .map(|index| format!("genre-{index}"))
@@ -350,21 +334,25 @@ fn normalize_media_item_bounds_text_and_gates_images() {
 
 #[test]
 fn normalize_media_details_bounds_lists_and_episode_fields() {
+    let thumbnail =
+        normalize_image_url(&format!("https://cdn.example/{}.jpg", "界".repeat(300))).unwrap();
+    assert!(thumbnail.len() > 2_048);
+    assert_eq!(normalize_image_url(&thumbnail).as_ref(), Some(&thumbnail));
     let episode = |number: u32| Episode {
         title: Some("t".repeat(900)),
         released: Some("2024-01-05".to_string()),
-        release_date: None,
         overview: Some("o".repeat(9_999)),
-        thumbnail: Some("t".repeat(4_096)),
-        stream_lookup_id: None,
+        thumbnail: Some(if number == 1 {
+            thumbnail.clone()
+        } else {
+            "not a URL".to_string()
+        }),
         ..test_episode(&"e".repeat(600), 1, number)
     };
     let details = MediaDetails {
         imdb_id: Some("i".repeat(900)),
         title: "Series".to_string(),
         year: Some("2024".to_string()),
-        display_year: None,
-        release_date: None,
         rating: Some("r".repeat(500)),
         cast: Some((0..200).map(|index| format!("actor-{index}")).collect()),
         directors: Some(
@@ -380,7 +368,7 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
         ..test_details("tt123", "series")
     };
 
-    let normalized = normalize_media_details(details, "tt123");
+    let normalized = normalize_media_details(details);
 
     assert_eq!(normalized.imdb_id.as_deref().map(str::len), Some(256));
     assert_eq!(normalized.rating, None);
@@ -393,5 +381,27 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
     assert_eq!(episodes[0].id.len(), 256);
     assert_eq!(episodes[0].title.as_deref().map(str::len), Some(512));
     assert_eq!(episodes[0].overview.as_deref().map(str::len), Some(4_096));
-    assert_eq!(episodes[0].thumbnail.as_deref().map(str::len), Some(2_048));
+    assert_eq!(episodes[0].thumbnail.as_deref(), Some(thumbnail.as_str()));
+    assert_eq!(episodes[1].thumbnail, None);
+}
+
+#[test]
+fn bounded_text_stays_idempotent_and_genres_dedupe_by_ascii_fold() {
+    let padded = format!("A{}B", " ".repeat(31));
+    let once = crate::providers::trim_to_max(&padded, 32);
+    assert_eq!(once.as_deref(), Some("A"));
+    assert_eq!(crate::providers::trim_to_max("A", 32), once);
+
+    let item = normalize_media_item(MediaItem {
+        genres: Some(
+            ["Action", "action", "Épique", "épique"]
+                .map(String::from)
+                .to_vec(),
+        ),
+        ..test_media_item("tt1", "movie")
+    });
+    assert_eq!(
+        item.genres,
+        Some(["Action", "Épique", "épique"].map(String::from).to_vec())
+    );
 }

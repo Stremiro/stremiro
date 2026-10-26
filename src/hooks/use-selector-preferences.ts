@@ -320,14 +320,10 @@ export function useSelectorPreferencesState({
   );
 
   return {
-    batchFilter: filters.batch,
     filters,
     hasActiveFilter: hasVisibleFilter,
-    qualityFilter: filters.quality,
     resetFilters,
     setFilters,
     showBatchFilter,
-    sortMode: filters.sort,
-    sourceFilter: filters.source,
   };
 }

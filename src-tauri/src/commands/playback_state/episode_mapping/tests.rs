@@ -42,11 +42,7 @@ fn shorter_episode_lists_remove_only_stale_mappings_in_the_replaced_scope() {
         "tt2560140",
         1
     ));
-    let mut episodes = [Episode {
-        release_date: None,
-        stream_lookup_id: None,
-        ..test_episode("tt2560140:1:1", 1, 1)
-    }];
+    let mut episodes = [test_episode("tt2560140:1:1", 1, 1)];
     let snapshots = [build_episode_mapping_snapshot(
         "series",
         "tt2560140",

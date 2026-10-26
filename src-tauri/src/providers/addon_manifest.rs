@@ -1,7 +1,7 @@
 use super::addon_resource::normalize_image_url;
 use super::{
     bound_optional, has_manifest_suffix, lenient_option, non_blank, strip_manifest_suffix,
-    trim_to_max, MANIFEST_JSON_SUFFIX,
+    trim_to_max, ADDON_URL_INVALID_MESSAGE, MANIFEST_JSON_SUFFIX,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -226,12 +226,10 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
     let extra_source = raw
         .extra
         .into_iter()
-        .chain(raw.extra_supported.into_iter().filter_map(|name| {
-            trim_to_max(&name, MAX_EXTRA_NAME_CHARS).map(|name| RawExtra {
-                name: Some(name),
-                is_required: None,
-                options: Vec::new(),
-            })
+        .chain(raw.extra_supported.into_iter().map(|name| RawExtra {
+            name: Some(name),
+            is_required: None,
+            options: Vec::new(),
         }));
 
     for extra in extra_source {
@@ -292,7 +290,7 @@ fn normalize_resource(
             types: types
                 .map(|values| normalize_opaque_list(values, MAX_TYPE_CHARS, MAX_TYPES))
                 .unwrap_or_else(|| manifest_types.to_vec()),
-            // Stremio object resources use only their own prefixes; absent or empty accepts any id.
+            // Addon protocol object resources use only their own prefixes; absent or empty accepts any id.
             id_prefixes: id_prefixes
                 .map(|values| normalize_opaque_list(values, MAX_PREFIX_CHARS, MAX_PREFIXES))
                 .unwrap_or_default(),
@@ -359,14 +357,10 @@ fn parse_addon_manifest_checked(
 }
 
 pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String> {
-    let mut parsed = reqwest::Url::parse(normalized_base).map_err(|_| {
-        "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
-    })?;
+    let mut parsed =
+        reqwest::Url::parse(normalized_base).map_err(|_| ADDON_URL_INVALID_MESSAGE.to_string())?;
     let trimmed_path = parsed.path().trim_end_matches('/');
-    let already_manifest = has_manifest_suffix(trimmed_path);
-    let manifest_path = if trimmed_path.is_empty() {
-        MANIFEST_JSON_SUFFIX.to_string()
-    } else if already_manifest {
+    let manifest_path = if has_manifest_suffix(trimmed_path) {
         trimmed_path.to_string()
     } else {
         format!("{trimmed_path}{MANIFEST_JSON_SUFFIX}")
@@ -375,11 +369,10 @@ pub(crate) fn build_manifest_url(normalized_base: &str) -> Result<String, String
     Ok(parsed.into())
 }
 
-/// Stremio convention: the configure page sits where `manifest.json` would, query kept.
+/// Addon convention: the configure page sits where `manifest.json` would, query kept.
 pub(crate) fn build_configure_url(normalized_base: &str) -> Result<String, String> {
-    let mut parsed = reqwest::Url::parse(normalized_base).map_err(|_| {
-        "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
-    })?;
+    let mut parsed =
+        reqwest::Url::parse(normalized_base).map_err(|_| ADDON_URL_INVALID_MESSAGE.to_string())?;
     let configure_path = format!("{}/configure", strip_manifest_suffix(parsed.path()));
     parsed.set_path(&configure_path);
     Ok(parsed.into())

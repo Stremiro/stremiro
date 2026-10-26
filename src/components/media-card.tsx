@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bookmark, Check, ChevronLeft, Play, Trash2 } from 'lucide-react';
+import { Bookmark, ChevronLeft, Play, Trash2 } from 'lucide-react';
 import {
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -11,8 +11,8 @@ import {
   type SetStateAction,
   Suspense,
   createContext,
+  use,
   useCallback,
-  useContext,
   useEffect,
   useId,
   useLayoutEffect,
@@ -23,7 +23,7 @@ import { currentPathWithSearch, navigateOnAnchorClick, navigateToDetails } from 
 import { HoverTrailerPreview } from '@/components/hover-trailer-preview';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { RemoteImage } from '@/components/remote-image';
-import { SaveIndicator, animateLibrarySave } from '@/components/ui/button';
+import { SaveIndicator } from '@/components/ui/button';
 import {
   ContextMenu,
   ContextMenuContent,
@@ -31,7 +31,7 @@ import {
   ContextMenuTrigger,
 } from '@/components/ui/context-menu';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
-import { WatchStatusIcon } from '@/components/watch-status-icon';
+import { SelectionCheck, WatchStatusIcon } from '@/components/watch-status-icon';
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import {
@@ -45,16 +45,15 @@ import { useMediaPrimaryPlayback } from '@/hooks/use-media-primary-playback';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
 import { api, type MediaItem, WATCH_STATUS_LABELS, type WatchStatus } from '@/lib/api';
-import { warmPlayerChunk } from '@/lib/player-session';
+import { pendingDetailsPrefetch } from '@/lib/details-prefetch';
 import {
   buildDetailsRoute,
   resolvePlayerRouteMediaType,
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
-import { routeChunks } from '@/lib/route-chunks';
+import { routeChunks, warmPlayerChunk } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
-  clamp,
   clearTimer,
   cn,
   isHttpUrl,
@@ -101,7 +100,7 @@ export const MEDIA_CARD_SLOT_CLASS_NAME = 'w-[170px] md:w-[190px]';
 export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 82;
 const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-[76px] px-0.5 space-y-1';
 const CARD_ICON_BUTTON_CLASS_NAME =
-  'flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-95';
+  'group/collection flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 not-aria-disabled:active:bg-white/[0.16] motion-reduce:transition-none';
 const CARD_INACTIVE_ICON_BUTTON_CLASS_NAME =
   'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white';
 
@@ -270,18 +269,16 @@ function MediaCardPoster({
         ) : null}
         {isNewEpisode && <NewEpisodeBadge />}
         {selectionMode && (
-          <span
-            aria-hidden='true'
+          <SelectionCheck
+            selected={isSelected}
             className={cn(
-              'absolute top-2.5 z-20 flex h-6 w-6 items-center justify-center rounded-lg border transition-all duration-150',
+              'absolute top-2.5 z-20 size-6 rounded-lg transition-[color,background-color,border-color,box-shadow,scale] duration-150 [&_svg]:size-3.5',
               isNewEpisode ? 'right-2.5' : 'left-2.5',
               isSelected
-                ? 'border-(--accent-nav) bg-(--accent-nav) text-(--on-accent-nav) shadow-md scale-100'
-                : 'border-white/30 bg-black/65 text-transparent group-hover:border-white/60',
+                ? 'shadow-md scale-100'
+                : 'border-white/30 bg-black/65 group-hover:border-white/60',
             )}
-          >
-            <Check className='h-3.5 w-3.5' strokeWidth={3} />
-          </span>
+          />
         )}
 
         {subtitle && (
@@ -303,6 +300,7 @@ function MediaCardPoster({
     <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
       <p
         dir='auto'
+        title={item.title}
         className='line-clamp-2 min-h-9 [overflow-wrap:anywhere] text-[14px] font-medium leading-[18px] tracking-[-0.01em] text-zinc-100'
       >
         {item.title}
@@ -358,7 +356,7 @@ function MediaCardPoster({
         className='block relative rounded-lg focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
         onClick={(event) => {
           if (event.detail === 0) onPrefetchDetails?.();
-          onPlay?.(event);
+          void onPlay?.(event);
           navigateToDetails(
             event,
             detailsPath,
@@ -425,7 +423,7 @@ function useMediaCardActions({
   const [from] = useState(currentPathWithSearch);
   const detailsPath = buildDetailsRoute(detailsRouteType, item.id);
 
-  const { data: historyEntry } = useMediaResumeEntry(item.id, item.type, {
+  const historyQuery = useMediaResumeEntry(item.id, item.type, {
     enabled: !onPlay,
   });
 
@@ -441,7 +439,7 @@ function useMediaCardActions({
   const { toggleLibrary } = collectionActions;
   const primaryPlayback = useMediaPrimaryPlayback({
     from,
-    historyEntry,
+    historyEntry: historyQuery.data,
     item,
     launchOwnerMountedRef,
     surface: 'card',
@@ -454,17 +452,26 @@ function useMediaCardActions({
         ? 'Play next episode'
         : PLAYBACK_INTENT_VERB[playbackIntent]
     : primaryPlayback.primaryActionLabel;
-  const isPrimaryPending = isPlayPending || primaryPlayback.isResolvingPrimaryAction;
+  const needsHistory =
+    !onPlay && !primaryPlayback.canReturnToActivePlayer && !historyQuery.isSuccess;
+  const isPrimaryPending =
+    isPlayPending ||
+    primaryPlayback.isResolvingPrimaryAction ||
+    (needsHistory && (historyQuery.isPending || historyQuery.isFetching));
 
   const handlePrimaryAction = (e: ReactMouseEvent) => {
     e.preventDefault();
     e.stopPropagation();
     if (isPrimaryPending) return;
     if (onPlay) {
-      onPlay(e);
+      void onPlay(e);
       return;
     }
 
+    if (needsHistory) {
+      void historyQuery.refetch();
+      return;
+    }
     void primaryPlayback.handlePrimaryAction();
   };
 
@@ -473,7 +480,6 @@ function useMediaCardActions({
     event.stopPropagation();
     if (!libraryReady || toggleLibrary.isPending) return;
     if (isInLibrary && isInLibraryOverride) onLibraryRemove();
-    if (!isInLibrary) animateLibrarySave(event.currentTarget as HTMLElement);
     toggleLibrary.mutate();
   };
 
@@ -611,7 +617,7 @@ export function MediaCardMenuScope({
   useEffect(() => () => handleOpenChange(false), [handleOpenChange, resetKey]);
 
   return (
-    <MediaCardMenuContext.Provider value={openMenu}>
+    <MediaCardMenuContext value={openMenu}>
       {children}
       <ContextMenu open={open} onOpenChange={handleOpenChange}>
         <ContextMenuTrigger ref={triggerRef} hidden />
@@ -624,7 +630,7 @@ export function MediaCardMenuScope({
           />
         )}
       </ContextMenu>
-    </MediaCardMenuContext.Provider>
+    </MediaCardMenuContext>
   );
 }
 
@@ -680,6 +686,9 @@ function MediaCardOverlay({
   // The id guard avoids a doomed IPC (Rust rejects empty ids); card payload only — hover never needs episodes.
   const { data: details, isLoading: isDetailsLoading } = useQuery({
     ...api.cardDetailsQueryOptions(detailsRouteType, item.id),
+    queryFn: async (context) =>
+      (await pendingDetailsPrefetch(detailsRouteType, item.id))?.details ??
+      api.cardDetailsQueryOptions(detailsRouteType, item.id).queryFn!(context),
     enabled: !!item.id.trim(),
   });
   const artworkRef = useRef<HTMLDivElement>(null);
@@ -711,9 +720,7 @@ function MediaCardOverlay({
 
   return (
     <>
-      {/* Top-anchored popout — center uses a negative margin, not translate, so the enter zoom never fights it.
-          Opacity-only entrance and exit: a scale or slide reads as the panel resizing under
-          the cursor. Height is already deterministic, so it paints once and holds. */}
+      {/* Centering uses a margin so the resume panel's short entrance never changes its anchor. */}
       <div
         id={expandedContentId}
         role='group'
@@ -723,7 +730,9 @@ function MediaCardOverlay({
           'absolute top-0 z-20 flex max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
           exiting
             ? 'pointer-events-none animate-out fade-out-0 duration-100 ease-in fill-mode-forwards'
-            : 'animate-in fade-in-0 duration-150 ease-out',
+            : removeFrom === 'Continue Watching'
+              ? 'resume-card-enter'
+              : 'animate-in fade-in-0 duration-150 ease-out',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
           popoverAlign === 'center' && 'left-1/2',
@@ -759,7 +768,7 @@ function MediaCardOverlay({
             tabIndex={-1}
             aria-hidden
             onClick={(event) => {
-              onPlay?.(event);
+              void onPlay?.(event);
               navigateToDetails(event, detailsPath, { state: { from } }, artworkRef.current);
             }}
           />
@@ -783,7 +792,10 @@ function MediaCardOverlay({
 
         <div className='flex flex-1 flex-col'>
           {showListPicker ? (
-            <div data-media-card-picker className='relative z-10 flex flex-1 flex-col p-2.5'>
+            <div
+              data-media-card-picker
+              className='page-enter relative z-10 flex flex-1 flex-col p-2.5'
+            >
               <div className='mb-1 flex shrink-0 items-center gap-1.5'>
                 <button
                   type='button'
@@ -855,6 +867,8 @@ function MediaCardOverlay({
                   data-media-card-primary
                   className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[14px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-[0.98] aria-disabled:cursor-default aria-disabled:opacity-80'
                   title={primaryActionLabel}
+                  onPointerEnter={warmPlayerChunk}
+                  onFocus={warmPlayerChunk}
                   onClick={handlePrimaryAction}
                   aria-disabled={isPrimaryPending || undefined}
                   aria-busy={isPrimaryPending || undefined}
@@ -906,7 +920,9 @@ function MediaCardOverlay({
                     aria-hidden='true'
                     className={cn(
                       'h-3.5 w-3.5 transition-[fill,color] duration-150 motion-reduce:transition-none',
-                      isInAnyList ? 'fill-current' : 'fill-transparent',
+                      isInAnyList
+                        ? 'fill-current'
+                        : 'fill-transparent group-hover/collection:fill-white/10',
                     )}
                   />
                 </button>
@@ -992,7 +1008,7 @@ export const MediaCard = memo(function MediaCard({
   const [popoverAlign, setPopoverAlign] = useState<PopoverAlign>('center');
   const [showListPicker, setShowListPickerState, showListPickerRef] = useSyncedBooleanState();
   const [createListOpen, setCreateListOpenState, createListOpenRef] = useSyncedBooleanState();
-  const openMenu = useContext(MediaCardMenuContext);
+  const openMenu = use(MediaCardMenuContext);
   const contextMenuOpenRef = useRef(false);
   const restoreMenuFocusRef = useRef(true);
   const menuFocusTargetRef = useRef<(() => HTMLElement | null) | null>(null);
@@ -1152,7 +1168,6 @@ export const MediaCard = memo(function MediaCard({
         : HOVER_EXPAND_DELAY_MS;
     expandTimer.current = setTimeout(() => {
       void routeChunks.details().catch(() => undefined);
-      warmPlayerChunk();
       setPopoverAlign(resolvePopoverAlign());
       setExpanded(true);
       expandTimer.current = null;
@@ -1268,8 +1283,6 @@ export const MediaCard = memo(function MediaCard({
   const currentStatus =
     currentStatusOverride !== undefined ? currentStatusOverride : resolvedCurrentStatus;
 
-  const safeProgress =
-    typeof progress === 'number' && Number.isFinite(progress) ? clamp(progress, 0, 100) : undefined;
   const overlay = useDelayedUnmount(!selectionMode && expanded, POPOUT_EXIT_MS);
 
   return (
@@ -1313,7 +1326,7 @@ export const MediaCard = memo(function MediaCard({
           onPlay={onPlay}
           playbackIntent={playbackIntent}
           onPrefetchDetails={onPlay ? undefined : prefetchDetails}
-          progress={safeProgress}
+          progress={progress}
           subtitle={subtitle}
           selectionMode={selectionMode}
           isSelected={isSelected}
@@ -1341,7 +1354,7 @@ export const MediaCard = memo(function MediaCard({
           onRemoveFromContinue={onRemoveFromContinue ? handleRemoveFromHistory : undefined}
           onToggleListPicker={toggleListPicker}
           popoverAlign={popoverAlign}
-          progress={safeProgress}
+          progress={progress}
           removeFrom={removeFrom}
           showListPicker={showListPicker}
           subtitle={subtitle}

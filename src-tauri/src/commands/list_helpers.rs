@@ -281,6 +281,8 @@ impl ListItemIdentity {
             primary_year: None,
             display_year: None,
             genres: None,
+            matches_search_credit: false,
+            catalog_genre: None,
         })
     }
 }

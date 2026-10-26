@@ -17,8 +17,7 @@ fn relative_redirects_inherit_playback_fragments() {
         ),
     ] {
         let target = resolve_redirect_url(&initial, location).unwrap();
-        let resolved =
-            build_resolved_direct_stream(initial.as_str(), target.to_string(), &[]).unwrap();
+        let resolved = build_resolved_direct_stream(&initial, target.to_string(), &[]).unwrap();
         assert_eq!(resolved.url, expected);
     }
 }
@@ -70,53 +69,39 @@ fn redirect_chains_inherit_the_previous_hops_fragment() {
         target = resolve_redirect_url(&target, location).unwrap();
         assert_eq!(target.fragment(), Some(expected_fragment));
     }
-    let resolved = build_resolved_direct_stream(initial.as_str(), target.to_string(), &[]).unwrap();
+    let resolved = build_resolved_direct_stream(&initial, target.to_string(), &[]).unwrap();
     assert_eq!(resolved.url, "https://other.test/final#");
 }
 
 #[test]
-fn torrent_probe_content_types_are_rejected() {
-    for content_type in [
-        "application/x-bittorrent",
-        "Application/X-BitTorrent; charset=binary",
-        " application/x-bittorrent ; name=video.torrent",
+fn probe_content_types_allow_media() {
+    for (label, content_type, allowed) in [
+        ("missing", None, true),
+        ("hls", Some("application/vnd.apple.mpegurl"), true),
+        (
+            "hls case",
+            Some("Application/X-MpegURL; charset=utf-8"),
+            true,
+        ),
+        ("dash", Some("application/dash+xml"), true),
+        ("binary", Some("application/octet-stream"), true),
+        ("mp4", Some("video/mp4"), true),
     ] {
         let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_str(content_type).unwrap(),
-        );
-        assert_eq!(
-            validate_probe_content_type(&headers).unwrap_err(),
-            "Direct stream probe returned HTML or JSON instead of media."
-        );
-    }
-}
-
-#[test]
-fn media_probe_content_types_remain_accepted() {
-    assert!(validate_probe_content_type(&reqwest::header::HeaderMap::new()).is_ok());
-    for content_type in [
-        "application/vnd.apple.mpegurl",
-        "Application/X-MpegURL; charset=utf-8",
-        "application/dash+xml",
-        "application/octet-stream",
-        "video/mp4",
-    ] {
-        let mut headers = reqwest::header::HeaderMap::new();
-        headers.insert(
-            reqwest::header::CONTENT_TYPE,
-            reqwest::header::HeaderValue::from_str(content_type).unwrap(),
-        );
-        assert!(
-            validate_probe_content_type(&headers).is_ok(),
-            "{content_type}"
-        );
+        if let Some(content_type) = content_type {
+            headers.insert(
+                reqwest::header::CONTENT_TYPE,
+                reqwest::header::HeaderValue::from_str(content_type).unwrap(),
+            );
+        }
+        let result = validate_probe_content_type(&headers);
+        assert_eq!(result.is_ok(), allowed, "{label}");
     }
 }
 
 #[test]
 fn resolved_headers_stay_on_first_hop_origin() {
+    let initial = reqwest::Url::parse("https://cdn.test/start").unwrap();
     let headers = || vec![("Authorization".to_string(), "Bearer fixture".to_string())];
     for (final_url, keep_headers) in [
         ("https://cdn.test/next.mkv", true),
@@ -124,12 +109,8 @@ fn resolved_headers_stay_on_first_hop_origin() {
         ("http://cdn.test/next.mkv", false),
         ("https://cdn.test:444/next.mkv", false),
     ] {
-        let resolved = build_resolved_direct_stream(
-            "https://cdn.test/start",
-            final_url.to_string(),
-            &headers(),
-        )
-        .expect("valid urls resolve");
+        let resolved = build_resolved_direct_stream(&initial, final_url.to_string(), &headers())
+            .expect("valid urls resolve");
         assert_eq!(resolved.url, final_url);
         if keep_headers {
             assert_eq!(
@@ -148,6 +129,7 @@ fn resolved_headers_stay_on_first_hop_origin() {
 #[test]
 fn resolved_playback_urls_preserve_unicode_encoding_and_opaque_fragments() {
     let prefix = "https://cdn.test/";
+    let initial = reqwest::Url::parse(prefix).unwrap();
     let fragment = "#file=Episode%201.mkv&hint=%2f%2F+opaque";
     for character in ["漢", "\u{10000}"] {
         let raw = format!(
@@ -159,9 +141,7 @@ fn resolved_playback_urls_preserve_unicode_encoding_and_opaque_fragments() {
         assert!(canonical.len() > 4_096);
         assert!(canonical.len() <= PLAYBACK_URL_MAX_BYTES);
         for final_url in [raw, canonical] {
-            let resolved =
-                build_resolved_direct_stream("https://cdn.test/start", final_url.clone(), &[])
-                    .unwrap();
+            let resolved = build_resolved_direct_stream(&initial, final_url.clone(), &[]).unwrap();
             assert_eq!(resolved.url, final_url);
             assert!(resolved.url.ends_with(fragment));
         }
@@ -171,13 +151,14 @@ fn resolved_playback_urls_preserve_unicode_encoding_and_opaque_fragments() {
 #[test]
 fn resolved_playback_urls_enforce_native_bounds_and_schemes() {
     let prefix = "https://cdn.test/";
+    let initial = reqwest::Url::parse(prefix).unwrap();
     let at_limit = format!(
         "{prefix}{}",
         "x".repeat(PLAYBACK_URL_MAX_BYTES - prefix.len())
     );
-    let resolved = build_resolved_direct_stream(prefix, at_limit.clone(), &[]).unwrap();
+    let resolved = build_resolved_direct_stream(&initial, at_limit.clone(), &[]).unwrap();
     assert_eq!(resolved.url, at_limit);
-    assert!(build_resolved_direct_stream(prefix, format!("{at_limit}x"), &[]).is_err());
+    assert!(build_resolved_direct_stream(&initial, format!("{at_limit}x"), &[]).is_err());
 
     let raw = format!(
         "{prefix}{}",
@@ -187,7 +168,7 @@ fn resolved_playback_urls_enforce_native_bounds_and_schemes() {
     let canonical = reqwest::Url::parse(&raw).unwrap().to_string();
     assert!(canonical.len() > PLAYBACK_URL_MAX_BYTES);
     for final_url in [raw, canonical] {
-        assert!(build_resolved_direct_stream(prefix, final_url, &[]).is_err());
+        assert!(build_resolved_direct_stream(&initial, final_url, &[]).is_err());
     }
 
     for final_url in [
@@ -197,14 +178,14 @@ fn resolved_playback_urls_enforce_native_bounds_and_schemes() {
         "https://",
         "http://?video",
     ] {
-        assert!(build_resolved_direct_stream(prefix, final_url.to_string(), &[]).is_err());
+        assert!(build_resolved_direct_stream(&initial, final_url.to_string(), &[]).is_err());
     }
     for final_url in [
         "http://127.0.0.1:11470/video",
         "http://localhost:11470/video",
         "http://[::1]:11470/video",
     ] {
-        let resolved = build_resolved_direct_stream(prefix, final_url.to_string(), &[]).unwrap();
+        let resolved = build_resolved_direct_stream(&initial, final_url.to_string(), &[]).unwrap();
         assert_eq!(resolved.url, final_url);
     }
 }
@@ -213,7 +194,7 @@ fn resolved_playback_urls_enforce_native_bounds_and_schemes() {
 fn mpv_http_header_fields_escape_commas_and_backslashes() {
     assert_eq!(format_mpv_http_header_fields(&[]), "");
     let resolved = build_resolved_direct_stream(
-        "https://cdn.test/start",
+        &reqwest::Url::parse("https://cdn.test/start").unwrap(),
         "https://cdn.test/video.mkv".to_string(),
         &[
             ("X-Custom".to_string(), r"one,two\three\,four".to_string()),

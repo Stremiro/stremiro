@@ -129,16 +129,6 @@ export function useDetailsStreamSelector({
     return true;
   };
 
-  // One owner for "open the selector at S/E": episode lookup plus the target payload.
-  const openEpisodeSelectorForCoordinates = (
-    season: number,
-    episode: number,
-    startTime?: number,
-  ): boolean => {
-    const targetEpisode = findEpisodeByCoordinates(itemEpisodes, season, episode);
-    return openEpisodeStreamSelector(targetEpisode ?? { id: '', season, episode }, { startTime });
-  };
-
   const openDetailsReopenSelector = useEffectEvent(
     (
       state?: Pick<
@@ -166,7 +156,12 @@ export function useDetailsStreamSelector({
         return false;
       }
 
-      return openEpisodeSelectorForCoordinates(reopenSeason, reopenEpisode, startTime);
+      // One owner for "open the selector at S/E": episode lookup plus the target payload.
+      const targetEpisode = findEpisodeByCoordinates(itemEpisodes, reopenSeason, reopenEpisode);
+      return openEpisodeStreamSelector(
+        targetEpisode ?? { id: '', season: reopenSeason, episode: reopenEpisode },
+        { startTime },
+      );
     },
   );
 
@@ -214,7 +209,6 @@ export function useDetailsStreamSelector({
     streamTarget,
     handleWatchMovie,
     openEpisodeStreamSelector,
-    openEpisodeSelectorForCoordinates,
     handleSelectorClose,
     handleSelectorClosed,
     getStreamTargetStartTime,

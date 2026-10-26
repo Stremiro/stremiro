@@ -35,6 +35,20 @@ static STREAM_HDR_REGEX: LazyLock<Regex> =
 // `\b4k\b` rejects "4Kids" dubs that `contains("4k")` misclassified as P2160.
 static STREAM_4K_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b4k\b").expect("valid stream 4k regex"));
+static STREAM_ATMOS_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:atmos|truehd)(?:\d+(?:\.\d+)?)?\b").expect("valid stream atmos regex")
+});
+static STREAM_DTS_HD_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\bdts(?:-hd|-x|x)(?:\d+(?:\.\d+)?)?\b").expect("valid stream dts-hd regex")
+});
+static STREAM_DTS_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\bdts(?:\d+(?:\.\d+)?)?\b").expect("valid stream dts regex"));
+static STREAM_EAC3_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)\b(?:eac3|ddp)(?:\d+(?:\.\d+)?)?\b|\bdd\+(?:\d+(?:\.\d+)?)?(?:\W|$)")
+        .expect("valid stream eac3 regex")
+});
+static STREAM_AAC_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)\baac(?:\d+(?:\.\d+)?)?\b").expect("valid stream aac regex"));
 // Strip `[57].1<size>` spans before probing — size text isn't a channel layout.
 static STREAM_SURROUND_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)\b[57]\.1\b").expect("valid stream surround regex"));
@@ -530,22 +544,15 @@ fn episode_matches_lowered_with_scratch(
     }
 
     // "Episode 52" / "Episode.1000" / "Ep 52" / "Ep.52" / "ep_5" / "ep52"
-    for captures in LOOSE_EPISODE_REGEX.captures_iter(t) {
-        if parse_captured_u32(&captures, 1) == Some(episode) {
-            return true;
-        }
-    }
-
-    // "S01.E05" — the `E` segment detached from its season token.
-    if matches!(season_context, Some(true)) {
-        for captures in BARE_E_EPISODE_REGEX.captures_iter(t) {
-            if parse_captured_u32(&captures, 1) == Some(episode) {
-                return true;
-            }
-        }
-    }
-
-    absolute_episode_claims(t).any(|candidate| candidate == episode)
+    LOOSE_EPISODE_REGEX
+        .captures_iter(t)
+        .any(|captures| parse_captured_u32(&captures, 1) == Some(episode))
+        // "S01.E05" — the `E` segment detached from its season token.
+        || (matches!(season_context, Some(true))
+            && BARE_E_EPISODE_REGEX
+                .captures_iter(t)
+                .any(|captures| parse_captured_u32(&captures, 1) == Some(episode)))
+        || absolute_episode_claims(t).any(|candidate| candidate == episode)
 }
 
 /// `_` defeats `\b` (it's a word char) but groups use it as a separator —
@@ -755,13 +762,11 @@ pub(crate) fn detect_stream_flags(haystack: &str) -> StreamFlags {
         hdr10_plus: haystack.contains("hdr10+"),
         hdr10: false,
         hdr: false,
-        atmos: haystack.contains("atmos") || haystack.contains("truehd"),
-        dts_hd: haystack.contains("dts-hd")
-            || haystack.contains("dts-x")
-            || haystack.contains("dtsx"),
-        dts: haystack.contains("dts"),
-        eac3: haystack.contains("eac3") || haystack.contains("dd+") || haystack.contains("ddp"),
-        aac: haystack.contains("aac"),
+        atmos: STREAM_ATMOS_REGEX.is_match(haystack),
+        dts_hd: STREAM_DTS_HD_REGEX.is_match(haystack),
+        dts: STREAM_DTS_REGEX.is_match(haystack),
+        eac3: STREAM_EAC3_REGEX.is_match(haystack),
+        aac: STREAM_AAC_REGEX.is_match(haystack),
         surround: haystack.contains("dd5.1")
             || STREAM_SURROUND_REGEX
                 .is_match(&STREAM_SURROUND_SIZE_REGEX.replace_all(haystack, " ")),
@@ -995,30 +1000,22 @@ impl StreamMatchText {
                     }
                 }
             }
-            for (regex, enabled) in [
-                (&*LOOSE_EPISODE_REGEX, true),
-                (&*BARE_E_EPISODE_REGEX, !seasons.is_empty()),
-            ] {
-                if !enabled {
-                    continue;
-                }
-                for captures in regex.captures_iter(&standalone) {
-                    if let Some(episode) = parse_captured_u32(&captures, 1) {
-                        episode_ranges.push(StreamPackEpisodeRange {
-                            season: None,
-                            start: episode,
-                            end: episode,
-                        });
-                    }
-                }
-            }
-            episode_ranges.extend(absolute_episode_claims(&standalone).map(|episode| {
-                StreamPackEpisodeRange {
+            episode_ranges.extend(
+                [
+                    (&*LOOSE_EPISODE_REGEX, true),
+                    (&*BARE_E_EPISODE_REGEX, !seasons.is_empty()),
+                ]
+                .into_iter()
+                .filter(|(_, enabled)| *enabled)
+                .flat_map(|(regex, _)| regex.captures_iter(&standalone))
+                .filter_map(|captures| parse_captured_u32(&captures, 1))
+                .chain(absolute_episode_claims(&standalone))
+                .map(|episode| StreamPackEpisodeRange {
                     season: None,
                     start: episode,
                     end: episode,
-                }
-            }));
+                }),
+            );
         }
         (!seasons.is_empty() || !episode_ranges.is_empty()).then_some(StreamPackCoverage {
             seasons,
@@ -1182,16 +1179,10 @@ pub(crate) fn stream_episode_match_texts(
             }
         }
     }
-    if batch_with_matching_season {
+    if batch_with_matching_season || (batch_without_season && !conflicting_season) {
         return StreamEpisodeMatch {
             kind: StreamEpisodeMatchKind::SeasonPack,
-            season_claim_verified: true,
-        };
-    }
-    if batch_without_season && !conflicting_season {
-        return StreamEpisodeMatch {
-            kind: StreamEpisodeMatchKind::SeasonPack,
-            season_claim_verified: false,
+            season_claim_verified: batch_with_matching_season,
         };
     }
 

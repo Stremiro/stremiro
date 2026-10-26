@@ -42,9 +42,9 @@ import { PlaybackSettings } from './playback';
 import { FIXED_SHORTCUT_SECTIONS, ShortcutsSection } from './shortcuts';
 import { UpdatesSection } from './updates';
 
-const AddonSettings = lazy(() =>
-  import('./streaming').then((module) => ({ default: module.AddonSettings })),
-);
+const loadAddonSettings = () =>
+  import('./streaming').then((module) => ({ default: module.AddonSettings }));
+const AddonSettings = lazy(loadAddonSettings);
 
 interface SearchControl {
   label: string;
@@ -76,7 +76,7 @@ const NAV_ITEMS = [
       { label: 'Launch at login', keywords: 'Open Stremiro when you sign in. Startup autostart' },
       {
         label: 'Start minimized',
-        keywords: 'Start in the system tray. Needs Launch at login or a tray option.',
+        keywords: 'Login launches start in the system tray. Manual launches stay visible.',
       },
       { label: 'Close to tray', keywords: 'Keep running in the tray when the window closes.' },
       {
@@ -94,7 +94,7 @@ const NAV_ITEMS = [
     controls: [
       {
         label: 'Addon manifest URL',
-        keywords: 'Add addon Paste a Stremio manifest.json or stremio:// URL to add an addon.',
+        keywords: 'Add addon Paste an addon manifest.json or stremiro:// URL to add an addon.',
       },
       {
         label: 'Manage addons',
@@ -111,8 +111,16 @@ const NAV_ITEMS = [
     icon: Settings2,
     description: 'Languages, audio, spoilers, auto-play and auto-skip.',
     controls: [
-      { label: 'Audio', keywords: 'Languages Auto preferred language' },
-      { label: 'Subtitles', keywords: 'Languages Auto Off preferred language captions' },
+      {
+        label: 'Audio',
+        keywords:
+          "Languages preferred language Auto reuses this title's remembered choice, or lets the player choose.",
+      },
+      {
+        label: 'Subtitles',
+        keywords:
+          "Languages Off preferred language captions Auto reuses this title's remembered choice, or lets the player choose.",
+      },
       {
         label: 'Audio sync',
         keywords:
@@ -148,7 +156,10 @@ const NAV_ITEMS = [
         keywords: 'Count down and start the next episode automatically.',
       },
       { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30' },
-      { label: 'Hide player controls after', keywords: 'Seconds 2 3 5 8 delay' },
+      {
+        label: 'Controls after keyboard input',
+        keywords: 'Hide player controls after Seconds 2 3 5 8 delay',
+      },
       {
         label: 'Auto-skip intros & recaps',
         keywords: 'Skip detected intros and recaps. Outros stay manual.',
@@ -380,6 +391,13 @@ export function Settings() {
   useEffect(() => {
     const nav = navRef.current;
     if (!nav || !indicator) return;
+    // Recentering an already visible item pans labels under the pointer while the pill travels.
+    const visible =
+      indicator.left >= nav.scrollLeft &&
+      indicator.left + indicator.width <= nav.scrollLeft + nav.clientWidth &&
+      indicator.top >= nav.scrollTop &&
+      indicator.top + indicator.height <= nav.scrollTop + nav.clientHeight;
+    if (visible) return;
     nav.scrollTo({
       left: Math.max(0, indicator.left - (nav.clientWidth - indicator.width) / 2),
       top: Math.max(0, indicator.top - (nav.clientHeight - indicator.height) / 2),
@@ -408,6 +426,7 @@ export function Settings() {
   }, []);
 
   const handleSectionChange = (sectionId: SectionId) => {
+    if (sectionId === active && !query && !searchTarget) return;
     setQuery('');
     setSearchTarget(null);
     // Same-path replaces are skipped by the route scroll manager — land at top.
@@ -520,6 +539,10 @@ export function Settings() {
                     }}
                     type='button'
                     onClick={() => handleSectionChange(item.id)}
+                    onPointerEnter={
+                      item.id === 'addons' ? () => void loadAddonSettings() : undefined
+                    }
+                    onFocus={item.id === 'addons' ? () => void loadAddonSettings() : undefined}
                     onKeyDown={handleNavKeyDown}
                     aria-current={isActive ? 'page' : undefined}
                     aria-label={

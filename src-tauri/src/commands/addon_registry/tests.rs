@@ -13,7 +13,7 @@ use crate::providers::addon_resource::{
     AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
 };
 use crate::test_helpers::{
-    cinemeta_addon, classified_cinemeta_addon, test_media_item, TestHttpServer,
+    cinemeta_addon, classified_cinemeta_addon, test_addon, test_media_item, TestHttpServer,
 };
 use futures_util::StreamExt;
 use std::collections::HashSet;
@@ -39,18 +39,12 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
     )]);
     let addons = [
         AddonConfig {
-            id: "primary".into(),
             url: format!("http://{}", stalled.local_addr().unwrap()),
-            name: "Primary".into(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("primary", "Primary")
         },
         AddonConfig {
-            id: "fallback".into(),
             url: server.url.clone(),
-            name: "Fallback".into(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("fallback", "Fallback")
         },
     ];
     let client = AddonResourceClient::new();
@@ -97,6 +91,7 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
                     media_type: "series".into(),
                     catalog_id: format!("group-{group}-source-{order}"),
                     extras: Vec::new(),
+                    catalog_genre: None,
                 })
             })
             .rev()
@@ -740,10 +735,7 @@ fn classified_catalog_allows_skip_and_animation_genre() {
 
 fn subtitle_addon() -> AddonConfig {
     AddonConfig {
-        id: "https://subtitles-addon.test".to_string(),
         url: "https://subtitles-addon.test".to_string(),
-        name: "Subtitles Addon".to_string(),
-        enabled: true,
         capabilities: Some(
             parse_addon_manifest(
                 br#"{
@@ -755,6 +747,7 @@ fn subtitle_addon() -> AddonConfig {
             )
             .expect("snapshot"),
         ),
+        ..test_addon("https://subtitles-addon.test", "Subtitles Addon")
     }
 }
 
@@ -963,6 +956,18 @@ fn subtitle_merge_dedupes_by_source_identity() {
     );
 }
 
+fn sourced_subtitle(id: &str, label: Option<&str>) -> SourcedAddonSubtitle {
+    let item = AddonSubtitle {
+        id: id.to_string(),
+        url: "https://subtitles-addon.test/subs/en.srt".to_string(),
+        lang: None,
+        label: label.map(str::to_string),
+    };
+    let mut subtitles = Vec::new();
+    add_subtitle_if_unique(&mut subtitles, &mut HashSet::new(), &subtitle_addon(), item);
+    subtitles.pop().unwrap()
+}
+
 #[test]
 fn subtitle_mpv_title_uses_js_trimmed_label_or_original_id() {
     for (label, expected) in [
@@ -972,21 +977,10 @@ fn subtitle_mpv_title_uses_js_trimmed_label_or_original_id() {
         (Some("\u{feff}  English \t"), "English"),
         (Some("\u{85}English\u{85}"), "\u{85}English\u{85}"),
     ] {
-        let mut subtitles = Vec::new();
-        add_subtitle_if_unique(
-            &mut subtitles,
-            &mut HashSet::new(),
-            &subtitle_addon(),
-            AddonSubtitle {
-                id: " sub-1 ".to_string(),
-                url: "https://subtitles-addon.test/subs/en.srt".to_string(),
-                lang: None,
-                label: label.map(str::to_string),
-            },
-        );
         assert_eq!(
-            serde_json::to_value(&subtitles[0]).unwrap()["mpvTitle"],
-            expected
+            serde_json::to_value(sourced_subtitle(" sub-1 ", label)).unwrap()["mpvTitle"],
+            expected,
+            "{label:?}"
         );
     }
 }
@@ -1022,21 +1016,10 @@ fn subtitle_detail_strips_extensions_and_preserves_release_separators() {
         (Some(""), None),
         (None, None),
     ] {
-        let mut subtitles = Vec::new();
-        add_subtitle_if_unique(
-            &mut subtitles,
-            &mut HashSet::new(),
-            &subtitle_addon(),
-            AddonSubtitle {
-                id: "sub-1".to_string(),
-                url: "https://subtitles-addon.test/subs/en.srt".to_string(),
-                lang: None,
-                label: label.map(str::to_string),
-            },
-        );
-        assert_eq!(subtitles[0].detail.as_deref(), expected, "{label:?}");
-        assert_eq!(subtitles[0].label.as_deref(), label);
-        let serialized = serde_json::to_value(&subtitles[0]).unwrap();
+        let subtitle = sourced_subtitle("sub-1", label);
+        assert_eq!(subtitle.detail.as_deref(), expected, "{label:?}");
+        assert_eq!(subtitle.label.as_deref(), label);
+        let serialized = serde_json::to_value(&subtitle).unwrap();
         assert_eq!(
             serialized.get("detail").and_then(serde_json::Value::as_str),
             expected

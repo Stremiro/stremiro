@@ -190,7 +190,7 @@ export function ProfileSettingsPopover({
             <div className='shrink-0 px-3.5 pb-3.5 space-y-1.5'>
               <Button
                 size='sm'
-                onClick={handleSave}
+                onClick={() => void handleSave()}
                 disabled={!draftName.trim() || isHydrating}
                 aria-disabled={isSaving || isAccentHexInvalid || undefined}
                 aria-busy={isSaving || undefined}
@@ -210,7 +210,7 @@ export function ProfileSettingsPopover({
                 type='button'
                 onClick={() => {
                   setOpen(false);
-                  navigate('/settings?section=appearance');
+                  void navigate('/settings?section=appearance');
                 }}
                 className='flex h-8 w-full items-center justify-center gap-1.5 rounded-md border border-white/[0.07] bg-white/[0.03] text-[11px] font-medium text-zinc-400 transition-colors hover:border-white/[0.12] hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
               >

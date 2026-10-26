@@ -1,6 +1,6 @@
 use super::{
     addon_registry::SourcedAddonSubtitle,
-    episode_navigation::{build_source_episode_coordinates, SourceEpisodeCoordinates},
+    episode_navigation::build_source_episode_coordinates,
     js_trim,
     media_normalization::with_requested_media_id,
     normalize_media_id, normalize_stream_media_type, normalize_watch_progress_type,
@@ -12,6 +12,7 @@ use super::{
     },
     JS_WHITESPACE,
 };
+use crate::operational_log::{field, log_warn};
 use crate::providers::{
     addon_resource::{meta_for_shape, AddonResourceClient},
     push_unique, Episode, MediaDetails,
@@ -193,16 +194,6 @@ async fn fetch_media_schedule_inner(
     Ok(build_media_schedule(&details, id, include_episodes))
 }
 
-fn source_coordinates_from_mapping(
-    mapping: PlaybackEpisodeMappingSnapshot,
-) -> SourceEpisodeCoordinates {
-    SourceEpisodeCoordinates {
-        lookup_id: mapping.source_lookup_id,
-        season: mapping.source_season,
-        episode: mapping.source_episode,
-    }
-}
-
 /// Cache episode-coordinate mappings and enrich stream targets in one blocking-pool
 /// round-trip — the cache pass returns resolved snapshots so enrichment reuses them.
 async fn cache_and_enrich_episode_targets(
@@ -255,10 +246,9 @@ fn enrich_episode_targets(
     match snapshots {
         Some(snapshots) => {
             for (episode, snapshot) in episodes.iter_mut().zip(snapshots) {
-                let source = source_coordinates_from_mapping(snapshot);
-                episode.stream_lookup_id = Some(source.lookup_id);
-                episode.stream_season = Some(source.season);
-                episode.stream_episode = Some(source.episode);
+                episode.stream_lookup_id = Some(snapshot.source_lookup_id);
+                episode.stream_season = Some(snapshot.source_season);
+                episode.stream_episode = Some(snapshot.source_episode);
             }
         }
         None => {
@@ -533,7 +523,15 @@ async fn fetch_media_schedules_inner(
                         .unwrap_or_else(|_| Err("Schedule metadata request timed out.".to_string()))
                     })
                     .await
-                    .unwrap_or_else(|_| Err("Schedule metadata task failed.".to_string()))
+                    .unwrap_or_else(|error| {
+                        log_warn(
+                            "media-schedule",
+                            "fetch_media_schedules",
+                            "task-failed",
+                            &[field("error", error)],
+                        );
+                        Err("Schedule metadata task failed.".to_string())
+                    })
                 } else {
                     fetch_media_schedule_inner(app, client, &media_type, &id).await
                 };

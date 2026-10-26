@@ -1,9 +1,9 @@
 use super::{
     build_candidate_input, build_probe_candidates, find_preferred_position, probe_candidate,
-    resolve_candidate_results, resolve_probe_candidates, resolve_ranked_best_stream_candidate,
-    CandidateProbeResult, PreferredStreamHint, ProbeError, ResolveStreamErrorKind, ResolvedStream,
-    StreamExclusions, StreamPoolQuery, StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES,
-    BEST_STREAM_PROBE_CONCURRENCY, SAME_HOST_PROBE_SPACING,
+    resolve_candidate_results, resolve_probe_candidates, CandidateProbeResult, PreferredStreamHint,
+    ProbeError, ResolveStreamErrorKind, ResolvedStream, StreamExclusions, StreamPoolQuery,
+    StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES, BEST_STREAM_PROBE_CONCURRENCY,
+    SAME_HOST_PROBE_SPACING,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
 use crate::providers::addons::{
@@ -17,12 +17,12 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Probeable row with an explicit prepared key and an optional info hash
+/// Probeable row with an explicit prepared key and an optional content hash
 /// (the hash feeds `stream_dedup_key` for the legacy-key tier).
-fn probeable_stream(stream_key: &str, info_hash: Option<&str>) -> AddonStream {
+fn probeable_stream(stream_key: &str, content_hash: Option<&str>) -> AddonStream {
     AddonStream {
         url: Some("https://cdn.example/file.mkv".to_string()),
-        info_hash: info_hash.map(str::to_string),
+        content_hash: content_hash.map(str::to_string),
         stream_key: stream_key.to_string(),
         ..test_stream()
     }
@@ -92,7 +92,7 @@ fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
             stream
         })
         .collect();
-    let plan = build_probe_candidates(streams, None, None, hint("s:10"));
+    let plan = build_probe_candidates(streams, hint("s:10"));
     assert_eq!(plan.len(), BEST_STREAM_MAX_CANDIDATES);
     assert_eq!(
         plan.iter()
@@ -127,18 +127,20 @@ fn probe_plan_deduplicates_requests_without_collapsing_auth_or_spending_slots_on
     );
     let mut excluded_url = probeable_stream("s:excluded-url", None);
     excluded_url.url = Some("https://cdn.example/excluded.mkv".to_string());
-    let plan = build_probe_candidates(
-        vec![
-            probeable_stream("s:duplicate", None),
-            probeable_stream("s:excluded-key", Some("ABC123")),
-            excluded_url,
-            authenticated,
-            preferred,
-        ],
+    let mut streams = vec![
+        probeable_stream("s:duplicate", None),
+        probeable_stream("s:excluded-key", Some("ABC123")),
+        excluded_url,
+        authenticated,
+        preferred,
+    ];
+    StreamExclusions::new(
+        &[],
         Some("h:abc123:0"),
         Some("https://cdn.example/excluded.mkv"),
-        hint("s:preferred"),
-    );
+    )
+    .retain(&mut streams);
+    let plan = build_probe_candidates(streams, hint("s:preferred"));
     assert_eq!(plan.len(), 2);
     assert_eq!(plan[0].0.stream_key, "s:preferred");
     assert_eq!(plan[1].0.stream_key, "s:auth");
@@ -172,7 +174,7 @@ fn probe_plan_ignores_fragment_aliases_without_losing_player_hints_or_request_va
     query_variant.url = Some("https://cdn.example/dead.mkv?token=other#hint.mkv".to_string());
     streams.push(query_variant);
 
-    let plan = build_probe_candidates(streams.clone(), None, None, PreferredStreamHint::default());
+    let plan = build_probe_candidates(streams.clone(), PreferredStreamHint::default());
     assert_eq!(
         plan.iter()
             .map(|(candidate, _)| candidate.stream_key.as_str())
@@ -182,8 +184,8 @@ fn probe_plan_ignores_fragment_aliases_without_losing_player_hints_or_request_va
     assert_eq!(plan[0].0.direct_url.fragment(), Some("hint0.mkv"));
     assert_eq!(plan[1].0.direct_url.fragment(), Some("container.mkv"));
 
-    let recovery =
-        build_probe_candidates(streams, Some("s:0"), None, PreferredStreamHint::default());
+    StreamExclusions::new(&[], Some("s:0"), None).retain(&mut streams);
+    let recovery = build_probe_candidates(streams, PreferredStreamHint::default());
     assert_eq!(
         recovery
             .iter()
@@ -237,7 +239,7 @@ fn probe_plan_deduplicates_header_names_without_changing_values_or_duplicates() 
     .collect::<Vec<_>>();
     let original_headers = streams[0].request_headers();
 
-    let plan = build_probe_candidates(streams, None, None, PreferredStreamHint::default());
+    let plan = build_probe_candidates(streams, PreferredStreamHint::default());
 
     assert_eq!(
         plan.iter()
@@ -312,12 +314,10 @@ fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants
         (None, vec![]),
         (Some("h:legacy:0"), vec![]),
     ] {
-        let plan = build_probe_candidates(
-            streams.clone(),
-            failed_key,
-            Some("https://cdn.example/file.mkv"),
-            PreferredStreamHint::default(),
-        );
+        let mut admitted = streams.clone();
+        StreamExclusions::new(&[], failed_key, Some("https://cdn.example/file.mkv"))
+            .retain(&mut admitted);
+        let plan = build_probe_candidates(admitted, PreferredStreamHint::default());
         assert_eq!(
             plan.iter()
                 .map(|(candidate, _)| candidate.stream_key.as_str())
@@ -468,7 +468,7 @@ preferred_position_tests! {
     preferred_position_ignores_key_hits_without_direct_url:
         (vec![AddonStream {
             url: None,
-            info_hash: Some("abc123".to_string()),
+            content_hash: Some("abc123".to_string()),
             stream_key: "s:prepared".to_string(),
             ..test_stream()
         }], hint("h:abc123:0"), None) => None;
@@ -770,28 +770,14 @@ fn episode_targets_limit_absolute_fallbacks_to_the_fetch_id() {
     }
 }
 
-#[tokio::test]
-async fn excluded_legacy_key_filters_matching_pool_candidate() {
+#[test]
+fn excluded_legacy_key_filters_matching_pool_candidate() {
     let mut stream = probeable_stream("s:prepared", Some("ABC123"));
     stream.source_name = Some("alpha".to_string());
 
-    let error = resolve_ranked_best_stream_candidate(
-        vec![stream],
-        Some("h:abc123:0"),
-        None,
-        PreferredStreamHint::default(),
-        tokio::time::Instant::now()
-            + Duration::from_secs(super::BEST_STREAM_CANDIDATE_TIMEOUT_SECS),
-        None,
-    )
-    .await
-    .expect_err("the excluded stream must be filtered before probing");
-
-    assert_eq!(error.kind, ResolveStreamErrorKind::Failed);
-    assert_eq!(
-        error.message,
-        "Unable to resolve a playable stream from the best candidates."
-    );
+    let mut streams = vec![stream];
+    StreamExclusions::new(&[], Some("h:abc123:0"), None).retain(&mut streams);
+    assert!(build_probe_candidates(streams, PreferredStreamHint::default()).is_empty());
 }
 
 fn candidate_input(source_name: &str, stream_key: &str) -> StreamResolveCandidateInput {
@@ -851,7 +837,7 @@ fn refill_probe_plan(count: usize) -> Vec<(StreamResolveCandidateInput, Duration
     alias.stream_key = "s:alias".to_string();
     alias.url.as_mut().unwrap().push_str("#filename.mkv");
     streams.insert(1, alias);
-    build_probe_candidates(streams, None, None, PreferredStreamHint::default())
+    build_probe_candidates(streams, PreferredStreamHint::default())
 }
 
 #[tokio::test]

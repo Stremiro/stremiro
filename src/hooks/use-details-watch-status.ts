@@ -1,4 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { createElement } from 'react';
+import { WatchStatusIcon } from '@/components/watch-status-icon';
 
 import {
   getOwnWatchStatus,
@@ -13,7 +15,6 @@ import {
   api,
   getWatchStatusErrorMessage,
   type MediaItem,
-  WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
   type WatchStatus,
 } from '@/lib/api';
@@ -111,7 +112,7 @@ export function useDetailsWatchStatus(
       notifyAction(WATCH_STATUS_LABELS[status], {
         detail: item?.title,
         thumb: item?.poster,
-        dot: WATCH_STATUS_COLORS[status].text,
+        icon: createElement(WatchStatusIcon, { status, className: 'size-4' }),
       });
     },
     onSettled: (_data, error) =>

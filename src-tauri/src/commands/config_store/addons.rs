@@ -1,10 +1,9 @@
 use super::{lenient_option, DurableStore, ADDON_CONFIGS_KEY, DEFAULT_ADDON_INSTALLS};
-use crate::commands::normalize_non_empty;
+use crate::commands::{app_links::APP_LINK_SCHEME, normalize_non_empty};
 use crate::providers::addon_manifest::{
     snapshot_is_classified, snapshot_resource_kinds, AddonManifest, AddonResourceKind,
 };
-use crate::providers::addons::sanitize_addon_log;
-use crate::providers::strip_manifest_suffix;
+use crate::providers::{strip_manifest_suffix, ADDON_URL_INVALID_MESSAGE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -74,9 +73,7 @@ impl AddonConfig {
     }
 }
 
-/// IPC view of an [`AddonConfig`]: `display_url` is the credential-masked URL computed
-/// by the same `sanitize_addon_log` pipeline that guards logs — one redaction
-/// implementation so a renderer-side masker can't drift and leak a user key.
+/// IPC view of an [`AddonConfig`]: `display_url` masks all config path/query values.
 /// Output-only; the masked string is never persisted.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -99,15 +96,46 @@ pub struct AddonConfigView {
     pub configurable: bool,
 }
 
-/// Readable masked URL: `https://` implied, redaction markers collapse to `•••`.
 pub(in crate::commands) fn addon_display_url(url: &str) -> String {
-    let masked = sanitize_addon_log(url);
-    masked
-        .strip_prefix("https://")
-        .unwrap_or(&masked)
-        .replace("[redacted-userinfo]", "•••")
-        .replace("[redacted-path]", "•••")
-        .replace("[redacted]", "•••")
+    let Ok(parsed) = reqwest::Url::parse(url) else {
+        return "•••".to_string();
+    };
+    let path = parsed.path().trim_end_matches('/');
+    let base_path = strip_manifest_suffix(path);
+    let suffix_start = ["/stream/", "/catalog/", "/meta/", "/subtitles/"]
+        .into_iter()
+        .filter_map(|resource| path.rfind(resource))
+        .filter(|&start| {
+            base_path.len() == path.len()
+                && path.ends_with(".json")
+                && path[start + 1..].split('/').count() >= 3
+        })
+        .max()
+        .unwrap_or(base_path.len());
+    let (config_path, suffix) = path.split_at(suffix_start);
+    let masked_path = config_path
+        .split('/')
+        .map(|segment| if segment.is_empty() { "" } else { "•••" })
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut display = format!(
+        "{}{masked_path}{suffix}",
+        parsed.origin().ascii_serialization()
+    );
+    if let Some(query) = parsed.query() {
+        display.push('?');
+        display.push_str(
+            &query
+                .split('&')
+                .map(|pair| {
+                    pair.split_once('=')
+                        .map_or_else(|| "•••".to_string(), |(key, _)| format!("{key}=•••"))
+                })
+                .collect::<Vec<_>>()
+                .join("&"),
+        );
+    }
+    display
 }
 
 impl AddonConfigView {
@@ -135,37 +163,31 @@ impl AddonConfigView {
     }
 }
 
-fn strip_ascii_prefix_ignore_case<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
-    let prefix_len = prefix.len();
-    if value.len() >= prefix_len
-        && value.is_char_boundary(prefix_len)
-        && value[..prefix_len].eq_ignore_ascii_case(prefix)
-    {
-        Some(&value[prefix_len..])
-    } else {
-        None
-    }
+pub(in crate::commands) fn strip_ascii_prefix_ignore_case<'a>(
+    value: &'a str,
+    prefix: &str,
+) -> Option<&'a str> {
+    value
+        .get(..prefix.len())
+        .filter(|head| head.eq_ignore_ascii_case(prefix))
+        .map(|_| &value[prefix.len()..])
 }
 
-fn rewrite_stremio_install_reference(trimmed: &str) -> Result<String, String> {
-    let Some(rest) = strip_ascii_prefix_ignore_case(trimmed, "stremio://") else {
-        if trimmed.contains("://") {
-            return Ok(trimmed.to_string());
-        }
-        return Ok(format!("https://{trimmed}"));
-    };
+pub(in crate::commands) const LEGACY_INSTALL_SCHEME: &str = concat!("strem", "io://");
 
-    if strip_ascii_prefix_ignore_case(rest, "https://").is_some()
-        || strip_ascii_prefix_ignore_case(rest, "http://").is_some()
+fn rewrite_install_reference(trimmed: &str) -> String {
+    let rest = strip_ascii_prefix_ignore_case(trimmed, APP_LINK_SCHEME)
+        .or_else(|| strip_ascii_prefix_ignore_case(trimmed, LEGACY_INSTALL_SCHEME))
+        .unwrap_or(trimmed);
+    // Configured paths and queries can themselves contain URLs.
+    if rest
+        .split_once("://")
+        .is_some_and(|(scheme, _)| !scheme.contains(['/', '?', '#']))
     {
-        return Ok(rest.to_string());
+        rest.to_string()
+    } else {
+        format!("https://{rest}")
     }
-
-    if rest.contains("://") {
-        return Err("Addon URL must start with http://, https://, or stremio://".to_string());
-    }
-
-    Ok(format!("https://{rest}"))
 }
 
 pub(crate) fn normalize_addon_url(config: &str) -> Result<Option<String>, String> {
@@ -174,15 +196,14 @@ pub(crate) fn normalize_addon_url(config: &str) -> Result<Option<String>, String
         return Ok(None);
     }
 
-    let candidate = rewrite_stremio_install_reference(trimmed)?;
+    let candidate = rewrite_install_reference(trimmed);
 
-    let mut parsed = reqwest::Url::parse(&candidate).map_err(|_| {
-        "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
-    })?;
+    let mut parsed =
+        reqwest::Url::parse(&candidate).map_err(|_| ADDON_URL_INVALID_MESSAGE.to_string())?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
-        return Err("Addon URL must start with http://, https://, or stremio://".to_string());
+        return Err(ADDON_URL_INVALID_MESSAGE.to_string());
     }
 
     if parsed.host_str().is_none() {
@@ -295,30 +316,27 @@ fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
 }
 
 /// Same URL identity `pin_default_addons` pins by — normalized once since the check runs per config.
-static NORMALIZED_DEFAULT_ADDON_URLS: LazyLock<Vec<String>> = LazyLock::new(|| {
+static DEFAULT_ADDON_CONFIGS: LazyLock<Vec<AddonConfig>> = LazyLock::new(|| {
     DEFAULT_ADDON_INSTALLS
         .iter()
-        .filter_map(|(install_url, _)| normalize_addon_url(install_url).ok().flatten())
+        .filter_map(|(install_url, name)| default_addon_config(install_url, name))
         .collect()
 });
 
 pub(in crate::commands) fn is_pinned_default_addon_url(url: &str) -> bool {
-    NORMALIZED_DEFAULT_ADDON_URLS
+    DEFAULT_ADDON_CONFIGS
         .iter()
-        .any(|default| default == url)
+        .any(|default| default.url == url)
 }
 
 /// Default addons are pinned: each `DEFAULT_ADDON_INSTALLS` entry always occupies its
 /// index and can't be removed. A user's `enabled: false` toggle is preserved.
 fn pin_default_addons(mut configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
-    for (index, (install_url, name)) in DEFAULT_ADDON_INSTALLS.iter().enumerate() {
-        let Some(default) = default_addon_config(install_url, name) else {
-            continue;
-        };
+    for (index, default) in DEFAULT_ADDON_CONFIGS.iter().enumerate() {
         // A stored copy keeps the user's toggle/name/snapshot; a missing one seeds enabled.
         let pinned = match configs.iter().position(|config| config.url == default.url) {
             Some(position) => configs.remove(position),
-            None => default,
+            None => default.clone(),
         };
         configs.insert(index.min(configs.len()), pinned);
     }

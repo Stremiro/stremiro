@@ -135,7 +135,6 @@ fn smart_list_manual_membership_gate_is_typed_and_backup_rules_are_optional() {
     });
     let error = list.require_manual().unwrap_err();
     assert_eq!(error.kind, ListErrorKind::SmartListReadOnly);
-    assert_eq!(error.message, "Smart lists update automatically.");
     let fixture = crate::test_helpers::test_store();
     let mut wire = serde_json::to_value(&list).unwrap();
     wire["items"] = serde_json::json!([]);

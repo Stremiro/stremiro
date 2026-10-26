@@ -49,7 +49,7 @@ import {
 } from '@/components/ui/context-menu';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
-import { warmPlayerChunk } from '@/lib/player-session';
+import { warmPlayerChunk } from '@/lib/route-chunks';
 import {
   api,
   getErrorMessage,
@@ -614,27 +614,6 @@ function StreamVirtualList({
     [focusRow, focusedIndex, streams.length],
   );
 
-  const renderRow = (stream: AddonStream, index: number) => {
-    const streamKey = stream.streamKey;
-    return (
-      <StreamItem
-        key={streamKey}
-        canBrowsePack={canBrowsePack}
-        stream={stream}
-        onSelect={handleSelectStream}
-        onCopyLink={handleCopyLink}
-        onRowFocus={setFocusedStreamKey}
-        isActive={currentStreamKey === streamKey}
-        isLastUsed={lastStreamKey === streamKey}
-        isSameFamily={familyFallbackKey === streamKey}
-        isResolving={isAnyResolving && activeResolveKey === streamKey}
-        disabled={isAnyResolving}
-        sortMode={sortMode}
-        tabIndex={index === focusedIndex ? 0 : -1}
-      />
-    );
-  };
-
   return (
     // Keydown lands here via bubbling from the focused row button — the container is never the target.
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions
@@ -663,7 +642,20 @@ function StreamVirtualList({
                 paddingBottom: `${STREAM_ROW_GAP_PX}px`,
               }}
             >
-              {renderRow(stream, virtualRow.index)}
+              <StreamItem
+                canBrowsePack={canBrowsePack}
+                stream={stream}
+                onSelect={handleSelectStream}
+                onCopyLink={handleCopyLink}
+                onRowFocus={setFocusedStreamKey}
+                isActive={currentStreamKey === stream.streamKey}
+                isLastUsed={lastStreamKey === stream.streamKey}
+                isSameFamily={familyFallbackKey === stream.streamKey}
+                isResolving={isAnyResolving && activeResolveKey === stream.streamKey}
+                disabled={isAnyResolving}
+                sortMode={sortMode}
+                tabIndex={virtualRow.index === focusedIndex ? 0 : -1}
+              />
             </div>
           );
         })}
@@ -717,7 +709,6 @@ export function StreamSelector({
     activeResolveFeedback,
     activeResolveKey,
     addonHealthMetrics,
-    batchFilter,
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
@@ -725,6 +716,7 @@ export function StreamSelector({
     episodeProgress,
     watchedEpisodeCeiling,
     fatalAddonError,
+    filters,
     handleDialogOpenChange,
     handleRequestClose,
     handleSelectStream,
@@ -732,7 +724,6 @@ export function StreamSelector({
     healthSummary,
     isAnyResolving,
     isLoading,
-    isLoadingAddonConfigs,
     isOnline,
     isRetrying,
     isSearchPending,
@@ -740,7 +731,6 @@ export function StreamSelector({
     lastStreamFamily,
     listResetKey,
     lookupId,
-    qualityFilter,
     rankingOptions,
     refetchStreams,
     refreshFailed,
@@ -750,9 +740,7 @@ export function StreamSelector({
     setSearchQuery,
     setFilters,
     showBatchFilter,
-    sortMode,
     sortedStreams,
-    sourceFilter,
     sourcesStillLoading,
     streamSourceCount,
     streamStats,
@@ -1001,9 +989,7 @@ export function StreamSelector({
             />
           ) : !isOnline ? (
             <StreamListOfflineState />
-          ) : streams.length === 0 &&
-            !isLoadingAddonConfigs &&
-            (!hasEnabledAddons || streamSourceCount === 0) ? (
+          ) : streams.length === 0 && (!hasEnabledAddons || streamSourceCount === 0) ? (
             <StreamListNoAddonsState
               metadataOnly={hasEnabledAddons}
               onManageAddons={handleManageAddons}
@@ -1018,8 +1004,8 @@ export function StreamSelector({
               {healthStrip}
 
               <StreamFilterToolbar
-                batchFilter={batchFilter}
                 filteredCount={sortedStreams.length}
+                filters={filters}
                 hasActiveFilter={hasActiveFilter}
                 isResolving={isAnyResolving}
                 onFiltersChange={setFilters}
@@ -1029,12 +1015,9 @@ export function StreamSelector({
                   if (isSearchPending) resultsFocusPendingRef.current = true;
                   else focusResults();
                 }}
-                qualityFilter={qualityFilter}
                 searchInputRef={searchInputRef}
                 searchQuery={searchQuery}
                 showBatchFilter={showBatchFilter}
-                sortMode={sortMode}
-                sourceFilter={sourceFilter}
                 stats={streamStats}
                 totalCount={streams.length}
               />
@@ -1063,7 +1046,7 @@ export function StreamSelector({
                     isAnyResolving={isAnyResolving}
                     initialFocusPending={listFocusPending}
                     onInitialFocusDone={handleInitialFocusDone}
-                    sortMode={sortMode}
+                    sortMode={filters.sort}
                   />
                 </div>
               ) : (
@@ -1083,7 +1066,6 @@ export function StreamSelector({
           ) : (
             <StreamListEmptyState
               isRetrying={isRetrying}
-              sourceCount={streamSourceCount}
               onRetry={refetchStreams}
               onManageAddons={handleManageAddons}
               healthStrip={healthStrip}

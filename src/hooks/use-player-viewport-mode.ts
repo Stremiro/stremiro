@@ -11,11 +11,11 @@ import {
   syncPlayerPip,
   waitForViewportTransition,
 } from '@/lib/player-pip';
-import { prefersReducedMotion, sleep, withTimeout } from '@/lib/utils';
+import { prefersReducedMotion, sleep, withFinally, withTimeout } from '@/lib/utils';
 
 const FULLSCREEN_VERIFY_ATTEMPTS = 12;
 const FULLSCREEN_VERIFY_DELAY_MS = 50;
-// Paired with the curtain's duration-[90ms] in player.tsx.
+// Paired with the curtain's and PiP chrome's duration-[90ms].
 const VIEWPORT_CURTAIN_FADE_IN_MS = 90;
 const VIEWPORT_SETTLE_TIMEOUT_MS = 100;
 
@@ -53,7 +53,8 @@ interface UsePlayerViewportModeOptions {
 interface UsePlayerViewportModeResult {
   isFullscreen: boolean;
   isPip: boolean;
-  isViewportTransitioning: boolean;
+  /** 'curtain' blacks out the viewport; 'leavingPip' only fades the PiP chrome. */
+  viewportTransition: 'curtain' | 'leavingPip' | null;
   canPip: boolean;
   togglePip: () => Promise<void>;
   returnFromPip: () => Promise<void>;
@@ -67,12 +68,13 @@ export function usePlayerViewportMode(
   const { onBeforeEnterFullscreen } = options;
   const expanded = options.expanded === undefined ? true : options.expanded;
   const isDesktopRuntime = isTauriDesktopRuntime();
-  const appWindow = isDesktopRuntime ? getCurrentWindow() : null;
+  const [appWindow] = useState(() => (isDesktopRuntime ? getCurrentWindow() : null));
   const [isFullscreen, setIsFullscreen] = useState(
     () => !!document.fullscreenElement || desktopFullscreen,
   );
   const isPip = useSyncExternalStore(subscribePlayerPip, isPlayerPip);
-  const [isViewportTransitioning, setIsViewportTransitioning] = useState(false);
+  const [viewportTransition, setViewportTransition] =
+    useState<UsePlayerViewportModeResult['viewportTransition']>(null);
   const transitionInFlightRef = useRef(false);
   const pipReturnRef = useRef<Promise<void> | null>(null);
   const preserveViewportOnUnmountRef = useRef(false);
@@ -134,12 +136,14 @@ export function usePlayerViewportMode(
   const withViewportMask = async (operation: () => Promise<void>) => {
     const animate = !prefersReducedMotion();
     if (animate) {
-      setIsViewportTransitioning(true);
+      // The WebView keeps its PiP-sized layout briefly after the native window grows,
+      // so a curtain would paint a PiP-sized black box; video shows through instead.
+      setViewportTransition(isPlayerPip() ? 'leavingPip' : 'curtain');
       await sleep(VIEWPORT_CURTAIN_FADE_IN_MS);
     }
-    await operation().finally(async () => {
+    await withFinally(operation(), async () => {
       if (animate) await withTimeout(nextFrames(2), VIEWPORT_SETTLE_TIMEOUT_MS, () => undefined);
-      if (!viewportCleanupHandledRef.current) setIsViewportTransitioning(false);
+      if (!viewportCleanupHandledRef.current) setViewportTransition(null);
     });
   };
 
@@ -150,7 +154,7 @@ export function usePlayerViewportMode(
       if (viewportCleanupHandledRef.current) return;
       ++syncGenerationRef.current;
       await withViewportMask(async () => {
-        await (async () => {
+        const change = (async () => {
           if (isPlayerPip()) await setPlayerPip(false);
           let nativeFullscreen = false;
           if (appWindow) nativeFullscreen = await appWindow.isFullscreen();
@@ -176,14 +180,11 @@ export function usePlayerViewportMode(
               await document.documentElement.requestFullscreen();
             }
           }
-        })()
-          .catch((error) => {
-            toast.error('Could not change fullscreen. Please try again.');
-            throw error;
-          })
-          .finally(async () => {
-            await syncFullscreenState(true);
-          });
+        })().catch((error) => {
+          toast.error('Could not change fullscreen. Please try again.');
+          throw error;
+        });
+        await withFinally(change, () => syncFullscreenState(true));
       });
     }).finally(() => {
       transitionInFlightRef.current = false;
@@ -276,7 +277,7 @@ export function usePlayerViewportMode(
   return {
     isFullscreen,
     isPip,
-    isViewportTransitioning,
+    viewportTransition,
     canPip: isDesktopRuntime,
     togglePip,
     returnFromPip,

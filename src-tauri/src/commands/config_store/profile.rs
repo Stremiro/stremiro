@@ -7,7 +7,7 @@ use crate::providers::bound_optional;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Which surfaces follow the profile accent — flags default on so pre-flag stores keep their look.
+/// Which surfaces follow the profile accent — defaults keep pre-flag stores' look (on, seekbar white).
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AccentTargets {
@@ -16,6 +16,7 @@ pub struct AccentTargets {
     pub progress: bool,
     pub artwork: bool,
     pub skip: bool,
+    pub seekbar: bool,
 }
 
 impl Default for AccentTargets {
@@ -26,6 +27,7 @@ impl Default for AccentTargets {
             progress: true,
             artwork: true,
             skip: true,
+            seekbar: false,
         }
     }
 }
@@ -88,6 +90,7 @@ struct AccentTargetsPatch {
     progress: Option<bool>,
     artwork: Option<bool>,
     skip: Option<bool>,
+    seekbar: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -103,6 +106,8 @@ struct StoredAccentTargets {
     artwork: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     skip: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    seekbar: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -159,7 +164,7 @@ fn normalize_profile_view_mode(value: Option<&str>) -> ProfileViewMode {
     }
 }
 
-// Missing flags default on — a pre-flag store keeps the behavior it was used with.
+// Missing flags take the default — a pre-flag store keeps the behavior it was used with.
 fn normalize_accent_targets(value: Option<StoredAccentTargets>) -> AccentTargets {
     let Some(targets) = value else {
         return AccentTargets::default();
@@ -170,6 +175,7 @@ fn normalize_accent_targets(value: Option<StoredAccentTargets>) -> AccentTargets
         progress: targets.progress.unwrap_or(true),
         artwork: targets.artwork.unwrap_or(true),
         skip: targets.skip.unwrap_or(true),
+        seekbar: targets.seekbar.unwrap_or(false),
     }
 }
 
@@ -239,6 +245,7 @@ pub(crate) fn apply_profile_preferences_patch(
             progress: targets.progress.unwrap_or(profile.accent_targets.progress),
             artwork: targets.artwork.unwrap_or(profile.accent_targets.artwork),
             skip: targets.skip.unwrap_or(profile.accent_targets.skip),
+            seekbar: targets.seekbar.unwrap_or(profile.accent_targets.seekbar),
         };
     }
     if let Some(value) = patch.view_mode {

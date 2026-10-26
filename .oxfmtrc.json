@@ -9,6 +9,7 @@
   "trailingComma": "all",
   "bracketSpacing": true,
   "ignorePatterns": [
+    "README.md",
     "dist/**",
     "src-tauri/target/**",
     "src-tauri/gen/**",

@@ -16,9 +16,8 @@ function dismissAppUpdateToast() {
   toast.dismiss(APP_UPDATE_TOAST_ID);
 }
 
-// Glass zinc surface matching the resolve toast; color only marks status accents.
 const CARD_CHROME =
-  'relative box-border w-[min(344px,calc(100vw_-_32px))] overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950/85 p-3.5 shadow-2xl backdrop-blur-xl';
+  'relative box-border w-[min(344px,calc(100vw_-_32px))] overflow-hidden rounded-[10px] border border-white/[0.07] bg-[#141417]/95 p-3.5 shadow-[0_10px_30px_-12px_rgb(0_0_0/0.65),0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(255_255_255/0.04)] backdrop-blur-md';
 
 function CloseButton({ onClose }: { onClose: () => void }) {
   return (
@@ -26,7 +25,7 @@ function CloseButton({ onClose }: { onClose: () => void }) {
       type='button'
       onClick={onClose}
       aria-label='Dismiss update notification'
-      className='absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+      className='absolute right-2 top-2 flex h-7 w-7 items-center justify-center rounded-md bg-white/[0.08] text-white/50 transition-colors hover:bg-white/[0.12] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
     >
       <X className='h-3.5 w-3.5' />
     </button>
@@ -51,15 +50,15 @@ function UpdateProgress({
       <div className='flex items-center gap-3'>
         <Download className='h-4.5 w-4.5 shrink-0 text-emerald-300/90' strokeWidth={2} />
         <div className='min-w-0 flex-1'>
-          <p className='break-words text-[13.5px] font-semibold leading-snug tracking-tight text-zinc-100'>
+          <p className='break-words text-[13px] font-medium leading-5 tracking-[-0.005em] text-white/95'>
             Updating to v{version}
           </p>
-          <p className='mt-0.5 text-[12px] tabular-nums text-zinc-500'>
+          <p className='mt-0.5 text-[12px] leading-4 tabular-nums text-white/50'>
             {formatAppUpdateProgress(installProgress)}
           </p>
         </div>
         {percent !== null ? (
-          <span className='shrink-0 text-[12.5px] font-semibold tabular-nums text-emerald-300/90'>
+          <span className='shrink-0 text-[12px] font-medium tabular-nums text-emerald-300/90'>
             {percent}%
           </span>
         ) : null}
@@ -110,12 +109,12 @@ function UpdateError({
           )}
         </span>
         <div className='min-w-0 flex-1'>
-          <p className='text-[13.5px] font-semibold tracking-tight text-zinc-100'>
+          <p className='text-[13px] font-medium leading-5 tracking-[-0.005em] text-white/95'>
             {isChecking ? 'Checking for updates' : 'Update failed'}
           </p>
           <p
             title={message}
-            className='mt-1 line-clamp-3 break-words text-[12.5px] leading-relaxed text-zinc-400'
+            className='mt-1 line-clamp-3 break-words text-[12px] leading-4 text-white/50'
           >
             {message}
           </p>
@@ -126,7 +125,7 @@ function UpdateError({
             }}
             aria-disabled={isChecking || undefined}
             aria-busy={isChecking}
-            className='mt-2.5 inline-flex h-9 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-100 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-wait aria-disabled:opacity-50'
+            className='mt-2.5 inline-flex h-9 items-center gap-1.5 rounded-md bg-white/[0.08] px-3 text-[12px] font-medium text-white transition-colors hover:bg-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25 aria-disabled:cursor-wait aria-disabled:opacity-50'
           >
             <RefreshCw
               className={cn('h-3.5 w-3.5', isChecking && 'animate-spin motion-reduce:animate-none')}
@@ -199,12 +198,12 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
           <Sparkles className='h-4 w-4 text-emerald-300' strokeWidth={2.25} />
         </span>
         <div className='min-w-0 flex-1 pr-6 pt-px'>
-          <p className='text-[13.5px] font-semibold leading-snug tracking-tight text-zinc-100'>
+          <p className='text-[13px] font-medium leading-5 tracking-[-0.005em] text-white/95'>
             Update available
           </p>
-          <p className='mt-0.5 text-[12px] leading-snug text-zinc-500'>
+          <p className='mt-0.5 text-[12px] leading-4 text-white/50'>
             Stremiro{' '}
-            <span className='font-medium tabular-nums text-zinc-300'>v{pendingUpdate.version}</span>
+            <span className='font-medium tabular-nums text-white/70'>v{pendingUpdate.version}</span>
             {currentVersion ? ` · currently v${currentVersion}` : ''}
           </p>
         </div>
@@ -214,7 +213,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
       {updateState.errorMessage ? (
         <p
           title={updateState.errorMessage}
-          className='mt-2.5 flex items-center gap-1.5 text-[11.5px] font-medium text-amber-400/90'
+          className='mt-2.5 flex items-center gap-1.5 text-[12px] font-medium leading-4 text-amber-400/90'
         >
           <CircleAlert className='h-3 w-3 shrink-0' />
           Update failed. Try again or check for updates in Settings.
@@ -228,7 +227,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
             // A throw just means the install failed; the card already renders that.
             void installUpdate(pendingUpdate).catch(() => undefined);
           }}
-          className='inline-flex h-8 items-center gap-1.5 rounded-lg bg-white px-3 text-[12px] font-semibold text-black transition-colors hover:bg-zinc-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          className='inline-flex h-8 items-center gap-1.5 rounded-md bg-white px-3 text-[12px] font-medium text-black transition-colors hover:bg-white/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
         >
           <Download className='h-3.5 w-3.5' />
           Update & restart
@@ -239,7 +238,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
             dismissAppUpdateToast();
             onViewNotes();
           }}
-          className='inline-flex h-8 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-3 text-[12px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+          className='inline-flex h-8 items-center gap-1 rounded-md bg-white/[0.08] px-3 text-[12px] font-medium text-white transition-colors hover:bg-white/[0.12] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
         >
           What's new
           <ArrowUpRight className='h-3.5 w-3.5' />

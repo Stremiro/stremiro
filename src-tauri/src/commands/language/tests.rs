@@ -192,81 +192,53 @@ fn resolve_preferred_track_selection_returns_match_state_and_best_track() {
 }
 
 #[test]
-fn resolve_preferred_track_selection_prefers_full_subtitles_over_signs_track() {
-    let tracks = vec![
-        TrackLanguageCandidate {
-            id: 1,
-            lang: Some("eng".to_string()),
-            title: Some("English Signs & Songs".to_string()),
-            default_track: true,
-            forced: false,
-            hearing_impaired: false,
-        },
-        TrackLanguageCandidate {
-            id: 2,
-            lang: Some("eng".to_string()),
-            title: Some("English Full".to_string()),
-            default_track: false,
-            forced: false,
-            hearing_impaired: false,
-        },
-    ];
+fn resolve_preferred_track_selection_prefers_main_matching_track() {
+    for (label, selected_lang, selected_title, preferred_title, preference) in [
+        (
+            "full subtitles over signs",
+            "eng",
+            "English Signs & Songs",
+            "English Full",
+            "English",
+        ),
+        (
+            "main audio over commentary",
+            "eng",
+            "English Commentary",
+            "English",
+            "English",
+        ),
+        (
+            "conflicting language tag despite title",
+            "jpn",
+            "English Main",
+            "English",
+            "en",
+        ),
+    ] {
+        let tracks = vec![
+            TrackLanguageCandidate {
+                id: 1,
+                lang: Some(selected_lang.to_string()),
+                title: Some(selected_title.to_string()),
+                default_track: true,
+                forced: false,
+                hearing_impaired: false,
+            },
+            TrackLanguageCandidate {
+                id: 2,
+                lang: Some("eng".to_string()),
+                title: Some(preferred_title.to_string()),
+                default_track: false,
+                forced: false,
+                hearing_impaired: false,
+            },
+        ];
 
-    let resolution = resolve_preferred_track_selection(&tracks, Some("English"), Some(1));
-    assert!(!resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, Some(2));
-}
-
-#[test]
-fn resolve_preferred_track_selection_prefers_main_audio_over_commentary() {
-    let tracks = vec![
-        TrackLanguageCandidate {
-            id: 1,
-            lang: Some("eng".to_string()),
-            title: Some("English Commentary".to_string()),
-            default_track: true,
-            forced: false,
-            hearing_impaired: false,
-        },
-        TrackLanguageCandidate {
-            id: 2,
-            lang: Some("eng".to_string()),
-            title: Some("English".to_string()),
-            default_track: false,
-            forced: false,
-            hearing_impaired: false,
-        },
-    ];
-
-    let resolution = resolve_preferred_track_selection(&tracks, Some("English"), Some(1));
-    assert!(!resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, Some(2));
-}
-
-#[test]
-fn resolve_preferred_track_selection_skips_conflicting_lang_tag_despite_title() {
-    let tracks = vec![
-        TrackLanguageCandidate {
-            id: 1,
-            lang: Some("jpn".to_string()),
-            title: Some("English Main".to_string()),
-            default_track: true,
-            forced: false,
-            hearing_impaired: false,
-        },
-        TrackLanguageCandidate {
-            id: 2,
-            lang: Some("eng".to_string()),
-            title: Some("English".to_string()),
-            default_track: false,
-            forced: false,
-            hearing_impaired: false,
-        },
-    ];
-
-    let resolution = resolve_preferred_track_selection(&tracks, Some("en"), Some(1));
-    assert!(!resolution.selected_matches);
-    assert_eq!(resolution.matched_track_id, Some(2));
+        let resolution = resolve_preferred_track_selection(&tracks, Some(preference), Some(1));
+        assert!(!resolution.selected_matches, "{label}");
+        assert_eq!(resolution.matched_track_id, Some(2), "{label}");
+    }
 }
 
 #[test]

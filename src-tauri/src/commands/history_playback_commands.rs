@@ -6,7 +6,7 @@ use super::history_helpers::{
 use super::media_commands::resolve_episode_stream_mapping_inner;
 use super::playback_state::PlaybackStateService;
 use super::WatchProgress;
-use crate::providers::{addon_resource::AddonResourceClient, non_blank};
+use crate::providers::{addon_resource::AddonResourceClient, encode_uri_component, non_blank};
 use serde::Serialize;
 use tauri::{command, AppHandle, State};
 
@@ -77,7 +77,7 @@ pub struct HistoryPlaybackPlan {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct HistoryWarmResolveRequest {
-    media_type: HistoryPlaybackMediaType,
+    media_type: &'static str,
     media_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_lookup_id: Option<String>,
@@ -107,24 +107,6 @@ struct HistoryPreferredStreamIdentity {
     stream_family: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum HistoryPlaybackMediaType {
-    Movie,
-    Series,
-    Anime,
-}
-
-impl HistoryPlaybackMediaType {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Movie => "movie",
-            Self::Series => "series",
-            Self::Anime => "anime",
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, Default)]
 struct HistoryEpisodeContext {
     absolute_season: Option<u32>,
@@ -150,19 +132,12 @@ fn normalize_saved_value(value: Option<&str>) -> Option<String> {
     value.and_then(super::normalize_opaque_field)
 }
 
-fn normalize_history_media_type(item: &WatchProgress) -> HistoryPlaybackMediaType {
-    match super::media_type::normalize_history_row_media_type(&item.type_, &item.id) {
-        "movie" => HistoryPlaybackMediaType::Movie,
-        "anime" => HistoryPlaybackMediaType::Anime,
-        _ => HistoryPlaybackMediaType::Series,
-    }
+fn normalize_history_media_type(item: &WatchProgress) -> &'static str {
+    super::media_type::normalize_history_row_media_type(&item.type_, &item.id)
 }
 
 fn is_series_like(item: &WatchProgress) -> bool {
-    matches!(
-        normalize_history_media_type(item),
-        HistoryPlaybackMediaType::Series | HistoryPlaybackMediaType::Anime
-    )
+    normalize_history_media_type(item) != "movie"
 }
 
 fn has_explicit_stream_episode_context(item: &WatchProgress) -> bool {
@@ -210,34 +185,24 @@ fn get_immediate_stream_lookup_id(item: &WatchProgress) -> String {
 }
 
 fn build_player_route(
-    media_type: HistoryPlaybackMediaType,
+    media_type: &str,
     media_id: &str,
     absolute_season: Option<u32>,
     absolute_episode: Option<u32>,
 ) -> String {
     // Media ids are opaque addon strings: encode so `/`, `?` or `#` stay
     // inside the one route segment.
-    let media_id = urlencoding::encode(media_id);
+    let media_id = encode_uri_component(media_id);
     match (absolute_season, absolute_episode) {
         (Some(season), Some(episode)) => {
-            format!(
-                "/player/{}/{}/{}/{}",
-                media_type.as_str(),
-                media_id,
-                season,
-                episode
-            )
+            format!("/player/{media_type}/{media_id}/{season}/{episode}")
         }
-        _ => format!("/player/{}/{}", media_type.as_str(), media_id),
+        _ => format!("/player/{media_type}/{media_id}"),
     }
 }
 
-fn build_details_target(media_type: HistoryPlaybackMediaType, media_id: &str) -> String {
-    format!(
-        "/details/{}/{}",
-        media_type.as_str(),
-        urlencoding::encode(media_id)
-    )
+fn build_details_target(media_type: &str, media_id: &str) -> String {
+    format!("/details/{media_type}/{}", encode_uri_component(media_id))
 }
 
 fn build_details_plan(item: &WatchProgress, from: Option<String>) -> HistoryPlaybackPlan {
@@ -279,7 +244,7 @@ fn build_player_plan(
         ..HistoryPlaybackRouteState::default()
     };
     // A coordinate-less series warm cannot join the player's mapped replay request.
-    let warm_resolve_request = (!(media_type != HistoryPlaybackMediaType::Movie
+    let warm_resolve_request = (!(media_type != "movie"
         && (state.absolute_season.is_some() || state.absolute_episode.is_some())
         && state.stream_season.is_none()
         && state.stream_episode.is_none()))
@@ -330,18 +295,24 @@ fn get_latest_history_playback_item(
     playback_state: &PlaybackStateService,
     item: &WatchProgress,
 ) -> Result<WatchProgress, String> {
-    let items =
-        resume_rows(playback_state.load_resume_entries_for_title(app, &item.type_, &item.id)?);
-    // Health only ranks series donors; movies and singleton titles have none.
-    let source_health = (items.len() > 1 && is_series_like_watch_progress(item))
-        .then(|| {
-            playback_state.source_health_priorities_for_ids(
-                app,
-                items.iter().map(|entry| entry.source_id.as_deref()),
-            )
-        })
-        .transpose()?;
     let context = get_episode_context(item);
+    let items = resume_rows(match (context.absolute_season, context.absolute_episode) {
+        (Some(season), Some(episode)) => playback_state.load_resume_entries_for_episode(
+            app,
+            &item.type_,
+            &item.id,
+            season,
+            episode,
+        )?,
+        _ => playback_state.load_resume_entries_for_title(app, &item.type_, &item.id)?,
+    });
+    // Health only ranks series donors; movies and singleton titles have none.
+    let source_health = (items.len() > 1 && is_series_like_watch_progress(item)).then(|| {
+        playback_state.source_health_priorities_for_ids(
+            app,
+            items.iter().map(|entry| entry.source_id.as_deref()),
+        )
+    });
 
     if let Some(mut latest) = choose_entry(
         items,
@@ -382,7 +353,7 @@ async fn resolve_history_episode_context(
                 app,
                 playback_state,
                 client,
-                normalize_history_media_type(item).as_str(),
+                normalize_history_media_type(item),
                 &item.id,
                 absolute_season,
                 absolute_episode,

@@ -58,7 +58,6 @@ pub(crate) struct ResumeStore {
 pub(crate) struct ResumeTitleIdentity {
     pub id: String,
     pub type_: String,
-    pub last_watched: u64,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -447,7 +446,7 @@ impl ResumeStore {
         let mut statement = self
             .connection
             .prepare_cached(
-                "SELECT media_id, media_type, last_watched FROM watch_progress
+                "SELECT media_id, media_type FROM watch_progress
                  WHERE media_id = ?1
                    AND typeof(media_type) = 'text'
                    AND typeof(last_watched) = 'integer'
@@ -461,7 +460,6 @@ impl ResumeStore {
                     Ok(ResumeTitleIdentity {
                         id: row.get(0)?,
                         type_: row.get(1)?,
-                        last_watched: from_sql_u64(row.get(2)?),
                     })
                 })
                 .optional()
@@ -533,27 +531,22 @@ impl ResumeStore {
             .map_err(|error| format!("Failed to read watched playback resume titles: {error}"))
     }
 
-    pub(crate) fn count_entries(&mut self) -> Result<usize, String> {
-        self.connection
-            .query_row("SELECT COUNT(*) FROM watch_progress", [], |row| {
-                row.get::<_, i64>(0)
-            })
-            .map(|count| usize::try_from(count.max(0)).unwrap_or(usize::MAX))
-            .map_err(|error| format!("Failed to count playback resume rows: {}", error))
-    }
-
-    pub(crate) fn count_titles(&mut self) -> Result<usize, String> {
+    pub(crate) fn counts(&mut self) -> Result<(usize, usize), String> {
         self.connection
             .query_row(
-                // History collapses by the exact (type, id) tuple, not just id.
-                "SELECT COUNT(*) FROM (
-                    SELECT DISTINCT media_type, media_id FROM watch_progress
+                "SELECT COALESCE(SUM(n), 0), COUNT(*) FROM (
+                    SELECT COUNT(*) AS n FROM watch_progress GROUP BY media_type, media_id
                 )",
                 [],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
             )
-            .map(|count| usize::try_from(count.max(0)).unwrap_or(usize::MAX))
-            .map_err(|error| format!("Failed to count playback history titles: {}", error))
+            .map(|(entries, titles)| {
+                (
+                    usize::try_from(entries.max(0)).unwrap_or(usize::MAX),
+                    usize::try_from(titles.max(0)).unwrap_or(usize::MAX),
+                )
+            })
+            .map_err(|error| format!("Failed to count playback resume rows: {}", error))
     }
 
     /// Sums saved progress once per canonical episode, choosing its newest storage

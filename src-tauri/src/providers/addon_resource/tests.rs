@@ -14,7 +14,8 @@ fn extra(name: &str, value: &str) -> CatalogExtra {
 }
 
 fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
-    parse_catalog_item(serde_json::from_value(value).expect("catalog item"))
+    let json = serde_json::to_string(&value).unwrap();
+    parse_catalog_item(serde_json::from_str(&json).expect("catalog item"))
 }
 
 fn subtitle_item(value: serde_json::Value) -> Option<AddonSubtitle> {
@@ -31,6 +32,12 @@ fn catalog_ids_reject_oversized_values_without_aliasing() {
     for suffix in ["a", "b"] {
         assert!(catalog_item(serde_json::json!({
             "id": format!("{prefix}{suffix}"), "name": "Title", "type": "movie"
+        }))
+        .is_none());
+    }
+    for sentinel in ["null", " Undefined "] {
+        assert!(catalog_item(serde_json::json!({
+            "id": sentinel, "name": "Title", "type": "movie"
         }))
         .is_none());
     }
@@ -53,13 +60,17 @@ fn cached_catalog_page_applies_normalizer_and_counts_consumed_entries_before_the
         })
     }));
     let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
-    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |mut item| {
-        item.primary_year = Some(2024);
-        if item.id == "tt0" {
-            item.title.clear();
-        }
-        item
-    });
+    let page = parse_catalog_page(
+        serde_json::from_slice(&bytes).unwrap(),
+        |mut item| {
+            item.primary_year = Some(2024);
+            if item.id == "tt0" {
+                item.title.clear();
+            }
+            item
+        },
+        None,
+    );
     assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS + 1);
     assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
     assert!(page.items[0].title.is_empty());
@@ -150,6 +161,7 @@ async fn cache_hits_skip_normalizers_and_keep_shared_metadata_request_agnostic()
         )
         .unwrap(),
         |item| item,
+        None,
     );
     client.catalog_cache.put(
         &resource_cache_key("catalog", &catalog_url),
@@ -279,7 +291,7 @@ async fn uncached_resources_normalize_off_async_worker_and_join_failures_stay_re
 #[test]
 fn build_resource_url_preserves_configured_path_and_query() {
     let url = build_resource_url(
-        "https://example.com/stremio/v1?token=abc",
+        "https://example.com/addon/v1?token=abc",
         "catalog",
         "movie",
         "top",
@@ -289,14 +301,14 @@ fn build_resource_url_preserves_configured_path_and_query() {
 
     assert_eq!(
         url,
-        "https://example.com/stremio/v1/catalog/movie/top/search=dune.json?token=abc"
+        "https://example.com/addon/v1/catalog/movie/top/search=dune.json?token=abc"
     );
     assert_eq!(
         crate::providers::addon_manifest::build_manifest_url(
-            "https://example.com/stremio/v1?token=abc"
+            "https://example.com/addon/v1?token=abc"
         )
         .expect("manifest url"),
-        "https://example.com/stremio/v1/manifest.json?token=abc"
+        "https://example.com/addon/v1/manifest.json?token=abc"
     );
 }
 
@@ -324,7 +336,7 @@ fn build_resource_url_encodes_id_and_extras() {
             url,
             format!(
                 "https://example.com/{resource}/series/{}.json",
-                encode(&lookup)
+                encode_uri_component(&lookup)
             )
         );
     }
@@ -396,7 +408,7 @@ fn parse_catalog_skips_malformed_siblings() {
         ]}"#,
     )
     .expect("catalog response");
-    let page = parse_catalog_page(response, |item| item);
+    let page = parse_catalog_page(response, |item| item, None);
     assert_eq!(page.source_item_count, 5);
     assert_eq!(page.items.len(), 2);
     assert_eq!(page.items[0].id, "tt1");
@@ -414,7 +426,7 @@ fn parse_catalog_caps_valid_rows_and_counts_consumed_source_rows() {
         })
         .collect();
     let bytes = serde_json::to_vec(&serde_json::json!({"metas": metas})).unwrap();
-    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |item| item);
+    let page = parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |item| item, None);
     assert_eq!(page.source_item_count, MAX_CATALOG_ITEMS * 2);
     assert_eq!(page.items.len(), MAX_CATALOG_ITEMS);
     for (index, item) in page.items.iter().enumerate() {
@@ -429,6 +441,7 @@ fn resource_item_envelopes_keep_missing_and_invalid_field_behavior() {
         let catalog = parse_catalog_page(
             serde_json::from_slice::<CatalogResponse<'_>>(bytes).unwrap(),
             |item| item,
+            None,
         );
         assert_eq!(catalog.source_item_count, 0);
         assert!(catalog.items.is_empty());
@@ -542,6 +555,63 @@ fn parse_catalog_reads_declared_genres_and_ignores_full_meta_fields() {
         assert_eq!(item.id, id, "{label}");
         assert_eq!(item.genres.expect(label), genres, "{label}");
     }
+}
+
+#[test]
+fn catalog_credit_matches_are_exact_bounded_and_search_only() {
+    for (links, query, expected) in [
+        (
+            serde_json::json!([{"category":"Cast", "name":"Leonardo DiCaprio"}]),
+            "leonardo dicaprio",
+            true,
+        ),
+        (
+            serde_json::json!([{"category":"Directors", "name":"Chloé Zhao"}]),
+            "chloe zhao",
+            true,
+        ),
+        (
+            serde_json::json!([null, {"category":"cast", "name":"Tom Hanks"}]),
+            "tom hanks",
+            true,
+        ),
+        (
+            serde_json::json!([{"category":"Cast", "name":"Tom Hanks Jr."}]),
+            "tom hanks",
+            false,
+        ),
+        (
+            serde_json::json!([{"category":"Genres", "name":"Tom Hanks"}]),
+            "tom hanks",
+            false,
+        ),
+        (
+            serde_json::json!([{"name":"Tom Hanks"}]),
+            "tom hanks",
+            false,
+        ),
+        (
+            serde_json::json!({"category":"Cast", "name":"Tom Hanks"}),
+            "tom hanks",
+            false,
+        ),
+    ] {
+        let bytes = serde_json::to_vec(&serde_json::json!({"metas":[{"id":"tt1", "type":"movie", "name":"Film", "links":links}]})).unwrap();
+        for search in [None, Some(query)] {
+            let page =
+                parse_catalog_page(serde_json::from_slice(&bytes).unwrap(), |item| item, search);
+            assert_eq!(page.items.len(), 1);
+            assert_eq!(
+                page.items[0].matches_search_credit,
+                search.is_some() && expected,
+                "{links}"
+            );
+        }
+    }
+    let mut links = vec![serde_json::json!({}); MAX_CAST + MAX_CREDITS + MAX_GENRES];
+    links.push(serde_json::json!({"category":"Cast", "name":"Tom Hanks"}));
+    let raw = serde_json::value::to_raw_value(&links).unwrap();
+    assert!(!catalog_matches_search_credit(Some(&raw), "tom hanks"));
 }
 
 #[test]
@@ -947,16 +1017,11 @@ fn resource_cache_roundtrips_and_stays_bounded() {
     cache.put("key-4", 4, false, || true);
     assert_eq!(cache.len(), 4, "cache must stay at max_entries");
     assert_eq!(cache.get("key-4"), Some(4));
-}
-
-#[test]
-fn resource_cache_clear_empties_all_entries() {
-    let cache = TtlCache::new(8, RESOURCE_CACHE_TTL, RESOURCE_CACHE_EMPTY_TTL);
-    cache.put("a", 1, false, || true);
-    cache.put("b", 2, false, || true);
     cache.clear();
-    assert_eq!(cache.get("a"), None);
-    assert_eq!(cache.get("b"), None);
+    assert_eq!(cache.len(), 0);
+    for index in 0..5 {
+        assert_eq!(cache.get(&format!("key-{index}")), None);
+    }
 }
 
 #[test]

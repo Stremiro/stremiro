@@ -3,8 +3,9 @@ use super::ttl_cache::{
 };
 use super::{
     addon_manifest::{AddonCatalogCapability, AddonManifest},
-    bound_optional, build_provider_http_client, normalize_media_year, strip_manifest_suffix,
-    trim_to_max, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
+    bound_optional, build_provider_http_client, encode_uri_component, normalize_media_year,
+    strip_manifest_suffix, trim_to_max, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
+    ADDON_URL_INVALID_MESSAGE, MAGNET_PREFIX,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -15,7 +16,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
-use urlencoding::encode;
 
 /// 2MiB bound, ~3x headroom over measured catalog pages (decompressed,
 /// 2026-09-03): series `top` ~537KB, `top` + `genre=Animation` ~695KB.
@@ -72,13 +72,14 @@ struct SubtitleDiskEntry {
 }
 
 fn read_subtitle_disk(path: &Path) -> Option<Arc<[AddonSubtitle]>> {
-    let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
+    let guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
     let mut bytes = Vec::new();
     std::fs::File::open(path)
         .ok()?
         .take((SUBTITLE_DISK_MAX_BYTES + 1) as u64)
         .read_to_end(&mut bytes)
         .ok()?;
+    drop(guard);
     if bytes.len() > SUBTITLE_DISK_MAX_BYTES {
         return None;
     }
@@ -100,16 +101,16 @@ fn write_subtitle_disk(
     generation: &AtomicU64,
     expected: u64,
 ) -> Option<()> {
-    let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
-    if generation.load(Ordering::SeqCst) != expected || SystemTime::now() >= expires_at {
-        return None;
-    }
     let bytes = serde_json::to_vec(&SubtitleDiskEntry {
         expires_at,
         response: serde_json::from_slice(bytes).ok()?,
     })
     .ok()?;
     if bytes.len() > SUBTITLE_DISK_MAX_BYTES {
+        return None;
+    }
+    let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
+    if generation.load(Ordering::SeqCst) != expected || SystemTime::now() >= expires_at {
         return None;
     }
     let directory = path.parent()?;
@@ -156,7 +157,7 @@ pub(crate) struct CatalogPage {
 /// only card fields keeps memory proportional to what browse renders.
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-struct CatalogItemJson {
+struct CatalogItemJson<'a> {
     id: Option<Value>,
     name: Option<Value>,
     #[serde(rename = "type")]
@@ -169,6 +170,8 @@ struct CatalogItemJson {
     release_info: Option<Value>,
     genre: Option<Value>,
     genres: Option<Value>,
+    #[serde(borrow)]
+    links: Option<&'a RawValue>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -414,12 +417,22 @@ impl AddonResourceClient {
                     let what = format!("catalog {type_}/{catalog_id}");
                     let bytes =
                         fetch_bounded_json(&self.client, &url, &what, CATALOG_MAX_BYTES).await?;
+                    let query = extras
+                        .iter()
+                        .find(|extra| extra.name == "search")
+                        .map(|extra| {
+                            crate::commands::search_commands::normalize_search_text(&extra.value)
+                        });
                     tokio::task::spawn_blocking(move || {
                         let response: CatalogResponse<'_> = serde_json::from_slice(&bytes)
                             .map_err(|_| {
                                 FetchFailure::Fatal("Invalid catalog response format.".to_string())
                             })?;
-                        Ok(Arc::new(parse_catalog_page(response, normalize)))
+                        Ok(Arc::new(parse_catalog_page(
+                            response,
+                            normalize,
+                            query.as_deref(),
+                        )))
                     })
                     .await
                     .map_err(|_| {
@@ -576,7 +589,7 @@ pub(crate) fn snapshot_supports_catalog<'a>(
     };
 
     // `search` is a hard capability gate (an undeclaring catalog echoes bogus
-    // rows); other extras are advisory — callers re-filter locally.
+    // rows); other extras are advisory — callers enforce unsupported filters locally.
     if extras
         .iter()
         .any(|extra| extra.name.eq_ignore_ascii_case("search"))
@@ -653,15 +666,20 @@ fn meta_link_names(value: &Value, category: &str, max_items: usize) -> Option<Ve
 fn parse_catalog_page(
     response: CatalogResponse<'_>,
     normalize: fn(MediaItem) -> MediaItem,
+    query: Option<&str>,
 ) -> CatalogPage {
     let mut items = Vec::new();
     let mut source_item_count = 0;
     for value in response.metas {
         source_item_count += 1;
-        if let Some(item) = serde_json::from_str::<CatalogItemJson>(value.get())
-            .ok()
-            .and_then(parse_catalog_item)
-        {
+        if let Ok(value) = serde_json::from_str::<CatalogItemJson<'_>>(value.get()) {
+            let links = value.links;
+            let Some(mut item) = parse_catalog_item(value) else {
+                continue;
+            };
+            item.matches_search_credit = query
+                .filter(|query| !query.is_empty())
+                .is_some_and(|query| catalog_matches_search_credit(links, query));
             items.push(normalize(item));
             if items.len() == MAX_CATALOG_ITEMS {
                 break;
@@ -674,11 +692,38 @@ fn parse_catalog_page(
     }
 }
 
-fn parse_catalog_item(value: CatalogItemJson) -> Option<MediaItem> {
-    let id = value.id.as_ref().and_then(json_string)?;
-    if id.chars().count() > MAX_ID_CHARS {
-        return None;
-    }
+fn catalog_matches_search_credit(links: Option<&RawValue>, query: &str) -> bool {
+    let Some(links) = links.and_then(|links| serde_json::from_str::<Value>(links.get()).ok())
+    else {
+        return false;
+    };
+    links.as_array().is_some_and(|links| {
+        links
+            .iter()
+            .take(MAX_CAST + MAX_CREDITS + MAX_GENRES)
+            .any(|link| {
+                let is_credit =
+                    link.get("category")
+                        .and_then(Value::as_str)
+                        .is_some_and(|category| {
+                            category.trim().eq_ignore_ascii_case("Cast")
+                                || category.trim().eq_ignore_ascii_case("Directors")
+                        });
+                is_credit
+                    && link
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .is_some_and(|name| {
+                            name.chars().take(MAX_STRING_CHARS + 1).count() <= MAX_STRING_CHARS
+                                && crate::commands::search_commands::normalize_search_text(name)
+                                    == query
+                        })
+            })
+    })
+}
+
+fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
+    let id = crate::commands::normalize_media_id(&value.id.as_ref().and_then(json_string)?)?;
     let title = value.name.as_ref().and_then(json_string)?;
     let type_ = value.type_.as_ref().and_then(json_string)?;
 
@@ -697,6 +742,8 @@ fn parse_catalog_item(value: CatalogItemJson) -> Option<MediaItem> {
         display_year: None,
         genres: json_string_list(value.genre.as_ref(), MAX_GENRES)
             .or_else(|| json_string_list(value.genres.as_ref(), MAX_GENRES)),
+        matches_search_credit: false,
+        catalog_genre: None,
         type_,
     })
 }
@@ -977,8 +1024,8 @@ fn parse_subtitle_item(parsed: SubtitleItem) -> Option<AddonSubtitle> {
 /// scheme-rejecting gates must recognize them first.
 pub(crate) fn is_magnet_url(url: &str) -> bool {
     url.trim()
-        .get(..7)
-        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("magnet:"))
+        .get(..MAGNET_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(MAGNET_PREFIX))
 }
 
 /// Gate for player-fetchable URLs before a privileged fetch path (mpv
@@ -999,7 +1046,7 @@ pub(crate) fn parse_fetchable_http_url(url: &str) -> Option<reqwest::Url> {
 fn encode_path_segment(value: &str, max_chars: usize) -> Result<String, String> {
     let trimmed =
         trim_to_max(value, max_chars).ok_or_else(|| "Addon resource path is empty.".to_string())?;
-    Ok(encode(&trimmed).into_owned())
+    Ok(encode_uri_component(&trimmed).into_owned())
 }
 
 fn encode_extra(extra: &CatalogExtra) -> Result<String, String> {
@@ -1011,7 +1058,11 @@ fn encode_extra(extra: &CatalogExtra) -> Result<String, String> {
         .chars()
         .take(MAX_EXTRA_VALUE_CHARS)
         .collect::<String>();
-    Ok(format!("{}={}", encode(&name), encode(&value)))
+    Ok(format!(
+        "{}={}",
+        encode_uri_component(&name),
+        encode_uri_component(&value)
+    ))
 }
 
 pub(crate) fn build_resource_url(
@@ -1021,9 +1072,8 @@ pub(crate) fn build_resource_url(
     id: &str,
     extras: &[CatalogExtra],
 ) -> Result<String, String> {
-    let mut parsed = reqwest::Url::parse(base_url).map_err(|_| {
-        "Invalid addon URL. Please provide a valid http(s) or stremio:// URL.".to_string()
-    })?;
+    let mut parsed =
+        reqwest::Url::parse(base_url).map_err(|_| ADDON_URL_INVALID_MESSAGE.to_string())?;
     let trimmed_path = parsed.path().trim_end_matches('/');
     let base_path = strip_manifest_suffix(trimmed_path);
 

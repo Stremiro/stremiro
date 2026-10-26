@@ -7,7 +7,7 @@ use crate::providers::addons::{
     StreamDeliveryKind, StreamFlags, StreamPresentation, StreamReleaseKind, StreamResolution,
     StreamResolutionTier,
 };
-use crate::providers::{non_blank, push_unique};
+use crate::providers::{non_blank, push_unique, CONTENT_HASH_URN_PREFIX};
 use regex::Regex;
 use sha2::{Digest, Sha256};
 use std::borrow::Cow;
@@ -17,7 +17,7 @@ use std::sync::LazyLock;
 static STREAM_FAMILY_EPISODE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
         r"(?i)",
-        r"\bs\d{1,2}e\d{1,4}(?:-?e\d{1,4})*\b",
+        r"\bs\d{1,2}[\s._]*e\d{1,4}(?:-?e\d{1,4})*\b",
         r"|\b\d{1,2}x\d{1,4}\b",
         r"|\b(?:episode|ep)\.?\s*\d{1,4}\b",
         r"|(?:^|\s|\b)(?:#(?P<hash_episode>\d{1,4})",
@@ -201,16 +201,8 @@ pub(crate) fn parse_playback_url(input: &str) -> Option<reqwest::Url> {
 }
 
 fn parse_http_url(input: &str) -> Option<reqwest::Url> {
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-
-    let parsed = reqwest::Url::parse(trimmed).ok()?;
-    match parsed.scheme() {
-        "http" | "https" => Some(parsed),
-        _ => None,
-    }
+    let parsed = reqwest::Url::parse(input.trim()).ok()?;
+    matches!(parsed.scheme(), "http" | "https").then_some(parsed)
 }
 
 #[cfg(test)]
@@ -225,19 +217,12 @@ pub(crate) fn has_playable_stream_source(stream: &AddonStream) -> bool {
 }
 
 fn has_playable_stream_source_with_http(stream: &AddonStream, has_http_url: bool) -> bool {
-    if stream.info_hash.as_deref().is_some_and(non_blank) {
-        return true;
-    }
-    let Some(url) = stream.url.as_deref().map(str::trim) else {
-        return false;
-    };
-    if url.is_empty() {
-        return false;
-    }
-    if is_magnet_url(url) {
-        return true;
-    }
-    has_http_url
+    stream.content_hash.as_deref().is_some_and(non_blank)
+        || stream
+            .url
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|url| !url.is_empty() && (is_magnet_url(url) || has_http_url))
 }
 
 pub(crate) fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
@@ -277,7 +262,7 @@ pub(crate) fn stream_dedup_key(stream: &AddonStream) -> Option<String> {
 
 fn stream_content_hash_key(stream: &AddonStream) -> Option<String> {
     if let Some(hash) = stream
-        .info_hash
+        .content_hash
         .as_deref()
         .map(str::trim)
         .filter(|h| !h.is_empty())
@@ -286,7 +271,7 @@ fn stream_content_hash_key(stream: &AddonStream) -> Option<String> {
         return Some(stream_hash_dedup_key(hash, stream.file_idx));
     }
 
-    // Magnet-only streams (URL but no `info_hash` — allowed by the addon spec) reuse the
+    // Magnet-only streams (URL but no `content_hash` — allowed by the addon spec) reuse the
     // `xt` hash as the `h:` identity so they dedupe against field-carrying duplicates.
     stream
         .url
@@ -320,7 +305,7 @@ fn magnet_xt_hash(url: &str) -> Option<String> {
         .filter_map(|(_, value)| {
             let lowered = value.to_ascii_lowercase();
             lowered
-                .strip_prefix("urn:btih:")
+                .strip_prefix(CONTENT_HASH_URN_PREFIX)
                 .or_else(|| lowered.strip_prefix("urn:btmh:"))
                 .map(str::to_string)
         })
@@ -404,8 +389,8 @@ fn looks_like_filename(value: &str) -> bool {
 fn get_display_lines(stream: &AddonStream) -> (&str, Cow<'_, str>) {
     let raw_name = stream.name.as_deref().unwrap_or("");
     let raw_title = stream.title.as_deref().unwrap_or("");
-    let name_first_line = raw_name.lines().next().map(str::trim).unwrap_or("");
-    let title_first_line = raw_title.lines().next().map(str::trim).unwrap_or("");
+    let name_first_line = raw_name.lines().next().map_or("", str::trim);
+    let title_first_line = raw_title.lines().next().map_or("", str::trim);
 
     if is_meta_only(name_first_line) && looks_like_filename(title_first_line) {
         let mut stream_title = String::new();
@@ -429,26 +414,16 @@ fn get_display_lines(stream: &AddonStream) -> (&str, Cow<'_, str>) {
         );
     }
 
-    (
-        if name_first_line.is_empty() {
-            if title_first_line.is_empty() {
-                "Unknown"
-            } else {
-                title_first_line
-            }
-        } else {
-            name_first_line
-        },
-        Cow::Borrowed(if title_first_line.is_empty() {
-            if name_first_line.is_empty() {
-                "Unknown"
-            } else {
-                name_first_line
-            }
-        } else {
-            title_first_line
-        }),
-    )
+    let source = [name_first_line, title_first_line]
+        .into_iter()
+        .find(|line| !line.is_empty())
+        .unwrap_or("Unknown");
+    let title = if title_first_line.is_empty() {
+        source
+    } else {
+        title_first_line
+    };
+    (source, Cow::Borrowed(title))
 }
 
 fn format_stream_size_label(size_bytes: Option<u64>) -> Option<String> {
@@ -898,10 +873,10 @@ pub(crate) fn stream_resolution_priority(
     stream: &AddonStream,
     flags: StreamFlags,
 ) -> StreamResolutionPriority {
-    // A magnet-only stream (URL `xt`, no `info_hash` field) shares the `h:` dedup
+    // A magnet-only stream (URL `xt`, no `content_hash` field) shares the `h:` dedup
     // identity with the field-carrying spelling, so it earns the same viability —
     // otherwise arrival order decides the rank input.
-    let has_info_hash = stream.info_hash.as_deref().is_some_and(non_blank)
+    let has_content_hash = stream.content_hash.as_deref().is_some_and(non_blank)
         || stream.url.as_deref().and_then(magnet_xt_hash).is_some();
 
     let texts = stream.match_texts();
@@ -922,20 +897,14 @@ pub(crate) fn stream_resolution_priority(
         4
     } else if matches!(stream.presentation.delivery_kind, StreamDeliveryKind::Http) {
         3
-    } else if has_info_hash {
+    } else if has_content_hash {
         2
     } else {
         1
     };
 
     let size_bytes = stream.size_bytes.unwrap_or(0);
-    // Prepared streams already carry the evidence; unprepared rows have no delivery label.
-    let has_audio_bonus = if stream.presentation.delivery_label.is_empty() {
-        let (dual_audio, multi_audio) = stream_audio_evidence(stream, flags);
-        dual_audio || multi_audio
-    } else {
-        stream.presentation.multi_audio_label.is_some()
-    };
+    let has_audio_bonus = stream.presentation.multi_audio_label.is_some();
     let oversize_limit = if matches!(stream.presentation.resolution, StreamResolution::P2160) {
         OVERSIZE_LIMIT_BYTES_UHD
     } else {

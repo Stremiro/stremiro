@@ -215,7 +215,9 @@ fn read_track_list(
     }
     for track in &mut tracks {
         if label_counts[track.r#type as usize][&track.display_label] > 1 {
-            track.display_label.push_str(&format!(" #{}", track.id));
+            use std::fmt::Write as _;
+
+            let _ = write!(track.display_label, " #{}", track.id);
         }
     }
     Ok(tracks)

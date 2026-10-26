@@ -3,9 +3,7 @@ use super::language::{
     flag_language_tags,
 };
 use super::normalize_token_text;
-use super::streaming_helpers::{
-    normalize_source_id, normalize_source_key, stream_resolution_priority,
-};
+use super::streaming_helpers::{normalize_source_id, stream_resolution_priority};
 use crate::providers::addons::{
     language_mention_is_audio, stream_episode_match_texts, AddonStream, SelectionPriority,
     StreamEpisodeMatch, StreamEpisodeMatchKind, StreamFlags, StreamMatchBadgeKind,
@@ -219,10 +217,8 @@ fn canonicalize_language_prefs(
     CanonicalLanguagePrefs { audio, subtitle }
 }
 
-/// Memoized per-stream entry: rank fields plus the normalized family key.
 struct CachedStreamSignals {
     key: StreamRecommendationKey,
-    normalized_family: Option<String>,
 }
 
 /// Per-fetch memo of the recommendation key's fetch-constant half: a re-sort is a
@@ -234,9 +230,6 @@ pub(crate) struct StreamSignalCache {
     reference: Option<ReferenceTitle>,
     /// Also marks the fetch context initialized when the reference title is absent.
     language_prefs: Option<CanonicalLanguagePrefs>,
-    /// Slot for key-less streams so `for_stream` always returns a borrow —
-    /// unprepared rows (tests) carry no identity and a "" key would collapse them.
-    uncached: Option<CachedStreamSignals>,
 }
 
 impl StreamSignalCache {
@@ -254,14 +247,6 @@ impl StreamSignalCache {
         }
         let reference = self.reference.as_ref();
         let language_prefs = self.language_prefs.expect("fetch context just initialized");
-        if stream.stream_key.is_empty() {
-            return self.uncached.insert(compute_cached_signals(
-                stream,
-                inputs,
-                reference,
-                language_prefs,
-            ));
-        }
         // get-then-insert avoids cloning the key on hits.
         if !self.by_stream_key.contains_key(&stream.stream_key) {
             let computed = compute_cached_signals(stream, inputs, reference, language_prefs);
@@ -293,10 +278,6 @@ fn compute_cached_signals(
     );
 
     CachedStreamSignals {
-        normalized_family: stream
-            .stream_family
-            .as_deref()
-            .and_then(normalize_source_key),
         key: StreamRecommendationKey {
             episode_match: episode_match.kind,
             season_claim_verified: episode_match.season_claim_verified,
@@ -336,8 +317,8 @@ fn stream_recommendation_key(
     let cached = signals.for_stream(stream, inputs);
     // Family priority is the one ranking input still growing between progressive passes — stays per-pass.
     StreamRecommendationKey {
-        family: cached
-            .normalized_family
+        family: stream
+            .stream_family
             .as_deref()
             .and_then(|family| inputs.stream_family_priorities.get(family).copied())
             .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY),
@@ -930,20 +911,17 @@ pub(crate) fn rank_stream_by_recommendation(
 }
 
 pub(crate) fn sort_streams_by_recommendation(
-    streams: &mut Vec<AddonStream>,
+    streams: &mut [AddonStream],
     inputs: StreamRecommendationInputs<'_>,
     signals: &mut StreamSignalCache,
 ) {
-    let mut keyed: Vec<_> = streams
-        .drain(..)
-        .map(|mut stream| {
-            let key = rank_stream_by_recommendation(&mut stream, inputs, signals);
-            (key, stream)
-        })
-        .collect();
+    for stream in streams.iter_mut() {
+        rank_stream_by_recommendation(stream, inputs, signals);
+    }
     // Stable sort keeps input order for tied keys.
-    keyed.sort_by_key(|entry| std::cmp::Reverse(entry.0));
-    streams.extend(keyed.into_iter().map(|(_, stream)| stream));
+    streams.sort_by_cached_key(|stream| {
+        std::cmp::Reverse(stream_recommendation_key(stream, &inputs, signals))
+    });
 }
 
 #[cfg(test)]

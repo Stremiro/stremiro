@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Manager};
 
+use crate::operational_log::{field, log_warn};
 use crate::providers::lock_or_recover;
 
 /// Windows AV/indexer scans briefly lock files and fail fs ops with
@@ -123,7 +124,15 @@ impl DurableStore {
         let entries = match retry_transient_fs(|| std::fs::read(path)) {
             Ok(bytes) => parse_store_bytes(&bytes, path)?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(error) => return Err(error.to_string()),
+            Err(error) => {
+                log_warn(
+                    "durable-store",
+                    "load",
+                    "failed",
+                    &[field("path", path.display()), field("error", &error)],
+                );
+                return Err(error.to_string());
+            }
         };
         Ok(Self {
             path: Arc::from(path),
@@ -215,7 +224,15 @@ impl DurableStore {
         }
         let bytes = serde_json::to_vec(&data.entries).map_err(|e| e.to_string())?;
         if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            std::fs::create_dir_all(parent).map_err(|error| {
+                log_warn(
+                    "durable-store",
+                    "create-directory",
+                    "failed",
+                    &[field("path", parent.display()), field("error", &error)],
+                );
+                error.to_string()
+            })?;
         }
         write_atomic_file(&self.path, &bytes, true)?;
         data.dirty = false;
@@ -278,7 +295,15 @@ pub(crate) fn write_atomic_file(
     if write_outcome.is_err() && created {
         let _ = std::fs::remove_file(&temp_path);
     }
-    write_outcome.map_err(|error| error.to_string())?;
+    write_outcome.map_err(|error| {
+        log_warn(
+            "durable-store",
+            "atomic-write",
+            "failed",
+            &[field("path", path.display()), field("error", &error)],
+        );
+        error.to_string()
+    })?;
 
     // Best-effort parent fsync so the rename survives power loss; opening a
     // directory fails on Windows — errors are ignored by design there.

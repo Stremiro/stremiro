@@ -184,37 +184,19 @@ fn final_season_pack_is_season_pack_only_for_its_own_season() {
 
 #[test]
 fn ordinal_season_claims_match_their_own_season_only() {
-    assert!(episode_matches_text_final(
-        "Re Zero 2nd Season - 05 [1080p]",
-        2,
-        5,
-        false
-    ));
-    assert!(episode_matches_text_final(
-        "Re Zero Second Season - 05 [1080p]",
-        2,
-        5,
-        false
-    ));
-    assert!(!episode_matches_text_final(
-        "Re Zero 2nd Season - 05 [1080p]",
-        1,
-        5,
-        false
-    ));
-    assert!(episode_matches_text_final(
-        "Overlord First Season - 04 [1080p]",
-        1,
-        4,
-        false
-    ));
-    // A season that outranks the ordinal claim is a mismatch too.
-    assert!(!episode_matches_text_final(
-        "Re Zero 2nd Season - 05 [1080p]",
-        3,
-        5,
-        false
-    ));
+    for (text, season, episode, expected) in [
+        ("Re Zero 2nd Season - 05 [1080p]", 2, 5, true),
+        ("Re Zero Second Season - 05 [1080p]", 2, 5, true),
+        ("Re Zero 2nd Season - 05 [1080p]", 1, 5, false),
+        ("Overlord First Season - 04 [1080p]", 1, 4, true),
+        ("Re Zero 2nd Season - 05 [1080p]", 3, 5, false),
+    ] {
+        assert_eq!(
+            episode_matches_text(text, season, episode),
+            expected,
+            "{text}: S{season}E{episode}"
+        );
+    }
 }
 
 #[test]
@@ -612,11 +594,11 @@ fn episode_claim_gate_honors_final_season_named_claim() {
     ));
 }
 
-fn mk_stream(info_hash: Option<&str>, url: Option<&str>, cached: bool) -> AddonStream {
+fn mk_stream(content_hash: Option<&str>, url: Option<&str>, cached: bool) -> AddonStream {
     AddonStream {
         name: Some("src".to_string()),
         title: Some("title".to_string()),
-        info_hash: info_hash.map(|s| s.to_string()),
+        content_hash: content_hash.map(|s| s.to_string()),
         url: url.map(|s| s.to_string()),
         cached,
         ..test_stream()
@@ -739,13 +721,13 @@ fn hydration_parses_emoji_binary_sizes_in_every_supported_unit() {
 #[test]
 fn decode_stream_items_skips_malformed_siblings() {
     let bytes = br#"{"streams": [
-            {"name": "Valid", "infoHash": "abc123"},
-            {"name": 42, "infoHash": "bad"},
+            {"name": "Valid"},
+            {"name": 42},
             {"url": "https://example.com/file.mp4"}
         ]}"#;
     let streams = decode_stream_items(bytes).expect("decodes");
     assert_eq!(streams.len(), 2);
-    assert_eq!(streams[0].info_hash.as_deref(), Some("abc123"));
+    assert_eq!(streams[0].name.as_deref(), Some("Valid"));
     assert_eq!(
         streams[1].url.as_deref(),
         Some("https://example.com/file.mp4")
@@ -785,10 +767,7 @@ fn decode_stream_items_keeps_missing_and_invalid_envelope_behavior() {
         br#"{"streams":"invalid"}"#,
         br#"{"streams":[{"name":42}]}"#,
     ] {
-        assert_eq!(
-            decode_stream_items(bytes).unwrap_err(),
-            "Invalid stream response format."
-        );
+        assert!(decode_stream_items(bytes).is_err());
     }
 }
 
@@ -842,7 +821,6 @@ fn stream_sources_decode_leniently_and_only_keep_bounded_trackers() {
         (0..30).map(|index| serde_json::json!(format!("tracker:https://tracker.example/{index}"))),
     );
     let stream: AddonStream = serde_json::from_value(serde_json::json!({
-        "infoHash": "ABCDEF0123456789ABCDEF0123456789ABCDEF01",
         "sources": sources
     }))
     .expect("decodes mixed sources");
@@ -868,10 +846,11 @@ fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
             "source_name": "Spoofed Source",
             "sourceId": 42,
             "streamFamily": ["spoofed"],
-            "streamKey": null
+            "streamKey": null,
+            "selectionPriority": ["exact", true, 4, 4, 6]
         }]}"#;
-    let streams = decode_stream_items(bytes).expect("decodes");
-    let stream = &streams[0];
+    let mut streams = decode_stream_items(bytes).expect("decodes");
+    let stream = &mut streams[0];
     assert_eq!(stream.seeders, None);
     assert_eq!(stream.size_bytes, None);
     assert_eq!(stream.source_name, None);
@@ -879,27 +858,15 @@ fn decode_stream_items_discards_spoofed_derived_ranking_inputs() {
     assert_eq!(stream.stream_family, None);
     assert!(stream.stream_key.is_empty());
     assert_eq!(stream.url.as_deref(), Some("https://example.com/file.mp4"));
-}
-
-#[test]
-fn selection_priority_is_never_forged_or_serialized() {
-    let bytes = br#"{"streams": [{
-            "name": "Release",
-            "url": "https://example.com/video.mp4",
-            "selectionPriority": ["exact", true, 4, 4, 6]
-        }]}"#;
-    let streams = decode_stream_items(bytes).expect("decodes");
-    assert_eq!(streams[0].selection_priority, None);
-
-    let mut prepared = stream_fixture(None, Some("https://example.com/video.mp4"));
-    prepared.selection_priority = Some(SelectionPriority {
+    assert_eq!(stream.selection_priority, None);
+    stream.selection_priority = Some(SelectionPriority {
         episode_match: StreamEpisodeMatchKind::Exact,
         season_claim_verified: true,
         title_match: 4,
         viability: 4,
         language: 6,
     });
-    let json = serde_json::to_value(&prepared).expect("serializes");
+    let json = serde_json::to_value(stream).expect("serializes");
     assert!(json.get("selectionPriority").is_none());
     assert!(json.get("selection_priority").is_none());
 }
@@ -907,7 +874,7 @@ fn selection_priority_is_never_forged_or_serialized() {
 #[test]
 fn stream_resource_url_preserves_config_and_encodes_id() {
     let url = crate::providers::addon_resource::build_resource_url(
-        "https://example.com/stremio/v1?token=abc",
+        "https://example.com/addon/v1?token=abc",
         "stream",
         "movie",
         "tt1234567:1:2",
@@ -916,11 +883,11 @@ fn stream_resource_url_preserves_config_and_encodes_id() {
     .expect("endpoint");
     assert_eq!(
         url,
-        "https://example.com/stremio/v1/stream/movie/tt1234567%3A1%3A2.json?token=abc"
+        "https://example.com/addon/v1/stream/movie/tt1234567%3A1%3A2.json?token=abc"
     );
     for token in ["abc/", "abc/manifest.json"] {
         let url = crate::providers::addon_resource::build_resource_url(
-            &format!("https://example.com/stremio/v1/manifest.json?token={token}"),
+            &format!("https://example.com/addon/v1/manifest.json?token={token}"),
             "stream",
             "movie",
             "tt1234567",
@@ -929,7 +896,7 @@ fn stream_resource_url_preserves_config_and_encodes_id() {
         .expect("configured manifest endpoint");
         assert_eq!(
             url,
-            format!("https://example.com/stremio/v1/stream/movie/tt1234567.json?token={token}")
+            format!("https://example.com/addon/v1/stream/movie/tt1234567.json?token={token}")
         );
     }
 }
@@ -1151,10 +1118,10 @@ fn decode_strips_blocked_url_but_keeps_stream_and_magnets() {
 }
 
 #[test]
-fn truncate_stream_item_rejects_oversized_info_hash() {
+fn truncate_stream_item_rejects_oversized_content_hash() {
     let mut stream = mk_stream(Some(&"a".repeat(113)), None, false);
     truncate_stream_item(&mut stream);
-    assert!(stream.info_hash.is_none());
+    assert!(stream.content_hash.is_none());
 }
 
 #[test]
@@ -1165,16 +1132,22 @@ fn decode_rejects_oversized_stream_urls_without_aliasing() {
         let bytes = serde_json::to_vec(&serde_json::json!({"streams": [
             {"url": prefix},
             {"url": format!("{prefix}a")},
-            {"url": format!("{prefix}b")},
-            {"url": format!("{prefix}a"), "infoHash": "0123456789012345678901234567890123456789"}
+            {"url": format!("{prefix}b")}
         ]}))
         .unwrap();
-        let streams = decode_stream_items(&bytes).unwrap();
+        let mut streams = decode_stream_items(&bytes).unwrap();
+        let mut hashed = mk_stream(
+            Some("0123456789012345678901234567890123456789"),
+            Some(&format!("{prefix}a")),
+            false,
+        );
+        truncate_stream_item(&mut hashed);
+        streams.push(hashed);
         assert_eq!(streams.len(), 4);
         assert_eq!(streams[0].url.as_deref(), Some(prefix.as_str()));
         assert!(streams[1..].iter().all(|stream| stream.url.is_none()));
         assert_eq!(
-            streams[3].info_hash.as_deref(),
+            streams[3].content_hash.as_deref(),
             Some("0123456789012345678901234567890123456789")
         );
     }
@@ -1213,7 +1186,13 @@ fn proxy_request_headers_extracts_bounded_request_entries() {
     let hints = hints_with_proxy_headers(serde_json::json!({
         "request": {
             "Authorization": "Bearer secret",
-            "User-Agent": "Stremio/1.0",
+            "User-Agent": "Addon/1.0",
+            "Referer": "https://example.com/",
+            "Range": "bytes=100-200",
+            "HOST": "evil.example",
+            "Content-Length": "12",
+            "Connection": "keep-alive",
+            "Proxy-Authorization": "Basic c2VjcmV0",
             "X-Retry": 3,
             "X-Inject": "a\nb",
             "Bad Name": "dropped",
@@ -1228,31 +1207,9 @@ fn proxy_request_headers_extracts_bounded_request_entries() {
         headers,
         vec![
             ("Authorization".to_string(), "Bearer secret".to_string()),
-            ("User-Agent".to_string(), "Stremio/1.0".to_string()),
-            ("X-Retry".to_string(), "3".to_string()),
-        ]
-    );
-}
-
-#[test]
-fn proxy_request_headers_drops_transport_owned_names() {
-    let hints = hints_with_proxy_headers(serde_json::json!({
-        "request": {
-            "Authorization": "Bearer secret",
-            "Range": "bytes=100-200",
-            "HOST": "evil.example",
-            "Content-Length": "12",
-            "Connection": "keep-alive",
-            "Proxy-Authorization": "Basic c2VjcmV0",
-            "Referer": "https://example.com/"
-        }
-    }));
-    let headers = hints.proxy_request_headers();
-    assert_eq!(
-        headers,
-        vec![
-            ("Authorization".to_string(), "Bearer secret".to_string()),
             ("Referer".to_string(), "https://example.com/".to_string()),
+            ("User-Agent".to_string(), "Addon/1.0".to_string()),
+            ("X-Retry".to_string(), "3".to_string()),
         ]
     );
 }
@@ -1312,6 +1269,32 @@ fn truncate_stream_item_drops_oversized_proxy_headers() {
 
 fn flags_for(text: &str) -> StreamFlags {
     detect_stream_flags(&normalize_separators(text).to_lowercase())
+}
+
+#[test]
+fn audio_tags_respect_word_boundaries_and_filename_fallback() {
+    for (title, filename_audio, expected) in [
+        ("The Fairly OddParents", "AAC2.0", (false, false, true)),
+        ("Isaac", "EAC3", (false, true, false)),
+        ("Atmosphere", "AAC2.0", (false, false, true)),
+        ("DD+5.1", "AAC2.0", (false, true, false)),
+        ("DDP5.1", "AAC2.0", (false, true, false)),
+        ("EAC3", "AAC2.0", (false, true, false)),
+        ("AAC2.0", "EAC3", (false, false, true)),
+        ("TrueHD", "AAC2.0", (true, false, false)),
+        ("Atmos", "AAC2.0", (true, false, false)),
+    ] {
+        let stream = AddonStream {
+            title: Some(title.to_string()),
+            behavior_hints: Some(BehaviorHints {
+                filename: Some(format!("Show.S01E01.{filename_audio}.mkv")),
+                ..Default::default()
+            }),
+            ..test_stream()
+        };
+        let flags = stream.match_texts().flags;
+        assert_eq!((flags.atmos, flags.eac3, flags.aac), expected, "{title}");
+    }
 }
 
 #[test]

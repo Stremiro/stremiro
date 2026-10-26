@@ -1,4 +1,7 @@
-const YOUTUBE_EMBED_ORIGIN = 'https://www.youtube-nocookie.com';
+export const YOUTUBE_EMBED_ORIGIN = 'https://www.youtube-nocookie.com';
+
+export const youTubeThumbnailUrl = (videoId: string) =>
+  `https://i.ytimg.com/vi/${encodeURIComponent(videoId)}/hqdefault.jpg`;
 
 export const YOUTUBE_PLAYER_STATE = {
   ENDED: 0,
@@ -121,7 +124,7 @@ function readPlayerState(info: unknown): number | null {
   }
 
   if (info && typeof info === 'object' && !Array.isArray(info) && 'playerState' in info) {
-    const playerState = (info as { playerState: unknown }).playerState;
+    const playerState = info.playerState;
     return typeof playerState === 'number' && Number.isFinite(playerState) ? playerState : null;
   }
 

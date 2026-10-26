@@ -8,18 +8,27 @@ const Toaster = (props: ToasterProps) => {
       theme='dark'
       // Mini player snaps to corners — center bottom is the only edge it never occupies.
       position='bottom-center'
+      expand
+      visibleToasts={3}
+      gap={8}
       // Top-center toasts must clear the 32px frameless titlebar.
-      offset={{ top: '48px' }}
+      offset={{ top: '48px', bottom: '20px', left: '16px', right: '16px' }}
+      mobileOffset={{ top: '48px', bottom: '12px', left: '12px', right: '12px' }}
       className='toaster group'
       toastOptions={{
         classNames: {
-          // Custom pills render `data-styled="false"` but inherit these classNames — scope to styled toasts.
+          // Custom cards inherit these classNames — scope chrome to styled toasts.
           toast:
-            'group toast group-[.toaster]:data-[styled=true]:rounded-xl group-[.toaster]:data-[styled=true]:border-white/[0.08] group-[.toaster]:data-[styled=true]:bg-[#111114]/95 group-[.toaster]:data-[styled=true]:text-[13px] group-[.toaster]:data-[styled=true]:text-zinc-100 group-[.toaster]:data-[styled=true]:shadow-[0_18px_44px_-14px_rgba(0,0,0,0.85),inset_0_1px_0_rgba(255,255,255,0.05)]',
-          description: 'group-[.toast]:text-zinc-400',
+            'group toast group-[.toaster]:data-[styled=true]:gap-2.5 group-[.toaster]:data-[styled=true]:rounded-[10px] group-[.toaster]:data-[styled=true]:border-white/[0.1] group-[.toaster]:data-[styled=true]:bg-[#17171b]/98 group-[.toaster]:data-[styled=true]:p-2.5 group-[.toaster]:data-[styled=true]:text-[13px] group-[.toaster]:data-[styled=true]:text-white/95 group-[.toaster]:data-[styled=true]:shadow-[0_8px_24px_-10px_rgb(0_0_0/0.65),0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(255_255_255/0.04)]',
+          title:
+            'group-[.toast]:text-[13px] group-[.toast]:font-medium group-[.toast]:leading-5 group-[.toast]:tracking-[-0.005em] group-[.toast]:text-white/95',
+          description:
+            'group-[.toast]:text-[12px] group-[.toast]:leading-4 group-[.toast]:text-white/50',
+          icon: 'group-data-[type=success]:text-emerald-400/90 group-data-[type=error]:text-red-300 group-data-[type=warning]:text-amber-300/90 group-data-[type=info]:text-sky-300/90',
           actionButton:
-            'group-[.toast]:rounded-md! group-[.toast]:bg-white/10! group-[.toast]:font-medium group-[.toast]:text-white! group-[.toast]:hover:bg-white/15!',
-          cancelButton: 'group-[.toast]:bg-white/[0.04] group-[.toast]:text-zinc-400',
+            'group-[.toast]:rounded-md! group-[.toast]:bg-white/[0.08]! group-[.toast]:text-[12px]! group-[.toast]:font-medium group-[.toast]:text-white! group-[.toast]:hover:bg-white/[0.12]!',
+          cancelButton:
+            'group-[.toast]:rounded-md! group-[.toast]:bg-white/[0.08]! group-[.toast]:text-[12px]! group-[.toast]:font-medium group-[.toast]:text-white! group-[.toast]:hover:bg-white/[0.12]!',
         },
       }}
       {...props}

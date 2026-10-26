@@ -1,5 +1,7 @@
 use super::{normalize_media_image_url, MEDIA_ID_MAX_CHARS, MEDIA_TITLE_MAX_CHARS};
-use crate::providers::{extract_primary_year, Episode, MediaDetails, MediaItem};
+use crate::providers::{
+    bound_optional, extract_primary_year, trim_to_max, Episode, MediaDetails, MediaItem,
+};
 use regex::Regex;
 use std::collections::HashSet;
 use std::sync::LazyLock;
@@ -20,7 +22,6 @@ const EPISODE_ID_MAX_CHARS: usize = 256;
 const EPISODE_TITLE_MAX_CHARS: usize = 512;
 const EPISODE_RELEASED_MAX_CHARS: usize = 64;
 const EPISODE_OVERVIEW_MAX_CHARS: usize = 4_096;
-const EPISODE_THUMBNAIL_MAX_CHARS: usize = 2_048;
 
 // `\b` after the day fails on ISO datetimes (`2024-07-18T00:00…` — `8T` is
 // word-to-word), the exact Cinemeta `released` shape; a non-digit terminator accepts it.
@@ -90,17 +91,7 @@ pub(crate) fn build_display_year(value: Option<&str>) -> Option<String> {
 /// Trim + char-bound a required field; the field stays present even when the
 /// payload collapses to empty (callers that need a title reject separately).
 fn bound_required(value: &str, max_chars: usize) -> String {
-    trim_bounded_end(value.trim().chars().take(max_chars).collect())
-}
-
-fn trim_bounded_end(mut value: String) -> String {
-    // Truncation can expose trailing whitespace; remove it now to keep normalization idempotent.
-    value.truncate(value.trim_end().len());
-    value
-}
-
-fn bound_optional(value: Option<String>, max_chars: usize) -> Option<String> {
-    crate::providers::bound_optional(value, max_chars).map(trim_bounded_end)
+    trim_to_max(value, max_chars).unwrap_or_default()
 }
 
 // Display text only: preserve punctuation, language and emoji sequences.
@@ -143,7 +134,8 @@ fn bound_string_list(
         .unwrap_or_default()
         .into_iter()
         .filter_map(|value| bound_optional(Some(value), max_chars))
-        .filter(|value| seen.insert(value.to_lowercase()))
+        // ASCII fold: the same equivalence genre filters and menus match with.
+        .filter(|value| seen.insert(value.to_ascii_lowercase()))
         .take(max_items)
         .collect();
     (!bounded.is_empty()).then_some(bounded)
@@ -158,17 +150,10 @@ fn normalize_episode_metadata(mut episode: Episode) -> Episode {
     episode.released = bound_optional(episode.released, EPISODE_RELEASED_MAX_CHARS);
     episode.release_date = build_release_date(episode.released.as_deref());
     episode.overview = bound_optional(episode.overview, EPISODE_OVERVIEW_MAX_CHARS);
-    episode.thumbnail = bound_optional(episode.thumbnail, EPISODE_THUMBNAIL_MAX_CHARS);
+    episode.thumbnail = episode
+        .thumbnail
+        .and_then(|url| normalize_media_image_url(&url));
     episode
-}
-
-pub(crate) fn normalize_episode_metadata_list(episodes: Vec<Episode>) -> Vec<Episode> {
-    // The only producer is `parse_episodes`, which already caps at
-    // MAX_EPISODES — no second bound needed here.
-    episodes
-        .into_iter()
-        .map(normalize_episode_metadata)
-        .collect()
 }
 
 pub(crate) fn days_in_month(year: u32, month: u32) -> Option<u32> {
@@ -234,8 +219,7 @@ pub(crate) fn with_requested_media_id(
     details
 }
 
-pub(crate) fn normalize_media_details(details: MediaDetails, requested_id: &str) -> MediaDetails {
-    let mut details = with_requested_media_id(details, requested_id);
+pub(crate) fn normalize_media_details(mut details: MediaDetails) -> MediaDetails {
     details.title = normalize_title(&details.title, MEDIA_TITLE_MAX_CHARS);
     details.imdb_id = bound_optional(details.imdb_id, MEDIA_ID_MAX_CHARS);
     details.poster = details.poster.and_then(|s| normalize_media_image_url(&s));
@@ -270,7 +254,12 @@ pub(crate) fn normalize_media_details(details: MediaDetails, requested_id: &str)
     // A parsed meta `released` (full ISO date) wins over the year-only
     // fallback so calendar movie events land on the real day, not Jan 1.
     details.release_date = release_date.or_else(|| build_release_date(details.year.as_deref()));
-    details.episodes = details.episodes.take().map(normalize_episode_metadata_list);
+    details.episodes = details.episodes.take().map(|episodes| {
+        episodes
+            .into_iter()
+            .map(normalize_episode_metadata)
+            .collect()
+    });
     details
 }
 

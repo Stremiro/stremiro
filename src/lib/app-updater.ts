@@ -223,44 +223,6 @@ export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUp
   return activeCheckPromise;
 }
 
-// Scheduled checks funnel here — returns the update only when this version hasn't been announced (once per release).
-export async function runScheduledAppUpdateCheck(
-  queryClient: QueryClient,
-): Promise<AppUpdateHandle | null> {
-  // Notify during install would flash the banner mid-download and permanently mute the version if it fails.
-  if (readAppUpdateState(queryClient).status === 'installing') return null;
-
-  const update = await runAppUpdateCheck(queryClient);
-  if (!update || readAppUpdateState(queryClient).status === 'installing') return null;
-
-  return update.notificationEligible ? update : null;
-}
-
-// Low-level invoke: owns only the progress listener lifetime; dedup, state, and recovery live above.
-async function installAppUpdate(
-  version: string,
-  onProgress: (progress: AppUpdateProgress) => void,
-): Promise<void> {
-  const operationId = crypto.randomUUID();
-  let listening = true;
-  const unlisten = await listen<AppUpdateProgress & { operationId: string }>(
-    APP_UPDATE_PROGRESS_EVENT,
-    (event) => {
-      if (listening && event.payload.operationId === operationId) onProgress(event.payload);
-    },
-  );
-
-  try {
-    // `version` pins the install to the presented handle — a newer release is rejected, not silently installed.
-    await invoke('download_app_update', { version, operationId });
-    await flushPendingAppWrites();
-    await invoke('install_app_update', { version, operationId });
-  } finally {
-    listening = false;
-    unlisten();
-  }
-}
-
 export async function runAppUpdateInstall(
   queryClient: QueryClient,
   targetUpdate: AppUpdateHandle,
@@ -290,12 +252,28 @@ export async function runAppUpdateInstall(
       // Settle current writes before downloading; a failure aborts into normal recovery rather than installing mid-write.
       await flushPendingAppWrites();
 
-      // Windows exits the process once the installer launches — this await only resolves on failure.
-      await installAppUpdate(targetUpdate.version, (progress) => {
-        writeAppUpdateState(queryClient, {
-          installProgress: progress,
-        });
-      });
+      const version = targetUpdate.version;
+      const operationId = crypto.randomUUID();
+      let listening = true;
+      const unlisten = await listen<AppUpdateProgress & { operationId: string }>(
+        APP_UPDATE_PROGRESS_EVENT,
+        (event) => {
+          if (listening && event.payload.operationId === operationId) {
+            writeAppUpdateState(queryClient, { installProgress: event.payload });
+          }
+        },
+      );
+
+      try {
+        // `version` pins the install to the presented handle — a newer release is rejected, not silently installed.
+        await invoke('download_app_update', { version, operationId });
+        await flushPendingAppWrites();
+        // Windows exits the process once the installer launches — this await only resolves on failure.
+        await invoke('install_app_update', { version, operationId });
+      } finally {
+        listening = false;
+        unlisten();
+      }
     } catch (error) {
       const message = getErrorMessage(error);
       let recoveredUpdate: AppUpdateHandle | null = null;

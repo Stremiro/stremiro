@@ -4,6 +4,7 @@ import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useFailedSrc } from '@/hooks/use-failed-src';
+import { useLocalDay } from '@/hooks/use-local-day';
 import { formatAirDate, parseLocalScheduleDate, SHORT_DATE_FORMATTER } from '@/lib/schedule-dates';
 import { cn, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
 
@@ -56,6 +57,7 @@ function EpisodeCardInner({
   onPlay,
   onToggleWatched,
 }: EpisodeCardProps) {
+  const localDay = useLocalDay();
   const [thumbnail, onThumbnailError] = useFailedSrc(episode.thumbnail);
   const descriptionId = useId();
   const description = isSpoiler
@@ -63,7 +65,7 @@ function EpisodeCardInner({
     : episode.overview?.trim() || null;
   const title = getEpisodeTitle(isSpoiler ? undefined : episode.title, episode.episode);
   const coordinates = formatSeasonEpisode(episode.season, episode.episode);
-  const airDate = formatAirDate(episode.releaseDate);
+  const airDate = formatAirDate(episode.releaseDate, localDay);
   const releaseDate = !isAired ? parseLocalScheduleDate(episode.releaseDate) : null;
   const releaseLabel = isAired
     ? airDate
@@ -139,7 +141,10 @@ function EpisodeCardInner({
               </>
             )}
           </p>
-          <h4 className='mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white drop-shadow-md'>
+          <h4
+            title={title}
+            className='pointer-events-auto mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white drop-shadow-md'
+          >
             {title}
           </h4>
           {description && (
@@ -176,7 +181,7 @@ function EpisodeCardInner({
               'flex h-7 w-7 items-center justify-center rounded-md border transition-colors duration-150',
               isWatched
                 ? 'border-(--accent-act) bg-(--accent-act) text-(--on-accent-act)'
-                : 'border-white/15 bg-black/65 text-white/65 group-hover/watch:border-white/30 group-hover/watch:text-white group-focus-visible/watch:text-white',
+                : 'border-white/15 bg-black/65 text-white/65 group-not-aria-disabled/watch:group-hover/watch:border-white/30 group-not-aria-disabled/watch:group-hover/watch:text-white group-focus-visible/watch:text-white',
             )}
           >
             <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />

@@ -174,13 +174,9 @@ export function usePlayerAddonSubtitles({
       .catch(() => undefined);
   }, [activeStreamLoadKey, autoLoadLanguage, loadedAddonSubtitles]);
 
-  const handleSubTrackSelect = (
-    trackType: 'sub',
-    trackId: number | 'no',
-    options?: { persistPreference?: boolean },
-  ) => {
+  const handleSubTrackSelect = (trackId: number | 'no') => {
     const epoch = subtitleSessionEpochRef.current;
-    void setTrack(trackType, trackId, options).then((applied) => {
+    void setTrack('sub', trackId, { persistPreference: true }).then((applied) => {
       if (!applied || !mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
       announce(
         trackId === 'no' ? 'Subtitles off' : `Subtitles: ${trackDisplayLabel(subTracks, trackId)}`,

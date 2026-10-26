@@ -60,8 +60,8 @@ class RootErrorBoundary extends React.Component<
 }
 
 if (isTauriDesktopRuntime()) {
-  const listener = listen('app://addon-capabilities-changed', () => {
-    void invalidateAddonCapabilityQueries(queryClient);
+  const listener = listen<boolean>('app://addon-capabilities-changed', (event) => {
+    void invalidateAddonCapabilityQueries(queryClient, event.payload);
   }).catch(() => {
     if (import.meta.env.DEV) console.warn('[app] addon-capabilities listener failed to register');
   });

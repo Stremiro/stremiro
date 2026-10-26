@@ -23,8 +23,12 @@ use crate::operational_log::{field, log_warn};
 use crate::providers::addon_resource::{
     is_fetchable_http_url, is_magnet_url, parse_fetchable_http_url,
 };
-use crate::providers::addons::{AddonStream, AddonTransport, StreamPackCoverage};
-use crate::providers::lock_or_recover;
+use crate::providers::addons::{
+    sanitize_addon_log, AddonStream, AddonTransport, StreamPackCoverage,
+};
+use crate::providers::{
+    encode_uri_component, lock_or_recover, CONTENT_HASH_URN_PREFIX, MAGNET_PREFIX,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -218,7 +222,7 @@ pub(crate) struct StreamLink {
     kind: StreamLinkKind,
 }
 
-fn validated_info_hash(hash: &str) -> Option<String> {
+fn validated_content_hash(hash: &str) -> Option<String> {
     if hash.len() == 40 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Some(hash.to_ascii_lowercase());
     }
@@ -249,11 +253,11 @@ fn stream_link(stream: &AddonStream) -> Result<StreamLink, String> {
         }
     }
     let hash = stream
-        .info_hash
+        .content_hash
         .as_deref()
-        .and_then(validated_info_hash)
+        .and_then(validated_content_hash)
         .ok_or_else(|| "This stream has no shareable link.".to_string())?;
-    let mut url = format!("magnet:?xt=urn:btih:{hash}");
+    let mut url = format!("{MAGNET_PREFIX}?xt={CONTENT_HASH_URN_PREFIX}{hash}");
     let name = stream
         .behavior_hints
         .as_ref()
@@ -269,7 +273,7 @@ fn stream_link(stream: &AddonStream) -> Result<StreamLink, String> {
         .filter(|name| !name.is_empty());
     if let Some(name) = name {
         url.push_str("&dn=");
-        url.push_str(&urlencoding::encode(name));
+        url.push_str(&encode_uri_component(name));
     }
     for tracker in stream
         .sources
@@ -277,7 +281,7 @@ fn stream_link(stream: &AddonStream) -> Result<StreamLink, String> {
         .filter_map(|source| source.strip_prefix("tracker:"))
     {
         url.push_str("&tr=");
-        url.push_str(&urlencoding::encode(tracker));
+        url.push_str(&encode_uri_component(tracker));
     }
     Ok(StreamLink {
         url,
@@ -330,7 +334,15 @@ pub async fn get_stream_link(
         source_id.as_deref(),
     )
     .await
-    .map_err(|_| "Could not retrieve this stream link. Try again.".to_string())?
+    .map_err(|error| {
+        log_warn(
+            "stream-link",
+            "get_stream_link",
+            "fetch-failed",
+            &[field("error", sanitize_addon_log(&error))],
+        );
+        "Could not retrieve this stream link. Try again.".to_string()
+    })?
     .ok_or_else(|| STREAM_LINK_CHANGED_MESSAGE.to_string())?;
     stream_link(&stream)
 }
@@ -682,219 +694,188 @@ pub async fn recover_playback_stream(
     // which must land even when the cancel arrived before this command started.
     tokio::select! {
         biased;
-        result = recover_playback_stream_work(
-            app, playback_state, addon_transport, media_type, id, season, episode,
-            absolute_season, absolute_episode, stream_lookup_id, failed_stream_url,
-            failed_source_id, failed_stream_family, failed_stream_key, excluded_stream_keys,
-            outcome, ranking_media_id, ranking_media_type, ranking_title, ranking_season,
-            ranking_episode,
-        ) => result.map_err(ResolveStreamError::from),
+        result = async {
+            let recovery_started = Instant::now();
+            let deadline = recovery_started + STREAM_RESOLVE_TIMEOUT;
+            let expected_generation = playback_state.history_generation();
+            let timestamp_ms = now_unix_millis();
+            let query = StreamPoolQuery::new(
+                &media_type,
+                &id,
+                season,
+                episode,
+                absolute_episode,
+                StreamRankingOverrides {
+                    media_type: ranking_media_type,
+                    media_id: ranking_media_id,
+                    title: ranking_title,
+                    season: ranking_season,
+                    episode: ranking_episode,
+                },
+                "stream recovery",
+            )?;
+            let normalized_id = query.id.as_str();
+            let normalized_media_type = query.media_type.as_str();
+            let normalized_history_type = normalize_watch_progress_type(js_trim(&media_type))
+                .ok_or_else(|| "Invalid media type for stream recovery.".to_string())?;
+            let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
+                .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
+            let failed_stream_url = normalize_recovery_url(failed_stream_url);
+            let failed_source_id = failed_source_id.as_deref().and_then(normalize_opaque_field);
+            let failed_stream_family = failed_stream_family
+                .as_deref()
+                .and_then(normalize_opaque_field);
+            let failed_stream_key = failed_stream_key.and_then(|key| normalize_stream_key(&key));
+            let excluded_stream_keys: Vec<String> = excluded_stream_keys
+                .unwrap_or_default()
+                .iter()
+                .take(RECOVERY_EXCLUDED_STREAM_KEYS_MAX)
+                .filter_map(|key| normalize_stream_key(key))
+                .collect();
+            // Recovery must query the same ID space the initial resolve used: on mapped
+            // titles (kitsu: → tt…) the media id is not what addons index streams under.
+            // The lookup id becomes the outbound path segment — same bound as the media id.
+            let stream_lookup_id = stream_lookup_id.as_deref().and_then(normalize_media_id);
+            let fetch_id = stream_lookup_id.as_deref().unwrap_or(normalized_id);
+
+            // Blocking store/file IO on the blocking pool, matching `report_playback_stream_outcome`.
+            // Best-effort telemetry — detached so a wedged store cannot delay the re-resolve.
+            {
+                let outcome_app = app.clone();
+                let outcome_service = playback_state.inner().clone();
+                let outcome_normalized_id = normalized_id.to_string();
+                let outcome_source_id = failed_source_id.clone();
+                let outcome_stream_family = failed_stream_family.clone();
+                tauri::async_runtime::spawn(async move {
+                    let outcome_result = super::run_blocking_store_op(move || {
+                        outcome_service.record_stream_outcome(
+                            &outcome_app,
+                            StreamOutcomeReport {
+                                media_id: outcome_normalized_id,
+                                media_type: normalized_history_type,
+                                season: absolute_season,
+                                episode: absolute_episode,
+                                source_id: outcome_source_id,
+                                stream_family: outcome_stream_family,
+                                outcome: normalized_outcome,
+                                timestamp_ms,
+                            },
+                            expected_generation,
+                        )
+                    })
+                    .await;
+                    if let Err(error) = outcome_result {
+                        log_warn(
+                            "stream-recovery",
+                            "recover_playback_stream",
+                            "outcome-persist-failed",
+                            &[field("error", &error)],
+                        );
+                    }
+                });
+            }
+
+            let exclusions = StreamExclusions::new(
+                &excluded_stream_keys,
+                failed_stream_key.as_deref(),
+                failed_stream_url.as_deref(),
+            );
+            let mut recovery_fetch = ResolveFetch {
+                exclusions: Some(&exclusions),
+                ..ResolveFetch::default()
+            };
+            if !matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified) {
+                recovery_fetch.failed_source_id = failed_source_id.as_deref();
+                recovery_fetch.failed_stream_family = failed_stream_family.as_deref();
+            }
+            let warn_recovery = |event: &str, error: &str| {
+                // Error text is a bounded summary, never a URL or header.
+                let summary: String = error.chars().take(160).collect();
+                log_warn(
+                    "stream-recovery",
+                    "recover_playback_stream",
+                    event,
+                    &[
+                        field("media_type", normalized_media_type),
+                        field("media_id", normalized_id),
+                        field("outcome", &outcome),
+                        field("error", &summary),
+                    ],
+                );
+            };
+            loop {
+                let refresh_claim = if recovery_fetch.not_before.is_some() {
+                    let refresh_key = format!(
+                        "{}|{}|{:?}|{:?}|{:?}",
+                        normalized_media_type,
+                        fetch_id,
+                        query.season,
+                        query.episode,
+                        query.absolute_episode
+                    );
+                    let Some(claim) = addon_transport.claim_stream_refresh(&refresh_key) else {
+                        return Ok::<_, String>(None);
+                    };
+                    Some(claim)
+                } else {
+                    None
+                };
+                let fetched = query
+                    .fetch_pool(
+                        &app,
+                        &playback_state,
+                        &addon_transport,
+                        fetch_id,
+                        recovery_fetch,
+                        deadline,
+                    )
+                    .await;
+                let mut streams = match fetched {
+                    Ok(streams) => {
+                        if let Some(claim) = refresh_claim {
+                            claim.complete();
+                        }
+                        streams
+                    }
+                    Err(error) => {
+                        // Contract stays Ok(None) for compat; observability only.
+                        warn_recovery("fetch-failed", &error);
+                        return Ok(None);
+                    }
+                };
+
+                exclusions.retain(&mut streams);
+                if streams.is_empty() {
+                    warn_recovery("empty-pool", "");
+                } else {
+                    match resolve_ranked_best_stream_candidate(
+                        streams,
+                        failed_stream_key.as_deref(),
+                        failed_stream_url.as_deref(),
+                        PreferredStreamHint::default(),
+                        deadline,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(resolved) => return Ok(Some(resolved)),
+                        Err(error) => warn_recovery("resolve-failed", &error.message),
+                    }
+                }
+
+                if recovery_fetch.not_before.is_some()
+                    || matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified)
+                    || Instant::now() >= deadline
+                {
+                    return Ok(None);
+                }
+                recovery_fetch.not_before = Some(recovery_started.into_std());
+            }
+        } => result.map_err(ResolveStreamError::from),
         _ = cancellation.wait_for(|cancelled| *cancelled) => Err(ResolveStreamError::new(
             ResolveStreamErrorKind::Cancelled,
             "Playback recovery cancelled.",
         )),
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn recover_playback_stream_work(
-    app: AppHandle,
-    playback_state: State<'_, PlaybackStateService>,
-    addon_transport: State<'_, AddonTransport>,
-    media_type: String,
-    id: String,
-    season: Option<u32>,
-    episode: Option<u32>,
-    absolute_season: Option<u32>,
-    absolute_episode: Option<u32>,
-    stream_lookup_id: Option<String>,
-    failed_stream_url: Option<String>,
-    failed_source_id: Option<String>,
-    failed_stream_family: Option<String>,
-    failed_stream_key: Option<String>,
-    excluded_stream_keys: Option<Vec<String>>,
-    outcome: String,
-    ranking_media_id: Option<String>,
-    ranking_media_type: Option<String>,
-    ranking_title: Option<String>,
-    ranking_season: Option<u32>,
-    ranking_episode: Option<u32>,
-) -> Result<Option<BestResolvedStream>, String> {
-    let recovery_started = Instant::now();
-    let deadline = recovery_started + STREAM_RESOLVE_TIMEOUT;
-    let expected_generation = playback_state.history_generation();
-    let timestamp_ms = now_unix_millis();
-    let query = StreamPoolQuery::new(
-        &media_type,
-        &id,
-        season,
-        episode,
-        absolute_episode,
-        StreamRankingOverrides {
-            media_type: ranking_media_type,
-            media_id: ranking_media_id,
-            title: ranking_title,
-            season: ranking_season,
-            episode: ranking_episode,
-        },
-        "stream recovery",
-    )?;
-    let normalized_id = query.id.as_str();
-    let normalized_media_type = query.media_type.as_str();
-    let normalized_history_type = normalize_watch_progress_type(js_trim(&media_type))
-        .ok_or_else(|| "Invalid media type for stream recovery.".to_string())?;
-    let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
-        .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
-    let failed_stream_url = normalize_recovery_url(failed_stream_url);
-    let failed_source_id = failed_source_id.as_deref().and_then(normalize_opaque_field);
-    let failed_stream_family = failed_stream_family
-        .as_deref()
-        .and_then(normalize_opaque_field);
-    let failed_stream_key = failed_stream_key.and_then(|key| normalize_stream_key(&key));
-    let excluded_stream_keys: Vec<String> = excluded_stream_keys
-        .unwrap_or_default()
-        .iter()
-        .take(RECOVERY_EXCLUDED_STREAM_KEYS_MAX)
-        .filter_map(|key| normalize_stream_key(key))
-        .collect();
-    // Recovery must query the same ID space the initial resolve used: on mapped
-    // titles (kitsu: → tt…) the media id is not what addons index streams under.
-    // The lookup id becomes the outbound path segment — same bound as the media id.
-    let stream_lookup_id = stream_lookup_id.as_deref().and_then(normalize_media_id);
-    let fetch_id = stream_lookup_id.as_deref().unwrap_or(normalized_id);
-
-    // Blocking store/file IO on the blocking pool, matching `report_playback_stream_outcome`.
-    // Best-effort telemetry — detached so a wedged store cannot delay the re-resolve.
-    {
-        let outcome_app = app.clone();
-        let outcome_service = playback_state.inner().clone();
-        let outcome_normalized_id = normalized_id.to_string();
-        let outcome_source_id = failed_source_id.clone();
-        let outcome_stream_family = failed_stream_family.clone();
-        tauri::async_runtime::spawn(async move {
-            let outcome_result = super::run_blocking_store_op(move || {
-                outcome_service.record_stream_outcome(
-                    &outcome_app,
-                    StreamOutcomeReport {
-                        media_id: outcome_normalized_id,
-                        media_type: normalized_history_type,
-                        season: absolute_season,
-                        episode: absolute_episode,
-                        source_id: outcome_source_id,
-                        stream_family: outcome_stream_family,
-                        outcome: normalized_outcome,
-                        timestamp_ms,
-                    },
-                    expected_generation,
-                )
-            })
-            .await;
-            if let Err(error) = outcome_result {
-                log_warn(
-                    "stream-recovery",
-                    "recover_playback_stream",
-                    "outcome-persist-failed",
-                    &[field("error", &error)],
-                );
-            }
-        });
-    }
-
-    let exclusions = StreamExclusions::new(
-        &excluded_stream_keys,
-        failed_stream_key.as_deref(),
-        failed_stream_url.as_deref(),
-    );
-    let mut recovery_fetch = ResolveFetch {
-        exclusions: Some(&exclusions),
-        ..ResolveFetch::default()
-    };
-    if !matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified) {
-        recovery_fetch.failed_source_id = failed_source_id.as_deref();
-        recovery_fetch.failed_stream_family = failed_stream_family.as_deref();
-    }
-    let warn_recovery = |event: &str, error: &str| {
-        // Error text is a bounded summary, never a URL or header.
-        let summary: String = error.chars().take(160).collect();
-        log_warn(
-            "stream-recovery",
-            "recover_playback_stream",
-            event,
-            &[
-                field("media_type", normalized_media_type),
-                field("media_id", normalized_id),
-                field("outcome", &outcome),
-                field("error", &summary),
-            ],
-        );
-    };
-    loop {
-        let refresh_claim = if recovery_fetch.not_before.is_some() {
-            let refresh_key = format!(
-                "{}|{}|{:?}|{:?}|{:?}",
-                normalized_media_type,
-                fetch_id,
-                query.season,
-                query.episode,
-                query.absolute_episode
-            );
-            let Some(claim) = addon_transport.claim_stream_refresh(&refresh_key) else {
-                return Ok(None);
-            };
-            Some(claim)
-        } else {
-            None
-        };
-        let fetched = query
-            .fetch_pool(
-                &app,
-                &playback_state,
-                &addon_transport,
-                fetch_id,
-                recovery_fetch,
-                deadline,
-            )
-            .await;
-        let mut streams = match fetched {
-            Ok(streams) => {
-                if let Some(claim) = refresh_claim {
-                    claim.complete();
-                }
-                streams
-            }
-            Err(error) => {
-                // Contract stays Ok(None) for compat; observability only.
-                warn_recovery("fetch-failed", &error);
-                return Ok(None);
-            }
-        };
-
-        exclusions.retain(&mut streams);
-        if streams.is_empty() {
-            warn_recovery("empty-pool", "");
-        } else {
-            match resolve_ranked_best_stream_candidate(
-                streams,
-                failed_stream_key.as_deref(),
-                failed_stream_url.as_deref(),
-                PreferredStreamHint::default(),
-                deadline,
-                None,
-            )
-            .await
-            {
-                Ok(resolved) => return Ok(Some(resolved)),
-                Err(error) => warn_recovery("resolve-failed", &error.message),
-            }
-        }
-
-        if recovery_fetch.not_before.is_some()
-            || matches!(normalized_outcome, PlaybackStreamOutcomeKind::Verified)
-            || Instant::now() >= deadline
-        {
-            return Ok(None);
-        }
-        recovery_fetch.not_before = Some(recovery_started.into_std());
     }
 }
 

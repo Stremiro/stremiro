@@ -1,8 +1,8 @@
+use super::encode_uri_component;
 use super::ttl_cache::{FetchFailure, InFlight, TtlCache};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use urlencoding::encode;
 
 /// One skippable segment (intro/recap/outro/preview); SkipDB decodes via `SkipDbSegmentEntry`.
 #[derive(Debug, Serialize, Clone, PartialEq)]
@@ -14,12 +14,21 @@ pub(crate) struct SkipSegment {
 }
 
 /// SkipDB lookup payload: the submitted segments for the title or episode.
-#[derive(Debug, Serialize, Clone, Default)]
+#[derive(Debug, Serialize, Clone, Default, PartialEq)]
 pub(crate) struct SkipTimesResult {
     pub segments: Vec<SkipSegment>,
+    /// Seconds a manual "skip intro ~Xs" jumps when this episode has no usable intro;
+    /// `None` once an intro is known or confirmed absent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub intro_estimate_secs: Option<f64>,
 }
 
 const MIN_SKIP_SEGMENT_DURATION_SECS: f64 = 1.0;
+/// SkipDB's segment bounds: at least 5 s, intros at most 5 min.
+const MIN_INTRO_ESTIMATE_SECS: f64 = 5.0;
+const MAX_INTRO_SECS: f64 = 300.0;
+/// The press lands a moment into the intro; stopping short never skips story.
+const INTRO_ESTIMATE_LEAD_SECS: f64 = 3.0;
 
 fn normalize_skip_time(value: f64) -> Option<f64> {
     if !value.is_finite() {
@@ -97,15 +106,6 @@ const SKIP_TIMES_MAX_BYTES: usize = 256 * 1024;
 
 const SKIPDB_SEGMENTS_URL: &str = "https://api.skipdb.tv/api/segments";
 const TRANSIENT_ERROR: &str = "Skip times are temporarily unavailable.";
-
-async fn read_skip_times_body(
-    response: reqwest::Response,
-) -> Result<Vec<u8>, super::BoundedBodyError> {
-    super::read_bounded_body(response, SKIP_TIMES_MAX_BYTES, |_| {
-        "Skip-times response too large.".to_string()
-    })
-    .await
-}
 
 fn skip_times_body_failure(error: super::BoundedBodyError) -> Result<SkipTimesResult, String> {
     match error {
@@ -203,12 +203,18 @@ impl SkipTimesProvider {
         episode: Option<u32>,
         duration_secs: Option<f64>,
     ) -> Result<SkipTimesResult, String> {
-        let mut url = format!("{}?imdb_id={}", SKIPDB_SEGMENTS_URL, encode(imdb_id));
+        use std::fmt::Write as _;
+
+        let mut url = format!(
+            "{}?imdb_id={}",
+            SKIPDB_SEGMENTS_URL,
+            encode_uri_component(imdb_id)
+        );
         if let (Some(season), Some(episode)) = (season, episode) {
-            url.push_str(&format!("&season={season}&episode={episode}"));
+            let _ = write!(url, "&season={season}&episode={episode}");
         }
         if let Some(duration_secs) = duration_secs {
-            url.push_str(&format!("&duration={duration_secs}&adjust=conservative"));
+            let _ = write!(url, "&duration={duration_secs}&adjust=conservative");
         }
 
         let res = match self.client.get(&url).send().await {
@@ -230,7 +236,11 @@ impl SkipTimesProvider {
             return skip_times_http_failure(status);
         }
 
-        let bytes = match read_skip_times_body(res).await {
+        let bytes = match super::read_bounded_body(res, SKIP_TIMES_MAX_BYTES, |_| {
+            "Skip-times response too large.".to_string()
+        })
+        .await
+        {
             Ok(bytes) => bytes,
             Err(error) => {
                 #[cfg(debug_assertions)]
@@ -247,20 +257,23 @@ impl SkipTimesProvider {
             }
         };
 
-        Ok(SkipTimesResult {
-            segments: normalize_skip_segments(
-                collect_skip_db_segments(body.segments, duration_secs),
-                duration_secs,
-            ),
-        })
+        Ok(collect_skip_db_segments(body, duration_secs))
     }
 }
 
 /// Per-entry parse isolation: one bad crowdsourced row must not sink the siblings.
 fn collect_skip_db_segments(
-    segments: SkipDbSegments,
+    body: SkipDbSegmentsResponse,
     duration_secs: Option<f64>,
-) -> Vec<SkipSegment> {
+) -> SkipTimesResult {
+    let SkipDbSegmentsResponse {
+        segments,
+        intro_length_estimate_ms,
+    } = body;
+    let mut intro_length_secs = intro_length_estimate_ms
+        .as_ref()
+        .and_then(serde_json::Value::as_f64)
+        .map(|ms| ms / 1000.0);
     let mut collected = Vec::with_capacity(4);
     for (segment_type, entry) in [
         ("intro", segments.intro),
@@ -268,14 +281,32 @@ fn collect_skip_db_segments(
         ("outro", segments.outro),
         ("preview", segments.preview),
     ] {
-        if let Some(segment) = entry
-            .and_then(|value| serde_json::from_value::<SkipDbSegmentEntry>(value).ok())
-            .and_then(|entry| entry.into_segment(segment_type, duration_secs))
-        {
+        let Some(entry) =
+            entry.and_then(|value| serde_json::from_value::<SkipDbSegmentEntry>(value).ok())
+        else {
+            continue;
+        };
+        // This episode's own intro outranks the season median: its length survives an
+        // out-of-range cut, and the 0/0 "confirmed none" sentinel measures zero.
+        if segment_type == "intro" {
+            if let Some(end_ms) = entry.end_ms {
+                intro_length_secs = Some((end_ms - entry.start_ms) / 1000.0);
+            }
+        }
+        if let Some(segment) = entry.into_segment(segment_type, duration_secs) {
             collected.push(segment);
         }
     }
-    collected
+    let segments = normalize_skip_segments(collected, duration_secs);
+    let intro_estimate_secs = intro_length_secs
+        .filter(|length| *length <= MAX_INTRO_SECS)
+        .map(|length| (length - INTRO_ESTIMATE_LEAD_SECS).floor())
+        .filter(|secs| *secs >= MIN_INTRO_ESTIMATE_SECS)
+        .filter(|_| !segments.iter().any(|segment| segment.type_ == "intro"));
+    SkipTimesResult {
+        segments,
+        intro_estimate_secs,
+    }
 }
 
 impl Default for SkipTimesProvider {
@@ -288,6 +319,9 @@ impl Default for SkipTimesProvider {
 struct SkipDbSegmentsResponse {
     #[serde(default)]
     segments: SkipDbSegments,
+    /// Season median intro length; raw so a malformed value can't sink the segments.
+    #[serde(default)]
+    intro_length_estimate_ms: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize, Default)]

@@ -1,7 +1,6 @@
 import { Channel } from '@tauri-apps/api/core';
 import { replaceEqualDeep, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
-import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useTitleWatchProgress } from '@/hooks/use-media-library';
@@ -91,15 +90,11 @@ export function useStreamSelectorController({
     absoluteEpisode ?? null,
   ]);
   const {
-    batchFilter,
     filters,
     hasActiveFilter: hasPreferenceFilter,
-    qualityFilter,
     resetFilters: resetPreferenceFilters,
     setFilters,
     showBatchFilter,
-    sortMode,
-    sourceFilter,
   } = useSelectorPreferencesState({
     episode,
     isSeriesLike,
@@ -151,15 +146,6 @@ export function useStreamSelectorController({
     absoluteEpisode,
     title,
   });
-
-  const {
-    data: addonConfigs = [],
-    refetch: refetchAddonConfigs,
-    isLoading: isLoadingAddonConfigs,
-    error: addonConfigsError,
-  } = useAddonConfigs({ enabled: open && isOnline });
-
-  const hasEnabledAddons = addonConfigs.some((addon) => addon.enabled);
 
   // Ranking inputs are part of the key so titles/episodes never share pages.
   const selectorQueryKey = streamSelectorQueryKey(
@@ -231,6 +217,7 @@ export function useStreamSelectorController({
   });
   const streams = streamSelectorData?.streams ?? EMPTY_SELECTOR_STREAMS;
   const streamStats = streamSelectorData?.stats ?? EMPTY_STREAM_STATS;
+  const hasEnabledAddons = streamSelectorData?.hasEnabledAddons ?? false;
 
   const addonHealthMetrics = streamSelectorData?.sourceSummaries ?? EMPTY_SOURCE_SUMMARIES;
 
@@ -323,13 +310,11 @@ export function useStreamSelectorController({
   const refreshFailed =
     streams.length > 0 && !!streamSelectorDataError && !isFetchingStreamSelectorData;
 
-  // A failed addon-config read must not masquerade as "no addons" — surface it as a retryable error once loading settles.
   const fatalAddonError =
     selectorViewError ??
     (streams.length === 0
       ? (streamSelectorData?.fatalErrorMessage ??
         streamSelectorDataError ??
-        (isFetchingStreamSelectorData || isLoadingAddonConfigs ? null : addonConfigsError) ??
         (isRetrying ? retryState?.error : null) ??
         null)
       : null);
@@ -338,17 +323,15 @@ export function useStreamSelectorController({
   const isLoading =
     !fatalAddonError &&
     !isRetrying &&
-    ((streams.length === 0 && (isLoadingAddonConfigs || isFetchingStreamSelectorData)) ||
+    ((streams.length === 0 && isFetchingStreamSelectorData) ||
       (streams.length > 0 && !selectorView && isFetchingSelectorView));
 
   const refetchStreams = () => {
     if (isRetrying) return;
     const retry = { sessionKey: selectorSessionKey, error: fatalAddonError };
     setRetryState(retry);
-    const requests = selectorViewError
-      ? [refetchSelectorView()]
-      : [refetchAddonConfigs(), refetchStreamSelectorData()];
-    void Promise.allSettled(requests).then(() => {
+    const request = selectorViewError ? refetchSelectorView() : refetchStreamSelectorData();
+    void Promise.allSettled([request]).then(() => {
       setRetryState((current) => (current === retry ? null : current));
     });
   };
@@ -363,7 +346,6 @@ export function useStreamSelectorController({
     activeResolveFeedback,
     activeResolveKey,
     addonHealthMetrics,
-    batchFilter,
     cancelResolve,
     compactOverview,
     effectiveAddonFilter,
@@ -371,6 +353,7 @@ export function useStreamSelectorController({
     episodeProgress,
     watchedEpisodeCeiling: titleProgress?.watchedEpisodeCeiling,
     fatalAddonError,
+    filters,
     lastStreamKey,
     lastStreamFamily,
     listResetKey,
@@ -383,11 +366,9 @@ export function useStreamSelectorController({
     healthSummary: streamStats.sourceHealth,
     isAnyResolving,
     isLoading,
-    isLoadingAddonConfigs,
     isOnline,
     isRetrying,
     isSearchPending,
-    qualityFilter,
     rankingOptions,
     refetchStreams,
     refreshFailed,
@@ -397,9 +378,7 @@ export function useStreamSelectorController({
     setSearchQuery,
     setFilters,
     showBatchFilter,
-    sortMode,
     sortedStreams,
-    sourceFilter,
     sourcesStillLoading,
     streamStats,
     streams,

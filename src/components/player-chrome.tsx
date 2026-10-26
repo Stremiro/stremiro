@@ -7,7 +7,7 @@ import {
   RotateCcw,
   RotateCw,
 } from 'lucide-react';
-import { memo, type Ref, useId, useState } from 'react';
+import { memo, type ReactNode, type Ref, useId } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
@@ -26,16 +26,11 @@ import {
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { PlayerSlider } from '@/components/player-slider';
-import {
-  AudioTrackSelector,
-  SubtitleTrackSelector,
-  type SubtitleTrackSelectorProps,
-} from '@/components/player-track-selectors';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
-import type { Track } from '@/lib/player-track-utils';
+import { preserveOpenPlayerMenuFocus } from '@/lib/player-dom';
 import { cn, formatSeasonEpisode } from '@/lib/utils';
 
 // Preset ladder shared by the popover and the speed hotkeys — one owner keeps them from drifting.
@@ -147,7 +142,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   );
 });
 
-interface PlayerControlsRowProps extends SubtitleTrackSelectorProps {
+interface PlayerControlsRowProps {
   clock: PlaybackClock;
   duration: number;
   active: boolean;
@@ -163,6 +158,8 @@ interface PlayerControlsRowProps extends SubtitleTrackSelectorProps {
   onVolumeWheel: (event: Pick<WheelEvent, 'deltaY' | 'deltaMode'>) => Promise<void>;
   playbackSpeed: number;
   onSpeedChange: (speed: number) => void;
+  speedMenuOpen: boolean;
+  onSpeedMenuOpenChange: (open: boolean) => void;
   hasEpisodes: boolean;
   episodesOpen: boolean;
   onToggleEpisodes: () => void;
@@ -177,12 +174,7 @@ interface PlayerControlsRowProps extends SubtitleTrackSelectorProps {
   onNextEpisode: () => void;
   /** e.g. `Next: S1E3 · Title` — the button tooltip names where it goes. */
   nextEpisodeLabel?: string;
-  audioTracks: Track[];
-  onSelectAudioTrack: (
-    type: 'audio',
-    id: number,
-    options?: { persistPreference?: boolean },
-  ) => void;
+  trackSelectors: ReactNode;
 }
 
 const SEEK_BUTTONS = [
@@ -218,6 +210,8 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   onVolumeWheel,
   playbackSpeed,
   onSpeedChange,
+  speedMenuOpen,
+  onSpeedMenuOpenChange,
   hasEpisodes,
   episodesOpen,
   onToggleEpisodes,
@@ -230,14 +224,10 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
   canGoNext,
   onNextEpisode,
   nextEpisodeLabel,
-  audioTracks,
-  trackSwitching,
-  onSelectAudioTrack,
-  ...subtitleProps
+  trackSelectors,
 }: PlayerControlsRowProps) {
   const keymap = usePlayerKeymap();
   const speedHeadingId = useId();
-  const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
   const volumeIsSilent = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
   const speedKeys = [keymap.keys.speedDown[0], keymap.keys.speedUp[0]]
@@ -359,14 +349,9 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </button>
         ))}
 
-        <SubtitleTrackSelector {...subtitleProps} trackSwitching={trackSwitching} />
-        <AudioTrackSelector
-          audioTracks={audioTracks}
-          trackSwitching={trackSwitching}
-          onSelectTrack={onSelectAudioTrack}
-        />
+        {trackSelectors}
 
-        <Popover open={speedMenuOpen} onOpenChange={setSpeedMenuOpen}>
+        <Popover open={speedMenuOpen} onOpenChange={onSpeedMenuOpenChange}>
           <PopoverTrigger asChild>
             <button
               type='button'
@@ -391,6 +376,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           </PopoverTrigger>
           <PopoverContent
             data-player-popover
+            onCloseAutoFocus={preserveOpenPlayerMenuFocus}
             side='top'
             sideOffset={10}
             aria-labelledby={speedHeadingId}
@@ -414,7 +400,7 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
                   aria-pressed={s === playbackSpeed}
                   onClick={() => {
                     onSpeedChange(s);
-                    setSpeedMenuOpen(false);
+                    onSpeedMenuOpenChange(false);
                   }}
                   className={cn(
                     CHROME_MENU_ROW_FOCUS_CLASS,

@@ -96,7 +96,9 @@ export function CreateListDialog({
     onSuccess: (newList) => {
       notifyAction('List created', { detail: newList.name });
       // Refresh after any follow-up write (e.g. adding the item) settles, so lists don't refetch empty first.
-      void Promise.resolve(onCreated?.(newList)).finally(() => invalidateListQueries(queryClient));
+      void Promise.resolve(onCreated?.(newList)).finally(
+        () => void invalidateListQueries(queryClient),
+      );
       if (mountedRef.current) onOpenChange(false);
     },
     onError: (error) => {

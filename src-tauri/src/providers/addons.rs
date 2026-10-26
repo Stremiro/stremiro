@@ -102,7 +102,7 @@ pub(crate) enum StreamMatchTier {
     Title,
 }
 
-/// Canonical Stremio stream object from any addon declaring `stream`.
+/// Canonical addon protocol stream object from any addon declaring `stream`.
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[cfg_attr(test, derive(Default))]
 #[serde(rename_all = "camelCase")]
@@ -113,7 +113,7 @@ pub(crate) struct AddonStream {
     #[serde(alias = "description", skip_serializing)]
     pub title: Option<String>,
     #[serde(rename = "infoHash", alias = "info_hash", skip_serializing)]
-    pub info_hash: Option<String>,
+    pub content_hash: Option<String>,
     #[serde(skip_serializing)]
     pub url: Option<String>,
     #[serde(rename = "fileIdx", alias = "file_idx", skip_serializing)]
@@ -123,7 +123,7 @@ pub(crate) struct AddonStream {
     #[serde(default, deserialize_with = "deserialize_sources", skip_serializing)]
     pub sources: Vec<String>,
 
-    // Stremio carries no `seeders`/`size`/`cached` keys — wire values could only spoof ranking.
+    // The addon protocol carries no `seeders`/`size`/`cached` keys — wire values could only spoof ranking.
     /// Hydration-derived availability hint; the wire exposes only `presentation.deliveryKind`.
     #[serde(skip)]
     pub cached: bool,

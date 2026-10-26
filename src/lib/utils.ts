@@ -59,7 +59,7 @@ export const GENRE_LINK_CLASS =
   'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[13px] font-medium text-white/85 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
 export const POPOVER_MOTION_CLASS =
-  'data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95 data-[side=bottom]:slide-in-from-top-2 data-[side=left]:slide-in-from-right-2 data-[side=right]:slide-in-from-left-2 data-[side=top]:slide-in-from-bottom-2 motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
+  'duration-150 ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[side=bottom]:slide-in-from-top-0.5 data-[side=left]:slide-in-from-right-0.5 data-[side=right]:slide-in-from-left-0.5 data-[side=top]:slide-in-from-bottom-0.5 motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
 
 function parseHexRgb(value: string): [number, number, number] | null {
   const match = HEX_COLOR_PATTERN.exec(value.trim());
@@ -96,7 +96,7 @@ export function applyAccentVars(accent: string, targets: AccentTargets) {
     ['accent-act', targets.actions, true],
     ['accent-prog', targets.progress, false],
     ['accent-art', targets.artwork, false],
-    ['accent-skip', targets.skip, true],
+    ['accent-skip', targets.skip, false],
   ];
   for (const [scope, enabled, foreground] of scopes) {
     const color = enabled ? accent : NEUTRAL_ACCENT;
@@ -104,6 +104,7 @@ export function applyAccentVars(accent: string, targets: AccentTargets) {
     root.style.setProperty(`--${scope}-rgb`, hexToRgbTriplet(color));
     if (foreground) root.style.setProperty(`--on-${scope}`, getAccentTextColor(color));
   }
+  root.style.setProperty('--accent-seek', targets.seekbar ? accent : '#ffffff');
 }
 
 /** Trimmed string, or `undefined` when blank — mirrors Rust `non_blank`. */
@@ -144,7 +145,7 @@ export function boundedMapSet<K, V>(map: Map<K, V>, key: K, value: V, max: numbe
 export function createSerialTaskQueue() {
   let tail: Promise<void> = Promise.resolve();
   return {
-    enqueue<T>(operation: () => Promise<T>): Promise<T> {
+    enqueue<T>(this: void, operation: () => Promise<T>): Promise<T> {
       const result = tail.then(operation);
       tail = result.then(
         () => undefined,
@@ -169,6 +170,15 @@ export function withTimeout<T>(work: Promise<T>, ms: number, onTimeout: () => T)
     }, ms);
   });
   return Promise.race([work, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** `work.finally(cleanup)` with an awaited async cleanup; hooks call this because the React Compiler can't lower `try/finally`. */
+export async function withFinally<T>(work: Promise<T>, cleanup: () => unknown): Promise<T> {
+  try {
+    return await work;
+  } finally {
+    await cleanup();
+  }
 }
 
 let reducedMotionQuery: MediaQueryList | undefined;
@@ -216,7 +226,7 @@ export function clamp(value: number, min: number, max: number): number {
   return Math.max(min, Math.min(max, value));
 }
 
-/** Renderable remote art check — mirrors backend `is_fetchable_http_url`; http:// addon art must not render as no-art. */
+/** Renderable remote art check; http:// addon art must not render as no-art. */
 export function isHttpUrl(value?: string | null): value is string {
   return !!value && /^https?:\/\//i.test(value);
 }

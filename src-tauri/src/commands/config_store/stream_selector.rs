@@ -99,22 +99,13 @@ pub(crate) fn apply_stream_selector_preferences_patch(
     if !initialized {
         preferences = default_stream_selector_preferences(patch.episode_context);
     }
-    if let Some(quality) = patch.quality {
-        preferences.quality = quality;
-    }
-    if let Some(source) = patch.source {
-        preferences.source = source;
-    }
-    if let Some(addon) = patch.addon {
-        preferences.addon = addon;
-    }
-    if let Some(sort) = patch.sort {
-        preferences.sort = sort;
-    }
-    if let Some(batch) = patch.batch {
-        preferences.batch = batch;
-    }
-    sanitize_stream_selector_preferences(preferences)
+    sanitize_stream_selector_preferences(StreamSelectorPreferences {
+        quality: patch.quality.unwrap_or(preferences.quality),
+        source: patch.source.unwrap_or(preferences.source),
+        addon: patch.addon.unwrap_or(preferences.addon),
+        sort: patch.sort.unwrap_or(preferences.sort),
+        batch: patch.batch.unwrap_or(preferences.batch),
+    })
 }
 
 #[derive(Debug, Deserialize)]

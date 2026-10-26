@@ -134,33 +134,6 @@ export function findExternalSubtitleTrack(
   return tracks.find((track) => isExternalSubtitleTrack(track, subtitle));
 }
 
-export function areTrackListsEqual(left: readonly Track[], right: readonly Track[]): boolean {
-  if (left.length !== right.length) return false;
-
-  for (let index = 0; index < left.length; index += 1) {
-    const leftTrack = left[index];
-    const rightTrack = right[index];
-
-    if (
-      leftTrack.id !== rightTrack.id ||
-      leftTrack.type !== rightTrack.type ||
-      leftTrack.displayLabel !== rightTrack.displayLabel ||
-      leftTrack.lang !== rightTrack.lang ||
-      leftTrack.title !== rightTrack.title ||
-      !!leftTrack.selected !== !!rightTrack.selected ||
-      !!leftTrack.defaultTrack !== !!rightTrack.defaultTrack ||
-      !!leftTrack.forced !== !!rightTrack.forced ||
-      !!leftTrack.hearingImpaired !== !!rightTrack.hearingImpaired ||
-      !!leftTrack.external !== !!rightTrack.external ||
-      leftTrack.externalFilename !== rightTrack.externalFilename
-    ) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 export function doesTrackSelectionMatch(
   tracks: Track[],
   type: 'audio' | 'sub',

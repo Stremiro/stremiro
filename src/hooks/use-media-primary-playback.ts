@@ -4,9 +4,10 @@ import { useNavigate } from 'react-router';
 import { toast } from 'sonner';
 
 import { useMountedRef } from '@/hooks/use-mounted-ref';
-import { type HistoryPlaybackPlanReason, type MediaItem, type WatchProgress } from '@/lib/api';
+import { type MediaItem, type WatchProgress } from '@/lib/api';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
-import { expandedSessionState, usePlayerSession, warmPlayerChunk } from '@/lib/player-session';
+import { expandedSessionState, usePlayerSession } from '@/lib/player-session';
+import { warmPlayerChunk } from '@/lib/route-chunks';
 import { isSameMediaKind, openHistoryPlaybackPlan } from '@/lib/history-playback';
 import { resolvePlayerStream } from '@/lib/resolve-player-stream';
 import {
@@ -20,7 +21,6 @@ import {
 import { formatSeasonEpisode } from '@/lib/utils';
 
 type PrimaryPlaybackSurface = 'card' | 'details';
-type EpisodeSelectionReason = 'no-history' | HistoryPlaybackPlanReason;
 
 interface UseMediaPrimaryPlaybackOptions {
   from: string;
@@ -29,7 +29,7 @@ interface UseMediaPrimaryPlaybackOptions {
   /** Keep a card's launch alive when only its hover overlay unmounts. */
   launchOwnerMountedRef?: RefObject<boolean>;
   onPlayMovieWithoutHistory?: (() => void | Promise<void>) | null;
-  onSelectEpisode?: ((reason: EpisodeSelectionReason) => void | Promise<void>) | null;
+  onSelectEpisode?: (() => void | Promise<void>) | null;
   surface: PrimaryPlaybackSurface;
 }
 
@@ -130,7 +130,7 @@ export function useMediaPrimaryPlayback({
       mediaId: itemId,
       mediaType: itemType,
     });
-    navigate(buildDetailsRoute(playbackType, itemId), { state: { from } });
+    void navigate(buildDetailsRoute(playbackType, itemId), { state: { from } });
   };
 
   const handlePrimaryAction = async () => {
@@ -139,7 +139,7 @@ export function useMediaPrimaryPlayback({
     }
     const launchGeneration = claimPlaybackLaunch();
     if (activeSession) {
-      navigate(activeSession.playerPath, { state: expandedSessionState(activeSession, from) });
+      void navigate(activeSession.playerPath, { state: expandedSessionState(activeSession, from) });
       return;
     }
 
@@ -167,7 +167,7 @@ export function useMediaPrimaryPlayback({
 
       if (playbackType !== 'movie') {
         if (onSelectEpisode) {
-          await onSelectEpisode('no-history');
+          await onSelectEpisode();
           return;
         }
 
@@ -205,11 +205,6 @@ export function useMediaPrimaryPlayback({
         toast.dismiss(toastId);
         if (!isCurrentAction()) return;
 
-        if (!resolved.url) {
-          toast.error('No streams found', { description: item.title });
-          navigateToDetails();
-          return;
-        }
         launchResolvedStream(navigate, request, resolved, {
           backdrop: item.backdrop,
           from,

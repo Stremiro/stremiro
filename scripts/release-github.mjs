@@ -61,16 +61,18 @@ function findInstallerAssets() {
   // Match the exact current product+version so a stale installer left in the
   // bundle dir can never be shipped by accident.
   const stem = `${tauriConfig.productName}_${version}_`;
-  const installer = entries.find(
+  const installers = entries.filter(
     (name) => name.startsWith(stem) && /_(?:x64|arm64)-setup\.exe$/.test(name),
   );
+  if (installers.length > 1) {
+    fail(`Multiple ${stem}*-setup.exe installers found in ${bundleDir}.`);
+  }
+  const installer = installers[0];
   if (!installer) {
     fail(`No ${stem}*-setup.exe found in ${bundleDir}.`);
   }
-  const zipBundle = entries.find(
-    (name) => name.startsWith(stem) && name.endsWith('-setup.nsis.zip'),
-  );
-  const updaterBundle = zipBundle ?? installer;
+  const zipBundle = `${installer.slice(0, -'.exe'.length)}.nsis.zip`;
+  const updaterBundle = entries.includes(zipBundle) ? zipBundle : installer;
   const updaterSignature = `${updaterBundle}.sig`;
   if (!entries.includes(updaterSignature)) {
     fail(
@@ -139,12 +141,23 @@ function publishRelease() {
   }
 
   if (exists) {
+    const isDraft =
+      execFileSync(
+        'gh',
+        ['release', 'view', tag, '--repo', repo, '--json', 'isDraft', '--jq', '.isDraft'],
+        {
+          encoding: 'utf8',
+        },
+      ).trim() === 'true';
+    if (draft && !isDraft) fail(`Cannot update published release ${tag} with --draft.`);
     execFileSync('gh', ['release', 'upload', tag, ...assets, '--clobber', '--repo', repo], {
       stdio: 'inherit',
     });
-    execFileSync('gh', ['release', 'edit', tag, '--latest', '--repo', repo], {
-      stdio: 'inherit',
-    });
+    if (!draft) {
+      execFileSync('gh', ['release', 'edit', tag, '--draft=false', '--latest', '--repo', repo], {
+        stdio: 'inherit',
+      });
+    }
     console.log(`Updated existing release ${tag}.`);
   } else {
     execFileSync(

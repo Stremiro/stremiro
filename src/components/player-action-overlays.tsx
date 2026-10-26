@@ -1,8 +1,7 @@
 import { ChevronsRight } from 'lucide-react';
-import { memo, type ReactNode, useSyncExternalStore } from 'react';
+import { useSyncExternalStore } from 'react';
 import { CHROME_ICON_STROKE, CHROME_SKIP_BUTTON_CLASS } from '@/components/player-chrome-styles';
 import { MINI_ICON_BUTTON_CLASS } from '@/components/player-control-buttons';
-import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { ariaKeyShortcuts, type PlayerKeymap, withShortcutHint } from '@/lib/player-keybindings';
 import { clamp, cn } from '@/lib/utils';
@@ -12,28 +11,24 @@ interface PlayerSkipAction {
   onSkip: () => void;
 }
 
-interface PlayerActionOverlaysProps {
-  clock: PlaybackClock;
-  skipAction?: PlayerSkipAction | null;
-  /** Active segment bounds (seconds) — drive the progress hairline. */
-  segmentStart?: number;
-  segmentEnd?: number;
-}
-
 export function PlayerSkipButton({
   action,
   keymap,
   variant = 'full',
   className,
   tabIndex,
-  children,
+  clock,
+  segmentStart,
+  segmentEnd,
 }: {
   action: PlayerSkipAction;
   keymap: PlayerKeymap;
   variant?: 'full' | 'compact' | 'icon';
   className?: string;
   tabIndex?: number;
-  children?: ReactNode;
+  clock?: PlaybackClock;
+  segmentStart?: number;
+  segmentEnd?: number;
 }) {
   return (
     <button
@@ -67,7 +62,12 @@ export function PlayerSkipButton({
         strokeWidth={CHROME_ICON_STROKE}
       />
       {variant !== 'icon' && <span className='truncate'>{action.label}</span>}
-      {children}
+      {clock &&
+        segmentStart !== undefined &&
+        segmentEnd !== undefined &&
+        segmentEnd > segmentStart && (
+          <SkipSegmentProgress clock={clock} start={segmentStart} end={segmentEnd} />
+        )}
     </button>
   );
 }
@@ -96,27 +96,3 @@ function SkipSegmentProgress({
     </span>
   );
 }
-
-// Memoized: `skipAction` is built to keep a stable identity across playback
-// ticks, so the overlay subtree only re-renders on real action changes.
-export const PlayerActionOverlays = memo(function PlayerActionOverlays({
-  clock,
-  skipAction,
-  segmentStart,
-  segmentEnd,
-}: PlayerActionOverlaysProps) {
-  const keymap = usePlayerKeymap();
-  if (!skipAction) {
-    return null;
-  }
-
-  return (
-    <div data-player-interactive className='pointer-events-auto flex max-w-full items-end'>
-      <PlayerSkipButton action={skipAction} keymap={keymap}>
-        {segmentStart !== undefined && segmentEnd !== undefined && segmentEnd > segmentStart && (
-          <SkipSegmentProgress clock={clock} start={segmentStart} end={segmentEnd} />
-        )}
-      </PlayerSkipButton>
-    </div>
-  );
-});

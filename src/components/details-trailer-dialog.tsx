@@ -16,6 +16,7 @@ import {
   parseYouTubeMessage,
   postYouTubeCommand,
   postYouTubeListening,
+  youTubeThumbnailUrl,
 } from '@/lib/youtube-player';
 import { cn, scrollBehavior } from '@/lib/utils';
 
@@ -219,6 +220,16 @@ export function DetailsTrailerDialog({
           tabIndex={hasPicker ? 0 : undefined}
           className='relative aspect-video w-full bg-black focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
         >
+          {selectedTrailerId && (
+            <img
+              key={selectedTrailerId}
+              src={youTubeThumbnailUrl(selectedTrailerId)}
+              alt=''
+              aria-hidden='true'
+              decoding='async'
+              className='absolute inset-0 h-full w-full object-cover opacity-40 animate-in fade-in-0 duration-300 motion-reduce:animate-none'
+            />
+          )}
           {isLoadingTrailer && (
             <div
               role='status'
@@ -254,7 +265,10 @@ export function DetailsTrailerDialog({
             <iframe
               key={frameKey}
               ref={setFrame}
-              className='absolute inset-0 h-full w-full border-0'
+              className={cn(
+                'absolute inset-0 h-full w-full border-0 transition-opacity duration-300 ease-out motion-reduce:transition-none',
+                isLoadingTrailer && 'opacity-0',
+              )}
               src={trailerUrl}
               onLoad={() => setLoadedFrameKey(frameKey)}
               title={`${title} — ${trailerLabel}`}

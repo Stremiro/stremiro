@@ -1,10 +1,9 @@
 use super::library_commands::LibraryWriteError;
 use super::store_helpers::{
     library_item_key, load_library_index, load_status_added_ids, load_watch_status_index,
-    load_watch_statuses_map, mark_status_added, normalize_bulk_ids, normalize_library_item,
-    normalize_watch_status, persist_index_map, read_library_snapshot, read_watch_status_snapshot,
-    remove_index_ids, retain_status_added_ids, watch_status_item_key, LIBRARY_LAYOUT,
-    WATCH_STATUS_LAYOUT,
+    load_watch_statuses_map, mark_status_added, normalize_library_item, normalize_watch_status,
+    persist_index_map, read_watch_status_snapshot, remove_index_ids, retain_status_added_ids,
+    watch_status_item_key, LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
 };
 use super::{
     normalize_media_id, run_typed_store_op, DurableStore, LIBRARY_INDEX_KEY, LIBRARY_STORE_FILE,
@@ -79,7 +78,7 @@ fn write_watch_status(
     })?;
     let mut index = load_watch_status_index(store)?;
 
-    let Some(value) = status else {
+    let Some(canonical) = normalize_bulk_status(status)? else {
         // Validate the library before the status commits; statuses commit first
         // so a failed library save can't leave a status on a removed title.
         let library_index = load_library_index(library_store)?;
@@ -104,12 +103,6 @@ fn write_watch_status(
             .flatten());
     };
 
-    let Some(canonical) = normalize_watch_status(&value) else {
-        return Err(WatchStatusError::new(
-            WatchStatusErrorKind::InvalidStatus,
-            "Invalid watch status.",
-        ));
-    };
     if !index.contains(&item_id) {
         if index.len() >= MAX_WATCH_STATUS_ITEMS {
             return Err(WatchStatusError::new(
@@ -150,19 +143,10 @@ fn resolve_bulk_status_ids(
     store: &DurableStore,
     ids: Vec<String>,
 ) -> Result<Vec<String>, WatchStatusError> {
-    let ids = normalize_bulk_ids(ids).map_err(LibraryWriteError::InvalidItem)?;
-    let library = read_library_snapshot(store)?;
-    let ids: Vec<_> = ids
+    Ok(super::library_commands::resolve_library_items(store, ids)?
         .into_iter()
-        .filter(|id| library.items.contains_key(id))
-        .collect();
-    if ids.is_empty() {
-        return Err(WatchStatusError::new(
-            WatchStatusErrorKind::InvalidItem,
-            "Selected titles are no longer in your library.",
-        ));
-    }
-    Ok(ids)
+        .map(|item| item.id)
+        .collect())
 }
 
 /// Bulk clears run inside the Library page, so the titles stay and become the user's own.
@@ -275,7 +259,7 @@ mod tests {
         );
         assert_eq!(load_status_added_ids(&library.store), ["added"]);
         assert!(
-            write_watch_status(&statuses.store, &library.store, added.clone(), None)
+            write_watch_status(&statuses.store, &library.store, added, None)
                 .unwrap()
                 .is_none()
         );

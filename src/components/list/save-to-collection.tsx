@@ -1,29 +1,15 @@
-import { Check, Library, Plus } from 'lucide-react';
+import { Library, Plus } from 'lucide-react';
 import { warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
 import { RetryBanner } from '@/components/retry-banner';
 import { Skeleton } from '@/components/ui/skeleton';
+import { SaveIndicator } from '@/components/ui/button';
 import { useListSummaries, type useMediaCollectionActions } from '@/hooks/use-media-library';
 import type { MediaItem } from '@/lib/api';
 import { cn, pluralize, queryNeedsRetry } from '@/lib/utils';
 
 const ROW_CLASS =
-  'flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors hover:bg-white/[0.06] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default';
-
-function SavedCheck({ saved }: { saved: boolean }) {
-  return (
-    <span className='grid size-5 shrink-0 place-items-center' aria-hidden='true'>
-      <span
-        className={cn(
-          'grid size-4.5 place-items-center rounded-full bg-[rgb(var(--accent-act-rgb)/0.14)] text-(--accent-act) transition-[opacity,transform] duration-150 motion-reduce:transition-none',
-          saved ? 'scale-100 opacity-100' : 'scale-75 opacity-0',
-        )}
-      >
-        <Check className='size-3' strokeWidth={2.5} />
-      </span>
-    </span>
-  );
-}
+  'group/collection flex w-full items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:active:bg-white/[0.09] aria-pressed:bg-white/[0.03] focus-visible:bg-white/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30 aria-disabled:cursor-default motion-reduce:transition-none';
 
 interface SaveToCollectionPanelProps {
   item: MediaItem;
@@ -70,10 +56,17 @@ export function SaveToCollectionPanel({
             <span className='min-w-0 flex-1'>
               <span className='block text-xs font-medium text-zinc-200'>Library</span>
               <span className='block text-[10px] text-zinc-500'>
-                {isInLibrary ? 'Saved to your profile' : 'Add to your profile'}
+                {isLibraryBusy
+                  ? 'Saving…'
+                  : isInLibrary
+                    ? 'Saved to your library'
+                    : 'Save to your library'}
               </span>
             </span>
-            <SavedCheck saved={isInLibrary} />
+            <SaveIndicator
+              saved={isInLibrary}
+              className={cn('size-4', isInLibrary ? 'text-(--accent-act)' : 'text-zinc-500')}
+            />
           </button>
           <div className='my-1.5 h-px bg-white/[0.08]' />
         </>
@@ -128,10 +121,16 @@ export function SaveToCollectionPanel({
                     {list.name}
                   </span>
                   <span className='block text-[10px] tabular-nums text-zinc-500'>
-                    {pluralize(list.item_count, 'title')}
+                    {pending ? 'Saving…' : pluralize(list.item_count, 'title')}
                   </span>
                 </span>
-                <SavedCheck saved={list.contains_item} />
+                <SaveIndicator
+                  saved={list.contains_item}
+                  className={cn(
+                    'size-4',
+                    list.contains_item ? 'text-(--accent-act)' : 'text-zinc-500',
+                  )}
+                />
               </button>
             );
           })

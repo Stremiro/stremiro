@@ -27,7 +27,8 @@ where
     let app = app.clone();
     let service = playback_state.clone();
     super::run_blocking_store_op(move || {
-        entries_with_source_health(&app, &service, load(&service, &app)?)
+        let entries = load(&service, &app)?;
+        Ok(entries_with_source_health(&app, &service, entries))
     })
     .await
 }
@@ -36,7 +37,7 @@ fn entries_with_source_health(
     app: &AppHandle,
     service: &PlaybackStateService,
     entries: Vec<(String, WatchProgress)>,
-) -> Result<(Vec<WatchProgress>, HashMap<String, u8>), String> {
+) -> (Vec<WatchProgress>, HashMap<String, u8>) {
     let items = resume_rows(entries);
     let priorities = service.source_health_priorities_for_ids(
         app,
@@ -44,8 +45,8 @@ fn entries_with_source_health(
             .iter()
             .filter(|item| is_series_like_watch_progress(item))
             .map(|item| item.source_id.as_deref()),
-    )?;
-    Ok((items, priorities))
+    );
+    (items, priorities)
 }
 
 /// Preserves first-seen title order so stable sorts retain loader recency ties.
@@ -279,8 +280,9 @@ pub async fn save_watch_progress_batch(
             return Ok(());
         }
         service
-            .merge_history_entries(&app, prepared, false)
+            .merge_history_entries(&app, prepared, false, Vec::new())
             .map(|_| ())
+            .map_err(String::from)
     })
     .await
 }
@@ -321,13 +323,11 @@ pub struct TitleWatchProgress {
     /// furthest watched episode's coordinates (the successor is picked from the schedule).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub up_next_source: Option<WatchProgress>,
-    /// Latest per-kind history heads and latest overall (`last_watched` DESC).
+    /// Latest per-kind history heads (`last_watched` DESC).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_series_entry: Option<WatchProgress>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub latest_movie_entry: Option<WatchProgress>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub latest_entry: Option<WatchProgress>,
 }
 
 /// Only canonical coordinates claim episode keys; legacy rows fall back to their
@@ -405,7 +405,6 @@ pub(super) fn build_title_watch_progress_with_priorities(
         .find(|row| is_series_like_watch_progress(row))
         .cloned();
     let latest_movie_entry = history.iter().find(|row| row.type_ == "movie").cloned();
-    let latest_entry = history.first().cloned();
     let up_next_source = choose_up_next_source(
         history
             .iter()
@@ -422,7 +421,6 @@ pub(super) fn build_title_watch_progress_with_priorities(
         up_next_source,
         latest_series_entry,
         latest_movie_entry,
-        latest_entry,
     }
 }
 
@@ -555,7 +553,7 @@ pub async fn set_episodes_watched(
                 prepare_episode_watch_changes(&item, &episodes, existing, watched, now_unix_millis())?;
             if watched {
                 service
-                    .merge_history_entries_checked(&app, writes, false)
+                    .merge_history_entries(&app, writes, false, Vec::new())
                     .map_err(|error| match error {
                         HistoryMergeError::CapacityExceeded(_) => format!(
                             "Watch history is full ({MAX_RESUME_TOTAL_ENTRIES} entries). Remove some entries to mark more episodes watched."
@@ -571,7 +569,7 @@ pub async fn set_episodes_watched(
             &app,
             &service,
             service.load_resume_entries_for_media_id(&app, &item.id)?,
-        )?;
+        );
         Ok((
             build_title_watch_progress_with_priorities(rows, Some(&source_health_priorities)),
             previous_rows,

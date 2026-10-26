@@ -7,7 +7,7 @@ export const CHROME_ICON_BUTTON_CLASS =
 
 /** Chrome reveal: a quick decelerating entrance and a slightly longer exit, so hiding reads as a dissolve, not a cut. */
 export const CHROME_ENTER_TIMING_CLASS = 'duration-200 ease-[cubic-bezier(0.22,1,0.36,1)]';
-export const CHROME_EXIT_TIMING_CLASS = 'duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]';
+export const CHROME_EXIT_TIMING_CLASS = 'duration-[420ms] ease-[cubic-bezier(0.4,0,0.2,1)]';
 
 export const CHROME_PILL_CLASS =
   'flex min-h-12 shrink-0 items-center gap-0.5 rounded-full bg-zinc-950/75 p-1 ring-1 ring-white/[0.08] shadow-[0_8px_24px_-8px_rgba(0,0,0,0.6),inset_0_1px_0_rgba(255,255,255,0.06)] backdrop-blur-xl';

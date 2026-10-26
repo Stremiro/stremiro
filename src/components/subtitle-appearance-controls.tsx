@@ -1,5 +1,5 @@
 import { Check, ChevronDown } from 'lucide-react';
-import { type CSSProperties, type ReactNode, useRef, useState } from 'react';
+import { type CSSProperties, useRef, useState } from 'react';
 import type { SubtitleColor, SubtitleEdge, SubtitleFont } from '@/lib/api';
 import {
   SUBTITLE_COLOR_OPTIONS,
@@ -109,40 +109,6 @@ function OptionList<Value extends string>({
   );
 }
 
-function EmphasizeButton({
-  children,
-  compact,
-  disabled,
-  label,
-  pressed,
-  onClick,
-}: {
-  children: ReactNode;
-  compact: boolean;
-  disabled: boolean;
-  label: string;
-  pressed: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type='button'
-      aria-pressed={pressed}
-      aria-label={label}
-      disabled={disabled}
-      onClick={onClick}
-      className={cn(
-        CONTROL_CLASS,
-        'text-[13px]',
-        compact ? 'h-8 w-8 border-transparent bg-white/[0.06]' : 'h-9 w-9',
-        pressed && CONTROL_PRESSED_CLASS,
-      )}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function SubtitleAppearanceControls({
   subtitleFont,
   subtitleColor,
@@ -207,6 +173,16 @@ export function SubtitleAppearanceControls({
     pickerRef.current?.focus();
     setMenuOpen(false);
   };
+  const emphasisOptions = [
+    ['Bold subtitles', subtitleBold, { subtitleBold: !subtitleBold }, 'font-bold', 'B'],
+    [
+      'Italic subtitles',
+      subtitleItalic,
+      { subtitleItalic: !subtitleItalic },
+      'font-serif italic',
+      'I',
+    ],
+  ] as const;
 
   return (
     <div className={compact ? 'space-y-2.5' : 'space-y-3'}>
@@ -244,28 +220,26 @@ export function SubtitleAppearanceControls({
       >
         {picker('font', 'Subtitle font', selectedFont?.label ?? subtitleFont)}
         {picker('edge', 'Subtitle edge style', selectedEdge?.label ?? subtitleEdge)}
-        <EmphasizeButton
-          compact={compact}
-          disabled={disabled}
-          label='Bold subtitles'
-          pressed={subtitleBold}
-          onClick={() => onPatch({ subtitleBold: !subtitleBold })}
-        >
-          <span aria-hidden='true' className='font-bold'>
-            B
-          </span>
-        </EmphasizeButton>
-        <EmphasizeButton
-          compact={compact}
-          disabled={disabled}
-          label='Italic subtitles'
-          pressed={subtitleItalic}
-          onClick={() => onPatch({ subtitleItalic: !subtitleItalic })}
-        >
-          <span aria-hidden='true' className='font-serif italic'>
-            I
-          </span>
-        </EmphasizeButton>
+        {emphasisOptions.map(([label, pressed, patch, glyphClass, glyph]) => (
+          <button
+            key={label}
+            type='button'
+            aria-pressed={pressed}
+            aria-label={label}
+            disabled={disabled}
+            onClick={() => onPatch(patch)}
+            className={cn(
+              CONTROL_CLASS,
+              'text-[13px]',
+              compact ? 'h-8 w-8 border-transparent bg-white/[0.06]' : 'h-9 w-9',
+              pressed && CONTROL_PRESSED_CLASS,
+            )}
+          >
+            <span aria-hidden='true' className={glyphClass}>
+              {glyph}
+            </span>
+          </button>
+        ))}
       </div>
       <div
         className={cn(

@@ -111,8 +111,8 @@ export function useDetailsEpisodePane({
   );
   const shouldShowEpisodeSearch = seasonEpisodes.length > EPISODE_SEARCH_MIN_COUNT;
   const {
-    effectiveEpisodeSearch,
-    filteredEpisodes: searchFilteredEpisodes,
+    effectiveSearch: effectiveEpisodeSearch,
+    filteredItems: searchFilteredEpisodes,
     searchError: episodeSearchError,
     isSearchFetching: isEpisodeSearchFetching,
     isSearchPending: isEpisodeSearchPending,

@@ -137,29 +137,6 @@ export function SettingsBody({
   );
 }
 
-/** Divider + caption that splits one card into labelled blocks. */
-export function SettingsSection({
-  action,
-  caption,
-  children,
-  className,
-}: {
-  action?: ReactNode;
-  caption: string;
-  children: ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={cn('border-t border-white/[0.06]', className)}>
-      <div className='flex flex-wrap items-baseline justify-between gap-3 px-4 pt-4 pb-1 sm:px-5'>
-        <p className={SETTINGS_CAPTION_CLASS}>{caption}</p>
-        {action ? <div className='shrink-0'>{action}</div> : null}
-      </div>
-      {children}
-    </div>
-  );
-}
-
 /**
  * Row chrome only — deliberately not a <label>. A label wrapping the control
  * makes every click on the title or description activate it, which reads as an

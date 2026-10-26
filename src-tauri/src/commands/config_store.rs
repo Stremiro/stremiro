@@ -16,11 +16,15 @@ pub use app_ui::{
 pub use profile::{ProfilePreferences, ProfilePreferencesPatch};
 pub use stream_selector::StreamSelectorPreferences;
 
+#[cfg(test)]
+pub(super) use addons::LEGACY_INSTALL_SCHEME;
 pub(crate) use addons::{
     addon_configs_generation, load_addon_configs, normalize_addon_url, parse_stored_addon_configs,
     resolve_addon_configs, save_addon_configs_to_store,
 };
-pub(super) use addons::{addon_display_url, is_pinned_default_addon_url};
+pub(super) use addons::{
+    addon_display_url, is_pinned_default_addon_url, strip_ascii_prefix_ignore_case,
+};
 pub(crate) use app_ui::{
     apply_app_ui_preferences_patch, default_player_keybindings, load_app_ui_preferences,
     normalize_audio_delay, normalize_start_minimized, normalize_subtitle_delay,
@@ -30,7 +34,7 @@ pub(crate) use app_ui::{
 pub(crate) use keybindings::bind_player_key;
 pub(crate) use profile::{
     apply_profile_preferences_patch, load_profile_preferences, normalize_profile_avatar,
-    parse_profile_preferences, sanitize_profile_preferences, save_profile_preferences_to_store,
+    parse_profile_preferences, save_profile_preferences_to_store,
 };
 pub(crate) use stream_selector::{
     apply_stream_selector_preferences_patch, default_stream_selector_preferences,
@@ -50,9 +54,9 @@ use app_ui::{
 #[cfg(test)]
 use keybindings::{normalize_player_binding_key, resolve_player_keybindings};
 #[cfg(test)]
-pub(crate) use profile::sanitize_local_profile;
-#[cfg(test)]
 use profile::{normalize_stored_profile_preferences, StoredProfilePreferences};
+#[cfg(test)]
+pub(crate) use profile::{sanitize_local_profile, sanitize_profile_preferences};
 #[cfg(test)]
 pub use profile::{AccentTargets, LocalProfile, ProfileViewMode};
 #[cfg(test)]
@@ -60,10 +64,11 @@ pub(crate) use stream_selector::sanitize_stream_selector_preferences;
 
 pub(super) const ADDON_CONFIGS_KEY: &str = "addon_configs";
 /// First pinned default. Order matters: index = pinned registry slot.
-const DEFAULT_CINEMETA_INSTALL_URL: &str = "stremio://v3-cinemeta.strem.io/manifest.json";
+const DEFAULT_CINEMETA_INSTALL_URL: &str = "stremiro://v3-cinemeta.strem.io/manifest.json";
 const DEFAULT_CINEMETA_ADDON_NAME: &str = "Cinemeta";
 /// Second pinned default.
-const DEFAULT_OPENSUBTITLES_INSTALL_URL: &str = "stremio://opensubtitles-v3.strem.io/manifest.json";
+const DEFAULT_OPENSUBTITLES_INSTALL_URL: &str =
+    "stremiro://opensubtitles-v3.strem.io/manifest.json";
 const DEFAULT_OPENSUBTITLES_ADDON_NAME: &str = "OpenSubtitles";
 
 const DEFAULT_ADDON_INSTALLS: [(&str, &str); 2] = [
@@ -121,19 +126,17 @@ pub(crate) fn load_last_notified_app_update_version(store: &DurableStore) -> Opt
     )
 }
 
-/// Returns whether the store changed so callers skip the disk write on a no-op clear.
 pub(crate) fn save_last_notified_app_update_version_to_store(
     store: &DurableStore,
     version: Option<String>,
-) -> bool {
+) {
     if let Some(version) = normalize_last_notified_app_update_version(version) {
         store.set(
             LAST_NOTIFIED_APP_UPDATE_VERSION_KEY,
             serde_json::json!(version),
         );
-        true
     } else {
-        store.delete(LAST_NOTIFIED_APP_UPDATE_VERSION_KEY)
+        store.delete(LAST_NOTIFIED_APP_UPDATE_VERSION_KEY);
     }
 }
 

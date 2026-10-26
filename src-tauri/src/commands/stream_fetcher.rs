@@ -145,6 +145,7 @@ pub(crate) struct StreamSourceSummary {
 
 #[derive(Debug, Clone)]
 pub(crate) struct StreamSelectorData {
+    pub has_enabled_addons: bool,
     pub streams: Vec<AddonStream>,
     pub source_summaries: Vec<StreamSourceSummary>,
     pub fatal_error_message: Option<String>,
@@ -223,6 +224,7 @@ impl StreamSelectorStats {
 impl Serialize for StreamSelectorData {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         StreamSelectorSnapshot {
+            has_enabled_addons: self.has_enabled_addons,
             streams: &self.streams,
             stats: StreamSelectorStats::from_snapshot(&self.streams, &self.source_summaries),
             source_summaries: &self.source_summaries,
@@ -237,6 +239,7 @@ impl Serialize for StreamSelectorData {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StreamSelectorSnapshot<'a, Streams, Sources> {
+    has_enabled_addons: bool,
     streams: Streams,
     stats: StreamSelectorStats,
     source_summaries: Sources,
@@ -252,6 +255,7 @@ fn send_selector_snapshot<'a>(
     // Progressive snapshots never carry a fatal error — the settled result owns that field.
     // Straight to the wire string: a `serde_json::Value` detour builds and drops a full tree per snapshot.
     if let Ok(payload) = serde_json::to_string(&StreamSelectorSnapshot {
+        has_enabled_addons: true,
         stats: StreamSelectorStats::from_snapshot(
             streams.iter().copied(),
             source_summaries.iter().copied(),
@@ -366,7 +370,7 @@ impl StreamQueryRequest<'_> {
         if self.media_type != "movie" && self.season.zip(self.episode).is_some() {
             if let Some(id) = normalize_video_id(video_id) {
                 if !ids.contains(&id) {
-                    // Keep the working primary, then try Stremio's video.id before heuristic fallbacks.
+                    // Keep the working primary, then try the addon's video.id before heuristic fallbacks.
                     ids.insert(1, id);
                 }
             }
@@ -442,23 +446,6 @@ pub(crate) struct StreamRankingOverrides {
     pub title: Option<String>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
-}
-
-/// One builder for the coordinator's match context — progressive snapshot and final
-/// merge must rank on identical coordinates. `is_final_season` lets the episode
-/// battery resolve numberless "final season" naming claims.
-fn stream_match_context<'a>(
-    episode_targets: &'a [(u32, u32)],
-    ranking: &'a StreamRankingScope,
-    is_final_season: bool,
-) -> StreamMatchContext<'a> {
-    StreamMatchContext {
-        media_type: &ranking.media_type,
-        title: ranking.title.as_deref(),
-        episode_targets,
-        canonical_season: ranking.season,
-        is_final_season,
-    }
 }
 
 pub(crate) fn resolve_stream_ranking_scope(
@@ -701,7 +688,7 @@ async fn fetch_stream_for_link_from_addons(
     first_error.map_or(Ok(None), Err)
 }
 
-/// `(media_type, media_id, season, episode)` of the cached Stremio `video.id`; episodes only.
+/// `(media_type, media_id, season, episode)` of the cached addon `video.id`; episodes only.
 fn episode_video_key(ranking: &StreamRankingScope) -> Option<(String, String, u32, u32)> {
     if ranking.media_type == "movie" {
         return None;
@@ -789,12 +776,10 @@ impl SelectorStoreRead {
 
     fn advisories(&self) -> (HashMap<String, u8>, Option<String>) {
         (
-            self.service
-                .source_health_priorities_for_ids(
-                    &self.app,
-                    self.addon_source_ids.iter().map(|id| Some(id.as_str())),
-                )
-                .unwrap_or_default(),
+            self.service.source_health_priorities_for_ids(
+                &self.app,
+                self.addon_source_ids.iter().map(|id| Some(id.as_str())),
+            ),
             self.service
                 .preferred_title_source_id(&self.app, &self.media_id, &self.media_type),
         )
@@ -894,11 +879,13 @@ impl SelectorFetchContext<'_> {
             source_health_priorities: &self.source_health_priorities,
             stream_family_priorities,
             preferred_title_source_id: self.preferred_title_source_id.as_deref(),
-            match_context: stream_match_context(
-                &self.episode_targets,
-                self.ranking,
-                self.is_final_season,
-            ),
+            match_context: StreamMatchContext {
+                media_type: &self.ranking.media_type,
+                title: self.ranking.title.as_deref(),
+                episode_targets: &self.episode_targets,
+                canonical_season: self.ranking.season,
+                is_final_season: self.is_final_season,
+            },
             preferred_audio_language: self
                 .language_preferences
                 .preferred_audio_language
@@ -1067,6 +1054,7 @@ pub(crate) async fn fetch_stream_selector_data(
     };
     if enabled_addons.is_empty() {
         return Ok(StreamSelectorData {
+            has_enabled_addons: false,
             streams: Vec::new(),
             source_summaries: Vec::new(),
             fatal_error_message: None,
@@ -1121,6 +1109,7 @@ pub(crate) async fn fetch_stream_selector_data(
         // Metadata-only addons (e.g. pinned Cinemeta) are not stream sources — listing
         // them "offline" is noise. No stream addons = empty streams, no fatal error.
         return Ok(StreamSelectorData {
+            has_enabled_addons: true,
             streams: Vec::new(),
             source_summaries: stream_addons
                 .iter()
@@ -1482,6 +1471,7 @@ async fn merge_selector_outcomes(
     }
 
     StreamSelectorData {
+        has_enabled_addons: true,
         fatal_error_message: (merged.is_empty() && !fatal_errors.is_empty())
             .then(|| fatal_errors.join(" | ")),
         source_summaries,

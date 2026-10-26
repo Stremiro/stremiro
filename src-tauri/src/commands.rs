@@ -4,6 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, State};
 
 mod addon_registry;
+pub(crate) mod app_links;
 pub(crate) mod app_shell_commands;
 pub(crate) mod app_update_commands;
 pub(crate) mod avatar_commands;
@@ -311,7 +312,6 @@ pub struct PlaybackLanguagePreferences {
 }
 
 /// Fetch skippable segment data (intro/recap/outro/preview) from SkipDB.
-/// SkipDB keys on the first valid IMDb id: metadata, media id, then stream lookup id.
 /// Unkeyable input and missing data return empty; only transient upstream failures are errors.
 #[command]
 #[allow(clippy::too_many_arguments)]
@@ -323,17 +323,17 @@ pub async fn get_skip_times(
     stream_lookup_id: Option<String>,
     season: Option<u32>,
     episode: Option<u32>,
+    stream_season: Option<u32>,
+    stream_episode: Option<u32>,
     duration_secs: Option<f64>,
 ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
-    let imdb_id = [
+    let Some((imdb_id, season, episode)) = skip_times_anchor(
+        &id,
         imdb_id.as_deref(),
-        Some(id.as_str()),
         stream_lookup_id.as_deref(),
-    ]
-    .into_iter()
-    .flatten()
-    .find_map(crate::providers::skip_times::normalize_imdb_id);
-    let Some(imdb_id) = imdb_id else {
+        (season, episode),
+        (stream_season, stream_episode),
+    ) else {
         return Ok(crate::providers::skip_times::SkipTimesResult::default());
     };
 
@@ -352,6 +352,28 @@ pub async fn get_skip_times(
     skip_provider
         .get_segments(&imdb_id, season, episode, duration_secs)
         .await
+}
+
+/// SkipDB numbers episodes the IMDb way. An IMDb stream lookup id pairs with the stream
+/// coordinates (aliased anime remap them onto it); metadata and media ids keep the title's own.
+fn skip_times_anchor(
+    id: &str,
+    imdb_id: Option<&str>,
+    stream_lookup_id: Option<&str>,
+    (season, episode): (Option<u32>, Option<u32>),
+    (stream_season, stream_episode): (Option<u32>, Option<u32>),
+) -> Option<(String, Option<u32>, Option<u32>)> {
+    use crate::providers::skip_times::normalize_imdb_id;
+    stream_lookup_id
+        .and_then(normalize_imdb_id)
+        .map(|lookup| (lookup, stream_season.or(season), stream_episode.or(episode)))
+        .or_else(|| {
+            [imdb_id, Some(id)]
+                .into_iter()
+                .flatten()
+                .find_map(normalize_imdb_id)
+                .map(|anchor| (anchor, season, episode))
+        })
 }
 
 fn skip_times_coordinates(
@@ -386,8 +408,7 @@ pub async fn get_data_stats(
     run_blocking_store_op({
         let service = playback_state.inner().clone();
         move || {
-            let history_count = service.count_resume_entries(&app)?;
-            let history_title_count = service.count_resume_titles(&app)?;
+            let (history_count, history_title_count) = service.resume_counts(&app)?;
             let has_learned_playback_data = service.has_learned_playback_data(&app)?;
 
             // Index headers alone answer the count — `load_*_map` parses every record

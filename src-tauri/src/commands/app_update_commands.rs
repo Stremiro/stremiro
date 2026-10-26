@@ -1,5 +1,7 @@
 use crate::providers::ttl_cache::InFlight;
-use crate::providers::{build_provider_http_client, lock_or_recover, read_bounded_body};
+use crate::providers::{
+    build_provider_http_client, encode_uri_component, lock_or_recover, read_bounded_body,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock, Mutex};
@@ -84,6 +86,7 @@ static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> =
 const UPDATE_DOWNLOAD_STALL_LIMIT: Duration = Duration::from_secs(120);
 const UPDATE_DOWNLOAD_WATCHDOG_TICK: Duration = Duration::from_secs(15);
 const UPDATE_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const UPDATE_DOWNLOAD_MAX_BYTES: u64 = 512 * 1024 * 1024;
 
 const APP_UPDATE_PROGRESS_EVENT: &str = "app-update-progress";
 const UPDATE_OPERATION_ID_MAX_BYTES: usize = 128;
@@ -392,7 +395,7 @@ async fn fetch_app_release_notes(version: &str) -> ReleaseNotesCacheEntry {
     let response = match RELEASE_NOTES_CLIENT
         .get(format!(
             "https://api.github.com/repos/stremiro/stremiro/releases/tags/v{}",
-            urlencoding::encode(version)
+            encode_uri_component(version)
         ))
         .header(
             reqwest::header::USER_AGENT,
@@ -621,6 +624,13 @@ pub async fn download_app_update(
     let mut last_reported_percent = None::<u64>;
     let last_activity_at = Arc::new(Mutex::new(Instant::now()));
     let chunk_activity_at = last_activity_at.clone();
+    let (size_limit_tx, mut size_limit_rx) = tokio::sync::watch::channel(false);
+    let size_limit_error = || {
+        format!(
+            "Update download exceeded the {} MB size limit.",
+            UPDATE_DOWNLOAD_MAX_BYTES / (1024 * 1024)
+        )
+    };
 
     let download_result = {
         let download = update.download(
@@ -628,6 +638,12 @@ pub async fn download_app_update(
                 *lock_or_recover(&chunk_activity_at) = Instant::now();
                 downloaded_bytes = downloaded_bytes
                     .saturating_add(u64::try_from(chunk_length).unwrap_or(u64::MAX));
+                if !*size_limit_tx.borrow()
+                    && (downloaded_bytes > UPDATE_DOWNLOAD_MAX_BYTES
+                        || content_length.is_some_and(|length| length > UPDATE_DOWNLOAD_MAX_BYTES))
+                {
+                    size_limit_tx.send_replace(true);
+                }
 
                 let total_bytes = content_length.filter(|length| *length > 0);
                 let clamped_downloaded = match total_bytes {
@@ -661,7 +677,15 @@ pub async fn download_app_update(
 
         loop {
             tokio::select! {
-                outcome = &mut download => break outcome.map_err(|error| error.to_string()),
+                outcome = &mut download => {
+                    // The final chunk can exceed the limit in the same poll that completes the download.
+                    break if *size_limit_rx.borrow() {
+                        Err(size_limit_error())
+                    } else {
+                        outcome.map_err(|error| error.to_string())
+                    };
+                }
+                Ok(()) = size_limit_rx.changed() => break Err(size_limit_error()),
                 _ = &mut deadline => {
                     break Err("Update download timed out after 30 minutes. Try again on a faster connection.".to_string());
                 }

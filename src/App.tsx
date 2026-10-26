@@ -1,4 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
+import { listen } from '@tauri-apps/api/event';
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   lazy,
@@ -11,7 +12,16 @@ import {
   useRef,
   useState,
 } from 'react';
-import { Navigate, Route, Routes, useLocation, useNavigate, useNavigationType } from 'react-router';
+import {
+  Navigate,
+  NavigationType,
+  Outlet,
+  Route,
+  Routes,
+  useLocation,
+  useNavigate,
+  useNavigationType,
+} from 'react-router';
 import { toast } from 'sonner';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
 import { Layout } from '@/components/layout';
@@ -23,7 +33,8 @@ import {
   useAppUiPreferences,
 } from '@/hooks/use-app-ui-preferences';
 import { api, type AppUiPreferences, getErrorMessage } from '@/lib/api';
-import { isTauriDesktopRuntime, runScheduledAppUpdateCheck } from '@/lib/app-updater';
+import { openAppLink } from '@/lib/app-links';
+import { isTauriDesktopRuntime, runAppUpdateCheck } from '@/lib/app-updater';
 import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
@@ -89,6 +100,30 @@ function AppNavigationBinder() {
     bindAppNavigate(navigate);
     return () => bindAppNavigate(null);
   }, [navigate]);
+
+  return null;
+}
+
+function AppLinkManager() {
+  useEffect(() => {
+    if (!isTauriDesktopRuntime()) return;
+    const openPendingLink = () => {
+      void api
+        .takePendingAppLink()
+        .then((link) => {
+          if (link) openAppLink(link);
+        })
+        .catch(() => undefined);
+    };
+    const listener = listen('app://link', openPendingLink);
+    void listener.then(openPendingLink, openPendingLink);
+    return () => {
+      void listener.then(
+        (unlisten) => unlisten(),
+        () => undefined,
+      );
+    };
+  }, []);
 
   return null;
 }
@@ -193,9 +228,9 @@ function RouteScrollManager() {
     savePausedRef.current = true;
 
     const savedPosition =
-      navigationType === 'POP'
+      navigationType === NavigationType.Pop
         ? positionsByKeyRef.current.get(location.key)
-        : navigationType === 'REPLACE' && lastEntry.pathname !== location.pathname
+        : navigationType === NavigationType.Replace && lastEntry.pathname !== location.pathname
           ? positionsByPathRef.current.get(path)
           : undefined;
 
@@ -211,7 +246,7 @@ function RouteScrollManager() {
       savePausedRef.current = false;
     };
 
-    if (navigationType === 'REPLACE' && lastEntry.pathname === location.pathname) {
+    if (navigationType === NavigationType.Replace && lastEntry.pathname === location.pathname) {
       rememberScrollPosition(positionsByKeyRef.current, location.key, window.scrollY);
       rememberScrollPosition(positionsByPathRef.current, path, window.scrollY);
       restoreFrame = window.requestAnimationFrame(cancelRestoration);
@@ -291,7 +326,7 @@ function AppUpdateManager() {
     const isDeferred = () =>
       document.hidden || window.location.pathname.startsWith('/player') || !navigator.onLine;
 
-    const maybeCheck = async (event?: Event) => {
+    const maybeCheck = (event?: Event) => {
       const state = getUpdateState();
       if (event?.type === 'online' && state.retryOnReconnect) {
         retryOnReconnectRef.current = true;
@@ -311,7 +346,7 @@ function AppUpdateManager() {
           Date.now() - state.lastCheckedAt >= UPDATE_RECHECK_INTERVAL_MS ||
           (retryOnReconnectRef.current && state.retryOnReconnect);
         retryOnReconnectRef.current = false;
-        const update = isDue ? await runScheduledAppUpdateCheck(queryClient) : state.update;
+        const update = isDue ? await runAppUpdateCheck(queryClient) : state.update;
         if (
           !update?.notificationEligible ||
           disposed ||
@@ -332,7 +367,7 @@ function AppUpdateManager() {
           },
         );
       };
-      await checkForUpdate()
+      void checkForUpdate()
         // Automatic checks stay silent; Settings retains the failure.
         .catch(() => undefined)
         .finally(() => {
@@ -349,13 +384,13 @@ function AppUpdateManager() {
         startupReadyAtRef.current!,
         (lastCheckedAt ?? 0) + UPDATE_RECHECK_INTERVAL_MS,
       );
-      dueTimer = window.setTimeout(() => void maybeCheck(), Math.max(0, dueAt - Date.now()));
+      dueTimer = window.setTimeout(() => maybeCheck(), Math.max(0, dueAt - Date.now()));
     };
     document.addEventListener('visibilitychange', maybeCheck);
     window.addEventListener('focus', maybeCheck);
     window.addEventListener('online', maybeCheck);
     armDueTimer();
-    void maybeCheck();
+    maybeCheck();
 
     return () => {
       disposed = true;
@@ -555,55 +590,21 @@ function App() {
         <Route element={<Layout onRouteRetry={retryRoute} />}>
           <Route path='/' element={<Home />} />
           <Route
-            path='/search'
             element={
               <RouteSuspense>
-                <Search />
+                <Outlet />
               </RouteSuspense>
             }
-          />
-          <Route
-            path='/details/:type/:id'
-            element={
-              <RouteSuspense>
-                <Details />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/settings'
-            element={
-              <RouteSuspense>
-                <Settings />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/profile'
-            element={
-              <RouteSuspense>
-                <Profile />
-              </RouteSuspense>
-            }
-          />
-          {/* /library is a deep link into Profile's library tab — the path
-              survives so the sidebar can highlight it. */}
-          <Route
-            path='/library'
-            element={
-              <RouteSuspense>
-                <Profile />
-              </RouteSuspense>
-            }
-          />
-          <Route
-            path='/calendar'
-            element={
-              <RouteSuspense>
-                <Calendar />
-              </RouteSuspense>
-            }
-          />
+          >
+            <Route path='/search' element={<Search />} />
+            <Route path='/details/:type/:id' element={<Details />} />
+            <Route path='/settings' element={<Settings />} />
+            <Route path='/profile' element={<Profile />} />
+            {/* /library is a deep link into Profile's library tab — the path
+                survives so the sidebar can highlight it. */}
+            <Route path='/library' element={<Profile />} />
+            <Route path='/calendar' element={<Calendar />} />
+          </Route>
           {/* Unknown paths land on Home rather than a blank shell. */}
           <Route path='*' element={<Navigate to='/' replace />} />
         </Route>
@@ -614,6 +615,7 @@ function App() {
           /player minimizes into the mini player instead of tearing down. */}
       <PlayerHost />
       <AppNavigationBinder />
+      <AppLinkManager />
       <RouteScrollManager />
       <LastLocationRecorder />
       <AppCloseManager />

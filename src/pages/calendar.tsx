@@ -13,7 +13,7 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api, type CalendarSchedule, type CalendarScheduleEvent } from '@/lib/api';
-import { toCalendarEvent, calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
+import { calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { buildDetailsRoute } from '@/lib/player-navigation';
@@ -80,10 +80,7 @@ function calendarEventLinkProps(
 
 // Grouping/sorting live in `get_calendar_events`; the frontend only parses `releaseDate`.
 const toCalendarEvents = (events: CalendarScheduleEvent[]) =>
-  events.flatMap((event) => {
-    const calendarEvent = toCalendarEvent(event);
-    return calendarEvent ? [calendarEvent] : [];
-  });
+  events.map((event) => ({ ...event, date: Temporal.PlainDate.from(event.releaseDate) }));
 
 function focusCalendarToday(container: HTMLDivElement | null) {
   const today = container?.querySelector<HTMLElement>('[data-calendar-today]');

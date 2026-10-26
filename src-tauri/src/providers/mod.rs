@@ -3,6 +3,21 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
+const URI_COMPONENT: &percent_encoding::AsciiSet = &percent_encoding::NON_ALPHANUMERIC
+    .remove(b'-')
+    .remove(b'_')
+    .remove(b'.')
+    .remove(b'~');
+
+pub(crate) const ADDON_URL_INVALID_MESSAGE: &str =
+    "Invalid addon URL. Please provide a valid http(s) or stremiro:// URL.";
+pub(crate) const MAGNET_PREFIX: &str = "magnet:";
+pub(crate) const CONTENT_HASH_URN_PREFIX: &str = "urn:btih:";
+
+pub(crate) fn encode_uri_component(s: &str) -> std::borrow::Cow<'_, str> {
+    percent_encoding::utf8_percent_encode(s, URI_COMPONENT).into()
+}
+
 /// Per-field tolerance: one malformed value drops to `None` without losing siblings.
 pub(crate) fn lenient_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -20,12 +35,10 @@ pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
 
 /// Trim + char-bound + empty-reject for untrusted provider fields.
 pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
-    let trimmed: String = value.trim().chars().take(max_chars).collect();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed)
-    }
+    let mut trimmed: String = value.trim().chars().take(max_chars).collect();
+    // Truncation can expose trailing whitespace; trimming it keeps normalization idempotent.
+    trimmed.truncate(trimmed.trim_end().len());
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 /// `trim_to_max` for optional fields — an all-empty result becomes `None`.
@@ -128,8 +141,12 @@ pub(crate) async fn read_bounded_body(
     );
     let mut body = response.bytes_stream();
     while let Some(chunk) = body.next().await {
-        let chunk = chunk
-            .map_err(|_| BoundedBodyError::Read("Failed to read response body.".to_string()))?;
+        let chunk = chunk.map_err(|error| {
+            BoundedBodyError::Read(format!(
+                "Failed to read response body: {}",
+                error.without_url()
+            ))
+        })?;
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(BoundedBodyError::TooLarge(too_large_error(None)));
         }
@@ -166,6 +183,12 @@ pub(crate) struct MediaItem {
     pub display_year: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genres: Option<Vec<String>>,
+    // Request-local relevance from catalog credits; never persisted or accepted over IPC.
+    #[serde(skip)]
+    pub matches_search_credit: bool,
+    // First claimant's declared catalog filter; request-local, never persisted or accepted over IPC.
+    #[serde(skip)]
+    pub catalog_genre: Option<String>,
     #[serde(rename = "type")]
     pub type_: String,
 }
@@ -324,6 +347,8 @@ pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Cl
     let mut builder = Client::builder()
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
         .redirect(fetch_policy::ssrf_redirect_policy())
+        // Auto-Referer would carry credential-bearing addon paths/queries to redirect targets.
+        .referer(false)
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(30))
         .pool_idle_timeout(Duration::from_secs(90));

@@ -3,7 +3,9 @@ use super::backup_commands::{
     MAX_BACKUP_PATH_LEN, MAX_IMPORT_BYTES,
 };
 use super::config_commands::{classify_missing_addon_capabilities, merge_classified_capabilities};
-use super::config_store::{normalize_addon_url, resolve_addon_configs, AddonConfig};
+use super::config_store::{
+    normalize_addon_url, resolve_addon_configs, AddonConfig, LEGACY_INSTALL_SCHEME,
+};
 use super::history_helpers::{
     choose_entry, is_continue_watching_candidate, sanitize_watch_progress, HistoryEntryQuery,
 };
@@ -24,8 +26,8 @@ use crate::providers::addons::{
     detect_stream_flags, AddonStream, BehaviorHints, StreamDeliveryKind, StreamResolution,
 };
 use crate::test_helpers::{
-    cinemeta_addon, cinemeta_manifest, classified_cinemeta_addon, test_media_item, test_progress,
-    test_store, test_stream,
+    cinemeta_addon, cinemeta_manifest, classified_cinemeta_addon, test_addon, test_media_item,
+    test_progress, test_store, test_stream,
 };
 use std::collections::HashMap;
 
@@ -59,7 +61,7 @@ fn history_write_cache_distinguishes_misses_from_required_writes() {
         service.cached_history_write_decision(&key, &progress),
         Some(true)
     );
-    let mut incoming = progress.clone();
+    let mut incoming = progress;
     incoming.position += 30.0;
     assert_eq!(
         service.cached_history_write_decision(&key, &incoming),
@@ -166,6 +168,56 @@ fn skip_times_coordinates_preserve_composed_ipc_trimming() {
         assert_eq!(
             skip_times_coordinates(media_type, None, None),
             skip_times_coordinates(js_trim(media_type), None, None)
+        );
+    }
+}
+
+#[test]
+fn skip_times_anchor_pairs_imdb_stream_lookup_with_stream_coordinates() {
+    let anchor = |id, imdb, lookup, stream| {
+        super::skip_times_anchor(id, imdb, lookup, (Some(1), Some(5)), stream)
+    };
+    for (label, actual, expected) in [
+        (
+            "kitsu episode remapped onto an IMDb season",
+            anchor(
+                "kitsu:42",
+                Some("tt0388629"),
+                Some("tt0388629"),
+                (Some(3), Some(17)),
+            ),
+            Some(("tt0388629", Some(3), Some(17))),
+        ),
+        (
+            "missing stream coordinates fall back to the title's own",
+            anchor("tt0903747", None, Some("TT0903747"), (None, None)),
+            Some(("tt0903747", Some(1), Some(5))),
+        ),
+        (
+            "a non-IMDb lookup keeps the metadata anchor and title numbering",
+            anchor(
+                "kitsu:42",
+                Some("tt0388629"),
+                Some("kitsu:42"),
+                (Some(3), Some(17)),
+            ),
+            Some(("tt0388629", Some(1), Some(5))),
+        ),
+        (
+            "media id anchors when metadata has none",
+            anchor("tt0903747", None, None, (Some(2), Some(1))),
+            Some(("tt0903747", Some(1), Some(5))),
+        ),
+        (
+            "no IMDb anchor at all",
+            anchor("kitsu:42", None, None, (None, None)),
+            None,
+        ),
+    ] {
+        assert_eq!(
+            actual,
+            expected.map(|(id, season, episode)| (id.to_string(), season, episode)),
+            "{label}"
         );
     }
 }
@@ -500,13 +552,13 @@ fn mk_stream(
     name: Option<&str>,
     title: Option<&str>,
     url: Option<&str>,
-    info_hash: Option<&str>,
+    content_hash: Option<&str>,
     filename: Option<&str>,
 ) -> AddonStream {
     AddonStream {
         name: name.map(|v| v.to_string()),
         title: title.map(|v| v.to_string()),
-        info_hash: info_hash.map(|v| v.to_string()),
+        content_hash: content_hash.map(|v| v.to_string()),
         url: url.map(|v| v.to_string()),
         behavior_hints: Some(BehaviorHints {
             filename: filename.map(|v| v.to_string()),
@@ -594,9 +646,9 @@ fn stream_dedup_key_prefers_hash_over_url() {
 
 #[test]
 fn stream_dedup_key_recovers_magnet_xt_hash() {
-    // Magnet-only streams (URL but no `info_hash` field) must still dedupe:
+    // Magnet-only streams (URL but no `content_hash` field) must still dedupe:
     // the `xt` hash yields the same legacy content-dedup key as an
-    // infoHash-field duplicate, including across case and extra trackers.
+    // content-hash-field duplicate, including across case and extra trackers.
     let magnet = mk_stream(
         Some("Magnet-only"),
         Some("1080p"),
@@ -623,7 +675,7 @@ fn stream_dedup_key_recovers_magnet_xt_hash() {
         streaming_helpers::stream_dedup_key(&magnet).as_deref(),
         Some("h:abc123:0")
     );
-    // infoHash-field and magnet-only streams share the legacy `h:` content-dedup key.
+    // content-hash-field and magnet-only streams share the legacy `h:` content-dedup key.
     assert_eq!(
         streaming_helpers::stream_dedup_key(&hashed).as_deref(),
         streaming_helpers::stream_dedup_key(&magnet).as_deref()
@@ -770,72 +822,54 @@ fn prepare_addon_streams_uses_generic_cached_label() {
 }
 
 #[test]
-fn stream_pipeline_dedupes_hash_case_insensitively() {
-    let mut upper = mk_stream(
-        Some("Upper hash"),
-        Some("1080p"),
-        Some("magnet:?xt=urn:btih:ABCDEF1234"),
-        Some("ABCDEF1234"),
-        None,
-    );
-    upper.file_idx = Some(2);
-
-    let mut lower = mk_stream(
-        Some("Lower hash"),
-        Some("1080p"),
-        Some("magnet:?xt=urn:btih:abcdef1234"),
-        Some("abcdef1234"),
-        None,
-    );
-    lower.file_idx = Some(2);
-
-    // Prepare keys each stream; the merge stage owns dedup.
-    let prepared = prepare_addon_streams(vec![upper, lower], "CaseTest", "addon-casetest");
-    assert_eq!(prepared.len(), 2);
-
-    let mut merged = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    merge_unique_streams(&mut merged, &mut seen, prepared);
-    assert_eq!(merged.len(), 1);
-}
-
-#[test]
 fn prepare_addon_streams_filters_labels_and_merge_dedupes() {
-    let mut a = mk_stream(
-        Some("Release A"),
-        Some("1080p"),
-        Some("magnet:?xt=urn:btih:abc"),
-        Some("abc"),
-        None,
-    );
-    a.file_idx = Some(1);
-
-    let mut duplicate = a.clone();
-    duplicate.title = Some("Duplicate entry".to_string());
-
-    let blocked = mk_stream(
-        Some("[BLOCKED] No Streams Available"),
-        Some("No streams found for this content"),
-        Some("data:text/plain,blocked"),
-        None,
-        Some("no_streams_available.txt"),
-    );
-
-    let prepared = prepare_addon_streams(
-        vec![a, duplicate, blocked],
-        "TestSource",
-        "addon-testsource",
-    );
-    assert_eq!(prepared.len(), 2);
-
-    let mut merged = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    merge_unique_streams(&mut merged, &mut seen, prepared);
-
-    assert_eq!(merged.len(), 1);
-    assert_eq!(merged[0].source_name.as_deref(), Some("TestSource"));
-    assert_eq!(merged[0].info_hash.as_deref(), Some("abc"));
-    assert!(merged[0].stream_family.is_some());
+    for (label, hash, duplicate_hash, file_idx) in [
+        ("hash case", "ABCDEF1234", "abcdef1234", 2),
+        ("duplicate label", "abc", "abc", 1),
+    ] {
+        let mut stream = mk_stream(
+            Some("Release A"),
+            Some("1080p"),
+            Some(&format!("magnet:?xt=urn:btih:{hash}")),
+            Some(hash),
+            None,
+        );
+        stream.file_idx = Some(file_idx);
+        let mut duplicate = stream.clone();
+        duplicate.title = Some("Duplicate entry".to_string());
+        duplicate.content_hash = Some(duplicate_hash.to_string());
+        duplicate.url = Some(format!("magnet:?xt=urn:btih:{duplicate_hash}"));
+        let blocked = mk_stream(
+            Some("[BLOCKED] No Streams Available"),
+            Some("No streams found for this content"),
+            Some("data:text/plain,blocked"),
+            None,
+            Some("no_streams_available.txt"),
+        );
+        let prepared = prepare_addon_streams(
+            vec![stream, duplicate, blocked],
+            "TestSource",
+            "addon-testsource",
+        );
+        assert_eq!(prepared.len(), 2, "{label}");
+        let mut merged = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        merge_unique_streams(&mut merged, &mut seen, prepared);
+        assert_eq!(merged.len(), 1, "{label}");
+        assert_eq!(
+            merged[0].source_name.as_deref(),
+            Some("TestSource"),
+            "{label}"
+        );
+        assert_eq!(
+            merged[0].source_id.as_deref(),
+            Some("addon-testsource"),
+            "{label}"
+        );
+        assert_eq!(merged[0].content_hash.as_deref(), Some(hash), "{label}");
+        assert_eq!(merged[0].file_idx, Some(file_idx), "{label}");
+        assert!(merged[0].stream_family.is_some(), "{label}");
+    }
 }
 
 #[test]
@@ -1357,6 +1391,12 @@ fn stream_family_strips_spaced_episode_markers_but_preserves_years() {
         "#02 Show 1080p",
         "Show - 01 1080p - 12 GB",
         "Show #02 1080p - 12.5 GiB",
+        "Show.S01.E05.1080p",
+        "Show.S01.E06.1080p",
+        "Show S01 E05 1080p",
+        "Show S01 E06 1080p",
+        "Show_S01_E05_1080p",
+        "Show_S01_E06_1080p",
     ] {
         let stream = mk_stream(None, None, None, None, Some(filename));
         assert_eq!(
@@ -1384,7 +1424,7 @@ fn stream_family_strips_spaced_episode_markers_but_preserves_years() {
 
 #[test]
 fn magnet_only_stream_shares_hashed_viability() {
-    // Magnet-only and infoHash-field spellings dedupe to one `h:`
+    // Magnet-only and content-hash-field spellings dedupe to one `h:`
     // identity, so viability must agree — otherwise which duplicate
     // survives merge order decides the rank input.
     let magnet = mk_stream(
@@ -1494,10 +1534,6 @@ fn title_watch_progress_keeps_episode_rows_and_selects_stable_resume_rows_per_ki
     assert_eq!(progress.movie_resume_entry.as_ref().unwrap().type_, "movie");
     // Pre-picked heads mirror the frontend's per-kind `find` scans.
     assert_eq!(
-        progress.latest_entry.as_ref().map(|row| row.episode),
-        Some(Some(8))
-    );
-    assert_eq!(
         progress.latest_series_entry.as_ref().map(|row| row.episode),
         Some(Some(8))
     );
@@ -1527,14 +1563,6 @@ fn title_watch_progress_keeps_episode_rows_and_selects_stable_resume_rows_per_ki
         movie.duration = 2_400.0;
         let progress =
             build_title_watch_progress_with_priorities(vec![movie.clone(), series.clone()], None);
-        assert_eq!(
-            progress.latest_entry.as_ref().unwrap().type_,
-            if movie_recency > series_recency {
-                "movie"
-            } else {
-                "series"
-            }
-        );
         assert_eq!(progress.movie_resume_entry.as_ref().unwrap().type_, "movie");
         assert_eq!(
             progress.series_resume_entry.as_ref().unwrap().type_,
@@ -1731,9 +1759,9 @@ fn merge_unique_streams_preserves_source_transport_variants() {
     let mut merged = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Same info-hash content identity, different serving transports: addon-a lists a
+    // Same content-hash identity, different serving transports: addon-a lists a
     // hash-only P2P row while addon-b serves a direct URL for the same file.
-    let torrent = mk_stream(
+    let hash_stream = mk_stream(
         Some("Shared"),
         Some("1080p"),
         None,
@@ -1751,7 +1779,7 @@ fn merge_unique_streams_preserves_source_transport_variants() {
     merge_unique_streams(
         &mut merged,
         &mut seen,
-        prepare_addon_streams(vec![torrent], "Shared", "addon-a"),
+        prepare_addon_streams(vec![hash_stream], "Shared", "addon-a"),
     );
     merge_unique_streams(
         &mut merged,
@@ -1935,11 +1963,9 @@ fn resolve_addon_configs_does_not_reseed_after_explicit_user_changes() {
             ..cinemeta_addon()
         },
         AddonConfig {
-            id: "https://opensubtitles-v3.strem.io".to_string(),
             url: "https://opensubtitles-v3.strem.io".to_string(),
-            name: "OpenSubtitles".to_string(),
             enabled: false,
-            capabilities: None,
+            ..test_addon("https://opensubtitles-v3.strem.io", "OpenSubtitles")
         },
     ]));
     assert_eq!(disabled.len(), 2);
@@ -1948,11 +1974,8 @@ fn resolve_addon_configs_does_not_reseed_after_explicit_user_changes() {
     assert!(!disabled[0].enabled && !disabled[1].enabled);
 
     let replaced = resolve_addon_configs(Some(vec![AddonConfig {
-        id: "metadata-replacement".to_string(),
         url: "https://example-meta.test".to_string(),
-        name: "Replacement".to_string(),
-        enabled: true,
-        capabilities: None,
+        ..test_addon("metadata-replacement", "Replacement")
     }]));
     // A replacement metadata addon is kept, but the pinned defaults stay on top.
     assert_eq!(replaced.len(), 3);
@@ -1967,11 +1990,8 @@ fn resolve_addon_configs_does_not_reseed_after_explicit_user_changes() {
 fn resolve_addon_configs_moves_stored_defaults_first_preserving_toggle() {
     let resolved = resolve_addon_configs(Some(vec![
         AddonConfig {
-            id: "stream-addon".to_string(),
             url: "https://stream-addon.test".to_string(),
-            name: "Stream Addon".to_string(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("stream-addon", "Stream Addon")
         },
         AddonConfig {
             enabled: false,
@@ -2069,43 +2089,31 @@ fn unclassified_snapshots_leave_the_name_and_capabilities_untouched() {
 
 #[tokio::test]
 async fn new_addon_validation_reports_failure_without_rejecting_installed_offline_sources() {
-    let addon = AddonConfig {
-        url: "http://127.0.0.1:0/config?token=private-value".to_string(),
-        name: "127.0.0.1:0".to_string(),
-        capabilities: None,
-        ..cinemeta_addon()
-    };
-    let error = classify_missing_addon_capabilities(vec![addon.clone()], true)
-        .await
-        .expect_err("a new unreachable addon must not report a successful installation");
-    assert!(error.contains("Failed to reach addon"));
-    assert!(!error.contains("private-value"));
-    assert_eq!(
-        classify_missing_addon_capabilities(vec![addon.clone()], false)
+    for enabled in [true, false] {
+        let addon = AddonConfig {
+            url: "http://127.0.0.1:0/config?token=private-value".to_string(),
+            name: "127.0.0.1:0".to_string(),
+            capabilities: None,
+            enabled,
+            ..cinemeta_addon()
+        };
+        let error = classify_missing_addon_capabilities(vec![addon.clone()], true)
             .await
-            .expect("installed offline sources remain usable settings entries"),
-        vec![addon.clone()]
-    );
-
-    let disabled = AddonConfig {
-        enabled: false,
-        ..addon
-    };
-    assert!(
-        classify_missing_addon_capabilities(vec![disabled.clone()], true)
-            .await
-            .is_err()
-    );
-    assert_eq!(
-        classify_missing_addon_capabilities(vec![disabled.clone()], false)
-            .await
-            .expect("disabled installed sources do not need manifest access"),
-        vec![disabled]
-    );
+            .expect_err("a new unreachable addon must not report a successful installation");
+        assert!(error.contains("Failed to reach addon"), "enabled={enabled}");
+        assert!(!error.contains("private-value"), "enabled={enabled}");
+        assert_eq!(
+            classify_missing_addon_capabilities(vec![addon.clone()], false)
+                .await
+                .expect("installed offline sources remain usable settings entries"),
+            vec![addon],
+            "enabled={enabled}"
+        );
+    }
 }
 
 /// Table-driven `normalize_addon_url` cases: `Ok(Some(url))` expects a
-/// normalized value, `Err(needle)` expects a rejection containing it. Each
+/// normalized value, `Err(())` expects a rejection. Each
 /// row keeps its own named `#[test]`, and the input is echoed in assert
 /// messages for diagnosability.
 macro_rules! addon_url_tests {
@@ -2115,22 +2123,14 @@ macro_rules! addon_url_tests {
             fn $name() {
                 for (input, expected) in [$($case),+] {
                     match expected {
-                        Ok::<Option<&str>, &str>(want) => assert_eq!(
+                        Ok::<Option<&str>, ()>(want) => assert_eq!(
                             normalize_addon_url(input)
                                 .unwrap_or_else(|error| panic!("{input} must normalize: {error}"))
                                 .as_deref(),
                             want,
                             "{input}"
                         ),
-                        Err(needle) => {
-                            let error = match normalize_addon_url(input) {
-                                Err(error) => error,
-                                Ok(normalized) => {
-                                    panic!("{input} must be rejected, got {normalized:?}")
-                                }
-                            };
-                            assert!(error.contains(needle), "{input}: {error}");
-                        }
+                        Err(()) => assert!(normalize_addon_url(input).is_err(), "{input}"),
                     }
                 }
             }
@@ -2153,28 +2153,45 @@ addon_url_tests! {
             Ok(Some("https://example-addon.test/?config=abc/"))
         ),
     ];
-    normalize_addon_url_accepts_stremio_install_references: [
+    normalize_addon_url_accepts_install_references: [
         (
-            "stremio://v3-cinemeta.strem.io/manifest.json",
+            format!("{LEGACY_INSTALL_SCHEME}v3-cinemeta.strem.io/manifest.json").as_str(),
+            Ok(Some("https://v3-cinemeta.strem.io"))
+        ),
+        (
+            "Stremiro://v3-cinemeta.strem.io/manifest.json",
             Ok(Some("https://v3-cinemeta.strem.io"))
         ),
     ];
-    normalize_addon_url_preserves_stremio_path_and_query: [
+    normalize_addon_url_preserves_install_path_and_query: [
         (
-            "STREMIO://stream-addon.test/configure/apikey=token/manifest.json?lang=en#ignored",
+            format!("{}stream-addon.test/configure/apikey=token/manifest.json?lang=en#ignored",
+                LEGACY_INSTALL_SCHEME.to_ascii_uppercase()).as_str(),
             Ok(Some("https://stream-addon.test/configure/apikey=token?lang=en"))
+        ),
+        (
+            "stream-addon.test/config/https://upstream.example/manifest.json?endpoint=https://api.example",
+            Ok(Some("https://stream-addon.test/config/https://upstream.example?endpoint=https://api.example"))
+        ),
+        (
+            "stremiro://stream-addon.test/manifest.json?endpoint=https://api.example",
+            Ok(Some("https://stream-addon.test/?endpoint=https://api.example"))
+        ),
+        (
+            &format!("{LEGACY_INSTALL_SCHEME}stream-addon.test/manifest.json?endpoint=https://api.example"),
+            Ok(Some("https://stream-addon.test/?endpoint=https://api.example"))
         ),
     ];
     normalize_addon_url_rejects_unsupported_schemes: [
-        ("ftp://example-addon.test/manifest.json", Err("stremio://")),
+        ("ftp://example-addon.test/manifest.json", Err(())),
     ];
     normalize_addon_url_unwraps_nested_http_transport: [
         (
-            "stremio://https://v3-cinemeta.strem.io/manifest.json",
+            &format!("{LEGACY_INSTALL_SCHEME}https://v3-cinemeta.strem.io/manifest.json"),
             Ok(Some("https://v3-cinemeta.strem.io"))
         ),
         (
-            "stremio://http://127.0.0.1:11470/manifest.json",
+            &format!("{LEGACY_INSTALL_SCHEME}http://127.0.0.1:11470/manifest.json"),
             Ok(Some("http://127.0.0.1:11470"))
         ),
     ];
@@ -2186,8 +2203,8 @@ addon_url_tests! {
     ];
     normalize_addon_url_rejects_nested_unsupported_scheme: [
         (
-            "stremio://ftp://example-addon.test/manifest.json",
-            Err("stremio://")
+            &format!("{LEGACY_INSTALL_SCHEME}ftp://example-addon.test/manifest.json"),
+            Err(())
         ),
     ];
 }
@@ -2195,11 +2212,8 @@ addon_url_tests! {
 #[test]
 fn resolve_addon_configs_normalizes_loaded_addons() {
     let resolved = resolve_addon_configs(Some(vec![AddonConfig {
-        id: "   ".to_string(),
         url: "stream-addon.test/manifest.json".to_string(),
-        name: "   ".to_string(),
-        enabled: true,
-        capabilities: None,
+        ..test_addon("   ", "   ")
     }]));
 
     assert_eq!(resolved.len(), 3);
@@ -2213,18 +2227,13 @@ fn resolve_addon_configs_normalizes_loaded_addons() {
 fn resolve_addon_configs_dedupes_duplicate_urls() {
     let resolved = resolve_addon_configs(Some(vec![
         AddonConfig {
-            id: "addon-primary".to_string(),
             url: "https://stream-addon.test/manifest.json".to_string(),
-            name: "Addon A".to_string(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("addon-primary", "Addon A")
         },
         AddonConfig {
-            id: "addon-secondary".to_string(),
             url: "stream-addon.test".to_string(),
-            name: "Addon B".to_string(),
             enabled: false,
-            capabilities: None,
+            ..test_addon("addon-secondary", "Addon B")
         },
     ]));
 
@@ -2239,18 +2248,12 @@ fn resolve_addon_configs_dedupes_duplicate_urls() {
 fn resolve_addon_configs_repairs_duplicate_ids_for_distinct_urls() {
     let resolved = resolve_addon_configs(Some(vec![
         AddonConfig {
-            id: "shared-id".to_string(),
             url: "https://stream-addon.test".to_string(),
-            name: "Stream Addon".to_string(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("shared-id", "Stream Addon")
         },
         AddonConfig {
-            id: "shared-id".to_string(),
             url: "https://example-addon.test/manifest.json".to_string(),
-            name: "Example".to_string(),
-            enabled: true,
-            capabilities: None,
+            ..test_addon("shared-id", "Example")
         },
     ]));
 

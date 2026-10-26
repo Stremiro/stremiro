@@ -239,7 +239,7 @@ export function LibraryToolbar({
             if (hasFilters) onReset();
           }}
           className={cn(
-            'h-9 gap-1.5 px-2 text-[12px] text-zinc-400 hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            'h-9 gap-1.5 px-2 text-[12px] text-zinc-400 hover:text-white aria-disabled:pointer-events-none aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >
@@ -630,7 +630,7 @@ export function CollectionBulkActionBar({
               onSelectAll();
           }}
           className={cn(
-            'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-300 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >
@@ -643,7 +643,7 @@ export function CollectionBulkActionBar({
             if (selectedCount > 0 && !isBusy) onClear();
           }}
           className={cn(
-            'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 hover:bg-white/[0.06] hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
+            'h-8 rounded-md px-2 text-xs font-medium text-zinc-400 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white aria-disabled:opacity-40 aria-disabled:cursor-default',
             LIBRARY_FOCUS_RING_CLASS,
           )}
         >

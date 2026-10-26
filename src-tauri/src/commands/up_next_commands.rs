@@ -142,38 +142,6 @@ pub(crate) fn build_resume_rail(
     rail
 }
 
-/// Schedule fetch + successor fold shared by both rail ends: requests fan out
-/// per source row and the entries come back recency-ordered for the merge.
-async fn build_up_next_for_sources(
-    app: &AppHandle,
-    client: &AddonResourceClient,
-    sources: Vec<WatchProgress>,
-    local_today: &str,
-    local_today_ms: u64,
-) -> Result<Vec<UpNextCandidate>, String> {
-    let requests = sources
-        .iter()
-        .map(|source| MediaScheduleRequest {
-            media_type: source.type_.clone(),
-            id: source.id.clone(),
-        })
-        .collect();
-    let schedules = fetch_media_schedules_with_response_timeout(
-        app,
-        client,
-        requests,
-        Some(UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT),
-    )
-    .await?;
-    Ok(build_up_next_entries(
-        sources,
-        schedules,
-        local_today,
-        local_today_ms,
-        now_unix_millis(),
-    ))
-}
-
 /// The home rail is one snapshot: both halves derive from the same loaded rows so
 /// the merged order can't skew. The local continue-watching half ships over the
 /// channel before the schedule fetch.
@@ -195,17 +163,6 @@ pub async fn get_resume_rail(
         let rows = resume_rows(service.load_continue_watching_entries(&store_app)?);
         let continue_watching =
             annotate_watch_progress_list(build_continue_watching_entries(&rows));
-        if let Ok(snapshot) = serde_json::to_string(
-            &continue_watching
-                .iter()
-                .map(|row| ResumeRailEntry {
-                    row,
-                    is_new_episode: None,
-                })
-                .collect::<Vec<_>>(),
-        ) {
-            let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
-        }
         if !rows.iter().any(is_series_like_watch_progress) {
             return Ok((continue_watching, Vec::new()));
         }
@@ -238,7 +195,7 @@ pub async fn get_resume_rail(
                             .is_none_or(|status| status != "dropped")
                 })
                 .map(|row| row.source_id.as_deref()),
-        )?;
+        );
         let sources = build_up_next_sources(
             rows,
             &statuses,
@@ -248,8 +205,40 @@ pub async fn get_resume_rail(
         Ok((continue_watching, sources))
     })
     .await?;
-    let up_next =
-        build_up_next_for_sources(&app, client.inner(), sources, &local_today, local_today_ms)
-            .await?;
+    if sources.is_empty() {
+        return Ok(build_resume_rail(continue_watching, Vec::new()));
+    }
+    if let Ok(snapshot) = serde_json::to_string(
+        &continue_watching
+            .iter()
+            .map(|row| ResumeRailEntry {
+                row,
+                is_new_episode: None,
+            })
+            .collect::<Vec<_>>(),
+    ) {
+        let _ = on_progress.send(InvokeResponseBody::Json(snapshot));
+    }
+    let requests = sources
+        .iter()
+        .map(|source| MediaScheduleRequest {
+            media_type: source.type_.clone(),
+            id: source.id.clone(),
+        })
+        .collect();
+    let schedules = fetch_media_schedules_with_response_timeout(
+        &app,
+        client.inner(),
+        requests,
+        Some(UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT),
+    )
+    .await?;
+    let up_next = build_up_next_entries(
+        sources,
+        schedules,
+        &local_today,
+        local_today_ms,
+        now_unix_millis(),
+    );
     Ok(build_resume_rail(continue_watching, up_next))
 }

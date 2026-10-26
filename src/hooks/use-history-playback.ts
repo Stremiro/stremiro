@@ -34,7 +34,7 @@ export function useHistoryPlayback(item: WatchProgress, errorTitle: string) {
         (session.season === String(item.absolute_season ?? item.season) &&
           session.episode === String(item.absolute_episode ?? item.episode)))
     ) {
-      boundNavigate(session.playerPath, { state: expandedSessionState(session, from) });
+      void boundNavigate(session.playerPath, { state: expandedSessionState(session, from) });
       return;
     }
     pendingRef.current = true;

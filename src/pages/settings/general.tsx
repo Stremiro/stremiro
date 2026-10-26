@@ -117,14 +117,14 @@ export function GeneralSettings() {
               label='Start minimized'
               description={
                 canStartMinimized
-                  ? 'Start in the system tray.'
+                  ? 'Login launches start in the system tray. Manual launches stay visible.'
                   : 'Needs Launch at login or a tray option.'
               }
             >
               <SettingsSwitch
                 ariaLabel='Start minimized'
                 checked={preferences.startMinimized}
-                disabled={isHydrating || !canStartMinimized}
+                disabled={isHydrating || (!canStartMinimized && !preferences.startMinimized)}
                 pending={launchMutation.isPending}
                 onChange={() => updatePreferences({ startMinimized: !preferences.startMinimized })}
               />

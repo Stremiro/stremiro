@@ -94,7 +94,9 @@ impl CalendarScheduleCache {
                     });
                     schedules.insert(key, schedule);
                 }
-                if last_publish.is_some_and(|last| last.elapsed() < Duration::from_millis(250)) {
+                if schedules.len() == keys.len()
+                    || last_publish.is_some_and(|last| last.elapsed() < Duration::from_millis(250))
+                {
                     return;
                 }
                 let snapshot: Vec<_> = keys
@@ -181,8 +183,7 @@ pub struct CalendarScheduleEvent {
     id: String,
     media_id: String,
     media_type: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    title: Option<String>,
+    title: String,
     series_title: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     season: Option<u32>,
@@ -225,49 +226,35 @@ fn calendar_requests(
                 .get(&item.id)
                 .is_none_or(|status| status != "dropped")
         {
-            requests.insert(
-                (item.type_.clone(), item.id.clone()),
-                MediaScheduleRequest {
-                    media_type: item.type_,
-                    id: item.id,
-                },
-            );
+            requests.insert((item.type_, item.id), None);
         }
     }
     // Calendar needs only identity and recency, so skip donor hydration,
     // source-health reads and the full history wire payload.
-    let mut latest_by_id: HashMap<&str, &ResumeTitleIdentity> = HashMap::new();
-    for row in &history {
-        latest_by_id
-            .entry(row.id.as_str())
-            .and_modify(|existing| {
-                if row.last_watched > existing.last_watched {
-                    *existing = row;
-                }
-            })
-            .or_insert(row);
-    }
-    for (id, status) in statuses {
-        if status != "watching" {
+    for row in history {
+        if statuses
+            .get(&row.id)
+            .is_none_or(|status| status != "watching")
+        {
             continue;
         }
-        let Some(row) = latest_by_id.get(id.as_str()) else {
-            continue;
-        };
         let canonical_type = match row.type_.as_str() {
             "movie" => "movie",
             "series" | "anime" => "series",
             _ => continue,
         };
         requests.insert(
-            (canonical_type.to_string(), row.id.clone()),
-            MediaScheduleRequest {
-                media_type: row.type_.clone(),
-                id: row.id.clone(),
-            },
+            (canonical_type.to_string(), row.id),
+            (row.type_ != canonical_type).then_some(row.type_),
         );
     }
-    let mut requests: Vec<_> = requests.into_values().collect();
+    let mut requests: Vec<_> = requests
+        .into_iter()
+        .map(|((media_type, id), raw_type)| MediaScheduleRequest {
+            media_type: raw_type.unwrap_or(media_type),
+            id,
+        })
+        .collect();
     requests
         .sort_by(|left, right| (&left.media_type, &left.id).cmp(&(&right.media_type, &right.id)));
     requests
@@ -304,7 +291,7 @@ fn calendar_events<'a>(
                 id: schedule.id.clone(),
                 media_id: schedule.id.clone(),
                 media_type: schedule.type_.clone(),
-                title: Some(schedule.title.clone()),
+                title: schedule.title.clone(),
                 series_title: schedule.title.clone(),
                 season: None,
                 episode: None,
@@ -332,15 +319,13 @@ fn calendar_events<'a>(
                 id: episode.id.clone(),
                 media_id: schedule.id.clone(),
                 media_type: schedule.type_.clone(),
-                title: Some(
-                    episode
-                        .title
-                        .as_deref()
-                        .map(str::trim)
-                        .filter(|title| !title.is_empty())
-                        .map(str::to_string)
-                        .unwrap_or_else(|| format!("Episode {}", episode.episode)),
-                ),
+                title: episode
+                    .title
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|title| !title.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("Episode {}", episode.episode)),
                 series_title: schedule.title.clone(),
                 season: Some(episode.season),
                 episode: Some(episode.episode),
@@ -360,22 +345,19 @@ fn calendar_schedule(
     upcoming: &Range<u32>,
 ) -> CalendarSchedule {
     // `release_date` is a validated `YYYY-MM-DD` local day.
-    let mut upcoming: Vec<_> = events
-        .iter()
-        .filter(|event| contains_upcoming(&event.release_date, upcoming))
-        .collect();
-    upcoming.sort_by(|left, right| left.release_date.cmp(&right.release_date));
-    let upcoming = upcoming
-        .into_iter()
-        .take(MAX_UPCOMING_EVENTS)
-        .cloned()
-        .collect();
     let mut days: BTreeMap<String, Vec<CalendarScheduleEvent>> = BTreeMap::new();
     for event in events {
         days.entry(event.release_date.clone())
             .or_default()
             .push(event);
     }
+    let upcoming = days
+        .iter()
+        .filter(|(date, _)| contains_upcoming(date, upcoming))
+        .flat_map(|(_, events)| events)
+        .take(MAX_UPCOMING_EVENTS)
+        .cloned()
+        .collect();
     CalendarSchedule {
         tracked_count,
         missing_count,
@@ -621,22 +603,10 @@ mod tests {
             ResumeTitleIdentity {
                 id: "tt123".into(),
                 type_: "anime".into(),
-                last_watched: 10,
-            },
-            ResumeTitleIdentity {
-                id: "tt123".into(),
-                type_: "series".into(),
-                last_watched: 9,
-            },
-            ResumeTitleIdentity {
-                id: "tt123".into(),
-                type_: "series".into(),
-                last_watched: 10,
             },
             ResumeTitleIdentity {
                 id: "ttold".into(),
                 type_: "series".into(),
-                last_watched: 0,
             },
         ];
         let requests = calendar_requests(
@@ -780,14 +750,9 @@ mod tests {
         assert_eq!(
             events
                 .iter()
-                .map(|event| event.title.as_deref())
+                .map(|event| event.title.as_str())
                 .collect::<Vec<_>>(),
-            [
-                Some("Episode 1"),
-                Some("Episode 2"),
-                Some("Episode 3"),
-                Some("Finale")
-            ]
+            ["Episode 1", "Episode 2", "Episode 3", "Finale"]
         );
     }
 
@@ -803,7 +768,7 @@ mod tests {
             id: id.into(),
             media_id: "tt1".into(),
             media_type: "series".into(),
-            title: None,
+            title: series.into(),
             series_title: series.into(),
             season,
             episode,

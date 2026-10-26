@@ -1,7 +1,7 @@
 use super::{
     collect_skip_db_segments, normalize_skip_segments, skip_times_body_failure,
     skip_times_fetch_failure, skip_times_http_failure, FetchFailure, SkipDbSegmentEntry,
-    SkipDbSegmentsResponse, SkipSegment, TRANSIENT_ERROR,
+    SkipDbSegmentsResponse, SkipSegment, SkipTimesResult, TRANSIENT_ERROR,
 };
 
 #[test]
@@ -179,14 +179,76 @@ fn skipdb_malformed_entry_drops_only_that_segment() {
     )
     .expect("malformed entries must not fail the response decode");
 
-    let segments = collect_skip_db_segments(response.segments, None);
     assert_eq!(
-        segments,
+        collect_skip_db_segments(response, None).segments,
         vec![SkipSegment {
             type_: "outro",
             start_time: 2760.0,
             end_time: 2820.0,
         }],
+    );
+}
+
+#[test]
+fn skipdb_intro_estimate_backs_only_a_missing_intro() {
+    let collect = |json: &str| {
+        collect_skip_db_segments(
+            serde_json::from_str::<SkipDbSegmentsResponse>(json).expect("response parses"),
+            Some(2820.0),
+        )
+    };
+    let outro = SkipSegment {
+        type_: "outro",
+        start_time: 2760.0,
+        end_time: 2820.0,
+    };
+    for (label, json, expected) in [
+        (
+            "season median when the episode has no intro",
+            r#"{"segments":{"intro":null,"outro":{"start_ms":2760000,"end_ms":2820000,"match":"exact"}},"intro_length_estimate_ms":30000}"#,
+            Some(27.0),
+        ),
+        (
+            "an out-of-range intro still measures this episode",
+            r#"{"segments":{"intro":{"start_ms":229500,"end_ms":246500,"match":"out-of-range"}},"intro_length_estimate_ms":30000}"#,
+            Some(14.0),
+        ),
+        (
+            "confirmed-absent sentinel suppresses the median",
+            r#"{"segments":{"intro":{"start_ms":0,"end_ms":0,"match":"exact"}},"intro_length_estimate_ms":30000}"#,
+            None,
+        ),
+        (
+            "a usable intro needs no estimate",
+            r#"{"segments":{"intro":{"start_ms":61000,"end_ms":91000,"match":"exact"}},"intro_length_estimate_ms":30000}"#,
+            None,
+        ),
+        (
+            "too short after lead time",
+            r#"{"segments":{},"intro_length_estimate_ms":7000}"#,
+            None,
+        ),
+        (
+            "longer than any valid intro",
+            r#"{"segments":{},"intro_length_estimate_ms":400000}"#,
+            None,
+        ),
+        (
+            "malformed estimate keeps the segments",
+            r#"{"segments":{"outro":{"start_ms":2760000,"end_ms":2820000}},"intro_length_estimate_ms":"30s"}"#,
+            None,
+        ),
+    ] {
+        assert_eq!(collect(json).intro_estimate_secs, expected, "{label}");
+    }
+    assert_eq!(
+        collect(
+            r#"{"segments":{"outro":{"start_ms":2760000,"end_ms":2820000}},"intro_length_estimate_ms":"30s"}"#
+        ),
+        SkipTimesResult {
+            segments: vec![outro],
+            intro_estimate_secs: None,
+        }
     );
 }
 

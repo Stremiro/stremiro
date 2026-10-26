@@ -14,11 +14,12 @@ use super::config_store::{
 use super::DurableStore;
 use crate::providers::addon_manifest::{
     build_configure_url, fetch_addon_manifest_snapshot, snapshot_is_classified,
+    snapshot_resource_kinds, AddonCatalogCapability, AddonResourceCapability,
     ADDON_CONFIGURATION_REQUIRED_MESSAGE,
 };
 use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
-use crate::providers::{build_provider_http_client, trim_to_max};
+use crate::providers::{build_provider_http_client, trim_to_max, ADDON_URL_INVALID_MESSAGE};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -351,11 +352,16 @@ pub(super) async fn classify_missing_addon_capabilities(
 
     for (index, snapshot) in snapshots {
         match snapshot {
+            Ok(snapshot)
+                if require_valid_manifest && snapshot_resource_kinds(&snapshot).is_empty() =>
+            {
+                return Err(
+                    "This addon provides no supported catalogs, metadata, streams, or subtitles."
+                        .to_string(),
+                )
+            }
             Ok(snapshot) if snapshot_is_classified(&snapshot) => {
                 classified[index].capabilities = Some(snapshot);
-            }
-            Ok(_) if require_valid_manifest => {
-                return Err("Addon manifest does not declare any resources or catalogs.".to_string())
             }
             Err(error) if require_valid_manifest => return Err(error),
             Ok(_) | Err(_) => {}
@@ -413,6 +419,20 @@ pub(super) fn merge_classified_capabilities(
     changed
 }
 
+type CatalogRoutingFacts = Option<(Vec<AddonResourceCapability>, Vec<AddonCatalogCapability>)>;
+
+fn catalog_routing_facts(configs: &[AddonConfig]) -> Vec<CatalogRoutingFacts> {
+    configs
+        .iter()
+        .map(|config| {
+            config
+                .capabilities
+                .as_ref()
+                .map(|snapshot| (snapshot.resources.clone(), snapshot.catalogs.clone()))
+        })
+        .collect()
+}
+
 pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Result<(), String> {
     let fresh = refresh_addon_capabilities(app.clone(), false, &[]).await?;
     if STARTUP_CAPABILITY_REFRESH.swap(false, Ordering::SeqCst) {
@@ -449,13 +469,16 @@ async fn refresh_addon_capabilities(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut latest = load_addon_configs(&store);
+        let routing_before = catalog_routing_facts(&latest);
         let changed = merge_classified_capabilities(&mut latest, classified, false);
         if changed {
             save_addon_configs_to_store(&store, &latest);
         }
         store.save()?;
         if changed {
-            let _ = app.emit("app://addon-capabilities-changed", ());
+            // Payload: whether catalog routing moved; display-only changes refresh just the addon rows.
+            let routing_changed = catalog_routing_facts(&latest) != routing_before;
+            let _ = app.emit("app://addon-capabilities-changed", routing_changed);
         }
         Ok(())
     })
@@ -502,24 +525,38 @@ pub async fn open_addon_configure_page(app: AppHandle, id: String) -> Result<(),
         .map_err(|_| "Could not open the addon's configuration page.".to_string())
 }
 
-fn load_addon_url(store: &DurableStore, id: &str) -> Result<String, String> {
-    AddonConfig::load_identities(store)
+#[derive(Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AddonShareLink {
+    pub link: String,
+    /// A path or query past the host is where addons keep per-user setup such as API keys.
+    pub includes_config: bool,
+}
+
+fn load_addon_share_link(store: &DurableStore, id: &str) -> Result<AddonShareLink, String> {
+    let url = AddonConfig::load_identities(store)
         .into_iter()
         .find(|addon| addon.id == id)
         .map(|addon| addon.url)
-        .ok_or_else(|| "Addon not found.".to_string())
+        .ok_or_else(|| "Addon not found.".to_string())?;
+    let includes_config = reqwest::Url::parse(&url)
+        .is_ok_and(|parsed| parsed.path() != "/" || parsed.query().is_some());
+    Ok(AddonShareLink {
+        link: super::app_links::addon_share_link(&url).unwrap_or(url),
+        includes_config,
+    })
 }
 
 #[command]
-pub async fn get_addon_url(app: AppHandle, id: String) -> Result<String, String> {
+pub async fn get_addon_share_link(app: AppHandle, id: String) -> Result<AddonShareLink, String> {
     super::with_store(app, super::SETTINGS_STORE_FILE, move |store| {
-        load_addon_url(&store, &id)
+        load_addon_share_link(&store, &id)
     })
     .await
 }
 
 /// Pasted install URLs are short; anything longer is junk, not an addon.
-const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
+pub(super) const MAX_ADDON_URL_INPUT_CHARS: usize = 4_096;
 
 /// Add-box verdict, built from the same normalizer the save path stores
 /// with, so a URL the UI accepts can't be rejected or duplicated at save.
@@ -616,7 +653,7 @@ fn apply_addon_configs_op(
             }
             let url = verdict
                 .normalized_url
-                .ok_or_else(|| "Enter a valid http(s) or stremio:// addon URL.".to_string())?;
+                .ok_or_else(|| ADDON_URL_INVALID_MESSAGE.to_string())?;
             if let Some(name) = verdict.duplicate_of {
                 return Err(format!("This addon URL is already configured as {name}."));
             }
@@ -761,21 +798,45 @@ mod tests {
     }
 
     #[test]
-    fn get_addon_url_reads_installed_ids_and_rejects_unknown_ids() {
+    fn addon_share_links_read_installed_ids_and_flag_config() {
         let fixture = crate::test_helpers::test_store();
-        let url = "https://addon.example/config?token=private";
         save_addon_configs_to_store(
             &fixture.store,
-            &[AddonConfig {
-                url: url.to_string(),
-                enabled: false,
-                ..test_addon("addon-1", "Private addon")
-            }],
+            &[
+                AddonConfig {
+                    url: "https://addon.example/config?token=private".to_string(),
+                    enabled: false,
+                    ..test_addon("private", "Private addon")
+                },
+                AddonConfig {
+                    url: "https://public.example".to_string(),
+                    ..test_addon("public", "Public addon")
+                },
+                AddonConfig {
+                    url: "http://127.0.0.1:7000".to_string(),
+                    ..test_addon("local", "Local addon")
+                },
+            ],
         );
 
-        assert_eq!(load_addon_url(&fixture.store, "addon-1").unwrap(), url);
+        let share = |id| load_addon_share_link(&fixture.store, id).unwrap();
         assert_eq!(
-            load_addon_url(&fixture.store, "missing").unwrap_err(),
+            share("private"),
+            AddonShareLink {
+                link: "stremiro://addon.example/config/manifest.json?token=private".to_string(),
+                includes_config: true,
+            }
+        );
+        assert_eq!(
+            share("public"),
+            AddonShareLink {
+                link: "stremiro://public.example/manifest.json".to_string(),
+                includes_config: false,
+            }
+        );
+        assert_eq!(share("local").link, "http://127.0.0.1:7000");
+        assert_eq!(
+            load_addon_share_link(&fixture.store, "missing").unwrap_err(),
             "Addon not found."
         );
     }
@@ -829,7 +890,7 @@ mod tests {
     #[test]
     fn addon_add_rejects_normalized_duplicates_and_invalid_install_urls() {
         for url in [
-            "stremio://addon.example/a/manifest.json/",
+            "stremiro://addon.example/a/manifest.json/",
             "https://addon.example/configure",
             "ftp://addon.example",
             "",
@@ -840,6 +901,45 @@ mod tests {
                 "new"
             )
             .is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn new_install_requires_usable_resources_but_background_classification_does_not() {
+        for (manifest, usable) in [
+            (r#"{"name":"Empty","resources":["stream"]}"#, false),
+            (
+                r#"{"name":"Empty","resources":["catalog"],"types":["movie"]}"#,
+                false,
+            ),
+            (crate::test_helpers::cinemeta_manifest_json(), true),
+            (
+                r#"{"name":"Streams","resources":["stream"],"types":["movie","series"]}"#,
+                true,
+            ),
+            (
+                r#"{"name":"OpenSubtitles","resources":["subtitles"],"types":["movie","series"]}"#,
+                true,
+            ),
+        ] {
+            let server = crate::test_helpers::TestHttpServer::new(vec![(200, manifest, None); 2]);
+            let addon = AddonConfig {
+                url: server.url.clone(),
+                ..test_addon("candidate", "Candidate")
+            };
+            let result = classify_missing_addon_capabilities(vec![addon.clone()], true).await;
+            if usable {
+                assert!(result.is_ok(), "{manifest}: {result:?}");
+            } else {
+                assert_eq!(
+                    result.unwrap_err(),
+                    "This addon provides no supported catalogs, metadata, streams, or subtitles."
+                );
+            }
+            assert!(classify_missing_addon_capabilities(vec![addon], false)
+                .await
+                .is_ok());
+            assert_eq!(server.finish(), vec!["/manifest.json"; 2]);
         }
     }
 
@@ -926,7 +1026,7 @@ mod tests {
         assert!(apply_addon_configs_op(
             &mut updated,
             AddonConfigsOp::Add {
-                url: "stremio://new.example/manifest.json/".into(),
+                url: "stremiro://new.example/manifest.json/".into(),
             },
             "new",
         )
@@ -1079,6 +1179,29 @@ mod tests {
         }
     }
 
+    #[test]
+    fn catalog_routing_facts_ignore_display_only_manifest_changes() {
+        let old = AddonConfig {
+            capabilities: Some(crate::test_helpers::cinemeta_manifest()),
+            ..test_addon("cinemeta", "Cinemeta")
+        };
+        let mut cosmetic = old.clone();
+        let snapshot = cosmetic.capabilities.as_mut().unwrap();
+        snapshot.version = Some("9.9.9".into());
+        snapshot.logo = Some("https://cdn.example/logo.png".into());
+        snapshot.description = Some("New copy".into());
+        assert_eq!(
+            catalog_routing_facts(std::slice::from_ref(&old)),
+            catalog_routing_facts(&[cosmetic])
+        );
+        let mut routed = old.clone();
+        routed.capabilities.as_mut().unwrap().catalogs.clear();
+        assert_ne!(
+            catalog_routing_facts(&[old]),
+            catalog_routing_facts(&[routed])
+        );
+    }
+
     #[tokio::test]
     async fn startup_refresh_retains_fallbacks_and_skips_disabled_or_already_refreshed_addons() {
         use std::io::{BufRead, BufReader, Write};
@@ -1188,7 +1311,7 @@ mod tests {
     fn addon_url_inspection_matches_the_save_normalizer() {
         let installed = [AddonConfig {
             url: "https://addon.example/abc".to_string(),
-            ..test_addon("addon-1", "Torrent Source")
+            ..test_addon("addon-1", "Addon Source")
         }];
 
         assert_eq!(
@@ -1200,26 +1323,29 @@ mod tests {
             .is_some());
 
         let duplicate =
-            inspect_addon_url_against("stremio://addon.example/abc/manifest.json/", &installed);
-        assert_eq!(duplicate.display_url.as_deref(), Some("addon.example/abc"));
+            inspect_addon_url_against("stremiro://addon.example/abc/manifest.json/", &installed);
+        assert_eq!(
+            duplicate.display_url.as_deref(),
+            Some("https://addon.example/•••")
+        );
         assert_eq!(
             duplicate.normalized_url.as_deref(),
             Some("https://addon.example/abc")
         );
-        assert_eq!(duplicate.duplicate_of.as_deref(), Some("Torrent Source"));
+        assert_eq!(duplicate.duplicate_of.as_deref(), Some("Addon Source"));
         assert!(!duplicate.configure_page);
         let value = serde_json::to_value(&duplicate).unwrap();
-        assert_eq!(value["displayUrl"], "addon.example/abc");
+        assert_eq!(value["displayUrl"], "https://addon.example/•••");
         assert!(value.get("valid").is_none());
         assert!(value.get("normalizedUrl").is_none());
 
         let private = inspect_addon_url_against(
-            "stremio://addon.example/AbCdEfGhIjKlMnOpQrStUvWxYz012345/manifest.json?token=sekrit",
+            "stremiro://addon.example/AbCdEfGhIjKlMnOpQrStUvWxYz012345/manifest.json?token=sekrit",
             &installed,
         );
         assert_eq!(
             private.display_url.as_deref(),
-            Some("addon.example/•••?token=•••")
+            Some("https://addon.example/•••?token=•••")
         );
         let serialized = serde_json::to_string(&private).unwrap();
         assert!(!serialized.contains("AbCdEfGhIjKlMnOpQrStUvWxYz012345"));

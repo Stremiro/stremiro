@@ -197,10 +197,6 @@ export function usePlayerSurfaceLayout({
     void setMpvProperty('sub-visibility', !isMini).catch(() => undefined);
   }, [activeStreamUrl, isMini, mpvSurfaceReady]);
 
-  useEffect(() => {
-    invalidateMarginRatio(lastAppliedMarginFingerprintRef);
-  }, [activeStreamUrl, mpvSurfaceReady, presentation]);
-
   const applyMarginRatio = useCallback(
     async (ratio: VideoMarginRatio, generation: number): Promise<boolean> => {
       // Stale-generation calls must return before the send records intent —
@@ -571,14 +567,14 @@ export function useMiniPlayerSurface({
   useEffect(() => {
     if (!enabled) return;
 
-    applyMiniSurface();
+    void applyMiniSurface();
 
     let frameId: number | null = null;
     const scheduleSync = () => {
       if (frameId !== null) return;
       frameId = window.requestAnimationFrame(() => {
         frameId = null;
-        applyMiniSurface();
+        void applyMiniSurface();
       });
     };
 

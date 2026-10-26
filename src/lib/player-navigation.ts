@@ -87,18 +87,9 @@ export function normalizeRouteNumber(value: unknown): number | undefined {
 }
 
 function normalizeRouteText(value: unknown): string | undefined {
-  if (typeof value !== 'string') {
-    return undefined;
-  }
-
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
+  const trimmed = typeof value === 'string' ? value.trim() : '';
   const lower = trimmed.toLowerCase();
-  if (lower === 'null' || lower === 'undefined') {
-    return undefined;
-  }
-
-  return trimmed;
+  return trimmed && lower !== 'null' && lower !== 'undefined' ? trimmed : undefined;
 }
 
 export function sanitizePlayerRouteState(
@@ -151,22 +142,41 @@ export function sanitizePlayerRouteState(
   return sanitized;
 }
 
-function buildPlayerRoute(
-  mediaType: PlayerRouteMediaType,
-  mediaId: string,
-  absoluteSeason?: number,
-  absoluteEpisode?: number,
-  streamSeason?: number,
-  streamEpisode?: number,
-): string {
-  // Prefer canonical coordinates; fall back to stream S/E so callers can still deep-link.
-  const season = normalizeRouteNumber(absoluteSeason) ?? normalizeRouteNumber(streamSeason);
-  const episode = normalizeRouteNumber(absoluteEpisode) ?? normalizeRouteNumber(streamEpisode);
-  const base = `/player/${mediaType}/${encodeURIComponent(mediaId)}`;
-
-  return season !== undefined && episode !== undefined ? `${base}/${season}/${episode}` : base;
+function parseRouteSegmentNumber(value: string | undefined): number | undefined {
+  // Season/episode 0 are valid coordinates (specials).
+  return value ? normalizeRouteNumber(Number.parseInt(value, 10)) : undefined;
 }
 
+/** Everything the player derives from its launch; the session host's loading screen reads the same view. */
+export function resolvePlayerLaunch(launch: {
+  type?: string;
+  id?: string;
+  season?: string;
+  episode?: string;
+  state?: unknown;
+}) {
+  const { type, id, season, episode } = launch;
+  const state = sanitizePlayerRouteState(launch.state as PlayerRouteState | null);
+  const routeSeason = parseRouteSegmentNumber(season);
+  const routeEpisode = parseRouteSegmentNumber(episode);
+  return {
+    ...state,
+    id,
+    type,
+    seasonParam: season,
+    episodeParam: episode,
+    routeSeason,
+    routeEpisode,
+    // Sanitized state fields need no second parse.
+    routeAbsoluteSeason: state.absoluteSeason ?? routeSeason,
+    routeAbsoluteEpisode: state.absoluteEpisode ?? routeEpisode,
+    title: state.title || 'Unknown Title',
+    // Raw route title — the 'Unknown Title' display fallback must not enter ranking or the best-stream key.
+    resolveTitle: state.title,
+    isHistoryResume: state.resumeFromHistory === true,
+    effectiveResolveMediaType: resolvePlayerRouteMediaType(type),
+  };
+}
 // The player owns one history slot: in-player hops replace, page launches push — a push
 // inside /player would leave stale coordinates for a later POP to resurrect. Evaluated at navigate time.
 function isPlayerRoutePath(pathname: string): boolean {
@@ -228,15 +238,11 @@ export function launchResolvedStream(
   const state = sanitizePlayerRouteState(
     buildResolvedStreamRouteState(request, resolved, extras, picked),
   );
-  navigate(
-    buildPlayerRoute(
-      request.mediaType,
-      request.mediaId,
-      state.absoluteSeason,
-      state.absoluteEpisode,
-      state.streamSeason,
-      state.streamEpisode,
-    ),
+  const season = state.absoluteSeason ?? state.streamSeason;
+  const episode = state.absoluteEpisode ?? state.streamEpisode;
+  const base = `/player/${request.mediaType}/${encodeURIComponent(request.mediaId)}`;
+  void navigate(
+    season !== undefined && episode !== undefined ? `${base}/${season}/${episode}` : base,
     { state, replace: isPlayerRoutePath(window.location.pathname) },
   );
 }

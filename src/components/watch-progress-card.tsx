@@ -1,4 +1,4 @@
-import { memo, type MouseEvent } from 'react';
+import { memo } from 'react';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import type { WatchProgress } from '@/lib/api';
 import {
@@ -48,12 +48,6 @@ export const WatchProgressCard = memo(function WatchProgressCard({
   const episode = item.absolute_episode ?? undefined;
   const subtitle = formatSeasonEpisode(season, episode) || undefined;
 
-  const handleRemove = (event: MouseEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    onRemove?.();
-  };
-
   return (
     <MediaCard
       item={mediaItem}
@@ -63,7 +57,7 @@ export const WatchProgressCard = memo(function WatchProgressCard({
       onPlay={play}
       playbackIntent={playbackIntent ?? (item.is_watched ? 'replay' : 'resume')}
       isPlayPending={isPending}
-      onRemoveFromContinue={onRemove ? handleRemove : undefined}
+      onRemoveFromContinue={onRemove ? () => onRemove() : undefined}
       removeFrom={removeFrom}
       subtitle={subtitle}
     />

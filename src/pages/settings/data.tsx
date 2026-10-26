@@ -3,14 +3,7 @@ import { Database, Download, Loader2, type LucideIcon, Upload } from 'lucide-rea
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/dialog';
 import { useRecentSearches } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { api, getBackupImportErrorMessage, getErrorMessage, type ImportResult } from '@/lib/api';
@@ -30,11 +23,11 @@ import {
 import { cn, pluralize } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
+  SETTINGS_CAPTION_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
-  SettingsSection,
   settingsControlId,
 } from './chrome';
 
@@ -137,7 +130,7 @@ function BackupRestore() {
           icon={Download}
           busy={exporting}
           disabled={exporting || importing || confirmImport}
-          onClick={handleExport}
+          onClick={() => void handleExport()}
         >
           Export
         </BackupButton>
@@ -150,29 +143,22 @@ function BackupRestore() {
           Import
         </BackupButton>
       </div>
-      <Dialog open={confirmImport} onOpenChange={setConfirmImport}>
-        <DialogContent
-          onOpenAutoFocus={(event) => {
+      <ConfirmDialog
+        open={confirmImport}
+        onOpenChange={setConfirmImport}
+        contentProps={{
+          onOpenAutoFocus: (event) => {
             event.preventDefault();
             cancelImportRef.current?.focus();
-          }}
-        >
-          <DialogHeader>
-            <DialogTitle>Import backup?</DialogTitle>
-            <DialogDescription>
-              Records, addons and per-title language picks merge with your existing data.
-              Preferences, profile and appearance are replaced by the backup's. This cannot be
-              undone.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button ref={cancelImportRef} variant='outline' onClick={() => setConfirmImport(false)}>
-              Cancel
-            </Button>
-            <Button onClick={() => void handleImport()}>Import backup</Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          },
+        }}
+        title='Import backup?'
+        description="Records, addons and per-title language picks merge with your existing data. Preferences, profile and appearance are replaced by the backup's. This cannot be undone."
+        cancelProps={{ ref: cancelImportRef }}
+        confirmProps={{}}
+        confirmLabel='Import backup'
+        onConfirm={() => void handleImport()}
+      />
     </SettingsBody>
   );
 }
@@ -270,7 +256,7 @@ function DataManager() {
       label: 'Watch history',
       description: 'Watched titles, resume progress and per-title track and source picks.',
       count: stats?.history_count,
-      isEmpty: stats?.history_count === 0 && stats.has_learned_playback_data === false,
+      isEmpty: stats?.history_count === 0 && !stats.has_learned_playback_data,
       unitSingular: 'entry',
       unitPlural: 'entries',
       clearFn: api.clearWatchHistory,
@@ -323,7 +309,10 @@ function DataManager() {
 
   return (
     <>
-      <SettingsSection caption='Clear local records'>
+      <div className='border-t border-white/[0.06]'>
+        <div className='flex flex-wrap items-baseline justify-between gap-3 px-4 pt-4 pb-1 sm:px-5'>
+          <p className={SETTINGS_CAPTION_CLASS}>Clear local records</p>
+        </div>
         <SettingsQueryError
           query={statsQuery}
           className='mx-4 mt-3 sm:mx-5'
@@ -411,7 +400,7 @@ function DataManager() {
             );
           })}
         </SettingsBody>
-      </SettingsSection>
+      </div>
     </>
   );
 }

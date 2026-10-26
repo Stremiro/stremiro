@@ -43,18 +43,8 @@ export function episodeMatchesCoordinates(
 
 /** Stream-target equality on all four coordinates (absolute user-facing + stream-space addon remap). */
 export function sameEpisodeCoordinates(
-  a: Partial<
-    Pick<
-      NextEpisodeStreamCoordinates,
-      'absoluteSeason' | 'absoluteEpisode' | 'streamSeason' | 'streamEpisode'
-    >
-  >,
-  b: Partial<
-    Pick<
-      NextEpisodeStreamCoordinates,
-      'absoluteSeason' | 'absoluteEpisode' | 'streamSeason' | 'streamEpisode'
-    >
-  >,
+  a: Partial<Omit<NextEpisodeStreamCoordinates, 'streamLookupId'>>,
+  b: Partial<Omit<NextEpisodeStreamCoordinates, 'streamLookupId'>>,
 ): boolean {
   return (
     a.absoluteSeason === b.absoluteSeason &&

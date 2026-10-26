@@ -1,12 +1,11 @@
-import { CircleAlert } from 'lucide-react';
+import { Check, CircleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { cn, hideBrokenImage } from '@/lib/utils';
 
 export interface ActionToastOptions {
   /** Secondary context rendered muted under the label (e.g. the title). */
   detail?: ReactNode;
-  /** Text-color class for a glowing status dot beside the label. */
-  dot?: string;
+  icon?: ReactNode;
   /** Poster for the acted-on title — usually still browser-warm, so it paints instantly. */
   thumb?: string;
   tone?: 'default' | 'error';
@@ -15,19 +14,18 @@ export interface ActionToastOptions {
 export function ActionToast({
   label,
   detail,
-  dot,
+  icon,
   thumb,
   tone = 'default',
 }: ActionToastOptions & { label: ReactNode }) {
   const isError = tone === 'error';
+  const feedbackIcon = isError ? (
+    <CircleAlert aria-hidden='true' className='size-4 text-red-300' />
+  ) : (
+    (icon ?? <Check aria-hidden='true' className='size-4 text-emerald-300' />)
+  );
   return (
-    <div
-      className={cn(
-        'animate-action-pill mx-auto flex w-fit min-w-[220px] max-w-[min(420px,calc(100vw_-_48px))] items-center gap-3 rounded-xl border p-1.5 pr-4 backdrop-blur-xl backdrop-saturate-150',
-        'shadow-[0_18px_44px_-14px_rgba(0,0,0,0.85),0_2px_6px_rgba(0,0,0,0.3),inset_0_1px_0_rgba(255,255,255,0.05)]',
-        isError ? 'border-red-400/[0.16] bg-[#190f11]/92' : 'border-white/[0.08] bg-[#111114]/92',
-      )}
-    >
+    <div className='flex w-full items-center gap-2.5 rounded-[10px] border border-white/[0.1] bg-[#17171b]/98 p-2.5 shadow-[0_8px_24px_-10px_rgb(0_0_0/0.65),0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(255_255_255/0.04)]'>
       {thumb ? (
         <img
           key={thumb}
@@ -36,33 +34,31 @@ export function ActionToast({
           draggable={false}
           referrerPolicy='no-referrer'
           onError={hideBrokenImage}
-          className='h-11 w-[30px] shrink-0 rounded-[4px] object-cover ring-1 ring-white/10'
+          className='h-10 w-7 shrink-0 rounded-[4px] object-cover ring-1 ring-white/10'
         />
-      ) : isError ? (
-        <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-red-500/[0.12] ring-1 ring-red-400/15'>
-          <CircleAlert aria-hidden='true' className='h-4 w-4 text-red-300' strokeWidth={2.25} />
-        </span>
-      ) : null}
-      <div className={cn('min-w-0 py-1', !thumb && !isError && 'pl-2.5')}>
+      ) : (
         <span
           className={cn(
-            'flex items-center gap-2 text-[13.5px] font-semibold leading-5 tracking-[-0.01em]',
-            isError ? 'text-red-100' : 'text-white',
+            'flex size-7 shrink-0 items-center justify-center rounded-md',
+            isError ? 'bg-red-400/[0.1]' : 'bg-white/[0.05]',
           )}
         >
-          {dot && (
-            <span
-              aria-hidden='true'
-              className={cn(
-                'h-1.5 w-1.5 shrink-0 rounded-full bg-current shadow-[0_0_6px_currentColor]',
-                dot,
-              )}
-            />
-          )}
+          {feedbackIcon}
+        </span>
+      )}
+      <div className='min-w-0 flex-1'>
+        <span className='flex items-center gap-2 text-[13px] font-medium leading-5 tracking-[-0.005em] text-white/95'>
+          {thumb && <span className='shrink-0'>{feedbackIcon}</span>}
           <span className='truncate'>{label}</span>
         </span>
         {detail ? (
-          <span className='mt-0.5 block truncate text-[12px] leading-4 text-white/55'>
+          <span
+            className={cn(
+              'mt-0.5 block text-[12px] leading-4 text-zinc-400',
+              'break-words',
+              isError ? 'line-clamp-3' : 'line-clamp-2',
+            )}
+          >
             {detail}
           </span>
         ) : null}

@@ -527,15 +527,8 @@ where
 
 fn build_probe_candidates(
     mut streams: Vec<AddonStream>,
-    excluded_stream_key: Option<&str>,
-    excluded_resolved_url: Option<&str>,
     preferred: PreferredStreamHint<'_>,
 ) -> Vec<(StreamResolveCandidateInput, Duration)> {
-    let excluded_stream_key = excluded_stream_key.and_then(normalize_non_empty);
-    if excluded_stream_key.is_some() || excluded_resolved_url.is_some() {
-        StreamExclusions::new(&[], excluded_stream_key.as_deref(), excluded_resolved_url)
-            .retain(&mut streams);
-    }
     if let Some(position) = find_preferred_position(&streams, preferred) {
         streams[..=position].rotate_right(1);
     }
@@ -585,12 +578,7 @@ pub(crate) async fn resolve_ranked_best_stream_candidate(
             "Stream resolution timed out.",
         ));
     }
-    let inputs = build_probe_candidates(
-        streams,
-        excluded_stream_key,
-        excluded_resolved_url,
-        preferred,
-    );
+    let inputs = build_probe_candidates(streams, preferred);
     let excluded_resolved_url = excluded_resolved_url.and_then(normalize_non_empty);
     resolve_probe_candidates(
         inputs,

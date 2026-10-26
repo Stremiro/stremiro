@@ -1,5 +1,5 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
-import { ArrowDownRight, Loader2, Maximize2, X } from 'lucide-react';
+import { AppWindow, ArrowDownRight, GripHorizontal, Loader2 } from 'lucide-react';
 import { memo, useEffect, useState, useSyncExternalStore } from 'react';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
 import {
@@ -26,6 +26,8 @@ interface PlayerPipChromeProps {
   title: string;
   episodeLabel?: string;
   visible: boolean;
+  /** Returning to the app: fade everything out so only video shows while the window grows. */
+  leaving: boolean;
   isPlaying: boolean;
   isMuted: boolean;
   volume: number;
@@ -55,7 +57,7 @@ interface PlayerPipChromeProps {
 
 export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChromeProps) {
   const mountedRef = useMountedRef();
-  const { title, episodeLabel, visible, status, error, ended, onReturn } = props;
+  const { title, episodeLabel, visible, leaving, status, error, ended, onReturn } = props;
   const autoPlaySecondsLeft = useSyncExternalStore(
     props.autoPlayCountdown.subscribe,
     props.autoPlayCountdown.getSnapshot,
@@ -75,7 +77,12 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
   }, []);
-  const chromeVisible = visible || !props.isPlaying || !!status || !!error || ended || focused;
+  const chromeVisible =
+    !leaving && (visible || !props.isPlaying || !!status || !!error || ended || focused);
+  const leavingClass = cn(
+    'transition-opacity duration-[90ms] motion-reduce:transition-none',
+    leaving && 'opacity-0',
+  );
   const volumeIsSilent = props.isMuted || props.volume === 0;
   const returnToApp = () => void onReturn().catch(() => undefined);
   const snapToCorner = () => {
@@ -91,10 +98,13 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
     <>
       <div
         aria-hidden='true'
-        className='pointer-events-none absolute inset-0 z-60 border border-white/15'
+        className={cn(
+          'pointer-events-none absolute inset-0 z-60 border border-white/15',
+          leavingClass,
+        )}
       />
       {(status || error || ended) && (
-        <div className='pointer-events-none absolute inset-0 z-30 bg-black/65'>
+        <div className={cn('pointer-events-none absolute inset-0 z-30 bg-black/65', leavingClass)}>
           <div className='absolute inset-x-4 top-11 bottom-24 flex min-h-0 items-center justify-center gap-2 text-center'>
             {status && !error && (
               <Loader2
@@ -131,9 +141,11 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         }}
         className={cn(
           'pointer-events-none absolute inset-0 z-40 flex cursor-auto flex-col justify-between transition-opacity motion-reduce:transition-none',
-          chromeVisible
-            ? cn(CHROME_ENTER_TIMING_CLASS, 'opacity-100')
-            : cn(CHROME_EXIT_TIMING_CLASS, 'opacity-0'),
+          leaving
+            ? 'opacity-0 duration-[90ms]'
+            : chromeVisible
+              ? cn(CHROME_ENTER_TIMING_CLASS, 'opacity-100')
+              : cn(CHROME_EXIT_TIMING_CLASS, 'opacity-0'),
         )}
       >
         <div
@@ -147,9 +159,9 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
         >
           <button
             type='button'
-            aria-label='Move picture in picture window. Enter snaps to corner.'
-            title='Drag to move. Enter snaps to corner.'
-            className='min-w-0 flex-1 cursor-grab truncate rounded-md px-1 py-2 text-left text-xs font-medium text-white/75 transition-colors hover:bg-white/5 hover:text-white active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+            aria-label='Drag picture in picture title to move. Enter snaps to bottom-right.'
+            title='Drag title to move · Enter to snap to bottom-right'
+            className='flex min-w-0 flex-1 cursor-grab items-center gap-1.5 rounded-md px-1 py-2 text-left text-xs font-medium text-white/75 transition-colors hover:bg-white/5 hover:text-white active:cursor-grabbing focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
             onPointerDown={(event) => {
               if (event.button === 0)
                 void getCurrentWindow()
@@ -160,27 +172,25 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
               if (event.detail === 0) snapToCorner();
             }}
           >
-            {title}
-            {episodeLabel ? ` · ${episodeLabel}` : ''}
+            <GripHorizontal aria-hidden='true' className='size-3.5 shrink-0 text-white/45' />
+            <span className='truncate'>
+              {title}
+              {episodeLabel ? ` · ${episodeLabel}` : ''}
+            </span>
           </button>
           <button
             type='button'
-            className={CHROME_ICON_BUTTON_CLASS}
+            className={cn(
+              CHROME_ICON_BUTTON_CLASS,
+              'h-8 w-auto gap-1.5 rounded-md px-2 text-xs font-medium',
+            )}
             onClick={returnToApp}
             aria-label='Return to app'
             title='Return to app (Esc)'
             aria-keyshortcuts='Escape'
           >
-            <Maximize2 aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
-          </button>
-          <button
-            type='button'
-            className={cn(CHROME_ICON_BUTTON_CLASS, 'hover:bg-red-500/20 hover:text-red-200')}
-            onClick={returnToApp}
-            aria-label='Close picture in picture and return to app'
-            title='Close picture in picture'
-          >
-            <X aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
+            <AppWindow aria-hidden='true' className='h-4 w-4' strokeWidth={CHROME_ICON_STROKE} />
+            Back to app
           </button>
         </div>
         <div

@@ -3,16 +3,6 @@ import { useEffect, useEffectEvent } from 'react';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { clamp } from '@/lib/utils';
 
-const MEDIA_SESSION_ACTIONS = [
-  'play',
-  'pause',
-  'previoustrack',
-  'nexttrack',
-  'seekto',
-  'seekbackward',
-  'seekforward',
-] as const satisfies readonly MediaSessionAction[];
-
 const DEFAULT_SEEK_OFFSET_SECS = 10;
 const POSITION_PUBLISH_INTERVAL_MS = 1_000;
 
@@ -90,46 +80,37 @@ export function useMediaSession({
   }, [supported]);
 
   // Stable action handlers read the latest callbacks.
-  const handleAction = useEffectEvent(
-    (action: MediaSessionAction, details: MediaSessionActionDetails) => {
-      switch (action) {
-        case 'play':
-          onPlay();
-          break;
-        case 'pause':
-          onPause();
-          break;
-        case 'previoustrack':
-          onPreviousTrack();
-          break;
-        case 'nexttrack':
-          onNextTrack?.();
-          break;
-        case 'seekto':
-          if (details.seekTime !== undefined) onSeekTo(details.seekTime);
-          break;
-        case 'seekbackward':
-          onSeekBy(-(details.seekOffset ?? DEFAULT_SEEK_OFFSET_SECS));
-          break;
-        case 'seekforward':
-          onSeekBy(details.seekOffset ?? DEFAULT_SEEK_OFFSET_SECS);
-          break;
-      }
+  const getActionHandlers = useEffectEvent(() => ({
+    play: () => onPlay(),
+    pause: () => onPause(),
+    previoustrack: () => onPreviousTrack(),
+    nexttrack: () => onNextTrack?.(),
+    seekto: (details: MediaSessionActionDetails) => {
+      if (details.seekTime !== undefined) onSeekTo(details.seekTime);
     },
-  );
+    seekbackward: (details: MediaSessionActionDetails) =>
+      onSeekBy(-(details.seekOffset ?? DEFAULT_SEEK_OFFSET_SECS)),
+    seekforward: (details: MediaSessionActionDetails) =>
+      onSeekBy(details.seekOffset ?? DEFAULT_SEEK_OFFSET_SECS),
+  }));
 
   useEffect(() => {
     if (!supported) return;
-    for (const action of MEDIA_SESSION_ACTIONS) {
+    const actions = Object.keys(getActionHandlers()) as (keyof ReturnType<
+      typeof getActionHandlers
+    >)[];
+    for (const action of actions) {
       if (action === 'nexttrack' && !hasNextTrack) continue;
       try {
-        navigator.mediaSession.setActionHandler(action, (details) => handleAction(action, details));
+        navigator.mediaSession.setActionHandler(action, (details) =>
+          getActionHandlers()[action](details),
+        );
       } catch {
         // Individual actions can be unsupported — skip, keep the rest.
       }
     }
     return () => {
-      for (const action of MEDIA_SESSION_ACTIONS) {
+      for (const action of actions) {
         try {
           navigator.mediaSession.setActionHandler(action, null);
         } catch {

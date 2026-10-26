@@ -1,6 +1,6 @@
 import type { QueryClient } from '@tanstack/react-query';
 
-import { api } from '@/lib/api';
+import { api, type DetailsPrefetchBundle } from '@/lib/api';
 import { getWatchProgressEpoch, getWatchProgressSnapshotRevision } from '@/lib/api-cache';
 import { resolvePlayerRouteMediaType } from '@/lib/player-navigation';
 import { routeChunks } from '@/lib/route-chunks';
@@ -19,7 +19,14 @@ interface PrefetchDetailsRouteDataOptions {
 
 // One bundle invoke per title at a time (in-flight leader pattern): the
 // resolved-data guard can't see an in-flight call, so followers share the leader.
-const detailsPrefetchInFlight = new Map<string, Promise<void>>();
+const detailsPrefetchInFlight = new Map<
+  string,
+  Promise<Partial<DetailsPrefetchBundle> | undefined>
+>();
+
+export function pendingDetailsPrefetch(mediaType: string | undefined, id: string) {
+  return detailsPrefetchInFlight.get(`${resolvePlayerRouteMediaType(mediaType)}:${id.trim()}`);
+}
 
 export function prefetchDetailsRouteData(
   queryClient: QueryClient,
@@ -76,13 +83,16 @@ export function prefetchDetailsRouteData(
       }
       // A warm logo paints with the page instead of fading in after it.
       if (isHttpUrl(bundle.details?.logo)) new Image().src = bundle.details.logo;
-      if (
+      const progressCurrent =
         progressEpoch === getWatchProgressEpoch() &&
-        progressRevision === getWatchProgressSnapshotRevision() &&
-        queryClient.getQueryData(progressKey) === undefined
-      ) {
+        progressRevision === getWatchProgressSnapshotRevision();
+      if (progressCurrent && queryClient.getQueryData(progressKey) === undefined) {
         queryClient.setQueryData(progressKey, bundle.progress);
       }
+      return {
+        details: bundle.details,
+        progress: progressCurrent ? bundle.progress : undefined,
+      };
     })
     .catch(() => undefined)
     .finally(() => {

@@ -20,6 +20,7 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -32,6 +33,7 @@ import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
+import { useLocalDay } from '@/hooks/use-local-day';
 import {
   type AddonStream,
   type AddonStreamResolution,
@@ -40,7 +42,6 @@ import {
   type StreamSelectorPreferences,
   type StreamSelectorQuality,
   type StreamSelectorSort,
-  type StreamSelectorSource,
   type StreamSelectorStats,
   type StreamSourceSummary,
   type WatchProgress,
@@ -65,25 +66,18 @@ import {
 
 const SELECTOR_SEGMENT_BASE_CLASS =
   'h-8 px-2.5 rounded-md text-[13px] font-semibold transition-colors duration-150 leading-none whitespace-nowrap focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30';
-const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 hover:text-zinc-200';
+const SELECTOR_SEGMENT_INACTIVE_CLASS = 'text-zinc-400 not-aria-disabled:hover:text-zinc-200';
 
 // Filters use the app accent; only Quality keeps its own hue, echoing the violet 4K badge it sorts by.
-const SORT_MODE_ACTIVE_CLASS: Record<StreamSelectorSort, string> = {
-  smart: 'accent-active shadow-xs',
-  quality: 'bg-violet-500/25 text-violet-300 shadow-xs',
-  seeds: 'accent-active shadow-xs',
-};
-const SORT_MODE_ICON_TINT: Record<StreamSelectorSort, string> = {
-  smart: 'text-[var(--accent-nav)]',
-  quality: 'text-violet-300/80',
-  seeds: 'text-[var(--accent-nav)]',
-};
-const SORT_MODE_LABELS: Record<StreamSelectorSort, string> = {
-  smart: 'Smart',
-  quality: 'Quality',
-  seeds: 'Seeds',
-};
-const SORT_MODES = Object.keys(SORT_MODE_LABELS) as StreamSelectorSort[];
+const SORT_OPTIONS: SegmentOption<StreamSelectorSort>[] = [
+  { value: 'smart', label: 'Smart' },
+  {
+    value: 'quality',
+    label: 'Quality',
+    activeClass: 'bg-violet-500/25 text-violet-300 shadow-xs',
+  },
+  { value: 'seeds', label: 'Seeds' },
+];
 const QUALITY_OPTIONS: ReadonlyArray<[StreamSelectorQuality, string]> = [
   ['all', 'All'],
   ...(Object.entries(RESOLUTION_LABELS) as [AddonStreamResolution, string][]),
@@ -496,13 +490,11 @@ export function StreamListNoAddonsState({
 export function StreamListEmptyState({
   healthStrip,
   isRetrying = false,
-  sourceCount,
   onRetry,
   onManageAddons,
 }: {
   healthStrip?: ReactNode;
   isRetrying?: boolean;
-  sourceCount: number;
   onRetry: () => void;
   onManageAddons: () => void;
 }) {
@@ -510,14 +502,10 @@ export function StreamListEmptyState({
     <StreamListMessage
       healthStrip={healthStrip}
       title='No streams found.'
-      body={
-        sourceCount > 0
-          ? 'Your stream sources returned nothing for this title. Try again shortly or add another stream addon.'
-          : 'Add a stream addon in Settings → Addons to get playable sources.'
-      }
+      body='Your stream sources returned nothing for this title. Try again shortly or add another stream addon.'
       action={
         <div className='flex flex-wrap items-center justify-center gap-2'>
-          {sourceCount > 0 && <StreamRetryButton isRetrying={isRetrying} onRetry={onRetry} />}
+          <StreamRetryButton isRetrying={isRetrying} onRetry={onRetry} />
           <Button variant='outline' size='sm' onClick={onManageAddons}>
             Manage addons
           </Button>
@@ -744,39 +732,33 @@ export function StreamAddonHealthStrip({
 }
 
 interface StreamFilterToolbarProps {
-  batchFilter: StreamSelectorBatch;
   filteredCount: number;
+  filters: StreamSelectorPreferences;
   hasActiveFilter: boolean;
   isResolving: boolean;
   onFiltersChange: Dispatch<SetStateAction<StreamSelectorPreferences>>;
   onResetFilters: () => void;
   onSearchQueryChange: (value: string) => void;
   onSearchSubmit: () => void;
-  qualityFilter: StreamSelectorQuality;
   searchInputRef?: RefObject<HTMLInputElement | null>;
   searchQuery: string;
   showBatchFilter: boolean;
-  sortMode: StreamSelectorSort;
-  sourceFilter: StreamSelectorSource;
   stats: StreamSelectorStats;
   totalCount: number;
 }
 
 export function StreamFilterToolbar({
-  batchFilter,
   filteredCount,
+  filters,
   hasActiveFilter,
   isResolving,
   onFiltersChange,
   onResetFilters,
   onSearchQueryChange,
   onSearchSubmit,
-  qualityFilter,
   searchInputRef,
   searchQuery,
   showBatchFilter,
-  sortMode,
-  sourceFilter,
   stats,
   totalCount,
 }: StreamFilterToolbarProps) {
@@ -817,10 +799,10 @@ export function StreamFilterToolbar({
             onResetFilters();
           }}
           className={cn(
-            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[14px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
-            hasActiveFilter
+            'inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md border px-2.5 text-[14px] font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 aria-disabled:pointer-events-none aria-disabled:opacity-50',
+            hasActiveFilter && !isResolving
               ? 'accent-lattice-soft hover:bg-[rgb(var(--accent-act-rgb)/0.14)]'
-              : 'pointer-events-none border-white/[0.07] text-zinc-500',
+              : 'border-white/[0.07] text-zinc-500',
           )}
         >
           <RotateCcw className='h-3.5 w-3.5' strokeWidth={2.25} />
@@ -832,25 +814,25 @@ export function StreamFilterToolbar({
           <SegmentGroup
             label='Quality filter'
             isResolving={isResolving}
-            value={qualityFilter}
+            value={filters.quality}
             onChange={(quality) => onFiltersChange((f) => ({ ...f, quality }))}
             options={QUALITY_OPTIONS.flatMap<SegmentOption<StreamSelectorQuality>>(
               ([value, label]) => {
                 if (value === 'all') return [{ value, label }];
                 const count = stats.resCounts[value];
                 // The active option stays visible at 0 — hiding it would leave an invisible filter emptying the list.
-                return count > 0 || qualityFilter === value ? [{ value, label, count }] : [];
+                return count > 0 || filters.quality === value ? [{ value, label, count }] : [];
               },
             )}
           />
 
-          {(stats.cachedCount > 0 || sourceFilter === 'cached') && (
+          {(stats.cachedCount > 0 || filters.source === 'cached') && (
             <>
               <SegmentDivider />
               <SegmentGroup
                 label='Source filter'
                 isResolving={isResolving}
-                value={sourceFilter}
+                value={filters.source}
                 onChange={(source) => onFiltersChange((f) => ({ ...f, source }))}
                 options={[
                   { value: 'all', label: 'All' },
@@ -861,13 +843,13 @@ export function StreamFilterToolbar({
           )}
 
           {showBatchFilter &&
-            (stats.batchCount > 0 || stats.episodeLikeCount > 0 || batchFilter !== 'all') && (
+            (stats.batchCount > 0 || stats.episodeLikeCount > 0 || filters.batch !== 'all') && (
               <>
                 <SegmentDivider />
                 <SegmentGroup
                   label='Episode or season-pack filter'
                   isResolving={isResolving}
-                  value={batchFilter}
+                  value={filters.batch}
                   onChange={(batch) => onFiltersChange((f) => ({ ...f, batch }))}
                   options={(
                     [
@@ -875,7 +857,7 @@ export function StreamFilterToolbar({
                       { value: 'packs', label: 'Packs', count: stats.batchCount },
                       { value: 'all', label: 'All' },
                     ] satisfies SegmentOption<StreamSelectorBatch>[]
-                  ).filter((option) => option.count !== 0 || option.value === batchFilter)}
+                  ).filter((option) => option.count !== 0 || option.value === filters.batch)}
                 />
               </>
             )}
@@ -885,21 +867,17 @@ export function StreamFilterToolbar({
           <SegmentGroup
             label='Sort order'
             isResolving={isResolving}
-            value={sortMode}
+            value={filters.sort}
             onChange={(sort) => onFiltersChange((f) => ({ ...f, sort }))}
             leading={
               <SlidersHorizontal
                 className={cn(
                   'w-3 h-3 ml-1.5 mr-0.5 shrink-0 transition-colors',
-                  SORT_MODE_ICON_TINT[sortMode],
+                  filters.sort === 'quality' ? 'text-violet-300/80' : 'text-[var(--accent-nav)]',
                 )}
               />
             }
-            options={SORT_MODES.map((value) => ({
-              value,
-              label: SORT_MODE_LABELS[value],
-              activeClass: SORT_MODE_ACTIVE_CLASS[value],
-            }))}
+            options={SORT_OPTIONS}
           />
         </div>
       </div>
@@ -1034,6 +1012,7 @@ export function StreamPackEpisodeList({
   targetMasked,
   targetSeason,
 }: StreamPackEpisodeListProps) {
+  const localDay = useLocalDay();
   const { preferences: spoilerProtection, isHydrating: isSpoilerPreferencePending } =
     useAppUiPreferences((preferences) => preferences.spoilerProtection);
   const panelRef = useRef<HTMLDivElement | null>(null);
@@ -1051,12 +1030,18 @@ export function StreamPackEpisodeList({
 
   const isVirtualized = rows.length >= PACK_LIST_VIRTUALIZE_THRESHOLD;
 
-  const firstEpisodeIndex = rows.findIndex((row) => row.type === 'episode');
-  const lastEpisodeIndex = rows.findLastIndex((row) => row.type === 'episode');
-  const episodeCount = rows.reduce((count, row) => (row.type === 'episode' ? count + 1 : count), 0);
-  const targetIndex = rows.findIndex(
-    (row) =>
-      row.type === 'episode' && episodeMatchesCoordinates(row.episode, targetSeason, targetEpisode),
+  const { firstEpisodeIndex, lastEpisodeIndex, episodeCount, targetIndex } = useMemo(
+    () => ({
+      firstEpisodeIndex: rows.findIndex((row) => row.type === 'episode'),
+      lastEpisodeIndex: rows.findLastIndex((row) => row.type === 'episode'),
+      episodeCount: rows.reduce((count, row) => (row.type === 'episode' ? count + 1 : count), 0),
+      targetIndex: rows.findIndex(
+        (row) =>
+          row.type === 'episode' &&
+          episodeMatchesCoordinates(row.episode, targetSeason, targetEpisode),
+      ),
+    }),
+    [rows, targetSeason, targetEpisode],
   );
 
   // Roving tabindex mirroring the stream list — headers never take the stop.
@@ -1205,7 +1190,7 @@ export function StreamPackEpisodeList({
     const progressPercent = watchEntry
       ? getWatchProgressPercent(watchEntry.position, watchEntry.duration)
       : 0;
-    const airDate = formatAirDate(ep.releaseDate);
+    const airDate = formatAirDate(ep.releaseDate, localDay);
     const isPending =
       disabled &&
       episodeMatchesCoordinates(
@@ -1395,6 +1380,7 @@ export function StreamPackEpisodeList({
               variant='outline'
               size='sm'
               aria-disabled={disabled || undefined}
+              className='aria-disabled:pointer-events-none aria-disabled:opacity-50'
               onClick={() => {
                 if (!disabled) onPlayTarget();
               }}

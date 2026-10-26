@@ -9,8 +9,6 @@ use crate::test_helpers::test_episode;
 fn episode(season: u32, episode: u32) -> Episode {
     Episode {
         title: Some(format!("Episode {}", episode)),
-        release_date: None,
-        stream_lookup_id: None,
         ..test_episode(&format!("{}:{}", season, episode), season, episode)
     }
 }

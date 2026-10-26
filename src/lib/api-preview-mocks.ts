@@ -35,6 +35,7 @@ let previewProfilePreferences: ProfilePreferences = {
       progress: true,
       artwork: true,
       skip: true,
+      seekbar: false,
     },
   },
   viewMode: 'grid',
@@ -135,6 +136,7 @@ const EMPTY_SEARCH_CATALOG_PAGE = {
 };
 
 const EMPTY_STREAM_SELECTOR_DATA: StreamSelectorData = {
+  hasEnabledAddons: false,
   streams: [],
   sourceSummaries: [],
   stats: {
@@ -358,9 +360,23 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
     subtitleColor:
       patch.subtitleColor === undefined
         ? current.subtitleColor
-        : ((['gray', 'yellow', 'cyan', 'green', 'red', 'orange', 'blue', 'pink'] as const).find(
-            (color) => color === patch.subtitleColor,
-          ) ?? 'white'),
+        : ((
+            [
+              'ivory',
+              'lavender',
+              'mint',
+              'amber',
+              'gray',
+              'yellow',
+              'cyan',
+              'green',
+              'red',
+              'orange',
+              'blue',
+              'pink',
+              'white',
+            ] as const
+          ).find((color) => color === patch.subtitleColor) ?? 'white'),
     subtitleEdge:
       patch.subtitleEdge === undefined
         ? current.subtitleEdge
@@ -467,6 +483,9 @@ export async function handlePreviewInvoke<T>(
       return previewLaunchAtLogin as T;
     case 'hide_main_window_to_tray':
       return undefined as T;
+    case 'take_pending_app_link':
+    case 'resolve_app_link':
+      return null as T;
     case 'save_app_ui_preferences': {
       const patch = typeof args?.patch === 'object' && args.patch !== null ? args.patch : {};
       mergePreviewAppUiPreferences(patch as Record<string, unknown>);
@@ -624,7 +643,6 @@ export async function handlePreviewInvoke<T>(
             count += 1;
           }
         } else {
-          addPreviewLibraryItem(item);
           previewWatchStatuses[item.id] = status;
           count += 1;
         }
@@ -753,7 +771,7 @@ export async function handlePreviewInvoke<T>(
       previewLists = [];
       return undefined as T;
     case 'get_calendar_events':
-      return { trackedCount: 0, days: [], upcoming: [] } as T;
+      return { trackedCount: 0, missingCount: 0, days: [], upcoming: [] } as T;
     case 'get_title_watch_progress':
       return {
         episodeProgress: {},
@@ -770,7 +788,10 @@ export async function handlePreviewInvoke<T>(
         },
       } as T;
     case 'get_stream_selector_data':
-      return EMPTY_STREAM_SELECTOR_DATA as T;
+      return {
+        ...EMPTY_STREAM_SELECTOR_DATA,
+        hasEnabledAddons: previewAddonConfigs.some((addon) => addon.enabled),
+      } as T;
     case 'get_addon_subtitles':
       return [
         {
@@ -817,10 +838,10 @@ export async function handlePreviewInvoke<T>(
       } as T;
     case 'get_addon_configs':
       return previewAddonConfigs as T;
-    case 'get_addon_url': {
+    case 'get_addon_share_link': {
       const url = previewAddonUrls.get(readStringArg(args, 'id', ''));
       if (url === undefined) throw new Error('Addon not found.');
-      return url as T;
+      return { link: url, includesConfig: false } as T;
     }
     case 'update_addon_configs': {
       const op =

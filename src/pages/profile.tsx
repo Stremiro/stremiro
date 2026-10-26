@@ -23,14 +23,7 @@ import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog';
+import { ConfirmDialog } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -626,7 +619,7 @@ function ProfileLibraryTab({
         </div>
       </div>
 
-      <ConfirmRemoveDialog
+      <ConfirmDialog
         open={confirmBulkRemoveOpen}
         onOpenChange={setConfirmBulkRemoveOpen}
         pending={bulkRemoveFromLibrary.isPending}
@@ -809,7 +802,7 @@ function ProfileHistoryTab({
           isLoading={historyLoading}
           items={filteredHistory}
           errorLabel='your watch history'
-          onRetry={refetchHistory}
+          onRetry={() => void refetchHistory()}
           isRetrying={historyFetching}
           viewMode={viewMode}
           getItemKey={watchProgressItemKey}
@@ -861,7 +854,7 @@ function ProfileHistoryTab({
           }
         />
       </div>
-      <ConfirmRemoveDialog
+      <ConfirmDialog
         open={confirmHistoryRemoveOpen}
         onOpenChange={setConfirmHistoryRemoveOpen}
         pending={bulkRemoveHistory.isPending}
@@ -1020,64 +1013,6 @@ function ProfileHeader({
         </div>
       )}
     </div>
-  );
-}
-
-function ConfirmRemoveDialog({
-  open,
-  onOpenChange,
-  pending,
-  title,
-  description,
-  confirmLabel,
-  confirmDisabled,
-  onConfirm,
-  triggerRef,
-  fallbackRef,
-}: {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  pending: boolean;
-  title: string;
-  description: string;
-  confirmLabel: string;
-  confirmDisabled: boolean;
-  onConfirm: () => void;
-  triggerRef: React.RefObject<HTMLButtonElement | null>;
-  fallbackRef: React.RefObject<HTMLElement | null>;
-}) {
-  return (
-    <Dialog open={open} onOpenChange={(next) => !pending && onOpenChange(next)}>
-      <DialogContent
-        className='border-white/10 bg-zinc-950 sm:max-w-md'
-        onEscapeKeyDown={(event) => pending && event.preventDefault()}
-        onPointerDownOutside={(event) => pending && event.preventDefault()}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          const trigger = triggerRef.current;
-          (trigger && !trigger.disabled ? trigger : fallbackRef.current)?.focus({
-            preventScroll: true,
-          });
-        }}
-      >
-        <DialogHeader>
-          <DialogTitle>{title}</DialogTitle>
-          <DialogDescription>{description}</DialogDescription>
-        </DialogHeader>
-        <DialogFooter>
-          <Button variant='outline' disabled={pending} onClick={() => onOpenChange(false)}>
-            Cancel
-          </Button>
-          <Button
-            disabled={confirmDisabled || pending}
-            onClick={onConfirm}
-            className='border border-rose-500/25 bg-rose-500/15 text-rose-200 hover:bg-rose-500/25'
-          >
-            {pending ? 'Removing…' : confirmLabel}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
   );
 }
 

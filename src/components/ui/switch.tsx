@@ -1,11 +1,6 @@
 import { Check } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
-/**
- * Checkbox-style switch instead of a sliding knob: one compact square that fills
- * with the accent when on, so a column of toggles reads as a checklist rather
- * than a row of sliders.
- */
 export function Switch({
   ariaDescribedBy,
   ariaLabel,

@@ -17,7 +17,7 @@ export function trackPendingAppWrite<T>(write: Promise<T>): Promise<T> {
 }
 
 export function trackNoncriticalAppWrite<T>(write: Promise<T>): Promise<T> {
-  trackPendingAppWrite(write.catch(() => undefined));
+  void trackPendingAppWrite(write.catch(() => undefined));
   return write;
 }
 
