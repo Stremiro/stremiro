@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react';
-import { type MpvSubtitleProperties, setMpvProperties, setMpvProperty } from '@/lib/player-mpv';
+import { type MpvSubtitleProperties, setMpvProperties } from '@/lib/player-mpv';
 
 export type MpvSetScheduler = (
   property: string,
@@ -12,8 +12,6 @@ interface PendingMpvSet {
   resolve: (value: number | undefined) => void;
   onFailed?: () => void;
 }
-
-type MpvWriteOutcome = 'success' | 'failure' | 'superseded';
 
 // Coalesce slider ticks per property into one animation frame.
 export function useMpvSetScheduler(): MpvSetScheduler {
@@ -46,16 +44,14 @@ export function useMpvSetScheduler(): MpvSetScheduler {
   );
 
   const applyAudio = useCallback(
-    async (property: string, request: PendingMpvSet): Promise<MpvWriteOutcome> => {
-      if (latestRef.current.get(property) !== request) return 'superseded';
+    async (requests: [string, PendingMpvSet][]) => {
+      let failed = false;
       try {
-        await setMpvProperty(property, request.value);
-        settle(property, request);
-        return 'success';
+        await setMpvProperties(requests.map(([name, request]) => [name, request.value]));
       } catch {
-        settle(property, request, undefined, true);
-        return 'failure';
+        failed = true;
       }
+      for (const [name, request] of requests) settle(name, request, undefined, failed);
     },
     [settle],
   );
@@ -69,27 +65,20 @@ export function useMpvSetScheduler(): MpvSetScheduler {
         // Muting stays immediate and cancels any queued unmute.
         if (property === 'mute' && value === true) {
           pendingRef.current.delete(property);
-          void applyAudio(property, nextRequest);
+          void applyAudio([[property, nextRequest]]);
           return;
         }
         pendingRef.current.set(property, nextRequest);
         if (frameRef.current !== null) return;
         frameRef.current = window.requestAnimationFrame(() => {
           frameRef.current = null;
-          const volume = pendingRef.current.get('volume');
-          const mute = pendingRef.current.get('mute');
-          pendingRef.current.delete('volume');
-          pendingRef.current.delete('mute');
-          // Unmute only after native volume succeeds; newer mutes invalidate it.
-          const volumeWrite = volume ? applyAudio('volume', volume) : undefined;
-          if (mute) {
-            if (volumeWrite)
-              void volumeWrite.then((outcome) => {
-                if (outcome === 'success') return applyAudio('mute', mute);
-                settle('mute', mute, undefined, true);
-              });
-            else void applyAudio('mute', mute);
+          const audio: [string, PendingMpvSet][] = [];
+          for (const name of ['volume', 'mute']) {
+            const request = pendingRef.current.get(name);
+            if (request) audio.push([name, request]);
+            pendingRef.current.delete(name);
           }
+          if (audio.length > 0) void applyAudio(audio);
           if (pendingRef.current.size === 0) return;
           const requests = [...pendingRef.current];
           pendingRef.current.clear();

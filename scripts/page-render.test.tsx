@@ -61,6 +61,119 @@ const { createPlaybackClock } = await import('../src/lib/player-clock');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
+const { usePlayerTrackController } = await import('../src/hooks/use-player-track-controller');
+const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
+
+test('Volume and unmute share one native batch with no delayed unmute after a newer mute', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  const frames: FrameRequestCallback[] = [];
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: {
+      requestAnimationFrame: (callback: FrameRequestCallback) => {
+        frames.push(callback);
+        return 1;
+      },
+      cancelAnimationFrame: () => {},
+    },
+  });
+  const pending = Promise.withResolvers<[]>();
+  const batch = spyOn(playerMpv, 'setMpvProperties')
+    .mockImplementationOnce(() => pending.promise)
+    .mockResolvedValue([]);
+  const single = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+  const controller = Promise.withResolvers<ReturnType<typeof useMpvSetScheduler>>();
+  const writes: Promise<unknown>[] = [];
+  function AudioFixture() {
+    controller.resolve(useMpvSetScheduler());
+    return null;
+  }
+  try {
+    renderToStaticMarkup(<AudioFixture />);
+    const schedule = await controller.promise;
+    writes.push(schedule('volume', 20), schedule('mute', false));
+    frames.shift()?.(0);
+    expect(batch).toHaveBeenCalledWith([
+      ['volume', 20],
+      ['mute', false],
+    ]);
+    writes.push(schedule('mute', true));
+    expect(batch).toHaveBeenLastCalledWith([['mute', true]]);
+    pending.resolve([]);
+    await Promise.all(writes);
+    expect(batch).toHaveBeenCalledTimes(2);
+    expect(single).not.toHaveBeenCalled();
+  } finally {
+    pending.resolve([]);
+    await Promise.allSettled(writes);
+    batch.mockRestore();
+    single.mockRestore();
+    if (descriptor) Object.defineProperty(globalThis, 'window', descriptor);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test('Manual subtitles Off blocks a late automatic addon subtitle selection', async () => {
+  const client = new QueryClient();
+  const embedded = { id: 1, type: 'sub' as const, displayLabel: 'English' };
+  const subtitle = {
+    id: 'external',
+    selectionKey: 'external',
+    url: 'https://example.com/sub.srt',
+    lang: 'en',
+    label: 'English',
+    mpvTitle: 'English',
+    sourceId: 'addon',
+    sourceName: 'Addon',
+  };
+  const tracks = spyOn(playerMpv, 'readPlayerTrackList')
+    .mockResolvedValueOnce([embedded])
+    .mockResolvedValue([
+      embedded,
+      { ...embedded, id: 2, selected: true, external: true, externalFilename: subtitle.url },
+    ]);
+  const count = spyOn(playerMpv, 'readPlayerTrackCount')
+    .mockResolvedValueOnce(1)
+    .mockResolvedValue(2);
+  const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue();
+  const write = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+  const save = spyOn(api, 'saveSelectedPlaybackLanguagePreference').mockResolvedValue({
+    preferences: { preferredSubtitleLanguage: 'off' },
+  });
+  const controller = Promise.withResolvers<ReturnType<typeof usePlayerTrackController>>();
+  function TrackFixture() {
+    controller.resolve(
+      usePlayerTrackController({
+        mediaId: 'local',
+        mediaType: 'movie',
+        activeStreamUrl: 'https://example.com/video',
+        hasPlaybackStarted: true,
+        isLoading: false,
+        isResolving: false,
+        resetKey: 'manual-off',
+      }),
+    );
+    return null;
+  }
+  try {
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <TrackFixture />
+      </QueryClientProvider>,
+    );
+    const player = await controller.promise;
+    await player.refreshTracks();
+    expect(await player.setTrack('sub', 'no', { persistPreference: true })).toBe(true);
+    expect(await player.selectAddonSubtitle(subtitle, { automatic: true })).toBe(false);
+    expect(add).not.toHaveBeenCalled();
+    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+    expect(add).toHaveBeenCalledTimes(1);
+  } finally {
+    await flushPendingAppWrites();
+    for (const spy of [tracks, count, add, write, save]) spy.mockRestore();
+    client.clear();
+  }
+});
 
 test('Startup seeks leave pending resume and the playback clock untouched until mpv is ready', async () => {
   const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();

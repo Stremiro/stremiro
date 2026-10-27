@@ -16,6 +16,7 @@ use crate::providers::fetch_policy::same_origin_for_proxy_headers;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use tauri::{command, AppHandle, Manager, Window};
 use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
@@ -57,6 +58,17 @@ const MPV_COMMAND_MAX_ARGS: usize = 8;
 const MPV_ARG_MAX_CHARS: usize = 4096;
 static MPV_OP_GATE: LazyLock<Arc<tokio::sync::Mutex<()>>> =
     LazyLock::new(|| Arc::new(tokio::sync::Mutex::new(())));
+static MPV_MUTE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+fn next_mute_write_epoch() -> u64 {
+    MPV_MUTE_EPOCH
+        .fetch_add(1, Ordering::SeqCst)
+        .wrapping_add(1)
+}
+
+fn mute_write_is_current(epoch: Option<u64>) -> bool {
+    epoch.is_none_or(|epoch| MPV_MUTE_EPOCH.load(Ordering::SeqCst) == epoch)
+}
 /// Last applied `http-header-fields`: mpv sends this global option with every
 /// new HTTP request, including subtitles fetched from other hosts.
 static MPV_STREAM_HEADER_FIELDS: Mutex<String> = Mutex::new(String::new());
@@ -332,7 +344,13 @@ pub async fn player_mpv_command(
         };
         normalize_mpv_subtitle_property(property.as_str().unwrap_or_default(), value);
     }
+    let mute_epoch = (name == "set" && args.first().and_then(Value::as_str) == Some("mute"))
+        .then(next_mute_write_epoch);
     run_mpv_op("command", move || {
+        if args.get(1).and_then(Value::as_bool) == Some(false) && !mute_write_is_current(mute_epoch)
+        {
+            return Ok(());
+        }
         let mpv = app.mpv();
         let label = window.label();
         let run = || {
@@ -422,12 +440,21 @@ fn validate_mpv_properties(properties: &[(String, Value)]) -> Result<(), String>
 
 fn apply_mpv_properties(
     properties: &[(String, Value)],
+    mute_epoch: Option<u64>,
     mut set_property: impl FnMut(&str, &Value) -> Result<(), String>,
 ) -> Result<(), String> {
     let mut first_error = None;
-    // Independent display writes still run when one property is unsupported.
+    let mut volume_failed = false;
     for (name, value) in properties {
+        // Failed volume or a newer mute must not expose an obsolete, possibly louder volume.
+        if name == "mute"
+            && value.as_bool() == Some(false)
+            && (volume_failed || !mute_write_is_current(mute_epoch))
+        {
+            continue;
+        }
         let result = set_property(name, value);
+        volume_failed |= name == "volume" && result.is_err();
         if first_error.is_none() {
             first_error = result.err();
         }
@@ -489,7 +516,7 @@ pub async fn player_mpv_set_audio_settings(
 ) -> Result<(), String> {
     let properties = mpv_audio_properties(audio_delay, night_mode);
     run_mpv_op("audio settings", move || {
-        apply_mpv_properties(&properties, |name, value| {
+        apply_mpv_properties(&properties, None, |name, value| {
             set_native_mpv_property(&app, window.label(), name, value)
         })
     })
@@ -570,7 +597,7 @@ pub async fn player_mpv_set_subtitle_appearance(
 ) -> Result<(), String> {
     let properties = mpv_subtitle_appearance_properties(font, color, edge, bold, italic);
     run_mpv_op("subtitle appearance", move || {
-        apply_mpv_properties(&properties, |name, value| {
+        apply_mpv_properties(&properties, None, |name, value| {
             set_native_mpv_property(&app, window.label(), name, value)
         })
     })
@@ -588,8 +615,12 @@ pub async fn player_mpv_set_properties(
         subtitle_properties: Vec::new(),
     })?;
     let subtitle_properties = normalize_mpv_subtitle_properties(&mut properties);
+    let mute_epoch = properties
+        .iter()
+        .any(|(name, _)| name == "mute")
+        .then(next_mute_write_epoch);
     let result = run_mpv_op("set", move || {
-        apply_mpv_properties(&properties, |name, value| {
+        apply_mpv_properties(&properties, mute_epoch, |name, value| {
             set_native_mpv_property(&app, window.label(), name, value)?;
             remember_stream_header_fields(name, value);
             Ok(())

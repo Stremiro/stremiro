@@ -90,6 +90,8 @@ pub struct AppUiPreferences {
     #[serde(default)]
     pub night_mode: bool,
     pub spoiler_protection: bool,
+    #[serde(default)]
+    pub calendar_hide_watched: bool,
     /// Subtitle tuning persisted across the per-episode player remount (a release group's offset is constant).
     pub subtitle_delay: f64,
     pub subtitle_pos: f64,
@@ -176,6 +178,7 @@ pub struct AppUiPreferencesPatch {
     pub audio_delay: Option<f64>,
     pub night_mode: Option<bool>,
     pub spoiler_protection: Option<bool>,
+    pub calendar_hide_watched: Option<bool>,
     pub subtitle_delay: Option<f64>,
     pub subtitle_pos: Option<f64>,
     pub subtitle_scale: Option<f64>,
@@ -216,6 +219,8 @@ pub(super) struct StoredAppUiPreferences {
     night_mode: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     spoiler_protection: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_option")]
+    calendar_hide_watched: Option<bool>,
     #[serde(default, deserialize_with = "lenient_option")]
     subtitle_delay: Option<f64>,
     #[serde(default, deserialize_with = "lenient_option")]
@@ -422,6 +427,9 @@ pub(crate) fn apply_app_ui_preferences_patch(
         spoiler_protection: patch
             .spoiler_protection
             .unwrap_or(current.spoiler_protection),
+        calendar_hide_watched: patch
+            .calendar_hide_watched
+            .unwrap_or(current.calendar_hide_watched),
         subtitle_delay: patch.subtitle_delay.unwrap_or(current.subtitle_delay),
         subtitle_pos: patch.subtitle_pos.unwrap_or(current.subtitle_pos),
         subtitle_scale: patch.subtitle_scale.unwrap_or(current.subtitle_scale),
@@ -466,6 +474,7 @@ pub(super) fn normalize_stored_app_ui_preferences(
         audio_delay: normalize_audio_delay(preferences.audio_delay),
         night_mode: preferences.night_mode.unwrap_or(false),
         spoiler_protection: preferences.spoiler_protection.unwrap_or(false),
+        calendar_hide_watched: preferences.calendar_hide_watched.unwrap_or(false),
         subtitle_delay: normalize_subtitle_delay(preferences.subtitle_delay),
         subtitle_pos: normalize_subtitle_pos(preferences.subtitle_pos),
         subtitle_scale: normalize_subtitle_scale(preferences.subtitle_scale),

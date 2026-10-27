@@ -639,10 +639,6 @@ export function useToggleLibraryItem(options: UseMediaCollectionActionsOptions) 
 
       await queryClient.cancelQueries({ queryKey: LIBRARY_QUERY_KEY });
       setCachedLibraryMembership(queryClient, savedItem ?? item, savedItem !== null);
-      notifyAction(savedItem ? 'Added to Library' : 'Removed from Library', {
-        detail: item.title,
-        thumb: item.poster,
-      });
     },
     onSettled: (_data, error, { isInLibrary }) =>
       reconcileCollectionQueries(queryClient, 'library-membership', error != null, isInLibrary),
@@ -1181,11 +1177,6 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
             : summary,
         ),
       );
-      if (!selectedItem) return;
-      notifyAction(`${action === 'added' ? 'Added to' : 'Removed from'} "${list.name}"`, {
-        detail: selectedItem.title,
-        thumb: selectedItem.poster,
-      });
     },
     onError: (error, { list }, context) => {
       restoreCachedListItems(queryClient, list.id, context);
@@ -1205,10 +1196,6 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
         return old?.some((entry) => entry.id === list.id)
           ? old.map((entry) => (entry.id === list.id ? summary : entry))
           : old && [...old, summary];
-      });
-      notifyAction(`Added to "${list.name}"`, {
-        detail: item.title,
-        thumb: item.poster,
       });
     } catch (error) {
       notifyAction(`List created, but couldn't add "${item.title}"`, {

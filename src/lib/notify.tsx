@@ -3,21 +3,28 @@ import type { ReactNode } from 'react';
 import { toast } from 'sonner';
 import { ActionToast, type ActionToastOptions } from '@/components/action-toast';
 
+interface CopyTextFeedback {
+  /** Omit when the trigger shows its own copied state. */
+  success?: string;
+  successDetail?: string;
+  failure?: string;
+}
+
 export async function copyText(
   text: string,
-  successMessage: string,
-  failureMessage = 'Could not copy link',
-  successDetail?: string,
+  { success, successDetail, failure = 'Could not copy link' }: CopyTextFeedback = {},
 ): Promise<boolean> {
   try {
     await navigator.clipboard.writeText(text);
-    notifyAction(successMessage, {
-      detail: successDetail,
-      icon: <ClipboardCheck aria-hidden='true' className='size-4 text-emerald-300' />,
-    });
+    if (success) {
+      notifyAction(success, {
+        detail: successDetail,
+        icon: <ClipboardCheck aria-hidden='true' className='size-4 text-emerald-300' />,
+      });
+    }
     return true;
   } catch {
-    notifyAction(failureMessage, { tone: 'error' });
+    notifyAction(failure, { tone: 'error' });
     return false;
   }
 }

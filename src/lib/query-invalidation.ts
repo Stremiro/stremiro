@@ -5,6 +5,8 @@ import { nonBlank } from '@/lib/utils';
 export const LIBRARY_QUERY_KEY = ['library'] as const;
 export const LIBRARY_GENRES_QUERY_KEY = [...LIBRARY_QUERY_KEY, 'genres'] as const;
 export const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
+// Reads library, statuses and history; kept off the profile-library prefix, whose entries are ProfileLibrary.
+export const WATCHLIST_QUERY_KEY = ['watchlist'] as const;
 export function profileLibraryQueryKey(filters: LibraryFilters) {
   return [...PROFILE_LIBRARY_QUERY_KEY, filters] as const;
 }
@@ -100,6 +102,7 @@ export function calendarEventsQueryKey(range: CalendarRange) {
     range.visibleStart,
     range.visibleEnd,
     range.upcomingStart,
+    range.hideWatched,
   ] as const;
 }
 
@@ -148,6 +151,7 @@ export async function invalidateLibraryQueries(
       ? invalidateQuery(queryClient, LIBRARY_QUERY_KEY)
       : invalidateQuery(queryClient, LIBRARY_GENRES_QUERY_KEY),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
+    invalidateQuery(queryClient, WATCHLIST_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),
     invalidateQuery(queryClient, LIST_SUMMARIES_QUERY_KEY),
     watchStatusChanged && invalidateQuery(queryClient, WATCH_STATUSES_QUERY_KEY),
@@ -164,6 +168,7 @@ async function invalidateHistoryCollections(
   if (refreshSimilar) void invalidateQuery(queryClient, trendingRowQueryKey('similar'));
   await Promise.all([
     invalidateQuery(queryClient, WATCH_HISTORY_QUERY_KEY),
+    invalidateQuery(queryClient, WATCHLIST_QUERY_KEY),
     refetchTitleProgress
       ? invalidateQuery(
           queryClient,

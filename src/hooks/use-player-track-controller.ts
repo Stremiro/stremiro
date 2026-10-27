@@ -537,7 +537,11 @@ export function usePlayerTrackController({
     subtitle: AddonSubtitle,
     { automatic }: { automatic?: boolean } = {},
   ): Promise<boolean> => {
-    if (trackSwitchingRef.current.sub) {
+    // Manual choices win before their preference update reaches the next render.
+    if (
+      trackSwitchingRef.current.sub ||
+      (automatic && manualTrackPreferencesRef.current.sub !== null)
+    ) {
       return false;
     }
 

@@ -26,8 +26,9 @@ import { SearchInput } from '@/components/ui/search-input';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useAppUpdater } from '@/hooks/use-app-updater';
 import { useDocumentTitle } from '@/hooks/use-document-title';
+import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
-import { PLAYER_ACTIONS } from '@/lib/player-keybindings';
+import { ariaKeyShortcuts, formatBindingKey, PLAYER_ACTIONS } from '@/lib/player-keybindings';
 import {
   SUBTITLE_COLOR_OPTIONS,
   SUBTITLE_EDGE_OPTIONS,
@@ -99,7 +100,7 @@ const NAV_ITEMS = [
       {
         label: 'Manage addons',
         keywords:
-          'Enable disable reorder remove copy addon link Cinemeta OpenSubtitles pinned defaults drag stream priority',
+          'Enable disable reorder remove copy addon link Configure configuration options account Cinemeta OpenSubtitles pinned defaults drag stream priority',
         target: 'setting-addon-list',
       },
     ],
@@ -155,10 +156,10 @@ const NAV_ITEMS = [
         label: 'Auto-play next episode',
         keywords: 'Count down and start the next episode automatically.',
       },
-      { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30' },
+      { label: 'Next episode countdown', keywords: 'Seconds 5 8 10 15 30 auto-play timer' },
       {
-        label: 'Controls after keyboard input',
-        keywords: 'Hide player controls after Seconds 2 3 5 8 delay',
+        label: 'Hide controls after keyboard input',
+        keywords: 'Player controls overlay timeout Seconds 2 3 5 8 delay mouse inactivity',
       },
       {
         label: 'Auto-skip intros & recaps',
@@ -379,10 +380,21 @@ export function Settings() {
   const navRef = useRef<HTMLElement>(null);
   const navButtons = useRef(new Map<SectionId, HTMLButtonElement>());
   const indicator = useSlidingIndicator(active, navRef, navButtons);
+  const keymap = usePlayerKeymap();
+  // Rebindable actions are also found by their current keys ("space", "m", "left").
+  const boundKeyText = new Map(
+    PLAYER_ACTIONS.map((action) => [
+      `setting-shortcut-${action.id}`,
+      `${keymap.keys[action.id].map(formatBindingKey).join(' ')} ${ariaKeyShortcuts(keymap, action.id) ?? ''}`.toLowerCase(),
+    ]),
+  );
   const searchText = query.trim().toLowerCase();
   const searchWords = searchText.split(/\s+/).filter(Boolean);
   const matches = searchWords.length
-    ? SEARCH_ITEMS.filter((item) => searchWords.every((word) => item.text.includes(word))).toSorted(
+    ? SEARCH_ITEMS.filter((item) => {
+        const text = `${item.text} ${(item.target && boundKeyText.get(item.target)) ?? ''}`;
+        return searchWords.every((word) => text.includes(word));
+      }).toSorted(
         (a, b) =>
           Number(b.labelText.includes(searchText)) - Number(a.labelText.includes(searchText)),
       )

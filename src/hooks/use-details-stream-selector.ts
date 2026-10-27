@@ -47,13 +47,6 @@ export function useDetailsStreamSelector({
   const getStreamTargetStartTime = () => streamTarget?.startTime;
 
   const preferredStreamId = item?.imdbId || item?.id;
-  const itemId = item?.id;
-  const itemTitle = item?.title;
-  const itemDescription = item?.description;
-  const itemPoster = item?.poster;
-  const itemBackdrop = item?.backdrop;
-  const itemLogo = item?.logo;
-  const itemEpisodes = item?.episodes;
 
   // Forwarded into the player route so Back→details→Back reaches the real
   // origin instead of dead-ending on the details route.
@@ -66,35 +59,29 @@ export function useDetailsStreamSelector({
   // One builder for the fields every details-launched target shares.
   const buildBaseTarget = (): DetailsStreamSelectorTarget => ({
     type: streamSelectorType,
-    id: itemId ?? '',
+    id: item?.id ?? '',
     originFrom: detailsOriginFrom,
-    poster: itemPoster,
-    backdrop: itemBackdrop,
-    logo: itemLogo,
-    episodes: itemEpisodes,
+    poster: item?.poster,
+    backdrop: item?.backdrop,
+    logo: item?.logo,
+    episodes: item?.episodes,
     from: currentPathWithSearch(),
-    title: '',
+    title: item?.title ?? '',
+    overview: item?.description,
   });
 
   const handleWatchMovie = (startTime?: number) => {
-    if (!itemId || !preferredStreamId) return;
+    if (!item?.id || !preferredStreamId) return;
     setStreamTarget({
       ...buildBaseTarget(),
       streamId: preferredStreamId,
-      title: itemTitle ?? '',
-      overview: itemDescription,
       startTime,
     });
     setStreamSelectorOpen(true);
   };
 
-  const openEpisodeStreamSelector = (
-    episodeInput: Episode,
-    options?: {
-      startTime?: number;
-    },
-  ): boolean => {
-    if (!itemId || !preferredStreamId) return false;
+  const openEpisodeStreamSelector = (episodeInput: Episode, startTime?: number): boolean => {
+    if (!item?.id || !preferredStreamId) return false;
 
     const target = buildEpisodeStreamTarget(preferredStreamId, episodeInput);
     const epProgress =
@@ -115,15 +102,13 @@ export function useDetailsStreamSelector({
       episode: target.streamEpisode,
       absoluteSeason: target.absoluteSeason,
       absoluteEpisode: target.absoluteEpisode,
-      // Bare title — the header owns the S/E label and player chrome re-adds it.
-      title: itemTitle ?? '',
       episodeTitle: getEpisodeTitle(
         hideSpoiler ? undefined : episodeInput.title,
         episodeInput.episode,
       ),
       targetMasked: hideSpoiler,
-      overview: hideSpoiler ? itemDescription : episodeInput.overview || itemDescription,
-      startTime: options?.startTime,
+      overview: hideSpoiler ? item.description : episodeInput.overview || item.description,
+      startTime,
     });
     setStreamSelectorOpen(true);
     return true;
@@ -147,20 +132,14 @@ export function useDetailsStreamSelector({
         return true;
       }
 
-      const reopenSeason =
-        typeof state.reopenStreamSeason === 'number' ? state.reopenStreamSeason : undefined;
-      const reopenEpisode =
-        typeof state.reopenStreamEpisode === 'number' ? state.reopenStreamEpisode : undefined;
-
-      if (reopenSeason === undefined || reopenEpisode === undefined) {
+      const { reopenStreamSeason: season, reopenStreamEpisode: episode } = state;
+      if (typeof season !== 'number' || typeof episode !== 'number') {
         return false;
       }
 
-      // One owner for "open the selector at S/E": episode lookup plus the target payload.
-      const targetEpisode = findEpisodeByCoordinates(itemEpisodes, reopenSeason, reopenEpisode);
       return openEpisodeStreamSelector(
-        targetEpisode ?? { id: '', season: reopenSeason, episode: reopenEpisode },
-        { startTime },
+        findEpisodeByCoordinates(item.episodes, season, episode) ?? { id: '', season, episode },
+        startTime,
       );
     },
   );

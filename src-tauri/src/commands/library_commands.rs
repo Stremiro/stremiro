@@ -1,4 +1,5 @@
 use super::list_helpers::normalize_smart_list_genre;
+use super::playback_state::PlaybackStateService;
 use super::store_helpers::{
     library_item_key, load_library_index, load_library_map, load_watch_status_index,
     merge_library_item, normalize_bulk_ids, normalize_library_item, normalize_watch_status,
@@ -12,14 +13,16 @@ use super::{
 use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use tauri::{command, AppHandle};
+use tauri::{command, AppHandle, State};
 
 /// Bound on the library index: every add rewrites the index key, so an
 /// unbounded index makes every read/write linear in junk entries.
 pub(super) const MAX_LIBRARY_ITEMS: usize = 5_000;
 const TITLE_SEARCH_MAX_TITLES: usize = 10_000;
 const TITLE_SEARCH_MAX_QUERY_CHARS: usize = 4_096;
+const WATCHLIST_LIMIT: usize = 20;
 
 #[derive(Debug)]
 pub(super) enum LibraryWriteError {
@@ -348,6 +351,57 @@ fn read_profile_library(
     filter_profile_library(items, &statuses, filters)
 }
 
+/// Unstarted Plan to Watch titles, newest release first; started ones already
+/// surface in Continue Watching.
+fn watchlist_items(
+    items: impl IntoIterator<Item = MediaItem>,
+    statuses: &HashMap<String, String>,
+    started: &HashSet<String>,
+) -> Vec<MediaItem> {
+    let mut items: Vec<_> = items
+        .into_iter()
+        .filter(|item| {
+            statuses.get(&item.id).map(String::as_str) == Some("plan_to_watch")
+                && !started.contains(&item.id)
+        })
+        .collect();
+    items.sort_by_cached_key(|item| {
+        (
+            item.primary_year.is_none(),
+            Reverse(item.primary_year),
+            item.title.to_lowercase(),
+            item.id.clone(),
+        )
+    });
+    items.truncate(WATCHLIST_LIMIT);
+    items
+}
+
+#[command]
+pub async fn get_watchlist(
+    app: AppHandle,
+    playback_state: State<'_, PlaybackStateService>,
+) -> Result<Vec<MediaItem>, String> {
+    let service = playback_state.inner().clone();
+    run_blocking_store_op(move || {
+        let items = read_library_snapshot(&super::open_store(&app, LIBRARY_STORE_FILE)?)?.items;
+        let statuses =
+            read_watch_status_snapshot(&super::open_store(&app, WATCH_STATUS_STORE_FILE)?)?.items;
+        let planned: Vec<_> = statuses
+            .iter()
+            .filter(|(id, status)| status.as_str() == "plan_to_watch" && items.contains_key(*id))
+            .map(|(id, _)| id.as_str())
+            .collect();
+        let started = service
+            .load_latest_resume_title_identities(&app, &planned)?
+            .into_iter()
+            .map(|title| title.id)
+            .collect();
+        Ok(watchlist_items(items.into_values(), &statuses, &started))
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::super::store_helpers::watch_status_item_key;
@@ -559,6 +613,34 @@ mod tests {
         assert!(library_status_counts([], &profile_statuses())
             .values()
             .all(|count| *count == 0));
+    }
+
+    #[test]
+    fn watchlist_keeps_unstarted_plan_to_watch_newest_first_and_caps() {
+        let statuses: HashMap<_, _> = ["z", "b", "a", "u", "j"]
+            .into_iter()
+            .map(|id| (id.to_string(), "plan_to_watch".to_string()))
+            .chain([("outside".to_string(), "plan_to_watch".to_string())])
+            .collect();
+        let ids = |started: &[&str], statuses: &HashMap<String, String>| {
+            let started = started.iter().map(|id| id.to_string()).collect();
+            watchlist_items(profile_items(), statuses, &started)
+                .into_iter()
+                .map(|item| item.id)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(ids(&[], &statuses), ["a", "z", "b", "u", "j"]);
+        assert_eq!(ids(&["z", "u"], &statuses), ["a", "b", "j"]);
+        assert!(ids(&[], &profile_statuses()).is_empty());
+        let many =
+            (0..WATCHLIST_LIMIT + 5).map(|index| test_media_item(&format!("m{index}"), "movie"));
+        let many_statuses = (0..WATCHLIST_LIMIT + 5)
+            .map(|index| (format!("m{index}"), "plan_to_watch".to_string()))
+            .collect();
+        assert_eq!(
+            watchlist_items(many, &many_statuses, &HashSet::new()).len(),
+            WATCHLIST_LIMIT
+        );
     }
 
     #[test]

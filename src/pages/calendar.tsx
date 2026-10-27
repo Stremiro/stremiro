@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Channel } from '@tauri-apps/api/core';
-import { CalendarDays, ChevronLeft, ChevronRight, WifiOff } from 'lucide-react';
+import { CalendarDays, Check, ChevronLeft, ChevronRight, Eye, EyeOff, WifiOff } from 'lucide-react';
 import { Fragment, memo, useEffect, useEffectEvent, useRef } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
 import { PosterThumb } from '@/components/poster-thumb';
@@ -9,10 +9,16 @@ import { Button } from '@/components/ui/button';
 import { HoverCard, HoverCardContent, HoverCardTrigger } from '@/components/ui/hover-card';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useOnlineStatus } from '@/hooks/use-online-status';
-import { api, type CalendarSchedule, type CalendarScheduleEvent } from '@/lib/api';
+import {
+  api,
+  type AppUiPreferences,
+  type CalendarSchedule,
+  type CalendarScheduleEvent,
+} from '@/lib/api';
 import { calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
@@ -57,16 +63,38 @@ function formatEventDayLabel(date: Temporal.PlainDate, today: Temporal.PlainDate
   return SHORT_DATE_FORMATTER.format(date);
 }
 
+const selectCalendarPreferences = (preferences: AppUiPreferences) => ({
+  spoilerProtection: preferences.spoilerProtection,
+  hideWatched: preferences.calendarHideWatched,
+});
+
+const visibleEpisodeTitle = (event: CalendarEvent, hideSpoilers: boolean) =>
+  hideSpoilers && !event.seen ? undefined : event.title;
+
+function WatchedMark() {
+  return (
+    <Check aria-hidden='true' className='size-3 shrink-0 text-(--accent-act)' strokeWidth={2.5} />
+  );
+}
+
+const WATCHED_EVENT_CLASS =
+  'opacity-55 hover:opacity-100 focus-visible:opacity-100 transition-opacity motion-reduce:transition-none';
+
 function calendarEventLinkProps(
   event: CalendarEvent,
   from: string,
   onPrefetch: (event: CalendarEvent) => void,
+  hideSpoilers: boolean,
 ) {
   const detail =
     event.type === 'episode'
-      ? formatEpisodeHeading(event.season, event.episode, event.title) || 'Episode'
+      ? formatEpisodeHeading(
+          event.season,
+          event.episode,
+          visibleEpisodeTitle(event, hideSpoilers),
+        ) || 'Episode'
       : 'Movie';
-  const label = `${event.seriesTitle} — ${detail} — ${FULL_DATE_FORMATTER.format(event.date)}`;
+  const label = `${event.seriesTitle} — ${detail} — ${FULL_DATE_FORMATTER.format(event.date)}${event.watched ? ' — Watched' : ''}`;
   return {
     to: buildDetailsRoute(event.mediaType, event.mediaId),
     state:
@@ -102,6 +130,12 @@ export function Calendar() {
   const { pathname, search } = useLocation();
   const from = `${pathname}${search}`;
   useDocumentTitle('Calendar');
+  const {
+    preferences: { spoilerProtection, hideWatched },
+    isHydrating: isHydratingPreferences,
+    updatePreferences,
+  } = useAppUiPreferences(selectCalendarPreferences);
+  const hideSpoilers = spoilerProtection || isHydratingPreferences;
 
   const visibleStart = currentMonth.subtract({ days: currentMonth.dayOfWeek % 7 });
   const lastDay = currentMonth.with({ day: currentMonth.daysInMonth });
@@ -113,6 +147,7 @@ export function Calendar() {
     visibleStart: visibleStart.toString(),
     visibleEnd: visibleEnd.toString(),
     upcomingStart: now.toString(),
+    hideWatched,
   };
   const {
     data: schedule,
@@ -234,55 +269,77 @@ export function Calendar() {
           <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
         </div>
 
-        <div
-          role='group'
-          aria-label='Calendar navigation'
-          className='flex w-full md:w-auto items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-1'
-        >
-          <Button
-            variant='ghost'
-            size='icon'
-            onClick={handlePrevMonth}
-            aria-label='Previous month'
-            aria-keyshortcuts='ArrowLeft'
-            title='Previous month (←)'
-            className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
-          >
-            <ChevronLeft className='w-3.5 h-3.5' />
-          </Button>
-          <div
-            className='px-1 font-medium text-[13px] flex-1 md:min-w-[130px] text-center text-zinc-200 tabular-nums'
-            aria-live='polite'
-          >
-            {MONTH_YEAR_FORMATTER.format(currentMonth)}
-          </div>
-          <Button
-            variant='ghost'
-            size='icon'
-            onClick={handleNextMonth}
-            aria-label='Next month'
-            aria-keyshortcuts='ArrowRight'
-            title='Next month (→)'
-            className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
-          >
-            <ChevronRight className='w-3.5 h-3.5' />
-          </Button>
+        <div className='flex w-full md:w-auto items-stretch gap-2'>
           <Button
             variant='ghost'
             size='sm'
-            aria-label='Jump to today'
-            aria-keyshortcuts='T'
-            onClick={handleToday}
-            title='Jump to today (T)'
+            aria-pressed={hideWatched}
+            onClick={() => updatePreferences({ calendarHideWatched: !hideWatched })}
+            title={hideWatched ? 'Show watched releases' : 'Hide watched releases'}
             className={cn(
-              'ml-1 text-[12px] font-medium rounded-md h-9 px-3 border',
-              isCurrentMonthView
+              'h-auto shrink-0 gap-1.5 rounded-lg border px-3 text-[12px] font-medium',
+              hideWatched
                 ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
-                : 'border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.06]',
+                : 'border-white/[0.08] bg-white/[0.025] text-zinc-400 hover:bg-white/[0.06] hover:text-white',
             )}
           >
-            Today
+            {hideWatched ? (
+              <EyeOff aria-hidden='true' className='h-3.5 w-3.5' />
+            ) : (
+              <Eye aria-hidden='true' className='h-3.5 w-3.5' />
+            )}
+            Hide watched
           </Button>
+          <div
+            role='group'
+            aria-label='Calendar navigation'
+            className='flex flex-1 md:flex-none items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-1'
+          >
+            <Button
+              variant='ghost'
+              size='icon'
+              onClick={handlePrevMonth}
+              aria-label='Previous month'
+              aria-keyshortcuts='ArrowLeft'
+              title='Previous month (←)'
+              className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+            >
+              <ChevronLeft className='w-3.5 h-3.5' />
+            </Button>
+            <div
+              className='px-1 font-medium text-[13px] flex-1 md:min-w-[130px] text-center text-zinc-200 tabular-nums'
+              aria-live='polite'
+            >
+              {MONTH_YEAR_FORMATTER.format(currentMonth)}
+            </div>
+            <Button
+              variant='ghost'
+              size='icon'
+              onClick={handleNextMonth}
+              aria-label='Next month'
+              aria-keyshortcuts='ArrowRight'
+              title='Next month (→)'
+              className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+            >
+              <ChevronRight className='w-3.5 h-3.5' />
+            </Button>
+            <Button
+              variant='ghost'
+              size='sm'
+              aria-label='Jump to today'
+              aria-keyshortcuts='T'
+              onClick={handleToday}
+              title='Jump to today (T)'
+              className={cn(
+                'ml-1 text-[12px] font-medium rounded-md h-9 px-3 border',
+                isCurrentMonthView
+                  ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
+                  : 'border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.06]',
+              )}
+            >
+              Today
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -389,7 +446,12 @@ export function Calendar() {
                       </time>
                     </h3>
                   )}
-                  <UpcomingEventCard event={event} from={from} onPrefetch={prefetchEventDetails} />
+                  <UpcomingEventCard
+                    event={event}
+                    from={from}
+                    onPrefetch={prefetchEventDetails}
+                    hideSpoilers={hideSpoilers}
+                  />
                 </Fragment>
               ))}
             </div>
@@ -409,7 +471,10 @@ export function Calendar() {
             role='status'
             className='mb-3 flex items-center justify-between gap-3 text-[13px] text-zinc-400'
           >
-            <p>No releases in {MONTH_YEAR_FORMATTER.format(currentMonth)}</p>
+            <p>
+              No {hideWatched ? 'unwatched ' : ''}releases in{' '}
+              {MONTH_YEAR_FORMATTER.format(currentMonth)}
+            </p>
             <Button
               variant='ghost'
               size='sm'
@@ -485,6 +550,7 @@ export function Calendar() {
                       }
                       from={from}
                       onPrefetch={prefetchEventDetails}
+                      hideSpoilers={hideSpoilers}
                     />
                   );
                 })}
@@ -502,15 +568,20 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
   event,
   from,
   onPrefetch,
+  hideSpoilers,
 }: {
   event: CalendarEvent;
   from: string;
   onPrefetch: (event: CalendarEvent) => void;
+  hideSpoilers: boolean;
 }) {
   return (
     <Link
-      {...calendarEventLinkProps(event, from, onPrefetch)}
-      className='group min-w-0 rounded-md p-2 transition-colors duration-150 hover:bg-white/[0.04] focus-visible:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
+      {...calendarEventLinkProps(event, from, onPrefetch, hideSpoilers)}
+      className={cn(
+        'group min-w-0 rounded-md p-2 transition-colors duration-150 hover:bg-white/[0.04] focus-visible:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40',
+        event.watched && WATCHED_EVENT_CLASS,
+      )}
     >
       <div className='flex items-center gap-2.5'>
         <PosterThumb
@@ -520,10 +591,17 @@ const UpcomingEventCard = memo(function UpcomingEventCard({
         />
         <div className='min-w-0 flex-1'>
           <div className='text-[13px] font-medium text-zinc-200 truncate'>{event.seriesTitle}</div>
-          <div className='text-[11px] text-zinc-400 truncate'>
-            {event.type === 'episode'
-              ? formatEpisodeHeading(event.season, event.episode, event.title)
-              : 'Movie'}
+          <div className='flex items-center gap-1 text-[11px] text-zinc-400'>
+            {event.watched && <WatchedMark />}
+            <span className='truncate'>
+              {event.type === 'episode'
+                ? formatEpisodeHeading(
+                    event.season,
+                    event.episode,
+                    visibleEpisodeTitle(event, hideSpoilers),
+                  )
+                : 'Movie'}
+            </span>
           </div>
         </div>
       </div>
@@ -541,6 +619,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
   isComplete,
   from,
   onPrefetch,
+  hideSpoilers,
 }: {
   day: Temporal.PlainDate;
   dayEvents: CalendarEvent[];
@@ -551,6 +630,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
   isComplete: boolean;
   from: string;
   onPrefetch: (event: CalendarEvent) => void;
+  hideSpoilers: boolean;
 }) {
   const visibleDayEvents = dayEvents.slice(0, MAX_VISIBLE_DAY_EVENTS);
   const hiddenCount = dayEvents.length - visibleDayEvents.length;
@@ -622,11 +702,12 @@ const CalendarDayCell = memo(function CalendarDayCell({
             <HoverCard key={calendarEventKey(event)} openDelay={150} closeDelay={120}>
               <HoverCardTrigger asChild>
                 <Link
-                  {...calendarEventLinkProps(event, from, onPrefetch)}
+                  {...calendarEventLinkProps(event, from, onPrefetch, hideSpoilers)}
                   title={undefined}
                   className={cn(
                     'min-h-10 w-full min-w-0 text-left hover:bg-white/[0.06] rounded-md px-1.5 py-1 transition-colors duration-150 flex items-center gap-1.5 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
                     isToday && 'bg-white/[0.035]',
+                    event.watched && WATCHED_EVENT_CLASS,
                   )}
                 >
                   {event.poster && (
@@ -643,11 +724,14 @@ const CalendarDayCell = memo(function CalendarDayCell({
                     </span>
                     <span
                       className={cn(
-                        'block truncate text-[11px] tabular-nums',
+                        'flex items-center gap-1 text-[11px] tabular-nums',
                         isToday ? 'text-[var(--accent-nav)]' : 'text-zinc-400',
                       )}
                     >
-                      {event.type === 'episode' ? episodeLabel || 'Episode' : 'Movie'}
+                      {event.watched && <WatchedMark />}
+                      <span className='truncate'>
+                        {event.type === 'episode' ? episodeLabel || 'Episode' : 'Movie'}
+                      </span>
                     </span>
                   </span>
                 </Link>
@@ -674,7 +758,8 @@ const CalendarDayCell = memo(function CalendarDayCell({
                           {episodeLabel}
                         </p>
                         <p className='text-[11px] text-zinc-500 line-clamp-2 mb-1.5'>
-                          {event.title}
+                          {visibleEpisodeTitle(event, hideSpoilers) ??
+                            'Title hidden to prevent spoilers.'}
                         </p>
                       </>
                     ) : (
@@ -685,6 +770,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
                       {isToday && (
                         <span className='text-[var(--accent-nav)] font-semibold'> · Today</span>
                       )}
+                      {event.watched && <span className='text-zinc-400'> · Watched</span>}
                     </p>
                   </div>
                 </div>
@@ -716,8 +802,11 @@ const CalendarDayCell = memo(function CalendarDayCell({
                 {dayEvents.map((event) => (
                   <Link
                     key={calendarEventKey(event)}
-                    {...calendarEventLinkProps(event, from, onPrefetch)}
-                    className='flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30'
+                    {...calendarEventLinkProps(event, from, onPrefetch, hideSpoilers)}
+                    className={cn(
+                      'flex min-h-10 items-center gap-2 rounded-md px-2 py-1.5 hover:bg-white/[0.06] transition-colors focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/30',
+                      event.watched && WATCHED_EVENT_CLASS,
+                    )}
                   >
                     {event.poster && (
                       <PosterThumb
@@ -730,6 +819,7 @@ const CalendarDayCell = memo(function CalendarDayCell({
                     <span className='min-w-0 flex-1 truncate text-[12px] text-zinc-200'>
                       {event.seriesTitle}
                     </span>
+                    {event.watched && <WatchedMark />}
                     <span className='shrink-0 text-[11px] text-zinc-400 tabular-nums'>
                       {event.type === 'episode'
                         ? formatSeasonEpisode(event.season, event.episode)

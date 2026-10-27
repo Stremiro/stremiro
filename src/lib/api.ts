@@ -88,6 +88,7 @@ export interface CalendarRange {
   visibleStart: string;
   visibleEnd: string;
   upcomingStart: string;
+  hideWatched: boolean;
 }
 
 export interface CalendarScheduleEvent {
@@ -101,6 +102,9 @@ export interface CalendarScheduleEvent {
   releaseDate: string;
   poster?: string;
   type: 'movie' | 'episode';
+  watched?: boolean;
+  /** Started, or at/before the furthest watched episode: safe to name under spoiler protection. */
+  seen?: boolean;
 }
 
 export interface CalendarSchedule {
@@ -496,6 +500,7 @@ export interface AppUiPreferences {
   /** Opt-in volume normalization for quieter listening. */
   nightMode: boolean;
   spoilerProtection: boolean;
+  calendarHideWatched: boolean;
   /** Subtitle tuning persists across the per-episode player remount. */
   subtitleDelay: number;
   subtitlePos: number;
@@ -546,6 +551,7 @@ export const DEFAULT_APP_UI_PREFERENCES: AppUiPreferences = {
   audioDelay: 0,
   nightMode: false,
   spoilerProtection: false,
+  calendarHideWatched: false,
   subtitleDelay: 0,
   subtitlePos: 100,
   subtitleScale: 1.0,

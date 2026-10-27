@@ -1,6 +1,8 @@
 import { openUrl } from '@tauri-apps/plugin-opener';
-import { ExternalLink, Loader2, RotateCw, X } from 'lucide-react';
-import { type KeyboardEvent, type RefObject, useEffect, useId, useRef, useState } from 'react';
+import { Trigger as DialogTrigger } from '@radix-ui/react-dialog';
+import { Clapperboard, ExternalLink, Loader2, RotateCw, X } from 'lucide-react';
+import { type KeyboardEvent, useEffect, useId, useRef, useState } from 'react';
+import { preconnect, preload } from 'react-dom';
 import {
   Dialog,
   DialogClose,
@@ -11,11 +13,13 @@ import {
 import type { MediaDetails } from '@/lib/api';
 import { notifyAction } from '@/lib/notify';
 import {
+  buildYouTubeEmbedUrl,
   isYouTubePlayerOrigin,
   isYouTubeReadyEvent,
   parseYouTubeMessage,
   postYouTubeCommand,
   postYouTubeListening,
+  YOUTUBE_EMBED_ORIGIN,
   youTubeThumbnailUrl,
 } from '@/lib/youtube-player';
 import { cn, scrollBehavior } from '@/lib/utils';
@@ -26,19 +30,14 @@ const TRAILER_START_VOLUME = 25;
 const PLAYER_HANDSHAKE_RETRY_MS = 250;
 const PLAYER_HANDSHAKE_BUDGET_MS = 4_000;
 
-interface DetailsTrailerDialogProps {
-  open: boolean;
-  onOpenChange: (open: boolean) => void;
-  trailerUrl: string | null;
+interface DetailsTrailerProps {
   trailers: NonNullable<MediaDetails['trailers']>;
-  selectedTrailerId: string | undefined;
-  onSelectTrailer: (id: string) => void;
   title: string;
-  returnFocusRef: RefObject<HTMLButtonElement | null>;
+  triggerClassName: string;
 }
 
 // Addon names often repeat the title for every entry; number them unless each name stands apart.
-function trailerLabels(trailers: DetailsTrailerDialogProps['trailers'], title: string) {
+function trailerLabels(trailers: DetailsTrailerProps['trailers'], title: string) {
   const names = trailers.map((trailer) => trailer.name?.trim() ?? '');
   const keys = names.map((name) => name.toLowerCase());
   const distinct =
@@ -83,20 +82,23 @@ function useTrailerStartVolume(frame: HTMLIFrameElement | null) {
   }, [frame]);
 }
 
-export function DetailsTrailerDialog({
-  open,
-  onOpenChange,
-  trailerUrl,
-  trailers,
-  selectedTrailerId,
-  onSelectTrailer,
-  title,
-  returnFocusRef,
-}: DetailsTrailerDialogProps) {
-  const selectedIndex = trailers.findIndex((trailer) => trailer.id === selectedTrailerId);
-  const activeIndex = Math.max(0, selectedIndex);
+export function DetailsTrailer({ trailers, title, triggerClassName }: DetailsTrailerProps) {
+  const [open, onOpenChange] = useState(false);
+  const [selectedId, onSelectTrailer] = useState<string>();
+  const returnFocusRef = useRef<HTMLButtonElement>(null);
+  const activeIndex = Math.max(
+    0,
+    trailers.findIndex((trailer) => trailer.id === selectedId),
+  );
   const selectedEntry = trailers[activeIndex];
   const selectedKey = selectedEntry?.id;
+  const trailerUrl = selectedKey
+    ? buildYouTubeEmbedUrl(selectedKey, {
+        autoplay: true,
+        jsApi: true,
+        origin: window.location.origin,
+      })
+    : null;
   const labels = trailerLabels(trailers, title);
   const trailerLabel = labels[activeIndex] ?? 'Trailer';
   const hasPicker = trailers.length > 1;
@@ -111,6 +113,12 @@ export function DetailsTrailerDialog({
   const [delayedFrameKey, setDelayedFrameKey] = useState<string | null>(null);
   const isLoadingTrailer = !!trailerUrl && loadedFrameKey !== frameKey;
   useTrailerStartVolume(frame);
+
+  const warmTrailer = () => {
+    if (!selectedKey) return;
+    preconnect(YOUTUBE_EMBED_ORIGIN);
+    preload(youTubeThumbnailUrl(selectedKey), { as: 'image', fetchPriority: 'low' });
+  };
 
   useEffect(() => {
     setFocusedTrailerId(selectedKey);
@@ -129,9 +137,9 @@ export function DetailsTrailerDialog({
   }, [open, isLoadingTrailer, frameKey]);
 
   const openSelectedTrailer = () => {
-    if (!selectedTrailerId) return;
-    void openUrl(`https://www.youtube.com/watch?v=${encodeURIComponent(selectedTrailerId)}`).catch(
-      () => notifyAction("Couldn't open YouTube", { tone: 'error' }),
+    if (!selectedKey) return;
+    void openUrl(`https://www.youtube.com/watch?v=${encodeURIComponent(selectedKey)}`).catch(() =>
+      notifyAction("Couldn't open YouTube", { tone: 'error' }),
     );
   };
 
@@ -170,6 +178,23 @@ export function DetailsTrailerDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogTrigger asChild>
+        <button
+          ref={returnFocusRef}
+          type='button'
+          aria-label='Watch trailer'
+          title='Trailer'
+          className={cn(triggerClassName, 'w-auto gap-2 px-3')}
+          onPointerEnter={warmTrailer}
+          onFocus={warmTrailer}
+        >
+          <Clapperboard
+            aria-hidden='true'
+            className='w-5 h-5 origin-bottom-left transition-transform duration-200 ease-out group-hover/action:-rotate-12 motion-reduce:transition-none'
+          />
+          <span className='text-[13px] font-medium'>Trailer</span>
+        </button>
+      </DialogTrigger>
       <DialogContent
         hideCloseButton
         onCloseAutoFocus={(event) => {
@@ -189,7 +214,7 @@ export function DetailsTrailerDialog({
             {title}
             <span className='font-normal text-zinc-500'> · {trailerLabel}</span>
           </DialogTitle>
-          {selectedTrailerId && (
+          {selectedKey && (
             <button
               type='button'
               aria-label='Watch on YouTube'
@@ -220,10 +245,10 @@ export function DetailsTrailerDialog({
           tabIndex={hasPicker ? 0 : undefined}
           className='relative aspect-video w-full bg-black focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
         >
-          {selectedTrailerId && (
+          {selectedKey && (
             <img
-              key={selectedTrailerId}
-              src={youTubeThumbnailUrl(selectedTrailerId)}
+              key={selectedKey}
+              src={youTubeThumbnailUrl(selectedKey)}
               alt=''
               aria-hidden='true'
               decoding='async'

@@ -68,7 +68,8 @@ import {
 // home minimum so wide screens fit a full row with no trailing empty slot.
 const SEARCH_RESULTS_CLASS_NAME =
   'grid grid-cols-[repeat(auto-fill,minmax(150px,1fr))] gap-x-4 gap-y-8 sm:grid-cols-[repeat(auto-fill,minmax(170px,1fr))]';
-const SEARCH_RESULT_ITEM_CLASS_NAME = 'min-w-0';
+// Scroll margins keep keyboard-focused cards clear of the fixed compact header.
+const SEARCH_RESULT_ITEM_CLASS_NAME = 'min-w-0 scroll-mt-24 scroll-mb-4';
 
 // Mirrors the auto-fill minmax() rules above so the virtualizer's column count
 // matches the CSS grid exactly.
@@ -117,7 +118,7 @@ const SEARCH_SKELETON_KEYS = Array.from(
 );
 const renderSearchResult = (item: MediaItem, index: number) => (
   <div data-search-result-index={index} className={SEARCH_RESULT_ITEM_CLASS_NAME}>
-    <MediaCard item={item} />
+    <MediaCard item={item} showLibraryMark />
   </div>
 );
 const estimateSearchItemHeight = (itemWidth: number) =>
@@ -685,6 +686,52 @@ export function Search() {
     );
   };
 
+  const moveResultFocus = (event: ReactKeyboardEvent) => {
+    if (
+      !event.key.startsWith('Arrow') ||
+      event.defaultPrevented ||
+      event.nativeEvent.isComposing ||
+      event.ctrlKey ||
+      event.altKey ||
+      event.metaKey ||
+      event.shiftKey ||
+      !(event.target instanceof HTMLElement) ||
+      !event.target.matches('[data-media-card-poster]')
+    )
+      return;
+    const cell = event.target.closest<HTMLElement>('[data-search-result-index]');
+    const row = cell?.parentElement;
+    if (!cell || !row) return;
+    const index = Number(cell.dataset.searchResultIndex);
+    const columns = getComputedStyle(row).gridTemplateColumns.split(' ').length;
+    if (event.key === 'ArrowUp' && index < columns) {
+      event.preventDefault();
+      searchInputRef.current?.focus({ preventScroll: true });
+      resetScroll();
+      return;
+    }
+    const lastIndex = results.length - 1;
+    const target =
+      event.key === 'ArrowLeft'
+        ? index - 1
+        : event.key === 'ArrowRight'
+          ? index + 1
+          : event.key === 'ArrowUp'
+            ? index - columns
+            : Math.floor(index / columns) < Math.floor(lastIndex / columns)
+              ? Math.min(index + columns, lastIndex)
+              : -1;
+    const targetCell =
+      target >= 0 && target <= lastIndex
+        ? resultsRef.current?.querySelector<HTMLElement>(`[data-search-result-index="${target}"]`)
+        : null;
+    const poster = targetCell?.querySelector<HTMLElement>('[data-media-card-poster]');
+    if (!targetCell || !poster) return;
+    event.preventDefault();
+    poster.focus({ preventScroll: true });
+    targetCell.scrollIntoView({ block: 'nearest' });
+  };
+
   const headerEndRef = useRef<HTMLDivElement>(null);
   const compactHeaderRef = useRef<HTMLDivElement>(null);
   const headerPassed = useScrolledPastTitlebar(headerEndRef, compactHeaderRef, searchInputRef);
@@ -1214,23 +1261,7 @@ export function Search() {
             )
               recordQuery();
           }}
-          onKeyDownCapture={(event) => {
-            if (
-              event.key === 'ArrowUp' &&
-              !event.defaultPrevented &&
-              !event.nativeEvent.isComposing &&
-              !event.ctrlKey &&
-              !event.altKey &&
-              !event.metaKey &&
-              event.target instanceof HTMLElement &&
-              event.target.matches('[data-media-card-poster]') &&
-              event.target.closest('[data-search-result-index="0"]')
-            ) {
-              event.preventDefault();
-              searchInputRef.current?.focus({ preventScroll: true });
-              resetScroll();
-            }
-          }}
+          onKeyDownCapture={moveResultFocus}
         >
           <SearchResults
             activeGenre={activeGenre}

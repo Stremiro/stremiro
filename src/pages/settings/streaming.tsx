@@ -76,12 +76,11 @@ function addonMonogram(name: string) {
 async function copyAddonShareLink(addonId: string): Promise<boolean> {
   try {
     const { link, includesConfig } = await api.getAddonShareLink(addonId);
-    return await copyText(
-      link,
-      'Addon link copied',
-      'Could not copy addon link',
-      includesConfig ? 'Includes your addon setup. Share with care.' : undefined,
-    );
+    return await copyText(link, {
+      success: 'Addon link copied',
+      successDetail: includesConfig ? 'Includes your addon setup. Share with care.' : undefined,
+      failure: 'Could not copy addon link',
+    });
   } catch {
     toast.error('Could not copy addon link');
     return false;
@@ -625,12 +624,12 @@ export function AddonSettings() {
         {isLoading && !isFetched ? (
           <SettingsBody className='flex items-center gap-3 text-[13px] text-zinc-500'>
             <Loader2 className='h-4 w-4 animate-spin' />
-            Loading sources…
+            Loading addons…
           </SettingsBody>
         ) : isLoadingError || (isFetched && isLoading) ? (
           <SettingsBody>
             <RetryBanner
-              message="Couldn't load your sources."
+              message="Couldn't load your addons."
               onRetry={() => void refetch()}
               isRetrying={isFetching}
             />
@@ -645,7 +644,7 @@ export function AddonSettings() {
             <SettingsQueryError
               query={addonsQuery}
               className='mx-5 my-3'
-              message="Couldn't refresh your sources."
+              message="Couldn't refresh your addons."
             />
             {pinnedAddons.map((addon) => (
               <PinnedAddonRow

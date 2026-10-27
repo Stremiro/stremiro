@@ -576,10 +576,24 @@ impl ResumeStore {
             .map_err(|error| format!("Failed to sum playback watch time: {}", error))
     }
 
-    pub(crate) fn load_entries_for_media_id(
+    pub(crate) fn load_entries_for_media_ids(
         &mut self,
-        media_id: &str,
+        media_ids: &[&str],
     ) -> Result<Vec<(String, WatchProgress)>, String> {
+        let [media_id] = media_ids else {
+            if media_ids.is_empty() {
+                return Ok(Vec::new());
+            }
+            let ids = serde_json::to_string(media_ids)
+                .map_err(|error| format!("Failed to encode playback resume media ids: {error}"))?;
+            return query_progress_rows(
+                &self.connection,
+                "WHERE media_id IN (SELECT value FROM json_each(?1))
+                 ORDER BY last_watched DESC, history_key DESC",
+                params![ids],
+                " media-id",
+            );
+        };
         query_progress_rows(
             &self.connection,
             "WHERE media_id = ?1 ORDER BY last_watched DESC, history_key DESC",

@@ -392,13 +392,13 @@ impl PlaybackStateService {
         self.with_resume_store(app, |resume_store| resume_store.total_watch_time_secs())
     }
 
-    pub(crate) fn load_resume_entries_for_media_id(
+    pub(crate) fn load_resume_entries_for_media_ids(
         &self,
         app: &AppHandle,
-        media_id: &str,
+        media_ids: &[&str],
     ) -> Result<Vec<(String, WatchProgress)>, String> {
         self.with_resume_store(app, |resume_store| {
-            resume_store.load_entries_for_media_id(media_id)
+            resume_store.load_entries_for_media_ids(media_ids)
         })
     }
 

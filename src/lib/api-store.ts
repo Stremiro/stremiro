@@ -172,6 +172,7 @@ export const storeApi = {
   getLibraryGenres: () => safeInvoke<string[]>('get_library_genres'),
   getProfileLibrary: (filters: LibraryFilters) =>
     safeInvoke<ProfileLibrary>('get_profile_library', { filters }),
+  getWatchlist: () => safeInvoke<MediaItem[]>('get_watchlist'),
   createList: (name: string, icon?: string, rules?: SmartListRules) =>
     write<UserList>('create_list', { name, icon, rules }),
   deleteList: (listId: string) => write<void>('delete_list', { listId }),

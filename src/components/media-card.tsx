@@ -1,5 +1,5 @@
 import { useQuery } from '@tanstack/react-query';
-import { Bookmark, ChevronLeft, Play, Trash2 } from 'lucide-react';
+import { Bookmark, ChevronLeft, Library, Play, Trash2 } from 'lucide-react';
 import {
   type FocusEvent as ReactFocusEvent,
   type KeyboardEvent as ReactKeyboardEvent,
@@ -35,6 +35,7 @@ import { SelectionCheck, WatchStatusIcon } from '@/components/watch-status-icon'
 import { useTrailerPreviews } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import {
+  useIsItemInLibrary,
   useLibraryMembership,
   useItemWatchStatus,
   useMediaResumeEntry,
@@ -51,6 +52,7 @@ import {
   resolvePlayerRouteMediaType,
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
+import { notifyAction } from '@/lib/notify';
 import { routeChunks, warmPlayerChunk } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
@@ -121,6 +123,8 @@ interface MediaCardProps {
   item: MediaItem;
   currentStatusOverride?: WatchStatus | null;
   isInLibraryOverride?: boolean;
+  /** Resting "In Library" line for unstatused saved titles; opt-in so most cards skip the library observer. */
+  showLibraryMark?: boolean;
   progress?: number;
   isNewEpisode?: boolean;
   /** Below-title resume line ("S1:E2 · 24m left") — plain string so memo holds. */
@@ -187,6 +191,7 @@ function PlaybackPendingOverlay() {
 
 interface MediaCardPosterProps {
   currentStatus: WatchStatus | null;
+  inLibrary: boolean;
   detailsRouteType: PlayerRouteMediaType;
   expanded: boolean;
   expandedContentId: string;
@@ -206,6 +211,7 @@ interface MediaCardPosterProps {
 
 function MediaCardPoster({
   currentStatus,
+  inLibrary,
   detailsRouteType,
   expanded,
   expandedContentId,
@@ -315,12 +321,17 @@ function MediaCardPoster({
       ) : item.displayYear ? (
         <p className='text-[13px] font-normal leading-4 text-zinc-400'>{item.displayYear}</p>
       ) : null}
-      {currentStatus && (
+      {currentStatus ? (
         <p className='flex items-center gap-1.5 text-[13px] font-medium leading-4 text-zinc-400'>
           <WatchStatusIcon status={currentStatus} className='size-3.5' strokeWidth={2.1} />
           {WATCH_STATUS_LABELS[currentStatus]}
         </p>
-      )}
+      ) : inLibrary ? (
+        <p className='flex items-center gap-1.5 text-[13px] font-medium leading-4 text-zinc-400'>
+          <Library aria-hidden='true' className='size-3.5' strokeWidth={2.1} />
+          In Library
+        </p>
+      ) : null}
     </div>
   );
 
@@ -475,11 +486,23 @@ function useMediaCardActions({
     void primaryPlayback.handlePrimaryAction();
   };
 
-  const handleToggleLibrary = (event: ReactMouseEvent) => {
+  const handleToggleLibrary = (event: ReactMouseEvent, announce = false) => {
     event.preventDefault();
     event.stopPropagation();
     if (!libraryReady || toggleLibrary.isPending) return;
     if (isInLibrary && isInLibraryOverride) onLibraryRemove();
+    else if (announce) {
+      // The closing menu unmounts this observer, so only the promise sees the result.
+      void toggleLibrary.mutateAsync().then(
+        (saved) =>
+          notifyAction(saved ? 'Added to Library' : 'Removed from Library', {
+            detail: item.title,
+            thumb: item.poster,
+          }),
+        () => undefined,
+      );
+      return;
+    }
     toggleLibrary.mutate();
   };
 
@@ -559,7 +582,7 @@ function MediaCardMenu({
       <ContextMenuItem
         disabled={!libraryReady || collectionActions.toggleLibrary.isPending}
         onClick={(event) => {
-          handleToggleLibrary(event);
+          handleToggleLibrary(event, true);
           onClose();
         }}
       >
@@ -987,6 +1010,7 @@ export const MediaCard = memo(function MediaCard({
   item,
   currentStatusOverride,
   isInLibraryOverride,
+  showLibraryMark = false,
   progress,
   isNewEpisode,
   metaLine,
@@ -1282,6 +1306,7 @@ export const MediaCard = memo(function MediaCard({
   });
   const currentStatus =
     currentStatusOverride !== undefined ? currentStatusOverride : resolvedCurrentStatus;
+  const { data: inLibrary = false } = useIsItemInLibrary(item.id, { enabled: showLibraryMark });
 
   const overlay = useDelayedUnmount(!selectionMode && expanded, POPOUT_EXIT_MS);
 
@@ -1316,6 +1341,7 @@ export const MediaCard = memo(function MediaCard({
       >
         <MediaCardPoster
           currentStatus={currentStatus}
+          inLibrary={showLibraryMark && inLibrary}
           detailsRouteType={detailsRouteType}
           expanded={!selectionMode && expanded}
           expandedContentId={expandedContentId}

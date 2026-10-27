@@ -24,7 +24,7 @@ import {
   SeasonSwitcher,
 } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
-import { DetailsTrailerDialog } from '@/components/details-trailer-dialog';
+import { DetailsTrailer } from '@/components/details-trailer-dialog';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
 import { SaveToCollectionPanel } from '@/components/list/save-to-collection';
 import { RemoteImage } from '@/components/remote-image';
@@ -42,7 +42,6 @@ import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useLocalDay } from '@/hooks/use-local-day';
 import { useDetailsStreamSelector } from '@/hooks/use-details-stream-selector';
-import { useDetailsTrailer } from '@/hooks/use-details-trailer';
 import { useDetailsWatchStatus } from '@/hooks/use-details-watch-status';
 import {
   useMarkSeasonWatched,
@@ -313,23 +312,12 @@ function DetailsContent() {
   const [saveOpen, setSaveOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
   const saveTriggerRef = useRef<HTMLButtonElement>(null);
-  const trailerTriggerRef = useRef<HTMLButtonElement>(null);
 
   // Season 0 (specials) is valid; only accept real numbers — `Number(null)`
   // would read a missing season as Specials.
   const locationSeason = locationCoordinate(location.state, 'season');
   const locationEpisode = locationCoordinate(location.state, 'episode');
 
-  const {
-    trailerOpen,
-    trailerUrl,
-    trailers,
-    selectedTrailerId,
-    selectTrailer,
-    openTrailer,
-    warmTrailer,
-    onTrailerOpenChange,
-  } = useDetailsTrailer(item);
   const heroBackdropSrc = item?.backdrop || item?.poster;
   // A painted logo stays put; an unpainted or failed one follows refetched metadata.
   const [loadedLogo, setLoadedLogo] = useState<string | null>(null);
@@ -585,9 +573,7 @@ function DetailsContent() {
 
   const handleWatchEpisode = (ep: Episode) => {
     const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
-    openEpisodeStreamSelector(ep, {
-      startTime: epProgress?.resume_start_time,
-    });
+    openEpisodeStreamSelector(ep, epProgress?.resume_start_time);
   };
 
   // Destructured `mutate` keeps this stable — the mutation object is
@@ -1064,25 +1050,12 @@ function DetailsContent() {
                     returnFocusRef={saveTriggerRef}
                   />
 
-                  {trailers.length > 0 && (
-                    <button
-                      ref={trailerTriggerRef}
-                      type='button'
-                      aria-label='Watch trailer'
-                      aria-haspopup='dialog'
-                      aria-expanded={trailerOpen}
-                      title='Trailer'
-                      className={cn(ICON_ACTION_CLASS, 'w-auto gap-2 px-3')}
-                      onPointerEnter={warmTrailer}
-                      onFocus={warmTrailer}
-                      onClick={openTrailer}
-                    >
-                      <Clapperboard
-                        aria-hidden='true'
-                        className='w-5 h-5 origin-bottom-left transition-transform duration-200 ease-out group-hover/action:-rotate-12 motion-reduce:transition-none'
-                      />
-                      <span className='text-[13px] font-medium'>Trailer</span>
-                    </button>
+                  {item.trailers && item.trailers.length > 0 && (
+                    <DetailsTrailer
+                      trailers={item.trailers}
+                      title={item.title}
+                      triggerClassName={ICON_ACTION_CLASS}
+                    />
                   )}
 
                   <CopyButton
@@ -1091,11 +1064,9 @@ function DetailsContent() {
                     title='Copy link'
                     className={cn(ICON_ACTION_CLASS, '[&>span]:size-5')}
                     onCopy={() =>
-                      copyText(
-                        buildTitleShareLink(baseRouteType, baseRouteId),
-                        'Title link copied',
-                        'Could not copy title link',
-                      )
+                      copyText(buildTitleShareLink(baseRouteType, baseRouteId), {
+                        failure: 'Could not copy title link',
+                      })
                     }
                   />
                 </div>
@@ -1505,17 +1476,6 @@ function DetailsContent() {
           getStartTime={getStreamTargetStartTime}
         />
       )}
-
-      <DetailsTrailerDialog
-        open={trailerOpen}
-        onOpenChange={onTrailerOpenChange}
-        trailerUrl={trailerUrl}
-        trailers={trailers}
-        selectedTrailerId={selectedTrailerId}
-        onSelectTrailer={selectTrailer}
-        title={item.title}
-        returnFocusRef={trailerTriggerRef}
-      />
     </div>
   );
 }

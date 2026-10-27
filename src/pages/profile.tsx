@@ -1,5 +1,13 @@
 import { useQuery } from '@tanstack/react-query';
-import { CheckSquare, History, LayoutList, Library, Search } from 'lucide-react';
+import {
+  CalendarArrowDown,
+  CalendarArrowUp,
+  CheckSquare,
+  History,
+  LayoutList,
+  Library,
+  Search,
+} from 'lucide-react';
 import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, type SetURLSearchParams, useLocation, useSearchParams } from 'react-router';
 import { toast } from 'sonner';
@@ -17,7 +25,9 @@ import {
   useCollectionSelection,
   ViewToggle,
   isLibrarySort,
+  SegmentedControl,
   SegmentPill,
+  TYPE_OPTIONS,
 } from '@/components/profile-library-controls';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
@@ -94,6 +104,11 @@ const PROFILE_TABS = [
 
 type ProfileTabId = (typeof PROFILE_TABS)[number]['id'];
 
+const HISTORY_ORDER_OPTIONS = [
+  { value: 'recent', label: 'Most recent first', icon: CalendarArrowDown },
+  { value: 'oldest', label: 'Oldest first', icon: CalendarArrowUp },
+] as const;
+
 function isProfileTabId(value: string | null): value is ProfileTabId {
   return PROFILE_TABS.some((tab) => tab.id === value);
 }
@@ -163,6 +178,15 @@ export function Profile() {
 
   // The open tab's own rows outrank the aggregate header counts.
   const libraryFilters = readLibraryFilters(searchParams);
+  const activeLibraryStatus =
+    activeTab === 'library' && libraryFilters.status !== 'all' && libraryFilters.status !== 'none'
+      ? libraryFilters.status
+      : undefined;
+  const toggleLibraryStatus = (status: WatchStatus) =>
+    patchSearchParams(setSearchParams, {
+      tab: null,
+      status: activeLibraryStatus === status ? null : status,
+    });
   const profileLibraryQuery = useProfileLibrary(libraryFilters, {
     enabled: activeTab === 'library',
   });
@@ -226,6 +250,9 @@ export function Profile() {
           totalWatchTimeSecs={totalWatchTimeSecs}
           statusCounts={libraryStatusCounts}
           statusCountsLoading={tabLibrary === undefined && dataStatsQuery.isPending}
+          onOpenTab={setActiveTab}
+          activeStatus={activeLibraryStatus}
+          onToggleStatus={toggleLibraryStatus}
         />
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
@@ -656,6 +683,10 @@ function ProfileHistoryTab({
   const historySearch = searchParams.get('historyQ') ?? '';
   const setHistorySearch = (value: string) =>
     patchSearchParams(setSearchParams, { historyQ: value || null });
+  const historyTypeParam = searchParams.get('historyType');
+  const historyType =
+    historyTypeParam === 'movie' || historyTypeParam === 'series' ? historyTypeParam : 'all';
+  const historyOrder = searchParams.get('historyOrder') === 'oldest' ? 'oldest' : 'recent';
   const historySearchRef = useRef<HTMLInputElement>(null);
   const historyContentRef = useRef<HTMLDivElement>(null);
   const historyRemovalFocusRef = useRef<{ button: HTMLButtonElement; index: number } | null>(null);
@@ -669,12 +700,23 @@ function ProfileHistoryTab({
     searchError: historySearchError,
     isSearchFetching: historySearchFetching,
     retrySearch: retryHistorySearch,
-  } = useTitleSearch(history ?? EMPTY_HISTORY_ITEMS, historySearch);
+  } = useTitleSearch(history ?? EMPTY_HISTORY_ITEMS, historySearch, history !== undefined);
+  // Filter after search so the searched list keeps the query-cached identity.
+  const typedHistory =
+    historyType === 'all'
+      ? filteredHistory
+      : filteredHistory.filter((item) => (item.type_ === 'movie') === (historyType === 'movie'));
+  const visibleHistory = historyOrder === 'oldest' ? typedHistory.toReversed() : typedHistory;
+  const historyFiltered = Boolean(effectiveHistorySearch) || historyType !== 'all';
+  const clearHistoryFilters = () => {
+    patchSearchParams(setSearchParams, { historyQ: null, historyType: null });
+    historySearchRef.current?.focus({ preventScroll: true });
+  };
 
   const bulkRemoveHistory = useBulkRemoveFromWatchHistory();
   const [confirmHistoryRemoveOpen, setConfirmHistoryRemoveOpen] = useState(false);
   const historySelectionIds = (history ?? EMPTY_HISTORY_ITEMS).map(watchTitleKey);
-  const filteredHistoryIds = filteredHistory.map(watchTitleKey);
+  const filteredHistoryIds = visibleHistory.map(watchTitleKey);
   const { triggerRef: historySelectionTriggerRef, ...historySelection } = useCollectionSelection(
     historySelectionIds,
     filteredHistoryIds,
@@ -712,7 +754,7 @@ function ProfileHistoryTab({
     }
     historyRemovalFocusRef.current = null;
     if (document.activeElement !== document.body) return;
-    const index = Math.min(pending.index, filteredHistory.length - 1);
+    const index = Math.min(pending.index, visibleHistory.length - 1);
     (
       historyContentRef.current?.querySelector<HTMLButtonElement>(
         `[data-history-remove="${index}"]`,
@@ -748,31 +790,55 @@ function ProfileHistoryTab({
             className='h-9 text-[13px] bg-white/[0.03] border-white/[0.07] text-white placeholder:text-zinc-500 focus-visible:border-(--accent-nav) focus-visible:ring-(--accent-nav)/25 rounded-lg'
           />
           <output className='shrink-0 text-[12px] tabular-nums text-zinc-400'>
-            {effectiveHistorySearch
-              ? `${filteredHistory.length} of ${history.length}`
+            {historyFiltered
+              ? `${visibleHistory.length} of ${history.length}`
               : pluralize(history.length, 'title')}
           </output>
-          <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
-          <Button
-            ref={historySelectionTriggerRef}
-            size='sm'
-            variant='outline'
-            aria-pressed={historySelection.selectionMode}
-            disabled={history.length === 0 || bulkRemoveHistory.isPending}
-            onClick={
-              historySelection.selectionMode ? historySelection.exit : historySelection.begin
+        </div>
+      )}
+      {history !== undefined && history.length > 0 && (
+        <div className='flex flex-wrap items-center gap-2'>
+          <SegmentedControl
+            label='History media type'
+            value={historyType}
+            options={TYPE_OPTIONS}
+            onChange={(type) =>
+              patchSearchParams(setSearchParams, { historyType: type === 'all' ? null : type })
             }
-            className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
-          >
-            <CheckSquare className='h-3.5 w-3.5' />
-            Select
-          </Button>
+          />
+          <SegmentedControl
+            label='History order'
+            value={historyOrder}
+            options={HISTORY_ORDER_OPTIONS}
+            onChange={(order) =>
+              patchSearchParams(setSearchParams, {
+                historyOrder: order === 'recent' ? null : order,
+              })
+            }
+          />
+          <div className='ml-auto flex items-center gap-2'>
+            <ViewToggle viewMode={viewMode} onChange={onViewModeChange} />
+            <Button
+              ref={historySelectionTriggerRef}
+              size='sm'
+              variant='outline'
+              aria-pressed={historySelection.selectionMode}
+              disabled={bulkRemoveHistory.isPending}
+              onClick={
+                historySelection.selectionMode ? historySelection.exit : historySelection.begin
+              }
+              className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
+            >
+              <CheckSquare className='h-3.5 w-3.5' />
+              Select
+            </Button>
+          </div>
         </div>
       )}
       {historySelection.selectionMode && (
         <CollectionBulkActionBar
           selectedCount={historySelection.selectedIds.size}
-          filteredCount={filteredHistory.length}
+          filteredCount={visibleHistory.length}
           allFilteredSelected={
             filteredHistoryIds.length > 0 &&
             filteredHistoryIds.every((id) => historySelection.selectedIds.has(id))
@@ -800,7 +866,7 @@ function ProfileHistoryTab({
         <CollectionTabContent
           isError={queryNeedsRetry(historyQuery)}
           isLoading={historyLoading}
-          items={filteredHistory}
+          items={visibleHistory}
           errorLabel='your watch history'
           onRetry={() => void refetchHistory()}
           isRetrying={historyFetching}
@@ -824,22 +890,23 @@ function ProfileHistoryTab({
             />
           )}
           empty={
-            effectiveHistorySearch ? (
+            historyFiltered ? (
               <EmptyState
                 icon={<Search className='w-6 h-6 text-zinc-600' />}
                 title='No results'
-                subtitle={`Nothing in your history matches "${effectiveHistorySearch}".`}
+                subtitle={
+                  effectiveHistorySearch
+                    ? `Nothing in your history matches "${effectiveHistorySearch}".`
+                    : `No ${historyType === 'movie' ? 'movies' : 'series'} in your history.`
+                }
                 action={
                   <Button
                     size='sm'
                     variant='ghost'
                     className='h-8 text-xs text-zinc-400'
-                    onClick={() => {
-                      setHistorySearch('');
-                      historySearchRef.current?.focus({ preventScroll: true });
-                    }}
+                    onClick={clearHistoryFilters}
                   >
-                    Clear search
+                    Clear filters
                   </Button>
                 }
               />
@@ -890,6 +957,9 @@ function ProfileHeader({
   totalWatchTimeSecs,
   statusCounts,
   statusCountsLoading,
+  onOpenTab,
+  activeStatus,
+  onToggleStatus,
 }: {
   profile: LocalProfile;
   onUpdateProfile: (updates: LocalProfileUpdate) => Promise<void>;
@@ -910,6 +980,9 @@ function ProfileHeader({
   totalWatchTimeSecs: number | undefined;
   statusCounts: Record<WatchStatus, number>;
   statusCountsLoading: boolean;
+  onOpenTab: (tab: ProfileTabId) => void;
+  activeStatus: WatchStatus | undefined;
+  onToggleStatus: (status: WatchStatus) => void;
 }) {
   return (
     <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
@@ -962,18 +1035,21 @@ function ProfileHeader({
             isLoading={statsLoading}
             label='Library'
             valueClassName='text-(--accent-nav)'
+            onClick={() => onOpenTab('library')}
           />
           <StatChip
             value={listsCount}
             isLoading={statsLoading}
             label='Lists'
             valueClassName='text-white'
+            onClick={() => onOpenTab('lists')}
           />
           <StatChip
             value={historyCount}
             isLoading={statsLoading}
             label='History'
             valueClassName='text-white'
+            onClick={() => onOpenTab('history')}
           />
           <StatChip
             value={totalWatchTimeSecs == null ? undefined : formatHoursWatched(totalWatchTimeSecs)}
@@ -993,7 +1069,7 @@ function ProfileHeader({
         />
       )}
       {(statusCountsLoading || WATCH_STATUSES.some((status) => statusCounts[status] > 0)) && (
-        <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-2 border-t border-white/[0.06] pt-3'>
+        <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-1 border-t border-white/[0.06] pt-2'>
           {statusCountsLoading ? (
             <Skeleton aria-hidden='true' className='h-4.5 w-48' />
           ) : (
@@ -1001,12 +1077,27 @@ function ProfileHeader({
               const count = statusCounts[s] ?? 0;
               if (count === 0) return null;
               const colors = WATCH_STATUS_COLORS[s];
+              const active = activeStatus === s;
               return (
-                <span key={s} className='flex items-center gap-1.5 text-[12px]'>
+                <button
+                  key={s}
+                  type='button'
+                  aria-pressed={active}
+                  title={
+                    active ? 'Show all Library titles' : `Show ${WATCH_STATUS_LABELS[s]} in Library`
+                  }
+                  onClick={() => onToggleStatus(s)}
+                  className={cn(
+                    '-mx-2 flex items-center gap-1.5 rounded-md px-2 py-1 text-[12px] transition-colors hover:bg-white/[0.05] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
+                    active && 'bg-white/[0.08] hover:bg-white/[0.1]',
+                  )}
+                >
                   <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
                   <span className={cn('font-medium tabular-nums', colors.text)}>{count}</span>
-                  <span className='text-zinc-400'>{WATCH_STATUS_LABELS[s]}</span>
-                </span>
+                  <span className={active ? 'text-zinc-100' : 'text-zinc-400'}>
+                    {WATCH_STATUS_LABELS[s]}
+                  </span>
+                </button>
               );
             })
           )}
@@ -1029,20 +1120,32 @@ function StatChip({
   label,
   valueClassName,
   title,
+  onClick,
 }: {
   value: number | string | undefined;
   isLoading: boolean;
   label: string;
   valueClassName?: string;
   title?: string;
+  onClick?: () => void;
 }) {
+  const Root = onClick ? 'button' : 'div';
   return (
-    <div className='flex min-w-0 flex-col items-center gap-1.5 text-center' title={title}>
+    <Root
+      type={onClick ? 'button' : undefined}
+      onClick={onClick}
+      title={title ?? (onClick ? `Open ${label}` : undefined)}
+      className={cn(
+        'flex min-w-0 flex-col items-center gap-1.5 rounded-lg py-1.5 text-center',
+        onClick &&
+          'transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
+      )}
+    >
       {isLoading && value === undefined ? (
-        <div role='status'>
+        <span role='status'>
           <Skeleton className='h-[21px] w-10' />
           <span className='sr-only'>Loading {label.toLowerCase()}…</span>
-        </div>
+        </span>
       ) : (
         <span
           className={cn(
@@ -1054,7 +1157,7 @@ function StatChip({
         </span>
       )}
       <span className='text-[11px] leading-4 text-zinc-400'>{label}</span>
-    </div>
+    </Root>
   );
 }
 

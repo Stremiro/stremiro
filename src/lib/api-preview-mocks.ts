@@ -398,6 +398,7 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   for (const key of [
     'nightMode',
     'spoilerProtection',
+    'calendarHideWatched',
     'autoPlayNext',
     'trailerPreviews',
     'autoSkipIntro',
@@ -600,6 +601,15 @@ export async function handlePreviewInvoke<T>(
       if (filters.sort === 'title-desc') items.reverse();
       return { items, allIds: previewLibrary.map((item) => item.id).toSorted(), statusCounts } as T;
     }
+    case 'get_watchlist':
+      return previewLibrary
+        .filter((item) => previewWatchStatuses[item.id] === 'plan_to_watch')
+        .toSorted(
+          (a, b) =>
+            (b.primaryYear ?? -1) - (a.primaryYear ?? -1) ||
+            a.title.toLowerCase().localeCompare(b.title.toLowerCase()),
+        )
+        .slice(0, 20) as T;
     case 'add_to_library': {
       const item = readPreviewMediaItem(args?.item);
       addPreviewLibraryItem(item);

@@ -37,6 +37,22 @@ interface MediaRowProps {
   genreFilter?: GenreFilterConfig;
 }
 
+export function RailTitleLink({ to, title }: { to: string; title: string }) {
+  return (
+    <Link
+      to={to}
+      aria-label={`Browse ${title}`}
+      className='group/rail-title inline-flex max-w-full items-center gap-1.5 rounded-xs transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
+    >
+      {title}
+      <ChevronRight
+        aria-hidden='true'
+        className='h-4 w-4 shrink-0 text-zinc-400 transition-[color,translate] duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-100'
+      />
+    </Link>
+  );
+}
+
 export function MediaRow({
   title,
   titleHref,
@@ -161,23 +177,7 @@ export function MediaRow({
           </div>
         ) : undefined
       }
-      title={
-        titleHref ? (
-          <Link
-            to={titleHref}
-            aria-label={`Browse ${title}`}
-            className='group/rail-title inline-flex max-w-full items-center gap-1.5 rounded-xs transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
-          >
-            {title}
-            <ChevronRight
-              aria-hidden='true'
-              className='h-4 w-4 shrink-0 text-zinc-400 transition-[color,translate] duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-100'
-            />
-          </Link>
-        ) : (
-          title
-        )
-      }
+      title={titleHref ? <RailTitleLink to={titleHref} title={title} /> : title}
       // Scroll memory keyed by the query — stable across remounts, genre switches land in their own slot.
       railId={`media-row:${queryKey.join(':')}`}
       items={data}

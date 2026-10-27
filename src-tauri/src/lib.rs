@@ -182,6 +182,7 @@ pub fn run() {
             commands::library_commands::get_library,
             commands::library_commands::get_library_genres,
             commands::library_commands::get_profile_library,
+            commands::library_commands::get_watchlist,
             commands::library_commands::search_titles,
             commands::list_commands::create_list,
             commands::list_commands::delete_list,

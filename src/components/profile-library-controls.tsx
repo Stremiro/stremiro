@@ -74,7 +74,7 @@ const VIEW_MODES: { value: 'grid' | 'list'; label: string; icon: LucideIcon }[] 
   { value: 'list', label: 'List view', icon: List },
 ];
 
-const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
+export const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
   { value: 'all', label: 'All' },
   { value: 'movie', label: 'Movies' },
   { value: 'series', label: 'Series' },
@@ -415,7 +415,7 @@ export function SegmentPill({
   );
 }
 
-function SegmentedControl<T extends string>({
+export function SegmentedControl<T extends string>({
   label,
   value,
   options,

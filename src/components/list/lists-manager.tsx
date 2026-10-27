@@ -619,11 +619,18 @@ function ListItemsView({ list }: { list: UserList }) {
       if (document.activeElement !== pending.button) removalFocusRef.current = null;
       return;
     }
-    removalFocusRef.current = null;
-    if (document.activeElement !== document.body) return;
+    if (document.activeElement !== document.body) {
+      removalFocusRef.current = null;
+      return;
+    }
     const buttons =
       itemsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-remove]');
-    (buttons?.[Math.min(pending.index, buttons.length - 1)] ?? addTitlesButtonRef.current)?.focus();
+    const target =
+      buttons?.[Math.min(pending.index, buttons.length - 1)] ?? addTitlesButtonRef.current;
+    // Add titles stays disabled until the removal settles; retry on that render.
+    if (target?.disabled) return;
+    removalFocusRef.current = null;
+    target?.focus();
   });
 
   // SortableContext diffs off this array's identity — keep it stable across membership-equal renders.

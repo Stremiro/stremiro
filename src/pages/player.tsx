@@ -62,7 +62,6 @@ import { usePlayerAutoResolve } from '@/hooks/use-player-auto-resolve';
 import { usePlayerHotkeys } from '@/hooks/use-player-hotkeys';
 import { usePlayerIdleOverlay } from '@/hooks/use-player-idle-overlay';
 import { getPlayerStreamLoadKey, usePlayerMpvLifecycle } from '@/hooks/use-player-mpv-lifecycle';
-import { usePlayerRouteState } from '@/hooks/use-player-route-state';
 import { usePlayerStreamSession } from '@/hooks/use-player-stream-session';
 import {
   type MiniVideoRect,
@@ -112,6 +111,7 @@ import {
   claimPlaybackLaunch,
   isCurrentPlaybackLaunch,
   launchResolvedStream,
+  resolvePlayerLaunch,
   resolveSafeInternalReturnPath,
 } from '@/lib/player-navigation';
 import { createPlaybackClock } from '@/lib/player-clock';
@@ -253,7 +253,7 @@ export function Player() {
     title,
     resolveTitle,
     type,
-  } = usePlayerRouteState();
+  } = resolvePlayerLaunch(session ?? {});
 
   // -- State --
   const stream = usePlayerStreamSession({
@@ -280,7 +280,7 @@ export function Player() {
   const activeStreamLoadKey = getPlayerStreamLoadKey(stream);
   const handleCopyStreamLink = () => {
     const url = committedStreamUrlRef.current;
-    if (url) void copyText(url, 'Stream link copied');
+    if (url) void copyText(url, { success: 'Stream link copied' });
   };
   const { preferences: appUiPreferences, updatePreferences: updateAppUiPreferences } =
     useAppUiPreferences(selectPlayerPreferences);

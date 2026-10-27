@@ -383,7 +383,7 @@ fn subtitle_property_values_use_persisted_normalization_and_survive_native_failu
                 .collect::<Vec<_>>()
         );
         let mut calls = Vec::new();
-        let message = apply_mpv_properties(&properties, |name, value| {
+        let message = apply_mpv_properties(&properties, None, |name, value| {
             calls.push((name.to_string(), value.clone()));
             Err("mpv unavailable".to_string())
         })
@@ -400,6 +400,59 @@ fn subtitle_property_values_use_persisted_normalization_and_survive_native_failu
                 "subtitleProperties": subtitle_properties,
             })
         );
+    }
+}
+
+#[test]
+fn failed_volume_does_not_unmute_but_other_properties_still_apply() {
+    for muted in [false, true] {
+        let properties = [
+            ("volume".to_string(), json!(20)),
+            ("mute".to_string(), json!(muted)),
+            ("sub-delay".to_string(), json!(0)),
+        ];
+        let mut calls = Vec::new();
+        assert!(apply_mpv_properties(&properties, None, |name, _| {
+            calls.push(name.to_string());
+            if name == "volume" {
+                Err("volume failed".to_string())
+            } else {
+                Ok(())
+            }
+        })
+        .is_err());
+        let expected = if muted {
+            vec!["volume", "mute", "sub-delay"]
+        } else {
+            vec!["volume", "sub-delay"]
+        };
+        assert_eq!(calls, expected, "muted={muted}");
+    }
+}
+
+#[test]
+fn newer_mute_intent_revokes_pending_unmute_but_never_suppresses_muting() {
+    for muted in [false, true] {
+        let epoch = next_mute_write_epoch();
+        let properties = [
+            ("volume".to_string(), json!(20)),
+            ("mute".to_string(), json!(muted)),
+        ];
+        let mut calls = Vec::new();
+        apply_mpv_properties(&properties, Some(epoch), |name, _| {
+            calls.push(name.to_string());
+            if name == "volume" {
+                next_mute_write_epoch();
+            }
+            Ok(())
+        })
+        .unwrap();
+        let expected = if muted {
+            vec!["volume", "mute"]
+        } else {
+            vec!["volume"]
+        };
+        assert_eq!(calls, expected, "muted={muted}");
     }
 }
 
@@ -595,7 +648,7 @@ fn property_batch_preserves_order_and_continues_after_native_failure() {
     ];
     for fail in [false, true] {
         let mut calls = Vec::new();
-        let result = apply_mpv_properties(&properties, |name, value| {
+        let result = apply_mpv_properties(&properties, None, |name, value| {
             calls.push((name.to_string(), value.clone()));
             if fail && name != "http-header-fields" {
                 Err(name.to_string())

@@ -4,6 +4,9 @@ use super::media_normalization::days_in_month;
 use super::playback_state::PlaybackStateService;
 use super::resume_store::ResumeTitleIdentity;
 use super::store_helpers::{load_library_item_identities, load_watch_statuses_map};
+use super::watch_history_commands::{
+    build_title_watch_progress_with_priorities, TitleWatchProgress,
+};
 use crate::providers::{addon_resource::AddonResourceClient, ttl_cache::TtlCache, MediaItem};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -126,6 +129,8 @@ pub struct CalendarRange {
     visible_start: String,
     visible_end: String,
     upcoming_start: String,
+    #[serde(default)]
+    hide_watched: bool,
 }
 
 // Gregorian day ordinal, independent of UTC offsets and daylight saving.
@@ -194,6 +199,11 @@ pub struct CalendarScheduleEvent {
     poster: Option<String>,
     #[serde(rename = "type")]
     type_: &'static str,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    watched: bool,
+    /// Started, or at/before the season's furthest watched episode: safe to name under spoiler protection.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    seen: bool,
 }
 
 const MAX_UPCOMING_EVENTS: usize = 8;
@@ -270,10 +280,34 @@ fn calendar_event_date<'a>(
     range.contains(date, ordinal, upcoming).then_some(date)
 }
 
+/// Same watched and spoiler-ceiling rules as the details episode list.
+fn episode_progress_flags(
+    progress: Option<&TitleWatchProgress>,
+    media_id: &str,
+    season: u32,
+    episode: u32,
+) -> (bool, bool) {
+    let Some(progress) = progress else {
+        return (false, false);
+    };
+    let row = progress
+        .episode_progress
+        .get(&format!("{media_id}:{season}:{episode}"));
+    let within_ceiling = progress
+        .watched_episode_ceiling
+        .get(&season)
+        .is_some_and(|ceiling| episode <= *ceiling);
+    (
+        row.is_some_and(|row| row.is_watched),
+        within_ceiling || row.is_some_and(|row| row.has_started_watching),
+    )
+}
+
 fn calendar_events<'a>(
     schedules: impl IntoIterator<Item = &'a MediaSchedule>,
     range: &CalendarRange,
     upcoming: &Range<u32>,
+    progress: &HashMap<String, TitleWatchProgress>,
 ) -> Vec<CalendarScheduleEvent> {
     let mut events = Vec::new();
     let mut seen = HashSet::new();
@@ -287,6 +321,13 @@ fn calendar_events<'a>(
             if !seen.insert(("movie", schedule.id.as_str(), "", 0, 0)) {
                 continue;
             }
+            let watched = progress
+                .get(&schedule.id)
+                .and_then(|progress| progress.latest_movie_entry.as_ref())
+                .is_some_and(|row| row.is_watched);
+            if watched && range.hide_watched {
+                continue;
+            }
             events.push(CalendarScheduleEvent {
                 id: schedule.id.clone(),
                 media_id: schedule.id.clone(),
@@ -298,6 +339,8 @@ fn calendar_events<'a>(
                 release_date: date.to_string(),
                 poster: schedule.poster.clone(),
                 type_: "movie",
+                watched,
+                seen: watched,
             });
             continue;
         }
@@ -313,6 +356,15 @@ fn calendar_events<'a>(
                 episode.season,
                 episode.episode,
             )) {
+                continue;
+            }
+            let (watched, seen_episode) = episode_progress_flags(
+                progress.get(&schedule.id),
+                &schedule.id,
+                episode.season,
+                episode.episode,
+            );
+            if watched && range.hide_watched {
                 continue;
             }
             events.push(CalendarScheduleEvent {
@@ -332,6 +384,8 @@ fn calendar_events<'a>(
                 release_date: date.to_string(),
                 poster: schedule.poster.clone(),
                 type_: "episode",
+                watched,
+                seen: seen_episode,
             });
         }
     }
@@ -392,7 +446,7 @@ pub async fn get_calendar_events(
     let upcoming = range.validate()?;
     let store_app = app.clone();
     let service = playback_state.inner().clone();
-    let requests = super::run_blocking_store_op(move || {
+    let (requests, progress) = super::run_blocking_store_op(move || {
         let library = load_library_item_identities(&super::open_store(
             &store_app,
             super::LIBRARY_STORE_FILE,
@@ -411,7 +465,18 @@ pub async fn get_calendar_events(
             .collect();
         let history = service.load_latest_resume_title_identities(&store_app, &watching_ids)?;
         let tracked = library.into_iter().chain(list_items);
-        Ok(calendar_requests(tracked, history, &statuses))
+        let requests = calendar_requests(tracked, history, &statuses);
+        // Loaded before fetching so streamed snapshots carry the same spoiler flags as the result.
+        let ids: Vec<_> = requests.iter().map(|request| request.id.as_str()).collect();
+        let mut rows_by_id: HashMap<String, Vec<_>> = HashMap::new();
+        for (_, row) in service.load_resume_entries_for_media_ids(&store_app, &ids)? {
+            rows_by_id.entry(row.id.clone()).or_default().push(row);
+        }
+        let progress = rows_by_id
+            .into_iter()
+            .map(|(id, rows)| (id, build_title_watch_progress_with_priorities(rows, None)))
+            .collect();
+        Ok((requests, progress))
     })
     .await?;
     let tracked_count = requests.len();
@@ -420,7 +485,7 @@ pub async fn get_calendar_events(
             let _ = on_cached.send(calendar_schedule(
                 tracked_count,
                 tracked_count.saturating_sub(cached.len()),
-                calendar_events(cached.iter().map(Arc::as_ref), &range, &upcoming),
+                calendar_events(cached.iter().map(Arc::as_ref), &range, &upcoming, &progress),
                 &upcoming,
             ));
         })
@@ -428,7 +493,12 @@ pub async fn get_calendar_events(
     Ok(calendar_schedule(
         tracked_count,
         tracked_count.saturating_sub(schedules.len()),
-        calendar_events(schedules.iter().map(Arc::as_ref), &range, &upcoming),
+        calendar_events(
+            schedules.iter().map(Arc::as_ref),
+            &range,
+            &upcoming,
+            &progress,
+        ),
         &upcoming,
     ))
 }
@@ -444,6 +514,7 @@ mod tests {
             visible_start: "2025-12-28".into(),
             visible_end: "2026-02-07".into(),
             upcoming_start: "2026-01-01".into(),
+            hide_watched: false,
         }
     }
 
@@ -685,6 +756,7 @@ mod tests {
             ],
             &range(),
             &range().validate().unwrap(),
+            &HashMap::new(),
         );
         assert_eq!(
             events
@@ -717,6 +789,7 @@ mod tests {
             &[schedule("series", vec![episode("today", "2026-01-01")])],
             &other_month,
             &other_month.validate().unwrap(),
+            &HashMap::new(),
         );
         assert_eq!(upcoming_only.len(), 1);
         assert_eq!(upcoming_only[0].id, "today");
@@ -746,6 +819,7 @@ mod tests {
             }],
             &range(),
             &range().validate().unwrap(),
+            &HashMap::new(),
         );
         assert_eq!(
             events
@@ -753,6 +827,95 @@ mod tests {
                 .map(|event| event.title.as_str())
                 .collect::<Vec<_>>(),
             ["Episode 1", "Episode 2", "Episode 3", "Finale"]
+        );
+    }
+
+    #[test]
+    fn calendar_events_flag_watched_and_spoiler_safe_releases_and_hide_watched() {
+        let row = |id: &str, type_: &str, episode: Option<u32>, position: f64, last_watched| {
+            super::super::WatchProgress {
+                id: id.into(),
+                type_: type_.into(),
+                season: episode.map(|_| 1),
+                episode,
+                absolute_season: episode.map(|_| 1),
+                absolute_episode: episode,
+                position,
+                duration: 1_000.0,
+                last_watched,
+                ..Default::default()
+            }
+        };
+        let progress = HashMap::from([
+            (
+                "tt1".to_string(),
+                build_title_watch_progress_with_priorities(
+                    vec![
+                        row("tt1", "series", Some(2), 300.0, 2),
+                        row("tt1", "series", Some(1), 1_000.0, 1),
+                    ],
+                    None,
+                ),
+            ),
+            (
+                "ttmovie".to_string(),
+                build_title_watch_progress_with_priorities(
+                    vec![row("ttmovie", "movie", None, 1_000.0, 1)],
+                    None,
+                ),
+            ),
+        ]);
+        let schedules = [
+            MediaSchedule {
+                id: "tt1".into(),
+                type_: "series".into(),
+                title: "Series".into(),
+                poster: None,
+                release_date: None,
+                episodes: (1..=3)
+                    .map(|episode| MediaScheduleEpisode {
+                        id: format!("e{episode}"),
+                        title: None,
+                        season: 1,
+                        episode,
+                        release_date: Some("2026-01-02".into()),
+                    })
+                    .collect(),
+            },
+            MediaSchedule {
+                id: "ttmovie".into(),
+                type_: "movie".into(),
+                title: "Movie".into(),
+                poster: None,
+                release_date: Some("2026-01-03".into()),
+                episodes: vec![],
+            },
+        ];
+        let flags = |range: &CalendarRange| {
+            calendar_events(&schedules, range, &range.validate().unwrap(), &progress)
+                .into_iter()
+                .map(|event| (event.id, event.watched, event.seen))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            flags(&range()),
+            [
+                ("e1".to_string(), true, true),
+                ("e2".to_string(), false, true),
+                ("e3".to_string(), false, false),
+                ("ttmovie".to_string(), true, true),
+            ]
+        );
+        let hidden = CalendarRange {
+            hide_watched: true,
+            ..range()
+        };
+        assert_eq!(
+            flags(&hidden),
+            [
+                ("e2".to_string(), false, true),
+                ("e3".to_string(), false, false)
+            ]
         );
     }
 
@@ -775,6 +938,8 @@ mod tests {
             release_date: date.into(),
             poster: None,
             type_,
+            watched: false,
+            seen: false,
         }
     }
 
@@ -852,6 +1017,7 @@ mod tests {
             visible_start: "2025-12-28".into(),
             visible_end: "2026-01-07".into(),
             upcoming_start: "2025-12-28".into(),
+            hide_watched: false,
         };
         let events = vec![
             event("later", "movie", "2026-01-07", None, None, "Later"),

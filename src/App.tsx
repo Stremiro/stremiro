@@ -442,6 +442,7 @@ function AppCloseManager() {
         () => false,
       );
 
+    // onCloseRequested destroys the window itself unless vetoed: keep core:window:allow-destroy.
     void getCurrentWindow()
       .onCloseRequested(async (event) => {
         if (closing) {

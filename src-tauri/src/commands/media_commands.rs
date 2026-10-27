@@ -356,7 +356,7 @@ pub async fn get_details_prefetch_bundle(
     let (details, loaded) = tokio::join!(
         fetch_media_details_inner(&app, &client, media_type, &id, false),
         load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
-            service.load_resume_entries_for_media_id(app, &progress_id)
+            service.load_resume_entries_for_media_ids(app, &[&progress_id])
         })
     );
     let (items, source_health_priorities) = loaded?;

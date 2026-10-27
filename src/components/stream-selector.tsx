@@ -803,7 +803,9 @@ export function StreamSelector({
         stream.sourceId,
       )
       .then((link) =>
-        copyText(link.url, link.kind === 'magnet' ? 'Magnet link copied' : 'Stream link copied'),
+        copyText(link.url, {
+          success: link.kind === 'magnet' ? 'Magnet link copied' : 'Stream link copied',
+        }),
       )
       .catch((error) => {
         toast.error(getErrorMessage(error));

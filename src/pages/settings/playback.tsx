@@ -564,14 +564,19 @@ export function PlaybackSettings() {
               />
               <SecondsSelect
                 label='Next episode countdown'
+                description={
+                  preferences.autoPlayNext
+                    ? undefined
+                    : 'Turn on Auto-play next episode to change this.'
+                }
                 seconds={preferences.nextEpisodeCountdownSecs}
                 options={COUNTDOWN_SECONDS}
                 disabled={isHydrating || !preferences.autoPlayNext}
                 onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
               />
               <SecondsSelect
-                label='Controls after keyboard input'
-                description='Mouse movement hides controls after 1.2 seconds of inactivity.'
+                label='Hide controls after keyboard input'
+                description='After mouse movement, controls hide after 1.2 seconds of inactivity.'
                 seconds={preferences.controlsHideDelayMs / 1000}
                 options={CONTROLS_HIDE_SECONDS}
                 disabled={isHydrating}

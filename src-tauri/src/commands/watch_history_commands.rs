@@ -568,7 +568,7 @@ pub async fn set_episodes_watched(
         let (rows, source_health_priorities) = entries_with_source_health(
             &app,
             &service,
-            service.load_resume_entries_for_media_id(&app, &item.id)?,
+            service.load_resume_entries_for_media_ids(&app, &[&item.id])?,
         );
         Ok((
             build_title_watch_progress_with_priorities(rows, Some(&source_health_priorities)),
@@ -589,7 +589,7 @@ pub async fn get_title_watch_progress(
 
     let (items, source_health_priorities) =
         load_entries_with_source_health(&app, playback_state.inner(), move |service, app| {
-            service.load_resume_entries_for_media_id(app, &id)
+            service.load_resume_entries_for_media_ids(app, &[&id])
         })
         .await?;
 
@@ -711,10 +711,8 @@ async fn remove_history_items(
         return Ok(Vec::new());
     }
     super::run_blocking_store_op(move || {
-        let rows = match targets.keys().next() {
-            Some(id) if targets.len() == 1 => service.load_resume_entries_for_media_id(&app, id)?,
-            _ => service.load_resume_entries(&app)?,
-        };
+        let ids: Vec<_> = targets.keys().map(String::as_str).collect();
+        let rows = service.load_resume_entries_for_media_ids(&app, &ids)?;
         let (keys, removed) = select_history_removals(rows, &targets);
         // remove_keys fences periodic saves without advancing the clear/import reset epoch.
         service.remove_keys(&app, &keys)?;

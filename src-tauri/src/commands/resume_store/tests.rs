@@ -113,6 +113,50 @@ fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
 }
 
 #[test]
+fn media_id_reads_keep_aliases_order_and_literal_ids() {
+    let path = TempDbPath::new("selected-titles");
+    let mut store = ResumeStore::open(&path).unwrap();
+    for (key, id, type_, watched) in [
+        ("movie:shared", "shared", "movie", 100),
+        ("series:shared:0:0", "shared", "series", 100),
+        ("series:shared:1:2", "shared", "series", 200),
+        ("series:other:8:102", "other", "series", 300),
+        ("series:other:1:2", "other", "series", 300),
+        ("movie:unrelated", "unrelated", "movie", 400),
+        ("movie:quote'\"", "quote'\"", "movie", 500),
+    ] {
+        store
+            .upsert_progress(
+                key,
+                &WatchProgress {
+                    id: id.into(),
+                    type_: type_.into(),
+                    ..sample_progress(watched, 120.0)
+                },
+            )
+            .unwrap();
+    }
+    let all = store.load_entries().unwrap();
+    for ids in [
+        vec![],
+        vec!["shared"],
+        vec!["other", "shared", "missing", "other", "quote'\""],
+    ] {
+        let expected: Vec<_> = all
+            .iter()
+            .filter(|(_, row)| ids.contains(&row.id.as_str()))
+            .cloned()
+            .collect();
+        let scoped = store.load_entries_for_media_ids(&ids).unwrap();
+        assert_eq!(
+            serde_json::to_value(&scoped).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "{ids:?}"
+        );
+    }
+}
+
+#[test]
 fn episode_prefilter_preserves_canonical_claims_raw_fallback_and_all_donors() {
     use crate::commands::history_helpers::{choose_entry, resume_rows, HistoryEntryQuery};
 
@@ -1468,10 +1512,12 @@ fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
     let keys: Vec<&str> = entries.iter().map(|(key, _)| key.as_str()).collect();
     assert_eq!(keys, ["movie:tt1234567"]);
 
-    let scoped = store
-        .load_entries_for_media_id("tt1234567")
-        .expect("scoped read survives corrupt row");
-    assert_eq!(scoped.len(), 1);
+    for ids in [&["tt1234567"][..], &["tt1234567", "missing"][..]] {
+        let scoped = store
+            .load_entries_for_media_ids(ids)
+            .expect("scoped read survives corrupt row");
+        assert_eq!(scoped.len(), 1);
+    }
 
     let clamped = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(clamped.position, 0.0);

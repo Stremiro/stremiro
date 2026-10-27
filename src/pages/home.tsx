@@ -8,7 +8,7 @@ import {
   HorizontalMediaRail,
 } from '@/components/horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from '@/components/media-card';
-import { MediaRow } from '@/components/media-row';
+import { MediaRow, RailTitleLink } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
 import { RetryBanner } from '@/components/retry-banner';
 import { ScrollToTop } from '@/components/scroll-to-top';
@@ -23,6 +23,7 @@ import {
   MEDIA_ROW_STALE_TIME_MS,
   RECENT_WATCH_SEED_QUERY_KEY,
   WATCH_HISTORY_STALE_TIME_MS,
+  WATCHLIST_QUERY_KEY,
   trendingRowQueryKey,
 } from '@/lib/query-invalidation';
 import { sameSearchGenre, searchGenrePath, type SearchMediaType } from '@/lib/search-page-state';
@@ -130,6 +131,27 @@ function DeferredHomeRow({ children }: { children: ReactNode }) {
   return <div ref={anchorRef}>{nearViewport ? children : <HomeRowPlaceholder />}</div>;
 }
 
+// Local-only rail: no skeleton or error surface, so it never appears for an empty watchlist.
+function WatchlistRail() {
+  const { data: watchlist } = useQuery({
+    queryKey: WATCHLIST_QUERY_KEY,
+    queryFn: api.getWatchlist,
+    staleTime: WATCH_HISTORY_STALE_TIME_MS,
+  });
+  if (!watchlist?.length) return null;
+
+  return (
+    <HorizontalMediaRail
+      title={<RailTitleLink to='/profile?status=plan_to_watch' title='Watchlist' />}
+      railId='watchlist'
+      items={watchlist}
+      isLoading={false}
+      getItemKey={mediaCardRailKey}
+      renderItem={renderMediaCardRailItem}
+    />
+  );
+}
+
 function RecentWatchRecommendations() {
   const isOnline = useOnlineStatus();
   const recentWatchSeedQuery = useQuery({
@@ -227,6 +249,7 @@ export function Home() {
         )}
         <StreamAddonHint />
         <ResumeSection />
+        <WatchlistRail />
 
         <RecentWatchRecommendations />
 
