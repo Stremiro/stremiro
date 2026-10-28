@@ -985,6 +985,8 @@ interface UseToggleEpisodeWatchedOptions {
 interface EpisodesWatchedVariables {
   episodes: readonly Episode[];
   watched: boolean;
+  /** Undo-toast title override for partial-season actions. */
+  label?: string;
 }
 
 // Variables paint instant watched checks; only Rust creates durable rows.
@@ -1038,11 +1040,11 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
       });
       return { previous };
     },
-    onSuccess: ([progress, previousRows], { episodes, watched }) => {
+    onSuccess: ([progress, previousRows], { episodes, watched, label }) => {
       queryClient.setQueryData<TitleWatchProgress>(progressKey, progress);
       if (seasonAction && item) {
         toastRemovedWithUndo(
-          watched ? 'Season marked as watched' : 'Season marked as unwatched',
+          label ?? (watched ? 'Season marked as watched' : 'Season marked as unwatched'),
           true,
           () =>
             revertEpisodesWatched(item, episodes, watched, previousRows, () =>

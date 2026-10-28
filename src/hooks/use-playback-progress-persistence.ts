@@ -143,7 +143,8 @@ export function usePlaybackProgressPersistence({
       const operation = saveQueueRef.current.then(async () => {
         if (getWatchProgressEpoch() !== enqueuedEpoch) return;
         await api.saveWatchProgress(payload);
-        // Cancel pre-save reads; only first-load observers need an immediate restart.
+        // Cancel pre-save reads. Periodic saves restart only first-load observers; lifecycle
+        // saves (pause, exit) also refresh mounted views such as details under the mini player.
         const queryKey = titleWatchProgressQueryKey(payload.id);
         await queryClient.cancelQueries({ queryKey });
         await queryClient.invalidateQueries({
@@ -153,7 +154,7 @@ export function usePlaybackProgressPersistence({
         void queryClient.refetchQueries({
           queryKey,
           type: 'active',
-          predicate: (query) => query.state.data === undefined,
+          predicate: (query) => pendingSave.refreshRail || query.state.data === undefined,
         });
         lastSavedFingerprintRef.current = fingerprint;
         clearPendingSave();

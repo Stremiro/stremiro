@@ -792,8 +792,8 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
     let full = meta_for_shape(hit.as_ref(), true);
     assert!(lite.episodes.is_none());
     assert!(lite.seasons.is_none());
-    assert!(lite.cast.is_none());
-    assert!(lite.directors.is_none());
+    assert_eq!(lite.cast.as_deref().unwrap(), ["Actor"]);
+    assert_eq!(lite.directors.as_deref().unwrap(), ["Director"]);
     assert_eq!(lite.runtime.as_deref(), Some("45 min"));
     assert_eq!(full.cast.as_deref().unwrap(), ["Actor"]);
     assert_eq!(full.directors.as_deref().unwrap(), ["Director"]);
@@ -809,14 +809,12 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
     assert!(Arc::ptr_eq(&hit, &still_cached));
     assert!(still_cached.episodes.is_some());
 
-    // Card shaping drops episodes and credits, keeping all other fields.
+    // Card shaping drops episodes, keeping all other fields.
     let lite_json = serde_json::to_value(&lite).expect("serialize lite");
     let mut full_json = serde_json::to_value(&full).expect("serialize full");
     let full_object = full_json.as_object_mut().unwrap();
     full_object.remove("episodes");
     full_object.remove("seasons");
-    full_object.remove("cast");
-    full_object.remove("directors");
     assert_eq!(lite_json, full_json);
 }
 

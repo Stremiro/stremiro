@@ -82,7 +82,7 @@ const PLAYER_LOADING_STAGES = [
   { id: 'buffering', label: 'Buffering' },
 ] as const;
 
-export interface PlayerLoadingOverlayProps {
+interface PlayerLoadingOverlayProps {
   headline: string;
   detail?: string;
   /** Index into the starting → finding → connecting → buffering ladder. */

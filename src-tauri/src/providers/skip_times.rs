@@ -107,16 +107,9 @@ const SKIP_TIMES_MAX_BYTES: usize = 256 * 1024;
 const SKIPDB_SEGMENTS_URL: &str = "https://api.skipdb.tv/api/segments";
 const TRANSIENT_ERROR: &str = "Skip times are temporarily unavailable.";
 
-fn skip_times_body_failure(error: super::BoundedBodyError) -> Result<SkipTimesResult, String> {
-    match error {
-        super::BoundedBodyError::Read(_) => Err(TRANSIENT_ERROR.to_string()),
-        super::BoundedBodyError::TooLarge(_) => Ok(SkipTimesResult::default()),
-    }
-}
-
 fn skip_times_fetch_failure(error: FetchFailure) -> Result<SkipTimesResult, String> {
     match error {
-        FetchFailure::Retryable(message) => Err(message),
+        FetchFailure::Retryable(_) => Err(TRANSIENT_ERROR.to_string()),
         FetchFailure::Fatal(_) => Ok(SkipTimesResult::default()),
     }
 }
@@ -220,8 +213,6 @@ impl SkipTimesProvider {
         let res = match self.client.get(&url).send().await {
             Ok(response) => response,
             Err(error) => {
-                #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] SkipDB request error: {}", error);
                 return skip_times_fetch_failure(FetchFailure::from_send_error(
                     &error,
                     TRANSIENT_ERROR.to_string(),
@@ -231,8 +222,6 @@ impl SkipTimesProvider {
 
         let status = res.status();
         if !status.is_success() {
-            #[cfg(debug_assertions)]
-            eprintln!("[SkipTimes] SkipDB HTTP {status}");
             return skip_times_http_failure(status);
         }
 
@@ -242,19 +231,10 @@ impl SkipTimesProvider {
         .await
         {
             Ok(bytes) => bytes,
-            Err(error) => {
-                #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] body error");
-                return skip_times_body_failure(error);
-            }
+            Err(error) => return skip_times_fetch_failure(error.into()),
         };
-        let body: SkipDbSegmentsResponse = match serde_json::from_slice(&bytes) {
-            Ok(b) => b,
-            Err(_e) => {
-                #[cfg(debug_assertions)]
-                eprintln!("[SkipTimes] SkipDB parse error: {}", _e);
-                return Ok(SkipTimesResult::default());
-            }
+        let Ok(body) = serde_json::from_slice::<SkipDbSegmentsResponse>(&bytes) else {
+            return Ok(SkipTimesResult::default());
         };
 
         Ok(collect_skip_db_segments(body, duration_secs))

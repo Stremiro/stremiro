@@ -392,7 +392,13 @@ export interface AddonShareLink {
 /** A `stremiro://` link Rust validated: it opens a title or prefills the addon add box. */
 export type AppLink =
   | { kind: 'addon'; url: string }
-  | { kind: 'title'; mediaType: PlayerRouteMediaType; mediaId: string };
+  | {
+      kind: 'title';
+      mediaType: PlayerRouteMediaType;
+      mediaId: string;
+      season?: number;
+      episode?: number;
+    };
 
 export type AddonResourceKind = 'catalog' | 'meta' | 'stream' | 'subtitles';
 
@@ -597,7 +603,7 @@ export function hasSubtitleAppearance(preferences: typeof SUBTITLE_APPEARANCE_RE
 }
 
 export type StreamSelectorQuality = 'all' | '4k' | '1080p' | '720p' | 'sd';
-export type StreamSelectorSource = 'all' | 'cached';
+type StreamSelectorSource = 'all' | 'cached';
 export type StreamSelectorSort = 'smart' | 'quality' | 'seeds';
 export type StreamSelectorBatch = 'all' | 'episodes' | 'packs';
 
@@ -665,7 +671,7 @@ export interface SearchCatalogPage {
   partial: boolean;
 }
 
-export type HistoryPlaybackPlanReason = 'missing-episode-context';
+type HistoryPlaybackPlanReason = 'missing-episode-context';
 
 interface HistoryPlaybackRouteState extends Omit<
   PlayerRouteState,

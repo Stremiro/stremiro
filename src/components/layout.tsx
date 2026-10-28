@@ -6,7 +6,6 @@ import { useProfileAccent } from '@/hooks/use-local-profile';
 import { navigateApp } from '@/lib/navigation';
 import { applyAccentVars, clamp } from '@/lib/utils';
 import { DesktopTitlebar } from './desktop-titlebar';
-import { MediaCardMenuScope } from './media-card';
 import { Sidebar } from './sidebar';
 
 // A route render crash must not unmount PlayerHost and the docked mini player —
@@ -71,9 +70,7 @@ function RouteOutlet({ onRetry }: { onRetry: () => void }) {
   const { key } = useLocation();
   return (
     <RouteErrorBoundary resetKey={key} onRetry={onRetry}>
-      <MediaCardMenuScope resetKey={key}>
-        <Outlet />
-      </MediaCardMenuScope>
+      <Outlet />
     </RouteErrorBoundary>
   );
 }
@@ -108,12 +105,8 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
       </a>
       <DesktopTitlebar historyControls className='vt-pin-titlebar' />
       <div data-mini-mask className='fixed inset-0 bg-black -z-10' />
-      {/* Ambient accent tint. Radial gradients only — blur on viewport layers
-          clips and quantizes into visible rings on WebView2. Alpha rides
-          var(--app-glow) so the settings slider previews live (always mounted).
-          Only the top-left wash: a second gradient anchored past the bottom
-          edge gets clipped by the viewport rect, which paints a hard square
-          outline in whatever color the user picked. */}
+      {/* One top-left gradient avoids WebView2 blur rings and clipped bottom-edge washes.
+          --app-glow previews the intensity slider live. */}
       <div
         aria-hidden='true'
         data-mini-mask

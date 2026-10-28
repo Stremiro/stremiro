@@ -194,41 +194,6 @@ async fn fetch_media_schedule_inner(
     Ok(build_media_schedule(&details, id, include_episodes))
 }
 
-/// Cache episode-coordinate mappings and enrich stream targets in one blocking-pool
-/// round-trip — the cache pass returns resolved snapshots so enrichment reuses them.
-async fn cache_and_enrich_episode_targets(
-    app: &AppHandle,
-    playback_state: &PlaybackStateService,
-    media_type: &str,
-    media_id: &str,
-    fallback_lookup_id: &str,
-    episodes: Vec<Episode>,
-) -> Result<Vec<Episode>, String> {
-    let app_owned = app.clone();
-    let service = playback_state.clone();
-    let media_type_owned = media_type.to_string();
-    let media_id_owned = media_id.to_string();
-    let fallback_owned = fallback_lookup_id.to_string();
-    // Retain the payload across a failed hop without deep-cloning it on success.
-    let episodes = Arc::new(episodes);
-    let cache_episodes = Arc::clone(&episodes);
-    let snapshots = super::run_blocking_store_op(move || {
-        service.cache_episode_mappings(
-            &app_owned,
-            &media_type_owned,
-            &media_id_owned,
-            Some(fallback_owned.as_str()),
-            &cache_episodes,
-        )
-    })
-    .await;
-    Ok(enrich_episode_targets(
-        Arc::unwrap_or_clone(episodes),
-        fallback_lookup_id,
-        snapshots,
-    ))
-}
-
 fn enrich_episode_targets(
     mut episodes: Vec<Episode>,
     fallback_lookup_id: &str,
@@ -312,19 +277,29 @@ pub async fn get_media_details(
     let mut details =
         fetch_media_details_inner(&app, &client, media_type, &id, include_episodes).await?;
 
-    if let Some(episodes) = details.episodes.as_mut().map(std::mem::take) {
+    if let Some(episodes) = details.episodes.take() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
-        details.episodes = Some(
-            cache_and_enrich_episode_targets(
+        let service = playback_state.inner().clone();
+        let cache_id = id.clone();
+        let fallback_owned = fallback_lookup_id.to_string();
+        // Retain the payload across a failed hop without deep-cloning it on success.
+        let episodes = Arc::new(episodes);
+        let cache_episodes = Arc::clone(&episodes);
+        let snapshots = super::run_blocking_store_op(move || {
+            service.cache_episode_mappings(
                 &app,
-                playback_state.inner(),
                 media_type,
-                &id,
-                fallback_lookup_id,
-                episodes,
+                &cache_id,
+                Some(fallback_owned.as_str()),
+                &cache_episodes,
             )
-            .await?,
-        );
+        })
+        .await;
+        details.episodes = Some(enrich_episode_targets(
+            Arc::unwrap_or_clone(episodes),
+            fallback_lookup_id,
+            snapshots,
+        ));
     }
 
     Ok(details)

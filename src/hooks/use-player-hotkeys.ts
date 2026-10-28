@@ -43,7 +43,6 @@ interface UsePlayerHotkeysOptions {
   isExpanded: boolean;
   isFullscreen: boolean;
   keymap: PlayerKeymap;
-  mountedRef: RefObject<boolean>;
   navigateBack: () => Promise<void>;
   nudgeSubtitleDelay: (direction: 1 | -1) => void;
   openStreamSelector: (() => void) | null;
@@ -79,7 +78,6 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
     isExpanded,
     isFullscreen,
     keymap,
-    mountedRef,
     navigateBack,
     nudgeSubtitleDelay,
     openStreamSelector,
@@ -103,7 +101,6 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
 
   // Effect event: one permanent listener reading latest options.
   const handleKeyDown = useEffectEvent((e: KeyboardEvent) => {
-    if (!mountedRef.current) return;
     // Docked: only the focused mini region owns media keys; the surrounding page keeps its shortcuts.
     const isMini = !isExpanded;
     if (

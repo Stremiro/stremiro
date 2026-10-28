@@ -258,7 +258,8 @@ pub(crate) struct AddonResourceClient {
 }
 
 /// Lite shape rebuilt field-by-field so a card hit never copies the discarded
-/// episodes and credits; a new `MediaDetails` field fails this literal on purpose.
+/// episodes; a new `MediaDetails` field fails this literal on purpose. Credits stay:
+/// the details hero paints from this shape and must not grow when the full one lands.
 pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> MediaDetails {
     if include_episodes {
         return details.clone();
@@ -278,8 +279,8 @@ pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> 
         rating: details.rating.clone(),
         rating_percent: details.rating_percent,
         runtime: details.runtime.clone(),
-        cast: None,
-        directors: None,
+        cast: details.cast.clone(),
+        directors: details.directors.clone(),
         genres: details.genres.clone(),
         trailers: details.trailers.clone(),
         episodes: None,
@@ -828,8 +829,7 @@ fn json_string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(json_string)
 }
 
-/// Strict 11-char YouTube token (`[A-Za-z0-9_-]`) — mirrors the frontend
-/// `isValidYouTubeVideoId` gate so `source` can't smuggle URL params/markup.
+/// Accept only 11-character YouTube tokens, never URL parameters or markup.
 fn is_youtube_video_token(source: &str) -> bool {
     source.len() == 11
         && source

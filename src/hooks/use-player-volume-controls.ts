@@ -89,12 +89,14 @@ export function usePlayerVolumeControls({
     volumeRef.current = newVol;
     if (newVol > 0) lastPositiveVolumeRef.current = newVol;
     scheduleVolumePersist({ playerVolume: newVol });
-    pendingVolumeRef.current = newVol;
-    void scheduleMpvSet('volume', newVol, rollbackVolume);
+    // Between instances nothing can take the write; init re-applies the live refs.
+    const native = mpvInitializedRef.current;
+    pendingVolumeRef.current = native ? newVol : null;
+    if (native) void scheduleMpvSet('volume', newVol, rollbackVolume);
     triggerOsd({ kind: 'volume', level: newVol });
     if (newVol > 0 && isMutedRef.current) {
       setIsMuted(false);
-      await scheduleMpvSet('mute', false, rollbackMute);
+      if (native) await scheduleMpvSet('mute', false, rollbackMute);
     }
   };
 
@@ -143,7 +145,7 @@ export function usePlayerVolumeControls({
     }
     setIsMuted(true);
     triggerOsd({ kind: 'volume', level: 0 });
-    await scheduleMpvSet('mute', true, rollbackMute);
+    if (mpvInitializedRef.current) await scheduleMpvSet('mute', true, rollbackMute);
   };
 
   return {

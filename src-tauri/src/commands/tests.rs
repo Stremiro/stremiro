@@ -2716,7 +2716,6 @@ fn backup_export_rejects_store_directory_and_descendants_after_canonicalization(
     ] {
         assert!(validate_backup_export_path(&target, &store_path).is_err());
     }
-    #[cfg(windows)]
     assert!(validate_backup_export_path(
         &std::path::PathBuf::from(store_path.to_string_lossy().to_ascii_uppercase()),
         &store_path,

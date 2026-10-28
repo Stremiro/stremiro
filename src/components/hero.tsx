@@ -108,7 +108,6 @@ function HeroCarouselIndicators({
       <button
         type='button'
         aria-label={isRotationPaused ? 'Resume automatic rotation' : 'Pause automatic rotation'}
-        aria-pressed={isRotationPaused}
         title={isRotationPaused ? 'Resume automatic rotation' : 'Pause automatic rotation'}
         onClick={onToggleRotation}
         className={cn(ARROW_BUTTON_CLASS_NAME, 'motion-reduce:hidden')}
@@ -425,6 +424,20 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
       onPointerEnter={() => setIsHovered(true)}
       onPointerLeave={() => setIsHovered(false)}
       onFocusCapture={() => setHasFocus(true)}
+      onKeyDownCapture={(event) => {
+        if (
+          event.defaultPrevented ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')
+        ) {
+          return;
+        }
+        event.preventDefault();
+        handleStep(event.key === 'ArrowLeft' ? -1 : 1);
+      }}
       onBlurCapture={(e) => {
         setHasFocus(e.relatedTarget instanceof Node && e.currentTarget.contains(e.relatedTarget));
       }}
@@ -560,7 +573,6 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                     variant={null}
                     aria-label={libraryActionLabel}
                     title={libraryActionLabel}
-                    aria-pressed={libraryReady ? isInLibrary : undefined}
                     aria-busy={
                       (!libraryReady && !libraryError) || toggleLibrary.isPending || undefined
                     }

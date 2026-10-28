@@ -73,7 +73,3 @@ version = "2.0.17"
 [build-dependencies.tauri-plugin]
 version = "2.5.1"
 features = ["build"]
-
-[target."cfg(unix)".dependencies]
-
-[target."cfg(windows)".dependencies]

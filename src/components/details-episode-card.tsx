@@ -1,12 +1,19 @@
-import { memo, useId, type Ref } from 'react';
-import { Check, Play } from 'lucide-react';
+import { memo, useId, useRef, useState, type Ref } from 'react';
+import { Check, CheckCheck, ChevronLeft, Link2, Play, RotateCcw } from 'lucide-react';
 import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
+import { InlineMenu } from '@/components/inline-menu';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { useFailedSrc } from '@/hooks/use-failed-src';
+import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useLocalDay } from '@/hooks/use-local-day';
+import { copyText } from '@/lib/notify';
 import { formatAirDate, parseLocalScheduleDate, SHORT_DATE_FORMATTER } from '@/lib/schedule-dates';
 import { cn, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
+
+// Clears the watched toggle and emphasis badge pinned to the card's top edge.
+const SYNOPSIS_TOP_CLEARANCE_PX = 48;
+const MIN_SYNOPSIS_LINES = 2;
 
 export function isEpisodeSpoiler(
   episode: Episode,
@@ -39,8 +46,12 @@ interface EpisodeCardProps {
   progressPercent: number;
   remainingText: string | null;
   resumeRef?: Ref<HTMLButtonElement>;
+  shareLink: string;
   onPlay: (episode: Episode) => void;
+  onPlayFromStart: (episode: Episode) => void;
   onToggleWatched?: (episode: Episode) => void;
+  /** Present when earlier aired episodes of the season are still unwatched. */
+  onMarkWatchedThrough?: (episode: Episode) => void;
 }
 
 function EpisodeCardInner({
@@ -54,12 +65,41 @@ function EpisodeCardInner({
   progressPercent,
   remainingText,
   resumeRef,
+  shareLink,
   onPlay,
+  onPlayFromStart,
   onToggleWatched,
+  onMarkWatchedThrough,
 }: EpisodeCardProps) {
   const localDay = useLocalDay();
   const [thumbnail, onThumbnailError] = useFailedSrc(episode.thumbnail);
   const descriptionId = useId();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const textRef = useRef<HTMLDivElement>(null);
+  const synopsisRef = useRef<HTMLDivElement>(null);
+  const menu = useInlineMenu({
+    rootRef,
+    returnFocus: () => rootRef.current?.querySelector('button'),
+  });
+  const watchedLocked = isWatchedDisabled || isWatchedPending;
+
+  // Hover grows the synopsis into whatever height the artwork leaves instead of a fixed clamp.
+  const [synopsisLines, setSynopsisLines] = useState(MIN_SYNOPSIS_LINES);
+  const fitSynopsis = () => {
+    const root = rootRef.current;
+    const text = textRef.current;
+    const synopsis = synopsisRef.current;
+    const paragraph = synopsis?.querySelector('p');
+    if (!root || !text || !synopsis || !paragraph) return;
+    const style = getComputedStyle(paragraph);
+    const available =
+      root.clientHeight -
+      (text.offsetHeight - synopsis.offsetHeight) -
+      SYNOPSIS_TOP_CLEARANCE_PX -
+      parseFloat(style.paddingTop);
+    const lines = Math.floor(available / parseFloat(style.lineHeight));
+    setSynopsisLines(Math.max(MIN_SYNOPSIS_LINES, lines || 0));
+  };
   const description = isSpoiler
     ? 'Description hidden to prevent spoilers.'
     : episode.overview?.trim() || null;
@@ -75,7 +115,13 @@ function EpisodeCardInner({
   const watchButtonLabel = `${emphasis === 'resume' ? 'Resume' : 'Play'} ${coordinates}: ${title}${releaseLabel ? `, ${releaseLabel}` : ''}${remainingText && !isWatched ? ` (${remainingText})` : ''}`;
 
   return (
-    <div className='relative'>
+    <div
+      ref={rootRef}
+      className='relative'
+      {...menu.rootProps}
+      onPointerEnter={fitSynopsis}
+      onFocus={fitSynopsis}
+    >
       <button
         type='button'
         ref={resumeRef}
@@ -125,7 +171,13 @@ function EpisodeCardInner({
           </>
         )}
 
-        <div className='pointer-events-none absolute inset-x-0 bottom-0 z-10 p-3.5'>
+        <div
+          ref={textRef}
+          className={cn(
+            'pointer-events-none absolute inset-x-0 bottom-0 z-10 p-3.5 transition-opacity duration-150 ease-out motion-reduce:transition-none',
+            menu.presence.mounted && 'opacity-0 duration-0',
+          )}
+        >
           <p className='flex min-w-0 items-center gap-1.5 text-[13px] font-medium leading-4 tabular-nums text-zinc-300'>
             <span className='shrink-0 font-semibold text-white/90'>E{episode.episode}</span>
             {releaseLabel && (
@@ -141,18 +193,19 @@ function EpisodeCardInner({
               </>
             )}
           </p>
-          <h4
-            title={title}
-            className='pointer-events-auto mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white drop-shadow-md'
-          >
+          <h4 className='mt-0.5 line-clamp-2 text-[15px] font-semibold leading-snug text-white drop-shadow-md'>
             {title}
           </h4>
           {description && (
-            <div className='grid grid-rows-[0fr] opacity-0 transition-[grid-template-rows,opacity] duration-300 ease-out group-hover/episode:grid-rows-[1fr] group-hover/episode:opacity-100 group-focus-visible/episode:grid-rows-[1fr] group-focus-visible/episode:opacity-100 motion-reduce:transition-none'>
+            <div
+              ref={synopsisRef}
+              className='grid grid-rows-[0fr] opacity-0 transition-[grid-template-rows,opacity] duration-300 ease-out group-hover/episode:grid-rows-[1fr] group-hover/episode:opacity-100 group-focus-visible/episode:grid-rows-[1fr] group-focus-visible/episode:opacity-100 motion-reduce:transition-none'
+            >
               <div className='min-h-0 overflow-hidden'>
                 <p
                   id={descriptionId}
                   className='line-clamp-2 pt-1.5 text-[13px] leading-snug text-zinc-200'
+                  style={{ WebkitLineClamp: synopsisLines }}
                 >
                   {description}
                 </p>
@@ -166,15 +219,17 @@ function EpisodeCardInner({
       {onToggleWatched && (
         <button
           type='button'
-          aria-pressed={isWatched}
-          aria-disabled={isWatchedDisabled || isWatchedPending || undefined}
+          aria-disabled={watchedLocked || undefined}
           aria-busy={isWatchedPending || undefined}
           aria-label={`Mark ${coordinates} as ${isWatched ? 'unwatched' : 'watched'}`}
-          title={isWatched ? 'Mark as unwatched' : 'Mark as watched'}
+          tabIndex={menu.presence.mounted ? -1 : undefined}
           onClick={() => {
-            if (!isWatchedDisabled && !isWatchedPending) onToggleWatched(episode);
+            if (!watchedLocked) onToggleWatched(episode);
           }}
-          className='group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default'
+          className={cn(
+            'group/watch absolute right-1 top-1 z-30 flex h-11 w-11 items-center justify-center rounded-lg focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 aria-disabled:cursor-default',
+            menu.presence.mounted && 'pointer-events-none opacity-0',
+          )}
         >
           <span
             className={cn(
@@ -188,6 +243,46 @@ function EpisodeCardInner({
           </span>
         </button>
       )}
+      <InlineMenu
+        presence={menu.presence}
+        label={`More actions for ${coordinates}`}
+        className='z-40 rounded-lg border border-white/[0.08] bg-zinc-950/85 backdrop-blur-md'
+        onAction={menu.close}
+        actions={[
+          { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
+          {
+            key: 'play-from-start',
+            label: 'Play from start',
+            icon: RotateCcw,
+            onSelect: () => onPlayFromStart(episode),
+          },
+          onToggleWatched && {
+            key: 'toggle-watched',
+            label: isWatched ? 'Mark unwatched' : 'Mark watched',
+            icon: Check,
+            disabled: watchedLocked,
+            onSelect: () => onToggleWatched(episode),
+          },
+          onMarkWatchedThrough && {
+            key: 'watched-through',
+            label: 'Mark watched up to here',
+            icon: CheckCheck,
+            disabled: isWatchedDisabled,
+            onSelect: () => onMarkWatchedThrough(episode),
+          },
+          {
+            key: 'copy-link',
+            label: 'Copy episode link',
+            icon: Link2,
+            onSelect: () =>
+              void copyText(shareLink, {
+                success: 'Episode link copied',
+                successDetail: `${coordinates} · ${title}`,
+                failure: 'Could not copy episode link',
+              }),
+          },
+        ]}
+      />
     </div>
   );
 }

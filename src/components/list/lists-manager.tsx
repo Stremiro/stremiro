@@ -16,6 +16,9 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { useMutation, useMutationState, useQueryClient } from '@tanstack/react-query';
 import {
+  ArrowDown,
+  ArrowUp,
+  ChevronLeft,
   ChevronRight,
   CheckSquare,
   GripVertical,
@@ -28,6 +31,7 @@ import {
   X,
 } from 'lucide-react';
 import { memo, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { InlineMenu } from '@/components/inline-menu';
 import { useSearchParams } from 'react-router';
 import {
   CreateListDialog,
@@ -46,6 +50,7 @@ import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
 import { useTitleSearch } from '@/hooks/use-item-search';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePrefetchDetails } from '@/hooks/use-prefetch-details';
+import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
@@ -97,6 +102,7 @@ const LIST_MANAGER_SKELETON_KEYS = [
   'list-manager-skeleton-2',
   'list-manager-skeleton-3',
 ] as const;
+const SORTABLE_TRANSITION = { duration: 200, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' };
 
 function ListPosterStack({ items }: { items?: MediaItem[] }) {
   const posters = items?.slice(0, 3) ?? [];
@@ -125,23 +131,35 @@ interface SortableListCardProps {
   list: UserList;
   isExpanded: boolean;
   isDeleting: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   onToggleExpand: (id: string) => void;
   onRename: (list: UserList) => void;
   onDelete: (list: UserList) => void;
+  onMove: (delta: -1 | 1) => void;
 }
 
 function SortableListCard({
   list,
   isExpanded,
   isDeleting,
+  canMoveUp,
+  canMoveDown,
   onToggleExpand,
   onRename,
   onDelete,
+  onMove,
 }: SortableListCardProps) {
   const contentId = useId();
+  const headerRef = useRef<HTMLDivElement>(null);
+  const menu = useInlineMenu({
+    rootRef: headerRef,
+    returnFocus: () => headerRef.current?.querySelector('[aria-expanded]'),
+  });
   const rulesSummary = list.rules ? smartRulesSummary(list.rules) : undefined;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: list.id,
+    transition: SORTABLE_TRANSITION,
   });
 
   const style = {
@@ -157,97 +175,113 @@ function SortableListCard({
       className={cn(
         'rounded-lg border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
         isDragging
-          ? 'opacity-40 border-white/20 bg-zinc-900/80 scale-[0.98]'
+          ? 'opacity-40 border-white/20 bg-zinc-900/80'
           : isExpanded
             ? 'border-white/[0.12] bg-zinc-900/50'
             : 'border-white/[0.08] bg-zinc-900/40 hover:border-white/[0.12] hover:bg-zinc-900/60 focus-within:border-white/[0.12] focus-within:bg-zinc-900/60',
       )}
     >
-      <div className='flex items-center gap-3 px-4 py-3'>
-        <button
-          type='button'
-          {...attributes}
-          {...listeners}
-          className='-ml-2 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
-          aria-label={`Reorder ${list.name}`}
+      <div ref={headerRef} className='relative overflow-hidden' {...menu.rootProps}>
+        <div
+          className={cn(
+            'flex items-center gap-3 px-4 py-3 transition-opacity duration-150 ease-out motion-reduce:transition-none',
+            menu.presence.mounted && 'opacity-0 duration-0',
+          )}
         >
-          <GripVertical className='w-4 h-4' />
-        </button>
+          <button
+            type='button'
+            {...attributes}
+            {...listeners}
+            className='-ml-2 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+            aria-label={`Reorder ${list.name}`}
+          >
+            <GripVertical className='w-4 h-4' />
+          </button>
 
-        <button
-          type='button'
-          onClick={() => onToggleExpand(list.id)}
-          aria-expanded={isExpanded}
-          aria-controls={isExpanded ? contentId : undefined}
-          className='flex min-h-8 items-center gap-3 flex-1 min-w-0 rounded-md group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
-        >
-          <ListIconTile iconId={list.icon} />
-          <div className='flex-1 min-w-0 text-left'>
-            <div className='flex items-center gap-2'>
-              <span
-                dir='auto'
-                title={list.name}
-                className='font-medium text-sm text-zinc-200 group-hover:text-white transition-colors truncate'
-              >
-                {list.name}
-              </span>
+          <button
+            type='button'
+            onClick={() => onToggleExpand(list.id)}
+            aria-expanded={isExpanded}
+            aria-controls={isExpanded ? contentId : undefined}
+            className='flex min-h-8 items-center gap-3 flex-1 min-w-0 rounded-md group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+          >
+            <ListIconTile iconId={list.icon} />
+            <div className='flex-1 min-w-0 text-left'>
+              <div className='flex items-center gap-2'>
+                <span
+                  dir='auto'
+                  className='font-medium text-sm text-zinc-200 group-hover:text-white transition-colors truncate'
+                >
+                  {list.name}
+                </span>
+                {list.rules && (
+                  <Sparkles
+                    className='size-3 shrink-0 text-(--accent-nav)'
+                    role='img'
+                    aria-label='Smart list'
+                  />
+                )}
+              </div>
+              <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
+                {pluralize(list.item_ids.length, 'title')}
+              </p>
               {list.rules && (
-                <Sparkles
-                  className='size-3 shrink-0 text-(--accent-nav)'
-                  role='img'
-                  aria-label='Smart list'
-                />
+                <p className='mt-0.5 truncate text-[11px] text-zinc-500'>{rulesSummary}</p>
               )}
             </div>
-            <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
-              {pluralize(list.item_ids.length, 'title')}
-            </p>
-            {list.rules && (
-              <p className='mt-0.5 truncate text-[11px] text-zinc-500' title={rulesSummary}>
-                {rulesSummary}
-              </p>
-            )}
-          </div>
-          <ListPosterStack items={list.items} />
-          <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
-            <ChevronRight
-              aria-hidden='true'
-              className={cn(
-                'w-4 h-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-                isExpanded && 'rotate-90',
-              )}
-            />
-          </div>
-        </button>
-
-        <div className='flex items-center gap-1 shrink-0'>
-          <Button
-            size='icon'
-            variant='ghost'
-            onPointerEnter={warmListEditorDialog}
-            onFocus={warmListEditorDialog}
-            onClick={() => onRename(list)}
-            aria-label={list.rules ? `Edit rules and name for ${list.name}` : `Rename ${list.name}`}
-            title={list.rules ? 'Edit rules and name' : 'Rename list'}
-            className='h-8 w-8 rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/8'
-          >
-            <Pencil className='w-3.5 h-3.5' />
-          </Button>
-          <Button
-            size='icon'
-            variant='ghost'
-            data-list-delete={list.id}
-            onClick={() => {
-              if (!isDeleting) onDelete(list);
-            }}
-            aria-disabled={isDeleting || undefined}
-            aria-label={`Delete ${list.name}`}
-            title='Delete list'
-            className='h-8 w-8 rounded-md text-zinc-500 not-aria-disabled:hover:text-red-400 not-aria-disabled:hover:bg-red-500/10 aria-disabled:opacity-50'
-          >
-            <Trash2 className='w-3.5 h-3.5' />
-          </Button>
+            <ListPosterStack items={list.items} />
+            <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
+              <ChevronRight
+                aria-hidden='true'
+                className={cn(
+                  'w-4 h-4 transition-transform duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+                  isExpanded && 'rotate-90',
+                )}
+              />
+            </div>
+          </button>
         </div>
+        <InlineMenu
+          presence={menu.presence}
+          orientation='horizontal'
+          label={`Actions for ${list.name}`}
+          className='rounded-lg bg-zinc-950/90 backdrop-blur-sm'
+          onAction={menu.close}
+          actions={[
+            { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
+            {
+              key: 'rename',
+              label: list.rules ? 'Edit' : 'Rename',
+              icon: Pencil,
+              onWarm: warmListEditorDialog,
+              onSelect: () => onRename(list),
+            },
+            {
+              key: 'move-up',
+              label: 'Move up',
+              icon: ArrowUp,
+              disabled: !canMoveUp,
+              keepOpen: true,
+              onSelect: () => onMove(-1),
+            },
+            {
+              key: 'move-down',
+              label: 'Move down',
+              icon: ArrowDown,
+              disabled: !canMoveDown,
+              keepOpen: true,
+              onSelect: () => onMove(1),
+            },
+            {
+              key: 'delete',
+              label: 'Delete',
+              icon: Trash2,
+              destructive: true,
+              disabled: isDeleting,
+              onSelect: () => onDelete(list),
+            },
+          ]}
+        />
       </div>
 
       {isExpanded && (
@@ -285,6 +319,7 @@ const SortableItemRow = memo(function SortableItemRow({
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: `${listId}::${item.id}`,
     disabled: readOnly || selectionMode,
+    transition: SORTABLE_TRANSITION,
   });
 
   const style = {
@@ -298,7 +333,6 @@ const SortableItemRow = memo(function SortableItemRow({
     return (
       <button
         type='button'
-        aria-pressed={isSelected}
         aria-label={`${isSelected ? 'Deselect' : 'Select'} ${item.title}`}
         onClick={(event) => onToggleSelect(item.id, event.shiftKey)}
         className={cn(
@@ -348,7 +382,7 @@ const SortableItemRow = memo(function SortableItemRow({
         style={style}
         className={cn(
           'relative group rounded-lg overflow-hidden bg-zinc-900/60 transition-[background-color,opacity,box-shadow] duration-200',
-          isDragging ? 'opacity-40 scale-95' : 'hover:ring-1 hover:ring-white/20',
+          isDragging ? 'opacity-40' : 'hover:ring-1 hover:ring-white/20',
         )}
       >
         {!readOnly && (
@@ -373,7 +407,6 @@ const SortableItemRow = memo(function SortableItemRow({
               onRemove(item.id, removeButtonRef.current);
             }}
             aria-label={`Remove ${item.title} from list`}
-            title='Remove from list'
             className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
           >
             <X className='w-3 h-3' />
@@ -475,7 +508,6 @@ const SortableItemRow = memo(function SortableItemRow({
           variant='ghost'
           onClick={() => onRemove(item.id, removeButtonRef.current)}
           aria-label={`Remove ${item.title} from list`}
-          title='Remove from list'
           className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
         >
           <X className='w-3.5 h-3.5' />
@@ -769,7 +801,7 @@ function ListItemsView({ list }: { list: UserList }) {
               className={
                 viewMode === 'grid'
                   ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-3'
-                  : 'space-y-0.5'
+                  : 'flex flex-col gap-0.5'
               }
             >
               {visibleItems.map((item) => (
@@ -912,7 +944,6 @@ export function ListsManager() {
   const newListButtonRef = useRef<HTMLButtonElement>(null);
   const deleteDialogRef = useRef<HTMLDivElement>(null);
   const listRemovalFocusRef = useRef<{
-    button: HTMLButtonElement;
     row: HTMLElement;
     dialog: HTMLDivElement | null;
     index: number;
@@ -933,9 +964,12 @@ export function ListsManager() {
     }
     if (pending.row.isConnected) return false;
     listRemovalFocusRef.current = null;
-    const buttons =
-      listsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-delete]');
-    (buttons?.[Math.min(pending.index, buttons.length - 1)] ?? newListButtonRef.current)?.focus();
+    const rows = listsContainerRef.current?.querySelectorAll<HTMLElement>('[data-list-row]');
+    const target =
+      rows?.[Math.min(pending.index, (rows.length || 1) - 1)]?.querySelector<HTMLElement>(
+        '[aria-expanded]',
+      );
+    (target ?? newListButtonRef.current)?.focus();
     return true;
   };
   useLayoutEffect(() => {
@@ -996,7 +1030,7 @@ export function ListsManager() {
       notifyAction('List deleted');
     },
     onError: (_, id) => {
-      if (listRemovalFocusRef.current?.button.dataset.listDelete === id) {
+      if (listRemovalFocusRef.current?.row.dataset.listRow === id) {
         listRemovalFocusRef.current = null;
       }
       notifyAction('Failed to delete list', { tone: 'error' });
@@ -1005,15 +1039,11 @@ export function ListsManager() {
   });
 
   const startDelete = (id: string) => {
-    const buttons =
-      listsContainerRef.current?.querySelectorAll<HTMLButtonElement>('[data-list-delete]');
-    const index = buttons
-      ? Array.from(buttons).findIndex((button) => button.dataset.listDelete === id)
-      : -1;
-    const button = buttons?.[index];
-    const row = button?.closest<HTMLElement>('[data-list-row]');
-    if (button && row) {
-      listRemovalFocusRef.current = { button, row, dialog: deleteDialogRef.current, index };
+    const rows = listsContainerRef.current?.querySelectorAll<HTMLElement>('[data-list-row]');
+    const index = rows ? Array.from(rows).findIndex((row) => row.dataset.listRow === id) : -1;
+    const row = rows?.[index];
+    if (row) {
+      listRemovalFocusRef.current = { row, dialog: deleteDialogRef.current, index };
     }
     deleteList.mutate(id);
   };
@@ -1027,6 +1057,15 @@ export function ListsManager() {
     setActiveListId(event.active.id);
   };
 
+  const moveList = (from: number, to: number) =>
+    reorderLists.mutate(
+      arrayMove(
+        lists.map((list) => list.id),
+        from,
+        to,
+      ),
+    );
+
   const handleDragEnd = (event: DragEndEvent) => {
     setActiveListId(null);
     const { active, over } = event;
@@ -1035,14 +1074,7 @@ export function ListsManager() {
     const oldIdx = lists.findIndex((l) => l.id === active.id);
     const newIdx = lists.findIndex((l) => l.id === over.id);
     if (oldIdx === -1 || newIdx === -1) return;
-
-    reorderLists.mutate(
-      arrayMove(
-        lists.map((list) => list.id),
-        oldIdx,
-        newIdx,
-      ),
-    );
+    moveList(oldIdx, newIdx);
   };
 
   const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
@@ -1125,16 +1157,22 @@ export function ListsManager() {
           onDragCancel={() => setActiveListId(null)}
         >
           <SortableContext items={lists.map((l) => l.id)} strategy={verticalListSortingStrategy}>
-            <div ref={listsContainerRef} className='space-y-2'>
-              {lists.map((list) => (
+            <div ref={listsContainerRef} className='flex flex-col gap-2'>
+              {lists.map((list, index) => (
                 <SortableListCard
                   key={list.id}
                   list={list}
                   isExpanded={expanded.has(list.id)}
                   isDeleting={pendingDeleteIds.includes(list.id)}
+                  canMoveUp={index > 0}
+                  canMoveDown={index < lists.length - 1}
                   onToggleExpand={updateExpanded}
                   onRename={setRenameTarget}
                   onDelete={handleDeleteConfirm}
+                  onMove={(delta) => {
+                    const next = index + delta;
+                    if (next >= 0 && next < lists.length) moveList(index, next);
+                  }}
                 />
               ))}
             </div>

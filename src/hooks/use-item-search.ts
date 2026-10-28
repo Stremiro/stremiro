@@ -17,7 +17,7 @@ export function useItemSearch<T>(
   const trimmedQuery = query.trim();
   const debouncedQuery = useDebounce(trimmedQuery, ITEM_SEARCH_DEBOUNCE_MS);
   const requestedSearch = enabled && trimmedQuery ? debouncedQuery : '';
-  const listId = getItemListId(items);
+  const listId = requestedSearch ? getItemListId(items) : 0;
   const { data, isError, isFetched, isFetching, isLoading, isPlaceholderData, refetch } = useQuery({
     queryKey: [searchKey, listId, requestedSearch],
     queryFn: async () => {

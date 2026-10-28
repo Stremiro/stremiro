@@ -869,6 +869,7 @@ export async function handlePreviewInvoke<T>(
     case 'get_all_watch_statuses':
       return { ...previewWatchStatuses } as T;
     case 'get_watch_progress':
+    case 'get_next_episode_row':
     case 'recover_playback_stream':
       return null as T;
     case 'cancel_stream_request':

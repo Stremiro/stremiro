@@ -48,10 +48,7 @@ Local changes:
 - Remove raw plugin IPC and permissions: the app owns every native operation
   through bounded, window-bound commands; the plugin still supplies native
   methods and frontend events.
-- Remove the Android/iOS module, `cfg(mobile)`/`cfg(desktop)` gates, the
-  mobile-only plugin error variant and the build script's mobile source paths:
-  the app targets Windows only. (Upstream `mobile.rs` also referenced model
-  types that no longer exist, so it could not compile anyway.)
+- Remove mobile wiring and non-Windows wrapper names; this fork targets Windows only.
 
 The app selects this source with `[patch.crates-io]`. Keep the existing 0.3.2
 JavaScript package and native DLL pair. Remove this override only after a

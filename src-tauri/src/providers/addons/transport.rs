@@ -425,9 +425,6 @@ impl AddonTransport {
         origin: &str,
         prepare: impl FnOnce(Vec<AddonStream>) -> Vec<AddonStream> + Send + 'static,
     ) -> Result<Vec<AddonStream>, FetchFailure> {
-        #[cfg(debug_assertions)]
-        eprintln!("Addon stream origin: {}", origin);
-
         let res = match self
             .client
             .get(url)
@@ -440,17 +437,12 @@ impl AddonTransport {
             Err(e) => {
                 let e = e.without_url();
                 let error = e.to_string();
-                #[cfg(debug_assertions)]
-                eprintln!("Addon stream request failed: {}", error);
                 return Err(FetchFailure::from_send_error(&e, error));
             }
         };
 
         if !res.status().is_success() {
             let status = res.status();
-            #[cfg(debug_assertions)]
-            eprintln!("Addon stream error {} for {}", status, origin);
-
             return Err(FetchFailure::from_http_status(
                 status,
                 format!(
@@ -465,24 +457,11 @@ impl AddonTransport {
                 .await
             {
                 Ok(bytes) => bytes,
-                Err(error) => {
-                    let failure = FetchFailure::from(error);
-                    #[cfg(debug_assertions)]
-                    {
-                        let (FetchFailure::Fatal(message) | FetchFailure::Retryable(message)) =
-                            &failure;
-                        eprintln!("Addon stream body error: {}", message);
-                    }
-                    return Err(failure);
-                }
+                Err(error) => return Err(FetchFailure::from(error)),
             };
 
         tokio::task::spawn_blocking(move || {
-            let mut streams = decode_stream_items(&bytes).map_err(|error| {
-                #[cfg(debug_assertions)]
-                eprintln!("Addon stream JSON parse error: {}", error);
-                FetchFailure::Fatal(error)
-            })?;
+            let mut streams = decode_stream_items(&bytes).map_err(FetchFailure::Fatal)?;
             Self::hydrate_streams(&mut streams);
             let fetched_at = Instant::now();
             for stream in &mut streams {

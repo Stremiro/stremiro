@@ -14,10 +14,11 @@ import {
 import { SLIDING_ACCENT_BAR_CLASS, useSlidingIndicator } from '@/hooks/use-sliding-indicator';
 import { api } from '@/lib/api';
 import { focusSearchInput } from '@/lib/dom';
+import { currentPathWithSearch } from '@/lib/navigation';
 import { routeChunks } from '@/lib/route-chunks';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import { lastSearchFacets, lastSearchPath } from '@/lib/search-page-state';
-import { cn } from '@/lib/utils';
+import { cn, scrollBehavior } from '@/lib/utils';
 
 interface SidebarProps {
   className?: string;
@@ -167,11 +168,17 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
           }
         }}
         onClick={
-          // Already on Search: a click just re-focuses the box, no nav reset.
-          isSearch && isActive
+          // Already there: Search re-focuses its box; other pages scroll to top. Anything with
+          // filters or sections in the URL still navigates, which resets them.
+          isActive
             ? (event) => {
-                event.preventDefault();
-                focusSearchInput();
+                if (isSearch) {
+                  event.preventDefault();
+                  focusSearchInput();
+                } else if (currentPathWithSearch() === item.href) {
+                  event.preventDefault();
+                  window.scrollTo({ top: 0, behavior: scrollBehavior() });
+                }
               }
             : undefined
         }

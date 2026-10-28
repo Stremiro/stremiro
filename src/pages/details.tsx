@@ -60,7 +60,8 @@ import {
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
 } from '@/lib/api';
-import { buildTitleShareLink } from '@/lib/app-links';
+import { buildEpisodeShareLink, buildTitleShareLink } from '@/lib/app-links';
+import { PLAYER_RESTART_START_TIME } from '@/lib/player-navigation';
 import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
 import { claimDetailsHero } from '@/lib/navigation';
 import { copyText } from '@/lib/notify';
@@ -560,7 +561,6 @@ function DetailsContent() {
     openEpisodeStreamSelector,
     handleSelectorClose,
     handleSelectorClosed,
-    getStreamTargetStartTime,
   } = useDetailsStreamSelector({
     item,
     isPlaceholderData,
@@ -574,6 +574,30 @@ function DetailsContent() {
   const handleWatchEpisode = (ep: Episode) => {
     const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
     openEpisodeStreamSelector(ep, epProgress?.resume_start_time);
+  };
+
+  const handlePlayEpisodeFromStart = (ep: Episode) =>
+    openEpisodeStreamSelector(ep, PLAYER_RESTART_START_TIME);
+
+  // Read through a ref so the handler stays stable for `EpisodeCard`'s memo.
+  const seasonWatchTargetsRef = useRef(seasonWatchTargets);
+  useLayoutEffect(() => {
+    seasonWatchTargetsRef.current = seasonWatchTargets;
+  });
+  const firstUnwatchedEpisode = Math.min(...seasonWatchTargets.map((ep) => ep.episode));
+  const { mutate: mutateSeasonWatched } = markSeasonWatched;
+  const handleMarkWatchedThrough = (ep: Episode) => {
+    if (episodeWatchedPending || markSeasonWatched.isPending) return;
+    const episodes = seasonWatchTargetsRef.current.filter(
+      (target) => target.season === ep.season && target.episode <= ep.episode,
+    );
+    if (!episodes.length) return;
+    retainEpisodePosition();
+    mutateSeasonWatched({
+      episodes,
+      watched: true,
+      label: `Marked watched through E${ep.episode}`,
+    });
   };
 
   // Destructured `mutate` keeps this stable — the mutation object is
@@ -646,7 +670,8 @@ function DetailsContent() {
     episodeActionPending ||
     upNextPending;
   const upNextTarget = hasNoSeriesResume ? upNextEpisode : null;
-  const primaryActionSelectsEpisode = hasNoSeriesResume && !upNextTarget && !upNextPending;
+  const primaryActionSelectsEpisode =
+    hasNoSeriesResume && !upNextTarget && !upNextPending && !historyPending;
 
   const handleRetryDetails = async () => {
     if (!baseRouteId || isFetching) return;
@@ -969,7 +994,13 @@ function DetailsContent() {
                         className='w-5 h-5 fill-current transition-transform duration-200 ease-out group-hover:translate-x-0.5 motion-reduce:transition-none'
                       />
                     )}
-                    <span className='text-sm font-semibold tracking-tight'>
+                    {/* Unknown history must not flash a label it is about to replace. */}
+                    <span
+                      className={cn(
+                        'text-sm font-semibold tracking-tight',
+                        historyPending && 'invisible',
+                      )}
+                    >
                       {historyUnavailable
                         ? 'Retry watch progress'
                         : primaryActionSelectsEpisode
@@ -1075,7 +1106,7 @@ function DetailsContent() {
                   <div className='flex basis-full items-center gap-2.5 pt-1 animate-in fade-in duration-200 motion-reduce:animate-none'>
                     <div className='h-[3px] w-32 overflow-hidden rounded-full bg-white/15'>
                       <div
-                        className='h-full rounded-full bg-(--accent-prog)'
+                        className='h-full rounded-full bg-(--accent-prog) transition-[width] duration-500 ease-out motion-reduce:transition-none'
                         style={{ width: `${resumePercent}%` }}
                       />
                     </div>
@@ -1422,8 +1453,20 @@ function DetailsContent() {
                         progressPercent={progressPercent}
                         remainingText={remainingText}
                         resumeRef={emphasis === 'resume' ? resumeEpisodeRef : undefined}
+                        shareLink={buildEpisodeShareLink(
+                          baseRouteType,
+                          baseRouteId,
+                          ep.season,
+                          ep.episode,
+                        )}
                         onPlay={handleWatchEpisode}
+                        onPlayFromStart={handlePlayEpisodeFromStart}
                         onToggleWatched={hasWatchProgress ? handleToggleEpisodeWatched : undefined}
+                        onMarkWatchedThrough={
+                          hasWatchProgress && airStatesReady && firstUnwatchedEpisode < ep.episode
+                            ? handleMarkWatchedThrough
+                            : undefined
+                        }
                       />
                     );
                   })
@@ -1473,7 +1516,7 @@ function DetailsContent() {
           onClose={handleSelectorClose}
           onClosed={handleSelectorClosed}
           target={streamTarget}
-          getStartTime={getStreamTargetStartTime}
+          getStartTime={() => streamTarget.startTime}
         />
       )}
     </div>

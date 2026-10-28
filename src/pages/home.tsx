@@ -16,7 +16,7 @@ import { Skeleton } from '@/components/ui/skeleton';
 import { useAddonConfigs, useBrowseGenres } from '@/hooks/use-addon-configs';
 import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
-import { api, type MediaItem } from '@/lib/api';
+import { api } from '@/lib/api';
 import { similarTitlesQueryKey } from '@/lib/api-discovery';
 import { handleRadioGroupKeyDown } from '@/lib/dom';
 import {
@@ -55,10 +55,6 @@ export const homeTrendingMoviesQueryOptions = {
   staleTime: MEDIA_ROW_STALE_TIME_MS,
 };
 
-function similarRowQuery(seed: MediaItem) {
-  return { queryKey: similarTitlesQueryKey(seed), queryFn: () => api.querySimilarTitles(seed) };
-}
-
 const recentWatchSeedQueryOptions = {
   queryKey: RECENT_WATCH_SEED_QUERY_KEY,
   queryFn: api.getRecentWatchSeed,
@@ -71,6 +67,9 @@ const HOME_NOTICE_CLASS =
 
 // Session-scoped: the hint returns on next launch until a stream addon is installed.
 let streamAddonHintDismissed = false;
+
+// Session-scoped: coming back to Home keeps the Trending tab and genre.
+const trendingSelection = { type: 'movie' as Exclude<SearchMediaType, 'all'>, genre: ALL_GENRES };
 
 function StreamAddonHint() {
   const [dismissed, setDismissed] = useState(streamAddonHintDismissed);
@@ -158,39 +157,40 @@ function RecentWatchRecommendations() {
     ...recentWatchSeedQueryOptions,
     enabled: isOnline,
   });
-  const { data: recentWatchSeed, isSuccess: isRecentSeedReady } = recentWatchSeedQuery;
-
-  if (isOnline && queryNeedsRetry(recentWatchSeedQuery)) {
-    return (
-      <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
-        <RetryBanner
-          className='px-2.5 py-2'
-          message="Couldn't load recommendations."
-          isRetrying={recentWatchSeedQuery.isFetching}
-          onRetry={() => void recentWatchSeedQuery.refetch()}
-        />
-      </div>
-    );
-  }
-  if (!isRecentSeedReady || !recentWatchSeed) return null;
+  const { data: recentWatchSeed } = recentWatchSeedQuery;
 
   return (
-    <DeferredHomeRow>
-      <MediaRow
-        key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
-        title={`Because you watched ${recentWatchSeed.title}`}
-        {...similarRowQuery(recentWatchSeed)}
-        enabled={isOnline}
-        minItems={4}
-      />
-    </DeferredHomeRow>
+    <>
+      {isOnline && queryNeedsRetry(recentWatchSeedQuery) && (
+        <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
+          <RetryBanner
+            className='px-2.5 py-2'
+            message="Couldn't load recommendations."
+            isRetrying={recentWatchSeedQuery.isFetching}
+            onRetry={() => void recentWatchSeedQuery.refetch()}
+          />
+        </div>
+      )}
+      {recentWatchSeed && (
+        <DeferredHomeRow>
+          <MediaRow
+            key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
+            title={`Because you watched ${recentWatchSeed.title}`}
+            queryKey={similarTitlesQueryKey(recentWatchSeed)}
+            queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+            enabled={isOnline}
+            minItems={4}
+          />
+        </DeferredHomeRow>
+      )}
+    </>
   );
 }
 
 export function Home() {
   const isOnline = useOnlineStatus();
-  const [selectedGenre, setSelectedGenre] = useState(ALL_GENRES);
-  const [trendingType, setTrendingType] = useState<Exclude<SearchMediaType, 'all'>>('movie');
+  const [selectedGenre, setSelectedGenre] = useState(trendingSelection.genre);
+  const [trendingType, setTrendingType] = useState(trendingSelection.type);
 
   // Same manifest-driven genre list as the search filter.
   const browseGenresQuery = useBrowseGenres({ enabled: isOnline });
@@ -221,10 +221,8 @@ export function Home() {
       <ScrollToTop />
       {showHero && <Hero items={heroSlice} />}
 
-      {/* Rails overlap the hero's bottom dissolve; the wash ramps across the
-          overlap then stays solid to the page end, so the ambient tint never
-          shows as a band below the last rail. Mid-stops keep the ramp from
-          banding on 8-bit panels (see the ambient layer). */}
+      {/* An opaque ramp across the hero overlap prevents an ambient band below the rails.
+          Intermediate stops reduce banding on 8-bit panels. */}
       <div
         className={cn(
           'relative z-10 flex-1 space-y-3 pb-20 md:space-y-5',
@@ -287,7 +285,10 @@ export function Home() {
                   aria-checked={trendingType === type}
                   tabIndex={trendingType === type ? 0 : -1}
                   onKeyDown={handleRadioGroupKeyDown}
-                  onClick={() => setTrendingType(type)}
+                  onClick={() => {
+                    trendingSelection.type = type;
+                    setTrendingType(type);
+                  }}
                   className={cn(
                     'inline-flex min-h-10 items-center border-b-2 px-0.5 text-sm font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-(--accent-nav) motion-reduce:transition-none',
                     trendingType === type
@@ -304,7 +305,10 @@ export function Home() {
             options: genreOptions,
             allOption: ALL_GENRES,
             active: genre,
-            onChange: setSelectedGenre,
+            onChange: (next) => {
+              trendingSelection.genre = next;
+              setSelectedGenre(next);
+            },
           }}
         />
       </div>

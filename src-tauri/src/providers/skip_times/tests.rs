@@ -1,7 +1,7 @@
 use super::{
-    collect_skip_db_segments, normalize_skip_segments, skip_times_body_failure,
-    skip_times_fetch_failure, skip_times_http_failure, FetchFailure, SkipDbSegmentEntry,
-    SkipDbSegmentsResponse, SkipSegment, SkipTimesResult, TRANSIENT_ERROR,
+    collect_skip_db_segments, normalize_skip_segments, skip_times_fetch_failure,
+    skip_times_http_failure, FetchFailure, SkipDbSegmentEntry, SkipDbSegmentsResponse, SkipSegment,
+    SkipTimesResult, TRANSIENT_ERROR,
 };
 
 #[test]
@@ -25,47 +25,34 @@ fn skipdb_http_failures_retry_timeouts_rate_limits_and_all_server_errors() {
 }
 
 #[test]
-fn skipdb_send_failures_only_retry_transient_errors() {
-    assert_eq!(
-        skip_times_fetch_failure(FetchFailure::Retryable(TRANSIENT_ERROR.to_string())).unwrap_err(),
-        TRANSIENT_ERROR
-    );
-    assert!(
-        skip_times_fetch_failure(FetchFailure::Fatal(TRANSIENT_ERROR.to_string()))
-            .unwrap()
-            .segments
-            .is_empty()
-    );
-
+fn skipdb_transport_failures_retry_reads_but_not_fatal_inputs() {
     crate::providers::ensure_rustls_crypto_provider();
     let error = reqwest::Client::new().get("not a URL").build().unwrap_err();
-    assert!(error.is_builder());
-    assert!(skip_times_fetch_failure(FetchFailure::from_send_error(
-        &error,
-        TRANSIENT_ERROR.to_string()
-    ))
-    .unwrap()
-    .segments
-    .is_empty());
-}
-
-#[test]
-fn skipdb_body_failures_distinguish_transient_reads_from_oversize_payloads() {
-    assert_eq!(
-        skip_times_body_failure(crate::providers::BoundedBodyError::Read(
-            "disconnect".to_string()
-        ))
-        .unwrap_err(),
-        TRANSIENT_ERROR
-    );
-    assert!(
-        skip_times_body_failure(crate::providers::BoundedBodyError::TooLarge(
-            "oversize".to_string()
-        ))
-        .unwrap()
-        .segments
-        .is_empty()
-    );
+    for (failure, retry) in [
+        (FetchFailure::Retryable("offline".into()), true),
+        (FetchFailure::Fatal("invalid".into()), false),
+        (
+            FetchFailure::from_send_error(&error, "invalid".into()),
+            false,
+        ),
+        (
+            crate::providers::BoundedBodyError::Read("disconnect".into()).into(),
+            true,
+        ),
+        (
+            crate::providers::BoundedBodyError::TooLarge("oversize".into()).into(),
+            false,
+        ),
+    ] {
+        assert_eq!(
+            skip_times_fetch_failure(failure),
+            if retry {
+                Err(TRANSIENT_ERROR.to_string())
+            } else {
+                Ok(SkipTimesResult::default())
+            }
+        );
+    }
 }
 
 #[test]

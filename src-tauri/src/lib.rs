@@ -35,10 +35,11 @@ pub fn run() {
         .plugin(tauri_plugin_libmpv::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_autostart::init(
-            tauri_plugin_autostart::MacosLauncher::LaunchAgent,
-            Some(vec!["--autostart"]),
-        ))
+        .plugin(
+            tauri_plugin_autostart::Builder::new()
+                .arg("--autostart")
+                .build(),
+        )
         // App-owned durable stores: registry exists before any command runs.
         .manage(commands::DurableStoreRegistry::default())
         .manage(commands::player_window_commands::PlayerPipState::default())
@@ -124,6 +125,7 @@ pub fn run() {
             commands::media_commands::search_episodes,
             commands::media_commands::get_details_prefetch_bundle,
             commands::up_next_commands::get_resume_rail,
+            commands::up_next_commands::get_next_episode_row,
             commands::calendar_commands::get_calendar_events,
             commands::media_commands::get_addon_subtitles,
             commands::history_playback_commands::build_history_playback_plan,
@@ -212,7 +214,6 @@ pub fn run() {
         .unwrap_or_else(|error| {
             let message = format!("Failed to start Stremiro:\n{error}");
             eprintln!("{message}");
-            #[cfg(windows)]
             // SAFETY: HSTRING and w! provide valid NUL-terminated UTF-16 strings that stay
             // alive through the synchronous MessageBoxW call; no owner window is supplied.
             unsafe {

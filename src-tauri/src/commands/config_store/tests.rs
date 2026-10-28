@@ -184,7 +184,6 @@ fn backup_profile_round_trip_restores_the_avatar_into_its_store() {
         .store
         .get(super::PROFILE_AVATAR_KEY)
         .is_none());
-    #[cfg(windows)]
     for replacement in [Some(avatar.to_string()), None] {
         use std::os::windows::fs::OpenOptionsExt;
 
@@ -716,7 +715,7 @@ fn stored_app_ui_preferences_drops_only_malformed_fields() {
 fn recent_searches_record_newest_first_deduplicated_and_bounded() {
     let long = "x".repeat(200);
     let full: Vec<String> = (1..=8).map(|index| format!("q{index}")).collect();
-    let cases: [(&str, Vec<String>, String, Vec<String>); 6] = [
+    let cases: [(&str, Vec<String>, String, Vec<String>); 9] = [
         (
             "prepends",
             vec!["dune".into()],
@@ -746,6 +745,24 @@ fn recent_searches_record_newest_first_deduplicated_and_bounded() {
             Vec::new(),
             long.clone(),
             vec![long[..120].to_string()],
+        ),
+        (
+            "unicode whitespace collapses before the scalar limit",
+            Vec::new(),
+            "  \u{2003}界\u{a0} ".repeat(1_000),
+            vec!["界 ".repeat(60).trim_end().to_string()],
+        ),
+        (
+            "truncation removes an exposed separator",
+            Vec::new(),
+            format!("{}  suffix", "x".repeat(119)),
+            vec!["x".repeat(119)],
+        ),
+        (
+            "controls beyond the limit stay discarded",
+            Vec::new(),
+            format!("{}\u{7}", "界".repeat(120)),
+            vec!["界".repeat(120)],
         ),
         (
             "capped at eight",

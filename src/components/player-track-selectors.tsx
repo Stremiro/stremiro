@@ -1,5 +1,5 @@
 import { AudioLines, Captions, Check, Loader2, Minus, Plus } from 'lucide-react';
-import { memo, type ReactNode, useId, useRef, useState } from 'react';
+import { memo, type ReactNode, useId, useMemo, useRef, useState } from 'react';
 import {
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
@@ -276,7 +276,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
   );
 });
 
-export interface SubtitleTrackSelectorProps {
+interface SubtitleTrackSelectorProps {
   open: boolean;
   subTracks: Track[];
   trackSwitching: { audio: boolean; sub: boolean };
@@ -349,7 +349,8 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
   const canResetSubtitleSettings = !isHydrating && hasNonDefaultSettings;
   const subtitleSwitchBusy = trackSwitching.sub || !!addonSubtitleLoadingId;
   const [view, setView] = useState<'tracks' | 'addons' | 'style'>('tracks');
-  const viewTabsRef = useRef<HTMLDivElement>(null);
+  const [viewTabsNode, setViewTabsNode] = useState<HTMLDivElement | null>(null);
+  const viewTabsRef = useMemo(() => ({ current: viewTabsNode }), [viewTabsNode]);
   const viewTabButtons = useRef(new Map<string, HTMLButtonElement>());
   const viewIndicator = useSlidingIndicator(view, viewTabsRef, viewTabButtons);
 
@@ -423,7 +424,7 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
         <div
           role='group'
           aria-label='Subtitle view'
-          ref={viewTabsRef}
+          ref={setViewTabsNode}
           className='relative isolate mx-1 mb-1.5 mt-1 flex shrink-0 rounded-lg bg-white/[0.05] p-0.5'
         >
           {viewIndicator && (

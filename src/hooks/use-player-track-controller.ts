@@ -693,7 +693,10 @@ export function usePlayerTrackController({
         manualSelectionEpoch === manualTrackSelectionEpochRef.current[kind] &&
         switched
       ) {
-        autoAppliedTrackPrefsRef.current[kind] = fingerprint;
+        autoAppliedTrackPrefsRef.current[kind] = buildTrackAutoApplyFingerprint(
+          preferredLanguage,
+          trackListRef.current.filter((track) => track.type === kind),
+        );
       }
     },
     [resetKey, setTrack],

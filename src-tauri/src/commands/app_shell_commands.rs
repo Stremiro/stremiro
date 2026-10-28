@@ -157,13 +157,11 @@ fn set_webview_memory_target(app: &AppHandle, low: bool) {
     {
         return;
     }
-    #[cfg(windows)]
     if let Some(window) = app.get_webview_window("main") {
         apply_webview_memory_target(&window, low);
     }
 }
 
-#[cfg(windows)]
 fn apply_webview_memory_target(window: &tauri::WebviewWindow, low: bool) {
     use webview2_com::Microsoft::Web::WebView2::Win32::{
         ICoreWebView2_19, COREWEBVIEW2_MEMORY_USAGE_TARGET_LEVEL_LOW,

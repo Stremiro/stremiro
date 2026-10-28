@@ -1,7 +1,7 @@
 use super::calendar_commands::date_ordinal;
 use super::episode_navigation::coordinate_neighbours;
 use super::history_helpers::{
-    compare_continue_watching, is_series_like_watch_progress, resume_rows,
+    compare_continue_watching, is_series_like_watch_progress, resume_rows, sanitize_watch_progress,
     watch_progress_absolute_episode, watch_progress_absolute_season,
 };
 use super::media_commands::{
@@ -241,4 +241,37 @@ pub async fn get_resume_rail(
         now_unix_millis(),
     );
     Ok(build_resume_rail(continue_watching, up_next))
+}
+
+/// The aired successor of a resume row, shaped like an Up Next row for playback planning.
+#[command]
+pub async fn get_next_episode_row(
+    app: AppHandle,
+    client: State<'_, AddonResourceClient>,
+    item: WatchProgress,
+    local_today: String,
+) -> Result<Option<WatchProgress>, String> {
+    if date_ordinal(&local_today).is_none() {
+        return Err("Invalid local schedule date.".to_string());
+    }
+    let Some(item) = sanitize_watch_progress(item).filter(is_series_like_watch_progress) else {
+        return Ok(None);
+    };
+    let request = MediaScheduleRequest {
+        media_type: item.type_.clone(),
+        id: item.id.clone(),
+    };
+    let schedules = fetch_media_schedules_with_response_timeout(
+        &app,
+        client.inner(),
+        vec![request],
+        Some(UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT),
+    )
+    .await?;
+    Ok(
+        build_up_next_entries(vec![item], schedules, &local_today, 0, 0)
+            .into_iter()
+            .next()
+            .map(|candidate| candidate.row),
+    )
 }

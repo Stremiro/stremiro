@@ -587,12 +587,7 @@ impl<R: Runtime> Mpv<R> {
         self.wrapper.get_or_try_init(|| {
             info!("libmpv-wrapper not initialized. Trying to load libmpv-wrapper now...");
 
-            #[cfg(target_os = "windows")]
             let lib_name = "libmpv-wrapper.dll";
-            #[cfg(target_os = "macos")]
-            let lib_name = "libmpv-wrapper.dylib";
-            #[cfg(target_os = "linux")]
-            let lib_name = "libmpv-wrapper.so";
 
             let mut search_dirs: Vec<PathBuf> = Vec::new();
             if let Ok(exe_path) = std::env::current_exe() {

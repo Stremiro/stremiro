@@ -78,7 +78,6 @@ const LibraryListRow = memo(function LibraryListRow({
   return (
     <button
       type='button'
-      aria-pressed={selectionMode ? isSelected : undefined}
       aria-label={selectionMode ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}` : undefined}
       className={cn(
         'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none text-left group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
@@ -213,7 +212,6 @@ const HistoryListRow = memo(function HistoryListRow({
             ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}`
             : `Open details for ${item.title}`
         }
-        aria-pressed={selectionMode ? isSelected : undefined}
         onClick={(event) =>
           selectionMode
             ? onToggleSelect?.(item, event.shiftKey)

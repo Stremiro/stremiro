@@ -530,10 +530,15 @@ export function useCollectionSelection(
   }, [ids, active, busy, selectionMode, clear, exit]);
   useEffect(() => {
     if (!selectionMode || busy || dialogOpen) return;
-    const handleEscape = (event: KeyboardEvent) => {
+    const handleKey = (event: KeyboardEvent) => {
       const focusedCollection = document.activeElement?.closest('[data-collection-selection]');
+      const selectsAll =
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === 'a';
       if (
-        event.key !== 'Escape' ||
+        (event.key !== 'Escape' && !selectsAll) ||
         event.defaultPrevented ||
         (focusedCollection &&
           triggerRef.current &&
@@ -543,11 +548,12 @@ export function useCollectionSelection(
       )
         return;
       event.preventDefault();
-      exit();
+      if (selectsAll) setSelectedIds((current) => new Set([...current, ...visibleIds]));
+      else exit();
     };
-    window.addEventListener('keydown', handleEscape);
-    return () => window.removeEventListener('keydown', handleEscape);
-  }, [selectionMode, busy, dialogOpen, exit]);
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [selectionMode, busy, dialogOpen, exit, visibleIds]);
   const toggle = useCallback(
     (id: string, shiftKey = false) => {
       if (busy) return;

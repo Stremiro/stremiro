@@ -3,12 +3,14 @@ import { useQuery } from '@tanstack/react-query';
 import {
   ArrowUp,
   Check,
+  ChevronLeft,
   ChevronRight,
   CloudCheck,
   Copy,
   Layers,
   Link2,
   Package,
+  Play,
   Waypoints,
   type LucideIcon,
 } from 'lucide-react';
@@ -40,14 +42,10 @@ import {
   StreamSelectorHeader,
   rovingListTarget,
 } from '@/components/stream-selector-panel';
+import { InlineMenu } from '@/components/inline-menu';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from '@/components/ui/context-menu';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
+import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useStreamSelectorController } from '@/hooks/use-stream-selector-controller';
 import { warmPlayerChunk } from '@/lib/route-chunks';
 import {
@@ -138,7 +136,10 @@ const StreamItem = memo(function StreamItem({
   sortMode,
   tabIndex,
 }: StreamItemProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
   const rowRef = useRef<HTMLButtonElement | null>(null);
+  const titleRef = useRef<HTMLSpanElement>(null);
+  const menu = useInlineMenu({ rootRef, returnFocus: () => rowRef.current });
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
   const matchBadges = stream.matchBadgeKinds.map((kind) => MATCH_BADGES[kind]);
@@ -167,258 +168,286 @@ const StreamItem = memo(function StreamItem({
   const playableAria = isPlayable ? '' : ', P2P source, not playable in this build';
   const DeliveryIcon = deliveryTile.Icon;
   const opensPack = canBrowsePack && isPlayable && stream.presentation.isBatch;
+  const copyLabel = presentation.deliveryKind === 'p2p' ? 'Copy magnet link' : 'Copy stream link';
+
+  const measureTitle = () => {
+    const title = titleRef.current;
+    if (!title) return;
+    const overflow = title.scrollWidth - title.clientWidth;
+    if (overflow <= 0) {
+      delete title.dataset.overflowing;
+      return;
+    }
+    // Overshoot by the edge fade so the filename's tail lands fully visible.
+    title.style.setProperty('--marquee-shift', `${-(overflow + 16)}px`);
+    title.style.setProperty('--marquee-duration', `${Math.max(1.5, overflow / 45)}s`);
+    title.dataset.overflowing = '';
+  };
 
   return (
-    <ContextMenu
-      onOpenChange={(open) => {
-        if (open) rowRef.current?.focus({ preventScroll: true });
+    <div
+      ref={rootRef}
+      {...menu.rootProps}
+      onPointerEnter={measureTitle}
+      onFocus={() => {
+        measureTitle();
+        onRowFocus(stream.streamKey);
       }}
+      className={cn(
+        'group relative px-3 py-2.5 rounded-xl',
+        'bg-white/[0.02] border border-white/[0.05]',
+        'hover:bg-white/[0.045] hover:border-white/[0.1]',
+        'transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
+        !isPlayable && 'opacity-55 saturate-[0.65]',
+        isActive &&
+          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
+        disabled && 'cursor-default',
+        disabled && !isResolving && 'opacity-60',
+        isResolving &&
+          'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.06)]',
+      )}
     >
-      <div
-        role='listitem'
-        className={cn(
-          'group relative px-3 py-2.5 rounded-xl',
-          'bg-white/[0.02] border border-white/[0.05]',
-          'hover:bg-white/[0.045] hover:border-white/[0.1]',
-          'transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none cursor-pointer w-full overflow-hidden',
-          !isPlayable && 'opacity-55 saturate-[0.65]',
-          isActive &&
-            'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.05)] hover:border-[rgb(var(--accent-act-rgb)/0.4)]',
-          disabled && 'cursor-default',
-          disabled && !isResolving && 'opacity-60',
-          isResolving &&
-            'border-[rgb(var(--accent-act-rgb)/0.3)] bg-[rgb(var(--accent-act-rgb)/0.06)]',
-        )}
-      >
-        {matchTier && (
+      {matchTier && (
+        <span
+          aria-hidden='true'
+          className='pointer-events-none absolute right-0 top-0 h-20 w-52'
+          style={{
+            backgroundImage: `radial-gradient(${MATCH_DOT_COLORS[matchTier]} 0.85px, transparent 1.35px)`,
+            backgroundSize: '5.5px 5.5px',
+            backgroundPosition: 'top right',
+            maskImage:
+              'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
+            WebkitMaskImage:
+              'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
+          }}
+        />
+      )}
+
+      <button
+        ref={rowRef}
+        type='button'
+        onClick={() => {
+          if (!disabled) onSelect(stream);
+        }}
+        aria-disabled={disabled || undefined}
+        aria-current={isActive ? 'true' : undefined}
+        aria-busy={isResolving || undefined}
+        data-stream-key={stream.streamKey}
+        tabIndex={tabIndex}
+        aria-label={`${opensPack ? 'Browse episodes in' : 'Select'} ${sourceName} ${opensPack ? 'pack' : 'stream'}${techBadges.map((badge) => `, ${badge.description ? `${badge.label} source` : badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
+        className='absolute inset-0 z-0 rounded-xl aria-disabled:cursor-default focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
+      />
+
+      {isResolving && (
+        <>
           <span
             aria-hidden='true'
-            className='pointer-events-none absolute right-0 top-0 h-20 w-52'
-            style={{
-              backgroundImage: `radial-gradient(${MATCH_DOT_COLORS[matchTier]} 0.85px, transparent 1.35px)`,
-              backgroundSize: '5.5px 5.5px',
-              backgroundPosition: 'top right',
-              maskImage:
-                'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
-              WebkitMaskImage:
-                'radial-gradient(210px 96px at 100% 0%, black 0%, rgba(0,0,0,0.5) 42%, transparent 84%)',
-            }}
+            className='pointer-events-none absolute inset-y-2 left-0 w-0.5 bg-(--accent-act)'
           />
-        )}
-
-        <ContextMenuTrigger asChild>
-          <button
-            ref={rowRef}
-            type='button'
-            onClick={() => {
-              if (!disabled) onSelect(stream);
-            }}
-            onFocus={() => onRowFocus(stream.streamKey)}
-            aria-disabled={disabled || undefined}
-            aria-current={isActive ? 'true' : undefined}
-            aria-busy={isResolving || undefined}
-            data-stream-key={stream.streamKey}
-            tabIndex={tabIndex}
-            title={hdrDescription ? `${streamTitle}\n${hdrDescription}` : streamTitle}
-            aria-label={`${opensPack ? 'Browse episodes in' : 'Select'} ${sourceName} ${opensPack ? 'pack' : 'stream'}${techBadges.map((badge) => `, ${badge.description ? `${badge.label} source` : badge.label}`).join('')}${matchAria}${playableAria}. ${streamTitle}`}
-            className='absolute inset-0 z-0 rounded-xl aria-disabled:cursor-default focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/25'
-          />
-        </ContextMenuTrigger>
-
-        {isResolving && (
-          <>
-            <span
-              aria-hidden='true'
-              className='pointer-events-none absolute inset-y-2 left-0 w-0.5 bg-(--accent-act)'
-            />
-            <div
-              aria-hidden='true'
-              className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
-            >
-              <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
-            </div>
-          </>
-        )}
-
-        <div className='relative z-10 flex items-center gap-3 pointer-events-none'>
           <div
             aria-hidden='true'
-            className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
+            className='pointer-events-none absolute inset-x-0 bottom-0 h-px overflow-hidden bg-white/[0.06]'
           >
-            <DeliveryIcon
-              className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
-              strokeWidth={1.75}
-            />
+            <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
+          </div>
+        </>
+      )}
+
+      <div
+        className={cn(
+          'relative z-10 flex items-center gap-3 pointer-events-none transition-opacity duration-150 ease-out motion-reduce:transition-none',
+          menu.presence.mounted && 'opacity-0 duration-0',
+        )}
+      >
+        <div
+          aria-hidden='true'
+          className='flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] border border-white/[0.08] bg-linear-to-b from-white/[0.08] to-white/[0.015] shadow-[inset_0_1px_0_rgba(255,255,255,0.07),0_1px_2px_rgba(0,0,0,0.4)]'
+        >
+          <DeliveryIcon
+            className={cn('h-[17px] w-[17px]', deliveryTile.iconClass)}
+            strokeWidth={1.75}
+          />
+        </div>
+
+        <div className='flex-1 min-w-0'>
+          <div className='flex items-center gap-1.5 min-w-0'>
+            <p className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'>
+              {sourceName}
+            </p>
+            <div className='flex items-center gap-1 shrink-0'>
+              {techBadges.map((badge, badgeIndex) => (
+                <span
+                  key={`${badge.label}:${badge.cls}`}
+                  className={cn(
+                    'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
+                    badge.cls,
+                    badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
+                  )}
+                >
+                  {badge.label}
+                </span>
+              ))}
+              {isActive && (
+                <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
+                  <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
+                  Current
+                </span>
+              )}
+              {!isActive && isLastUsed && (
+                <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
+                  <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
+                  Last played
+                </span>
+              )}
+              {!isActive && !isLastUsed && isSameFamily && (
+                <span className='text-[11px] font-medium leading-none text-zinc-400'>
+                  Same release
+                </span>
+              )}
+            </div>
           </div>
 
-          <div className='flex-1 min-w-0'>
-            <div className='flex items-center gap-1.5 min-w-0'>
-              <p className='text-[13px] font-semibold text-zinc-100 truncate group-hover:text-white transition-colors leading-tight min-w-0'>
-                {sourceName}
-              </p>
-              <div className='flex items-center gap-1 shrink-0'>
-                {techBadges.map((badge, badgeIndex) => (
+          <p className='mt-0.5 overflow-hidden text-[11px] leading-snug text-zinc-400'>
+            <span ref={titleRef} className='hover-marquee block truncate'>
+              {streamTitle}
+              {hdrDescription && <span className='text-zinc-500'> · {hdrDescription}</span>}
+            </span>
+          </p>
+
+          <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
+            <span
+              className={cn(
+                'w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums',
+                isResolving ? 'text-(--accent-act)' : 'text-zinc-400',
+              )}
+            >
+              {isResolving ? 'Opening…' : stream.presentation.sizeLabel}
+            </span>
+            <span
+              className={cn(
+                'w-[4.5rem] shrink-0 inline-flex items-center gap-0.5 truncate text-[10.5px] tabular-nums',
+                stream.seeders === 0
+                  ? 'text-zinc-500 font-medium'
+                  : sortMode === 'seeds'
+                    ? 'text-white font-semibold'
+                    : 'text-zinc-300 font-medium',
+              )}
+            >
+              {typeof stream.seeders === 'number' && (
+                <>
+                  {stream.seeders > 0 && (
+                    <ArrowUp className='w-[9px] h-[9px] shrink-0' strokeWidth={2.5} />
+                  )}
+                  {stream.seeders === 0 ? '0 seeds' : stream.seeders}
+                </>
+              )}
+            </span>
+            <div className='flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden'>
+              {metaParts.map((part, index) => (
+                <Fragment key={part.key}>
+                  {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
                   <span
-                    key={`${badge.label}:${badge.cls}`}
                     className={cn(
-                      'inline-flex h-[18px] items-center px-1.5 rounded-[5px] border text-[10.5px] font-semibold leading-none tabular-nums',
-                      badge.cls,
-                      badgeIndex === 0 && sortMode === 'quality' && 'ring-1 ring-violet-300/50',
+                      'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
+                      part.className,
                     )}
                   >
+                    {part.text}
+                  </span>
+                </Fragment>
+              ))}
+            </div>
+          </div>
+
+          {(opensPack || matchBadges.length > 0 || recommendationReasons.length > 0) && (
+            <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
+              {matchBadges.map((badge) => {
+                const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
+                return (
+                  <span
+                    key={badge.kind}
+                    className={cn(
+                      'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
+                      badge.cls,
+                    )}
+                  >
+                    {BadgeIcon && (
+                      <BadgeIcon className='-ml-px h-[11px] w-[11px]' strokeWidth={2.5} />
+                    )}
                     {badge.label}
                   </span>
-                ))}
-                {isActive && (
-                  <span className='accent-lattice-soft inline-flex h-[18px] items-center gap-1 rounded-[5px] border px-1.5 text-[10.5px] font-medium leading-none'>
-                    <span className='h-1.5 w-1.5 rounded-full bg-(--accent-act)' />
-                    Current
-                  </span>
-                )}
-                {!isActive && isLastUsed && (
-                  <span className='inline-flex h-[18px] items-center gap-1 rounded-[5px] border border-white/[0.12] bg-white/[0.05] px-1.5 text-[10.5px] font-medium leading-none text-zinc-200'>
-                    <span className='h-1.5 w-1.5 rounded-full bg-zinc-300' />
-                    Last played
-                  </span>
-                )}
-                {!isActive && !isLastUsed && isSameFamily && (
-                  <span className='text-[11px] font-medium leading-none text-zinc-400'>
-                    Same release
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <p
-              title={streamTitle}
-              className='text-[11px] text-zinc-400 truncate mt-0.5 leading-snug'
-            >
-              {streamTitle}
-            </p>
-
-            <div className='flex items-center gap-1.5 mt-1 overflow-hidden whitespace-nowrap'>
-              <span
-                className={cn(
-                  'w-16 shrink-0 truncate text-[10.5px] font-medium tabular-nums',
-                  isResolving ? 'text-(--accent-act)' : 'text-zinc-400',
-                )}
-              >
-                {isResolving ? 'Opening…' : stream.presentation.sizeLabel}
-              </span>
-              <span
-                className={cn(
-                  'w-[4.5rem] shrink-0 inline-flex items-center gap-0.5 truncate text-[10.5px] tabular-nums',
-                  stream.seeders === 0
-                    ? 'text-zinc-500 font-medium'
-                    : sortMode === 'seeds'
-                      ? 'text-white font-semibold'
-                      : 'text-zinc-300 font-medium',
-                )}
-              >
-                {typeof stream.seeders === 'number' && (
-                  <>
-                    {stream.seeders > 0 && (
-                      <ArrowUp className='w-[9px] h-[9px] shrink-0' strokeWidth={2.5} />
+                );
+              })}
+              {recommendationReasons.map((reason, index) => (
+                <Fragment key={reason.kind}>
+                  {index > 0 && (
+                    <span aria-hidden='true' className='text-[11px] text-zinc-700'>
+                      ·
+                    </span>
+                  )}
+                  <span
+                    className={cn(
+                      'text-[11px] leading-none',
+                      index === 0 && matchBadges.length > 0 && 'ml-1.5',
+                      REASON_TONE_CLASS[reason.tone],
                     )}
-                    {stream.seeders === 0 ? '0 seeds' : stream.seeders}
-                  </>
-                )}
-              </span>
-              <div className='flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden'>
-                {metaParts.map((part, index) => (
-                  <Fragment key={part.key}>
-                    {index > 0 && <span className='text-zinc-700 text-[10px]'>·</span>}
-                    <span
-                      className={cn(
-                        'text-[10.5px] font-medium text-zinc-400 truncate min-w-0',
-                        part.className,
-                      )}
-                    >
-                      {part.text}
-                    </span>
-                  </Fragment>
-                ))}
-              </div>
-            </div>
-
-            {(opensPack || matchBadges.length > 0 || recommendationReasons.length > 0) && (
-              <div className='mt-1.5 flex flex-wrap items-center gap-x-1 gap-y-1'>
-                {matchBadges.map((badge) => {
-                  const BadgeIcon = MATCH_BADGE_ICONS[badge.kind];
-                  return (
-                    <span
-                      key={badge.kind}
-                      className={cn(
-                        'inline-flex h-[18px] items-center gap-1 rounded-[4px] border px-1.5 text-[10.5px] font-medium leading-none',
-                        badge.cls,
-                      )}
-                    >
-                      {BadgeIcon && (
-                        <BadgeIcon className='-ml-px h-[11px] w-[11px]' strokeWidth={2.5} />
-                      )}
-                      {badge.label}
-                    </span>
-                  );
-                })}
-                {recommendationReasons.map((reason, index) => (
-                  <Fragment key={reason.kind}>
-                    {index > 0 && (
-                      <span aria-hidden='true' className='text-[11px] text-zinc-700'>
-                        ·
-                      </span>
-                    )}
-                    <span
-                      className={cn(
-                        'text-[11px] leading-none',
-                        index === 0 && matchBadges.length > 0 && 'ml-1.5',
-                        REASON_TONE_CLASS[reason.tone],
-                      )}
-                    >
-                      {reason.label}
-                    </span>
-                  </Fragment>
-                ))}
-                {opensPack && (
-                  <span className='ml-auto inline-flex items-center gap-0.5 pl-2 text-[11px] font-medium text-amber-100/75 group-hover:text-amber-100 group-focus-within:text-amber-100'>
-                    Choose episode
-                    <ChevronRight aria-hidden='true' className='h-3 w-3' />
+                  >
+                    {reason.label}
                   </span>
-                )}
-              </div>
-            )}
-          </div>
-          {isPlayable && stream.presentation.deliveryKind !== 'p2p' && (
-            <button
-              type='button'
-              aria-label='Copy stream URL'
-              title='Copy stream URL'
-              aria-disabled={disabled || undefined}
-              tabIndex={tabIndex}
-              onFocus={() => onRowFocus(stream.streamKey)}
-              onClick={(event) => {
-                event.stopPropagation();
-                if (!disabled) void onCopyLink(stream);
-              }}
-              className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
-            >
-              <Copy aria-hidden='true' className='h-3.5 w-3.5' />
-            </button>
+                </Fragment>
+              ))}
+              {opensPack && (
+                <span className='ml-auto inline-flex items-center gap-0.5 pl-2 text-[11px] font-medium text-amber-100/75 group-hover:text-amber-100 group-focus-within:text-amber-100'>
+                  Choose episode
+                  <ChevronRight aria-hidden='true' className='h-3 w-3' />
+                </span>
+              )}
+            </div>
           )}
         </div>
+        {isPlayable && stream.presentation.deliveryKind !== 'p2p' && (
+          <button
+            type='button'
+            aria-label='Copy stream URL'
+            aria-disabled={disabled || undefined}
+            tabIndex={menu.presence.mounted ? -1 : tabIndex}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (!disabled) void onCopyLink(stream);
+            }}
+            className='pointer-events-auto flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.08] bg-white/[0.03] text-zinc-400 opacity-0 transition-[color,background-color,opacity] duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:opacity-100 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 group-hover:opacity-100 group-focus-within:opacity-100'
+          >
+            <Copy aria-hidden='true' className='h-3.5 w-3.5' />
+          </button>
+        )}
       </div>
-      <ContextMenuContent
-        onKeyDown={(event) => event.stopPropagation()}
-        onCloseAutoFocus={(event) => {
-          event.preventDefault();
-          rowRef.current?.focus({ preventScroll: true });
-        }}
-      >
-        <ContextMenuItem disabled={disabled} onSelect={() => void onCopyLink(stream)}>
-          <Copy className='h-4 w-4' />
-          {stream.presentation.deliveryKind === 'p2p' ? 'Copy magnet link' : 'Copy stream link'}
-        </ContextMenuItem>
-      </ContextMenuContent>
-    </ContextMenu>
+      <InlineMenu
+        presence={menu.presence}
+        orientation='horizontal'
+        label={`Actions for ${sourceName} stream`}
+        className='rounded-xl bg-zinc-950/90 backdrop-blur-sm'
+        onAction={menu.close}
+        actions={[
+          { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
+          {
+            key: 'play',
+            label: opensPack ? 'Choose episode' : 'Play',
+            icon: opensPack ? Layers : Play,
+            iconClassName: opensPack ? undefined : 'fill-current',
+            disabled,
+            onWarm: warmPlayerChunk,
+            onSelect: () => onSelect(stream),
+          },
+          {
+            key: 'copy-link',
+            label: copyLabel,
+            icon: Copy,
+            disabled,
+            onSelect: () => void onCopyLink(stream),
+          },
+        ]}
+      />
+    </div>
   );
 });
 
@@ -471,14 +500,11 @@ function StreamVirtualList({
   }, [streams]);
   const getItemKey = useCallback((index: number) => streams[index].streamKey, [streams]);
 
-  // Roving tabindex: one tab stop for the list; lands on the playing row, else last-used, else first playable.
+  // Roving tabindex: one tab stop for the list; lands on the playing row, else last-used, else the top row (Rust ranks playable first).
   const [focusedStreamKey, setFocusedStreamKey] = useState(() => {
     if (currentStreamKey && streamIndexByKey.has(currentStreamKey)) return currentStreamKey;
     if (lastStreamKey && streamIndexByKey.has(lastStreamKey)) return lastStreamKey;
-    return (
-      streams.find((stream) => stream.presentation.isInstantlyPlayable)?.streamKey ??
-      streams[0]?.streamKey
-    );
+    return streams[0]?.streamKey;
   });
   // Progressive ranking can insert rows before the focused stream — identity, not index, owns the tab stop.
   const matchedFocusedIndex = streamIndexByKey.get(focusedStreamKey ?? '');
@@ -620,6 +646,7 @@ function StreamVirtualList({
     <div
       ref={scrollRef}
       role='list'
+      aria-label='Streams'
       className='h-full overflow-y-auto overscroll-contain'
       onKeyDown={handleListKeyDown}
     >
@@ -634,6 +661,9 @@ function StreamVirtualList({
           return (
             <div
               key={stream.streamKey}
+              role='listitem'
+              aria-posinset={virtualRow.index + 1}
+              aria-setsize={streams.length}
               data-index={virtualRow.index}
               ref={virtualizer.measureElement}
               className='absolute left-3 right-3 top-3'
@@ -866,7 +896,6 @@ export function StreamSelector({
     queryKey: ['stream-pack-rows', packStream?.matchSummary?.packCoverage ?? null, packCoordinates],
     queryFn: () => api.getStreamPackRows(packStream?.matchSummary?.packCoverage, packCoordinates),
     enabled: isPackOpen,
-    networkMode: 'always',
     staleTime: Infinity,
     gcTime: 120_000,
     retry: false,
@@ -1162,6 +1191,9 @@ export function StreamSelector({
           } else if (packStream) {
             event.preventDefault();
             closePackPicker();
+          } else if (document.activeElement?.closest('[data-inline-menu]')) {
+            // The row's own keydown closes its inline menu.
+            event.preventDefault();
           }
         }}
         overlayClassName='bg-black/55 backdrop-blur-[2px]'

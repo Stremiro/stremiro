@@ -796,7 +796,7 @@ export function Player() {
     suspended: error !== null,
     mountedRef,
     isDestroyedRef,
-    currentTimeRef: clock.ref,
+    currentTimeRef,
     durationRef,
     failoverResumePositionRef,
     onResumeMessage: handleResumeMessage,
@@ -1008,7 +1008,6 @@ export function Player() {
     selectorCommittedReloadRef.current = null;
     selectorOpenRequestIdRef.current += 1;
     clearNextEpisodeRequest();
-    setError(null);
     setStreamSelectorState({
       open: true,
       target: nextTarget,
@@ -1786,6 +1785,10 @@ export function Player() {
     setPlaybackSpeed(speed);
     appliedSpeedRef.current = speed;
     updateAppUiPreferences({ playerSpeed: speed });
+    if (!mpvInitializedRef.current) {
+      announce(`Speed: ${speed}x`, 'gauge');
+      return;
+    }
     const epoch = playbackControlEpochRef.current;
     const isStale = () =>
       epoch !== playbackControlEpochRef.current || !mountedRef.current || isDestroyedRef.current;
@@ -1849,7 +1852,6 @@ export function Player() {
     isExpanded,
     isFullscreen,
     keymap,
-    mountedRef,
     navigateBack: isPip ? returnFromPip : navigateBack,
     nudgeSubtitleDelay,
     openStreamSelector: id ? openManualStreamFallback : null,

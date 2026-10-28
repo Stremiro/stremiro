@@ -43,8 +43,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use tauri::{command, AppHandle, Manager, State};
 use tauri_plugin_dialog::DialogExt;
 
-/// Backup imports are untrusted input: reject oversized payloads before
-/// parsing/allocating (mirrors the 512 KiB manifest/stream body caps).
+/// Reject oversized backups before parsing.
 pub(super) const MAX_IMPORT_BYTES: usize = 5 * 1024 * 1024;
 const MAX_IMPORT_HISTORY: usize = 10_000;
 const MAX_IMPORT_LIBRARY: usize = 10_000;
@@ -113,17 +112,10 @@ pub(super) fn validate_backup_export_path(
         Err(error) => return Err(error.to_string()),
     };
     let inside_store = target_parent.ancestors().any(|parent| {
-        #[cfg(windows)]
-        {
-            parent
-                .as_os_str()
-                .to_string_lossy()
-                .eq_ignore_ascii_case(&store_parent.as_os_str().to_string_lossy())
-        }
-        #[cfg(not(windows))]
-        {
-            parent == store_parent
-        }
+        parent
+            .as_os_str()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(&store_parent.as_os_str().to_string_lossy())
     });
     if inside_store {
         return Err("Backup export cannot write inside the app data directory.".to_string());

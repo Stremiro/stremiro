@@ -54,8 +54,8 @@ export function SaveToCollectionPanel({
               <Library size={15} strokeWidth={2.25} />
             </span>
             <span className='min-w-0 flex-1'>
-              <span className='block text-xs font-medium text-zinc-200'>Library</span>
-              <span className='block text-[10px] text-zinc-500'>
+              <span className='block text-[13px] font-medium leading-4 text-zinc-200'>Library</span>
+              <span className='mt-0.5 block h-3.5 truncate text-[12px] leading-[14px] text-zinc-500'>
                 {isLibraryBusy
                   ? 'Saving…'
                   : isInLibrary
@@ -72,7 +72,7 @@ export function SaveToCollectionPanel({
         </>
       )}
 
-      <div className='flex shrink-0 items-center justify-between px-2.5 pb-1 pt-1.5 text-[10px] font-medium uppercase tracking-[0.12em] text-zinc-500'>
+      <div className='flex h-7 shrink-0 items-center justify-between px-2.5 text-[12px] font-medium text-zinc-500'>
         <span>Lists</span>
         {listsQuery.data && <span className='tabular-nums'>{lists.length}</span>}
       </div>
@@ -105,7 +105,6 @@ export function SaveToCollectionPanel({
                 key={list.id}
                 type='button'
                 className={ROW_CLASS}
-                title={list.name}
                 aria-pressed={list.contains_item}
                 aria-disabled={pending || undefined}
                 aria-busy={pending || undefined}
@@ -117,10 +116,13 @@ export function SaveToCollectionPanel({
               >
                 <ListIconTile iconId={list.icon} size='sm' />
                 <span className='min-w-0 flex-1'>
-                  <span dir='auto' className='block truncate text-xs font-medium text-zinc-200'>
+                  <span
+                    dir='auto'
+                    className='block truncate text-[13px] font-medium leading-4 text-zinc-200'
+                  >
                     {list.name}
                   </span>
-                  <span className='block text-[10px] tabular-nums text-zinc-500'>
+                  <span className='mt-0.5 block h-3.5 tabular-nums text-[12px] leading-[14px] text-zinc-500'>
                     {pending ? 'Saving…' : pluralize(list.item_count, 'title')}
                   </span>
                 </span>
@@ -156,7 +158,7 @@ export function SaveToCollectionPanel({
           }}
         >
           <Plus className='size-4 shrink-0 text-zinc-400' />
-          <span className='text-xs font-medium text-zinc-300'>New list…</span>
+          <span className='text-[13px] font-medium text-zinc-300'>New list…</span>
         </button>
       </div>
     </div>

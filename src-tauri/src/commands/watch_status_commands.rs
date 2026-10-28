@@ -449,7 +449,6 @@ mod tests {
             0
         );
         assert_eq!(statuses.store.save_count(), 2);
-        #[cfg(windows)]
         for (bulk, id) in [(false, "auto-single"), (true, "auto-bulk")] {
             use std::os::windows::fs::OpenOptionsExt;
 

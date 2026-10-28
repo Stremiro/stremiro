@@ -456,6 +456,9 @@ impl FetchContract<'_> {
             loop {
                 if attempt > 0 {
                     tokio::time::sleep(FETCH_RETRY_BACKOFF).await;
+                    if self.generation.load(Ordering::SeqCst) != generation {
+                        return Err("Addon request was superseded. Please try again.".to_string());
+                    }
                 }
                 let started_at = Instant::now();
                 match fetch().await {
@@ -832,9 +835,9 @@ mod tests {
         assert!(!cooldown.cooling_down("addon"));
     }
 
-    #[tokio::test]
-    async fn queued_fetches_cannot_repopulate_caches_or_cooldowns_after_clear() {
-        for outcome in 0..3 {
+    #[tokio::test(start_paused = true)]
+    async fn cleared_fetches_cannot_retry_or_repopulate_caches_and_cooldowns() {
+        for outcome in 0..4 {
             let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
             let failures = TtlCache::new(8, Duration::from_secs(30), Duration::from_secs(30));
             let cooldown = FetchFailureCooldown::new(Duration::from_secs(60));
@@ -845,10 +848,11 @@ mod tests {
                 fetch_failures: &cooldown,
                 in_flight: &in_flight,
                 generation: &generation,
-                request_timeout: Duration::ZERO,
+                request_timeout: Duration::from_secs(if outcome == 3 { 20 } else { 0 }),
                 cooldown_message: "cooling",
             };
             let finish_leader = tokio::sync::Notify::new();
+            let leader_loads = AtomicU64::new(0);
             let obsolete_loads = AtomicU64::new(0);
             let fresh_loads = AtomicU64::new(0);
             let mut leader = std::pin::pin!(contract.run(
@@ -857,7 +861,9 @@ mod tests {
                 "addon",
                 |_| false,
                 || async {
-                    finish_leader.notified().await;
+                    if leader_loads.fetch_add(1, Ordering::SeqCst) == 0 {
+                        finish_leader.notified().await;
+                    }
                     match outcome {
                         0 => Ok(1u32),
                         1 => Err(FetchFailure::Fatal("invalid".into())),
@@ -878,6 +884,10 @@ mod tests {
             assert!(futures_util::poll!(leader.as_mut()).is_pending());
             assert!(futures_util::poll!(follower.as_mut()).is_pending());
 
+            if outcome == 3 {
+                finish_leader.notify_one();
+                assert!(futures_util::poll!(leader.as_mut()).is_pending());
+            }
             generation.fetch_add(1, Ordering::SeqCst);
             cache.clear();
             failures.clear();
@@ -897,9 +907,11 @@ mod tests {
             let expected = match outcome {
                 0 => Ok(1),
                 1 => Err("invalid".to_string()),
-                _ => Err("down".to_string()),
+                2 => Err("down".to_string()),
+                _ => Err("Addon request was superseded. Please try again.".to_string()),
             };
             assert_eq!(leader.await, expected);
+            assert_eq!(leader_loads.load(Ordering::SeqCst), 1);
             assert_eq!(cache.get("k"), None);
             assert_eq!(failures.get("k"), None);
             assert!(!cooldown.cooling_down("addon"));

@@ -57,7 +57,6 @@ export function AddTitlesDialog({
   const addTitles = useBulkAddToList();
   const selectionDisabled =
     addTitles.isPending ||
-    hasLibraryError ||
     isSearchPending ||
     matchingLibraryQuery.isPending ||
     matchingLibraryQuery.isFetching;
@@ -120,6 +119,13 @@ export function AddTitlesDialog({
         <span role='status' className='sr-only'>
           {isSearchPending ? 'Searching library…' : ''}
         </span>
+        {hasLibraryError && (
+          <RetryBanner
+            message="Couldn't load your library."
+            onRetry={() => void matchingLibraryQuery.refetch()}
+            isRetrying={matchingLibraryQuery.isFetching}
+          />
+        )}
         <div
           aria-busy={isSearchPending || matchingLibraryQuery.isPending}
           className={cn(
@@ -127,15 +133,7 @@ export function AddTitlesDialog({
             matchingLibraryQuery.isPlaceholderData && 'opacity-60',
           )}
         >
-          {hasLibraryError ? (
-            <RetryBanner
-              message="Couldn't load your library."
-              onRetry={() => {
-                void matchingLibraryQuery.refetch();
-              }}
-              isRetrying={matchingLibraryQuery.isFetching}
-            />
-          ) : matchingLibraryQuery.isPending ? (
+          {matchingLibraryQuery.isPending ? (
             <div
               role='status'
               className='flex items-center justify-center gap-2 py-12 text-sm text-zinc-500'
@@ -143,7 +141,7 @@ export function AddTitlesDialog({
               <Loader2 className='h-4 w-4 animate-spin' />
               Loading your library…
             </div>
-          ) : matchingLibraryQuery.data?.allIds.length === 0 ? (
+          ) : !matchingLibraryQuery.data ? null : matchingLibraryQuery.data.allIds.length === 0 ? (
             <div className='space-y-3 px-4 py-10 text-center'>
               <p className='text-sm font-medium text-zinc-300'>Your library is empty</p>
               <p className='text-xs leading-relaxed text-zinc-500'>

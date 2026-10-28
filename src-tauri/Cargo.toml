@@ -5,14 +5,9 @@ description = "Lightweight addon-compatible desktop client"
 authors = ["Stremiro contributors"]
 edition = "2021"
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
 [lib]
-# The `_lib` suffix may seem redundant but it is necessary
-# to make the lib name unique and wouldn't conflict with the bin name.
-# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+# Avoid Windows artifact collisions: https://github.com/rust-lang/cargo/issues/8519
 name = "stremiro_lib"
-# Desktop-only app: rlib alone — staticlib/cdylib exist only for mobile targets.
 crate-type = ["rlib"]
 
 [lints.clippy]
@@ -29,8 +24,7 @@ tauri-plugin-opener = "2.7.2"
 tauri-plugin-updater = "2.13.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["raw_value"] }
-# `system-proxy` honors Windows/macOS proxy settings; declared here so it
-# does not depend on another crate enabling it through feature unification.
+# Enable Windows proxy settings without relying on transitive feature unification.
 reqwest = { version = "0.13", features = ["rustls-no-provider", "stream", "gzip", "deflate", "brotli", "system-proxy"], default-features = false }
 rustls = { version = "0.23", features = ["ring"], default-features = false }
 tauri-plugin-libmpv = "0.3.2"
@@ -67,10 +61,7 @@ debug = 1
 opt-level = 1
 
 [profile.release]
-# Fat LTO + single codegen unit: smaller and faster shipped binary at the
-# cost of release-build time (dev profile is unaffected). `opt-level` stays
-# at the default 3 — "z" would trade stream-matching CPU for a negligible
-# slice of a bundle already dominated by libmpv.
+# Favor shipped size with fat LTO and one codegen unit; dev builds stay unchanged.
 lto = true
 codegen-units = 1
 strip = true

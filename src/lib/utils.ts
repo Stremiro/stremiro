@@ -59,7 +59,7 @@ export const GENRE_LINK_CLASS =
   'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[13px] font-medium text-white/85 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
 
 export const POPOVER_MOTION_CLASS =
-  'duration-150 ease-out data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[side=bottom]:slide-in-from-top-0.5 data-[side=left]:slide-in-from-right-0.5 data-[side=right]:slide-in-from-left-0.5 data-[side=top]:slide-in-from-bottom-0.5 motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
+  'data-[state=open]:animate-surface-in data-[state=closed]:animate-surface-out motion-reduce:data-[state=open]:animate-none motion-reduce:data-[state=closed]:animate-none';
 
 function parseHexRgb(value: string): [number, number, number] | null {
   const match = HEX_COLOR_PATTERN.exec(value.trim());

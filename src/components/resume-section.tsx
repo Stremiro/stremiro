@@ -5,7 +5,8 @@ import { useLocalDay } from '@/hooks/use-local-day';
 import { useRemoveFromContinueWatching, useResumeRail } from '@/hooks/use-media-library';
 import type { ResumeRailEntry } from '@/lib/api';
 import { watchProgressItemKey } from '@/lib/history-playback';
-import { cn, pad2, queryNeedsRetry } from '@/lib/utils';
+import { toLocalDate } from '@/lib/schedule-dates';
+import { cn, queryNeedsRetry } from '@/lib/utils';
 import { HorizontalMediaRail, HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS } from './horizontal-media-rail';
 
 // A stable empty keeps the rail's key-set diff from re-running while loading.
@@ -18,7 +19,7 @@ const renderResumeEntry = (entry: ResumeRailEntry) => <ResumeCard entry={entry} 
 
 export function ResumeSection() {
   const localDay = useLocalDay();
-  const localToday = `${String(localDay.getFullYear()).padStart(4, '0')}-${pad2(localDay.getMonth() + 1)}-${pad2(localDay.getDate())}`;
+  const localToday = toLocalDate(localDay).toString();
   const resumeRailQuery = useResumeRail(localToday, localDay.getTime());
   const {
     data: entries = EMPTY_ENTRIES,
@@ -76,6 +77,7 @@ const ResumeCard = memo(function ResumeCard({ entry }: { entry: ResumeRailEntry 
       item={item}
       onRemove={removeFromContinueWatching}
       removeFrom='Continue Watching'
+      episodeActions
       playbackIntent={isUpNext ? 'next-episode' : 'resume'}
       isNewEpisode={isNewEpisode === true}
       metaLine={isUpNext ? 'Up next' : undefined}

@@ -132,12 +132,13 @@ export const playbackApi = {
         isPlayable: stream.presentation.isInstantlyPlayable,
         seeders: stream.seeders,
         sizeBytes: stream.sizeBytes,
-        // Filter-only changes skip the nine strings per row — Rust reads them only when searching.
+        // Filter-only changes skip the per-row search strings — Rust reads them only when searching.
         searchFields: searchQuery
           ? [
               stream.sourceName,
               stream.presentation.streamTitle,
               stream.presentation.sourceName,
+              stream.presentation.deliveryLabel,
               stream.presentation.codecLabel,
               stream.presentation.hdrLabel,
               stream.presentation.audioLabel,
@@ -314,6 +315,8 @@ export const playbackApi = {
       localTodayMs,
       onProgress,
     }),
+  getNextEpisodeRow: (item: WatchProgress, localToday: string) =>
+    safeInvoke<WatchProgress | null>('get_next_episode_row', { item, localToday }),
   getTitleWatchProgress: (id: string) =>
     safeInvoke<TitleWatchProgress>('get_title_watch_progress', { id }),
   getTotalWatchTimeSecs: () => safeInvoke<number>('get_total_watch_time_secs'),

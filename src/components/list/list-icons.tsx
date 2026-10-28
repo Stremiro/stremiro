@@ -25,52 +25,39 @@ import {
   Tv,
   Zap,
 } from 'lucide-react';
+import { cn } from '@/lib/utils';
 
 interface ListIconDef {
   id: string;
   Icon: LucideIcon;
   label: string;
-  hue: keyof typeof ICON_HUES;
 }
 
-const ICON_HUES = {
-  rose: '251 113 133',
-  amber: '251 191 36',
-  emerald: '52 211 153',
-  sky: '56 189 248',
-  violet: '167 139 250',
-  fuchsia: '232 121 249',
-  teal: '45 212 191',
-  orange: '251 146 60',
-  indigo: '129 140 248',
-  lime: '163 230 53',
-};
-
 export const LIST_ICONS: ListIconDef[] = [
-  { id: 'Film', Icon: Film, label: 'Movies', hue: 'sky' },
-  { id: 'Clapperboard', Icon: Clapperboard, label: 'Cinema', hue: 'violet' },
-  { id: 'Tv', Icon: Tv, label: 'Series', hue: 'indigo' },
-  { id: 'Popcorn', Icon: Popcorn, label: 'Movie night', hue: 'amber' },
-  { id: 'Drama', Icon: Drama, label: 'Drama', hue: 'rose' },
-  { id: 'Star', Icon: Star, label: 'Favourites', hue: 'amber' },
-  { id: 'Heart', Icon: Heart, label: 'Loved', hue: 'rose' },
-  { id: 'Sparkles', Icon: Sparkles, label: 'Hidden gems', hue: 'fuchsia' },
-  { id: 'Bookmark', Icon: Bookmark, label: 'Saved', hue: 'emerald' },
-  { id: 'Clock', Icon: Clock, label: 'Watch later', hue: 'teal' },
-  { id: 'Eye', Icon: Eye, label: 'Watched', hue: 'sky' },
-  { id: 'Trophy', Icon: Trophy, label: 'Award winners', hue: 'amber' },
-  { id: 'Flame', Icon: Flame, label: 'Trending', hue: 'orange' },
-  { id: 'Zap', Icon: Zap, label: 'Must watch', hue: 'lime' },
-  { id: 'Globe', Icon: Globe, label: 'World cinema', hue: 'teal' },
-  { id: 'Music2', Icon: Music2, label: 'Musicals', hue: 'fuchsia' },
-  { id: 'Laugh', Icon: FaceGrinning, label: 'Comedy', hue: 'amber' },
-  { id: 'Ghost', Icon: Ghost, label: 'Horror', hue: 'violet' },
-  { id: 'Swords', Icon: Swords, label: 'Action', hue: 'orange' },
-  { id: 'Rocket', Icon: Rocket, label: 'Sci-fi', hue: 'indigo' },
-  { id: 'Baby', Icon: Baby, label: 'Family', hue: 'lime' },
-  { id: 'BookOpen', Icon: BookOpen, label: 'Documentaries', hue: 'emerald' },
-  { id: 'Gamepad2', Icon: Gamepad2, label: 'Gaming', hue: 'violet' },
-  { id: 'ThumbsUp', Icon: ThumbsUp, label: 'Recommended', hue: 'sky' },
+  { id: 'Film', Icon: Film, label: 'Movies' },
+  { id: 'Clapperboard', Icon: Clapperboard, label: 'Cinema' },
+  { id: 'Tv', Icon: Tv, label: 'Series' },
+  { id: 'Popcorn', Icon: Popcorn, label: 'Movie night' },
+  { id: 'Drama', Icon: Drama, label: 'Drama' },
+  { id: 'Star', Icon: Star, label: 'Favourites' },
+  { id: 'Heart', Icon: Heart, label: 'Loved' },
+  { id: 'Sparkles', Icon: Sparkles, label: 'Hidden gems' },
+  { id: 'Bookmark', Icon: Bookmark, label: 'Saved' },
+  { id: 'Clock', Icon: Clock, label: 'Watch later' },
+  { id: 'Eye', Icon: Eye, label: 'Watched' },
+  { id: 'Trophy', Icon: Trophy, label: 'Award winners' },
+  { id: 'Flame', Icon: Flame, label: 'Trending' },
+  { id: 'Zap', Icon: Zap, label: 'Must watch' },
+  { id: 'Globe', Icon: Globe, label: 'World cinema' },
+  { id: 'Music2', Icon: Music2, label: 'Musicals' },
+  { id: 'Laugh', Icon: FaceGrinning, label: 'Comedy' },
+  { id: 'Ghost', Icon: Ghost, label: 'Horror' },
+  { id: 'Swords', Icon: Swords, label: 'Action' },
+  { id: 'Rocket', Icon: Rocket, label: 'Sci-fi' },
+  { id: 'Baby', Icon: Baby, label: 'Family' },
+  { id: 'BookOpen', Icon: BookOpen, label: 'Documentaries' },
+  { id: 'Gamepad2', Icon: Gamepad2, label: 'Gaming' },
+  { id: 'ThumbsUp', Icon: ThumbsUp, label: 'Recommended' },
 ];
 
 const ICON_BY_ID = new Map(LIST_ICONS.map((icon) => [icon.id, icon]));
@@ -78,9 +65,9 @@ const ICON_BY_ID = new Map(LIST_ICONS.map((icon) => [icon.id, icon]));
 export const DEFAULT_LIST_ICON = 'Film';
 
 const TILE_SIZES = {
-  sm: { className: 'h-7 w-7 rounded-md', iconSize: 15, strokeWidth: 2.25 },
-  md: { className: 'h-9 w-9 rounded-lg', iconSize: 19, strokeWidth: 2 },
-  lg: { className: 'h-14 w-14 rounded-xl', iconSize: 28, strokeWidth: 1.8 },
+  sm: { className: 'size-7 rounded-md', iconClassName: 'size-3.5' },
+  md: { className: 'size-9 rounded-lg', iconClassName: 'size-[18px]' },
+  lg: { className: 'size-12 rounded-xl', iconClassName: 'size-6' },
 };
 
 export function ListIconTile({
@@ -91,25 +78,21 @@ export function ListIconTile({
   size?: 'sm' | 'md' | 'lg';
 }) {
   const found = ICON_BY_ID.get(iconId);
-  const hue = found ? ICON_HUES[found.hue] : '161 161 170';
   const tile = TILE_SIZES[size];
   const Icon = found?.Icon;
 
   return (
     <span
       aria-hidden='true'
-      className={`inline-flex shrink-0 items-center justify-center overflow-hidden ring-1 ring-inset ring-white/10 ${tile.className}`}
-      style={{
-        color: `rgb(${hue})`,
-        background: `linear-gradient(145deg, rgb(${hue} / 0.18), rgb(${hue} / 0.04))`,
-      }}
+      className={cn(
+        'inline-flex shrink-0 items-center justify-center bg-white/[0.04] text-zinc-300 ring-1 ring-inset ring-white/[0.08]',
+        tile.className,
+      )}
     >
       {Icon ? (
-        <Icon size={tile.iconSize} strokeWidth={tile.strokeWidth} />
+        <Icon className={tile.iconClassName} strokeWidth={1.75} />
       ) : (
-        <span className='max-w-full truncate px-1 leading-none' style={{ fontSize: tile.iconSize }}>
-          {iconId}
-        </span>
+        <span className='max-w-full truncate px-1 text-[11px] leading-none'>{iconId}</span>
       )}
     </span>
   );

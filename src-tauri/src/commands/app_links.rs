@@ -23,6 +23,11 @@ pub(crate) enum AppLink {
         media_type: &'static str,
         #[serde(rename = "mediaId")]
         media_id: String,
+        /// Episode links land on this season/episode of a series details page.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        season: Option<u32>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        episode: Option<u32>,
     },
 }
 
@@ -52,8 +57,17 @@ pub(crate) fn find_app_link(args: impl IntoIterator<Item = String>) -> Option<Ap
 fn parse_title_link(path: &str) -> Option<AppLink> {
     // Browsers may append a trailing slash when handing the link to the OS.
     let path = path.strip_suffix('/').unwrap_or(path);
-    let (media_type, encoded_id) = path.split_once('/')?;
-    if encoded_id.contains(['/', '?', '#']) {
+    let mut segments = path.split('/');
+    let (media_type, encoded_id) = (segments.next()?, segments.next()?);
+    let coordinates = match (segments.next(), segments.next(), segments.next()) {
+        (None, ..) => None,
+        (Some(season), Some(episode), None) => Some((
+            parse_link_coordinate(season)?,
+            parse_link_coordinate(episode)?,
+        )),
+        _ => return None,
+    };
+    if encoded_id.contains(['?', '#']) {
         return None;
     }
     let decoded = percent_encoding::percent_decode_str(encoded_id)
@@ -64,10 +78,23 @@ fn parse_title_link(path: &str) -> Option<AppLink> {
     }
     let media_id = super::normalize_media_id(&decoded)?;
     let media_type = super::normalize_stream_media_type(media_type, Some(&media_id))?;
+    if coordinates.is_some() && media_type == "movie" {
+        return None;
+    }
     Some(AppLink::Title {
         media_type,
         media_id,
+        season: coordinates.map(|(season, _)| season),
+        episode: coordinates.map(|(_, episode)| episode),
     })
+}
+
+/// Plain decimal digits only: signs, spaces and encodings are rejected rather than normalized.
+fn parse_link_coordinate(segment: &str) -> Option<u32> {
+    if segment.is_empty() || !segment.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    segment.parse().ok()
 }
 
 fn parse_addon_link(link: &str) -> Option<AppLink> {
@@ -133,7 +160,18 @@ mod tests {
         Some(AppLink::Title {
             media_type,
             media_id: media_id.to_string(),
+            season: None,
+            episode: None,
         })
+    }
+
+    fn episode(media_type: &'static str, media_id: &str, season: u32, episode: u32) -> AppLink {
+        AppLink::Title {
+            media_type,
+            media_id: media_id.to_string(),
+            season: Some(season),
+            episode: Some(episode),
+        }
     }
 
     #[test]
@@ -195,6 +233,39 @@ mod tests {
             "stremiro://details/movie/%0Att1",
             "stremiro://details/movie/%FF",
             &format!("stremiro://details/movie/{long_id}"),
+        ] {
+            assert_eq!(parse_app_link(rejected), None, "{rejected}");
+        }
+    }
+
+    #[test]
+    fn episode_links_carry_series_coordinates_only() {
+        assert_eq!(
+            parse_app_link("stremiro://details/series/tt0903747/1/2"),
+            Some(episode("series", "tt0903747", 1, 2))
+        );
+        assert_eq!(
+            parse_app_link("stremiro://details/series/kitsu%3A1/0/3/"),
+            Some(episode("anime", "kitsu:1", 0, 3))
+        );
+        assert_eq!(
+            serde_json::to_value(episode("series", "tt1", 1, 2)).unwrap(),
+            serde_json::json!({
+                "kind": "title",
+                "mediaType": "series",
+                "mediaId": "tt1",
+                "season": 1,
+                "episode": 2,
+            })
+        );
+        for rejected in [
+            "stremiro://details/movie/tt1/1/2",
+            "stremiro://details/series/tt1/1",
+            "stremiro://details/series/tt1/1/x",
+            "stremiro://details/series/tt1/+1/2",
+            "stremiro://details/series/tt1/1/2/3",
+            "stremiro://details/series/tt1/1/2?x=1",
+            "stremiro://details/series/tt1/1/99999999999",
         ] {
             assert_eq!(parse_app_link(rejected), None, "{rejected}");
         }

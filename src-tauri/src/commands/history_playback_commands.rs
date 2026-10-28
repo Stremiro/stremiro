@@ -124,8 +124,7 @@ struct ResolvedHistoryEpisodeContext {
     stream_lookup_id: String,
 }
 
-/// `from` is echoed back into webview route state; the bound mirrors the
-/// frontend's `PLAYER_ROUTE_FROM_MAX_CHARS` so direct IPC can't widen it.
+/// Bound `from` before echoing it into webview route state.
 const ROUTE_FROM_MAX_CHARS: usize = 2_048;
 
 fn normalize_saved_value(value: Option<&str>) -> Option<String> {

@@ -51,8 +51,10 @@ function ListEditorDialog(props: ListEditorDialogProps) {
         }}
       >
         <DialogHeader>
-          <DialogTitle className='text-white font-semibold'>{props.title}</DialogTitle>
-          <DialogDescription className='text-zinc-400'>
+          <DialogTitle className='text-[15px] font-semibold tracking-tight text-white'>
+            {props.title}
+          </DialogTitle>
+          <DialogDescription className='text-[13px] leading-relaxed text-zinc-400'>
             A home for your next obsession, favourites, or movie night.
           </DialogDescription>
         </DialogHeader>
@@ -61,7 +63,7 @@ function ListEditorDialog(props: ListEditorDialogProps) {
             <div role='status'>
               <span className='sr-only'>Loading list editor…</span>
               <div aria-hidden='true' className='space-y-5'>
-                <Skeleton className='h-20 rounded-xl' />
+                <Skeleton className='h-12 rounded-lg' />
                 <Skeleton className='h-16 rounded-lg' />
                 <Skeleton className='h-32 rounded-xl' />
                 <Skeleton className='ml-auto h-9 w-28 rounded-lg' />
@@ -116,7 +118,7 @@ export function CreateListDialog({
       onSubmit={(values) => createList.mutate(values)}
       open={open}
       returnFocusRef={returnFocusRef}
-      submitLabel={createList.isPending ? 'Creating…' : 'Create List'}
+      submitLabel='Create List'
       submitReady={({ trimmedName }) => Boolean(trimmedName)}
       title='Create New List'
     />
@@ -157,7 +159,7 @@ export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogP
       onOpenChange={onOpenChange}
       onSubmit={(values) => renameList.mutate(values)}
       open={open}
-      submitLabel={renameList.isPending ? 'Saving…' : 'Save Changes'}
+      submitLabel='Save Changes'
       submitReady={({ icon, trimmedName, rules }) =>
         Boolean(trimmedName) &&
         (trimmedName !== list.name ||

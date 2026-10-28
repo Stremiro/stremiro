@@ -44,7 +44,6 @@ export function useDetailsStreamSelector({
   const [streamTarget, setStreamTarget] = useState<DetailsStreamSelectorTarget | null>(null);
   // One-shot latch, not render state — it's only read inside the effect.
   const reopenSelectorConsumedRef = useRef(false);
-  const getStreamTargetStartTime = () => streamTarget?.startTime;
 
   const preferredStreamId = item?.imdbId || item?.id;
 
@@ -190,6 +189,5 @@ export function useDetailsStreamSelector({
     openEpisodeStreamSelector,
     handleSelectorClose,
     handleSelectorClosed,
-    getStreamTargetStartTime,
   };
 }

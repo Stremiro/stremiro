@@ -32,9 +32,7 @@ fn retry_transient_fs<T>(mut op: impl FnMut() -> std::io::Result<T>) -> std::io:
     }
 }
 
-/// Clears the read-only flag on a store file — Windows `MoveFileEx` can't replace a
-/// read-only destination, and a flag this app never sets is stale state, not intent.
-/// The clippy lint guards a Unix footgun unreachable on this Windows-only build.
+/// Clear stale store flags so Windows can replace the destination.
 #[allow(clippy::permissions_set_readonly_false)]
 fn clear_readonly_flag(path: &Path) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
@@ -305,15 +303,6 @@ pub(crate) fn write_atomic_file(
         error.to_string()
     })?;
 
-    // Best-effort parent fsync so the rename survives power loss; opening a
-    // directory fails on Windows — errors are ignored by design there.
-    if let Some(parent) = path.parent() {
-        if !parent.as_os_str().is_empty() {
-            if let Ok(dir) = std::fs::File::open(parent) {
-                let _ = dir.sync_all();
-            }
-        }
-    }
     Ok(())
 }
 

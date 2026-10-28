@@ -1072,7 +1072,6 @@ mod tests {
         ));
     }
 
-    #[cfg(windows)]
     #[test]
     fn addon_mutation_invalidates_after_failed_save_and_retries_unchanged_data() {
         use std::os::windows::fs::OpenOptionsExt;

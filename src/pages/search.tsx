@@ -923,7 +923,6 @@ export function Search() {
                 <button
                   type='button'
                   aria-label='Clear recent searches'
-                  title='Clear recent searches'
                   onMouseDown={keepSearchInputFocus}
                   onKeyDown={dismissRecentOnEscape}
                   onClick={() => {
@@ -947,7 +946,7 @@ export function Search() {
                   className='max-h-[min(216px,38vh)] overflow-y-auto overscroll-contain'
                 >
                   {recentSearches.map((entry, index) => (
-                    <li key={entry} className='flex items-center gap-1'>
+                    <li key={entry} className='group/recent flex items-center gap-1'>
                       <button
                         type='button'
                         onMouseDown={keepSearchInputFocus}
@@ -975,7 +974,6 @@ export function Search() {
                       <button
                         type='button'
                         aria-label={`Remove ${entry} from recent searches`}
-                        title='Remove from recent searches'
                         onMouseDown={keepSearchInputFocus}
                         onKeyDown={dismissRecentOnEscape}
                         onClick={() => {
@@ -985,7 +983,7 @@ export function Search() {
                         }}
                         className={cn(
                           RECENT_SEARCH_ROW_BUTTON_CLASS,
-                          'w-9 shrink-0 justify-center',
+                          'w-9 shrink-0 justify-center opacity-0 transition-opacity duration-150 group-hover/recent:opacity-100 group-focus-within/recent:opacity-100 focus-visible:opacity-100',
                         )}
                       >
                         <X aria-hidden='true' className='h-3.5 w-3.5' />

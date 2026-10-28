@@ -236,7 +236,7 @@ export function useStreamSelectorController({
 
   // Badge the row the title last played so a reopening user can re-pick what worked.
   const { data: titleProgress } = useTitleWatchProgress(id, {
-    enabled: open && isOnline && Boolean(id),
+    enabled: open && Boolean(id),
   });
   // Exact episode targets read the per-episode map; anything else takes the newest same-kind head.
   const targetSeason = absoluteSeason ?? season;
@@ -331,7 +331,7 @@ export function useStreamSelectorController({
     const retry = { sessionKey: selectorSessionKey, error: fatalAddonError };
     setRetryState(retry);
     const request = selectorViewError ? refetchSelectorView() : refetchStreamSelectorData();
-    void Promise.allSettled([request]).then(() => {
+    void request.then(() => {
       setRetryState((current) => (current === retry ? null : current));
     });
   };

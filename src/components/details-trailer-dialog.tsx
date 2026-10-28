@@ -112,7 +112,7 @@ export function DetailsTrailer({ trailers, title, triggerClassName }: DetailsTra
   const [loadedFrameKey, setLoadedFrameKey] = useState<string | null>(null);
   const [delayedFrameKey, setDelayedFrameKey] = useState<string | null>(null);
   const isLoadingTrailer = !!trailerUrl && loadedFrameKey !== frameKey;
-  useTrailerStartVolume(frame);
+  useTrailerStartVolume(isLoadingTrailer ? null : frame);
 
   const warmTrailer = () => {
     if (!selectedKey) return;

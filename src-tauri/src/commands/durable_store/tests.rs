@@ -177,7 +177,6 @@ fn delete_matching_marks_dirty_only_when_keys_are_removed() {
 /// Windows regression: an exclusive-lock reader (AV/indexer semantics via a
 /// zero-share handle) must fail the rename without tearing the committed
 /// file, and a retry after the handle drops must land cleanly.
-#[cfg(windows)]
 #[test]
 fn save_fails_cleanly_on_locked_destination() {
     use std::io::{Read, Seek, SeekFrom};
@@ -255,7 +254,6 @@ fn save_fails_cleanly_on_locked_destination() {
 /// `clear_readonly_on_denied` splits user-owned from app-owned destinations:
 /// a user backup keeps its read-only flag (write fails, bytes untouched),
 /// an app store clears the stale flag and commits.
-#[cfg(windows)]
 #[test]
 fn write_atomic_file_honors_readonly_flag_only_when_allowed() {
     let path = temp_store_path("readonly");

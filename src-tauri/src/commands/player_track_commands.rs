@@ -78,8 +78,7 @@ fn property_non_blank(value: Option<serde_json::Value>) -> Option<String> {
     crate::providers::bound_optional(Some(value), usize::MAX)
 }
 
-/// Duplicate `type:id` rows merge — later non-empty strings win, flags OR
-/// together (mirrors the retired frontend `mergeTrackVariants`).
+/// Merge duplicate `type:id` rows: later strings win and flags OR together.
 fn merge_track_variants(existing: &mut PlayerTrack, next: PlayerTrack) {
     existing.title = next.title.or(existing.title.take());
     existing.lang = next.lang.or(existing.lang.take());

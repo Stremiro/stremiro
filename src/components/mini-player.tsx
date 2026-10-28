@@ -1,4 +1,13 @@
-import { Loader2, Maximize2, Pause, Play, TriangleAlert, VolumeX, X } from 'lucide-react';
+import {
+  ChevronLeft,
+  Loader2,
+  Maximize2,
+  Pause,
+  Play,
+  TriangleAlert,
+  VolumeX,
+  X,
+} from 'lucide-react';
 import {
   useCallback,
   memo,
@@ -9,6 +18,7 @@ import {
   useSyncExternalStore,
 } from 'react';
 import { createPortal } from 'react-dom';
+import { InlineMenu } from '@/components/inline-menu';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
 import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import {
@@ -21,7 +31,9 @@ import {
 import { PlayerSlider } from '@/components/player-slider';
 import { PlayerEndCard } from '@/components/player-state-overlays';
 import { RemoteImage } from '@/components/remote-image';
+import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
+import { usePointerIdle } from '@/hooks/use-pointer-idle';
 import {
   PLAYER_SIDEBAR_WIDTH_PX,
   PLAYER_TITLEBAR_HEIGHT_PX,
@@ -134,7 +146,6 @@ function MiniExpandButton({ keymap, onClick }: { keymap: PlayerKeymap; onClick: 
       type='button'
       aria-label='Back to player'
       aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
-      title={withShortcutHint('Back to player', keymap, 'toggleFullscreen')}
       onClick={onClick}
       className={MINI_ICON_BUTTON_CLASS}
     >
@@ -148,7 +159,6 @@ function MiniCloseButton({ onClick }: { onClick: () => void }) {
     <button
       type='button'
       aria-label='Close mini player'
-      title='Close'
       onClick={onClick}
       className={cn(MINI_ICON_BUTTON_CLASS, 'hover:bg-red-500/25 hover:text-red-200')}
     >
@@ -377,6 +387,12 @@ export const MiniPlayer = memo(function MiniPlayer({
   const pendingFocusClaimRef = useRef(claimFocusOnMount);
   const [hovered, setHovered] = useState(false);
   const [hasFocus, setHasFocus] = useState(false);
+  const { idle: pointerIdle, wake: wakePointer } = usePointerIdle();
+  const menu = useInlineMenu({
+    rootRef: frameRef,
+    enabled: !exiting,
+    returnFocus: () => videoSurfaceRef.current,
+  });
   useEffect(() => {
     const releaseInteraction = () => {
       setHovered(false);
@@ -856,11 +872,13 @@ export const MiniPlayer = memo(function MiniPlayer({
     !isMoving &&
     !isDocking &&
     !isSettling &&
-    (hovered || hasFocus || !isPlaying || isWorking || !!upNext || endOfMedia);
+    !menu.presence.mounted &&
+    (hasFocus || !isPlaying || isWorking || !!upNext || endOfMedia || (hovered && !pointerIdle));
   const effectivelyMuted = isMuted || volume === 0;
   const displayedVolume = isMuted ? 0 : Math.round(volume);
 
   const frame = (
+    // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- menu keys and right-click morph the docked chrome in place.
     <div
       ref={frameRef}
       data-mini-player
@@ -886,12 +904,23 @@ export const MiniPlayer = memo(function MiniPlayer({
         transformOrigin: '0 0',
       }}
       onPointerDown={handlePointerDown}
-      onPointerMove={handlePointerMove}
+      onPointerMove={(event) => {
+        handlePointerMove(event);
+        wakePointer();
+      }}
       onPointerUp={finishDrag}
       onPointerCancel={handlePointerCancel}
       onLostPointerCapture={handlePointerCancel}
-      onPointerEnter={() => setHovered(document.visibilityState !== 'hidden')}
-      onPointerLeave={() => setHovered(false)}
+      onPointerEnter={() => {
+        setHovered(document.visibilityState !== 'hidden');
+        wakePointer();
+      }}
+      onPointerLeave={() => {
+        setHovered(false);
+        menu.rootProps.onPointerLeave();
+      }}
+      onContextMenu={menu.rootProps.onContextMenu}
+      onKeyDown={menu.rootProps.onKeyDown}
       onPointerDownCapture={() => setHasFocus(false)}
       onFocusCapture={(event) =>
         setHasFocus(document.hasFocus() && event.target.matches(':focus-visible'))
@@ -904,7 +933,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           stays transparent — a fill would cover the mask hole below. */}
       <div
         className={cn(
-          'overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
+          'relative overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
           // A FLIPped mount already entered — the pop-in would restart at the dock rect and read as a second pop.
           exiting ? 'animate-mini-undock' : dockFlipFrom ? '' : 'animate-mini-dock',
           isMoving
@@ -985,7 +1014,7 @@ export const MiniPlayer = memo(function MiniPlayer({
               tabIndex={-1}
               className={cn(
                 'absolute bottom-2.5 right-2 z-[25] min-h-9 gap-2 px-3 py-2 font-medium leading-tight transition-[opacity,color,background-color,border-color]',
-                (hovered || hasFocus) && 'pointer-events-none opacity-0',
+                controlsActive && 'pointer-events-none opacity-0',
               )}
             />
           )}
@@ -1006,7 +1035,7 @@ export const MiniPlayer = memo(function MiniPlayer({
             <div
               className={cn(
                 'pointer-events-none absolute right-2 top-2 z-[15] flex items-center gap-1.5 transition-opacity duration-200',
-                (hovered || hasFocus) && 'opacity-0',
+                controlsActive && 'opacity-0',
               )}
             >
               {effectivelyMuted && (
@@ -1039,10 +1068,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                 )}
               >
                 <MiniExpandButton keymap={keymap} onClick={onExpand} />
-                <p
-                  className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'
-                  title={title}
-                >
+                <p className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'>
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>
                 <MiniCloseButton onClick={onClose} />
@@ -1136,7 +1162,6 @@ export const MiniPlayer = memo(function MiniPlayer({
                         active={controlsActive}
                         aria-label='Volume'
                         aria-valuetext={effectivelyMuted ? 'Muted' : `${displayedVolume}%`}
-                        title={effectivelyMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
                         value={[isMuted ? 0 : volume]}
                         max={100}
                         step={1}
@@ -1169,7 +1194,6 @@ export const MiniPlayer = memo(function MiniPlayer({
                 <button
                   type='button'
                   aria-label='Back to player'
-                  title='Click to return to the player'
                   onClick={onExpand}
                   className='absolute inset-0 rounded-[11px] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-inset'
                 />
@@ -1211,6 +1235,29 @@ export const MiniPlayer = memo(function MiniPlayer({
             </div>
           )}
         </div>
+        <InlineMenu
+          presence={menu.presence}
+          orientation='horizontal'
+          label='Mini player actions'
+          className='z-40 rounded-[14px] bg-zinc-950/85 backdrop-blur-md'
+          onAction={menu.close}
+          actions={[
+            { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
+            {
+              key: 'expand',
+              label: 'Expand',
+              icon: Maximize2,
+              onSelect: onExpand,
+            },
+            {
+              key: 'close',
+              label: 'Close',
+              icon: X,
+              destructive: true,
+              onSelect: onClose,
+            },
+          ]}
+        />
       </div>
     </div>
   );

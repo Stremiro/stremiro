@@ -1,9 +1,11 @@
-import { Film, Paintbrush, Palette, Play } from 'lucide-react';
+import { Film, Paintbrush, Palette, Play, RotateCcw } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { AccentControls, resolveAccentPreviewColor } from '@/components/accent-controls';
+import { Button } from '@/components/ui/button';
 import {
   type AccentTargets,
+  DEFAULT_PROFILE_ACCENT,
   type LocalProfileUpdate,
   useLocalProfile,
 } from '@/hooks/use-local-profile';
@@ -143,6 +145,20 @@ export function AppearanceSettings() {
     saveProfile({ accentTargets: { [field]: !profile.accentTargets[field] } });
   };
 
+  const appearanceChanged =
+    profile.accentColor.toLowerCase() !== DEFAULT_PROFILE_ACCENT.accentColor ||
+    profile.accentIntensity !== DEFAULT_PROFILE_ACCENT.accentIntensity ||
+    TINT_TARGETS.some(
+      ({ field }) => profile.accentTargets[field] !== DEFAULT_PROFILE_ACCENT.accentTargets[field],
+    );
+
+  const resetAppearance = () => {
+    if (isHydrating || !appearanceChanged) return;
+    setDraftAccentColor(undefined);
+    setDraftIntensity(undefined);
+    saveProfile(DEFAULT_PROFILE_ACCENT);
+  };
+
   return (
     <div className='@container/appearance space-y-4'>
       <SettingsQueryError
@@ -155,6 +171,19 @@ export function AppearanceSettings() {
             icon={Palette}
             title='Color & glow'
             description='Choose an accent and background intensity. Changes apply live.'
+            action={
+              <Button
+                variant='ghost'
+                aria-label='Reset appearance'
+                title='Reset color, glow and tint targets'
+                aria-disabled={isHydrating || !appearanceChanged || undefined}
+                onClick={resetAppearance}
+                className='h-8 gap-1.5 px-2 text-xs text-zinc-400 hover:bg-white/[0.05] hover:text-white aria-disabled:opacity-35'
+              >
+                <RotateCcw aria-hidden='true' className='size-3' />
+                Reset all
+              </Button>
+            }
           />
           <SettingsBody className='@container/appearance-controls space-y-5'>
             <TintPreview />

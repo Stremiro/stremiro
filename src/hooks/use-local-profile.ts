@@ -57,7 +57,7 @@ const selectProfileAccent = ({ profile }: ProfilePreferences) => ({
   accentTargets: profile.accentTargets,
 });
 
-const FALLBACK_PROFILE_ACCENT: ReturnType<typeof selectProfileAccent> = {
+export const DEFAULT_PROFILE_ACCENT: ReturnType<typeof selectProfileAccent> = {
   accentColor: DEFAULT_PROFILE.accentColor,
   accentIntensity: DEFAULT_PROFILE.accentIntensity,
   accentTargets: DEFAULT_PROFILE.accentTargets,
@@ -66,7 +66,7 @@ const FALLBACK_PROFILE_ACCENT: ReturnType<typeof selectProfileAccent> = {
 /// Accent-only observer for always-mounted chrome — skips username/view-mode re-renders.
 export function useProfileAccent(): ReturnType<typeof selectProfileAccent> {
   const profilePreferencesQuery = useProfilePreferencesQuery(selectProfileAccent);
-  return profilePreferencesQuery.data ?? FALLBACK_PROFILE_ACCENT;
+  return profilePreferencesQuery.data ?? DEFAULT_PROFILE_ACCENT;
 }
 
 const selectProfileAvatar = (preferences: ProfilePreferences) => {

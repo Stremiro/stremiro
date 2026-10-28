@@ -70,13 +70,17 @@ export function buildDetailsRoute(mediaType: string | null | undefined, mediaId:
 
 /// Details navigation with the caller's path as `from` — one shape so
 /// click sites can't drift.
-export function navigateToDetails(mediaType: string | null | undefined, mediaId: string): void {
+export function navigateToDetails(
+  mediaType: string | null | undefined,
+  mediaId: string,
+  landing?: { season: number; episode: number },
+): void {
   navigateApp(buildDetailsRoute(mediaType, mediaId), {
-    state: { from: currentPathWithSearch() },
+    state: { from: currentPathWithSearch(), ...landing },
   });
 }
 
-export function normalizeRouteNumber(value: unknown): number | undefined {
+function normalizeRouteNumber(value: unknown): number | undefined {
   if (typeof value !== 'number' || !Number.isFinite(value)) {
     return undefined;
   }
@@ -92,9 +96,7 @@ function normalizeRouteText(value: unknown): string | undefined {
   return trimmed && lower !== 'null' && lower !== 'undefined' ? trimmed : undefined;
 }
 
-export function sanitizePlayerRouteState(
-  state: PlayerRouteState | null | undefined,
-): PlayerRouteState {
+function sanitizePlayerRouteState(state: PlayerRouteState | null | undefined): PlayerRouteState {
   if (!state) {
     return {};
   }

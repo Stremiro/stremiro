@@ -14,10 +14,25 @@ export function buildTitleShareLink(mediaType: string, mediaId: string): string 
   return `${APP_LINK_SCHEME}${buildDetailsRoute(mediaType, mediaId).slice(1)}`;
 }
 
+export function buildEpisodeShareLink(
+  mediaType: string,
+  mediaId: string,
+  season: number,
+  episode: number,
+): string {
+  return `${buildTitleShareLink(mediaType, mediaId)}/${season}/${episode}`;
+}
+
 // Router state, not the query string: lastVisited persists the URL and addon links may carry keys.
 export function openAppLink(link: AppLink): void {
   if (link.kind === 'title') {
-    navigateToDetails(link.mediaType, link.mediaId);
+    navigateToDetails(
+      link.mediaType,
+      link.mediaId,
+      link.season !== undefined && link.episode !== undefined
+        ? { season: link.season, episode: link.episode }
+        : undefined,
+    );
   } else {
     navigateApp('/settings?section=addons', { state: { addonInstallUrl: link.url } });
   }

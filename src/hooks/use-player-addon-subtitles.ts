@@ -54,13 +54,14 @@ export function usePlayerAddonSubtitles({
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
   const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
-  const autoLoadedSelectionKeyRef = useRef<string | null>(null);
+  const autoLoadedLanguageRef = useRef<string | null>(null);
 
   // External tracks die with each native load, including same-URL credential swaps.
   useEffect(() => {
     subtitleSessionEpochRef.current += 1;
     setPickedAddonSubtitleId(null);
     setAddonSubtitleLoadingId(null);
+    autoLoadedLanguageRef.current = null;
     return () => {
       subtitleSessionEpochRef.current += 1;
     };
@@ -72,7 +73,7 @@ export function usePlayerAddonSubtitles({
 
   // Trimmed so the query key matches what the API sends — untrimmed keys would fork the cache entry.
   const lookupMediaType = effectiveResolveMediaType.trim();
-  const lookupMediaId = (streamLookupId || id)?.trim();
+  const lookupMediaId = nonBlank(streamLookupId) ?? nonBlank(id);
   const subtitlesEnabled =
     ((menuAvailable && subtitleMenuOpened) || autoLoadLanguage !== null) &&
     lookupMediaType !== '' &&
@@ -95,22 +96,18 @@ export function usePlayerAddonSubtitles({
       );
     },
     enabled: subtitlesEnabled,
-    staleTime: 1000 * 60 * 10,
+    // Reopening rechecks Rust's cache without extending signed-link or empty-result lifetimes.
+    staleTime: 0,
     retry: 1,
   });
 
   const addonSubtitles: AddonSubtitle[] = subtitlesQuery.data ?? EMPTY_ADDON_SUBTITLES;
-  const addonSubtitlesLoading = subtitlesQuery.isLoading && subtitlesEnabled;
   // Keep the retry notice mounted while an initial error is retried.
   const addonSubtitlesError =
     subtitlesEnabled &&
     (subtitlesQuery.isError || (subtitlesQuery.isFetched && subtitlesQuery.isLoading))
-      ? subtitlesQuery.error
-        ? getErrorMessage(subtitlesQuery.error)
-        : "Couldn't load addon subtitles."
+      ? getErrorMessage(subtitlesQuery.error || "Couldn't load addon subtitles.")
       : undefined;
-  // Query availability gates the empty-state hint.
-  const addonSubtitlesAvailable = subtitlesEnabled;
 
   const handleSelectAddonSubtitle = async (
     subtitle: AddonSubtitle,
@@ -146,17 +143,17 @@ export function usePlayerAddonSubtitles({
     },
   );
 
-  const loadedAddonSubtitles = subtitlesQuery.data;
+  const loadedAddonSubtitles =
+    subtitlesQuery.isSuccess && !subtitlesQuery.isFetching ? subtitlesQuery.data : undefined;
   useEffect(() => {
-    const selectionKey = JSON.stringify([activeStreamLoadKey, autoLoadLanguage]);
     if (
       !autoLoadLanguage ||
       !loadedAddonSubtitles?.length ||
-      autoLoadedSelectionKeyRef.current === selectionKey
+      autoLoadedLanguageRef.current === autoLoadLanguage
     )
       return;
-    autoLoadedSelectionKeyRef.current = selectionKey;
-    const streamLoadKey = activeStreamLoadKey;
+    autoLoadedLanguageRef.current = autoLoadLanguage;
+    const epoch = subtitleSessionEpochRef.current;
     void api
       .resolvePreferredTrackSelection(
         loadedAddonSubtitles.map((subtitle, index) => ({
@@ -169,7 +166,9 @@ export function usePlayerAddonSubtitles({
       .then(({ matchedTrackId }) => {
         const subtitle =
           matchedTrackId === undefined ? undefined : loadedAddonSubtitles[matchedTrackId];
-        if (subtitle) selectAutoLoadedSubtitle(subtitle, streamLoadKey, autoLoadLanguage);
+        if (subtitle && epoch === subtitleSessionEpochRef.current) {
+          selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, autoLoadLanguage);
+        }
       })
       .catch(() => undefined);
   }, [activeStreamLoadKey, autoLoadLanguage, loadedAddonSubtitles]);
@@ -206,11 +205,14 @@ export function usePlayerAddonSubtitles({
     addonSubtitles,
     addonSubtitlesError,
     addonSubtitlesFetching: subtitlesQuery.isFetching && subtitlesEnabled,
-    addonSubtitlesLoading,
-    addonSubtitlesAvailable,
+    addonSubtitlesLoading: subtitlesQuery.isLoading && subtitlesEnabled,
+    addonSubtitlesAvailable: subtitlesEnabled,
     handleAddonSubtitleSelect: handleSelectAddonSubtitle,
     handleSubTrackSelect,
-    handleSubtitleMenuOpenChange: setSubtitleMenuOpened,
+    handleSubtitleMenuOpenChange: (open: boolean) => {
+      setSubtitleMenuOpened(open);
+      if (open && subtitlesEnabled) void subtitlesQuery.refetch({ cancelRefetch: false });
+    },
     refetchAddonSubtitles: subtitlesQuery.refetch,
   };
 }

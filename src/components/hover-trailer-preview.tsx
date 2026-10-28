@@ -13,39 +13,46 @@ import { cn } from '@/lib/utils';
 
 interface HoverTrailerPreviewProps {
   videoId: string;
+  /** Embedding disabled, removed or private — the caller may try another trailer. */
+  onUnavailable: () => void;
+  onRevealChange: (revealed: boolean) => void;
 }
 
 const LISTENING_RETRY_MS = 250;
 const LISTENING_RETRY_BUDGET_MS = 4_000;
-// YouTube reflows its frame and chrome for a moment after playback starts; reveal once it settles.
-const REVEAL_SETTLE_MS = 600;
+// The embed's title bar and pause glyph auto-hide 3.5–4.1 s after PLAYING; no player command hides them sooner.
+const REVEAL_SETTLE_MS = 4_200;
 
-export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
+export function HoverTrailerPreview({
+  videoId,
+  onUnavailable,
+  onRevealChange,
+}: HoverTrailerPreviewProps) {
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const hasPlayedRef = useRef(false);
   const connectedRef = useRef(false);
   // Prevent PAUSED events from undoing a visibility pause.
   const visibilityPausedRef = useRef(true);
   const offscreenRef = useRef(true);
-  const [revealed, setRevealed] = useState(false);
-  const revealedRef = useRef(false);
+  // 'settling' runs from PLAYING until YouTube's chrome has hidden.
+  const [phase, setPhase] = useState<'hidden' | 'settling' | 'revealed'>('hidden');
+  const phaseRef = useRef(phase);
   const revealTimerRef = useRef<number | null>(null);
+  const revealed = phase === 'revealed';
 
   const reveal = useCallback((next: boolean) => {
-    if (next && (revealedRef.current || revealTimerRef.current !== null)) return;
+    if (next && phaseRef.current !== 'hidden') return;
     if (revealTimerRef.current !== null) {
       window.clearTimeout(revealTimerRef.current);
       revealTimerRef.current = null;
     }
-    if (!next) {
-      revealedRef.current = false;
-      setRevealed(false);
-      return;
-    }
+    phaseRef.current = next ? 'settling' : 'hidden';
+    setPhase(phaseRef.current);
+    if (!next) return;
     revealTimerRef.current = window.setTimeout(() => {
       revealTimerRef.current = null;
-      revealedRef.current = true;
-      setRevealed(true);
+      phaseRef.current = 'revealed';
+      setPhase('revealed');
     }, REVEAL_SETTLE_MS);
   }, []);
 
@@ -66,6 +73,7 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
 
     postYouTubeListening(iframe);
     postYouTubeCommand(iframe, 'addEventListener', ['onStateChange']);
+    postYouTubeCommand(iframe, 'addEventListener', ['onError']);
     postYouTubeCommand(iframe, 'mute');
     visibilityPausedRef.current = document.hidden || !document.hasFocus() || offscreenRef.current;
     postYouTubeCommand(iframe, visibilityPausedRef.current ? 'pauseVideo' : 'playVideo');
@@ -95,6 +103,10 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
       if (isYouTubeReadyEvent(payload)) {
         connectedRef.current = true;
         handshake();
+        return;
+      }
+      if (payload?.event === 'onError') {
+        onUnavailable();
         return;
       }
 
@@ -150,7 +162,9 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
     return () => {
       window.removeEventListener('message', handleMessage);
     };
-  }, [handshake, reveal, videoId]);
+  }, [handshake, onUnavailable, reveal, videoId]);
+
+  useEffect(() => onRevealChange(revealed), [onRevealChange, revealed]);
 
   // Pause while hidden, unfocused or offscreen; late autoplay is handled above.
   useEffect(() => {
@@ -205,25 +219,37 @@ export function HoverTrailerPreview({ videoId }: HoverTrailerPreviewProps) {
   // top-level navigation, forms, and downloads.
   /* eslint-disable react/iframe-missing-sandbox */
   return (
-    <iframe
-      ref={iframeRef}
-      key={embedUrl}
-      src={embedUrl}
-      onLoad={handshake}
-      className={cn(
-        // Crop YouTube's edge chrome outside the preview.
-        'absolute inset-0 h-full w-full scale-[1.3] border-0 pointer-events-none ease-out',
-        revealed
-          ? 'opacity-100 transition-opacity duration-500'
-          : 'opacity-0 transition-opacity duration-75',
+    <>
+      {phase !== 'hidden' && (
+        <div
+          aria-hidden
+          className={cn(
+            'pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 origin-left bg-(--accent-prog) shadow-[0_0_8px_rgb(var(--accent-prog-rgb)/0.6)] transition-opacity duration-300',
+            revealed && 'opacity-0',
+          )}
+          style={{ animation: `watch-progress-entrance ${REVEAL_SETTLE_MS}ms linear both` }}
+        />
       )}
-      sandbox='allow-scripts allow-same-origin allow-presentation allow-popups'
-      allow='accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture'
-      referrerPolicy='strict-origin-when-cross-origin'
-      title='Trailer preview'
-      tabIndex={-1}
-      aria-hidden
-    />
+      <iframe
+        ref={iframeRef}
+        key={embedUrl}
+        src={embedUrl}
+        onLoad={handshake}
+        className={cn(
+          // Crop YouTube's edge chrome outside the preview.
+          'absolute inset-0 h-full w-full scale-[1.3] border-0 pointer-events-none ease-out',
+          revealed
+            ? 'opacity-100 transition-opacity duration-300'
+            : 'opacity-0 transition-opacity duration-75',
+        )}
+        sandbox='allow-scripts allow-same-origin allow-presentation allow-popups'
+        allow='accelerometer; autoplay; encrypted-media; gyroscope; picture-in-picture'
+        referrerPolicy='strict-origin-when-cross-origin'
+        title='Trailer preview'
+        tabIndex={-1}
+        aria-hidden
+      />
+    </>
   );
   /* eslint-enable react/iframe-missing-sandbox */
 }

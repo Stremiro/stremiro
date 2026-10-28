@@ -28,12 +28,12 @@ mock.module('react', () => ({
 
 const radixDialog = await import('@radix-ui/react-dialog');
 const DialogPortal = radixDialog.Portal;
-let renderSelectorPortal = false;
-// SSR omits portals; expose only the selector fixture's content, retaining the real dialog.
+let renderDialogPortal = false;
+// Expose dialog content during page renders; retain the real Radix dialog.
 mock.module('@radix-ui/react-dialog', () => ({
   ...radixDialog,
   Portal: ({ children, ...props }: ComponentProps<typeof DialogPortal>) =>
-    renderSelectorPortal ? children : <DialogPortal {...props}>{children}</DialogPortal>,
+    renderDialogPortal ? children : <DialogPortal {...props}>{children}</DialogPortal>,
 }));
 
 const { QueryClient, QueryClientProvider, QueryObserver, onlineManager } =
@@ -48,12 +48,14 @@ const {
   APP_UI_PREFERENCES_QUERY_KEY,
   DETAILS_QUERY_KEY,
   RECENT_WATCH_SEED_QUERY_KEY,
+  profileLibraryQueryKey,
   streamSelectorQueryKey,
 } = await import('../src/lib/query-invalidation');
 const { playerStreamRankingOptions } = await import('../src/lib/resolve-player-stream');
 const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-cache-key');
 
 const { StreamSelector } = await import('../src/components/stream-selector');
+const { AddTitlesDialog } = await import('../src/components/list/add-titles-dialog');
 const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
@@ -63,6 +65,193 @@ const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
 const { usePlayerTrackController } = await import('../src/hooks/use-player-track-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
+const { useTitleSearch } = await import('../src/hooks/use-item-search');
+const { usePlayerAddonSubtitles } = await import('../src/hooks/use-player-addon-subtitles');
+const { useHistoryPlayback } = await import('../src/hooks/use-history-playback');
+const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
+const { toast } = await import('sonner');
+
+test('Reopening addon subtitles rechecks Rust before automatic selection', async () => {
+  const client = new QueryClient();
+  const key = ['addonSubtitles', 'movie', 'tt1', null, null] as const;
+  const cached = [
+    {
+      id: 'en',
+      selectionKey: 'en',
+      url: 'https://subs.test/old.srt',
+      mpvTitle: 'English',
+      sourceId: 'subs',
+      sourceName: 'Subs',
+    },
+  ];
+  client.setQueryData(key, cached);
+  const fetch = spyOn(api, 'getAddonSubtitles').mockResolvedValue([]);
+  const matchLanguage = spyOn(api, 'resolvePreferredTrackSelection').mockResolvedValue({});
+  const controller = Promise.withResolvers<ReturnType<typeof usePlayerAddonSubtitles>>();
+  function Subtitles() {
+    controller.resolve(
+      usePlayerAddonSubtitles({
+        activeStreamLoadKey: 'stream',
+        announce: () => {},
+        autoLoadLanguage: 'eng',
+        effectiveResolveMediaType: 'movie',
+        id: key[2],
+        menuAvailable: true,
+        mountedRef: { current: true },
+        selectAddonSubtitle: async () => false,
+        setTrack: async () => false,
+        subTracks: [],
+      }),
+    );
+    return null;
+  }
+  let unsubscribe: (() => void) | undefined;
+  const cleanups: (() => void)[] = [];
+  const view = (
+    <QueryClientProvider client={client}>
+      <Subtitles />
+    </QueryClientProvider>
+  );
+  try {
+    capturedEffects = [];
+    renderToStaticMarkup(view);
+    const effects = capturedEffects;
+    capturedEffects = null;
+    for (const effect of effects) {
+      const cleanup = effect();
+      if (cleanup) cleanups.push(cleanup);
+    }
+    expect(matchLanguage).not.toHaveBeenCalled();
+    const query = client.getQueryCache().find({ queryKey: key })!;
+    const observer = new QueryObserver(client, query.options);
+    unsubscribe = observer.subscribe(() => {});
+    await query.promise;
+    expect(fetch).toHaveBeenCalledTimes(1);
+    const subtitles = await controller.promise;
+    subtitles.handleSubtitleMenuOpenChange(true);
+    await query.promise;
+    expect(fetch).toHaveBeenCalledTimes(2);
+    subtitles.handleSubtitleMenuOpenChange(false);
+    subtitles.handleSubtitleMenuOpenChange(true);
+    await query.promise;
+    expect(fetch).toHaveBeenCalledTimes(3);
+
+    client.setDefaultOptions({ queries: { refetchOnMount: false } });
+    client.setQueryData(key, cached);
+    capturedEffects = [];
+    renderToStaticMarkup(view);
+    const readyEffects = capturedEffects;
+    capturedEffects = null;
+    for (let load = 0; load < 2; load++) {
+      for (const effect of readyEffects) {
+        const cleanup = effect();
+        if (cleanup) cleanups.push(cleanup);
+      }
+      expect(matchLanguage).toHaveBeenCalledTimes(load + 1);
+    }
+  } finally {
+    capturedEffects = null;
+    cleanups.forEach((cleanup) => cleanup());
+    unsubscribe?.();
+    client.clear();
+    fetch.mockRestore();
+    matchLanguage.mockRestore();
+  }
+});
+
+test.each([
+  { cancelled: false, failed: false },
+  { cancelled: false, failed: true },
+  { cancelled: true, failed: false },
+  { cancelled: true, failed: true },
+])('Play next reports only the current lookup result (%j)', async ({ cancelled, failed }) => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+  Object.defineProperty(globalThis, 'window', {
+    configurable: true,
+    value: { location: { pathname: '/profile', search: '' } },
+  });
+  const client = new QueryClient();
+  const lookup = Promise.withResolvers<Awaited<ReturnType<typeof api.getNextEpisodeRow>>>();
+  const next = spyOn(api, 'getNextEpisodeRow').mockImplementation(() => lookup.promise);
+  const info = spyOn(toast, 'info').mockImplementation(() => 'notice');
+  const error = spyOn(toast, 'error').mockImplementation(() => 'error');
+  const controller = Promise.withResolvers<ReturnType<typeof useHistoryPlayback>>();
+  function History() {
+    controller.resolve(
+      useHistoryPlayback(
+        {
+          id: 'tt1',
+          type_: 'series',
+          season: 1,
+          episode: 1,
+          position: 100,
+          duration: 1000,
+          last_watched: 1,
+          title: 'Series',
+        },
+        'Failed to resume',
+      ),
+    );
+    return null;
+  }
+  try {
+    renderToStaticMarkup(
+      <MemoryRouter>
+        <QueryClientProvider client={client}>
+          <PlayerSessionProvider>
+            <History />
+          </PlayerSessionProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+    const playback = await controller.promise;
+    const pending = playback.playNext();
+    expect(next).toHaveBeenCalledTimes(1);
+    if (cancelled) claimPlaybackLaunch();
+    if (failed) lookup.reject(new Error('Lookup failed'));
+    else lookup.resolve(null);
+    await pending;
+    expect(info).toHaveBeenCalledTimes(!cancelled && !failed ? 1 : 0);
+    expect(error).toHaveBeenCalledTimes(!cancelled && failed ? 1 : 0);
+  } finally {
+    lookup.resolve(null);
+    for (const spy of [next, info, error]) spy.mockRestore();
+    client.clear();
+    if (descriptor) Object.defineProperty(globalThis, 'window', descriptor);
+    else Reflect.deleteProperty(globalThis, 'window');
+  }
+});
+
+test.each([
+  { query: '', enabled: true, expectedQueries: 1 },
+  { query: 'Title', enabled: false, expectedQueries: 1 },
+  { query: 'Title', enabled: true, expectedQueries: 30 },
+])(
+  'Collection search retains distinct snapshots only while searching (%j)',
+  ({ query, enabled, expectedQueries }) => {
+    const client = new QueryClient();
+    function Collection({ revision }: { revision: number }) {
+      const items = [{ title: `Title ${revision}` }];
+      const { filteredItems } = useTitleSearch(items, query, enabled);
+      expect(filteredItems).toBe(items);
+      return null;
+    }
+    try {
+      for (let revision = 0; revision < 30; revision++) {
+        renderToStaticMarkup(
+          <QueryClientProvider client={client}>
+            <Collection revision={revision} />
+          </QueryClientProvider>,
+        );
+      }
+      expect(client.getQueryCache().findAll({ queryKey: ['title-search'] })).toHaveLength(
+        expectedQueries,
+      );
+    } finally {
+      client.clear();
+    }
+  },
+);
 
 test('Volume and unmute share one native batch with no delayed unmute after a newer mute', async () => {
   const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -362,6 +551,7 @@ function renderPage(
 ) {
   // The Hero reads native window location; keep this server fixture on the rails.
   client.setQueryData(homeTrendingMoviesQueryOptions.queryKey, []);
+  renderDialogPortal = true;
   try {
     return renderToStaticMarkup(
       <QueryClientProvider client={client}>
@@ -371,6 +561,7 @@ function renderPage(
       </QueryClientProvider>,
     );
   } finally {
+    renderDialogPortal = false;
     client.clear();
   }
 }
@@ -381,6 +572,43 @@ test.each(['/search', '/search?q=matrix', '/search?type=anime&genre=Action'])(
     const markup = renderPage(Search, route);
     expect(markup).toContain('data-search-input');
     expect(markup).toContain('About unified catalog results');
+  },
+);
+
+test.each([false, true])(
+  'Add Titles keeps cached rows available after a refresh failure (cached=%s)',
+  async (cached) => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
+    });
+    const queryKey = profileLibraryQueryKey({ query: '', sort: 'title-asc' });
+    if (cached) {
+      client.setQueryData(queryKey, {
+        items: [{ id: 'saved-title', title: 'Saved title', type: 'movie' }],
+        allIds: ['saved-title'],
+      });
+    }
+    await client.prefetchQuery({
+      queryKey,
+      queryFn: () => {
+        throw new Error('Library unavailable');
+      },
+    });
+    const markup = renderPage(
+      () => (
+        <AddTitlesDialog
+          list={{ id: 'test-list', name: 'Test list', icon: 'list', item_ids: [] }}
+          onOpenChange={() => {}}
+          returnFocusRef={{ current: null }}
+        />
+      ),
+      '/profile?tab=lists',
+      client,
+    );
+    expect(markup).toContain('load your library.');
+    expect(markup.includes('aria-label="Library titles"')).toBe(cached);
+    expect(markup.includes('aria-label="Saved title"')).toBe(cached);
+    expect(markup).not.toContain('Your library is empty');
   },
 );
 
@@ -422,89 +650,83 @@ test.each([
     });
     const target = { type: 'movie' as const, id: 'selector-test' };
     const failure = new Error('Stream source unavailable');
-    try {
-      await client.prefetchQuery({
-        ...api.addonConfigsQueryOptions(),
-        queryFn: () => {
-          throw new Error('Addon configuration unavailable');
-        },
-      });
-      const data: StreamSelectorData = {
-        hasEnabledAddons,
-        fatalErrorMessage: selectorFailed ? failure.message : undefined,
-        streams: available
-          ? [
-              {
-                streamKey: 'available-stream',
-                matchBadgeKinds: [],
-                matchTier: null,
-                showPackBadge: false,
-                presentation: {
-                  sourceName: 'Available source',
-                  streamTitle: 'Available release',
-                  resolution: '1080p',
-                  deliveryKind: 'http',
-                  deliveryLabel: 'HTTP',
-                  isInstantlyPlayable: true,
-                  isBatch: false,
-                },
+    await client.prefetchQuery({
+      ...api.addonConfigsQueryOptions(),
+      queryFn: () => {
+        throw new Error('Addon configuration unavailable');
+      },
+    });
+    const data: StreamSelectorData = {
+      hasEnabledAddons,
+      fatalErrorMessage: selectorFailed ? failure.message : undefined,
+      streams: available
+        ? [
+            {
+              streamKey: 'available-stream',
+              matchBadgeKinds: [],
+              matchTier: null,
+              showPackBadge: false,
+              presentation: {
+                sourceName: 'Available source',
+                streamTitle: 'Available release',
+                resolution: '1080p',
+                deliveryKind: 'http',
+                deliveryLabel: 'HTTP',
+                isInstantlyPlayable: true,
+                isBatch: false,
               },
-            ]
-          : [],
-        sourceSummaries: available
-          ? [
-              {
-                id: 'available-source',
-                name: 'Available source',
-                status: 'healthy',
-                streamCount: 1,
-              },
-            ]
-          : [],
-        stats: {
-          resCounts: { '4k': 0, '1080p': Number(available), '720p': 0, sd: 0 },
-          playableCount: Number(available),
-          p2pCount: 0,
-          cachedCount: 0,
-          batchCount: 0,
-          episodeLikeCount: 0,
-          sourceHealth: { degraded: 0, offline: 0, pending: 0 },
-        },
-      };
-      client.setQueryData(
-        streamSelectorQueryKey(
-          target.type,
-          target.id,
-          undefined,
-          undefined,
-          undefined,
-          buildStreamRankingCacheKey(
-            playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
-          ),
+            },
+          ]
+        : [],
+      sourceSummaries: available
+        ? [
+            {
+              id: 'available-source',
+              name: 'Available source',
+              status: 'healthy',
+              streamCount: 1,
+            },
+          ]
+        : [],
+      stats: {
+        resCounts: { '4k': 0, '1080p': Number(available), '720p': 0, sd: 0 },
+        playableCount: Number(available),
+        p2pCount: 0,
+        cachedCount: 0,
+        batchCount: 0,
+        episodeLikeCount: 0,
+        sourceHealth: { degraded: 0, offline: 0, pending: 0 },
+      },
+    };
+    client.setQueryData(
+      streamSelectorQueryKey(
+        target.type,
+        target.id,
+        undefined,
+        undefined,
+        undefined,
+        buildStreamRankingCacheKey(
+          playerStreamRankingOptions({ mediaId: target.id, mediaType: target.type }),
         ),
-        data,
-      );
-      renderSelectorPortal = true;
-      const markup = renderPage(
-        () => <StreamSelector open onClose={() => {}} target={target} />,
-        '/details/movie/selector-test',
-        client,
-      );
-      expect(markup.includes('Search streams by release, codec or keyword')).toBe(available);
-      expect(markup).not.toContain('Addon configuration unavailable');
-      expect(markup.includes(failure.message)).toBe(!available && selectorFailed);
-      expect(markup.includes('Retry</button>')).toBe(!available && selectorFailed);
-      expect(markup.includes('No enabled stream sources.')).toBe(
-        !available && !selectorFailed && !hasEnabledAddons,
-      );
-      expect(markup.includes('No stream-capable addons enabled.')).toBe(
-        !available && !selectorFailed && hasEnabledAddons,
-      );
-      expect(markup.includes('Manage addons')).toBe(!available && !selectorFailed);
-    } finally {
-      renderSelectorPortal = false;
-      client.clear();
-    }
+      ),
+      data,
+    );
+    const markup = renderPage(
+      () => <StreamSelector open onClose={() => {}} target={target} />,
+      '/details/movie/selector-test',
+      client,
+    );
+    expect(markup.includes('Search streams by release, codec or keyword')).toBe(available);
+    expect(markup).not.toContain('Addon configuration unavailable');
+    expect(markup.includes(failure.message)).toBe(!available && selectorFailed);
+    expect(markup.includes('Retry</button>')).toBe(!available && selectorFailed);
+    expect(markup.includes('No enabled stream sources.')).toBe(
+      !available && !selectorFailed && !hasEnabledAddons,
+    );
+    expect(markup.includes('No stream-capable addons enabled.')).toBe(
+      !available && !selectorFailed && hasEnabledAddons,
+    );
+    expect(markup.includes('Manage addons')).toBe(!available && !selectorFailed);
   },
 );
 
@@ -551,8 +773,6 @@ test.each([false, true])(
       expect(result.isPlaceholderData).toBe(false);
       expect(result.data).toEqual(persistent ? undefined : storedPreferences);
       expect(result.error).toBe(persistent ? failure : null);
-      const isHydrating = !result.isSuccess || result.isPlaceholderData;
-      expect(isHydrating).toBe(persistent);
     } finally {
       unsubscribe?.();
       clearTimeout(timeout);

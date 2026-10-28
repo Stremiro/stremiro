@@ -376,7 +376,12 @@ fn normalize_recent_searches(searches: impl IntoIterator<Item = String>) -> Vec<
     searches
         .into_iter()
         .filter_map(|query| {
-            super::super::normalize_query(&query.split_whitespace().collect::<Vec<_>>().join(" "))
+            let collapsed: String = query
+                .split_whitespace()
+                .flat_map(|word| word.chars().chain(std::iter::once(' ')))
+                .take(super::super::MAX_SEARCH_QUERY_CHARS)
+                .collect();
+            super::super::normalize_query(&collapsed)
         })
         .filter(|query| !query.chars().any(char::is_control) && seen.insert(query.to_lowercase()))
         .take(RECENT_SEARCHES_MAX)
