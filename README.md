@@ -10,6 +10,9 @@
 
 <h1 align="center">⛩️ Iroh / Stremiro</h1>
 
+https://github.com/user-attachments/assets/26fc6cdc-17a4-4958-98cd-59537ad77fd7
+
+
 <p align="center">
   <strong>Your addons. Your library. Your way.</strong><br />
   A streaming client for Windows with a lean Rust core and a custom mpv player.
