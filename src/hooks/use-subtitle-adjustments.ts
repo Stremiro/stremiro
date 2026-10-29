@@ -41,7 +41,6 @@ export function useSubtitleAdjustments({
     scale: preferences.subtitleScale,
   });
   const settingsRef: RefObject<SubtitleAdjustmentSettings> = useRef(settings);
-  const canonicalDelayRef = useRef(settings.delay);
   const delayNudgeGenerationRef = useRef(0);
   const delayNudgeChainRef = useRef<Promise<number | undefined>>(Promise.resolve(undefined));
   const sequenceRef = useRef({ delay: 0, pos: 0, scale: 0 });
@@ -62,7 +61,6 @@ export function useSubtitleAdjustments({
         if (sequenceRef.current[key] !== sequence) return undefined;
         pendingRef.current.delete(key);
         if (normalized === undefined) return undefined;
-        if (key === 'delay') canonicalDelayRef.current = normalized;
         settingsRef.current = { ...settingsRef.current, [key]: normalized };
         setSettings((current) =>
           current[key] === normalized ? current : { ...current, [key]: normalized },
@@ -121,7 +119,7 @@ export function useSubtitleAdjustments({
     delayNudgeChainRef.current = delayNudgeChainRef.current
       .then(() => {
         if (delayNudgeGenerationRef.current !== generation) return undefined;
-        return applySubtitleSetting('delay', canonicalDelayRef.current + direction * 0.1);
+        return applySubtitleSetting('delay', settingsRef.current.delay + direction * 0.1);
       })
       .catch(() => undefined);
     return delayNudgeChainRef.current;

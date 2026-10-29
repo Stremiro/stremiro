@@ -5,7 +5,7 @@ use super::config_store::{
     default_stream_selector_preferences, is_pinned_default_addon_url, load_addon_configs,
     load_app_ui_preferences, load_last_notified_app_update_version, load_profile_preferences,
     load_stream_selector_preferences_state, normalize_addon_url, normalize_start_minimized,
-    push_recent_search, resolve_addon_configs, save_addon_configs_to_store,
+    opaque_addon_id, push_recent_search, resolve_addon_configs, save_addon_configs_to_store,
     save_app_ui_preferences_to_store, save_last_notified_app_update_version_to_store,
     save_profile_preferences_to_store, save_stream_selector_preferences_to_store, startup_route,
     AddonConfig, AddonConfigView, AppUiPreferencesPatch, AppUiPreferencesView, ProfilePreferences,
@@ -14,8 +14,7 @@ use super::config_store::{
 use super::DurableStore;
 use crate::providers::addon_manifest::{
     build_configure_url, fetch_addon_manifest_snapshot, snapshot_is_classified,
-    snapshot_resource_kinds, AddonCatalogCapability, AddonResourceCapability,
-    ADDON_CONFIGURATION_REQUIRED_MESSAGE,
+    snapshot_resource_kinds, ADDON_CONFIGURATION_REQUIRED_MESSAGE,
 };
 use crate::providers::addon_resource::AddonResourceClient;
 use crate::providers::addons::AddonTransport;
@@ -43,40 +42,66 @@ const MAX_ADDON_CONFIGS: usize = 32;
 /// can't persist unbounded strings.
 const MAX_ADDON_FIELD_CHARS: usize = 256;
 
-/// Backup restore: appends addons whose URL isn't installed, under the same
-/// normalization and bounds as `update_addon_configs`. Imported capability
-/// snapshots are dropped — never trusted outside a server-side fetch — so the
-/// classifier re-fetches them. Returns addons added; caller owns `store.save()`.
-pub(crate) fn merge_imported_addon_configs(
+pub(crate) struct PreparedAddonImport {
+    pub configs: Vec<AddonConfig>,
+    pub source_ids: HashMap<String, String>,
+    pub added: usize,
+}
+
+/// Prepares the merged registry without mutating stores. Imported snapshots
+/// are discarded; installed identities and device toggles stay unchanged.
+pub(crate) fn prepare_imported_addon_configs(
     store: &DurableStore,
-    imported: Vec<AddonConfig>,
-) -> usize {
+    imported: impl IntoIterator<Item = AddonConfig>,
+) -> PreparedAddonImport {
     let mut configs = load_addon_configs(store);
     let before = configs.len();
+    let mut source_urls = HashMap::new();
     for mut config in imported {
-        if configs.len() >= MAX_ADDON_CONFIGS {
-            break;
-        }
         let verdict = validate_installable_addon_reference(&config.url);
         let Some(url) = verdict.normalized_url else {
             continue;
         };
-        if configs.iter().any(|existing| existing.url == url) {
-            continue;
+        let source_id = opaque_addon_id(config.id.clone());
+        if !configs.iter().any(|existing| existing.url == url) {
+            if configs.len() >= MAX_ADDON_CONFIGS {
+                continue;
+            }
+            config.url.clone_from(&url);
+            config.name = trim_to_max(&config.name, MAX_ADDON_FIELD_CHARS).unwrap_or_default();
+            config.capabilities = None;
+            configs.push(config);
         }
-        config.url = url;
-        config.id = trim_to_max(&config.id, MAX_ADDON_FIELD_CHARS).unwrap_or_default();
-        config.name = trim_to_max(&config.name, MAX_ADDON_FIELD_CHARS).unwrap_or_default();
-        config.capabilities = None;
-        configs.push(config);
+        if super::streaming_helpers::normalize_source_id(&source_id).is_some()
+            && !source_id.eq_ignore_ascii_case("all")
+        {
+            source_urls.entry(source_id).or_insert(url);
+        }
     }
-    if configs.len() == before {
-        return 0;
-    }
-    let configs = resolve_addon_configs(Some(configs));
+    let registry_changed = configs.len() != before;
+    let configs = if !registry_changed {
+        configs
+    } else {
+        resolve_addon_configs(Some(configs))
+    };
     let added = configs.len().saturating_sub(before);
-    save_addon_configs_to_store(store, &configs);
-    added
+    let source_ids = source_urls
+        .into_iter()
+        .filter_map(|(source, url)| {
+            let url = if registry_changed {
+                normalize_addon_url(&url).ok().flatten()?
+            } else {
+                url
+            };
+            let target = &configs.iter().find(|config| config.url == url)?.id;
+            (source != *target).then(|| (source, target.clone()))
+        })
+        .collect();
+    PreparedAddonImport {
+        configs,
+        source_ids,
+        added,
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -386,11 +411,12 @@ async fn refresh_installed_addon_capabilities(
     Ok(classified)
 }
 
+/// Returns whether snapshots changed and whether their routing changed.
 pub(super) fn merge_classified_capabilities(
     latest: &mut [AddonConfig],
     classified: Vec<AddonConfig>,
     new_install: bool,
-) -> bool {
+) -> (bool, bool) {
     let mut snapshots: HashMap<_, _> = classified
         .into_iter()
         .filter_map(|config| {
@@ -401,12 +427,17 @@ pub(super) fn merge_classified_capabilities(
         .collect();
 
     let mut changed = false;
+    let mut routing_changed = false;
     for config in latest {
         if let Some((url, snapshot)) = snapshots.remove(&config.id) {
             if config.url == url
                 && config.capabilities.as_ref() != Some(&snapshot)
                 && snapshot_is_classified(&snapshot)
             {
+                routing_changed |= config.capabilities.as_ref().is_none_or(|previous| {
+                    previous.resources != snapshot.resources
+                        || previous.catalogs != snapshot.catalogs
+                });
                 if new_install && is_host_fallback_name(config) {
                     config.name = snapshot.name.clone();
                 }
@@ -416,21 +447,7 @@ pub(super) fn merge_classified_capabilities(
         }
     }
 
-    changed
-}
-
-type CatalogRoutingFacts = Option<(Vec<AddonResourceCapability>, Vec<AddonCatalogCapability>)>;
-
-fn catalog_routing_facts(configs: &[AddonConfig]) -> Vec<CatalogRoutingFacts> {
-    configs
-        .iter()
-        .map(|config| {
-            config
-                .capabilities
-                .as_ref()
-                .map(|snapshot| (snapshot.resources.clone(), snapshot.catalogs.clone()))
-        })
-        .collect()
+    (changed, routing_changed)
 }
 
 pub(crate) async fn classify_installed_addon_capabilities(app: AppHandle) -> Result<(), String> {
@@ -469,18 +486,12 @@ async fn refresh_addon_capabilities(
     super::run_blocking_store_op(move || {
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut latest = load_addon_configs(&store);
-        let routing_before = catalog_routing_facts(&latest);
-        let changed = merge_classified_capabilities(&mut latest, classified, false);
-        if changed {
-            save_addon_configs_to_store(&store, &latest);
-        }
-        store.save()?;
-        if changed {
+        let (changed, routing_changed) =
+            merge_classified_capabilities(&mut latest, classified, false);
+        persist_addon_configs(&store, &latest, changed, || {
             // Payload: whether catalog routing moved; display-only changes refresh just the addon rows.
-            let routing_changed = catalog_routing_facts(&latest) != routing_before;
             let _ = app.emit("app://addon-capabilities-changed", routing_changed);
-        }
-        Ok(())
+        })
     })
     .await?;
     Ok(identities)
@@ -766,7 +777,7 @@ pub async fn update_addon_configs(
         let store = super::open_store(&app, super::SETTINGS_STORE_FILE)?;
         let mut updated = load_addon_configs(&store);
         let mut changed = apply_addon_configs_op(&mut updated, op, &new_addon_id)?;
-        changed |= merge_classified_capabilities(&mut updated, classified, true);
+        changed |= merge_classified_capabilities(&mut updated, classified, true).0;
         persist_addon_configs(&store, &updated, changed, || {
             // The live registry changed even if saving fails or its caller timed out.
             clear_addon_caches(&app)
@@ -1146,17 +1157,9 @@ mod tests {
         ];
         let mut expected = latest.clone();
         expected[1].capabilities = fetched.capabilities.clone();
-        assert!(merge_classified_capabilities(
-            &mut latest,
-            vec![fetched.clone()],
-            false
-        ));
+        assert!(merge_classified_capabilities(&mut latest, vec![fetched.clone()], false).0);
         assert_eq!(latest, expected);
-        assert!(!merge_classified_capabilities(
-            &mut latest,
-            vec![fetched.clone()],
-            false
-        ));
+        assert!(!merge_classified_capabilities(&mut latest, vec![fetched.clone()], false).0);
         for unmatched in [
             Vec::new(),
             vec![AddonConfig {
@@ -1169,17 +1172,13 @@ mod tests {
             }],
         ] {
             let mut latest = unmatched.clone();
-            assert!(!merge_classified_capabilities(
-                &mut latest,
-                vec![fetched.clone()],
-                false
-            ));
+            assert!(!merge_classified_capabilities(&mut latest, vec![fetched.clone()], false).0);
             assert_eq!(latest, unmatched);
         }
     }
 
     #[test]
-    fn catalog_routing_facts_ignore_display_only_manifest_changes() {
+    fn capability_merge_distinguishes_display_only_manifest_changes() {
         let old = AddonConfig {
             capabilities: Some(crate::test_helpers::cinemeta_manifest()),
             ..test_addon("cinemeta", "Cinemeta")
@@ -1189,15 +1188,16 @@ mod tests {
         snapshot.version = Some("9.9.9".into());
         snapshot.logo = Some("https://cdn.example/logo.png".into());
         snapshot.description = Some("New copy".into());
+        let mut latest = vec![old.clone()];
         assert_eq!(
-            catalog_routing_facts(std::slice::from_ref(&old)),
-            catalog_routing_facts(&[cosmetic])
+            merge_classified_capabilities(&mut latest, vec![cosmetic], false),
+            (true, false)
         );
-        let mut routed = old.clone();
+        let mut routed = old;
         routed.capabilities.as_mut().unwrap().catalogs.clear();
-        assert_ne!(
-            catalog_routing_facts(&[old]),
-            catalog_routing_facts(&[routed])
+        assert_eq!(
+            merge_classified_capabilities(&mut latest, vec![routed], false),
+            (true, true)
         );
     }
 
@@ -1278,7 +1278,7 @@ mod tests {
             let mut latest = vec![addon.clone()];
             let success = status == 200 && body == valid;
             assert_eq!(
-                merge_classified_capabilities(&mut latest, fetched, false),
+                merge_classified_capabilities(&mut latest, fetched, false).0,
                 success
             );
             let expected = if success {
@@ -1302,7 +1302,7 @@ mod tests {
             .await
             .unwrap();
         let mut latest = vec![offline.clone()];
-        assert!(!merge_classified_capabilities(&mut latest, fetched, false));
+        assert!(!merge_classified_capabilities(&mut latest, fetched, false).0);
         assert_eq!(latest, vec![offline]);
     }
 

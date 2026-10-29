@@ -84,3 +84,44 @@ fn player_track_serializes_with_frontend_field_names() {
     assert!(minimal.get("title").is_none());
     assert!(minimal.get("externalFilename").is_none());
 }
+
+#[test]
+fn track_changes_allow_only_audio_subtitle_ids_off_and_cycle() {
+    use serde_json::json;
+
+    for (kind, target, command, args) in [
+        ("audio", json!(2), "set", json!(["aid", 2])),
+        ("sub", json!(3), "set", json!(["sid", 3])),
+        ("sub", json!("no"), "set", json!(["sid", "no"])),
+        ("audio", json!("cycle"), "cycle", json!(["aid"])),
+        ("sub", json!("cycle"), "cycle", json!(["sub"])),
+    ] {
+        let (actual, values) = track_change_command(kind, &target).unwrap();
+        assert_eq!(actual, command);
+        assert_eq!(json!(values), args);
+    }
+    for (kind, target) in [
+        ("video", json!(1)),
+        ("audio", json!("no")),
+        ("sub", json!(0)),
+        ("sub", json!(-1)),
+        ("sub", json!(1.5)),
+        ("sub", json!("auto")),
+        ("sub", json!("1")),
+        ("sub", json!(null)),
+        ("sub", json!(true)),
+    ] {
+        assert!(
+            track_change_command(kind, &target).is_err(),
+            "{kind}/{target}"
+        );
+    }
+    let tracks = [PlayerTrack {
+        selected: true,
+        ..track(3, PlayerTrackType::Sub)
+    }];
+    assert!(track_selection_matches(&tracks, "sub", &json!(3)));
+    assert!(!track_selection_matches(&tracks, "sub", &json!(2)));
+    assert!(!track_selection_matches(&tracks, "sub", &json!("no")));
+    assert!(track_selection_matches(&tracks, "audio", &json!("no")));
+}

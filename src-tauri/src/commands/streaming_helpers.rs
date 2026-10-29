@@ -106,7 +106,24 @@ pub(crate) fn derive_stream_family(stream: &AddonStream, source_id: &str) -> Opt
 
 fn stream_family_source_key(source_id: &str) -> Option<String> {
     let source_id = normalize_source_id(source_id)?;
+    // URL ids already contain the original source digest; keep saved release-family matches.
+    if let Some(digest) = source_id.strip_prefix("addon-url:").filter(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    }) {
+        return Some(format!("v2:{digest}"));
+    }
     Some(format!("v2:{:x}", Sha256::digest(source_id.as_bytes())))
+}
+
+pub(super) fn remap_stream_family_source(family: &str, from: &str, to: &str) -> Option<String> {
+    let (source, suffix) = family.split_once('|')?;
+    if source != stream_family_source_key(from)? {
+        return None;
+    }
+    Some(format!("{}|{suffix}", stream_family_source_key(to)?))
 }
 
 pub(crate) fn is_current_stream_family(value: &str) -> bool {
@@ -794,8 +811,7 @@ pub(crate) fn normalize_source_key(value: &str) -> Option<String> {
 }
 
 /// Stable addon-instance identity (`AddonConfig.id`). Unlike `normalize_source_key` this
-/// is case-sensitive — ids are opaque exact strings (usually the transport URL), not
-/// display names. Trim + bound only.
+/// is case-sensitive — ids are opaque exact strings, not display names. Trim + bound only.
 pub(crate) fn normalize_source_id(value: &str) -> Option<&str> {
     let trimmed = value.trim();
     (!trimmed.is_empty() && trimmed.chars().nth(SOURCE_IDENTITY_MAX_CHARS).is_none())

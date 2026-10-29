@@ -19,9 +19,13 @@ const SEARCH_YEAR_MAX: u32 = 2100;
 const MAX_GENRE_FILTERS: usize = 6;
 const CINEMETA_ANIME_GENRE: &str = "Animation";
 const MAX_BROWSE_SOURCE_FETCHES: usize = 8;
+const BROWSE_PAGE_TARGET: usize = 24;
+const BROWSE_LOOKAHEAD_PAGES: usize = 4;
+const BROWSE_SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 const MAX_CATALOG_SEEN_KEYS: usize = 10_000;
 const MAX_SEARCH_SOURCE_CURSORS: usize =
     MAX_GENRE_FILTERS * super::addon_registry::MAX_CATALOG_SOURCES;
+const _: () = assert!(MAX_SEARCH_SOURCE_CURSORS <= u64::BITS as usize);
 // Provider type strings are bounded to 2,048 characters; ids use the IPC id bound.
 const MAX_CATALOG_SEEN_KEY_CHARS: usize = 2_048 + 1 + MEDIA_ID_MAX_CHARS;
 
@@ -43,6 +47,8 @@ pub struct SearchCatalogContinuation {
     all_cursors: Option<AllBrowseCursors>,
     #[serde(skip_serializing_if = "Option::is_none")]
     search_cursors: Option<Vec<SearchSourceCursor>>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_pages: Vec<String>,
     seen_keys: Vec<String>,
 }
 
@@ -86,8 +92,7 @@ impl SearchMediaType {
         }
     }
 
-    /// Catalog type requested from the registry. Anime is an app-level category over
-    /// Cinemeta series, so it maps to the series type at the addon boundary.
+    /// Anime is an app-level Animation category, not an addon media type.
     fn catalog_type(self) -> &'static str {
         match self {
             Self::Movie => "movie",
@@ -198,8 +203,14 @@ fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
 fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogCriteria, String> {
     let normalized_query = request.query.as_deref().and_then(normalize_query);
     let parsed_media_type = SearchMediaType::parse(request.media_type.as_deref());
+    if request.media_type.is_some() && parsed_media_type.is_none() {
+        return Err("Unsupported search media type.".into());
+    }
+    let is_hash =
+        |value: &str| value.len() == 16 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
 
-    let all_browse = normalized_query.is_none() && request.media_type.is_none();
+    let all_browse = normalized_query.is_none()
+        && (request.media_type.is_none() || parsed_media_type == Some(SearchMediaType::Anime));
     let continuation = request.continuation.unwrap_or_else(|| {
         if all_browse {
             SearchCatalogContinuation {
@@ -218,7 +229,7 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     });
     if continuation.all_cursors.is_some() && (!all_browse || continuation.skip.is_some()) {
         return Err(
-            "All-browse cursors cannot be combined with a query, media type or skip.".into(),
+            "Branch cursors require an All or Anime browse without a query or skip.".into(),
         );
     }
     if all_browse && continuation.all_cursors.is_none() {
@@ -237,8 +248,11 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
         let mut keys = HashSet::new();
         if cursors.len() > MAX_SEARCH_SOURCE_CURSORS
             || cursors.iter().any(|cursor| {
-                cursor.key.len() != 16
-                    || !cursor.key.bytes().all(|byte| byte.is_ascii_hexdigit())
+                !is_hash(&cursor.key)
+                    || cursor
+                        .page_hash
+                        .as_deref()
+                        .is_some_and(|hash| !is_hash(hash))
                     || !keys.insert(&cursor.key)
                     || (cursor.skip == 0 && !cursor.retry)
             })
@@ -248,11 +262,21 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     } else if normalized_query.is_some() && continuation.skip.is_some_and(|skip| skip > 0) {
         return Err("Search continuation requires source cursors.".into());
     }
+    if continuation.source_pages.len() > MAX_CATALOG_SEEN_KEYS
+        || (!continuation.source_pages.is_empty() && normalized_query.is_none())
+        || continuation.source_pages.iter().any(|page| {
+            !page
+                .split_once(':')
+                .is_some_and(|(source, page)| is_hash(source) && is_hash(page))
+        })
+    {
+        return Err("Invalid catalog continuation source pages.".into());
+    }
     if continuation.seen_keys.len() > MAX_CATALOG_SEEN_KEYS
         || continuation
             .seen_keys
             .iter()
-            .any(|key| key.is_empty() || key.chars().count() > MAX_CATALOG_SEEN_KEY_CHARS)
+            .any(|key| key.is_empty() || key.chars().nth(MAX_CATALOG_SEEN_KEY_CHARS).is_some())
     {
         return Err("Invalid catalog continuation seen keys.".into());
     }
@@ -360,12 +384,14 @@ fn rank_search_results(
     mut items: Vec<MediaItem>,
     year_range: SearchYearRange,
 ) -> Vec<MediaItem> {
-    if year_range.is_active() {
-        items.retain(|item| {
-            item.primary_year
-                .is_some_and(|year| year_range.contains(year))
-        });
-    }
+    let mut seen = HashSet::new();
+    items.retain(|item| {
+        (!year_range.is_active()
+            || item
+                .primary_year
+                .is_some_and(|year| year_range.contains(year)))
+            && seen.insert(catalog_dedup_key(&item.type_, &item.id))
+    });
     let normalized_query = normalize_search_text(query);
     if normalized_query.is_empty() {
         return items;
@@ -411,26 +437,6 @@ fn item_has_genre(item: &MediaItem, genre: &str) -> bool {
     })
 }
 
-fn is_animation_genre(genre: &str) -> bool {
-    genre.eq_ignore_ascii_case(CINEMETA_ANIME_GENRE)
-}
-
-fn browse_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<String> {
-    match media_type {
-        SearchMediaType::Anime => {
-            if genres.iter().any(|genre| is_animation_genre(genre)) {
-                genres.to_vec()
-            } else {
-                let mut injected = Vec::with_capacity(genres.len() + 1);
-                injected.push(CINEMETA_ANIME_GENRE.to_string());
-                injected.extend(genres.iter().cloned());
-                injected
-            }
-        }
-        SearchMediaType::Movie | SearchMediaType::Series => genres.to_vec(),
-    }
-}
-
 /// Genres sent as Cinemeta `genre` extras. Anime plus extra filters fetches the
 /// extras and keeps titles also declaring Animation, instead of unioning the full
 /// Animation catalog with unrelated live-action catalogs.
@@ -439,7 +445,7 @@ fn catalog_fetch_genres(media_type: SearchMediaType, genres: &[String]) -> Vec<S
         SearchMediaType::Anime => {
             let extras = genres
                 .iter()
-                .filter(|genre| !is_animation_genre(genre))
+                .filter(|genre| !genre.eq_ignore_ascii_case(CINEMETA_ANIME_GENRE))
                 .cloned()
                 .collect::<Vec<_>>();
             if extras.is_empty() {
@@ -481,14 +487,6 @@ fn apply_browse_filters(
     items
 }
 
-/// Keep pulling provider pages until the response fills a usable grid page —
-/// sparse intersections (e.g. anime + Crime) keep only a few titles per page.
-const MIN_BROWSE_FILL_ITEMS: usize = 24;
-
-fn should_continue_browse_fetch(item_count: usize, next_skip: Option<u32>, fetches: usize) -> bool {
-    item_count < MIN_BROWSE_FILL_ITEMS && next_skip.is_some() && fetches < MAX_BROWSE_SOURCE_FETCHES
-}
-
 async fn fetch_query_results(
     app: &AppHandle,
     client: &AddonResourceClient,
@@ -498,19 +496,12 @@ async fn fetch_query_results(
     let media_types: &[&str] = match criteria.media_type {
         Some(SearchMediaType::Movie) => &["movie"],
         Some(SearchMediaType::Series) => &["series"],
-        // Anime films are only reachable through search: browse is series-only.
         Some(SearchMediaType::Anime) | None => &["movie", "series"],
     };
     let fetch_genres = criteria
         .media_type
         .map(|media_type| catalog_fetch_genres(media_type, &criteria.genres))
         .unwrap_or_else(|| criteria.genres.clone());
-    // Anime requires the Animation marker on top of the requested genres.
-    let required_genres = criteria
-        .media_type
-        .map(|media_type| browse_genres(media_type, &criteria.genres))
-        .unwrap_or_else(|| criteria.genres.clone());
-
     let genre_extras: Vec<Option<String>> = if fetch_genres.is_empty() {
         vec![None]
     } else {
@@ -528,7 +519,8 @@ async fn fetch_query_results(
     .await?;
     let items = retain_search_items_matching_genres(
         retain_titled_catalog_items(page.items),
-        &required_genres,
+        &criteria.genres,
+        criteria.media_type,
     );
     let mut result = finish_catalog_page(
         rank_search_results(query, items, criteria.year_range),
@@ -543,7 +535,6 @@ async fn fetch_query_results(
 }
 
 fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
-    // Filter after merging so an empty first claimant still owns a duplicate identity.
     items.retain(|item| !item.title.is_empty());
     items
 }
@@ -554,12 +545,16 @@ fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
 fn retain_search_items_matching_genres(
     mut items: Vec<MediaItem>,
     genres: &[String],
+    media_type: Option<SearchMediaType>,
 ) -> Vec<MediaItem> {
-    if genres.is_empty() {
+    let require_animation = media_type == Some(SearchMediaType::Anime);
+    if genres.is_empty() && !require_animation {
         return items;
     }
     items.retain(|item| {
-        item.genres.is_none() || genres.iter().all(|genre| item_has_genre(item, genre))
+        item.genres.is_none()
+            || ((!require_animation || item_has_genre(item, CINEMETA_ANIME_GENRE))
+                && genres.iter().all(|genre| item_has_genre(item, genre)))
     });
     items
 }
@@ -609,18 +604,23 @@ async fn fetch_registry_browse_pages(
     media_type: SearchMediaType,
     catalog_id: &str,
     genres: &[Option<&str>],
-    skip: u32,
+    skips: &[u32],
+    deadline: Option<tokio::time::Instant>,
 ) -> Vec<Result<CatalogFetchPage, String>> {
     let media_type = media_type.catalog_type();
-    let groups = genres
+    let groups = skips
         .iter()
-        .map(|genre| {
-            let extras = catalog_browse_extras(*genre, skip);
+        .flat_map(|skip| genres.iter().map(move |genre| (*skip, *genre)))
+        .map(|(skip, genre)| {
+            let extras = catalog_browse_extras(genre, skip);
             super::addon_registry::select_catalog_targets(snapshot, media_type, catalog_id, &extras)
                 .map(|targets| (targets, extras))
         })
         .collect();
-    super::addon_registry::fetch_catalog_pages_for_target_groups(client, media_type, groups).await
+    super::addon_registry::fetch_catalog_pages_for_target_groups(
+        client, media_type, groups, deadline,
+    )
+    .await
 }
 
 /// One first page per seed genre, sharing the captured registry and one fetch pool.
@@ -651,32 +651,37 @@ pub(super) async fn fetch_genre_catalog_pages(
         media_type,
         SearchFeed::Popular.cinemeta_catalog(),
         &genres,
-        0,
+        &[0],
+        None,
     )
     .await
     .into_iter()
     .zip(fetch_genres)
     .map(|(page, fetch_genres)| {
         page.map(|page| {
-            apply_browse_filters(
+            let mut items = apply_browse_filters(
                 retain_titled_catalog_items(page.items),
                 media_type,
                 &fetch_genres,
                 SearchYearRange::resolve(None, None),
-            )
+            );
+            let mut seen = HashSet::new();
+            items.retain(|item| seen.insert(catalog_dedup_key(&item.type_, &item.id)));
+            items
         })
     })
     .collect())
 }
 
-async fn fetch_registry_browse_page(
+async fn fetch_registry_browse_batches(
     snapshot: &[AddonConfig],
     client: &AddonResourceClient,
     media_type: SearchMediaType,
     catalog_id: &str,
     genres: &[String],
-    skip: u32,
-) -> Result<CatalogFetchPage, String> {
+    skips: &[u32],
+    deadline: Option<tokio::time::Instant>,
+) -> Vec<Result<CatalogFetchPage, String>> {
     let genre_groups: Vec<_> = genres
         .iter()
         .map(|genre| Some(genre.as_str()))
@@ -688,17 +693,23 @@ async fn fetch_registry_browse_page(
         media_type,
         catalog_id,
         &genre_groups,
-        skip,
+        skips,
+        deadline,
     )
     .await;
-    if genres.len() > 1 {
-        super::addon_registry::merge_catalog_pages(pages, "Failed to load catalog.")
-    } else {
-        pages
-            .into_iter()
-            .next()
-            .unwrap_or_else(|| Err("Failed to load catalog.".to_string()))
-    }
+    let mut pages = pages.into_iter();
+    skips
+        .iter()
+        .map(|_| {
+            let pages: Vec<_> = pages.by_ref().take(genre_groups.len()).collect();
+            if deadline.is_some() {
+                if let Some(error) = pages.iter().find_map(|page| page.as_ref().err()) {
+                    return Err(error.clone());
+                }
+            }
+            super::addon_registry::merge_catalog_pages(pages, "Failed to load catalog.")
+        })
+        .collect()
 }
 
 async fn fetch_browse_page(
@@ -706,10 +717,19 @@ async fn fetch_browse_page(
     client: &AddonResourceClient,
     criteria: &SearchCatalogCriteria,
     media_type: SearchMediaType,
-    mut skip: u32,
+    skip: u32,
 ) -> Result<(CatalogFetchPage, SearchCursorClaims), String> {
     let feed = criteria.feed;
-    let fetch_genres = catalog_fetch_genres(media_type, &criteria.genres);
+    // Extra anime genres intersect Animation, not the general-TV genre catalogs.
+    let filter_type = criteria
+        .media_type
+        .filter(|kind| *kind == SearchMediaType::Anime)
+        .unwrap_or(media_type);
+    let fetch_genres = if filter_type == SearchMediaType::Anime {
+        vec![CINEMETA_ANIME_GENRE.to_string()]
+    } else {
+        criteria.genres.clone()
+    };
     // Prefer the provider `year` catalog for a single pinned year; when no enabled
     // addon declares it, use the feed path with a client-side filter. `skip` is a
     // cursor into one result space, so the space is decided once by capability —
@@ -741,55 +761,93 @@ async fn fetch_browse_page(
     let mut items = Vec::new();
     let mut seen = HashSet::new();
     let mut claims = HashMap::new();
-    let mut next_skip = None;
+    let mut next_skip = Some(skip);
+    let mut skips = vec![skip];
+    let mut deadline = None;
+    let mut stride = 0;
+    let filtered = filter_type == SearchMediaType::Anime
+        || criteria.year_range.is_active()
+        || !criteria.genres.is_empty();
 
-    loop {
-        fetches += 1;
-        let result = fetch_registry_browse_page(
+    'scan: loop {
+        fetches += skips.len();
+        let pages = fetch_registry_browse_batches(
             snapshot,
             client,
             media_type,
             catalog_id,
             catalog_genres,
-            skip,
+            &skips,
+            deadline,
         )
         .await;
-        let page = match result {
-            Ok(page) => page,
-            // Keep the catalog's cursor space on failure: fail an empty
-            // browse, or serve gathered items with the last good next_skip.
-            Err(error) if items.is_empty() => return Err(error),
-            Err(_) => break,
-        };
-        next_skip = page.next_skip;
-        claims.extend(page.items.iter().map(|item| {
-            (
-                catalog_dedup_key(&item.type_, &item.id),
-                Some(usize::from(media_type != SearchMediaType::Movie)),
-            )
-        }));
-
-        let batch = apply_browse_filters(
-            retain_titled_catalog_items(page.items),
-            media_type,
-            &fetch_genres,
-            criteria.year_range,
-        );
-        for item in batch {
-            let key = catalog_dedup_key(&item.type_, &item.id);
-            if seen.insert(key) {
-                items.push(item);
+        for (skip, result) in skips.into_iter().zip(pages) {
+            // Speculative offsets are consumed only along the confirmed cursor chain.
+            if next_skip != Some(skip) {
+                break;
             }
-        }
+            let page = match result {
+                Ok(page) => page,
+                // Keep the catalog's cursor space on failure: fail an empty
+                // browse, or serve gathered items with the last good next_skip.
+                Err(error) if claims.is_empty() => return Err(error),
+                Err(_) => break 'scan,
+            };
+            next_skip = page.next_skip;
+            stride = next_skip
+                .and_then(|next| next.checked_sub(skip))
+                .unwrap_or(0);
+            let previous_claim_count = claims.len();
+            claims.extend(page.items.iter().map(|item| {
+                (
+                    catalog_dedup_key(&item.type_, &item.id),
+                    1_u64 << usize::from(media_type != SearchMediaType::Movie),
+                )
+            }));
+            // Replayed pages cannot fill the grid, even when every title is filtered out.
+            if claims.len() == previous_claim_count {
+                next_skip = None;
+            }
 
-        match next_skip {
-            Some(continue_skip)
-                if should_continue_browse_fetch(items.len(), next_skip, fetches) =>
+            let batch = apply_browse_filters(
+                retain_titled_catalog_items(page.items),
+                filter_type,
+                &criteria.genres,
+                criteria.year_range,
+            );
+            for item in batch {
+                let key = catalog_dedup_key(&item.type_, &item.id);
+                if seen.insert(key) {
+                    items.push(item);
+                }
+            }
+
+            if next_skip.is_none()
+                || stride == 0
+                || (!items.is_empty() && (!filtered || stride < BROWSE_PAGE_TARGET as u32))
+                || items.len() >= BROWSE_PAGE_TARGET
             {
-                skip = continue_skip;
+                break 'scan;
             }
-            _ => break,
         }
+        let deadline =
+            *deadline.get_or_insert_with(|| tokio::time::Instant::now() + BROWSE_SCAN_BUDGET);
+        if fetches >= MAX_BROWSE_SOURCE_FETCHES || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        let Some(next) = next_skip else { break };
+        let window = if stride >= BROWSE_PAGE_TARGET as u32 {
+            BROWSE_LOOKAHEAD_PAGES
+        } else {
+            1
+        };
+        skips = (0..window.min(MAX_BROWSE_SOURCE_FETCHES - fetches))
+            .filter_map(|index| {
+                stride
+                    .checked_mul(index as u32)
+                    .and_then(|offset| next.checked_add(offset))
+            })
+            .collect();
     }
 
     Ok((CatalogFetchPage { items, next_skip }, claims))
@@ -820,7 +878,10 @@ fn merge_all_browse_pages(
                 succeeded = true;
                 *cursor = page.next_skip.filter(|next_skip| *next_skip > skip);
                 pages[index] = page.items;
-                claims.extend(page_claims);
+                claims.reserve(page_claims.len());
+                for (key, claimants) in page_claims {
+                    *claims.entry(key).or_default() |= claimants;
+                }
             }
             Err(error) => {
                 // Preserve a failed branch's cursor so the next page retries it.
@@ -855,7 +916,7 @@ fn merge_all_browse_pages(
     ))
 }
 
-fn finish_catalog_page(
+pub(super) fn finish_catalog_page(
     items: Vec<MediaItem>,
     previous: SearchCatalogContinuation,
     next_skip: Option<u32>,
@@ -864,16 +925,17 @@ fn finish_catalog_page(
     claims: SearchCursorClaims,
 ) -> SearchCatalogPage {
     let mut seen: HashSet<String> = previous.seen_keys.into_iter().collect();
-    let mut progress = vec![false; search_cursors.as_ref().map_or(2, Vec::len)];
+    let mut source_pages: HashSet<String> = previous.source_pages.into_iter().collect();
+    let mut progress = 0_u64;
     // Claims cover the page before genre/year filtering, so a source whose new titles
     // were all filtered out still advanced.
     for (key, claimant) in &claims {
-        if let Some(progress) = claimant.and_then(|index| progress.get_mut(index)) {
-            *progress |= !seen.contains(key);
+        if !seen.contains(key) {
+            progress |= claimant;
         }
     }
-    let mut added_movie = search_cursors.is_none() && progress[0];
-    let mut added_series = search_cursors.is_none() && progress[1];
+    let mut added_movie = search_cursors.is_none() && progress & 1 != 0;
+    let mut added_series = search_cursors.is_none() && progress & 2 != 0;
     let items: Vec<_> = items
         .into_iter()
         .filter(|item| {
@@ -911,15 +973,24 @@ fn finish_catalog_page(
                     .filter(|skip| Some(*skip) == previous.series || added_series),
             }
         }),
-        // A source that adds no unseen title stops paging, so an addon that
-        // ignores `skip` cannot replay its first page forever.
+        // Display deduplication must not stop a different source's advancing pages.
         search_cursors: search_cursors.map(|cursors| {
             cursors
                 .into_iter()
-                .zip(progress)
-                .filter_map(|(cursor, progress)| (cursor.retry || progress).then_some(cursor))
+                .enumerate()
+                .filter_map(|(index, cursor)| {
+                    let advanced = cursor.page_hash.as_ref().map_or_else(
+                        || progress & (1_u64 << index) != 0,
+                        |hash| {
+                            source_pages.len() < MAX_CATALOG_SEEN_KEYS
+                                && source_pages.insert(format!("{}:{hash}", cursor.key))
+                        },
+                    );
+                    (cursor.retry || advanced).then_some(cursor)
+                })
                 .collect()
         }),
+        source_pages: source_pages.into_iter().collect(),
         seen_keys: seen.into_iter().collect(),
     };
     SearchCatalogPage {

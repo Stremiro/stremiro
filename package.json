@@ -1,7 +1,7 @@
 {
   "name": "stremiro",
   "private": true,
-  "version": "0.8.8-beta",
+  "version": "0.8.9-beta",
   "type": "module",
   "packageManager": "bun@1.4.2",
   "engines": {
@@ -14,10 +14,10 @@
   "scripts": {
     "dev": "vite",
     "build": "bun run typecheck && vite build",
-    "tauri:clean": "powershell -ExecutionPolicy Bypass -File ./scripts/clean-tauri.ps1",
-    "tauri:build": "powershell -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1",
-    "tauri:build:unsigned": "powershell -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1 -Unsigned",
-    "tauri:build:clean": "powershell -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1 -Clean",
+    "tauri:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/clean-tauri.ps1",
+    "tauri:build": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1",
+    "tauri:build:unsigned": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1 -Unsigned",
+    "tauri:build:clean": "powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-tauri.ps1 -Clean",
     "format": "oxfmt",
     "format:check": "oxfmt --check",
     "lint": "oxlint --type-aware --deny-warnings",

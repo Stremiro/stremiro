@@ -492,6 +492,7 @@ export function useCollectionSelection(
   busy: boolean,
   dialogOpen = false,
   fallbackFocusRef?: RefObject<HTMLElement | null>,
+  selectAllDisabled = false,
 ) {
   const [selectionMode, setSelectionMode] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
@@ -501,6 +502,13 @@ export function useCollectionSelection(
     setSelectedIds(new Set());
     anchorRef.current = null;
   }, []);
+  const selectAll = useCallback(
+    (selected: string[]) => {
+      if (!busy && !selectAllDisabled)
+        setSelectedIds((current) => new Set([...current, ...selected]));
+    },
+    [busy, selectAllDisabled],
+  );
   const exit = useCallback(() => {
     setSelectionMode(false);
     clear();
@@ -548,12 +556,12 @@ export function useCollectionSelection(
       )
         return;
       event.preventDefault();
-      if (selectsAll) setSelectedIds((current) => new Set([...current, ...visibleIds]));
+      if (selectsAll) selectAll(visibleIds);
       else exit();
     };
     window.addEventListener('keydown', handleKey);
     return () => window.removeEventListener('keydown', handleKey);
-  }, [selectionMode, busy, dialogOpen, exit, visibleIds]);
+  }, [selectionMode, busy, dialogOpen, exit, visibleIds, selectAll]);
   const toggle = useCallback(
     (id: string, shiftKey = false) => {
       if (busy) return;
@@ -581,8 +589,7 @@ export function useCollectionSelection(
     toggle,
     begin: () => setSelectionMode(true),
     clear,
-    selectAll: (selected: string[]) =>
-      setSelectedIds((current) => new Set([...current, ...selected])),
+    selectAll,
   };
 }
 

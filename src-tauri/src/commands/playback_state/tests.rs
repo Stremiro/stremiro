@@ -349,7 +349,7 @@ fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_onc
     let source_id = "https://user:secret@addon.example/manifest.json";
     let family = derive_stream_family(&crate::test_helpers::test_stream(), source_id).unwrap();
     let current_key = playback_stream_family_snapshot_key("series:tt1|alternate", &family);
-    let snapshot = json!(stream_family_snapshot(Some(source_id), Some(50_000), None));
+    let mut snapshot = json!(stream_family_snapshot(Some(source_id), Some(50_000), None));
     let legacy_keys = [
         "series:tt1|shared|release:show",
         "series:tt1|shared|binge:show",
@@ -377,7 +377,7 @@ fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_onc
         50_000,
         false,
     );
-    let preserved = [
+    let mut preserved = [
         (
             playback_source_health_item_key(&health_key),
             store
@@ -414,6 +414,14 @@ fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_onc
 
     let service = PlaybackStateService::new();
     service.migrate_legacy_stream_families(store).unwrap();
+    let opaque_id = crate::commands::config_store::opaque_addon_id(source_id.to_string());
+    let migrated_health_key = source_health_key(&opaque_id);
+    assert!(store
+        .get(playback_source_health_item_key(&health_key))
+        .is_none());
+    preserved[0].0 = playback_source_health_item_key(&migrated_health_key);
+    preserved[1].1 = json!([migrated_health_key]);
+    snapshot["sourceId"] = json!(opaque_id);
     assert_eq!(store.save_count(), saves_before + 1);
     assert_eq!(
         store.get(PLAYBACK_STREAM_FAMILY_INDEX_KEY),
@@ -434,7 +442,7 @@ fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_onc
     }
     assert_eq!(
         score_source_health_priority(
-            load_source_health_snapshot(store, &health_key).as_ref(),
+            load_source_health_snapshot(store, &source_health_key(&opaque_id)).as_ref(),
             50_000
         ),
         3

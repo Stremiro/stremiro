@@ -2,6 +2,7 @@ use super::{
     evict_least_active, insert_sorted_unique, load_advisory_index, playback_title_scope_key,
     PlaybackStateService, PlaybackStreamOutcomeKind,
 };
+use crate::commands::config_store::opaque_addon_id;
 use crate::commands::history_helpers::normalize_episode_coordinate;
 use crate::commands::stream_coordinator::{
     DEFAULT_SOURCE_HEALTH_PRIORITY, DEFAULT_STREAM_FAMILY_PRIORITY,
@@ -104,6 +105,51 @@ pub(super) fn remove_legacy_stream_family_reputation(store: &DurableStore) {
     index.retain(|key| current_snapshot_key(key));
     if index.len() != previous_len {
         store.set(PLAYBACK_STREAM_FAMILY_INDEX_KEY, json!(index));
+    }
+}
+
+pub(super) fn migrate_addon_source_ids(store: &DurableStore) {
+    let mut index = load_advisory_index(store, PLAYBACK_SOURCE_HEALTH_INDEX_KEY);
+    let mut changed = false;
+    for key in &mut index {
+        let Some(id) = key.strip_prefix("id:") else {
+            continue;
+        };
+        let migrated = source_health_key(&opaque_addon_id(id.to_string()));
+        if *key == migrated {
+            continue;
+        }
+        if let Some(snapshot) = load_source_health_snapshot(store, key) {
+            let activity = |snapshot: &PlaybackSourceHealthSnapshot| {
+                snapshot.last_success_at.max(snapshot.last_failure_at)
+            };
+            if load_source_health_snapshot(store, &migrated)
+                .is_none_or(|current| activity(&snapshot) > activity(&current))
+            {
+                store.set(playback_source_health_item_key(&migrated), json!(snapshot));
+            }
+        }
+        store.delete(playback_source_health_item_key(key));
+        *key = migrated;
+        changed = true;
+    }
+    if changed {
+        index.sort_unstable();
+        index.dedup();
+        store.set(PLAYBACK_SOURCE_HEALTH_INDEX_KEY, json!(index));
+    }
+    for key in load_advisory_index(store, PLAYBACK_STREAM_FAMILY_INDEX_KEY) {
+        let item_key = playback_stream_family_item_key(&key);
+        let Some(mut snapshot) = store.get(&item_key) else {
+            continue;
+        };
+        if let Some(id) = snapshot.get("sourceId").and_then(serde_json::Value::as_str) {
+            let migrated = opaque_addon_id(id.to_string());
+            if migrated != id {
+                snapshot["sourceId"] = json!(migrated);
+                store.set(item_key, snapshot);
+            }
+        }
     }
 }
 
@@ -475,6 +521,7 @@ fn prune_by_recency(
         .then(|| Vec::<(String, u64, usize)>::with_capacity(index.len()));
     index.retain(|key| {
         let Some(activity) = load_activity(store, key) else {
+            store.delete(item_key(key));
             return false;
         };
 
@@ -570,9 +617,9 @@ impl PlaybackStateService {
         // report (legacy route state) skips the health write rather than guessing.
         let resolved_source_id = report
             .source_id
-            .as_deref()
-            .and_then(normalize_source_id)
-            .map(str::to_string);
+            .take()
+            .map(opaque_addon_id)
+            .filter(|id| normalize_source_id(id).is_some());
         // `set` mutates the shared map immediately, so the generation guard must run
         // before the first mutation, not only before `save`. The lock serializes the
         // whole section so a `clear`/`remove_keys` bump+delete can't interleave.

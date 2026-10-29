@@ -131,7 +131,10 @@ export function findExternalSubtitleTrack(
   tracks: readonly Track[],
   subtitle: { mpvTitle: string; url: string },
 ): Track | undefined {
-  return tracks.find((track) => isExternalSubtitleTrack(track, subtitle));
+  return (
+    tracks.find((track) => track.selected && isExternalSubtitleTrack(track, subtitle)) ??
+    tracks.find((track) => isExternalSubtitleTrack(track, subtitle))
+  );
 }
 
 export function doesTrackSelectionMatch(

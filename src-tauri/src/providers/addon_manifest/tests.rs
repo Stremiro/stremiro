@@ -351,7 +351,7 @@ fn display_only_snapshot_without_resources_is_unclassified() {
 }
 
 #[test]
-fn catalog_matching_is_case_insensitive() {
+fn catalog_types_and_resource_matching_are_case_insensitive() {
     let snapshot = parse(
         r#"{
                 "name": "Case",
@@ -365,8 +365,7 @@ fn catalog_matching_is_case_insensitive() {
             }"#,
     );
 
-    // Duplicate catalog collapses case-insensitively; extras dedupe too.
-    assert_eq!(snapshot.catalogs.len(), 1);
+    assert_eq!(snapshot.catalogs.len(), 2);
     assert_eq!(snapshot.catalogs[0].extras.len(), 1);
     // ID prefix matches regardless of media-id casing.
     assert!(snapshot_supports_request(

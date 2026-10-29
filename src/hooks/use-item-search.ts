@@ -26,6 +26,7 @@ export function useItemSearch<T>(
     },
     enabled: requestedSearch.length > 0,
     placeholderData: (previousData, previousQuery) => {
+      if (!requestedSearch) return undefined;
       if (previousQuery?.queryKey[1] === listId) return previousData;
       if (!matchKey || !previousData) return undefined;
       // Keyed by value, not identity: a refetch may recreate row objects, and a match depends only on the key.

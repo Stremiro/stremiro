@@ -103,7 +103,7 @@ where
         .unwrap_or_default())
 }
 
-/// `null` behaves like an absent key: `types` inherits, `idPrefixes` accepts any id.
+/// `null` behaves like an absent key: `types` inherits.
 /// An explicit empty `types` list serves nothing.
 fn deserialize_optional_string_list<'de, D>(
     deserializer: D,
@@ -121,12 +121,8 @@ struct RawManifest {
     resources: Vec<RawResource>,
     #[serde(default, deserialize_with = "deserialize_item_list")]
     types: Vec<String>,
-    #[serde(
-        default,
-        alias = "idPrefixes",
-        deserialize_with = "deserialize_item_list"
-    )]
-    id_prefixes: Vec<String>,
+    #[serde(default, alias = "idPrefixes")]
+    id_prefixes: serde_json::Value,
     #[serde(default, deserialize_with = "deserialize_item_list")]
     catalogs: Vec<RawCatalog>,
     #[serde(default, rename = "behaviorHints")]
@@ -147,12 +143,8 @@ enum RawResource {
         name: Option<String>,
         #[serde(default, deserialize_with = "deserialize_optional_string_list")]
         types: Option<Vec<String>>,
-        #[serde(
-            default,
-            alias = "idPrefixes",
-            deserialize_with = "deserialize_optional_string_list"
-        )]
-        id_prefixes: Option<Vec<String>>,
+        #[serde(default, alias = "idPrefixes")]
+        id_prefixes: serde_json::Value,
     },
 }
 
@@ -179,11 +171,19 @@ struct RawCatalog {
 
 #[derive(Debug, Deserialize)]
 struct RawExtra {
+    #[serde(default, deserialize_with = "lenient_option")]
     name: Option<String>,
     #[serde(default, alias = "isRequired")]
     is_required: Option<bool>,
     #[serde(default, deserialize_with = "deserialize_item_list")]
     options: Vec<String>,
+}
+
+fn normalize_opaque(value: String, max_chars: usize) -> Option<String> {
+    if value.trim().chars().nth(max_chars).is_some() {
+        return None;
+    }
+    bound_optional(Some(value), max_chars)
 }
 
 fn normalize_opaque_list(
@@ -194,46 +194,72 @@ fn normalize_opaque_list(
     let mut seen = std::collections::HashSet::new();
     values
         .into_iter()
-        .filter_map(|value| bound_optional(Some(value), max_chars))
+        .filter_map(|value| normalize_opaque(value, max_chars))
         .filter(|item| seen.insert(item.clone()))
         .take(max_items.max(1))
         .collect()
 }
 
-fn normalize_resource_name(value: &str) -> Option<String> {
-    trim_to_max(value, MAX_RESOURCE_CHARS).map(|mut name| {
-        name.make_ascii_lowercase();
-        name
-    })
-}
-
-fn catalog_identity_key(type_: &str, id: &str) -> String {
-    let mut key = format!("{type_}\u{1f}{id}");
-    key.make_ascii_lowercase();
-    key
+fn normalize_id_prefixes(value: serde_json::Value) -> Option<Vec<String>> {
+    let values = match value {
+        serde_json::Value::Null => return Some(Vec::new()),
+        serde_json::Value::Array(values) => values,
+        _ => return None,
+    };
+    let restricted = !values.is_empty();
+    let prefixes = normalize_opaque_list(
+        values.into_iter().filter_map(|value| match value {
+            serde_json::Value::String(value) => Some(value),
+            _ => None,
+        }),
+        MAX_PREFIX_CHARS,
+        MAX_PREFIXES,
+    );
+    (!restricted || !prefixes.is_empty()).then_some(prefixes)
 }
 
 fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
-    let type_ = bound_optional(raw.type_, MAX_TYPE_CHARS)?;
-    let id = bound_optional(raw.id, MAX_CATALOG_ID_CHARS)?;
+    let type_ = normalize_opaque(raw.type_?, MAX_TYPE_CHARS)?;
+    let id = normalize_opaque(raw.id?, MAX_CATALOG_ID_CHARS)?;
 
-    let required = normalize_opaque_list(raw.extra_required, MAX_EXTRA_NAME_CHARS, MAX_EXTRAS);
+    let mut required = Vec::<String>::new();
+    for name in raw.extra_required.iter().map(String::as_str).chain(
+        raw.extra
+            .iter()
+            .filter(|extra| extra.is_required == Some(true))
+            .map(|extra| extra.name.as_deref().unwrap_or_default()),
+    ) {
+        let name = name.trim();
+        if name.is_empty() || name.chars().nth(MAX_EXTRA_NAME_CHARS).is_some() {
+            return None;
+        }
+        if !required.iter().any(|item| item.eq_ignore_ascii_case(name)) {
+            if required.len() == MAX_EXTRAS {
+                return None;
+            }
+            required.push(name.to_string());
+        }
+    }
     let mut extras = Vec::new();
     let mut seen_extras = std::collections::HashSet::new();
 
-    // `extra` (objects) and `extraSupported` (bare names) are complementary —
-    // merge both; objects win dedupe so their options survive.
-    let extra_source = raw
-        .extra
-        .into_iter()
-        .chain(raw.extra_supported.into_iter().map(|name| RawExtra {
-            name: Some(name),
-            is_required: None,
-            options: Vec::new(),
-        }));
+    // Objects keep their options; legacy required names also declare supported inputs.
+    let extra_source = raw.extra.into_iter().chain(
+        raw.extra_supported
+            .into_iter()
+            .chain(required.iter().cloned())
+            .map(|name| RawExtra {
+                name: Some(name),
+                is_required: None,
+                options: Vec::new(),
+            }),
+    );
 
     for extra in extra_source {
-        let Some(name) = bound_optional(extra.name, MAX_EXTRA_NAME_CHARS) else {
+        let Some(name) = extra
+            .name
+            .and_then(|name| normalize_opaque(name, MAX_EXTRA_NAME_CHARS))
+        else {
             continue;
         };
         // Extra names match case-insensitively at request time — dedupe the same way.
@@ -242,8 +268,7 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
         }
 
         extras.push(AddonCatalogExtra {
-            is_required: extra.is_required.unwrap_or(false)
-                || required.iter().any(|item| item.eq_ignore_ascii_case(&name)),
+            is_required: required.iter().any(|item| item.eq_ignore_ascii_case(&name)),
             name,
             options: normalize_opaque_list(
                 extra.options,
@@ -257,7 +282,14 @@ fn normalize_catalog(raw: RawCatalog) -> Option<AddonCatalogCapability> {
         }
     }
 
-    Some(AddonCatalogCapability { type_, id, extras })
+    required
+        .iter()
+        .all(|name| {
+            extras
+                .iter()
+                .any(|extra| extra.name.eq_ignore_ascii_case(name))
+        })
+        .then_some(AddonCatalogCapability { type_, id, extras })
 }
 
 fn normalize_catalogs(raw_catalogs: Vec<RawCatalog>) -> Vec<AddonCatalogCapability> {
@@ -265,7 +297,7 @@ fn normalize_catalogs(raw_catalogs: Vec<RawCatalog>) -> Vec<AddonCatalogCapabili
     raw_catalogs
         .into_iter()
         .filter_map(normalize_catalog)
-        .filter(|catalog| seen.insert(catalog_identity_key(&catalog.type_, &catalog.id)))
+        .filter(|catalog| seen.insert((catalog.type_.to_ascii_lowercase(), catalog.id.clone())))
         .take(MAX_CATALOGS)
         .collect()
 }
@@ -273,29 +305,39 @@ fn normalize_catalogs(raw_catalogs: Vec<RawCatalog>) -> Vec<AddonCatalogCapabili
 fn normalize_resource(
     raw: RawResource,
     manifest_types: &[String],
-    manifest_prefixes: &[String],
+    manifest_prefixes: Option<&[String]>,
 ) -> Option<AddonResourceCapability> {
-    match raw {
-        RawResource::Name(name) => Some(AddonResourceCapability {
-            name: normalize_resource_name(&name)?,
-            types: manifest_types.to_vec(),
-            id_prefixes: manifest_prefixes.to_vec(),
-        }),
+    let (name, types, prefixes) = match raw {
+        RawResource::Name(name) => (
+            name,
+            manifest_types.to_vec(),
+            manifest_prefixes.map(<[String]>::to_vec),
+        ),
         RawResource::Object {
             name,
             types,
             id_prefixes,
-        } => Some(AddonResourceCapability {
-            name: normalize_resource_name(name.as_deref().unwrap_or(""))?,
-            types: types
+        } => (
+            name.unwrap_or_default(),
+            types
                 .map(|values| normalize_opaque_list(values, MAX_TYPE_CHARS, MAX_TYPES))
                 .unwrap_or_else(|| manifest_types.to_vec()),
             // Addon protocol object resources use only their own prefixes; absent or empty accepts any id.
-            id_prefixes: id_prefixes
-                .map(|values| normalize_opaque_list(values, MAX_PREFIX_CHARS, MAX_PREFIXES))
-                .unwrap_or_default(),
-        }),
-    }
+            normalize_id_prefixes(id_prefixes),
+        ),
+    };
+    let mut name = normalize_opaque(name, MAX_RESOURCE_CHARS)?;
+    name.make_ascii_lowercase();
+    Some(AddonResourceCapability {
+        name,
+        // Keep invalid scopes classified so registry fallback cannot turn them into unrestricted addons.
+        types: if prefixes.is_some() {
+            types
+        } else {
+            Vec::new()
+        },
+        id_prefixes: prefixes.unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]
@@ -326,11 +368,12 @@ fn parse_addon_manifest_checked(
     let configurable = behavior_hint("configurable");
 
     let types = normalize_opaque_list(raw.types, MAX_TYPE_CHARS, MAX_TYPES);
-    let id_prefixes = normalize_opaque_list(raw.id_prefixes, MAX_PREFIX_CHARS, MAX_PREFIXES);
+    let id_prefixes = normalize_id_prefixes(raw.id_prefixes);
 
     let mut resources = Vec::new();
     for raw_resource in raw.resources {
-        let Some(resource) = normalize_resource(raw_resource, &types, &id_prefixes) else {
+        let Some(resource) = normalize_resource(raw_resource, &types, id_prefixes.as_deref())
+        else {
             continue;
         };
         if resources.contains(&resource) {
@@ -404,24 +447,23 @@ pub(crate) fn snapshot_supports_request(
     media_type: &str,
     media_id: &str,
 ) -> bool {
-    let Some(resource_name) = normalize_resource_name(resource) else {
+    let resource_name = resource.trim();
+    let media_type = media_type.trim();
+    if media_type.is_empty() || media_type.chars().nth(MAX_TYPE_CHARS).is_some() {
         return false;
-    };
-    let Some(media_type) = trim_to_max(media_type, MAX_TYPE_CHARS) else {
-        return false;
-    };
+    }
     let media_id = media_id.trim();
     if media_id.is_empty() {
         return false;
     }
 
     snapshot.resources.iter().any(|capability| {
-        capability.name == resource_name
+        capability.name.eq_ignore_ascii_case(resource_name)
             && capability
                 .types
                 .iter()
-                .any(|item| item.eq_ignore_ascii_case(&media_type))
-            && (resource_name == "catalog"
+                .any(|item| item.eq_ignore_ascii_case(media_type))
+            && (resource_name.eq_ignore_ascii_case("catalog")
                 || capability.id_prefixes.is_empty()
                 || capability.id_prefixes.iter().any(|prefix| {
                     media_id

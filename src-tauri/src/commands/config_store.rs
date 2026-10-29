@@ -16,15 +16,15 @@ pub use app_ui::{
 pub use profile::{ProfilePreferences, ProfilePreferencesPatch};
 pub use stream_selector::StreamSelectorPreferences;
 
-#[cfg(test)]
-pub(super) use addons::LEGACY_INSTALL_SCHEME;
 pub(crate) use addons::{
-    addon_configs_generation, load_addon_configs, normalize_addon_url, parse_stored_addon_configs,
+    addon_configs_generation, load_addon_configs, normalize_addon_url, opaque_addon_id,
     resolve_addon_configs, save_addon_configs_to_store,
 };
 pub(super) use addons::{
     addon_display_url, is_pinned_default_addon_url, strip_ascii_prefix_ignore_case,
 };
+#[cfg(test)]
+pub(super) use addons::{parse_stored_addon_configs, LEGACY_INSTALL_SCHEME};
 pub(crate) use app_ui::{
     apply_app_ui_preferences_patch, default_player_keybindings, load_app_ui_preferences,
     normalize_audio_delay, normalize_start_minimized, normalize_subtitle_delay,

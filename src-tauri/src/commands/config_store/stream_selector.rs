@@ -163,16 +163,14 @@ fn normalize_stream_selector_batch(value: Option<&str>) -> StreamSelectorBatch {
 }
 
 fn normalize_stream_selector_addon(value: Option<String>) -> String {
-    match value.as_deref().map(str::trim) {
-        Some(value)
-            if !value.is_empty()
+    value
+        .map(super::opaque_addon_id)
+        .filter(|value| {
+            !value.is_empty()
                 && !value.eq_ignore_ascii_case("all")
-                && value.chars().nth(STREAM_SELECTOR_ADDON_MAX_CHARS).is_none() =>
-        {
-            value.to_string()
-        }
-        _ => "all".to_string(),
-    }
+                && value.chars().nth(STREAM_SELECTOR_ADDON_MAX_CHARS).is_none()
+        })
+        .unwrap_or_else(|| "all".to_string())
 }
 
 pub(crate) fn sanitize_stream_selector_preferences(

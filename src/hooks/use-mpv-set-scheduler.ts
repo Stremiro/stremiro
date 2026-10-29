@@ -14,7 +14,7 @@ interface PendingMpvSet {
 }
 
 // Coalesce slider ticks per property into one animation frame.
-export function useMpvSetScheduler(): MpvSetScheduler {
+export function useMpvSetScheduler(resetKey?: string): MpvSetScheduler {
   const pendingRef = useRef<Map<string, PendingMpvSet>>(new Map());
   const latestRef = useRef<Map<string, PendingMpvSet>>(new Map());
   const frameRef = useRef<number | null>(null);
@@ -31,7 +31,7 @@ export function useMpvSetScheduler(): MpvSetScheduler {
       latest.clear();
       pending.clear();
     };
-  }, []);
+  }, [resetKey]);
 
   const settle = useCallback(
     (property: string, request: PendingMpvSet, value?: number, failed = false) => {

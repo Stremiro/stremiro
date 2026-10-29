@@ -1949,7 +1949,12 @@ fn resolve_addon_configs_seeds_defaults_when_uninitialized() {
         ]) {
             assert_eq!(
                 (&*addon.id, &*addon.url, &*addon.name, addon.enabled),
-                (url, url, name, true)
+                (
+                    super::config_store::opaque_addon_id(url.to_string()).as_str(),
+                    url,
+                    name,
+                    true
+                )
             );
         }
     }
@@ -2048,19 +2053,11 @@ fn new_install_capabilities_fill_only_the_host_fallback_name() {
             ..addon.clone()
         };
         let mut installed = vec![addon.clone()];
-        assert!(merge_classified_capabilities(
-            &mut installed,
-            vec![classified.clone()],
-            true
-        ));
+        assert!(merge_classified_capabilities(&mut installed, vec![classified.clone()], true).0);
         assert_eq!(installed[0].name, expected);
         assert_eq!(installed[0].capabilities, Some(cinemeta_manifest()));
         let mut refreshed = vec![addon.clone()];
-        assert!(merge_classified_capabilities(
-            &mut refreshed,
-            vec![classified],
-            false
-        ));
+        assert!(merge_classified_capabilities(&mut refreshed, vec![classified], false).0);
         assert_eq!(refreshed[0].name, addon.name);
     }
 }
@@ -2076,14 +2073,17 @@ fn unclassified_snapshots_leave_the_name_and_capabilities_untouched() {
         ..Default::default()
     };
     let mut installed = vec![addon.clone()];
-    assert!(!merge_classified_capabilities(
-        &mut installed,
-        vec![AddonConfig {
-            capabilities: Some(display_only),
-            ..addon.clone()
-        }],
-        true
-    ));
+    assert!(
+        !merge_classified_capabilities(
+            &mut installed,
+            vec![AddonConfig {
+                capabilities: Some(display_only),
+                ..addon.clone()
+            }],
+            true
+        )
+        .0
+    );
     assert_eq!(installed, vec![addon]);
 }
 
@@ -2218,7 +2218,10 @@ fn resolve_addon_configs_normalizes_loaded_addons() {
 
     assert_eq!(resolved.len(), 3);
     assert_eq!(resolved[0].url, "https://v3-cinemeta.strem.io");
-    assert_eq!(resolved[2].id, "https://stream-addon.test");
+    assert_eq!(
+        resolved[2].id,
+        super::config_store::opaque_addon_id("https://stream-addon.test".to_string())
+    );
     assert_eq!(resolved[2].url, "https://stream-addon.test");
     assert_eq!(resolved[2].name, "stream-addon.test");
 }
@@ -2260,7 +2263,10 @@ fn resolve_addon_configs_repairs_duplicate_ids_for_distinct_urls() {
     assert_eq!(resolved.len(), 4);
     assert_eq!(resolved[0].url, "https://v3-cinemeta.strem.io");
     assert_eq!(resolved[2].id, "shared-id");
-    assert_eq!(resolved[3].id, "https://example-addon.test");
+    assert_eq!(
+        resolved[3].id,
+        super::config_store::opaque_addon_id("https://example-addon.test".to_string())
+    );
     assert_eq!(resolved[3].url, "https://example-addon.test");
 }
 

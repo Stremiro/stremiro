@@ -222,12 +222,17 @@ impl PlaybackStateService {
         // of one shifting insert per row (imports can carry 10k entries).
         let mut accepted = HashSet::new();
 
-        for (key, value) in entries {
-            let Some(scope_key) = key.split_once(':').and_then(|(media_type, media_id)| {
-                playback_title_scope_key(Some(media_type), Some(media_id))
-            }) else {
-                continue;
-            };
+        let mut entries: Vec<_> = entries
+            .into_iter()
+            .filter_map(|(key, value)| {
+                let (media_type, media_id) = key.split_once(':')?;
+                let scope_key = playback_title_scope_key(Some(media_type), Some(media_id))?;
+                Some((key != scope_key, key, scope_key, value))
+            })
+            .collect();
+        entries.sort_unstable_by(|left, right| (&left.0, &left.1).cmp(&(&right.0, &right.1)));
+
+        for (_, _, scope_key, value) in entries {
             let Ok(snapshot) = serde_json::from_value::<PlaybackLanguagePreferencesSnapshot>(value)
             else {
                 continue;
@@ -239,7 +244,18 @@ impl PlaybackStateService {
             if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
                 continue;
             }
-            if accepted.contains(&scope_key) || preferences_index.binary_search(&scope_key).is_ok()
+            if accepted.contains(&scope_key)
+                || load_playback_language_preferences_snapshot(&store, &scope_key).is_some_and(
+                    |local| {
+                        sanitize_language_pref(local.preferred_audio_language.as_deref(), false)
+                            .is_some()
+                            || sanitize_language_pref(
+                                local.preferred_subtitle_language.as_deref(),
+                                true,
+                            )
+                            .is_some()
+                    },
+                )
             {
                 continue;
             }

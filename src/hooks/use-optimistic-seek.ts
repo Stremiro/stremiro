@@ -1,5 +1,5 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
-import { mpvCommand, seekAbsoluteSeconds } from '@/lib/player-mpv';
+import { mpvCommand, seekAbsoluteSeconds, type PlayerSeekTarget } from '@/lib/player-mpv';
 
 import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 import type { PlaybackClock } from '@/lib/player-clock';
@@ -39,6 +39,8 @@ export function useOptimisticSeek({
   triggerOsd,
 }: UseOptimisticSeekArgs) {
   const pendingSeekTargetRef = useRef<number | null>(null);
+  // Matching time-pos can precede a failed range read; retain the target until playback advances.
+  const seekTargetRef = useRef<PlayerSeekTarget | null>(null);
   const pendingSeekDeadlineRef = useRef(0);
   // Bumped on prime and clear — a late rejection must not roll the clock back over a fresher position.
   const seekGenerationRef = useRef(0);
@@ -55,10 +57,12 @@ export function useOptimisticSeek({
 
   useEffect(() => {
     clearOptimisticSeek();
+    seekTargetRef.current = null;
     seekAnnounceEpochRef.current += 1;
     seekStreakRef.current = null;
     return () => {
       clearOptimisticSeek();
+      seekTargetRef.current = null;
       seekAnnounceEpochRef.current += 1;
     };
   }, [resetKey, clearOptimisticSeek]);
@@ -91,6 +95,7 @@ export function useOptimisticSeek({
       );
 
       pendingSeekTargetRef.current = boundedTarget;
+      seekTargetRef.current = { seconds: boundedTarget, startedAt: now };
       pendingSeekDeadlineRef.current = now + OPTIMISTIC_SEEK_ACK_TIMEOUT_MS;
       seekGenerationRef.current += 1;
       seekAnnounceEpochRef.current += 1;
@@ -122,6 +127,7 @@ export function useOptimisticSeek({
         // Roll back only while this seek still owns the pending slot — publishing the pre-seek time would stomp a newer prime.
         if (seekGenerationRef.current === generation) {
           clearOptimisticSeek();
+          seekTargetRef.current = null;
           clock.publish(previousTime);
         }
         throw seekError;
@@ -192,6 +198,10 @@ export function useOptimisticSeek({
 
   // Position-probe gate: a pending seek means position is about to move — the paused poll must keep ticking until settle or hold lapse.
   const isSeekPending = useCallback(() => pendingSeekTargetRef.current !== null, []);
+  const getSeekTarget = useCallback(() => seekTargetRef.current, []);
+  const confirmSeek = useCallback(() => {
+    seekTargetRef.current = null;
+  }, []);
 
-  return { isSeekPending, observeTimeUpdate, seek, seekRelative };
+  return { confirmSeek, getSeekTarget, isSeekPending, observeTimeUpdate, seek, seekRelative };
 }

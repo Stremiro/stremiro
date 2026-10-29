@@ -153,6 +153,13 @@ pub(crate) struct CatalogPage {
     pub items: Vec<MediaItem>,
 }
 
+fn deserialize_optional_json<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Value>, D::Error> {
+    let raw = Option::<&RawValue>::deserialize(deserializer)?;
+    Ok(raw.and_then(|raw| serde_json::from_str(raw.get()).ok()))
+}
+
 /// Card-only decode — search endpoints return full meta objects, so decoding
 /// only card fields keeps memory proportional to what browse renders.
 #[derive(Debug, Deserialize, Default)]
@@ -162,13 +169,21 @@ struct CatalogItemJson<'a> {
     name: Option<Value>,
     #[serde(rename = "type")]
     type_: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     poster: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     background: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     logo: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     description: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     year: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     release_info: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     genre: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     genres: Option<Value>,
     #[serde(borrow)]
     links: Option<&'a RawValue>,
@@ -192,13 +207,21 @@ struct SubtitleItem {
     id: Option<String>,
     url: Option<String>,
     lang: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     label: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     title: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     name: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     subtitle_file_name: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     movie_release_name: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     release_name: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     file_name: Option<Value>,
+    #[serde(default, deserialize_with = "deserialize_optional_json")]
     filename: Option<Value>,
 }
 
@@ -581,9 +604,17 @@ pub(crate) fn snapshot_supports_catalog<'a>(
     extras: &[CatalogExtra],
 ) -> Result<&'a AddonCatalogCapability, String> {
     // `catalogs[]` is authoritative: a catalogs-only manifest may omit `resources`.
-    let Some(catalog) = snapshot.catalogs.iter().find(|catalog| {
-        catalog.type_.eq_ignore_ascii_case(type_) && catalog.id.eq_ignore_ascii_case(catalog_id)
-    }) else {
+    let Some(catalog) = snapshot
+        .catalogs
+        .iter()
+        .find(|catalog| catalog.type_.eq_ignore_ascii_case(type_) && catalog.id == catalog_id)
+        .or_else(|| {
+            snapshot.catalogs.iter().find(|catalog| {
+                catalog.type_.eq_ignore_ascii_case(type_)
+                    && catalog.id.eq_ignore_ascii_case(catalog_id)
+            })
+        })
+    else {
         return Err(format!(
             "Addon does not declare catalog {catalog_id} for type {type_}."
         ));
@@ -621,6 +652,14 @@ fn json_string(value: &Value) -> Option<String> {
     match value {
         Value::String(text) => trim_to_max(text, MAX_STRING_CHARS),
         Value::Number(number) => trim_to_max(&number.to_string(), MAX_STRING_CHARS),
+        _ => None,
+    }
+}
+
+fn json_media_id(value: &Value) -> Option<String> {
+    match value {
+        Value::String(id) => crate::commands::normalize_media_id(id),
+        Value::Number(id) => crate::commands::normalize_media_id(&id.to_string()),
         _ => None,
     }
 }
@@ -694,37 +733,39 @@ fn parse_catalog_page(
 }
 
 fn catalog_matches_search_credit(links: Option<&RawValue>, query: &str) -> bool {
-    let Some(links) = links.and_then(|links| serde_json::from_str::<Value>(links.get()).ok())
+    let Some(links) =
+        links.and_then(|links| serde_json::from_str::<Vec<&RawValue>>(links.get()).ok())
     else {
         return false;
     };
-    links.as_array().is_some_and(|links| {
-        links
-            .iter()
-            .take(MAX_CAST + MAX_CREDITS + MAX_GENRES)
-            .any(|link| {
-                let is_credit =
-                    link.get("category")
-                        .and_then(Value::as_str)
-                        .is_some_and(|category| {
-                            category.trim().eq_ignore_ascii_case("Cast")
-                                || category.trim().eq_ignore_ascii_case("Directors")
-                        });
-                is_credit
-                    && link
-                        .get("name")
-                        .and_then(Value::as_str)
-                        .is_some_and(|name| {
-                            name.chars().take(MAX_STRING_CHARS + 1).count() <= MAX_STRING_CHARS
-                                && crate::commands::search_commands::normalize_search_text(name)
-                                    == query
-                        })
-            })
-    })
+    links
+        .into_iter()
+        .take(MAX_CAST + MAX_CREDITS + MAX_GENRES)
+        .any(|link| {
+            let Ok(link) = serde_json::from_str::<Value>(link.get()) else {
+                return false;
+            };
+            let is_credit = link
+                .get("category")
+                .and_then(Value::as_str)
+                .is_some_and(|category| {
+                    category.trim().eq_ignore_ascii_case("Cast")
+                        || category.trim().eq_ignore_ascii_case("Directors")
+                });
+            is_credit
+                && link
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| {
+                        name.chars().take(MAX_STRING_CHARS + 1).count() <= MAX_STRING_CHARS
+                            && crate::commands::search_commands::normalize_search_text(name)
+                                == query
+                    })
+        })
 }
 
 fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
-    let id = crate::commands::normalize_media_id(&value.id.as_ref().and_then(json_string)?)?;
+    let id = value.id.as_ref().and_then(json_media_id)?;
     let title = value.name.as_ref().and_then(json_string)?;
     let type_ = value.type_.as_ref().and_then(json_string)?;
 
@@ -750,29 +791,52 @@ fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
 }
 
 fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
-    // Borrow field values without allocating the unbounded videos tree.
+    // Decode consumed fields only; episodes have a separate bounded decoder.
     let mut fields: BTreeMap<String, &RawValue> = serde_json::from_str(raw.get()).ok()?;
     let videos = fields.remove("videos");
     let value = Value::Object(
         fields
             .into_iter()
-            .map(|(key, raw)| serde_json::from_str(raw.get()).map(|value| (key, value)))
-            .collect::<Result<_, _>>()
-            .ok()?,
+            .filter(|(key, _)| {
+                matches!(
+                    key.as_str(),
+                    "id" | "name"
+                        | "type"
+                        | "imdb_id"
+                        | "imdbId"
+                        | "poster"
+                        | "background"
+                        | "logo"
+                        | "year"
+                        | "releaseInfo"
+                        | "released"
+                        | "description"
+                        | "imdbRating"
+                        | "rating"
+                        | "runtime"
+                        | "cast"
+                        | "director"
+                        | "genre"
+                        | "genres"
+                        | "links"
+                        | "trailers"
+                        | "trailerStreams"
+                )
+            })
+            .filter_map(|(key, raw)| Some((key, serde_json::from_str(raw.get()).ok()?)))
+            .collect(),
     );
-    let id: String = json_string(value.get("id")?)?
-        .chars()
-        .take(MAX_ID_CHARS)
-        .collect();
+    let id = json_media_id(value.get("id")?)?;
     let title = json_string(value.get("name")?)?;
     let type_ = json_string(value.get("type")?)?;
     // `imdb_id` is a lookup id embedded in stream query paths — it shares `id`'s bound.
     let imdb_id = if id.starts_with("tt") {
         Some(id.clone())
     } else {
-        json_string_field(&value, "imdb_id")
-            .or_else(|| json_string_field(&value, "imdbId"))
-            .and_then(|value| trim_to_max(&value, MAX_ID_CHARS))
+        value
+            .get("imdb_id")
+            .and_then(json_media_id)
+            .or_else(|| value.get("imdbId").and_then(json_media_id))
     };
 
     // `seasons` is populated iff `episodes` is, so the lite shape drops both together.
@@ -931,10 +995,13 @@ fn parse_episodes(value: Option<&RawValue>) -> Option<Vec<Episode>> {
         ) -> Result<Self::Value, A::Error> {
             let mut episodes = Vec::new();
             while episodes.len() < MAX_EPISODES {
-                let Some(item) = sequence.next_element::<Value>()? else {
+                let Some(raw) = sequence.next_element::<&RawValue>()? else {
                     break;
                 };
-                let Some(id) = json_string_field(&item, "id") else {
+                let Ok(item) = serde_json::from_str::<Value>(raw.get()) else {
+                    continue;
+                };
+                let Some(id) = item.get("id").and_then(json_media_id) else {
                     continue;
                 };
                 episodes.push(Episode {
@@ -1006,8 +1073,7 @@ fn parse_subtitle_item(parsed: SubtitleItem) -> Option<AddonSubtitle> {
     )?;
     let id = bound_optional(parsed.id, MAX_ID_CHARS).unwrap_or_else(|| url.clone());
 
-    // mpv fetches subtitle URLs itself, outside the backend redirect/size
-    // policy — gate here so a payload can't aim the player at loopback/LAN/metadata IPs.
+    // Keep subtitle URL admission aligned with the bounded player download path.
     if !is_fetchable_http_url(&url) {
         return None;
     }
@@ -1044,9 +1110,14 @@ pub(crate) fn parse_fetchable_http_url(url: &str) -> Option<reqwest::Url> {
 }
 
 fn encode_path_segment(value: &str, max_chars: usize) -> Result<String, String> {
-    let trimmed =
-        trim_to_max(value, max_chars).ok_or_else(|| "Addon resource path is empty.".to_string())?;
-    Ok(encode_uri_component(&trimmed).into_owned())
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Addon resource path is empty.".to_string());
+    }
+    if matches!(trimmed, "." | "..") || trimmed.chars().nth(max_chars).is_some() {
+        return Err("Addon resource path is invalid.".to_string());
+    }
+    Ok(encode_uri_component(trimmed).into_owned())
 }
 
 fn encode_extra(extra: &CatalogExtra) -> Result<String, String> {

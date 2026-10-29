@@ -27,8 +27,9 @@ export function usePlayerVolumeControls({
   const lastPositiveVolumeRef = useRef(playerVolume > 0 ? playerVolume : 50);
   const nativeVolumeRef = useRef(playerVolume);
   const nativeMutedRef = useRef(false);
-  // Echoes of superseded writes must not rebase rapid relative steps.
-  const pendingVolumeRef = useRef<number | null>(null);
+  // Native echoes cannot replace explicit input; keep observations for failed-write rollback.
+  const hasVolumeIntentRef = useRef(false);
+  const hasMuteIntentRef = useRef(false);
   const wheelDeltaAccumulatorRef = useRef(0);
   const lastWheelEventAtRef = useRef(0);
   // mpv re-inits (stream swap, recovery) read this so a muted session stays muted.
@@ -41,30 +42,31 @@ export function usePlayerVolumeControls({
 
   const applyNativeVolume = (value: number) => {
     nativeVolumeRef.current = value;
-    if (pendingVolumeRef.current !== null) {
-      if (value !== pendingVolumeRef.current) return;
-      pendingVolumeRef.current = null;
-    }
+    if (hasVolumeIntentRef.current && value !== volumeRef.current) return;
     if (!isMutedRef.current) setVolume(value);
     volumeRef.current = value;
     if (value > 0) lastPositiveVolumeRef.current = value;
   };
   const applyNativeMute = (muted: boolean) => {
     nativeMutedRef.current = muted;
+    if (hasMuteIntentRef.current && muted !== isMutedRef.current) return;
     setIsMuted(muted);
   };
 
   // Coalesce preference writes and flush the last input on unmount.
   const scheduleVolumePersist = useDebouncedPrefsPersist(updatePreferences);
   const rollbackVolume = useCallback(() => {
-    pendingVolumeRef.current = null;
+    hasVolumeIntentRef.current = false;
     const restored = nativeVolumeRef.current;
     volumeRef.current = restored;
     if (restored > 0) lastPositiveVolumeRef.current = restored;
     setVolume(restored);
     scheduleVolumePersist({ playerVolume: restored });
   }, [scheduleVolumePersist]);
-  const rollbackMute = () => setIsMuted(nativeMutedRef.current);
+  const rollbackMute = () => {
+    hasMuteIntentRef.current = false;
+    setIsMuted(nativeMutedRef.current);
+  };
 
   useEffect(() => {
     // Locally persisted volume already matches the live ref; apply only external changes.
@@ -73,9 +75,9 @@ export function usePlayerVolumeControls({
     volumeRef.current = playerVolume;
     if (playerVolume > 0) lastPositiveVolumeRef.current = playerVolume;
 
-    if (mpvInitializedRef.current && volumeChanged) {
-      pendingVolumeRef.current = playerVolume;
-      void scheduleMpvSet('volume', playerVolume, rollbackVolume);
+    if (volumeChanged) {
+      hasVolumeIntentRef.current = true;
+      if (mpvInitializedRef.current) void scheduleMpvSet('volume', playerVolume, rollbackVolume);
     }
   }, [playerVolume, mpvInitializedRef, scheduleMpvSet, rollbackVolume]);
 
@@ -91,10 +93,11 @@ export function usePlayerVolumeControls({
     scheduleVolumePersist({ playerVolume: newVol });
     // Between instances nothing can take the write; init re-applies the live refs.
     const native = mpvInitializedRef.current;
-    pendingVolumeRef.current = native ? newVol : null;
+    hasVolumeIntentRef.current = true;
     if (native) void scheduleMpvSet('volume', newVol, rollbackVolume);
     triggerOsd({ kind: 'volume', level: newVol });
     if (newVol > 0 && isMutedRef.current) {
+      hasMuteIntentRef.current = true;
       setIsMuted(false);
       if (native) await scheduleMpvSet('mute', false, rollbackMute);
     }
@@ -143,6 +146,7 @@ export function usePlayerVolumeControls({
         volumeRef.current > 0 ? volumeRef.current : lastPositiveVolumeRef.current,
       );
     }
+    hasMuteIntentRef.current = true;
     setIsMuted(true);
     triggerOsd({ kind: 'volume', level: 0 });
     if (mpvInitializedRef.current) await scheduleMpvSet('mute', true, rollbackMute);

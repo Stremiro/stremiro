@@ -73,7 +73,14 @@ function patchCachedWatchStatuses(
       if ((getOwnWatchStatus(next, id) ?? null) === status) continue;
       if (next === old) next = { ...old };
       if (status === null) delete next[id];
-      else next[id] = status;
+      else {
+        Object.defineProperty(next, id, {
+          value: status,
+          enumerable: true,
+          configurable: true,
+          writable: true,
+        });
+      }
     }
     return next;
   });
@@ -345,6 +352,7 @@ export function useResumeRail(
       // eslint-disable-next-line unicorn/prefer-add-event-listener
       channel.onmessage = (snapshot) => {
         if (
+          snapshot.length > 0 &&
           query?.promise === request &&
           query?.state.fetchStatus === 'fetching' &&
           progressEpoch === getWatchProgressEpoch() &&

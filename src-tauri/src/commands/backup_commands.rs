@@ -1,11 +1,12 @@
-use super::config_commands::{clear_addon_caches, merge_imported_addon_configs};
+use super::config_commands::{
+    clear_addon_caches, prepare_imported_addon_configs, PreparedAddonImport,
+};
 use super::config_store::{
-    load_addon_configs, load_app_ui_preferences, load_profile_preferences,
-    load_stream_selector_preferences_state, parse_app_ui_preferences, parse_profile_preferences,
-    parse_stored_addon_configs, parse_stream_selector_preferences,
-    save_app_ui_preferences_to_store, save_profile_preferences_to_store,
-    save_stream_selector_preferences_to_store, AddonConfig, AppUiPreferences, ProfilePreferences,
-    StreamSelectorPreferences,
+    load_app_ui_preferences, load_profile_preferences, load_stream_selector_preferences_state,
+    parse_app_ui_preferences, parse_profile_preferences, parse_stream_selector_preferences,
+    save_addon_configs_to_store, save_app_ui_preferences_to_store,
+    save_profile_preferences_to_store, save_stream_selector_preferences_to_store, AddonConfig,
+    AppUiPreferences, ProfilePreferences, StreamSelectorPreferences,
 };
 use super::history_helpers::{build_history_key, sanitize_watch_progress};
 use super::library_commands::MAX_LIBRARY_ITEMS;
@@ -364,13 +365,7 @@ fn export_settings(
     let (stream_selector_preferences, selector_initialized) =
         load_stream_selector_preferences_state(&store);
     Ok(AppSettingsExport {
-        addon_configs: load_addon_configs(&store)
-            .into_iter()
-            .map(|config| AddonConfig {
-                capabilities: None,
-                ..config
-            })
-            .collect(),
+        addon_configs: AddonConfig::load_identities(&store),
         app_ui_preferences: load_app_ui_preferences(&store),
         profile_preferences: load_profile_preferences(
             &store,
@@ -388,6 +383,7 @@ fn import_settings(
     app: &AppHandle,
     service: &PlaybackStateService,
     settings: AppSettingsImportPayload,
+    addons: PreparedAddonImport,
 ) -> Result<(usize, bool), String> {
     let store = super::open_store(app, SETTINGS_STORE_FILE)?;
     let avatars = super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
@@ -406,10 +402,13 @@ fn import_settings(
         save_profile_preferences_to_store(&store, &avatars, &preferences)?;
         restored = true;
     }
-    if let Some(preferences) = settings
+    if let Some(mut preferences) = settings
         .stream_selector_preferences
         .and_then(parse_stream_selector_preferences)
     {
+        if let Some(id) = addons.source_ids.get(&preferences.addon) {
+            preferences.addon.clone_from(id);
+        }
         save_stream_selector_preferences_to_store(&store, &preferences);
         restored = true;
     }
@@ -432,10 +431,10 @@ fn import_settings(
         );
         restored = true;
     }
-    let addons_imported = settings
-        .addon_configs
-        .map(|value| merge_imported_addon_configs(&store, parse_stored_addon_configs(&value)))
-        .unwrap_or(0);
+    let addons_imported = addons.added;
+    if addons_imported > 0 {
+        save_addon_configs_to_store(&store, &addons.configs);
+    }
     if restored || addons_imported > 0 {
         super::app_shell_commands::sync_preferences(
             app,
@@ -619,11 +618,32 @@ fn import_library_status_added(
     Ok(())
 }
 
+fn remap_imported_history_source(
+    progress: &mut WatchProgress,
+    source_ids: &HashMap<String, String>,
+) {
+    let Some((from, to)) = progress
+        .source_id
+        .as_ref()
+        .and_then(|id| source_ids.get(id).map(|mapped| (id, mapped)))
+    else {
+        return;
+    };
+    if let Some(family) = progress
+        .stream_family
+        .as_deref()
+        .and_then(|family| super::streaming_helpers::remap_stream_family_source(family, from, to))
+    {
+        progress.stream_family = Some(family);
+    }
+    progress.source_id = Some(to.clone());
+}
+
 /// Synchronous backup-merge body. Runs inside `run_store_op_at`.
 fn import_app_data_entries(
     app: &AppHandle,
     service: &PlaybackStateService,
-    export: AppDataImportPayload,
+    mut export: AppDataImportPayload,
 ) -> Result<ImportResult, BackupError> {
     // Preflight before the first mutation: every touched store file must parse and capacities must hold.
     let lib_store = super::open_store(app, LIBRARY_STORE_FILE)?;
@@ -633,7 +653,7 @@ fn import_app_data_entries(
     let lists_store = super::open_store(app, LISTS_STORE_FILE)?;
     let existing_order = load_lists_order(&lists_store)?;
     // `import_settings` reopens these via the registry cache; opening now validates the files first.
-    super::open_store(app, SETTINGS_STORE_FILE)?;
+    let settings_store = super::open_store(app, SETTINGS_STORE_FILE)?;
     super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
     super::open_store(app, super::playback_state::PLAYBACK_STATE_STORE_FILE)?;
 
@@ -664,14 +684,27 @@ fn import_app_data_entries(
 
     let prepared_lists = prepare_import_lists(export.lists, &existing_order, &lists_store)?;
 
+    let addons = prepare_imported_addon_configs(
+        &settings_store,
+        export
+            .settings
+            .addon_configs
+            .take()
+            .as_ref()
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(AddonConfig::from_identity),
+    );
     let mut history_entries = Vec::with_capacity(export.history.len());
     for item in export.history {
-        let Some(sanitized) = serde_json::from_value::<WatchProgress>(item)
+        let Some(mut sanitized) = serde_json::from_value::<WatchProgress>(item)
             .ok()
             .and_then(sanitize_watch_progress)
         else {
             continue;
         };
+        remap_imported_history_source(&mut sanitized, &addons.source_ids);
         let key = build_history_key(
             &sanitized.type_,
             &sanitized.id,
@@ -759,7 +792,8 @@ fn import_app_data_entries(
         &imported_status_ids,
     )?;
 
-    let (addons_imported, settings_restored) = import_settings(app, service, export.settings)?;
+    let (addons_imported, settings_restored) =
+        import_settings(app, service, export.settings, addons)?;
 
     Ok(ImportResult {
         history_imported,

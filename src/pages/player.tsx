@@ -782,6 +782,8 @@ export function Player() {
     cancelAutomaticResume,
     clearResumeRetryTimer,
     isResumePending,
+    getResumeSeekTarget,
+    confirmResumeSeek,
     prepareForStreamLoad,
     takeResumePause,
   } = usePlayerResumeController({
@@ -834,14 +836,15 @@ export function Player() {
     cancelAutomaticResume();
     if (playbackEndedRef.current) cancelAutoPlayNext();
   };
-  const { isSeekPending, observeTimeUpdate, seek, seekRelative } = useOptimisticSeek({
-    clock,
-    durationRef,
-    mpvInitializedRef,
-    resetKey: activeStreamLoadKey,
-    onUserSeek: handleUserSeek,
-    triggerOsd,
-  });
+  const { confirmSeek, getSeekTarget, isSeekPending, observeTimeUpdate, seek, seekRelative } =
+    useOptimisticSeek({
+      clock,
+      durationRef,
+      mpvInitializedRef,
+      resetKey: activeStreamLoadKey,
+      onUserSeek: handleUserSeek,
+      triggerOsd,
+    });
 
   // -- Addon subtitles (manifest-routed) --
   const {
@@ -854,7 +857,6 @@ export function Player() {
     addonSubtitlesAvailable,
     handleAddonSubtitleSelect,
     handleSubTrackSelect,
-    handleSubtitleMenuOpenChange,
     refetchAddonSubtitles,
   } = usePlayerAddonSubtitles({
     activeStreamLoadKey,
@@ -862,7 +864,7 @@ export function Player() {
     autoLoadLanguage: appUiPreferences.autoLoadAddonSubtitles ? addonSubtitleLanguage : null,
     effectiveResolveMediaType,
     id,
-    menuAvailable: isExpanded && !isPip,
+    menuOpen: isExpanded && !isPip && openSettingsMenu === 'subtitles',
     mountedRef,
     resolvedStreamEpisode,
     resolvedStreamSeason,
@@ -875,21 +877,11 @@ export function Player() {
   const handleSettingsMenuOpenChange = (menu: 'audio' | 'subtitles' | 'speed', open: boolean) => {
     // Ignore a late dismiss from the menu being replaced.
     setOpenSettingsMenu((current) => (open ? menu : current === menu ? null : current));
-    if (menu === 'subtitles' || open) handleSubtitleMenuOpenChange(open && menu === 'subtitles');
   };
 
   useEffect(() => {
     setOpenSettingsMenu(null);
-    handleSubtitleMenuOpenChange(false);
-  }, [
-    activeStreamLoadKey,
-    handleSubtitleMenuOpenChange,
-    isExpanded,
-    isPip,
-    showEpisodes,
-    showShortcuts,
-    showStreamSelector,
-  ]);
+  }, [activeStreamLoadKey, isExpanded, isPip, showEpisodes, showShortcuts, showStreamSelector]);
 
   const handleAudioTrackSelect = (trackId: number) => {
     void setTrack('audio', trackId, { persistPreference: true }).then((applied) => {
@@ -1104,6 +1096,8 @@ export function Player() {
       setError(null);
       markPlaybackReady();
     }
+    confirmSeek();
+    confirmResumeSeek();
     if (playbackVerifiedAtRef.current > 0) return;
     setHasPlaybackAdvanced(true);
     markPlaybackStarted();
@@ -1199,7 +1193,7 @@ export function Player() {
     setShowControls(true);
   };
 
-  const scheduleMpvSet = useMpvSetScheduler();
+  const scheduleMpvSet = useMpvSetScheduler(activeStreamLoadKey);
   const {
     subtitleDelay,
     subtitlePos,
@@ -1278,6 +1272,7 @@ export function Player() {
     onEndedChange: handleEndedChange,
     observeTimeUpdate,
     isSeekPending,
+    getSeekTarget: () => getSeekTarget() ?? getResumeSeekTarget(),
     isResumePending,
     onObservedTrackSelection: notifyObservedTrackSelection,
     refreshTracks,
@@ -1306,7 +1301,8 @@ export function Player() {
       !error &&
       !showStreamSelector &&
       !showEpisodes &&
-      !showShortcuts,
+      !showShortcuts &&
+      openSettingsMenu === null,
     mountedRef,
   });
 

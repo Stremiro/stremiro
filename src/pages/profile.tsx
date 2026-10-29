@@ -414,6 +414,11 @@ function ProfileLibraryTab({
   const librarySelectionIds = libraryIds ?? EMPTY_LIBRARY_IDS;
   const libraryCount = libraryIds?.length;
   const filteredLibraryIds = filteredLibrary.map((item) => item.id);
+  const selectAllDisabled =
+    profileLibraryQuery.isError ||
+    profileLibraryQuery.isFetching ||
+    profileLibraryQuery.isPlaceholderData ||
+    librarySearch !== librarySearchParam;
   const { triggerRef: librarySelectionTriggerRef, ...librarySelection } = useCollectionSelection(
     librarySelectionIds,
     filteredLibraryIds,
@@ -421,13 +426,9 @@ function ProfileLibraryTab({
     isBulkBusy,
     confirmBulkRemoveOpen,
     libraryTabRef,
+    selectAllDisabled,
   );
   const { selectionMode, selectedIds, exit: exitSelectionMode } = librarySelection;
-  const selectAllDisabled =
-    profileLibraryQuery.isError ||
-    profileLibraryQuery.isFetching ||
-    profileLibraryQuery.isPlaceholderData ||
-    librarySearch !== librarySearchParam;
 
   const resetLibraryFilters = () => {
     setLibrarySearch('');
@@ -441,11 +442,6 @@ function ProfileLibraryTab({
 
   const handleToggleSelect = (item: MediaItem, shiftKey = false) =>
     librarySelection.toggle(item.id, shiftKey);
-
-  const handleSelectAllFiltered = () => {
-    if (isBulkBusy || selectAllDisabled) return;
-    librarySelection.selectAll(filteredLibraryIds);
-  };
 
   const handleBulkSetStatus = async (status: WatchStatus | null) => {
     if (selectedIds.size === 0 || isBulkBusy) return;
@@ -571,7 +567,7 @@ function ProfileLibraryTab({
             filteredCount={filteredLibrary.length}
             selectAllDisabled={selectAllDisabled}
             allFilteredSelected={allFilteredSelected}
-            onSelectAllFiltered={handleSelectAllFiltered}
+            onSelectAllFiltered={() => librarySelection.selectAll(filteredLibraryIds)}
             onClearSelection={librarySelection.clear}
             onExitSelectionMode={exitSelectionMode}
             onBulkSetStatus={(status) => void handleBulkSetStatus(status)}
@@ -717,6 +713,7 @@ function ProfileHistoryTab({
   const [confirmHistoryRemoveOpen, setConfirmHistoryRemoveOpen] = useState(false);
   const historySelectionIds = (history ?? EMPTY_HISTORY_ITEMS).map(watchTitleKey);
   const filteredHistoryIds = visibleHistory.map(watchTitleKey);
+  const selectAllDisabled = historySearchPending || historySearchError || historyFetching;
   const { triggerRef: historySelectionTriggerRef, ...historySelection } = useCollectionSelection(
     historySelectionIds,
     filteredHistoryIds,
@@ -724,6 +721,7 @@ function ProfileHistoryTab({
     bulkRemoveHistory.isPending,
     confirmHistoryRemoveOpen,
     historySearchRef,
+    selectAllDisabled,
   );
   const toggleHistorySelection = (item: WatchProgress, shiftKey = false) =>
     historySelection.toggle(watchTitleKey(item), shiftKey);
@@ -843,7 +841,7 @@ function ProfileHistoryTab({
             filteredHistoryIds.length > 0 &&
             filteredHistoryIds.every((id) => historySelection.selectedIds.has(id))
           }
-          selectAllDisabled={historySearchPending || historySearchError || historyFetching}
+          selectAllDisabled={selectAllDisabled}
           isBusy={bulkRemoveHistory.isPending}
           onSelectAll={() => historySelection.selectAll(filteredHistoryIds)}
           onClear={historySelection.clear}

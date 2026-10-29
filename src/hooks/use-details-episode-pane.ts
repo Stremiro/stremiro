@@ -129,11 +129,8 @@ export function useDetailsEpisodePane({
       ? -1
       : seasonEpisodes.findIndex((episode) => episode.episode === defaultEpisode);
   const resumeEpisodeIndex =
-    item?.type === 'series' && resumeSeason !== undefined && resumeEpisode !== undefined
-      ? (resumeSeason === selectedSeason
-          ? seasonEpisodes
-          : episodesInSeason(item, resumeSeason)
-        ).findIndex((episode) => episode.episode === resumeEpisode)
+    resumeEpisodeForSelectedSeason !== null
+      ? seasonEpisodes.findIndex((episode) => episode.episode === resumeEpisodeForSelectedSeason)
       : -1;
   const resumeEpisodePageIndex =
     resumeEpisodeIndex >= 0 ? Math.floor(resumeEpisodeIndex / EPISODE_DISPLAY_PAGE_SIZE) : null;

@@ -32,13 +32,6 @@ export function setVideoMarginRatio(ratio: VideoMarginRatio): Promise<void> {
   return invoke('player_mpv_set_video_margin_ratio', { ratio });
 }
 
-function mpvGetProperty<T>(
-  name: string,
-  format: 'int64' | 'string' | 'flag' | 'double',
-): Promise<T | null> {
-  return invoke<T | null>('player_mpv_get_property', { name, format });
-}
-
 export type MpvSubtitleProperties = readonly (readonly [string, number])[];
 
 export function setMpvProperty(
@@ -73,50 +66,73 @@ export function setMpvSubtitleAppearance(appearance: {
   return invoke('player_mpv_set_subtitle_appearance', appearance);
 }
 
-/** `cycle` steps aid/sid — resolves after mpv applies, so a follow-up read reports the landed id. */
-export function cycleMpvTrack(type: 'audio' | 'sub'): Promise<void> {
-  return mpvCommand('cycle', [type === 'audio' ? 'aid' : 'sub']);
+/** Rust changes and confirms selection under one native gate. */
+export function changePlayerTrack(
+  type: 'audio' | 'sub',
+  target: number | 'no' | 'cycle',
+): Promise<Track[]> {
+  return invoke('player_mpv_change_track', { kind: type, target });
 }
 
-/** mpv `sub-add <url> [flags [title [lang]]]` — resolves at command accept; the track lands in `track-list` only after mpv fetches it. */
-export async function addSubtitleTrack(url: string, title: string, lang?: string): Promise<void> {
-  const args = [url, 'select', title];
-  const normalizedLang = lang?.trim();
-  if (normalizedLang) args.push(normalizedLang);
-  await mpvCommand('sub-add', args);
+/** Rust downloads, fences playback changes, and returns the confirmed native track list. */
+export function addSubtitleTrack(url: string, title: string, lang?: string): Promise<Track[]> {
+  return invoke('player_mpv_add_subtitle', { url, title, lang });
 }
 
 export function seekAbsoluteSeconds(seconds: number): Promise<void> {
   return mpvCommand('seek', [seconds.toString(), 'absolute']);
 }
 
-/** One IPC reads playhead seconds + demuxer cache ahead; IPC failure is a silent no-op during teardown. */
-export async function readPlaybackPositionProbe(durationSecs: number): Promise<{
+export interface PlayerSeekTarget {
+  seconds: number;
+  startedAt: number;
+  failed?: boolean;
+}
+
+interface PlaybackPositionProbe {
   timePos: number | null;
   bufferedAhead: number | null;
   nearCompletion: boolean;
   nextEpisodePrefetchDue: boolean;
-}> {
+  seekFailed: boolean;
+  prematureEof: boolean;
+}
+
+/** One IPC reads playhead seconds + demuxer cache ahead; IPC failure is a silent no-op during teardown. */
+export async function readPlaybackPositionProbe(
+  durationSecs: number,
+  seekTarget: PlayerSeekTarget | null,
+  checkEof = false,
+): Promise<PlaybackPositionProbe> {
   try {
-    return await invoke('player_mpv_get_playback_position', { durationSecs });
+    const { seekFailureWindowSecs, ...probe } = await invoke<
+      Omit<PlaybackPositionProbe, 'seekFailed'> & { seekFailureWindowSecs: number | null }
+    >('player_mpv_get_playback_position', {
+      durationSecs,
+      seekTargetSecs: seekTarget?.seconds ?? null,
+      checkEof,
+    });
+    const seekFailed =
+      seekTarget !== null &&
+      seekFailureWindowSecs !== null &&
+      (seekTarget.failed === true ||
+        performance.now() - seekTarget.startedAt < seekFailureWindowSecs * 1000);
+    return {
+      ...probe,
+      seekFailed,
+      nearCompletion: !seekFailed && probe.nearCompletion,
+      nextEpisodePrefetchDue: !seekFailed && probe.nextEpisodePrefetchDue,
+    };
   } catch {
     return {
       timePos: null,
       bufferedAhead: null,
       nearCompletion: false,
       nextEpisodePrefetchDue: false,
+      seekFailed: false,
+      prematureEof: false,
     };
   }
-}
-
-// Single-id poll (1 IPC vs full list); throws on IPC failure so callers retry — genuine "off" is null.
-export function readSelectedTrackId(type: 'audio' | 'sub'): Promise<number | null> {
-  return mpvGetProperty<number | null>(`current-tracks/${type}/id`, 'int64');
-}
-
-/** Poll the count alone — 1 IPC — for callers waiting on track-list growth. */
-export function readPlayerTrackCount(): Promise<number | null> {
-  return mpvGetProperty<number>('track-list/count', 'int64').catch(() => null);
 }
 
 export function readPlayerTrackList(

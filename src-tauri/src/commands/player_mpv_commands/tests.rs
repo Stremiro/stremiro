@@ -9,7 +9,11 @@ async fn cancelled_native_waiter_does_not_run_or_release_running_operation() {
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = std::sync::mpsc::channel();
     let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+    let input =
+        subtitles::SubtitleInput::create(b"1\n00:00:00,000 --> 00:00:01,000\nCue\n").unwrap();
+    let input_path = input.path.clone();
     let running = tokio::spawn(run_mpv_op("running operation", move || {
+        let _input = input;
         started_tx.send(()).unwrap();
         release_rx.recv().unwrap();
         finished_tx.send(()).unwrap();
@@ -18,6 +22,10 @@ async fn cancelled_native_waiter_does_not_run_or_release_running_operation() {
     started_rx.await.unwrap();
     running.abort();
     assert!(running.await.unwrap_err().is_cancelled());
+    assert!(
+        input_path.exists(),
+        "a running native call still owns its input"
+    );
 
     let called = Arc::new(AtomicBool::new(false));
     let cancelled_call = Arc::clone(&called);
@@ -32,9 +40,24 @@ async fn cancelled_native_waiter_does_not_run_or_release_running_operation() {
     .is_err());
     assert!(!called.load(Ordering::SeqCst));
 
+    let obsolete_input =
+        subtitles::SubtitleInput::create(b"1\n00:00:00,000 --> 00:00:01,000\nOld cue\n").unwrap();
+    let obsolete_path = obsolete_input.path.clone();
+    let request = subtitles::SESSION.begin();
+    let obsolete_call = Arc::clone(&called);
+    let obsolete = tokio::spawn(run_mpv_op("obsolete subtitle", move || {
+        let _input = obsolete_input;
+        request.ensure_current()?;
+        obsolete_call.store(true, Ordering::SeqCst);
+        Ok(())
+    }));
+    subtitles::SESSION.cancel();
     release_tx.send(()).unwrap();
     finished_rx.await.unwrap();
+    assert!(obsolete.await.unwrap().is_err());
+    assert!(!obsolete_path.exists());
     run_mpv_op("subsequent operation", || Ok(())).await.unwrap();
+    assert!(!input_path.exists());
     assert!(!called.load(Ordering::SeqCst));
 }
 
@@ -93,15 +116,23 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
         (f64::INFINITY, Some(json!(120)), None, false, false),
     ] {
         let calls = RefCell::new(Vec::new());
-        let probe = read_playback_position(duration_secs, |name| {
-            calls.borrow_mut().push(name.to_string());
+        let probe = read_playback_position(duration_secs, None, false, |name, format| {
+            calls
+                .borrow_mut()
+                .push((name.to_string(), format.to_string()));
             match name {
                 "time-pos" => time_pos.clone(),
                 "demuxer-cache-duration" => buffered_ahead.clone(),
                 _ => panic!("unexpected native property {name}"),
             }
         });
-        assert_eq!(*calls.borrow(), ["time-pos", "demuxer-cache-duration"]);
+        assert_eq!(
+            *calls.borrow(),
+            [
+                ("time-pos".into(), "double".into()),
+                ("demuxer-cache-duration".into(), "double".into())
+            ]
+        );
         assert_eq!(
             serde_json::to_value(probe).unwrap(),
             json!({
@@ -109,8 +140,59 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
                 "bufferedAhead": buffered_ahead.and_then(|value| value.as_f64()),
                 "nearCompletion": near_completion,
                 "nextEpisodePrefetchDue": prefetch_due,
+                "seekFailureWindowSecs": null,
+                "prematureEof": false,
             })
         );
+    }
+}
+
+#[test]
+fn failed_range_seek_is_not_natural_completion() {
+    for (target, position, eof, window) in [
+        (Some(10.0), 120.0, true, Some(27.0)),
+        (Some(90.0), 120.0, true, Some(7.0)),
+        (Some(120.0), 120.0, true, None),
+        (Some(119.0), 120.0, true, None),
+        (Some(117.0), 120.0, true, Some(0.25)),
+        (Some(10.0), 10.0, false, None),
+        (Some(10.0), 120.0, false, None),
+        (None, 120.0, true, None),
+    ] {
+        let probe =
+            read_playback_position(120.0, target, false, |name, format| match (name, format) {
+                ("time-pos", "double") => Some(json!(position)),
+                ("eof-reached", "flag") => Some(json!(eof)),
+                _ => None,
+            });
+        assert_eq!(
+            probe.seek_failure_window_secs, window,
+            "target={target:?}, position={position}, eof={eof}"
+        );
+    }
+}
+
+#[test]
+fn premature_eof_is_a_stream_failure_instead_of_completion() {
+    for (duration, position, eof, premature) in [
+        (120.0, 3.0, true, true),
+        (120.0, 3.0, false, false),
+        (120.0, 117.9, true, true),
+        (120.0, 118.0, true, false),
+        (120.0, 120.0, true, false),
+        (0.0, 3.0, true, false),
+        (f64::NAN, 3.0, true, false),
+    ] {
+        let probe = read_playback_position(duration, None, true, |name, _| match name {
+            "time-pos" => Some(json!(position)),
+            "eof-reached" => Some(json!(eof)),
+            _ => None,
+        });
+        assert_eq!(probe.premature_eof, premature, "{duration}/{position}");
+        if premature {
+            assert!(!probe.near_completion);
+            assert!(!probe.next_episode_prefetch_due);
+        }
     }
 }
 
@@ -169,10 +251,10 @@ fn mpv_config_keeps_native_options_and_observers_fixed() {
 
 #[test]
 fn mpv_command_allowlist_admits_only_player_verbs() {
-    for verb in ["seek", "cycle", "loadfile", "sub-add", "set"] {
+    for verb in ["seek", "cycle", "loadfile", "set"] {
         // Property/URL checks still apply; pick args that satisfy them.
         let args = match verb {
-            "loadfile" | "sub-add" => vec![json!("https://example.com/x")],
+            "loadfile" => vec![json!("https://example.com/x")],
             "set" | "cycle" => vec![json!("pause")],
             _ => vec![json!("0")],
         };
@@ -186,6 +268,7 @@ fn mpv_command_allowlist_admits_only_player_verbs() {
         "screenshot-to-file",
         "write-watch-later-config",
         "load-script",
+        "sub-add",
     ] {
         assert!(
             validate_mpv_command(verb, &[json!("x")]).is_err(),
@@ -260,20 +343,22 @@ fn mpv_command_targets_are_gated() {
         "http://[::1]/sub.srt",
     ] {
         assert!(
-            validate_mpv_command("sub-add", &[json!(target)]).is_err(),
+            subtitles::validate_url(target, "Subtitle", None).is_err(),
             "{target}"
         );
     }
     assert!(
-        validate_mpv_command("sub-add", &[json!("https://cdn.example/sub.srt?token=x")]).is_ok()
+        subtitles::validate_url("https://cdn.example/sub.srt?token=x", "Subtitle", None).is_ok()
     );
-    // set/cycle only reach allowlisted properties (`sub` is mpv's sid alias —
-    // the subtitle cycle hotkey depends on it).
     assert!(validate_mpv_command("set", &[json!("script"), json!("evil.lua")]).is_err());
     assert!(validate_mpv_command("cycle", &[json!("watch-later-directory")]).is_err());
     assert!(validate_mpv_command("set", &[json!("screenshot-directory"), json!("C:\\")]).is_err());
     assert!(validate_mpv_command("set", &[json!("volume"), json!("80")]).is_ok());
-    assert!(validate_mpv_command("cycle", &[json!("sub")]).is_ok());
+    for property in ["aid", "sid", "sub"] {
+        assert!(validate_mpv_command("cycle", &[json!(property)]).is_err());
+        assert!(validate_mpv_command("set", &[json!(property), json!(1)]).is_err());
+        assert!(validate_mpv_properties(&[(property.to_string(), json!(1))]).is_err());
+    }
     assert!(validate_mpv_command("cycle", &[json!("volume")]).is_err());
 }
 

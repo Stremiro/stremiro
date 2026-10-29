@@ -153,13 +153,14 @@ pub fn run() {
             commands::playback_preferences_commands::save_playback_language_preference_outcome_from_tracks,
             commands::playback_preferences_commands::get_supported_languages,
             commands::player_track_commands::read_player_track_list,
+            commands::player_track_commands::player_mpv_change_track,
             commands::player_mpv_commands::player_mpv_command,
+            commands::player_mpv_commands::player_mpv_add_subtitle,
             commands::player_mpv_commands::player_mpv_destroy,
             commands::player_mpv_commands::player_mpv_set_video_margin_ratio,
             commands::player_mpv_commands::player_mpv_set_properties,
             commands::player_mpv_commands::player_mpv_set_audio_settings,
             commands::player_mpv_commands::player_mpv_set_subtitle_appearance,
-            commands::player_mpv_commands::player_mpv_get_property,
             commands::player_mpv_commands::player_mpv_get_playback_position,
             commands::player_mpv_commands::player_mpv_init,
             commands::player_window_commands::set_player_pip,
@@ -228,23 +229,5 @@ pub fn run() {
             }
             std::process::exit(1);
         })
-        .run(|app, event| {
-            if matches!(
-                event,
-                tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
-            ) {
-                // Persist whatever the trailing debounce window mutated —
-                // before the single-instance lock is released.
-                if let Some(registry) = app.try_state::<commands::DurableStoreRegistry>() {
-                    if let Err(error) = registry.flush_dirty() {
-                        operational_log::log_warn(
-                            "shutdown",
-                            "durable-store-flush",
-                            "failed",
-                            &[operational_log::field("error", error)],
-                        );
-                    }
-                }
-            }
-        });
+        .run(commands::app_shell_commands::handle_run_event);
 }

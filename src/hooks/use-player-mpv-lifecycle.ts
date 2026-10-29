@@ -22,6 +22,7 @@ import {
   mpvDestroy,
   mpvInit,
   readPlaybackPositionProbe,
+  type PlayerSeekTarget,
   setMpvAudioSettings,
   setMpvProperties,
   setMpvSubtitleAppearance,
@@ -108,9 +109,10 @@ interface UsePlayerMpvLifecycleArgs {
   observeTimeUpdate: (timePos: number, now: number) => boolean;
   /** True while an optimistic seek is pending — keeps the probe alive past the idle gate. */
   isSeekPending: () => boolean;
+  getSeekTarget: () => PlayerSeekTarget | null;
   /** Resume seeks bypass optimistic seeking and need observed positions while paused. */
   isResumePending: () => boolean;
-  /** True when a switch waiter owns the follow-up track refresh. */
+  /** True when a native track change owns the confirmed snapshot. */
   onObservedTrackSelection: (type: 'audio' | 'sub', id: number | null) => boolean;
   refreshTracks: () => Promise<unknown>;
   reportStreamFailure: (
@@ -421,6 +423,8 @@ export function usePlayerMpvLifecycle({
       nearCompletion: boolean,
       prefetchDue: boolean,
       generation: number,
+      seekFailed: boolean,
+      prematureEof: boolean,
     ) => {
       const now = performance.now();
       const seekPending = getCallbacks().isSeekPending();
@@ -429,6 +433,21 @@ export function usePlayerMpvLifecycle({
       }
       // A pending optimistic seek owns the displayed position — swallow stale pre-seek ticks.
       if (getCallbacks().observeTimeUpdate(data, now)) return;
+      if (seekFailed || prematureEof) {
+        const target = getCallbacks().getSeekTarget();
+        if (target && seekFailed) target.failed = true;
+        pendingEof = false;
+        eofGeneration += 1;
+        if (!errorRef.current)
+          setStreamError(
+            prematureEof
+              ? 'This stream ended unexpectedly. Try another stream.'
+              : 'This stream could not seek to that position. Try another stream.',
+          );
+        if (prematureEof)
+          getCallbacks().reportStreamFailure('disconnected', activeStreamUrl, activeStreamKey);
+        return;
+      }
 
       setNextEpisodePrefetchDue(prefetchDue);
       observedPositionRef.current = data;
@@ -561,27 +580,40 @@ export function usePlayerMpvLifecycle({
       const generation = positionGeneration;
       const eofReadGeneration = eofGeneration;
       const streamError = recoverableStreamErrorRef.current;
+      const seekTarget = getCallbacks().getSeekTarget();
       return (async () => {
         const {
           timePos,
           bufferedAhead,
           nearCompletion,
           nextEpisodePrefetchDue: prefetchDue,
-        } = await readPlaybackPositionProbe(durationRef.current);
+          seekFailed,
+          prematureEof,
+        } = await readPlaybackPositionProbe(
+          durationRef.current,
+          seekTarget,
+          pendingEof &&
+            !isLoadingNow() &&
+            !seeking &&
+            !getCallbacks().isSeekPending() &&
+            !getCallbacks().isResumePending(),
+        );
         if (
           streamGone() ||
           generation !== positionGeneration ||
+          eofReadGeneration !== eofGeneration ||
+          seekTarget !== getCallbacks().getSeekTarget() ||
           committedStreamUrlRef.current !== activeStreamUrl ||
           streamError !== recoverableStreamErrorRef.current
         )
           return;
         if (typeof timePos === 'number' && Number.isFinite(timePos)) {
-          handleTimePos(timePos, nearCompletion, prefetchDue, generation);
+          handleTimePos(timePos, nearCompletion, prefetchDue, generation, seekFailed, prematureEof);
         }
         if (typeof bufferedAhead === 'number') handleBufferedAhead(bufferedAhead);
         if (
           pendingEof &&
-          eofReadGeneration === eofGeneration &&
+          !seekFailed &&
           generation === positionGeneration &&
           !isLoadingNow() &&
           !seeking &&
@@ -693,7 +725,6 @@ export function usePlayerMpvLifecycle({
             if (!name) return;
 
             if (name === 'current-tracks/audio/id' || name === 'current-tracks/sub/id') {
-              // Observed selection ids double as the switch-confirm channel — a pending `aid`/`sid` write resolves on this event.
               const switchWillRefresh = getCallbacks().onObservedTrackSelection(
                 name === 'current-tracks/audio/id' ? 'audio' : 'sub',
                 typeof data === 'number' ? data : null,

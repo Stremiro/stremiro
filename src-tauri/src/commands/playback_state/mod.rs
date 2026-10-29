@@ -142,6 +142,7 @@ impl PlaybackStateService {
         let _guard = self.lock_state_file_write();
         if !self.stream_family_keys_migrated.load(Ordering::Relaxed) {
             remove_legacy_stream_family_reputation(store);
+            stream_health::migrate_addon_source_ids(store);
             // A failed save leaves the migration retryable even after the shared map changed.
             store.save()?;
             self.stream_family_keys_migrated

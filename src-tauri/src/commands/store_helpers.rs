@@ -39,21 +39,6 @@ pub(super) fn normalize_library_item(mut item: MediaItem) -> Option<MediaItem> {
     (!item.title.is_empty()).then_some(item)
 }
 
-#[cfg(test)]
-pub(super) fn normalize_library_items(items: Vec<MediaItem>) -> Result<Vec<MediaItem>, String> {
-    if items.len() > MAX_BULK_ITEMS {
-        return Err(format!("Too many titles. Maximum is {MAX_BULK_ITEMS}."));
-    }
-    items
-        .into_iter()
-        .map(|item| {
-            normalize_library_item(item).ok_or_else(|| {
-                "Invalid media item. Missing required id, title, or type.".to_string()
-            })
-        })
-        .collect()
-}
-
 pub(super) fn merge_library_item(existing: Option<&MediaItem>, mut item: MediaItem) -> MediaItem {
     if let Some(existing) = existing {
         item.poster = item.poster.or_else(|| existing.poster.clone());
@@ -401,10 +386,6 @@ mod tests {
         assert!(normalize_bulk_ids(vec!["a".into(), "".into()]).is_err());
         assert!(normalize_bulk_ids(vec!["a".into(); MAX_BULK_ITEMS]).is_ok());
         assert!(normalize_bulk_ids(vec!["a".into(); MAX_BULK_ITEMS + 1]).is_err());
-        assert!(
-            normalize_library_items(vec![test_media_item("a", "movie"); MAX_BULK_ITEMS + 1])
-                .is_err()
-        );
         fixture.store.save().unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
         assert_eq!(fixture.store.save_count(), 1);

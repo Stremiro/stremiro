@@ -20,6 +20,8 @@ pub(crate) struct AppShellState {
     initial_reveal_pending: AtomicBool,
     quit_pending: AtomicBool,
     frontend_quit_ready: AtomicBool,
+    exit_pending: AtomicBool,
+    exit_ready: AtomicBool,
     webview_memory_low: AtomicBool,
     pending_app_link: Mutex<Option<AppLink>>,
 }
@@ -31,6 +33,35 @@ impl AppShellState {
         self.minimize_to_tray
             .store(preferences.minimize_to_tray, Ordering::Relaxed);
     }
+}
+
+pub(crate) fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
+    let tauri::RunEvent::ExitRequested { api, code, .. } = event else {
+        return;
+    };
+    let state = app.state::<AppShellState>();
+    if state.exit_ready.load(Ordering::Relaxed) {
+        return;
+    }
+    api.prevent_exit();
+    if state.exit_pending.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = super::flush_stores_on_exit(app.clone()).await {
+            crate::operational_log::log_warn(
+                "shutdown",
+                "durable-store-flush",
+                "failed",
+                &[crate::operational_log::field("error", error)],
+            );
+        }
+        app.state::<AppShellState>()
+            .exit_ready
+            .store(true, Ordering::Relaxed);
+        app.exit(code.unwrap_or(0));
+    });
 }
 
 pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {

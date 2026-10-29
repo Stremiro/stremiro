@@ -370,7 +370,8 @@ fn default_install_aliases_preserve_stored_and_backup_identities() {
         Some(serde_json::json!(expected))
     );
     assert_eq!(
-        crate::commands::config_commands::merge_imported_addon_configs(&fixture.store, legacy),
+        crate::commands::config_commands::prepare_imported_addon_configs(&fixture.store, legacy)
+            .added,
         0
     );
 }
@@ -441,9 +442,9 @@ fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_s
         .cloned()
         .map(AddonConfigView::from_config)
         .collect();
-    use crate::providers::addon_manifest::AddonResourceKind::{Catalog, Meta};
+    use crate::providers::addon_manifest::AddonResourceKind::{Catalog, Meta, Subtitles};
     assert_eq!(full_views[0].resources, Some(vec![Catalog, Meta]));
-    assert_eq!(full_views[1].resources, None);
+    assert_eq!(full_views[1].resources, Some(vec![Subtitles]));
     let expected: Vec<_> = full
         .into_iter()
         .map(|mut config| {
@@ -460,7 +461,10 @@ fn addon_identity_projection_matches_full_load_with_capabilities_and_malformed_s
     assert!(projected[1].enabled);
     assert_eq!(projected[2].id, "duplicate-id");
     assert!(!projected[2].enabled);
-    assert_eq!(projected[3].id, "https://other.example");
+    assert_eq!(
+        projected[3].id,
+        super::opaque_addon_id("https://other.example".to_string())
+    );
     assert_eq!(projected[3].name, "other.example");
     assert_eq!(projected.len(), 5);
     // Identities feed URL lookups only; rows keep the snapshot-derived facts.
@@ -507,6 +511,12 @@ fn addon_identity_projection_matches_full_load_for_missing_or_invalid_registries
         assert_eq!(
             AddonConfig::load_identities(&fixture.store),
             super::load_addon_configs(&fixture.store)
+                .into_iter()
+                .map(|mut config| {
+                    config.capabilities = None;
+                    config
+                })
+                .collect::<Vec<_>>()
         );
     }
 }
@@ -1440,8 +1450,14 @@ fn selector_addon_ids_are_preserved_without_truncation_or_aliasing() {
     let long_url_id = format!("https://addon.example/{}/manifest.json", "a".repeat(200));
     let max_id = "界".repeat(super::STREAM_SELECTOR_ADDON_MAX_CHARS);
     for (addon, expected) in [
-        (long_url_id.clone(), long_url_id.clone()),
-        (format!("  {long_url_id}  "), long_url_id),
+        (
+            long_url_id.clone(),
+            super::opaque_addon_id(long_url_id.clone()),
+        ),
+        (
+            format!("  {long_url_id}  "),
+            super::opaque_addon_id(long_url_id),
+        ),
         (max_id.clone(), max_id.clone()),
         (format!("{max_id}a"), "all".to_string()),
         (format!("{max_id}b"), "all".to_string()),

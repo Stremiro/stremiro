@@ -1,7 +1,7 @@
 import { useCallback, type RefObject, useEffect, useRef } from 'react';
 import { api } from '@/lib/api';
 import { MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
-import { seekAbsoluteSeconds, setMpvProperty } from '@/lib/player-mpv';
+import { type PlayerSeekTarget, seekAbsoluteSeconds, setMpvProperty } from '@/lib/player-mpv';
 import { usePlayerSession } from '@/lib/player-session';
 import { clearTimer, formatTime, isLocalMediaId } from '@/lib/utils';
 
@@ -81,6 +81,7 @@ export function usePlayerResumeController({
   const resumeSeekAttemptsRef = useRef(0);
   const resumeSeekInFlightRef = useRef(false);
   const resumeSeekSettleUntilRef = useRef(0);
+  const resumeSeekTargetRef = useRef<PlayerSeekTarget | null>(null);
   const resumeSeekRetryTimerRef = useRef<number | null>(null);
   const resumePausePendingRef = useRef(false);
   const resumeOsdShownRef = useRef(false);
@@ -94,6 +95,10 @@ export function usePlayerResumeController({
   const suspendedRef = useRef(suspended);
 
   const clearResumeRetryTimer = useCallback(() => clearTimer(resumeSeekRetryTimerRef), []);
+  const getResumeSeekTarget = useCallback(() => resumeSeekTargetRef.current, []);
+  const confirmResumeSeek = useCallback(() => {
+    if (resumeAppliedRef.current) resumeSeekTargetRef.current = null;
+  }, []);
 
   const isResumePending = useCallback(
     () =>
@@ -131,6 +136,7 @@ export function usePlayerResumeController({
       resumeAppliedRef.current = true;
       resumeSeekInFlightRef.current = false;
       resumeSeekSettleUntilRef.current = 0;
+      if (!didSeek) resumeSeekTargetRef.current = null;
       resumeSeekAttemptsRef.current = 0;
       clearResumeRetryTimer();
 
@@ -223,6 +229,7 @@ export function usePlayerResumeController({
     resumeSeekInFlightRef.current = true;
     resumeSeekAttemptsRef.current += 1;
     const seekEpoch = resumeSessionEpochRef.current;
+    resumeSeekTargetRef.current = { seconds: resumeTime, startedAt: performance.now() };
 
     await (async () => {
       try {
@@ -340,6 +347,7 @@ export function usePlayerResumeController({
     resumeSeekAttemptsRef.current = 0;
     resumeSeekInFlightRef.current = false;
     resumeSeekSettleUntilRef.current = 0;
+    resumeSeekTargetRef.current = null;
     resumePausePendingRef.current = false;
     resumeOsdShownRef.current = false;
     clearResumeRetryTimer();
@@ -463,6 +471,8 @@ export function usePlayerResumeController({
     cancelAutomaticResume,
     clearResumeRetryTimer,
     isResumePending,
+    getResumeSeekTarget,
+    confirmResumeSeek,
     prepareForStreamLoad,
     takeResumePause,
   };

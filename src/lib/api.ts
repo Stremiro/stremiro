@@ -650,7 +650,9 @@ export interface SearchCatalogContinuation {
     key: string;
     skip: number;
     retry?: boolean;
+    pageHash?: string;
   }[];
+  sourcePages?: string[];
   seenKeys: string[];
 }
 

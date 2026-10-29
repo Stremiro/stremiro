@@ -1,11 +1,18 @@
-use super::{lenient_option, DurableStore, ADDON_CONFIGS_KEY, DEFAULT_ADDON_INSTALLS};
-use crate::commands::{app_links::APP_LINK_SCHEME, normalize_non_empty};
+use super::{
+    lenient_option, DurableStore, ADDON_CONFIGS_KEY, DEFAULT_ADDON_INSTALLS,
+    DEFAULT_OPENSUBTITLES_INSTALL_URL,
+};
+use crate::commands::{
+    app_links::APP_LINK_SCHEME, normalize_non_empty, streaming_helpers::normalize_source_id,
+};
 use crate::providers::addon_manifest::{
-    snapshot_is_classified, snapshot_resource_kinds, AddonManifest, AddonResourceKind,
+    snapshot_is_classified, snapshot_resource_kinds, AddonManifest, AddonResourceCapability,
+    AddonResourceKind,
 };
 use crate::providers::{strip_manifest_suffix, ADDON_URL_INVALID_MESSAGE};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::LazyLock;
 
@@ -53,17 +60,31 @@ impl From<AddonConfigIdentity> for AddonConfig {
 }
 
 impl AddonConfig {
+    pub(crate) fn from_identity(value: &Value) -> Option<Self> {
+        if value.is_object() {
+            AddonConfigIdentity::deserialize(value).ok().map(Self::from)
+        } else {
+            Self::deserialize(value).ok().map(|mut config| {
+                config.capabilities = None;
+                config
+            })
+        }
+    }
+
     pub(crate) fn load_identities(store: &DurableStore) -> Vec<Self> {
         let configs = store.with_value(ADDON_CONFIGS_KEY, |value| {
             value
                 .and_then(Value::as_array)
                 .into_iter()
                 .flatten()
-                .filter_map(|value| AddonConfigIdentity::deserialize(value).ok())
-                .map(Self::from)
+                .filter_map(Self::from_identity)
                 .collect()
         });
-        resolve_addon_configs(Some(configs))
+        let mut configs = resolve_addon_configs(Some(configs));
+        for config in &mut configs {
+            config.capabilities = None;
+        }
+        configs
     }
 
     pub(crate) fn needs_classification(&self) -> bool {
@@ -236,10 +257,25 @@ pub(crate) fn normalize_addon_url(config: &str) -> Result<Option<String>, String
     Ok(Some(normalized))
 }
 
+pub(crate) fn opaque_addon_id(value: String) -> String {
+    match value.trim() {
+        trimmed if trimmed.contains("://") => {
+            format!("addon-url:{:x}", Sha256::digest(trimmed.as_bytes()))
+        }
+        trimmed if trimmed.len() != value.len() => trimmed.to_string(),
+        _ => value,
+    }
+}
+
 fn normalize_loaded_addon_config(mut config: AddonConfig) -> Option<AddonConfig> {
     let url = normalize_addon_url(&config.url).ok().flatten()?;
 
-    config.id = normalize_non_empty(&config.id).unwrap_or_else(|| url.clone());
+    let id = opaque_addon_id(config.id);
+    config.id = if normalize_source_id(&id).is_some() && !id.eq_ignore_ascii_case("all") {
+        id
+    } else {
+        opaque_addon_id(url.clone())
+    };
     config.name = normalize_non_empty(&config.name)
         .or_else(|| {
             reqwest::Url::parse(&url)
@@ -268,7 +304,7 @@ pub(crate) fn parse_stored_addon_configs(value: &Value) -> Vec<AddonConfig> {
             if !item.is_object() {
                 return AddonConfig::deserialize(item).ok();
             }
-            let mut config = AddonConfig::from(AddonConfigIdentity::deserialize(item).ok()?);
+            let mut config = AddonConfig::from_identity(item)?;
             config.capabilities = item
                 .get("capabilities")
                 .and_then(|value| AddonManifest::deserialize(value).ok());
@@ -291,9 +327,12 @@ fn normalize_loaded_addon_configs(configs: Vec<AddonConfig>) -> Vec<AddonConfig>
         }
 
         if !seen_ids.insert(config.id.clone()) {
-            config.id = config.url.clone();
-            if !seen_ids.insert(config.id.clone()) {
-                continue;
+            let fallback = opaque_addon_id(config.url.clone());
+            config.id.clone_from(&fallback);
+            let mut suffix = 1;
+            while !seen_ids.insert(config.id.clone()) {
+                config.id = format!("{fallback}-{suffix}");
+                suffix += 1;
             }
         }
 
@@ -307,11 +346,19 @@ fn default_addon_config(install_url: &str, name: &str) -> Option<AddonConfig> {
     let url = normalize_addon_url(install_url).ok().flatten()?;
 
     Some(AddonConfig {
-        id: url.clone(),
+        id: opaque_addon_id(url.clone()),
         url,
         name: name.to_string(),
         enabled: true,
-        capabilities: None,
+        capabilities: (install_url == DEFAULT_OPENSUBTITLES_INSTALL_URL).then(|| AddonManifest {
+            name: name.to_string(),
+            resources: vec![AddonResourceCapability {
+                name: "subtitles".to_string(),
+                types: vec!["movie".to_string(), "series".to_string()],
+                id_prefixes: vec!["tt".to_string()],
+            }],
+            ..AddonManifest::default()
+        }),
     })
 }
 
@@ -336,7 +383,15 @@ fn pin_default_addons(mut configs: Vec<AddonConfig>) -> Vec<AddonConfig> {
         // A stored copy keeps the user's toggle/name/snapshot; a missing one seeds enabled.
         let pinned = match configs.iter().position(|config| config.url == default.url) {
             Some(position) => configs.remove(position),
-            None => default.clone(),
+            None => {
+                let mut pinned = default.clone();
+                let mut suffix = 1;
+                while configs.iter().any(|config| config.id == pinned.id) {
+                    pinned.id = format!("{}-{suffix}", default.id);
+                    suffix += 1;
+                }
+                pinned
+            }
         };
         configs.insert(index.min(configs.len()), pinned);
     }

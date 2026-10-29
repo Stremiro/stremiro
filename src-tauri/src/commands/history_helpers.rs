@@ -26,9 +26,7 @@ pub(super) const WATCH_PROGRESS_FUTURE_SKEW_MS: u64 = 5 * 60 * 1000;
 /// Char bounds for free-text watch-progress fields — past these caps is malformed input, not a real value.
 const STREAM_FORMAT_MAX_CHARS: usize = 64;
 pub(crate) const STREAM_KEY_MAX_CHARS: usize = 128;
-const STREAM_LOOKUP_ID_MAX_CHARS: usize = 256;
 const SOURCE_NAME_MAX_CHARS: usize = 256;
-const SOURCE_ID_MAX_CHARS: usize = 256;
 const STREAM_FAMILY_MAX_CHARS: usize = 512;
 /// Bound for season/episode coordinates: real catalogs never approach this.
 /// `0` stays valid — specials and the `series:{id}:0:0` movie-fallback key use it.
@@ -114,14 +112,18 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
         .and_then(|s| normalize_media_image_url(&s));
     progress.last_stream_format =
         bound_optional(progress.last_stream_format, STREAM_FORMAT_MAX_CHARS);
-    progress.last_stream_lookup_id =
-        bound_optional(progress.last_stream_lookup_id, STREAM_LOOKUP_ID_MAX_CHARS);
+    progress.last_stream_lookup_id = progress
+        .last_stream_lookup_id
+        .and_then(|id| normalize_media_id(&id));
     // Only opaque hash identities (`h:`/`uh:`/`s:`) may persist — legacy `u:` keys
     // embed the normalized URL verbatim, signed credentials included.
     progress.last_stream_key = bound_optional(progress.last_stream_key, STREAM_KEY_MAX_CHARS)
         .filter(|key| is_persistable_stream_key(key));
     progress.source_name = bound_optional(progress.source_name, SOURCE_NAME_MAX_CHARS);
-    progress.source_id = bound_optional(progress.source_id, SOURCE_ID_MAX_CHARS);
+    progress.source_id = progress
+        .source_id
+        .map(super::config_store::opaque_addon_id)
+        .filter(|id| normalize_source_id(id).is_some());
     progress.stream_family = bound_optional(progress.stream_family, STREAM_FAMILY_MAX_CHARS);
 
     Some(progress)

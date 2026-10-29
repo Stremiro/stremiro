@@ -1,5 +1,6 @@
+import { type Range, useVirtualizer } from '@tanstack/react-virtual';
 import { Check, Loader2, Plus } from 'lucide-react';
-import { type RefObject, useRef, useState } from 'react';
+import { type RefObject, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -12,15 +13,18 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
+import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useDebounce } from '@/hooks/use-debounce';
 import { useBulkAddToList, useProfileLibrary } from '@/hooks/use-media-library';
-import { getListErrorMessage, type UserList } from '@/lib/api';
+import { getListErrorMessage, type MediaItem, type UserList } from '@/lib/api';
+import { whenRowMounted } from '@/lib/dom';
 import { navigateApp } from '@/lib/navigation';
 import { notifyAction } from '@/lib/notify';
 import { cn, pluralize } from '@/lib/utils';
 import { ListIconTile } from './list-icons';
 
 const VISIBLE_PAGE_SIZE = 150;
+const EMPTY_ITEMS: MediaItem[] = [];
 
 export function AddTitlesDialog({
   list,
@@ -31,7 +35,10 @@ export function AddTitlesDialog({
   onOpenChange: (open: boolean) => void;
   returnFocusRef: RefObject<HTMLElement | null>;
 }) {
+  'use no memo';
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [focusedId, setFocusedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(VISIBLE_PAGE_SIZE);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -45,8 +52,8 @@ export function AddTitlesDialog({
     (matchingLibraryQuery.isFetched &&
       (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
   const isSearchPending = search !== debouncedSearch || matchingLibraryQuery.isPlaceholderData;
-  const matchingItems = matchingLibraryQuery.data?.items ?? [];
-  const existingIds = new Set(list.item_ids);
+  const matchingItems = matchingLibraryQuery.data?.items ?? EMPTY_ITEMS;
+  const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
   const selectedItemIds =
     selectedIds.size === 0
       ? []
@@ -69,6 +76,43 @@ export function AddTitlesDialog({
       return next;
     });
   };
+
+  const rowCount = Math.min(visibleLimit, matchingItems.length);
+  const focusedIndex =
+    focusedId === null ? -1 : matchingItems.findIndex((item) => item.id === focusedId);
+  const virtualize = rowCount >= 40;
+  const rangeExtractor = useCallback(
+    (range: Range) => {
+      const indices = focusedRowRange(range, focusedIndex);
+      if (focusedIndex >= 0) {
+        for (const direction of [-1, 1]) {
+          let index = focusedIndex + direction;
+          while (index >= 0 && index < range.count && existingIds.has(matchingItems[index].id))
+            index += direction;
+          if (index >= 0 && index < range.count && !indices.includes(index)) indices.push(index);
+        }
+      }
+      return indices.toSorted((left, right) => left - right);
+    },
+    [focusedIndex, existingIds, matchingItems],
+  );
+  const virtualizer = useVirtualizer({
+    count: rowCount,
+    enabled: virtualize,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => matchingItems[index].id,
+    estimateSize: () => 64,
+    gap: 2,
+    overscan: 5,
+    rangeExtractor,
+  });
+  useLayoutEffect(() => {
+    scrollRef.current?.scrollTo(0, 0);
+    setFocusedId(null);
+  }, [debouncedSearch]);
+  const rows = virtualize
+    ? virtualizer.getVirtualItems()
+    : matchingItems.slice(0, rowCount).map((item, index) => ({ key: item.id, index, start: 0 }));
 
   return (
     <Dialog
@@ -127,6 +171,7 @@ export function AddTitlesDialog({
           />
         )}
         <div
+          ref={scrollRef}
           aria-busy={isSearchPending || matchingLibraryQuery.isPending}
           className={cn(
             'min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5 transition-opacity duration-200',
@@ -163,61 +208,75 @@ export function AddTitlesDialog({
           ) : matchingItems.length === 0 ? (
             <p className='py-10 text-center text-sm text-zinc-500'>No titles match your search.</p>
           ) : (
-            <div role='group' aria-label='Library titles' className='space-y-0.5'>
-              {matchingItems.slice(0, visibleLimit).map((item) => {
-                const inList = existingIds.has(item.id);
-                const selected = selectedIds.has(item.id) && !inList;
-                const year = item.displayYear || item.primaryYear || item.year;
-                return (
-                  <button
-                    key={item.id}
-                    type='button'
-                    disabled={inList || addTitles.isPending}
-                    aria-label={inList ? `${item.title}, already in list` : item.title}
-                    aria-pressed={inList || selected}
-                    onClick={() => toggleSelection(item.id)}
-                    className={cn(
-                      'flex w-full items-center gap-3 rounded-lg p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30',
-                      inList
-                        ? 'text-zinc-500'
-                        : selected
-                          ? 'bg-white/[0.06] text-white'
-                          : 'text-zinc-300 hover:bg-white/[0.04]',
-                    )}
-                  >
-                    <PosterThumb
-                      poster={item.poster}
-                      mediaType={item.type}
-                      className='bg-zinc-900 ring-white/10'
-                    />
-                    <span className='min-w-0 flex-1'>
-                      <span dir='auto' className='block truncate text-[13px] font-medium'>
-                        {item.title}
-                      </span>
-                      <span className='mt-0.5 block text-[11px] text-zinc-500'>
-                        {year && `${year} · `}
-                        {item.type === 'movie' ? 'Movie' : 'Series'}
-                      </span>
-                    </span>
-                    {inList && <span className='text-[10px] text-zinc-500'>In list</span>}
-                    <span
-                      aria-hidden='true'
+            <div role='group' aria-label='Library titles'>
+              <div
+                className={cn('relative', !virtualize && 'space-y-0.5')}
+                style={virtualize ? { height: virtualizer.getTotalSize() } : undefined}
+              >
+                {rows.map((row) => {
+                  const item = matchingItems[row.index];
+                  const inList = existingIds.has(item.id);
+                  const selected = selectedIds.has(item.id) && !inList;
+                  const year = item.displayYear || item.primaryYear || item.year;
+                  return (
+                    <button
+                      key={row.key}
+                      data-library-id={item.id}
+                      type='button'
+                      disabled={inList || addTitles.isPending}
+                      aria-label={inList ? `${item.title}, already in list` : item.title}
+                      aria-pressed={inList || selected}
+                      onClick={() => toggleSelection(item.id)}
+                      onFocus={() => setFocusedId(item.id)}
+                      onBlur={(event) => {
+                        if (!scrollRef.current?.contains(event.relatedTarget)) setFocusedId(null);
+                      }}
+                      style={
+                        virtualize ? { position: 'absolute', top: row.start, left: 0 } : undefined
+                      }
                       className={cn(
-                        'flex h-5 w-5 shrink-0 items-center justify-center rounded-md',
-                        selected
-                          ? 'bg-[var(--accent-nav)] text-[var(--on-accent-nav)]'
-                          : 'border border-white/10 text-zinc-500',
+                        'flex h-16 w-full items-center gap-3 rounded-lg p-2 text-left transition-colors focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30',
+                        inList
+                          ? 'text-zinc-500'
+                          : selected
+                            ? 'bg-white/[0.06] text-white'
+                            : 'text-zinc-300 hover:bg-white/[0.04]',
                       )}
                     >
-                      {inList || selected ? (
-                        <Check className='h-3 w-3' strokeWidth={2.5} />
-                      ) : (
-                        <Plus className='h-3 w-3' />
-                      )}
-                    </span>
-                  </button>
-                );
-              })}
+                      <PosterThumb
+                        poster={item.poster}
+                        mediaType={item.type}
+                        className='bg-zinc-900 ring-white/10'
+                      />
+                      <span className='min-w-0 flex-1'>
+                        <span dir='auto' className='block truncate text-[13px] font-medium'>
+                          {item.title}
+                        </span>
+                        <span className='mt-0.5 block text-[11px] text-zinc-500'>
+                          {year && `${year} · `}
+                          {item.type === 'movie' ? 'Movie' : 'Series'}
+                        </span>
+                      </span>
+                      {inList && <span className='text-[10px] text-zinc-500'>In list</span>}
+                      <span
+                        aria-hidden='true'
+                        className={cn(
+                          'flex h-5 w-5 shrink-0 items-center justify-center rounded-md',
+                          selected
+                            ? 'bg-[var(--accent-nav)] text-[var(--on-accent-nav)]'
+                            : 'border border-white/10 text-zinc-500',
+                        )}
+                      >
+                        {inList || selected ? (
+                          <Check className='h-3 w-3' strokeWidth={2.5} />
+                        ) : (
+                          <Plus className='h-3 w-3' />
+                        )}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
               {matchingItems.length > visibleLimit && (
                 <div className='space-y-2 px-3 py-3 text-center'>
                   <p className='text-[11px] text-zinc-500'>
@@ -227,7 +286,25 @@ export function AddTitlesDialog({
                     variant='outline'
                     size='sm'
                     disabled={addTitles.isPending}
-                    onClick={() => setVisibleLimit((limit) => limit + VISIBLE_PAGE_SIZE)}
+                    onClick={() => {
+                      const nextLimit = Math.min(
+                        rowCount + VISIBLE_PAGE_SIZE,
+                        matchingItems.length,
+                      );
+                      let nextIndex = rowCount;
+                      while (nextIndex < nextLimit && existingIds.has(matchingItems[nextIndex].id))
+                        nextIndex += 1;
+                      setVisibleLimit((limit) => limit + VISIBLE_PAGE_SIZE);
+                      if (nextIndex < nextLimit) {
+                        const id = matchingItems[nextIndex].id;
+                        setFocusedId(id);
+                        whenRowMounted(
+                          () => scrollRef.current,
+                          `[data-library-id="${CSS.escape(id)}"]`,
+                          (row) => row.focus(),
+                        );
+                      } else searchInputRef.current?.focus();
+                    }}
                   >
                     Load more
                   </Button>

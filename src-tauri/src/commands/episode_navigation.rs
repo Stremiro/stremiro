@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tauri::command;
 
 use super::calendar_commands::date_ordinal;
-use super::{js_trim, normalize_media_id, MEDIA_ID_MAX_CHARS};
+use super::{js_trim, normalize_media_id};
 
 const EPISODE_NAVIGATION_MAX_EPISODES: usize = 2_000;
 
@@ -152,10 +152,6 @@ pub(crate) fn additional_episode_video_id(
     episode: &Episode,
     source: &SourceEpisodeCoordinates,
 ) -> Option<String> {
-    // Metadata normalization truncates at this boundary; never request a possibly clipped id.
-    if episode.id.chars().nth(MEDIA_ID_MAX_CHARS - 1).is_some() {
-        return None;
-    }
     let id = normalize_media_id(js_trim(&episode.id))?;
     (id != source.lookup_id
         && id != format!("{}:{}:{}", source.lookup_id, source.season, source.episode))

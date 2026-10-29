@@ -56,7 +56,21 @@ pub(super) fn resolve_library_items(
     if ids.is_empty() {
         return Ok(Vec::new());
     }
-    let mut library = read_library_snapshot(store)?.items;
+    let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
+    let mut library = HashMap::with_capacity(ids.len());
+    for stored_id in load_library_index(store)? {
+        let item = store.with_value(library_item_key(&stored_id), |value| {
+            let value = value?;
+            selected
+                .contains(value.get("id").or_else(|| value.get(0))?.as_str()?.trim())
+                .then(|| MediaItem::deserialize(value).ok())
+                .flatten()
+        });
+        if let Some(item) = item.and_then(normalize_library_item) {
+            let item = merge_library_item(library.get(&item.id), item);
+            library.insert(item.id.clone(), item);
+        }
+    }
     // Titles removed elsewhere since selection are skipped; only an all-stale
     // selection fails, so callers never report success for zero matches.
     let items: Vec<MediaItem> = ids.iter().filter_map(|id| library.remove(id)).collect();
@@ -270,7 +284,7 @@ pub fn search_titles(titles: Vec<String>, query: String) -> Result<Vec<u32>, Str
 }
 
 fn filter_profile_library(
-    mut items: Vec<MediaItem>,
+    items: Vec<MediaItem>,
     statuses: &HashMap<String, String>,
     filters: LibraryFilters,
 ) -> Result<ProfileLibrary, String> {
@@ -281,7 +295,7 @@ fn filter_profile_library(
             Some(normalize_watch_status(value).ok_or_else(|| "Invalid watch status.".to_string())?)
         }
     };
-    // Keep literal Unicode/punctuation matching; remote search normalization is ASCII-only.
+    // Local collection search keeps literal Unicode and punctuation matching.
     let query: String = js_trim(filters.query.as_deref().unwrap_or(""))
         .chars()
         .take(super::MAX_SEARCH_QUERY_CHARS)
@@ -290,19 +304,19 @@ fn filter_profile_library(
     let mut all_ids: Vec<_> = items.iter().map(|item| item.id.clone()).collect();
     all_ids.sort_unstable();
     let status_counts = library_status_counts(items.iter().map(|item| item.id.as_str()), statuses);
-    items.retain(|item| {
-        let type_matches = match filters.type_ {
-            LibraryType::All => true,
-            LibraryType::Movie => item.type_ == "movie",
-            LibraryType::Series => item.type_ == "series",
-        };
-        type_matches
-            && status.as_deref().is_none_or(|status| {
-                statuses.get(&item.id).map_or("none", String::as_str) == status
-            })
-    });
     let mut items: Vec<_> = items
         .into_iter()
+        .filter(|item| {
+            let type_matches = match filters.type_ {
+                LibraryType::All => true,
+                LibraryType::Movie => item.type_ == "movie",
+                LibraryType::Series => item.type_ == "series",
+            };
+            type_matches
+                && status.as_deref().is_none_or(|status| {
+                    statuses.get(&item.id).map_or("none", String::as_str) == status
+                })
+        })
         .filter_map(|item| {
             let title = matching_title_key(&item.title, &query)?;
             let year = item.primary_year;

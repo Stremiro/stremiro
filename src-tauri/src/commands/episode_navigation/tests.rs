@@ -53,9 +53,12 @@ fn additional_video_ids_preserve_source_mapping_and_reject_unusable_ids() {
         );
         assert_eq!(source.lookup_id, "tt123");
     }
-    for len in [256, 257] {
+    for len in [255, 256, 257] {
         episode.id = "x".repeat(len);
-        assert!(additional_episode_video_id(&episode, &source).is_none());
+        assert_eq!(
+            additional_episode_video_id(&episode, &source),
+            (len <= 256).then(|| episode.id.clone())
+        );
     }
 }
 

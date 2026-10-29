@@ -4,7 +4,7 @@ use crate::providers::{
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, Emitter, Manager, State};
 use tauri_plugin_updater::UpdaterExt;
@@ -54,14 +54,13 @@ impl PendingAppUpdate {
     }
 
     fn fail_install(&self, message: String) -> String {
+        let retry_message =
+            format!("{message} Run another update check before retrying installation.");
         let mut state = self.lock();
         state.install_in_progress = false;
         state.download_operation_id = None;
-        state.last_error = Some(message.clone());
-        format!(
-            "{} Run another update check before retrying installation.",
-            message
-        )
+        state.last_error = Some(message);
+        retry_message
     }
 }
 
@@ -618,12 +617,9 @@ pub async fn download_app_update(
         update
     };
 
-    let progress_app = app.clone();
-    let progress_operation_id = operation_id.clone();
     let mut downloaded_bytes = 0_u64;
     let mut last_reported_percent = None::<u64>;
-    let last_activity_at = Arc::new(Mutex::new(Instant::now()));
-    let chunk_activity_at = last_activity_at.clone();
+    let last_activity_at = Mutex::new(Instant::now());
     let (size_limit_tx, mut size_limit_rx) = tokio::sync::watch::channel(false);
     let size_limit_error = || {
         format!(
@@ -634,8 +630,8 @@ pub async fn download_app_update(
 
     let download_result = {
         let download = update.download(
-            move |chunk_length, content_length| {
-                *lock_or_recover(&chunk_activity_at) = Instant::now();
+            |chunk_length, content_length| {
+                *lock_or_recover(&last_activity_at) = Instant::now();
                 downloaded_bytes = downloaded_bytes
                     .saturating_add(u64::try_from(chunk_length).unwrap_or(u64::MAX));
                 if !*size_limit_tx.borrow()
@@ -660,8 +656,8 @@ pub async fn download_app_update(
                 if last_reported_percent != Some(percent) {
                     last_reported_percent = Some(percent);
                     emit_progress(
-                        &progress_app,
-                        &progress_operation_id,
+                        &app,
+                        &operation_id,
                         AppUpdateProgress::Downloading {
                             downloaded_bytes: clamped_downloaded,
                             total_bytes,

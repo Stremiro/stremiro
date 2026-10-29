@@ -21,14 +21,13 @@ use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use tauri::{command, AppHandle, Manager, Window};
 use tauri_plugin_libmpv::{MpvConfig, MpvExt, VideoMarginRatio};
 
+mod subtitles;
+
 /// mpv verbs the UI is allowed to issue.
-const MPV_COMMANDS: &[&str] = &["cycle", "loadfile", "seek", "set", "sub-add"];
+const MPV_COMMANDS: &[&str] = &["cycle", "loadfile", "seek", "set"];
 
 /// Properties writable via `set_property` or the `set` verb.
 const MPV_SETTABLE_PROPERTIES: &[&str] = &[
-    "aid",
-    "sid",
-    "sub",
     "pause",
     "volume",
     "mute",
@@ -42,17 +41,7 @@ const MPV_SETTABLE_PROPERTIES: &[&str] = &[
 
 /// Properties the `cycle` verb may toggle; it carries no value, so numeric
 /// bounds cannot be enforced for anything else.
-const MPV_CYCLE_PROPERTIES: &[&str] = &["aid", "pause", "sub"];
-
-/// Properties readable via `get_property`.
-const MPV_READABLE_PROPERTIES: &[&str] = &[
-    "track-list/count",
-    "current-tracks/audio/id",
-    "current-tracks/sub/id",
-];
-
-/// `get_property` formats the wrapper accepts.
-const MPV_PROPERTY_FORMATS: &[&str] = &["flag", "int64", "double", "string"];
+const MPV_CYCLE_PROPERTIES: &[&str] = &["pause"];
 
 const MPV_COMMAND_MAX_ARGS: usize = 8;
 const MPV_ARG_MAX_CHARS: usize = 4096;
@@ -69,8 +58,12 @@ fn next_mute_write_epoch() -> u64 {
 fn mute_write_is_current(epoch: Option<u64>) -> bool {
     epoch.is_none_or(|epoch| MPV_MUTE_EPOCH.load(Ordering::SeqCst) == epoch)
 }
-/// Last applied `http-header-fields`: mpv sends this global option with every
-/// new HTTP request, including subtitles fetched from other hosts.
+
+fn is_unmute_value(value: &Value) -> bool {
+    value.as_bool() == Some(false) || value.as_str() == Some("no")
+}
+
+/// Last applied stream headers; subtitle downloads receive them only on the stream's origin.
 static MPV_STREAM_HEADER_FIELDS: Mutex<String> = Mutex::new(String::new());
 
 fn stream_header_fields() -> std::sync::MutexGuard<'static, String> {
@@ -105,6 +98,9 @@ where
         // A wedged native call retains the gate: later requests wait without
         // occupying more blocking threads, even after the caller times out.
         let _permit = permit;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("mpv {label} timed out."));
+        }
         operation()
     });
     match tokio::time::timeout_at(deadline, &mut task).await {
@@ -131,12 +127,16 @@ fn validate_video_margins(ratio: &VideoMarginRatio) -> Result<(), String> {
 
 #[command]
 pub async fn player_mpv_destroy(app: AppHandle, window: Window) -> Result<(), String> {
+    subtitles::SESSION.cancel();
     run_mpv_op("destroy", move || {
         let result = app
             .mpv()
             .destroy(window.label())
             .map_err(|error| format!("mpv destroy failed: {error}"));
         stream_header_fields().clear();
+        if result.is_ok() {
+            subtitles::SESSION.clear_tracks();
+        }
         result
     })
     .await
@@ -189,6 +189,7 @@ fn build_player_mpv_config(
             ("resume-playback", "no"),
             ("save-position-on-quit", "no"),
             ("ytdl", "no"),
+            ("tls-verify", "yes"),
             ("msg-level", "all=warn"),
             ("cache", "auto"),
             ("demuxer-max-bytes", "96MiB"),
@@ -315,11 +316,6 @@ fn validate_mpv_command(name: &str, args: &[Value]) -> Result<(), String> {
         {
             Err("mpv 'loadfile' requires an http(s) URL and optional 'replace' mode".to_string())
         }
-        "sub-add"
-            if !first.is_some_and(crate::providers::addon_resource::is_fetchable_http_url) =>
-        {
-            Err("mpv 'sub-add' requires a subtitle URL allowed by fetch policy".to_string())
-        }
         "set" if !first.is_some_and(|p| MPV_SETTABLE_PROPERTIES.contains(&p)) => {
             Err(format!("mpv '{name}' property is not allowed"))
         }
@@ -338,6 +334,9 @@ pub async fn player_mpv_command(
     mut args: Vec<Value>,
 ) -> Result<(), String> {
     validate_mpv_command(&name, &args)?;
+    if name == "loadfile" {
+        subtitles::SESSION.cancel();
+    }
     if name == "set" {
         let [property, value, ..] = args.as_mut_slice() else {
             return Err("mpv 'set' requires a property and value".to_string());
@@ -347,45 +346,92 @@ pub async fn player_mpv_command(
     let mute_epoch = (name == "set" && args.first().and_then(Value::as_str) == Some("mute"))
         .then(next_mute_write_epoch);
     run_mpv_op("command", move || {
-        if args.get(1).and_then(Value::as_bool) == Some(false) && !mute_write_is_current(mute_epoch)
-        {
+        if args.get(1).is_some_and(is_unmute_value) && !mute_write_is_current(mute_epoch) {
             return Ok(());
         }
         let mpv = app.mpv();
         let label = window.label();
-        let run = || {
-            mpv.command(&name, &args, label)
-                .map_err(|error| format!("mpv command '{name}' failed: {error}"))
-        };
-        let (headers, url) = match (name.as_str(), args.as_slice()) {
-            ("set", [property, value, ..]) => {
-                run()?;
-                remember_stream_header_fields(property.as_str().unwrap_or_default(), value);
-                return Ok(());
-            }
-            ("sub-add", [url, ..]) => (
-                stream_header_fields().clone(),
-                url.as_str().unwrap_or_default(),
-            ),
-            _ => return run(),
-        };
-        let same_origin = || {
-            mpv.get_property("path".to_string(), "string".to_string(), label)
-                .is_ok_and(|path| {
-                    path.as_str()
-                        .is_some_and(|path| shares_stream_origin(path, url))
-                })
-        };
-        if headers.is_empty() || same_origin() {
-            return run();
+        mpv.command(&name, &args, label)
+            .map_err(|error| format!("mpv command '{name}' failed: {error}"))?;
+        if let ("set", [property, value, ..]) = (name.as_str(), args.as_slice()) {
+            remember_stream_header_fields(property.as_str().unwrap_or_default(), value);
         }
-        // Verified on bundled mpv 0.41: sub-add fetches synchronously, and an
-        // open stream keeps the headers it was opened with.
-        set_native_mpv_property(&app, label, "http-header-fields", &Value::from(""))?;
-        let result = run();
-        let restored =
-            set_native_mpv_property(&app, label, "http-header-fields", &Value::String(headers));
-        result.and(restored)
+        Ok(())
+    })
+    .await
+}
+
+pub(super) fn subtitle_original_url(path: String) -> String {
+    subtitles::SESSION.original_url(path)
+}
+
+pub(super) fn cancel_subtitle_selection() {
+    subtitles::SESSION.cancel();
+}
+
+#[command]
+pub async fn player_mpv_add_subtitle(
+    app: AppHandle,
+    window: Window,
+    url: String,
+    title: String,
+    lang: Option<String>,
+) -> Result<Vec<super::player_track_commands::PlayerTrack>, String> {
+    let parsed = subtitles::validate_url(&url, &title, lang.as_deref())?;
+    let mut request = subtitles::SESSION.begin();
+    let context_app = app.clone();
+    let label = window.label().to_string();
+    let context_label = label.clone();
+    let subtitle_url = url.clone();
+    let (path, headers) = run_mpv_op("subtitle context", move || {
+        let path = context_app
+            .mpv()
+            .get_property("path".to_string(), "string".to_string(), &context_label)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_owned))
+            .filter(|path| !path.is_empty())
+            .ok_or_else(|| "No active playback for subtitle selection.".to_string())?;
+        let headers = if shares_stream_origin(&path, &subtitle_url) {
+            subtitles::request_headers(&stream_header_fields())
+        } else {
+            reqwest::header::HeaderMap::new()
+        };
+        Ok((path, headers))
+    })
+    .await?;
+    let bytes = request.download(parsed, headers).await?;
+    let input =
+        tauri::async_runtime::spawn_blocking(move || subtitles::SubtitleInput::create(&bytes))
+            .await
+            .map_err(|_| "Could not stage the subtitle.".to_string())??;
+    run_mpv_op("subtitle add", move || {
+        request.ensure_current()?;
+        let mpv = app.mpv();
+        if !mpv
+            .get_property("path".to_string(), "string".to_string(), &label)
+            .is_ok_and(|current| current.as_str() == Some(path.as_str()))
+        {
+            return Err("Playback changed during subtitle download.".to_string());
+        }
+        let local_path = subtitles::SESSION.register(url.clone(), &input);
+        let mut args = vec![
+            Value::from(local_path.clone()),
+            Value::from("select"),
+            Value::from(title),
+        ];
+        if let Some(lang) = lang
+            .as_deref()
+            .map(str::trim)
+            .filter(|lang| !lang.is_empty())
+        {
+            args.push(Value::from(lang));
+        }
+        if mpv.command("sub-add", &args, &label).is_err() {
+            subtitles::SESSION.discard(&local_path);
+            return Err("The player could not load the subtitle.".to_string());
+        }
+        request.ensure_current()?;
+        super::player_track_commands::read_added_subtitle(&app, &label, &url)
     })
     .await
 }
@@ -448,7 +494,7 @@ fn apply_mpv_properties(
     for (name, value) in properties {
         // Failed volume or a newer mute must not expose an obsolete, possibly louder volume.
         if name == "mute"
-            && value.as_bool() == Some(false)
+            && is_unmute_value(value)
             && (volume_failed || !mute_write_is_current(mute_epoch))
         {
             continue;
@@ -636,26 +682,6 @@ pub async fn player_mpv_set_properties(
     }
 }
 
-#[command]
-pub async fn player_mpv_get_property(
-    app: AppHandle,
-    window: Window,
-    name: String,
-    format: String,
-) -> Result<Value, String> {
-    if !MPV_READABLE_PROPERTIES.contains(&name.as_str())
-        || !MPV_PROPERTY_FORMATS.contains(&format.as_str())
-    {
-        return Err(format!("mpv property '{name}' is not readable"));
-    }
-    run_mpv_op("get", move || {
-        app.mpv()
-            .get_property(name, format, window.label())
-            .map_err(|error| format!("mpv get failed: {error}"))
-    })
-    .await
-}
-
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlaybackPositionProbe {
@@ -663,19 +689,46 @@ pub struct PlaybackPositionProbe {
     buffered_ahead: Option<f64>,
     near_completion: bool,
     next_episode_prefetch_due: bool,
+    seek_failure_window_secs: Option<f64>,
+    premature_eof: bool,
 }
 
 fn read_playback_position(
     duration_secs: f64,
-    get_property: impl Fn(&str) -> Option<Value>,
+    seek_target_secs: Option<f64>,
+    check_eof: bool,
+    get_property: impl Fn(&str, &str) -> Option<Value>,
 ) -> PlaybackPositionProbe {
-    let time_pos = get_property("time-pos").and_then(|value| value.as_f64());
+    let time_pos = get_property("time-pos", "double").and_then(|value| value.as_f64());
+    let premature_eof = check_eof
+        && duration_secs.is_finite()
+        && duration_secs > 0.0
+        && time_pos.is_some_and(|position| {
+            position.is_finite() && position >= 0.0 && position < duration_secs - 2.0
+        })
+        && property_flag(get_property("eof-reached", "flag"));
+    // A failed HTTP range seek can report EOF at duration even when the requested target was mid-file.
+    let seek_failure_window_secs = seek_target_secs
+        .filter(|target| {
+            duration_secs.is_finite()
+                && target.is_finite()
+                && *target >= 0.0
+                && *target < duration_secs - 2.0
+                && time_pos.is_some_and(|position| position >= duration_secs - 2.0)
+                && property_flag(get_property("eof-reached", "flag"))
+        })
+        .map(|target| (duration_secs - target - 2.0) / PLAYER_SPEED_MAX);
     PlaybackPositionProbe {
+        premature_eof,
+        seek_failure_window_secs,
         time_pos,
-        buffered_ahead: get_property("demuxer-cache-duration").and_then(|value| value.as_f64()),
-        near_completion: time_pos
-            .is_some_and(|position| is_near_completion_watch_progress(position, duration_secs)),
-        next_episode_prefetch_due: duration_secs.is_finite()
+        buffered_ahead: get_property("demuxer-cache-duration", "double")
+            .and_then(|value| value.as_f64()),
+        near_completion: !premature_eof
+            && time_pos
+                .is_some_and(|position| is_near_completion_watch_progress(position, duration_secs)),
+        next_episode_prefetch_due: !premature_eof
+            && duration_secs.is_finite()
             && duration_secs > 0.0
             && time_pos.is_some_and(|position| {
                 position.is_finite()
@@ -691,15 +744,22 @@ pub async fn player_mpv_get_playback_position(
     app: AppHandle,
     window: Window,
     duration_secs: f64,
+    seek_target_secs: Option<f64>,
+    check_eof: Option<bool>,
 ) -> Result<PlaybackPositionProbe, String> {
     // One IPC per poll; synchronous native reads stay off the async executor.
     // A timeout releases IPC; an already-running native call cannot be stopped.
     run_mpv_op("position probe", move || {
-        Ok(read_playback_position(duration_secs, |name| {
-            app.mpv()
-                .get_property(name.to_string(), "double".to_string(), window.label())
-                .ok()
-        }))
+        Ok(read_playback_position(
+            duration_secs,
+            seek_target_secs,
+            check_eof.unwrap_or(false),
+            |name, format| {
+                app.mpv()
+                    .get_property(name.to_string(), format.to_string(), window.label())
+                    .ok()
+            },
+        ))
     })
     .await
 }
@@ -728,6 +788,7 @@ pub async fn player_mpv_init(
     preferred_audio_language: Option<String>,
     preferred_subtitle_language: Option<String>,
 ) -> Result<String, String> {
+    subtitles::SESSION.cancel();
     let shader_cache_dir = app
         .path()
         .app_cache_dir()

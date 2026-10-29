@@ -18,7 +18,7 @@ interface UsePlayerAddonSubtitlesOptions {
   autoLoadLanguage: string | null;
   effectiveResolveMediaType: string;
   id?: string;
-  menuAvailable: boolean;
+  menuOpen: boolean;
   mountedRef: RefObject<boolean>;
   resolvedStreamEpisode?: number;
   resolvedStreamSeason?: number;
@@ -41,7 +41,7 @@ export function usePlayerAddonSubtitles({
   autoLoadLanguage,
   effectiveResolveMediaType,
   id,
-  menuAvailable,
+  menuOpen,
   mountedRef,
   resolvedStreamEpisode,
   resolvedStreamSeason,
@@ -52,7 +52,6 @@ export function usePlayerAddonSubtitles({
 }: UsePlayerAddonSubtitlesOptions) {
   const [pickedAddonSubtitleId, setPickedAddonSubtitleId] = useState<string | null>(null);
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
-  const [subtitleMenuOpened, setSubtitleMenuOpened] = useState(false);
   const subtitleSessionEpochRef = useRef(0);
   const autoLoadedLanguageRef = useRef<string | null>(null);
 
@@ -67,17 +66,11 @@ export function usePlayerAddonSubtitles({
     };
   }, [activeStreamLoadKey]);
 
-  useEffect(() => {
-    if (!menuAvailable) setSubtitleMenuOpened(false);
-  }, [menuAvailable]);
-
   // Trimmed so the query key matches what the API sends — untrimmed keys would fork the cache entry.
   const lookupMediaType = effectiveResolveMediaType.trim();
   const lookupMediaId = nonBlank(streamLookupId) ?? nonBlank(id);
   const subtitlesEnabled =
-    ((menuAvailable && subtitleMenuOpened) || autoLoadLanguage !== null) &&
-    lookupMediaType !== '' &&
-    !!lookupMediaId;
+    (menuOpen || autoLoadLanguage !== null) && lookupMediaType !== '' && !!lookupMediaId;
 
   const subtitlesQuery = useQuery({
     queryKey: addonSubtitlesQueryKey(
@@ -102,6 +95,10 @@ export function usePlayerAddonSubtitles({
   });
 
   const addonSubtitles: AddonSubtitle[] = subtitlesQuery.data ?? EMPTY_ADDON_SUBTITLES;
+  const { refetch } = subtitlesQuery;
+  useEffect(() => {
+    if (menuOpen && lookupMediaType && lookupMediaId) void refetch({ cancelRefetch: false });
+  }, [menuOpen, lookupMediaType, lookupMediaId, refetch]);
   // Keep the retry notice mounted while an initial error is retried.
   const addonSubtitlesError =
     subtitlesEnabled &&
@@ -118,7 +115,7 @@ export function usePlayerAddonSubtitles({
     const epoch = subtitleSessionEpochRef.current;
     setAddonSubtitleLoadingId(subtitleKey);
     return (async () => {
-      // The track controller owns the mpv side: URL reuse, single-switch gate, fetch polling, preference persistence.
+      // The controller owns track reuse and preferences; Rust owns download and native confirmation.
       const selected = await selectAddonSubtitle(subtitle, { automatic });
       if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
       if (!selected) {
@@ -127,11 +124,17 @@ export function usePlayerAddonSubtitles({
       }
       setPickedAddonSubtitleId(subtitleKey);
       if (!automatic) announce(`Subtitles: ${nonBlank(subtitle.label) || 'External'}`, 'subtitles');
-    })().finally(() => {
-      if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
-        setAddonSubtitleLoadingId(null);
-      }
-    });
+    })()
+      .catch((error: unknown) => {
+        if (!automatic && mountedRef.current && epoch === subtitleSessionEpochRef.current) {
+          toast.error('Failed to load addon subtitle', { description: getErrorMessage(error) });
+        }
+      })
+      .finally(() => {
+        if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
+          setAddonSubtitleLoadingId(null);
+        }
+      });
   };
 
   // A manual pick clears `autoLoadLanguage`, so a late resolution never overrides it.
@@ -209,10 +212,6 @@ export function usePlayerAddonSubtitles({
     addonSubtitlesAvailable: subtitlesEnabled,
     handleAddonSubtitleSelect: handleSelectAddonSubtitle,
     handleSubTrackSelect,
-    handleSubtitleMenuOpenChange: (open: boolean) => {
-      setSubtitleMenuOpened(open);
-      if (open && subtitlesEnabled) void subtitlesQuery.refetch({ cancelRefetch: false });
-    },
-    refetchAddonSubtitles: subtitlesQuery.refetch,
+    refetchAddonSubtitles: refetch,
   };
 }

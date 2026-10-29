@@ -1,6 +1,7 @@
 import { expect, mock, spyOn, test } from 'bun:test';
 import type { ComponentProps, ComponentType, DependencyList, EffectCallback } from 'react';
-import type { StreamSelectorData } from '../src/lib/api';
+import type { CalendarSchedule, StreamSelectorData } from '../src/lib/api';
+import type { QueryObserverOptions } from '@tanstack/react-query';
 
 // Bun's navigator has no connectivity snapshot; render the pages as online.
 Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
@@ -39,8 +40,10 @@ mock.module('@radix-ui/react-dialog', () => ({
 const { QueryClient, QueryClientProvider, QueryObserver, onlineManager } =
   await import('@tanstack/react-query');
 const { renderToStaticMarkup } = await import('react-dom/server');
-const { MemoryRouter } = await import('react-router');
+const router = await import('react-router');
+const { MemoryRouter } = router;
 const { Search } = await import('../src/pages/search');
+const { Calendar } = await import('../src/pages/calendar');
 const { Home, homeTrendingMoviesQueryOptions } = await import('../src/pages/home');
 const { api, DEFAULT_APP_UI_PREFERENCES } = await import('../src/lib/api');
 const { queryClient } = await import('../src/lib/query-client');
@@ -59,6 +62,7 @@ const { AddTitlesDialog } = await import('../src/components/list/add-titles-dial
 const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
+const tauriCore = await import('@tauri-apps/api/core');
 const { createPlaybackClock } = await import('../src/lib/player-clock');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
@@ -66,10 +70,71 @@ const { usePlayerResumeController } = await import('../src/hooks/use-player-resu
 const { usePlayerTrackController } = await import('../src/hooks/use-player-track-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
 const { useTitleSearch } = await import('../src/hooks/use-item-search');
+const { useSearchPageState } = await import('../src/hooks/use-search-page-state');
 const { usePlayerAddonSubtitles } = await import('../src/hooks/use-player-addon-subtitles');
 const { useHistoryPlayback } = await import('../src/hooks/use-history-playback');
 const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
 const { toast } = await import('sonner');
+
+test.each([
+  ['genre', 'dune', false, 'dune'],
+  ['feed', 'dune', false, 'dune'],
+  ['clear', 'dune', false, 'dune'],
+  ['reset', 'dune', false, 'dune'],
+  ['type', 'dune', false, 'dune'],
+  ['genre', 'dune', true, 'du'],
+  ['genre', 'stremiro://details/movie/tt1', false, 'du'],
+] as const)(
+  'Filter %s commits only eligible drafts (%s, composing=%j)',
+  async (action, draft, composing, expectedQuery) => {
+    const params = new URLSearchParams('q=du&type=movie&genre=Action&feed=featured');
+    const commit = mock((_next?: unknown) => {});
+    const readParams = spyOn(router, 'useSearchParams').mockReturnValue([params, commit]);
+    const controller = Promise.withResolvers<ReturnType<typeof useSearchPageState>>();
+    function FilterFixture() {
+      const current = useSearchPageState();
+      if (current.query !== draft) current.setQuery(draft);
+      else if (current.isComposing !== composing) current.setIsComposing(composing);
+      else controller.resolve(current);
+      return null;
+    }
+    try {
+      renderToStaticMarkup(
+        <MemoryRouter>
+          <FilterFixture />
+        </MemoryRouter>,
+      );
+      const state = await controller.promise;
+      switch (action) {
+        case 'genre':
+          state.handleGenreChange('Crime');
+          break;
+        case 'feed':
+          state.handleFeedChange('new');
+          break;
+        case 'clear':
+          state.clearGenre();
+          break;
+        case 'reset':
+          state.resetFilters();
+          break;
+        case 'type':
+          state.handleTypeChange('series');
+          break;
+      }
+      expect(commit).toHaveBeenCalledTimes(1);
+      const next = commit.mock.calls[0]?.[0] as URLSearchParams;
+      expect(next.get('q')).toBe(expectedQuery);
+      if (action === 'genre') expect(next.get('genre')).toBe('Crime');
+      if (action === 'feed') expect(next.get('feed')).toBe('new');
+      if (action === 'clear' || action === 'reset') expect(next.has('genre')).toBe(false);
+      if (action === 'reset') expect(next.has('type') || next.has('feed')).toBe(false);
+      if (action === 'type') expect(next.get('type')).toBe('series');
+    } finally {
+      readParams.mockRestore();
+    }
+  },
+);
 
 test('Reopening addon subtitles rechecks Rust before automatic selection', async () => {
   const client = new QueryClient();
@@ -87,22 +152,20 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   client.setQueryData(key, cached);
   const fetch = spyOn(api, 'getAddonSubtitles').mockResolvedValue([]);
   const matchLanguage = spyOn(api, 'resolvePreferredTrackSelection').mockResolvedValue({});
-  const controller = Promise.withResolvers<ReturnType<typeof usePlayerAddonSubtitles>>();
+  let menuOpen = false;
   function Subtitles() {
-    controller.resolve(
-      usePlayerAddonSubtitles({
-        activeStreamLoadKey: 'stream',
-        announce: () => {},
-        autoLoadLanguage: 'eng',
-        effectiveResolveMediaType: 'movie',
-        id: key[2],
-        menuAvailable: true,
-        mountedRef: { current: true },
-        selectAddonSubtitle: async () => false,
-        setTrack: async () => false,
-        subTracks: [],
-      }),
-    );
+    usePlayerAddonSubtitles({
+      activeStreamLoadKey: 'stream',
+      announce: () => {},
+      autoLoadLanguage: 'eng',
+      effectiveResolveMediaType: 'movie',
+      id: key[2],
+      menuOpen,
+      mountedRef: { current: true },
+      selectAddonSubtitle: async () => false,
+      setTrack: async () => false,
+      subTracks: [],
+    });
     return null;
   }
   let unsubscribe: (() => void) | undefined;
@@ -127,14 +190,18 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     unsubscribe = observer.subscribe(() => {});
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(1);
-    const subtitles = await controller.promise;
-    subtitles.handleSubtitleMenuOpenChange(true);
+    menuOpen = true;
+    capturedEffects = [];
+    renderToStaticMarkup(view);
+    const openEffects = capturedEffects;
+    capturedEffects = null;
+    for (const effect of openEffects) {
+      const cleanup = effect();
+      if (cleanup) cleanups.push(cleanup);
+    }
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(2);
-    subtitles.handleSubtitleMenuOpenChange(false);
-    subtitles.handleSubtitleMenuOpenChange(true);
-    await query.promise;
-    expect(fetch).toHaveBeenCalledTimes(3);
+    menuOpen = false;
 
     client.setDefaultOptions({ queries: { refetchOnMount: false } });
     client.setQueryData(key, cached);
@@ -142,13 +209,11 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     renderToStaticMarkup(view);
     const readyEffects = capturedEffects;
     capturedEffects = null;
-    for (let load = 0; load < 2; load++) {
-      for (const effect of readyEffects) {
-        const cleanup = effect();
-        if (cleanup) cleanups.push(cleanup);
-      }
-      expect(matchLanguage).toHaveBeenCalledTimes(load + 1);
+    for (const effect of readyEffects) {
+      const cleanup = effect();
+      if (cleanup) cleanups.push(cleanup);
     }
+    expect(matchLanguage).toHaveBeenCalledTimes(1);
   } finally {
     capturedEffects = null;
     cleanups.forEach((cleanup) => cleanup());
@@ -158,6 +223,77 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     matchLanguage.mockRestore();
   }
 });
+
+test.each([
+  { automatic: false, cancelled: false },
+  { automatic: true, cancelled: false },
+  { automatic: false, cancelled: true },
+])(
+  'Subtitle download failures explain only the current manual selection (%j)',
+  async ({ automatic, cancelled }) => {
+    const client = new QueryClient();
+    const native = Promise.withResolvers<boolean>();
+    const controller = Promise.withResolvers<ReturnType<typeof usePlayerAddonSubtitles>>();
+    const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
+    const cleanups: (() => void)[] = [];
+    function Fixture() {
+      controller.resolve(
+        usePlayerAddonSubtitles({
+          activeStreamLoadKey: 'stream',
+          announce: () => {},
+          autoLoadLanguage: null,
+          effectiveResolveMediaType: 'movie',
+          id: 'tt1',
+          menuOpen: false,
+          mountedRef: { current: true },
+          selectAddonSubtitle: () => native.promise,
+          setTrack: async () => false,
+          subTracks: [],
+        }),
+      );
+      return null;
+    }
+    try {
+      capturedEffects = [];
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Fixture />
+        </QueryClientProvider>,
+      );
+      const effects = capturedEffects;
+      capturedEffects = null;
+      for (const effect of effects) {
+        const cleanup = effect();
+        if (cleanup) cleanups.push(cleanup);
+      }
+      const hook = await controller.promise;
+      const pending = hook.handleAddonSubtitleSelect(
+        {
+          id: 'sub',
+          selectionKey: 'sub',
+          url: 'https://example.com/sub',
+          mpvTitle: 'English',
+          sourceId: 'addon',
+          sourceName: 'Addon',
+        },
+        { automatic },
+      );
+      if (cancelled) cleanups.splice(0).forEach((cleanup) => cleanup());
+      native.reject(new Error('Subtitle exceeds the 8 MiB limit.'));
+      await pending;
+      expect(notice).toHaveBeenCalledTimes(automatic || cancelled ? 0 : 1);
+      if (!automatic && !cancelled)
+        expect(notice).toHaveBeenCalledWith('Failed to load addon subtitle', {
+          description: 'Subtitle exceeds the 8 MiB limit.',
+        });
+    } finally {
+      capturedEffects = null;
+      cleanups.forEach((cleanup) => cleanup());
+      notice.mockRestore();
+      client.clear();
+    }
+  },
+);
 
 test.each([
   { cancelled: false, failed: false },
@@ -302,7 +438,29 @@ test('Volume and unmute share one native batch with no delayed unmute after a ne
   }
 });
 
-test('Manual subtitles Off blocks a late automatic addon subtitle selection', async () => {
+test('Track changes send a native intent and return its confirmed snapshot', async () => {
+  const snapshot = [{ id: 2, type: 'audio' as const, displayLabel: 'English', selected: true }];
+  const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(snapshot);
+  try {
+    const changes = [
+      ['audio', 2],
+      ['sub', 'no'],
+      ['sub', 'cycle'],
+    ] as const;
+    await Promise.all(
+      changes.map(async ([kind, target]) => {
+        expect(await playerMpv.changePlayerTrack(kind, target)).toBe(snapshot);
+        expect(invoke).toHaveBeenCalledWith('player_mpv_change_track', { kind, target });
+      }),
+    );
+    invoke.mockRejectedValueOnce(new Error('Track unavailable'));
+    await expect(playerMpv.changePlayerTrack('audio', 3)).rejects.toThrow('Track unavailable');
+  } finally {
+    invoke.mockRestore();
+  }
+});
+
+test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed addon track', async () => {
   const client = new QueryClient();
   const embedded = { id: 1, type: 'sub' as const, displayLabel: 'English' };
   const subtitle = {
@@ -315,17 +473,18 @@ test('Manual subtitles Off blocks a late automatic addon subtitle selection', as
     sourceId: 'addon',
     sourceName: 'Addon',
   };
-  const tracks = spyOn(playerMpv, 'readPlayerTrackList')
-    .mockResolvedValueOnce([embedded])
-    .mockResolvedValue([
-      embedded,
-      { ...embedded, id: 2, selected: true, external: true, externalFilename: subtitle.url },
-    ]);
-  const count = spyOn(playerMpv, 'readPlayerTrackCount')
-    .mockResolvedValueOnce(1)
-    .mockResolvedValue(2);
-  const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue();
+  const tracks = spyOn(playerMpv, 'readPlayerTrackList').mockResolvedValue([embedded]);
+  const confirmed = [
+    embedded,
+    { ...embedded, id: 2, external: true, externalFilename: subtitle.url },
+    { ...embedded, id: 3, selected: true, external: true, externalFilename: subtitle.url },
+  ];
+  const add = spyOn(playerMpv, 'addSubtitleTrack').mockResolvedValue(confirmed);
+  const staleTracks =
+    Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
   const write = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+  const change = spyOn(playerMpv, 'changePlayerTrack').mockResolvedValue([embedded]);
+  const notice = spyOn(toast, 'error').mockReturnValue('track-error');
   const save = spyOn(api, 'saveSelectedPlaybackLanguagePreference').mockResolvedValue({
     preferences: { preferredSubtitleLanguage: 'off' },
   });
@@ -353,16 +512,73 @@ test('Manual subtitles Off blocks a late automatic addon subtitle selection', as
     const player = await controller.promise;
     await player.refreshTracks();
     expect(await player.setTrack('sub', 'no', { persistPreference: true })).toBe(true);
+    expect(change).toHaveBeenCalledWith('sub', 'no');
     expect(await player.selectAddonSubtitle(subtitle, { automatic: true })).toBe(false);
     expect(add).not.toHaveBeenCalled();
+    tracks.mockImplementationOnce(() => staleTracks.promise);
+    const refresh = player.refreshTracks();
     expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+    await flushPendingAppWrites();
+    expect(save.mock.calls.at(-1)?.[1]?.id).toBe(3);
+    staleTracks.resolve([embedded]);
+    await refresh;
+    const repeatedSnapshot =
+      Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+    tracks.mockImplementationOnce(() => repeatedSnapshot.promise);
+    const repeatedRefresh = player.refreshTracks();
+    change.mockResolvedValue(confirmed);
+    expect(await player.setTrack('sub', 3)).toBe(true);
+    repeatedSnapshot.resolve([embedded]);
+    expect(await repeatedRefresh).toEqual(confirmed);
+    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+    expect(change).toHaveBeenLastCalledWith('sub', 3);
     expect(add).toHaveBeenCalledTimes(1);
+    expect(await player.cycleTrack('sub')).toBe(3);
+    expect(change).toHaveBeenLastCalledWith('sub', 'cycle');
+    change.mockRejectedValueOnce(new Error('Track unavailable'));
+    expect(await player.setTrack('sub', 2)).toBe(false);
+    expect(notice).toHaveBeenLastCalledWith('Failed to switch track');
+    expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
+    expect(change).toHaveBeenLastCalledWith('sub', 3);
   } finally {
     await flushPendingAppWrites();
-    for (const spy of [tracks, count, add, write, save]) spy.mockRestore();
+    for (const spy of [tracks, add, write, change, save, notice]) spy.mockRestore();
     client.clear();
   }
 });
+
+test.each([
+  [100, true, false],
+  [1000, false, false],
+  [1000, true, true],
+] as const)(
+  'Seek failure verdict includes IPC wait time (%s ms)',
+  async (elapsed, failed, latched) => {
+    const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue({
+      timePos: 120,
+      bufferedAhead: 0,
+      nearCompletion: true,
+      nextEpisodePrefetchDue: true,
+      seekFailureWindowSecs: 0.25,
+    });
+    const now = spyOn(performance, 'now').mockReturnValue(0);
+    try {
+      const pending = playerMpv.readPlaybackPositionProbe(120, {
+        seconds: 117,
+        startedAt: 0,
+        failed: latched,
+      });
+      now.mockReturnValue(elapsed);
+      const probe = await pending;
+      expect(probe.seekFailed).toBe(failed);
+      expect(probe.nearCompletion).toBe(!failed);
+      expect(probe.nextEpisodePrefetchDue).toBe(!failed);
+    } finally {
+      invoke.mockRestore();
+      now.mockRestore();
+    }
+  },
+);
 
 test('Startup seeks leave pending resume and the playback clock untouched until mpv is ready', async () => {
   const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
@@ -405,6 +621,7 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
     expect(nativeCommand).not.toHaveBeenCalled();
     expect(clock.getSnapshot()).toBe(900);
     expect(seeking.isSeekPending()).toBe(false);
+    expect(seeking.getSeekTarget()).toBeNull();
     mpvInitializedRef.current = true;
     durationRef.current = 3600;
     await seeking.seekRelative(10);
@@ -413,6 +630,11 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
     expect(nativeSeek).toHaveBeenCalledWith(950);
     expect(onUserSeek).toHaveBeenCalledTimes(2);
     expect(clock.getSnapshot()).toBe(950);
+    expect(seeking.observeTimeUpdate(950, performance.now())).toBe(false);
+    expect(seeking.isSeekPending()).toBe(false);
+    expect(seeking.getSeekTarget()?.seconds).toBe(950);
+    seeking.confirmSeek();
+    expect(seeking.getSeekTarget()).toBeNull();
   } finally {
     for (const spy of [nativeSeek, nativeCommand]) spy.mockRestore();
   }
@@ -426,6 +648,14 @@ test.each([false, true])(
     const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
     const pauseWrite = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
     const now = spyOn(performance, 'now').mockReturnValue(0);
+    const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue({
+      timePos: 3600,
+      bufferedAhead: 0,
+      nearCompletion: true,
+      nextEpisodePrefetchDue: true,
+      seekFailureWindowSecs: (3600 - 900 - 2) / 4,
+      prematureEof: false,
+    });
     const currentTimeRef = { current: 0 };
     const durationRef = { current: 0 };
     const effects: EffectCallback[] = [];
@@ -467,6 +697,11 @@ test.each([false, true])(
       expect(resume.prepareForStreamLoad()).toBe(true);
       durationRef.current = 3600;
       await resume.applyResumeIfReady();
+      expect(resume.getResumeSeekTarget()).toEqual({ seconds: 900, startedAt: 0 });
+      const failed = await playerMpv.readPlaybackPositionProbe(3600, resume.getResumeSeekTarget());
+      expect(failed.seekFailed).toBe(true);
+      expect(failed.nearCompletion).toBe(false);
+      expect(failed.nextEpisodePrefetchDue).toBe(false);
       await Promise.all(
         [220, 360, 1499].map((time) => {
           now.mockReturnValue(time);
@@ -484,12 +719,14 @@ test.each([false, true])(
       currentTimeRef.current = 899;
       await resume.applyResumeIfReady();
       expect(resume.isResumePending()).toBe(false);
+      resume.confirmResumeSeek();
+      expect(resume.getResumeSeekTarget()).toBeNull();
       expect(pauseWrite).toHaveBeenCalledTimes(trayPaused ? 0 : 1);
       if (!trayPaused) expect(pauseWrite).toHaveBeenCalledWith('pause', false);
     } finally {
       capturedEffects = null;
       for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
-      for (const spy of [nativeSeek, pauseWrite, now]) spy.mockRestore();
+      for (const spy of [nativeSeek, pauseWrite, now, invoke]) spy.mockRestore();
       if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor);
       else Reflect.deleteProperty(globalThis, 'window');
     }
@@ -574,6 +811,49 @@ test.each(['/search', '/search?q=matrix', '/search?type=anime&genre=Action'])(
     expect(markup).toContain('About unified catalog results');
   },
 );
+
+test('Calendar keeps upcoming placeholders only for the same watched filter', () => {
+  const client = new QueryClient();
+  try {
+    client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, {
+      ...DEFAULT_APP_UI_PREFERENCES,
+      calendarHideWatched: true,
+    });
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <Calendar />
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    const query = client
+      .getQueryCache()
+      .find<CalendarSchedule>({ queryKey: ['calendar-events'], exact: false });
+    if (!query) throw new Error('Calendar query missing');
+    const { placeholderData } = query.options as QueryObserverOptions<CalendarSchedule>;
+    const options = { queryKey: query.queryKey, placeholderData };
+    const previous: CalendarSchedule = { trackedCount: 1, missingCount: 0, days: [], upcoming: [] };
+    const observer = new QueryObserver(client, {
+      ...options,
+      enabled: false,
+      initialData: previous,
+      queryKey: [...query.queryKey.slice(0, 4), false],
+    });
+    observer.setOptions({ ...options, enabled: false });
+    expect(observer.getCurrentResult().data).toBeUndefined();
+    client.setQueryData(query.queryKey, previous);
+    observer.setOptions({ ...options, enabled: false });
+    observer.setOptions({
+      ...options,
+      enabled: false,
+      queryKey: [query.queryKey[0], 'another month', ...query.queryKey.slice(2)],
+    });
+    expect(observer.getCurrentResult().data).toEqual(previous);
+    observer.destroy();
+  } finally {
+    client.clear();
+  }
+});
 
 test.each([false, true])(
   'Add Titles keeps cached rows available after a refresh failure (cached=%s)',

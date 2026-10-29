@@ -1,5 +1,9 @@
-import { QueryClient } from '@tanstack/react-query';
-import { DETAILS_GC_TIME_MS, DETAILS_QUERY_KEY } from '@/lib/query-invalidation';
+import { QueryClient, replaceEqualDeep } from '@tanstack/react-query';
+import {
+  DETAILS_GC_TIME_MS,
+  DETAILS_QUERY_KEY,
+  WATCH_STATUSES_QUERY_KEY,
+} from '@/lib/query-invalidation';
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -15,3 +19,10 @@ export const queryClient = new QueryClient({
   },
 });
 queryClient.setQueryDefaults(DETAILS_QUERY_KEY, { gcTime: DETAILS_GC_TIME_MS });
+queryClient.setQueryDefaults(WATCH_STATUSES_QUERY_KEY, {
+  // The default deep copy loses an own "__proto__" media ID through the prototype setter.
+  structuralSharing: (previous, current) =>
+    current !== null && typeof current === 'object' && Object.hasOwn(current, '__proto__')
+      ? current
+      : replaceEqualDeep(previous, current),
+});

@@ -45,13 +45,14 @@ export function useInlineMenu({ rootRef, enabled = true, returnFocus }: InlineMe
   };
 
   useLayoutEffect(() => {
-    if (!open) return;
+    if (!enabled) setOpen(false);
+    if (!open || !enabled) return;
     // Pointer opens focus the panel so no row reads as preselected.
     const target = rootRef.current?.querySelector<HTMLElement>(
       openedByKeyboardRef.current ? FIRST_ITEM_SELECTOR : '[data-inline-menu]',
     );
     target?.focus({ preventScroll: true });
-  }, [open, rootRef]);
+  }, [enabled, open, rootRef]);
 
   useEffect(() => {
     if (!open) return;

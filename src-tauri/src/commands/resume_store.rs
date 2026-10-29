@@ -655,21 +655,19 @@ impl ResumeStore {
             )
         })?;
         {
-            let mut statement = transaction
-                .prepare("SELECT history_key FROM watch_progress")
+            let keys: Vec<_> = entries.iter().map(|(key, _)| key.as_str()).collect();
+            let keys = serde_json::to_string(&keys)
+                .map_err(|error| format!("Failed to encode playback resume keys: {error}"))?;
+            let (existing, new_keys): (i64, i64) = transaction
+                .query_row(
+                    "SELECT (SELECT COUNT(*) FROM watch_progress), COUNT(DISTINCT value)
+                     FROM json_each(?1)
+                     WHERE value NOT IN (SELECT history_key FROM watch_progress)",
+                    params![keys],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
                 .map_err(|error| format!("Failed to read playback resume keys: {error}"))?;
-            let existing: HashSet<String> = statement
-                .query_map([], |row| row.get(0))
-                .and_then(|rows| rows.collect())
-                .map_err(|error| format!("Failed to read playback resume keys: {error}"))?;
-            let new_keys: HashSet<&str> = entries
-                .iter()
-                .map(|(key, _)| key.as_str())
-                .filter(|key| !existing.contains(*key))
-                .collect();
-            if !new_keys.is_empty()
-                && existing.len().saturating_add(new_keys.len()) > MAX_RESUME_TOTAL_ENTRIES as usize
-            {
+            if new_keys > 0 && existing.saturating_add(new_keys) > MAX_RESUME_TOTAL_ENTRIES {
                 let action = if is_backup_import {
                     "This backup"
                 } else {
@@ -1107,7 +1105,9 @@ fn read_watch_progress_row(row: &Row<'_>) -> rusqlite::Result<(String, WatchProg
         last_stream_key: row.get(17)?,
         source_name: row.get(18)?,
         stream_family: row.get(19)?,
-        source_id: row.get(20)?,
+        source_id: row
+            .get::<_, Option<String>>(20)?
+            .map(super::config_store::opaque_addon_id),
         resume_start_time: None,
         is_watched: false,
         has_started_watching: false,

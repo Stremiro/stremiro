@@ -670,6 +670,8 @@ function DetailsContent() {
     episodeActionPending ||
     upNextPending;
   const upNextTarget = hasNoSeriesResume ? upNextEpisode : null;
+  const upNextUnavailable =
+    hasNoSeriesResume && !!titleProgress?.upNextSource && upNextQuery.isError && !upNextEpisode;
   const primaryActionSelectsEpisode =
     hasNoSeriesResume && !upNextTarget && !upNextPending && !historyPending;
 
@@ -1117,6 +1119,14 @@ function DetailsContent() {
                 )}
               </div>
 
+              {upNextUnavailable && (
+                <RetryBanner
+                  className='max-w-xl px-3 py-2'
+                  message="Couldn't find the next episode. You can still choose one below."
+                  isRetrying={upNextQuery.isFetching}
+                  onRetry={() => void upNextQuery.refetch()}
+                />
+              )}
               {watchStateError && (
                 <RetryBanner
                   className='max-w-xl px-3 py-2'

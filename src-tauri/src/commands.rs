@@ -1,7 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
-use tauri::{command, AppHandle, State};
+use tauri::{command, AppHandle, Manager, State};
 
 mod addon_registry;
 pub(crate) mod app_links;
@@ -75,6 +76,7 @@ impl<K: Default> From<String> for CommandError<K> {
 /// snapshot silently drop the other's write. One lock covers every store; ops are
 /// milliseconds and a single lock cannot deadlock.
 static STORE_OP_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+static STORE_OP_CLOSED: AtomicBool = AtomicBool::new(false);
 
 /// Shared budget for blocking hops off the async runtime (store ops, plugin IPC,
 /// file IO). A timeout releases the caller; running blocking work can't be cancelled.
@@ -88,6 +90,18 @@ where
     F: FnOnce() -> Result<T, String> + Send + 'static,
 {
     run_typed_store_op(operation).await
+}
+
+pub(crate) async fn flush_stores_on_exit(app: AppHandle) -> Result<(), String> {
+    let result = run_blocking_store_op(move || {
+        // Close admission under the gate so no later operation can dirty the final snapshot.
+        STORE_OP_CLOSED.store(true, Ordering::Relaxed);
+        app.state::<DurableStoreRegistry>().flush_dirty()
+    })
+    .await;
+    // A stalled worker may retain the gate beyond the exit deadline.
+    STORE_OP_CLOSED.store(true, Ordering::Relaxed);
+    result
 }
 
 pub(crate) async fn run_typed_store_op<T, E, F>(operation: F) -> Result<T, E>
@@ -126,6 +140,9 @@ where
     let guard = tokio::time::timeout_at(deadline, STORE_OP_LOCK.lock())
         .await
         .map_err(|_| PERSISTENCE_TIMEOUT_MESSAGE.to_string())?;
+    if STORE_OP_CLOSED.load(Ordering::Relaxed) {
+        return Err("Application is shutting down.".to_string().into());
+    }
     run_blocking_op(deadline, PERSISTENCE_TIMEOUT_MESSAGE, move || {
         let _guard = guard;
         Ok(operation())

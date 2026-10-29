@@ -41,23 +41,24 @@ export function useSearchPageState() {
 
   // Facets are URL-owned; only typing needs a local draft and debounce.
   const updateSearchParams = useCallback(
-    (update: (params: URLSearchParams) => void) => {
+    (update?: (params: URLSearchParams) => void) => {
       const nextParams = new URLSearchParams(searchParams);
-      update(nextParams);
+      if (!isComposing && !isLinkDraft) {
+        setReflectedQuery(trimmedQuery);
+        if (trimmedQuery) nextParams.set('q', trimmedQuery);
+        else nextParams.delete('q');
+      }
+      update?.(nextParams);
       if (searchParams.toString() !== nextParams.toString()) {
         setSearchParams(nextParams, { replace: true });
       }
     },
-    [searchParams, setSearchParams],
+    [isComposing, isLinkDraft, searchParams, setSearchParams, trimmedQuery],
   );
   const flushQuery = useCallback(() => {
     if (isComposing || isLinkDraft || window.location.pathname !== pathname) return;
-    setReflectedQuery(trimmedQuery);
-    updateSearchParams((params) => {
-      if (trimmedQuery) params.set('q', trimmedQuery);
-      else params.delete('q');
-    });
-  }, [isComposing, isLinkDraft, pathname, trimmedQuery, updateSearchParams]);
+    updateSearchParams();
+  }, [isComposing, isLinkDraft, pathname, updateSearchParams]);
 
   // Remember drafts immediately; commit typing without adding history.
   useEffect(() => {
@@ -78,12 +79,7 @@ export function useSearchPageState() {
   }, [flushQuery, isComposing, isLinkDraft, query, searchParams, trimmedQuery, urlQuery]);
 
   const handleTypeChange = (nextType: SearchMediaType, clearIncompatibleGenre = false) => {
-    if (!isComposing && !isLinkDraft) setReflectedQuery(trimmedQuery);
     updateSearchParams((params) => {
-      if (!isComposing && !isLinkDraft) {
-        if (trimmedQuery) params.set('q', trimmedQuery);
-        else params.delete('q');
-      }
       if (nextType === 'all') params.delete('type');
       else params.set('type', nextType);
       if (clearIncompatibleGenre) params.delete('genre');

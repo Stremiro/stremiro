@@ -427,7 +427,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     moved: boolean;
     videoClick: boolean;
   } | null>(null);
-  const reportFrameRef = useRef<number | null>(null);
   const snapFrameRef = useRef<number | null>(null);
   // External store, not state — per-pointermove publishes reach only the tick leaves.
   const [seekPreviewStore] = useState(() => createSubscribableStore<number | null>(null));
@@ -473,14 +472,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     rectOpsRef.current = { reportVideoRect, onVideoRectChange, hasVideo };
   });
 
-  const scheduleVideoRectReport = useCallback(() => {
-    if (reportFrameRef.current !== null) return;
-    reportFrameRef.current = window.requestAnimationFrame(() => {
-      reportFrameRef.current = null;
-      void reportVideoRect();
-    });
-  }, [reportVideoRect]);
-
   const cancelSnap = useCallback(() => {
     motionGenerationRef.current += 1;
     clearTimer(settleTimerRef);
@@ -507,7 +498,6 @@ export const MiniPlayer = memo(function MiniPlayer({
         generation === motionGenerationRef.current;
       const attempt = async (retryDelay: number) => {
         if (!isCurrent()) return;
-        cancelFrame(reportFrameRef);
         const holeReady = await Promise.resolve(rectOpsRef.current.reportVideoRect()).catch(
           () => false,
         );
@@ -527,7 +517,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     [mountedRef],
   );
 
-  // Drop the motion cover only after the last margin IPC lands — earlier reveals the surface mid-chase.
+  // Keep the motion cover until the final rectangle is verified.
   const startSurfaceSettle = useCallback(() => {
     if (!rectOpsRef.current.hasVideo) return;
     setIsSettling(true);
@@ -571,14 +561,13 @@ export const MiniPlayer = memo(function MiniPlayer({
     flashKindRef.current = null;
   }, [isPlaying]);
 
-  // Eased glide to a snap anchor — each frame re-reports the rect so mpv tracks the motion; reduced-motion skips it (CSS can't reach rAF).
+  // Only the covered frame moves; the native surface lands once the glide ends.
   const animateTo = useCallback(
     (target: MiniPlayerPosition) => {
       cancelSnap();
       const start = positionRef.current;
       if (prefersReducedMotion()) {
         const landed = applyPosition(target);
-        void reportVideoRect();
         endMotion();
         onPositionChange(landed);
         return;
@@ -591,7 +580,6 @@ export const MiniPlayer = memo(function MiniPlayer({
           x: start.x + (target.x - start.x) * eased,
           y: start.y + (target.y - start.y) * eased,
         });
-        scheduleVideoRectReport();
         if (t < 1) {
           snapFrameRef.current = window.requestAnimationFrame(step);
         } else {
@@ -602,22 +590,14 @@ export const MiniPlayer = memo(function MiniPlayer({
       };
       snapFrameRef.current = window.requestAnimationFrame(step);
     },
-    [
-      applyPosition,
-      cancelSnap,
-      endMotion,
-      onPositionChange,
-      reportVideoRect,
-      scheduleVideoRectReport,
-    ],
+    [applyPosition, cancelSnap, endMotion, onPositionChange],
   );
 
   // The dock flight owns geometry until landing.
   useEffect(() => {
     if (isDocking) return;
     onPositionChange(applyPosition(positionRef.current));
-    void reportVideoRect();
-  }, [applyPosition, reportVideoRect, isDocking, onPositionChange]);
+  }, [applyPosition, isDocking, onPositionChange]);
 
   // Dock entrance: a WAAPI flight scales the frame from the expanded rect — no per-frame rect reports or margin
   // IPC. The motion cover hides the interior until the landing hole is verified.
@@ -671,7 +651,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     }
   }, [exiting, isDocking]);
 
-  // A live surface or resize starts a margin chase — cover until margins settle; the dock FLIP holds its own
+  // A live surface or resize keeps its cover until landing; the dock FLIP holds its own
   // cover and the exiting instance never veils.
   useEffect(() => {
     if (!hasVideo) clearTimer(settleTimerRef);
@@ -687,21 +667,23 @@ export const MiniPlayer = memo(function MiniPlayer({
     const handleResize = () => {
       // Stop old-geometry frames before the new metrics clamp/report.
       cancelSnap();
-      cancelFrame(reportFrameRef);
-      if (!dragStateRef.current) setIsMoving(false);
+      void rectOpsRef.current.onVideoRectChange(null);
+      if (dragStateRef.current?.moved) {
+        setIsSettling(rectOpsRef.current.hasVideo);
+      } else {
+        endMotion();
+      }
       setSnapTargetIndex(null);
       setIsDocking(false);
       setMetrics(computeMiniMetrics());
-      startSurfaceSettle();
     };
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [cancelSnap, startSurfaceSettle]);
+  }, [cancelSnap, endMotion]);
 
   // Unmount-only teardown — a rebuilt `onVideoRectChange` mid-life would kill an in-flight snap.
   useEffect(() => {
     return () => {
-      cancelFrame(reportFrameRef);
       cancelSnap();
       clearTimer(flashTimerRef);
       void rectOpsRef.current.onVideoRectChange(null);
@@ -755,12 +737,15 @@ export const MiniPlayer = memo(function MiniPlayer({
     const deltaY = event.clientY - drag.startY;
     if (!drag.moved && Math.hypot(deltaX, deltaY) < DRAG_CLICK_TOLERANCE_PX) return;
 
-    drag.moved = true;
-    setIsMoving(true);
+    if (!drag.moved) {
+      drag.moved = true;
+      cancelSnap();
+      void rectOpsRef.current.onVideoRectChange(null);
+      setIsMoving(true);
+    }
     setSnapTargetIndex(
       findSnapAnchorIndex(applyPosition({ x: drag.originX + deltaX, y: drag.originY + deltaY })),
     );
-    scheduleVideoRectReport();
   };
 
   // Ends the drag this pointer owns; null when it isn't the tracked pointer.
@@ -779,8 +764,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     (event: React.PointerEvent<HTMLDivElement>) => {
       const drag = releaseDrag(event);
       if (!drag) return;
-      void reportVideoRect();
-
       const position = positionRef.current;
       if (drag.moved) {
         // Magnetic corner snap: release near a corner and the frame glides in.
@@ -817,7 +800,6 @@ export const MiniPlayer = memo(function MiniPlayer({
       onPositionChange,
       onTogglePlay,
       releaseDrag,
-      reportVideoRect,
       startSurfaceSettle,
       triggerPlaybackFlash,
     ],
@@ -827,8 +809,6 @@ export const MiniPlayer = memo(function MiniPlayer({
     const drag = releaseDrag(event);
     if (!drag) return;
     if (drag.moved) {
-      // A cancelled drag still owns its end position: flush the rect report and persist so a remount lands there.
-      void reportVideoRect();
       endMotion();
       onPositionChange(positionRef.current);
     } else {
@@ -955,12 +935,14 @@ export const MiniPlayer = memo(function MiniPlayer({
           style={{ height: metrics.videoHeight }}
         >
           {/* eslint-enable jsx-a11y/no-noninteractive-tabindex */}
-          {/* Motion cover: mpv margins chase the DOM rect over async IPC — an opaque poster hides the surface mid-move. */}
+          {/* Keep the cover opaque until the final native rectangle is verified. */}
           <div
             aria-hidden='true'
             className={cn(
-              'pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[11px] bg-[#0a0a0e] transition-opacity duration-150',
-              isMoving || isSettling || isDocking ? 'opacity-100' : 'opacity-0',
+              'pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[11px] bg-[#0a0a0e] transition-opacity',
+              isMoving || isSettling || isDocking
+                ? 'opacity-100 duration-0'
+                : 'opacity-0 duration-150',
             )}
           >
             {backdrop && (

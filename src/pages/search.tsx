@@ -1279,7 +1279,7 @@ export function Search() {
             onClearSearch={handleClearSearch}
             refetch={refetch}
             results={results}
-            resultSetKey={firstPage ? getResultPageId(firstPage) : 0}
+            resultSetKey={firstPage ? getResultPageId(firstPage.items) : 0}
             partial={partial}
             showSkeleton={showSkeleton}
             trimmedDebouncedQuery={trimmedDebouncedQuery}

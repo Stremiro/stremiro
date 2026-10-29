@@ -307,8 +307,10 @@ fn similar_titles_media_type(source: &MediaItem, source_genres: &BTreeSet<String
 }
 
 fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<String> {
+    let anime = similar_titles_media_type(source, &lower_genres(source)) == "anime";
     let supported: HashMap<String, &str> = supported
         .iter()
+        .filter(|genre| !anime || !js_trim(genre).eq_ignore_ascii_case("animation"))
         .map(|genre| (js_trim(genre).to_lowercase(), js_trim(genre)))
         .collect();
     let mut seeds: Vec<String> = Vec::with_capacity(MAX_SEED_GENRES);
@@ -323,7 +325,7 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     // specific ones first (stable sort keeps the source order otherwise).
     seeds.sort_by_key(|genre| matches!(genre.to_lowercase().as_str(), "drama" | "comedy"));
     seeds.truncate(MAX_SEED_GENRES);
-    if seeds.is_empty() && similar_titles_media_type(source, &lower_genres(source)) == "anime" {
+    if seeds.is_empty() && anime {
         // Animation is implied by the anime route and hidden from its browse menu.
         seeds.push("Animation".to_string());
     }
@@ -420,7 +422,12 @@ pub async fn query_similar_titles(
     let media_type = similar_titles_media_type(&source, &lower_genres(&source));
     let addons = load_enabled_addons_snapshot(&app).await?;
     let browse_genres = build_browse_genres(&addons);
-    let seed_genres = similar_titles_seed_genres(&source, browse_genres.for_media_type(media_type));
+    let supported = if media_type == "movie" {
+        &browse_genres.movie
+    } else {
+        &browse_genres.series
+    };
+    let seed_genres = similar_titles_seed_genres(&source, supported);
     if seed_genres.is_empty() {
         return Ok(Vec::new());
     }
@@ -930,7 +937,7 @@ mod tests {
     #[test]
     fn anime_seeds_fall_back_to_animation_only_when_specific_seeds_are_missing() {
         let genres = build_browse_genres(&[]);
-        let supported = genres.for_media_type("anime");
+        let supported = genres.anime.as_slice();
         assert!(!supported.iter().any(|genre| genre == "Animation"));
         for source_genres in [
             vec!["Animation"],

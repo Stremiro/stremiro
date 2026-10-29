@@ -298,6 +298,7 @@ const UPDATE_RECHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 function AppUpdateManager() {
   const queryClient = useQueryClient();
+  const hasPlayerSession = usePlayerSession().session !== null;
   const { isSupported, isInstalling, getUpdateState } = useAppUpdater();
   const { preferences: automaticUpdateChecks, isHydrating } = useAppUiPreferences(
     (preferences) => preferences.automaticUpdateChecks,
@@ -306,6 +307,13 @@ function AppUpdateManager() {
   const startupReadyAtRef = useRef<number | null>(null);
   const retryOnReconnectRef = useRef(false);
   const announcedVersionRef = useRef<string | null>(null);
+  const isDeferred = useEffectEvent(
+    () =>
+      document.hidden ||
+      hasPlayerSession ||
+      window.location.pathname.startsWith('/player') ||
+      !navigator.onLine,
+  );
 
   useEffect(() => {
     if (
@@ -323,9 +331,6 @@ function AppUpdateManager() {
     if (startupReadyAtRef.current === null) {
       startupReadyAtRef.current = Date.now() + UPDATE_STARTUP_DELAY_MS;
     }
-    const isDeferred = () =>
-      document.hidden || window.location.pathname.startsWith('/player') || !navigator.onLine;
-
     const maybeCheck = (event?: Event) => {
       const state = getUpdateState();
       if (event?.type === 'online' && state.retryOnReconnect) {
@@ -376,7 +381,7 @@ function AppUpdateManager() {
         });
     };
     // One wake per due check instead of a polling tick; deferred checks resume on visibility, focus, online or
-    // route change.
+    // route change or session close.
     const armDueTimer = () => {
       window.clearTimeout(dueTimer);
       const { lastCheckedAt } = getUpdateState();
@@ -405,6 +410,7 @@ function AppUpdateManager() {
     automaticUpdateChecks,
     isInstalling,
     pathname,
+    hasPlayerSession,
     queryClient,
     getUpdateState,
   ]);

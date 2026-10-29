@@ -1,8 +1,7 @@
 use super::{
-    apply_browse_filters, browse_genres, browse_year_catalog, catalog_browse_extras,
-    catalog_fetch_genres, normalize_genres, rank_search_results,
-    retain_search_items_matching_genres, should_continue_browse_fetch, SearchFeed, SearchMediaType,
-    SearchYearRange, CINEMETA_ANIME_GENRE,
+    apply_browse_filters, browse_year_catalog, catalog_browse_extras, catalog_fetch_genres,
+    normalize_genres, rank_search_results, retain_search_items_matching_genres, SearchFeed,
+    SearchMediaType, SearchYearRange, CINEMETA_ANIME_GENRE,
 };
 use crate::commands::media_normalization::normalize_media_item;
 use crate::providers::MediaItem;
@@ -294,6 +293,40 @@ fn browse_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
 }
 
 #[test]
+fn all_browse_overlapping_filtered_items_keep_both_cursors_until_replayed() {
+    let mut continuation = super::SearchCatalogContinuation {
+        all_cursors: Some(super::AllBrowseCursors {
+            movie: Some(0),
+            series: Some(0),
+        }),
+        ..Default::default()
+    };
+    for skip in [50, 100] {
+        let branch = |index| {
+            Some(Ok((
+                super::CatalogFetchPage {
+                    items: vec![],
+                    next_skip: Some(skip),
+                },
+                search_claims(&[("movie:shared", Some(index))]),
+            )))
+        };
+        let page = super::merge_all_browse_pages(continuation, branch(0), branch(1)).unwrap();
+        let expected = (skip == 50).then_some(skip);
+        assert_eq!(
+            page.continuation.all_cursors,
+            Some(super::AllBrowseCursors {
+                movie: expected,
+                series: expected,
+            })
+        );
+        assert_eq!(page.exhausted, skip != 50);
+        assert!(page.items.is_empty());
+        continuation = page.continuation;
+    }
+}
+
+#[test]
 fn browse_filtered_titles_advance_once_and_branches_stop_independently() {
     let claims = || search_claims(&[("movie:old", Some(0))]);
     let first = super::finish_catalog_page(
@@ -406,13 +439,19 @@ fn search_cursor(key: &str, skip: u32, retry: bool) -> super::SearchSourceCursor
         key: key.into(),
         skip,
         retry,
+        page_hash: None,
     }
 }
 
 fn search_claims(claims: &[(&str, Option<usize>)]) -> super::SearchCursorClaims {
     claims
         .iter()
-        .map(|(key, claimant)| ((*key).to_string(), *claimant))
+        .map(|(key, claimant)| {
+            (
+                (*key).to_string(),
+                claimant.map_or(0, |index| 1_u64 << index),
+            )
+        })
         .collect()
 }
 
@@ -610,7 +649,7 @@ fn ids(items: &[MediaItem]) -> Vec<&str> {
 }
 
 #[test]
-fn cached_empty_titles_are_filtered_only_after_duplicate_selection() {
+fn empty_primary_titles_do_not_hide_titled_fallbacks() {
     let empty = build_item("tt1", "\u{feff}\0", Some("2024"));
     let fallback = build_item("tt1", "Fallback", Some("2024"));
     let visible = build_item("tt2", "Visible", Some("2024"));
@@ -626,7 +665,7 @@ fn cached_empty_titles_are_filtered_only_after_duplicate_selection() {
     .unwrap();
     assert_eq!(
         ids(&super::retain_titled_catalog_items(merged.items)),
-        ["tt2"]
+        ["tt1", "tt2"]
     );
 }
 
@@ -892,6 +931,170 @@ fn normalize_genres_owns_unicode_bound_deduplication_and_count_limit() {
 }
 
 #[tokio::test]
+async fn browse_returns_matches_promptly_and_stops_replayed_empty_pages() {
+    use crate::test_helpers::{test_addon, TestHttpServer};
+
+    let first = r#"{"metas":[{"id":"a","name":"A","type":"movie","genres":["Drama"]}]}"#;
+    let second = r#"{"metas":[{"id":"b","name":"B","type":"movie","genres":["Drama"]}]}"#;
+    for filtered in [false, true] {
+        let server = TestHttpServer::new(
+            [
+                first, second, second, second, second, second, second, second,
+            ]
+            .into_iter()
+            .map(|body| (200, body, None))
+            .collect(),
+        );
+        let snapshot = [super::AddonConfig {
+            url: server.url.clone(),
+            ..test_addon("catalog", "Catalog")
+        }];
+        let criteria = super::build_search_criteria(
+            serde_json::from_value(serde_json::json!({
+                "mediaType": "movie",
+                "genres": if filtered { vec!["Action"] } else { vec![] },
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let (page, claims) = super::fetch_browse_page(
+            &snapshot,
+            &super::AddonResourceClient::new(),
+            &criteria,
+            SearchMediaType::Movie,
+            0,
+        )
+        .await
+        .unwrap();
+        let requests = server.finish();
+        assert_eq!(requests.len(), if filtered { 3 } else { 1 }, "{requests:?}");
+        assert_eq!(claims.len(), if filtered { 2 } else { 1 });
+        assert_eq!(ids(&page.items), if filtered { vec![] } else { vec!["a"] });
+        assert_eq!(page.next_skip, if filtered { None } else { Some(1) });
+    }
+}
+
+#[tokio::test]
+async fn anime_browse_filters_animation_pages_and_preserves_continuation() {
+    use crate::providers::addon_manifest::parse_addon_manifest;
+    use crate::test_helpers::{test_addon, TestHttpServer};
+
+    let server = TestHttpServer::new(vec![
+        (
+            200,
+            r#"{"metas":[
+            {"id":"action","name":"Action","type":"series","year":"2026","genres":["Animation","Action"]},
+            {"id":"comedy","name":"Comedy","type":"series","year":"2026","genres":["Animation","Comedy"]},
+            {"id":"older","name":"Older","type":"series","year":"2025","genres":["Animation","Action"]},
+            {"id":"live","name":"Live","type":"series","year":"2026","genres":["Action"]}
+        ]}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"metas":[
+            {"id":"next","name":"Next","type":"series","year":"2026","genres":["Animation","Action"]}
+        ]}"#,
+            None,
+        ),
+    ]);
+    let snapshot = [super::AddonConfig {
+        url: server.url.clone(),
+        capabilities: Some(parse_addon_manifest(br#"{
+            "name":"Catalog","catalogs":[{"type":"series","id":"top","extra":[{"name":"genre"},{"name":"skip"}]}]
+        }"#).unwrap()),
+        ..test_addon("catalog", "Catalog")
+    }];
+    let criteria = super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({
+            "mediaType":"anime", "genres":["Action"], "yearFrom":2026, "yearTo":2026
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let client = super::AddonResourceClient::new();
+    let (first, _) =
+        super::fetch_browse_page(&snapshot, &client, &criteria, SearchMediaType::Anime, 0)
+            .await
+            .unwrap();
+    assert_eq!(ids(&first.items), ["action"]);
+    assert_eq!(first.next_skip, Some(4));
+    let comedy_criteria = super::SearchCatalogCriteria {
+        genres: vec!["Comedy".to_string()],
+        ..super::build_search_criteria(
+            serde_json::from_value(serde_json::json!({"mediaType":"anime"})).unwrap(),
+        )
+        .unwrap()
+    };
+    let (comedy, _) = super::fetch_browse_page(
+        &snapshot,
+        &client,
+        &comedy_criteria,
+        SearchMediaType::Anime,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&comedy.items), ["comedy"]);
+    let (second, _) = super::fetch_browse_page(
+        &snapshot,
+        &client,
+        &criteria,
+        SearchMediaType::Anime,
+        first.next_skip.unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(ids(&second.items), ["next"]);
+    assert_eq!(second.next_skip, Some(5));
+    assert_eq!(
+        server.finish(),
+        [
+            "/catalog/series/top/genre=Animation.json",
+            "/catalog/series/top/genre=Animation&skip=4.json",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn empty_filtered_browse_keeps_a_bounded_resumable_cursor() {
+    use crate::test_helpers::{test_addon, TestHttpServer};
+
+    let server = TestHttpServer::new(
+        (0..8)
+            .map(|index| {
+                let body = format!(
+                    r#"{{"metas":[{{"id":"{index}","name":"Filtered","type":"movie","genres":["Drama"]}}]}}"#
+                );
+                (200, Box::leak(body.into_boxed_str()) as &str, None)
+            })
+            .collect(),
+    );
+    let criteria = super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({"mediaType":"movie","genres":["Action"]}))
+            .unwrap(),
+    )
+    .unwrap();
+    let snapshot = [super::AddonConfig {
+        url: server.url.clone(),
+        ..test_addon("catalog", "Catalog")
+    }];
+    let (page, claims) = super::fetch_browse_page(
+        &snapshot,
+        &super::AddonResourceClient::new(),
+        &criteria,
+        SearchMediaType::Movie,
+        0,
+    )
+    .await
+    .unwrap();
+    assert!(page.items.is_empty());
+    assert_eq!(claims.len(), 8);
+    assert_eq!(page.next_skip, Some(8));
+    assert_eq!(server.finish().len(), 8);
+}
+
+#[tokio::test]
 async fn browse_trusts_only_declared_provider_genres_and_enforces_other_filters() {
     use crate::providers::{
         addon_manifest::parse_addon_manifest, addon_resource::AddonResourceClient,
@@ -926,7 +1129,8 @@ async fn browse_trusts_only_declared_provider_genres_and_enforces_other_filters(
             SearchMediaType::Movie,
             "top",
             &[Some("Action")],
-            0,
+            &[0],
+            None,
         )
         .await
         .pop()
@@ -952,7 +1156,8 @@ async fn browse_trusts_only_declared_provider_genres_and_enforces_other_filters(
         assert_eq!(
             ids(&retain_search_items_matching_genres(
                 page.items.clone(),
-                &genres
+                &genres,
+                Some(SearchMediaType::Movie),
             )),
             ["both", "unknown"],
         );
@@ -1118,7 +1323,7 @@ fn genre_and_year_filters_preserve_browse_and_search_contracts() {
     ] {
         let genres: Vec<_> = genres.iter().map(|genre| genre.to_string()).collect();
         let kept = if search {
-            retain_search_items_matching_genres(items, &browse_genres(media_type, &genres))
+            retain_search_items_matching_genres(items, &genres, Some(media_type))
         } else {
             apply_browse_filters(items, media_type, &genres, range)
         };
@@ -1127,24 +1332,28 @@ fn genre_and_year_filters_preserve_browse_and_search_contracts() {
 }
 
 #[test]
-fn browse_genres_injects_cinemeta_animation_for_anime() {
-    assert_eq!(
-        browse_genres(SearchMediaType::Anime, &[]),
-        vec![CINEMETA_ANIME_GENRE]
-    );
-    assert_eq!(
-        browse_genres(SearchMediaType::Anime, &["Action".to_string()]),
-        vec![CINEMETA_ANIME_GENRE, "Action"]
-    );
-    assert_eq!(
-        browse_genres(SearchMediaType::Anime, &["animation".to_string()]),
-        vec!["animation"]
-    );
-    assert!(browse_genres(SearchMediaType::Series, &[]).is_empty());
-    assert_eq!(
-        browse_genres(SearchMediaType::Movie, &["Action".to_string()]),
-        vec!["Action"]
-    );
+fn anime_search_requires_animation_without_dropping_unlabeled_hits() {
+    for genres in [vec![], vec!["animation".to_string()]] {
+        let items = vec![
+            test_media_item("unknown", "series"),
+            MediaItem {
+                genres: Some(vec!["Animation".into()]),
+                ..test_media_item("anime", "series")
+            },
+            MediaItem {
+                genres: Some(vec!["Drama".into()]),
+                ..test_media_item("live-action", "series")
+            },
+        ];
+        assert_eq!(
+            ids(&retain_search_items_matching_genres(
+                items,
+                &genres,
+                Some(SearchMediaType::Anime)
+            )),
+            ["unknown", "anime"],
+        );
+    }
 }
 
 #[test]
@@ -1177,16 +1386,6 @@ fn catalog_fetch_genres_does_not_union_animation_with_extra_anime_filters() {
         catalog_fetch_genres(SearchMediaType::Movie, &["Action".to_string()]),
         vec!["Action"]
     );
-}
-
-#[test]
-fn should_continue_browse_fetch_fills_sparse_pages_until_bound() {
-    assert!(should_continue_browse_fetch(0, Some(50), 1));
-    // Sparse intersections fill until the page is a usable batch.
-    assert!(should_continue_browse_fetch(3, Some(50), 1));
-    assert!(!should_continue_browse_fetch(24, Some(50), 1));
-    assert!(!should_continue_browse_fetch(0, None, 1));
-    assert!(!should_continue_browse_fetch(0, Some(50), 8));
 }
 
 #[test]

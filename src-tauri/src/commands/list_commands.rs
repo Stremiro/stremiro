@@ -9,7 +9,7 @@ use super::store_helpers::{merge_library_item, normalize_library_item};
 use super::{normalize_media_id, run_typed_store_op, with_store, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle};
 
 fn require_list_id(list_id: &str) -> Result<String, String> {
@@ -167,10 +167,10 @@ fn add_list_items(
     if items.is_empty() {
         return Ok(0);
     }
-    let mut known: HashSet<&str> = list.item_ids.iter().map(String::as_str).collect();
+    let known: HashSet<&str> = list.item_ids.iter().map(String::as_str).collect();
     let new_ids: Vec<String> = items
         .iter()
-        .filter(|item| known.insert(&item.id))
+        .filter(|item| !known.contains(item.id.as_str()))
         .map(|item| item.id.clone())
         .collect();
     if !new_ids.is_empty() && list.item_ids.len() + new_ids.len() > MAX_LIST_ITEMS {
@@ -182,26 +182,14 @@ fn add_list_items(
     drop(known);
     let added = new_ids.len();
     list.item_ids.extend(new_ids);
-    // Stage merges before any store mutation. Duplicate ids merge in payload
-    // order and cost only one store read and one final write.
-    let mut prepared = HashMap::<String, MediaItem>::with_capacity(items.len());
+    // Library resolution already supplies unique, validated items.
     for item in items {
-        match prepared.entry(item.id.clone()) {
-            Entry::Occupied(mut entry) => {
-                let existing = entry.get_mut();
-                *existing = merge_library_item(Some(existing), item);
-            }
-            Entry::Vacant(entry) => {
-                let existing = store
-                    .get_typed(list_item_store_key(list_id, entry.key()))
-                    .and_then(normalize_library_item)
-                    .filter(|existing| existing.id == *entry.key());
-                entry.insert(merge_library_item(existing.as_ref(), item));
-            }
-        }
-    }
-    for (id, item) in prepared {
-        store.set(list_item_store_key(list_id, &id), json!(item));
+        let existing = store
+            .get_typed(list_item_store_key(list_id, &item.id))
+            .and_then(normalize_library_item)
+            .filter(|existing| existing.id == item.id);
+        let item = merge_library_item(existing.as_ref(), item);
+        store.set(list_item_store_key(list_id, &item.id), json!(item));
     }
     store.set(list_meta_key(list_id), json!(list));
     store.save()?;
@@ -652,7 +640,9 @@ pub async fn reorder_lists(app: AppHandle, list_ids: Vec<String>) -> Result<(), 
 
 #[cfg(test)]
 mod tests {
-    use super::super::store_helpers::normalize_library_items;
+    use super::super::library_commands::resolve_library_items;
+    use super::super::store_helpers::library_item_key;
+    use super::super::LIBRARY_INDEX_KEY;
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
 
@@ -912,16 +902,22 @@ mod tests {
             .store
             .set(list_item_store_key("list_a", "a"), json!(existing));
         seed_list(&fixture.store, vec!["a".into()]);
-        let mut first_b = test_media_item("b", "movie");
-        first_b.description = Some("Keep this description".into());
-        let mut last_b = test_media_item(" b ", "movie");
-        last_b.title = "Last title".into();
-        let items = normalize_library_items(vec![
+        let library = test_store();
+        let mut b = test_media_item("b", "movie");
+        b.description = Some("Keep this description".into());
+        b.title = "New title".into();
+        library.store.set(LIBRARY_INDEX_KEY, json!(["a", "b", "c"]));
+        for item in [
             test_media_item("a", "movie"),
-            first_b,
+            b,
             test_media_item("c", "series"),
-            last_b,
-        ])
+        ] {
+            library.store.set(library_item_key(&item.id), json!(item));
+        }
+        let items = resolve_library_items(
+            &library.store,
+            ["a", " b ", "c", "b"].map(str::to_string).to_vec(),
+        )
         .unwrap();
         assert_eq!(add_list_items(&fixture.store, "list_a", items).unwrap(), 2);
         assert_eq!(
@@ -937,7 +933,7 @@ mod tests {
             .store
             .get_typed::<MediaItem>(list_item_store_key("list_a", "b"))
             .unwrap();
-        assert_eq!(b.title, "Last title");
+        assert_eq!(b.title, "New title");
         assert_eq!(b.description.as_deref(), Some("Keep this description"));
         assert_eq!(fixture.store.save_count(), 2);
         let reopened = super::super::DurableStoreRegistry::default()
@@ -959,11 +955,10 @@ mod tests {
                 .collect(),
         );
         let before = std::fs::read(&fixture.path).unwrap();
-        let items = normalize_library_items(vec![
+        let items = vec![
             test_media_item("id0", "movie"),
             test_media_item("new", "movie"),
-        ])
-        .unwrap();
+        ];
         let error = add_list_items(&fixture.store, "list_a", items).unwrap_err();
         assert_eq!(error.kind, ListErrorKind::ListFull);
         assert_eq!(error.message, "A custom list cannot exceed 2000 items");
@@ -977,37 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn bulk_list_duplicate_ids_do_not_double_count_capacity() {
-        let fixture = test_store();
-        seed_list(
-            &fixture.store,
-            (0..MAX_LIST_ITEMS - 1)
-                .map(|index| format!("id{index}"))
-                .collect(),
-        );
-        let items = normalize_library_items(vec![
-            test_media_item("new", "movie"),
-            test_media_item(" new ", "movie"),
-        ])
-        .unwrap();
-        assert_eq!(add_list_items(&fixture.store, "list_a", items).unwrap(), 1);
-        assert_eq!(
-            load_list(&fixture.store, "list_a").unwrap().item_ids.len(),
-            MAX_LIST_ITEMS
-        );
-    }
-
-    #[test]
-    fn bulk_list_invalid_item_and_missing_list_fail_without_mutations() {
+    fn bulk_list_missing_and_smart_lists_fail_without_mutations() {
         let fixture = test_store();
         seed_list(&fixture.store, Vec::new());
-        let result = normalize_library_items(vec![
-            test_media_item("a", "movie"),
-            test_media_item("", "movie"),
-        ])
-        .map_err(ListError::from)
-        .and_then(|items| add_list_items(&fixture.store, "list_a", items));
-        assert!(result.is_err());
         assert!(normalize_list_id("invalid:list").is_none());
         assert_eq!(
             add_list_items(&fixture.store, "list_a", Vec::new()).unwrap(),

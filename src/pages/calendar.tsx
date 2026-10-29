@@ -175,7 +175,9 @@ export function Calendar() {
       });
     },
     placeholderData: (previous, previousQuery) =>
-      previousQuery?.queryKey[3] === range.upcomingStart && previous
+      previousQuery?.queryKey[3] === range.upcomingStart &&
+      previousQuery.queryKey[4] === range.hideWatched &&
+      previous
         ? { ...previous, days: [] }
         : undefined,
     staleTime: CALENDAR_EVENTS_STALE_TIME_MS,

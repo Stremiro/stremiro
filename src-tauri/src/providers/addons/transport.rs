@@ -473,19 +473,12 @@ impl AddonTransport {
         .map_err(|_| FetchFailure::Fatal("Stream response processing task failed.".to_string()))?
     }
 
-    fn hydrate_streams(streams: &mut [AddonStream]) {
+    pub(super) fn hydrate_streams(streams: &mut [AddonStream]) {
         // One scratch buffer for the name+title probe text across all streams.
         let mut combined = String::new();
         for stream in streams {
             Self::hydrate_stream_inner(stream, &mut combined);
         }
-    }
-
-    /// Single-stream wrapper for tests; the batch path uses `hydrate_streams`.
-    #[cfg(test)]
-    pub(super) fn hydrate_stream(stream: &mut AddonStream) {
-        let mut combined = String::new();
-        Self::hydrate_stream_inner(stream, &mut combined);
     }
 
     fn hydrate_stream_inner(stream: &mut AddonStream, combined: &mut String) {

@@ -616,21 +616,21 @@ fn stream_fixture(name: Option<&str>, url: Option<&str>) -> AddonStream {
 #[test]
 fn direct_http_url_is_not_labeled_cached() {
     let mut stream = stream_fixture(None, Some("https://example.com/file.mp4"));
-    AddonTransport::hydrate_stream(&mut stream);
+    AddonTransport::hydrate_streams(std::slice::from_mut(&mut stream));
     assert!(!stream.cached);
 }
 
 #[test]
 fn lightning_hint_marks_cached_and_download_arrow_opts_out() {
     let mut cached = stream_fixture(Some("Release \u{26A1}"), None);
-    AddonTransport::hydrate_stream(&mut cached);
+    AddonTransport::hydrate_streams(std::slice::from_mut(&mut cached));
     assert!(cached.cached);
 
     let mut plain = stream_fixture(
         Some("Release \u{2B07}"),
         Some("https://example.com/file.mp4"),
     );
-    AddonTransport::hydrate_stream(&mut plain);
+    AddonTransport::hydrate_streams(std::slice::from_mut(&mut plain));
     assert!(!plain.cached);
 }
 
@@ -649,7 +649,7 @@ fn hydration_parses_grouped_seeders_without_truncating_decimals() {
         ("👤 1.2345", None),
     ] {
         let mut stream = named_stream(text);
-        AddonTransport::hydrate_stream(&mut stream);
+        AddonTransport::hydrate_streams(std::slice::from_mut(&mut stream));
         assert_eq!(stream.seeders, expected, "{text}");
     }
 }
@@ -713,7 +713,7 @@ fn hydration_parses_emoji_binary_sizes_in_every_supported_unit() {
         stream.behavior_hints = video_size.map(|size| {
             serde_json::from_value(serde_json::json!({"videoSize": size})).expect("tolerant hints")
         });
-        AddonTransport::hydrate_stream(&mut stream);
+        AddonTransport::hydrate_streams(std::slice::from_mut(&mut stream));
         assert_eq!(stream.size_bytes, expected, "{text}");
     }
 }

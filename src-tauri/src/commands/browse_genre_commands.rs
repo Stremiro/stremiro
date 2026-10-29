@@ -28,8 +28,7 @@ const MOVIE_GENRE_FALLBACK: [&str; 19] = [
     "Western",
 ];
 const SERIES_ONLY_GENRES: [&str; 3] = ["Game-Show", "Reality-TV", "Talk-Show"];
-/// Anime browses Cinemeta series filtered by this genre, so it is implied by
-/// the anime tab and never offered as a menu entry there.
+/// Animation is implied by the anime tab rather than offered as a genre.
 const ANIME_CATEGORY_GENRE: &str = "animation";
 
 /// Genre menu entries per browse tab, in manifest-declared order.
@@ -92,13 +91,13 @@ pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
     let movie = collect_catalog_genres(addons, "movie");
     let series = collect_catalog_genres(addons, "series");
     let mut seen = HashSet::new();
-    let all = movie
+    let all: Vec<_> = movie
         .iter()
         .chain(&series)
         .filter(|genre| seen.insert(genre.to_ascii_lowercase()))
         .cloned()
         .collect();
-    let anime = series
+    let anime = all
         .iter()
         .filter(|genre| !genre.eq_ignore_ascii_case(ANIME_CATEGORY_GENRE))
         .cloned()
@@ -108,17 +107,6 @@ pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
         movie,
         series,
         anime,
-    }
-}
-
-impl BrowseGenres {
-    /// Options for one browse tab (`movie`, `series`, or `anime`).
-    pub(crate) fn for_media_type(&self, media_type: &str) -> &[String] {
-        match media_type {
-            "movie" => &self.movie,
-            "anime" => &self.anime,
-            _ => &self.series,
-        }
     }
 }
 
@@ -173,7 +161,7 @@ mod tests {
         assert_eq!(genres.movie, ["Drama", "Comedy", "Horror"]);
         assert_eq!(genres.series, ["Animation", "Drama"]);
         assert_eq!(genres.all, ["Drama", "Comedy", "Horror", "Animation"]);
-        assert_eq!(genres.anime, ["Drama"]);
+        assert_eq!(genres.anime, ["Drama", "Comedy", "Horror"]);
     }
 
     #[test]

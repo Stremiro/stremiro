@@ -102,7 +102,7 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
     stalled.set_nonblocking(true).unwrap();
     let stalled_url = format!("http://{}", stalled.local_addr().unwrap());
     {
-        let pending = run_catalog_work_pool(&client, work(&vec![stalled_url; 4]), 3);
+        let pending = run_catalog_work_pool(&client, work(&vec![stalled_url; 4]), 3, None);
         tokio::pin!(pending);
         let observe = async {
             let mut connections = Vec::new();
@@ -137,7 +137,7 @@ async fn catalog_pool_bounds_all_groups_and_restores_source_order() {
     .map(|body| TestHttpServer::new(vec![(200, body, None); 3]))
     .collect();
     let urls: Vec<_> = servers.iter().map(|server| server.url.clone()).collect();
-    let groups = run_catalog_work_pool(&client, work(&urls), 3).await;
+    let groups = run_catalog_work_pool(&client, work(&urls), 3, None).await;
     for (group, bucket) in groups.into_iter().enumerate() {
         assert_eq!(bucket.len(), 4 - group);
         for (expected_order, (order, page)) in bucket.into_iter().enumerate() {
@@ -207,6 +207,7 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
                             key: "primary".into(),
                             skip: 50,
                             retry: false,
+                            page_hash: None,
                         },
                         supports_skip: true,
                     },
@@ -215,6 +216,7 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
                             key: "straggler".into(),
                             skip: 50,
                             retry: false,
+                            page_hash: None,
                         },
                         supports_skip: true,
                     },
@@ -300,7 +302,7 @@ fn query_extras_include_skip_only_on_later_pages() {
 }
 
 #[test]
-fn search_merges_addon_duplicates_by_identity_without_merging_titles_or_types() {
+fn search_merge_preserves_candidates_and_independent_offsets() {
     let primary = classified_cinemeta_addon();
     let mut secondary = primary.clone();
     secondary.id = "secondary".into();
@@ -349,12 +351,12 @@ fn search_merges_addon_duplicates_by_identity_without_merging_titles_or_types() 
             .collect::<Vec<_>>(),
         [
             ("tt1", "movie", "Primary title"),
+            (" TT1 ", "MOVIE", "Duplicate in primary"),
+            ("TT1", "movie", "Secondary title"),
             ("tt1", "series", "Primary title"),
             ("tt2", "movie", "Primary title"),
         ]
     );
-    assert_eq!(page.claims.len(), 3);
-    assert_eq!(page.claims["movie:tt1"], Some(0));
     assert_eq!(
         page.cursors
             .iter()
@@ -425,7 +427,6 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
             .collect::<Vec<_>>(),
         [2, 4]
     );
-    assert_eq!(page.claims.get("movie:single"), Some(&None));
     assert!(!page.partial);
     let mut added = addon.clone();
     added.url = "https://new.example/manifest.json".into();
@@ -462,7 +463,6 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
     .unwrap();
     assert_eq!(page.cursors.len(), 1);
     assert_eq!(page.cursors[0].skip, 7);
-    assert_eq!(page.claims.get("movie:next"), Some(&Some(0)));
     let (work, sources) =
         select_search_catalog_work(&snapshot, "dune", &["movie"], &[None], Some(&page.cursors));
     assert_eq!(work.len(), 1);
@@ -476,6 +476,167 @@ fn search_sources_advance_independently_and_drop_exhausted_sources() {
     .unwrap()
     .cursors
     .is_empty());
+}
+
+#[test]
+fn overlapping_search_sources_keep_their_later_unique_titles() {
+    use crate::commands::search_commands::{finish_catalog_page, SearchCatalogContinuation};
+
+    for primary_pages in [false, true] {
+        let sources = |cursors: Option<Vec<SearchSourceCursor>>| {
+            vec![cursors
+                .unwrap_or_else(|| {
+                    vec![
+                        SearchSourceCursor {
+                            key: "0123456789abcdef".into(),
+                            skip: 0,
+                            retry: false,
+                            page_hash: None,
+                        },
+                        SearchSourceCursor {
+                            key: "1123456789abcdef".into(),
+                            skip: 0,
+                            retry: false,
+                            page_hash: None,
+                        },
+                    ]
+                })
+                .into_iter()
+                .map(|cursor| SearchCatalogSource {
+                    supports_skip: cursor.key != "0123456789abcdef" || primary_pages,
+                    cursor,
+                })
+                .collect()]
+        };
+        let shared = || CatalogPage {
+            items: vec![test_media_item("shared", "movie")],
+            source_item_count: 1,
+        };
+        let merged = merge_search_catalog_pages(
+            sources(None),
+            vec![vec![(0, Ok(shared())), (1, Ok(shared()))]],
+            true,
+        )
+        .unwrap();
+        let first = finish_catalog_page(
+            merged.items,
+            SearchCatalogContinuation::default(),
+            None,
+            None,
+            Some(merged.cursors),
+            merged.claims,
+        );
+        assert_eq!(first.items.len(), 1);
+        let continuation = serde_json::to_value(&first.continuation).unwrap();
+        let cursors: Vec<SearchSourceCursor> =
+            serde_json::from_value(continuation["searchCursors"].clone()).unwrap();
+        assert_eq!(cursors.len(), if primary_pages { 2 } else { 1 });
+        let outcomes = cursors
+            .iter()
+            .enumerate()
+            .map(|(index, cursor)| {
+                (
+                    index,
+                    Ok(if cursor.key == "0123456789abcdef" {
+                        shared()
+                    } else {
+                        CatalogPage {
+                            items: vec![test_media_item("later-unique", "movie")],
+                            source_item_count: 1,
+                        }
+                    }),
+                )
+            })
+            .collect();
+        let merged =
+            merge_search_catalog_pages(sources(Some(cursors)), vec![outcomes], false).unwrap();
+        let next = finish_catalog_page(
+            merged.items,
+            first.continuation,
+            None,
+            None,
+            Some(merged.cursors),
+            merged.claims,
+        );
+        assert_eq!(
+            next.items
+                .iter()
+                .map(|item| item.id.as_str())
+                .collect::<Vec<_>>(),
+            ["later-unique"]
+        );
+        let wire = serde_json::to_value(&next).unwrap();
+        assert_eq!(
+            wire["continuation"]["searchCursors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            wire["continuation"]["searchCursors"][0]["key"],
+            "1123456789abcdef"
+        );
+    }
+}
+
+#[test]
+fn all_search_sources_survive_overlap_but_stop_replayed_pages() {
+    use crate::commands::search_commands::{finish_catalog_page, SearchCatalogContinuation};
+
+    let mut continuation = SearchCatalogContinuation::default();
+    for round in 0..2 {
+        let sources = (0..6)
+            .map(|group| {
+                (0..8)
+                    .map(|order| SearchCatalogSource {
+                        cursor: SearchSourceCursor {
+                            key: format!("{:016x}", group * 8 + order),
+                            skip: round,
+                            retry: false,
+                            page_hash: None,
+                        },
+                        supports_skip: true,
+                    })
+                    .collect()
+            })
+            .collect();
+        let outcomes = (0..6)
+            .map(|_| {
+                (0..8)
+                    .map(|order| {
+                        (
+                            order,
+                            Ok(CatalogPage {
+                                items: vec![test_media_item("shared", "movie")],
+                                source_item_count: 1,
+                            }),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        let merged = merge_search_catalog_pages(sources, outcomes, round == 0).unwrap();
+        let page = finish_catalog_page(
+            merged.items,
+            continuation,
+            None,
+            None,
+            Some(merged.cursors),
+            merged.claims,
+        );
+        let wire = serde_json::to_value(&page).unwrap();
+        assert_eq!(page.items.len(), if round == 0 { 1 } else { 0 });
+        assert_eq!(page.exhausted, round != 0);
+        assert_eq!(
+            wire["continuation"]["searchCursors"]
+                .as_array()
+                .unwrap()
+                .len(),
+            if round == 0 { 48 } else { 0 }
+        );
+        continuation = page.continuation;
+    }
 }
 
 #[test]
@@ -494,6 +655,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
             key: "0123456789abcdef".into(),
             skip: 50,
             retry: false,
+            page_hash: None,
         }]),
         vec![vec![(0, Err("offline".into()))]],
         false,
@@ -539,6 +701,7 @@ fn search_failures_retry_once_reset_after_success_and_bound_stragglers() {
             key: "0123456789abcdef".into(),
             skip: u32::MAX,
             retry: false,
+            page_hash: None,
         }]),
         vec![vec![(
             0,
@@ -618,7 +781,7 @@ fn extra_skip_value_reads_the_declared_skip_extra() {
 }
 
 #[test]
-fn merge_catalog_pages_keeps_partial_success_and_the_earliest_next_skip() {
+fn catalog_merge_preserves_candidates_and_the_earliest_next_skip() {
     let page = merge_catalog_pages(
         vec![
             Ok(CatalogFetchPage {
@@ -646,7 +809,7 @@ fn merge_catalog_pages_keeps_partial_success_and_the_earliest_next_skip() {
             .iter()
             .map(|item| item.id.as_str())
             .collect::<Vec<_>>(),
-        vec!["tt1", "tt2", "tt3"]
+        vec!["tt1", "tt2", "tt2", "tt3"]
     );
     assert_eq!(page.next_skip, Some(24));
 }
@@ -660,6 +823,7 @@ fn empty_search_pages_preserve_constituent_failures_for_retry() {
                     key: format!("{index:016x}"),
                     skip: 0,
                     retry: false,
+                    page_hash: None,
                 },
                 supports_skip: true,
             })
@@ -749,6 +913,92 @@ fn subtitle_addon() -> AddonConfig {
         ),
         ..test_addon("https://subtitles-addon.test", "Subtitles Addon")
     }
+}
+
+#[tokio::test]
+async fn empty_subtitle_sources_do_not_cancel_the_first_usable_answer() {
+    use std::io::{Read, Write};
+
+    let empty = TestHttpServer::new(vec![(200, r#"{"subtitles":[]}"#, None)]);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || {
+        let (mut connection, _) = listener.accept().unwrap();
+        connection
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut request = Vec::new();
+        let mut buffer = [0; 2048];
+        while !request.ends_with(b"\r\n\r\n") {
+            let count = connection.read(&mut buffer).unwrap();
+            assert!(count > 0);
+            request.extend_from_slice(&buffer[..count]);
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        let body =
+            r#"{"subtitles":[{"id":"found","url":"https://subs.test/found.srt","lang":"eng"}]}"#;
+        let _ = write!(
+            connection,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+    });
+    let addons = [
+        AddonConfig {
+            url: empty.url.clone(),
+            ..subtitle_addon()
+        },
+        AddonConfig {
+            id: "slow".into(),
+            url,
+            ..subtitle_addon()
+        },
+    ];
+    let result = super::fetch_subtitles_from_addons(
+        &AddonResourceClient::new(),
+        &addons,
+        "movie",
+        &["tt1".into()],
+        Duration::from_millis(10),
+    )
+    .await
+    .unwrap();
+    server.join().unwrap();
+    assert_eq!(empty.finish(), ["/subtitles/movie/tt1.json"]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].source_id, "slow");
+
+    let ready = TestHttpServer::new(vec![(
+        200,
+        r#"{"subtitles":[{"id":"found","url":"https://subs.test/found.srt"}]}"#,
+        None,
+    )]);
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addons = [
+        AddonConfig {
+            url: ready.url.clone(),
+            ..subtitle_addon()
+        },
+        AddonConfig {
+            url: format!("http://{}", stalled.local_addr().unwrap()),
+            ..subtitle_addon()
+        },
+    ];
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::fetch_subtitles_from_addons(
+            &AddonResourceClient::new(),
+            &addons,
+            "movie",
+            &["tt1".into()],
+            Duration::from_millis(10),
+        ),
+    )
+    .await
+    .expect("a usable answer must still bound a stalled source")
+    .unwrap();
+    assert_eq!(result.len(), 1);
+    assert_eq!(ready.finish(), ["/subtitles/movie/tt1.json"]);
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ use crate::providers::ttl_cache::hash_segment;
 use crate::providers::{lock_or_recover, MediaDetails, MediaItem};
 use futures_util::stream::{self, StreamExt};
 use serde::{Deserialize, Serialize};
-use std::collections::{hash_map::Entry, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -236,11 +236,12 @@ pub(crate) struct SearchSourceCursor {
     pub skip: u32,
     #[serde(default)]
     pub retry: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_hash: Option<String>,
 }
 
-/// Dedup key of each item -> index in `cursors` of its first claimant's
-/// advanced cursor (`None` when that source cannot page further).
-pub(crate) type SearchCursorClaims = HashMap<String, Option<usize>>;
+/// Dedup key -> bitmask of advanced source cursors; zero when no source can page.
+pub(crate) type SearchCursorClaims = HashMap<String, u64>;
 
 #[derive(Debug)]
 pub(crate) struct SearchCatalogFetchPage {
@@ -293,7 +294,6 @@ pub(crate) fn merge_catalog_pages(
     empty_error: &str,
 ) -> Result<CatalogFetchPage, String> {
     let mut items = Vec::new();
-    let mut seen = HashSet::new();
     let mut had_success = false;
     let mut last_error: Option<String> = None;
     let mut next_skip: Option<u32> = None;
@@ -307,12 +307,7 @@ pub(crate) fn merge_catalog_pages(
                     (None, Some(right)) => Some(right),
                     (left, None) => left,
                 };
-                for item in page.items {
-                    let key = catalog_dedup_key(&item.type_, &item.id);
-                    if seen.insert(key) {
-                        items.push(item);
-                    }
-                }
+                items.extend(page.items);
             }
             Err(error) => last_error = Some(error),
         }
@@ -454,6 +449,7 @@ async fn run_catalog_work_pool(
     client: &AddonResourceClient,
     mut work: Vec<CatalogWorkItem>,
     group_count: usize,
+    deadline: Option<tokio::time::Instant>,
 ) -> Vec<Vec<(usize, Result<CatalogPage, String>)>> {
     let mut remaining = vec![0; group_count];
     for item in &work {
@@ -464,21 +460,25 @@ async fn run_catalog_work_pool(
     work.sort_by_key(|item| (item.order, item.group));
     let outcomes = collect_catalog_outcomes(
         stream::iter(work.into_iter().map(|item| async move {
-            let result = client
-                .fetch_catalog(
-                    &item.addon_url,
-                    &item.media_type,
-                    &item.catalog_id,
-                    &item.extras,
-                    normalize_media_item,
-                )
-                .await
-                .map(|mut page| {
-                    for media_item in &mut page.items {
-                        media_item.catalog_genre.clone_from(&item.catalog_genre);
-                    }
-                    page
-                });
+            let fetch = client.fetch_catalog(
+                &item.addon_url,
+                &item.media_type,
+                &item.catalog_id,
+                &item.extras,
+                normalize_media_item,
+            );
+            let result = match deadline {
+                Some(deadline) => tokio::time::timeout_at(deadline, fetch)
+                    .await
+                    .unwrap_or_else(|_| Err("Catalog scan time budget reached.".into())),
+                None => fetch.await,
+            }
+            .map(|mut page| {
+                for media_item in &mut page.items {
+                    media_item.catalog_genre.clone_from(&item.catalog_genre);
+                }
+                page
+            });
             (item.group, item.order, result)
         }))
         .buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
@@ -505,16 +505,17 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
     client: &AddonResourceClient,
     type_: &str,
     groups: Vec<CatalogGroupSelection>,
+    deadline: Option<tokio::time::Instant>,
 ) -> Vec<Result<CatalogFetchPage, String>> {
     let group_count = groups.len();
     let mut work = Vec::new();
-    let mut group_errors: Vec<Option<String>> = Vec::with_capacity(group_count);
+    let mut group_errors = Vec::with_capacity(group_count);
     let mut group_skips: Vec<u32> = Vec::with_capacity(group_count);
 
     for (group, entry) in groups.into_iter().enumerate() {
         match entry {
             Ok((targets, extras)) => {
-                group_errors.push(None);
+                group_errors.push((None, targets.len()));
                 group_skips.push(extra_skip_value(&extras));
                 for (order, target) in targets.into_iter().enumerate() {
                     work.push(CatalogWorkItem {
@@ -529,19 +530,25 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
                 }
             }
             Err(error) => {
-                group_errors.push(Some(error));
+                group_errors.push((Some(error), 0));
                 group_skips.push(0);
             }
         }
     }
 
-    run_catalog_work_pool(client, work, group_count)
+    run_catalog_work_pool(client, work, group_count, deadline)
         .await
         .into_iter()
         .zip(group_errors)
         .zip(group_skips)
-        .map(|((bucket, error), skip)| match error {
+        .map(|((bucket, (error, source_count)), skip)| match error {
             Some(error) => Err(error),
+            None if deadline.is_some()
+                && (bucket.len() != source_count
+                    || bucket.iter().any(|(_, result)| result.is_err())) =>
+            {
+                Err("Catalog scan incomplete.".into())
+            }
             None => merge_catalog_pages(
                 bucket.into_iter().map(|(_, result)| {
                     result.map(|page| catalog_fetch_page_from_source(page, skip))
@@ -601,6 +608,7 @@ fn select_search_catalog_work(
                             key,
                             skip: 0,
                             retry: false,
+                            page_hash: None,
                         }
                     };
                     let extras = catalog_search_extras(query, genre.as_deref(), cursor.skip);
@@ -653,7 +661,7 @@ pub(crate) async fn search_catalog_pages_for_genres(
     }
     merge_search_catalog_pages(
         sources,
-        run_catalog_work_pool(client, work, genres.len()).await,
+        run_catalog_work_pool(client, work, genres.len(), None).await,
         cursors.is_none(),
     )
 }
@@ -693,18 +701,25 @@ fn merge_search_catalog_pages(
                     let advanced = catalog_page_next_skip(cursor.skip, page.source_item_count)
                         .filter(|skip| source.supports_skip && *skip > cursor.skip)
                         .map(|skip| {
+                            let mut keys: Vec<_> = page
+                                .items
+                                .iter()
+                                .map(|item| catalog_dedup_key(&item.type_, &item.id))
+                                .collect();
+                            keys.sort_unstable();
+                            keys.dedup();
+                            cursor.page_hash = Some(hash_segment(&keys));
                             cursor.skip = skip;
                             cursor.retry = false;
                             cursors.push(cursor);
-                            cursors.len() - 1
-                        });
+                            1_u64 << (cursors.len() - 1)
+                        })
+                        .unwrap_or(0);
                     for item in page.items {
-                        if let Entry::Vacant(entry) =
-                            claims.entry(catalog_dedup_key(&item.type_, &item.id))
-                        {
-                            entry.insert(advanced);
-                            items.push(item);
-                        }
+                        *claims
+                            .entry(catalog_dedup_key(&item.type_, &item.id))
+                            .or_default() |= advanced;
+                        items.push(item);
                     }
                 }
                 Err(error) => {
@@ -917,7 +932,24 @@ pub async fn fetch_addon_subtitles(
     query_ids: &[String],
 ) -> Result<Vec<SourcedAddonSubtitle>, String> {
     let snapshot = load_enabled_addons_snapshot(app).await?;
-    let requests: Vec<_> = snapshot
+    fetch_subtitles_from_addons(
+        client,
+        &snapshot,
+        type_,
+        query_ids,
+        SUBTITLE_STRAGGLER_GRACE,
+    )
+    .await
+}
+
+async fn fetch_subtitles_from_addons(
+    client: &AddonResourceClient,
+    addons: &[AddonConfig],
+    type_: &str,
+    query_ids: &[String],
+    grace: Duration,
+) -> Result<Vec<SourcedAddonSubtitle>, String> {
+    let requests: Vec<_> = addons
         .iter()
         .filter(|addon| {
             query_ids
@@ -942,8 +974,8 @@ pub async fn fetch_addon_subtitles(
 
     let mut outcomes = collect_with_deadline(
         stream::iter(requests).buffer_unordered(ADDON_RESOURCE_CONCURRENCY),
-        SUBTITLE_STRAGGLER_GRACE,
-        |(_, _, result)| result.is_ok(),
+        grace,
+        |(_, _, result)| result.as_ref().is_ok_and(|items| !items.is_empty()),
     )
     .await;
     outcomes.sort_by_key(|(index, _, _)| *index);

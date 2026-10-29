@@ -64,6 +64,7 @@ import {
 } from '@/lib/api';
 import { navigateToDetails } from '@/lib/player-navigation';
 import { notifyAction } from '@/lib/notify';
+import { trackPendingAppWrite } from '@/lib/pending-app-writes';
 
 import {
   invalidateListMetadataQueries,
@@ -92,6 +93,7 @@ function smartRulesSummary(rules: SmartListRules) {
     .join(' · ');
 }
 const DELETE_LIST_MUTATION_KEY = ['delete-list'] as const;
+const LIST_ORDER_MUTATION_KEY = ['list-order'] as const;
 const listViewStates = new Map<
   string,
   { viewMode: 'grid' | 'list'; search: string; visibleLimit: number }
@@ -568,23 +570,24 @@ function ListItemsView({ list }: { list: UserList }) {
 
   // Only the latest drag may release its local order after the persisted items have refetched.
   const latestReorderIdsRef = useRef<string[] | null>(null);
+  const reorderKey = ['list-item-order', list.id] as const;
 
   const reorderItems = useMutation({
+    mutationKey: reorderKey,
+    scope: { id: `list-item-order:${list.id}` },
     mutationFn: (newIds: string[]) => api.reorderListItems(list.id, newIds),
-    onSuccess: async (_data, newIds) => {
+    onSettled: async (_data, error, newIds) => {
+      if (error) notifyAction('Failed to save order', { tone: 'error' });
+      if (
+        latestReorderIdsRef.current !== newIds ||
+        queryClient.isMutating({ mutationKey: reorderKey, exact: true }) > 1
+      )
+        return;
       await queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
       if (latestReorderIdsRef.current === newIds) {
         latestReorderIdsRef.current = null;
         if (mountedRef.current) setOrderedIds(null);
       }
-    },
-    onError: (_error, newIds) => {
-      if (latestReorderIdsRef.current === newIds) {
-        latestReorderIdsRef.current = null;
-        if (mountedRef.current) setOrderedIds(null);
-      }
-      void queryClient.invalidateQueries({ queryKey: LISTS_QUERY_KEY });
-      notifyAction('Failed to save order', { tone: 'error' });
     },
   });
 
@@ -612,7 +615,7 @@ function ListItemsView({ list }: { list: UserList }) {
     const next = arrayMove(current, oldIndex, newIndex);
     setOrderedIds(next);
     latestReorderIdsRef.current = next;
-    reorderItems.mutate(next);
+    void trackPendingAppWrite(reorderItems.mutateAsync(next)).catch(() => {});
   };
 
   const {
@@ -626,6 +629,7 @@ function ListItemsView({ list }: { list: UserList }) {
 
   const visibleItems = filtered.slice(0, visibleLimit);
   const visibleIds = visibleItems.map((item) => item.id);
+  const selectAllDisabled = isSearchPending || searchError;
   const { triggerRef: selectionTriggerRef, ...selection } = useCollectionSelection(
     list.item_ids,
     visibleIds,
@@ -633,6 +637,7 @@ function ListItemsView({ list }: { list: UserList }) {
     bulkRemove.isPending || reorderItems.isPending,
     false,
     addTitlesButtonRef,
+    selectAllDisabled,
   );
   const removeSelected = async () => {
     if (bulkRemove.isPending || reorderItems.isPending || selection.selectedIds.size === 0) return;
@@ -741,7 +746,7 @@ function ListItemsView({ list }: { list: UserList }) {
           allFilteredSelected={
             filtered.length > 0 && filtered.every((item) => selection.selectedIds.has(item.id))
           }
-          selectAllDisabled={isSearchPending || searchError}
+          selectAllDisabled={selectAllDisabled}
           isBusy={bulkRemove.isPending || reorderItems.isPending}
           onSelectAll={() => selection.selectAll(filtered.map((item) => item.id))}
           onClear={selection.clear}
@@ -999,6 +1004,8 @@ export function ListsManager() {
       return [...ordered, ...remaining.values()];
     });
   const reorderLists = useMutation({
+    mutationKey: LIST_ORDER_MUTATION_KEY,
+    scope: { id: LIST_ORDER_MUTATION_KEY[0] },
     mutationFn: (ids: string[]) => api.reorderLists(ids),
     onMutate: async (next) => {
       const generation = ++listOrderGenerationRef.current;
@@ -1009,10 +1016,21 @@ export function ListsManager() {
       }
       return { previousOrder: previous?.map((list) => list.id), generation };
     },
-    onSettled: () => invalidateListMetadataQueries(queryClient),
+    onSettled: (_data, _error, _next, context) => {
+      if (
+        context?.generation === listOrderGenerationRef.current &&
+        queryClient.isMutating({ mutationKey: LIST_ORDER_MUTATION_KEY, exact: true }) === 1
+      ) {
+        return invalidateListMetadataQueries(queryClient);
+      }
+    },
     onError: (_, _next, context) => {
       const previousOrder = context?.previousOrder;
-      if (context?.generation === listOrderGenerationRef.current && previousOrder) {
+      if (
+        context?.generation === listOrderGenerationRef.current &&
+        queryClient.isMutating({ mutationKey: LIST_ORDER_MUTATION_KEY, exact: true }) === 1 &&
+        previousOrder
+      ) {
         setCachedOrder(previousOrder);
       }
       notifyAction('Failed to save list order', { tone: 'error' });
@@ -1058,13 +1076,15 @@ export function ListsManager() {
   };
 
   const moveList = (from: number, to: number) =>
-    reorderLists.mutate(
-      arrayMove(
-        lists.map((list) => list.id),
-        from,
-        to,
+    void trackPendingAppWrite(
+      reorderLists.mutateAsync(
+        arrayMove(
+          lists.map((list) => list.id),
+          from,
+          to,
+        ),
       ),
-    );
+    ).catch(() => {});
 
   const handleDragEnd = (event: DragEndEvent) => {
     setActiveListId(null);

@@ -57,6 +57,7 @@ import {
   type PlayerRouteMediaType,
 } from '@/lib/player-navigation';
 import { copyText } from '@/lib/notify';
+import { usePlayerSession } from '@/lib/player-session';
 import { routeChunks, warmPlayerChunk } from '@/lib/route-chunks';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
@@ -617,13 +618,14 @@ function MediaCardOverlay({
   const trailerVideoId =
     trailerIndex < MAX_TRAILER_ATTEMPTS ? details?.trailers?.[trailerIndex]?.id : undefined;
   // Reduced-motion CSS cannot stop playback inside an iframe.
-  const trailersEnabled = useTrailerPreviews() && !prefersReducedMotion();
+  const { session } = usePlayerSession();
+  const trailersEnabled = useTrailerPreviews() && !session && !prefersReducedMotion();
 
   // A still pointer over a playing trailer fades the remaining artwork chrome.
   const [trailerShowing, setTrailerShowing] = useState(false);
   const { idle: pointerIdle, wake: wakePointer } = usePointerIdle();
   useEffect(() => wakePointer(), [wakePointer]);
-  const hideArtworkChrome = trailerShowing && pointerIdle;
+  const hideArtworkChrome = trailersEnabled && trailerShowing && pointerIdle;
   const menu = useDelayedUnmount(panel === 'menu', INLINE_MENU_EXIT_MS);
   const closeMenu = () => onPanelChange('details');
   const hasResumeActions = !!(onPlayNext || onMarkWatched);
@@ -631,6 +633,8 @@ function MediaCardOverlay({
   // A second dwell avoids mounting expensive embeds during quick card hops.
   const [trailerArmed, setTrailerArmed] = useState(false);
   useEffect(() => {
+    setTrailerArmed(false);
+    setTrailerShowing(false);
     if (!trailerVideoId || !trailersEnabled) return;
     const timer = window.setTimeout(() => setTrailerArmed(true), TRAILER_ARM_MS);
     return () => window.clearTimeout(timer);

@@ -3,6 +3,7 @@
 //! still apply, so per-field stays.
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{hash_map::Entry, HashMap};
 use tauri::{command, AppHandle, Window};
 use tauri_plugin_libmpv::MpvExt;
@@ -171,7 +172,8 @@ fn read_track_list(
             track.forced = property_flag(read("forced", "flag"));
             track.hearing_impaired = property_flag(read("hearing-impaired", "flag"));
             if external {
-                track.external_filename = property_non_blank(read("external-filename", "string"));
+                track.external_filename = property_non_blank(read("external-filename", "string"))
+                    .map(super::player_mpv_commands::subtitle_original_url);
             }
         }
 
@@ -233,6 +235,84 @@ pub async fn read_player_track_list(
         read_track_list(&app, &window_label, observed_ids)
     })
     .await
+}
+
+fn track_change_command(kind: &str, target: &Value) -> Result<(&'static str, Vec<Value>), String> {
+    let property = match kind {
+        "audio" => "aid",
+        "sub" => "sid",
+        _ => return Err("Unsupported track type.".to_string()),
+    };
+    match target {
+        Value::String(action) if action == "cycle" => Ok((
+            "cycle",
+            vec![Value::from(if kind == "sub" { "sub" } else { property })],
+        )),
+        Value::String(action) if action == "no" && kind == "sub" => {
+            Ok(("set", vec![Value::from(property), target.clone()]))
+        }
+        Value::Number(id) if id.as_i64().is_some_and(|id| id > 0) => {
+            Ok(("set", vec![Value::from(property), target.clone()]))
+        }
+        _ => Err("Unsupported track selection.".to_string()),
+    }
+}
+
+fn track_selection_matches(tracks: &[PlayerTrack], kind: &str, target: &Value) -> bool {
+    let kind = if kind == "audio" {
+        PlayerTrackType::Audio
+    } else {
+        PlayerTrackType::Sub
+    };
+    let selected = tracks
+        .iter()
+        .find(|track| track.r#type == kind && track.selected);
+    match target {
+        Value::String(action) if action == "cycle" => true,
+        Value::String(action) if action == "no" => selected.is_none(),
+        _ => selected.is_some_and(|track| Some(track.id) == target.as_i64()),
+    }
+}
+
+#[command]
+pub async fn player_mpv_change_track(
+    app: AppHandle,
+    window: Window,
+    kind: String,
+    target: Value,
+) -> Result<Vec<PlayerTrack>, String> {
+    let (command, args) = track_change_command(&kind, &target)?;
+    if kind == "sub" {
+        super::player_mpv_commands::cancel_subtitle_selection();
+    }
+    super::player_mpv_commands::run_mpv_op("track change", move || {
+        app.mpv()
+            .command(command, &args, window.label())
+            .map_err(|_| "The player could not switch track.".to_string())?;
+        let tracks = read_track_list(&app, window.label(), None)?;
+        if !track_selection_matches(&tracks, &kind, &target) {
+            return Err("The player did not select the requested track.".to_string());
+        }
+        Ok(tracks)
+    })
+    .await
+}
+
+pub(super) fn read_added_subtitle(
+    app: &AppHandle,
+    label: &str,
+    url: &str,
+) -> Result<Vec<PlayerTrack>, String> {
+    let tracks = read_track_list(app, label, None)?;
+    if tracks.iter().any(|track| {
+        track.r#type == PlayerTrackType::Sub
+            && track.selected
+            && track.external_filename.as_deref() == Some(url)
+    }) {
+        Ok(tracks)
+    } else {
+        Err("The player did not select the downloaded subtitle.".to_string())
+    }
 }
 
 #[cfg(test)]

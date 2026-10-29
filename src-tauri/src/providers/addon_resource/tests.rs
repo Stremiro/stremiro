@@ -19,7 +19,8 @@ fn catalog_item(value: serde_json::Value) -> Option<MediaItem> {
 }
 
 fn subtitle_item(value: serde_json::Value) -> Option<AddonSubtitle> {
-    parse_subtitle_item(serde_json::from_value(value).ok()?)
+    let json = serde_json::to_string(&value).ok()?;
+    parse_subtitle_item(serde_json::from_str(&json).ok()?)
 }
 
 fn parse_meta_item(value: serde_json::Value) -> Option<MediaDetails> {
@@ -27,19 +28,18 @@ fn parse_meta_item(value: serde_json::Value) -> Option<MediaDetails> {
 }
 
 #[test]
-fn catalog_ids_reject_oversized_values_without_aliasing() {
+fn resource_ids_reject_oversized_values_without_aliasing() {
     let prefix = "x".repeat(MAX_ID_CHARS);
-    for suffix in ["a", "b"] {
-        assert!(catalog_item(serde_json::json!({
-            "id": format!("{prefix}{suffix}"), "name": "Title", "type": "movie"
-        }))
-        .is_none());
-    }
-    for sentinel in ["null", " Undefined "] {
-        assert!(catalog_item(serde_json::json!({
-            "id": sentinel, "name": "Title", "type": "movie"
-        }))
-        .is_none());
+    for id in [
+        format!("{prefix}a"),
+        format!("{prefix}b"),
+        format!("valid{}suffix", " ".repeat(MAX_STRING_CHARS)),
+        "null".into(),
+        " Undefined ".into(),
+    ] {
+        let value = serde_json::json!({"id": id, "name": "Title", "type": "movie"});
+        assert!(catalog_item(value.clone()).is_none(), "catalog id: {id:?}");
+        assert!(parse_meta_item(value).is_none(), "metadata id: {id:?}");
     }
     assert_eq!(
         catalog_item(serde_json::json!({
@@ -48,6 +48,22 @@ fn catalog_ids_reject_oversized_values_without_aliasing() {
         .unwrap()
         .id,
         prefix
+    );
+    let details = parse_meta_item(serde_json::json!({
+        "id": "custom", "name": "Title", "type": "series",
+        "imdb_id": format!("{prefix}a"), "imdbId": "tt1",
+        "videos": [{"id": format!("{prefix}b")}, {"id": "tt1:1:1", "season": 1, "episode": 1}]
+    }))
+    .unwrap();
+    assert_eq!(details.imdb_id.as_deref(), Some("tt1"));
+    assert_eq!(
+        details
+            .episodes
+            .unwrap()
+            .iter()
+            .map(|episode| episode.id.as_str())
+            .collect::<Vec<_>>(),
+        ["tt1:1:1"]
     );
 }
 
