@@ -13,6 +13,8 @@ import {
   STREAM_SELECTOR_PREFERENCES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 import { sleep } from '@/lib/utils';
+import { prefetchSearchCatalog } from '@/lib/search-catalog';
+import { readSearchFacets } from '@/lib/search-page-state';
 import { homeTrendingMoviesQueryOptions } from '@/pages/home';
 import App from './App';
 import './index.css';
@@ -105,10 +107,16 @@ const bootstrapSnapshot = api.getBootstrapSnapshot().then(
   () => undefined,
 );
 
-// Checked after any startup-route replace so a non-Home start page skips the remote catalog.
+// Start the visible catalog before its page code mounts, using the same query key.
 void bootstrapSnapshot.then(() => {
-  if (window.location.pathname === '/' && navigator.onLine) {
+  if (!navigator.onLine) return;
+  if (window.location.pathname === '/') {
     void queryClient.prefetchQuery(homeTrendingMoviesQueryOptions);
+  } else if (window.location.pathname === '/search') {
+    void prefetchSearchCatalog(
+      queryClient,
+      readSearchFacets(new URLSearchParams(window.location.search)),
+    );
   }
 });
 

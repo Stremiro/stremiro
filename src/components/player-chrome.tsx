@@ -1,32 +1,35 @@
 import {
   ArrowLeft,
   Cloud,
+  Copy,
   Maximize,
   Minimize,
   PictureInPicture2,
   RotateCcw,
   RotateCw,
+  SkipBack,
+  SkipForward,
 } from 'lucide-react';
 import { memo, type ReactNode, type Ref, useId } from 'react';
 import {
+  CHROME_CORNER_BUTTON_CLASS,
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
   CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_PILL_CLASS,
   CHROME_POPOVER_CLASS,
-  CHROME_VALUE_BUBBLE_CLASS,
 } from '@/components/player-chrome-styles';
 import {
-  PlayerMuteButton,
+  PlayerVolumeControl,
   PlayerNextButton,
   PlayerPlayButton,
   PlayerPreviousButton,
 } from '@/components/player-control-buttons';
 import { PlayerEpisodesToggleButton } from '@/components/player-episodes-panel';
 import { PlayerTimeDisplay } from '@/components/player-progress-bar';
-import { PlayerSlider } from '@/components/player-slider';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { ContextMenuContent, ContextMenuItem } from '@/components/ui/context-menu';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
@@ -35,6 +38,83 @@ import { cn, formatSeasonEpisode } from '@/lib/utils';
 
 // Preset ladder shared by the popover and the speed hotkeys — one owner keeps them from drifting.
 export const SPEED_OPTIONS = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
+
+export const PlayerContextActions = memo(function PlayerContextActions({
+  canGoPrevious,
+  canGoNext,
+  canCopy,
+  previousLabel,
+  nextLabel,
+  onPrevious,
+  onNext,
+  onCopy,
+}: {
+  canGoPrevious: boolean;
+  canGoNext: boolean;
+  canCopy: boolean;
+  previousLabel?: string;
+  nextLabel?: string;
+  onPrevious: () => void;
+  onNext: () => void;
+  onCopy: () => void;
+}) {
+  const actions = [
+    {
+      label: previousLabel ?? 'Previous episode',
+      icon: SkipBack,
+      disabled: !canGoPrevious,
+      run: onPrevious,
+    },
+    { label: 'Copy stream link', icon: Copy, disabled: !canCopy, run: onCopy },
+    { label: nextLabel ?? 'Next episode', icon: SkipForward, disabled: !canGoNext, run: onNext },
+  ];
+  return (
+    <ContextMenuContent
+      data-player-popover
+      side='top'
+      align='center'
+      sideOffset={0}
+      collisionPadding={8}
+      aria-label='Player actions'
+      aria-orientation='horizontal'
+      className='flex min-w-0 items-end gap-1.5 overflow-visible rounded-none border-0 bg-transparent p-1 shadow-none backdrop-blur-none data-[state=open]:slide-in-from-top-0 data-[state=open]:slide-in-from-bottom-0'
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+        event.preventDefault();
+        const items = Array.from(
+          event.currentTarget.querySelectorAll<HTMLElement>(
+            '[role="menuitem"]:not([data-disabled])',
+          ),
+        );
+        const current = items.indexOf(document.activeElement as HTMLElement);
+        const next =
+          event.key === 'ArrowRight'
+            ? items[(current + 1) % items.length]
+            : items.at(current < 0 ? -1 : current - 1);
+        next?.focus();
+      }}
+    >
+      {actions.map(({ label, icon: Icon, disabled, run }, index) => (
+        <ContextMenuItem
+          key={label}
+          disabled={disabled}
+          onSelect={run}
+          aria-label={label}
+          title={label}
+          className={cn(
+            'size-11 justify-center rounded-xl border border-white/12 p-0 shadow-lg backdrop-blur-md transition-colors motion-reduce:transition-none',
+            index === 1
+              ? 'size-12 -translate-y-1 bg-(--accent-act) text-(--on-accent-act) focus:bg-(--accent-act)/90 focus:text-(--on-accent-act)'
+              : 'bg-zinc-950/90 text-white/75 focus:bg-zinc-800 focus:text-white',
+          )}
+        >
+          <Icon aria-hidden='true' className='size-[18px]' strokeWidth={CHROME_ICON_STROKE} />
+        </ContextMenuItem>
+      ))}
+    </ContextMenuContent>
+  );
+});
 
 interface PlayerTopChromeProps {
   chromeRef?: Ref<HTMLDivElement>;
@@ -47,6 +127,7 @@ interface PlayerTopChromeProps {
   /** Live source label — reflects failover swaps, not just the launch pick. */
   streamSourceName?: string;
   onBack: () => Promise<void>;
+  onOpenDetails: () => void;
   isFullscreen: boolean;
   onToggleFullscreen: () => Promise<void>;
 }
@@ -61,44 +142,53 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
   episodeTitle,
   streamSourceName,
   onBack,
+  onOpenDetails,
   isFullscreen,
   onToggleFullscreen,
 }: PlayerTopChromeProps) {
   const keymap = usePlayerKeymap();
   const seasonEpisode = formatSeasonEpisode(season, episode);
   const separator = (
-    <span aria-hidden='true' className='h-1 w-1 shrink-0 rounded-full bg-white/35' />
+    <span aria-hidden='true' className='h-[3px] w-[3px] shrink-0 rounded-full bg-white/30' />
   );
 
   return (
     <div
       ref={chromeRef}
       data-player-interactive
-      className='cursor-auto relative flex items-center justify-between'
+      className='cursor-auto relative grid grid-cols-[2.75rem_minmax(0,1fr)_2.75rem] items-center'
     >
-      <div className={CHROME_PILL_CLASS}>
-        <button
-          type='button'
-          aria-label='Back'
-          aria-keyshortcuts='Escape'
-          title='Back (Esc)'
-          onClick={() => void onBack().catch(() => undefined)}
-          className={CHROME_ICON_BUTTON_CLASS}
-        >
-          <ArrowLeft className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-        </button>
-      </div>
-      <div className='mx-6 min-w-0 flex-1 text-center [text-shadow:0_1px_2px_rgba(0,0,0,0.55),0_2px_12px_rgba(0,0,0,0.45)]'>
-        <h1 className='truncate text-[17px] leading-6 font-semibold tracking-tight text-white'>
-          {title}
+      <button
+        type='button'
+        aria-label='Back'
+        aria-keyshortcuts='Escape'
+        title='Back (Esc)'
+        onClick={() => void onBack().catch(() => undefined)}
+        className={CHROME_CORNER_BUTTON_CLASS}
+      >
+        <ArrowLeft className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+      </button>
+      <div className='min-w-0 px-3 text-center [text-shadow:0_1px_2px_rgba(0,0,0,0.55)]'>
+        <h1 className='truncate text-center text-[16px] leading-6 font-semibold tracking-[-0.015em] text-white'>
+          <button
+            type='button'
+            title='View details'
+            onClick={(event) => {
+              event.stopPropagation();
+              onOpenDetails();
+            }}
+            className='inline-block max-w-full truncate rounded-sm text-center transition-opacity hover:opacity-80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40'
+          >
+            {title}
+          </button>
         </h1>
         {(seasonEpisode || episodeTitle || streamSourceName) && (
-          <p className='mt-0.5 flex min-w-0 items-center justify-center gap-2 text-[13px] leading-5'>
+          <p className='flex min-w-0 items-center justify-center gap-1.5 text-[12.5px] leading-5'>
             {seasonEpisode && (
-              <span className='shrink-0 font-semibold tabular-nums text-white/90'>
+              <span className='shrink-0 font-medium tabular-nums tracking-tight text-white/85'>
                 {seasonEpisode}
                 {episodeCountInSeason ? (
-                  <span className='font-medium text-white/45'> / {episodeCountInSeason}</span>
+                  <span className='font-normal text-white/40'> / {episodeCountInSeason}</span>
                 ) : null}
               </span>
             )}
@@ -115,29 +205,27 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
           </p>
         )}
       </div>
-      <div className={CHROME_PILL_CLASS}>
-        <button
-          type='button'
-          onClick={(e) => {
-            e.stopPropagation();
-            void onToggleFullscreen().catch(() => undefined);
-          }}
-          className={CHROME_ICON_BUTTON_CLASS}
-          aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
-          aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
-          title={withShortcutHint(
-            isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
-            keymap,
-            'toggleFullscreen',
-          )}
-        >
-          {isFullscreen ? (
-            <Minimize className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-          ) : (
-            <Maximize className={CHROME_ICON_CLASS} strokeWidth={CHROME_ICON_STROKE} />
-          )}
-        </button>
-      </div>
+      <button
+        type='button'
+        onClick={(e) => {
+          e.stopPropagation();
+          void onToggleFullscreen().catch(() => undefined);
+        }}
+        className={cn(CHROME_CORNER_BUTTON_CLASS, 'justify-self-end')}
+        aria-label={isFullscreen ? 'Exit fullscreen' : 'Fullscreen'}
+        aria-keyshortcuts={ariaKeyShortcuts(keymap, 'toggleFullscreen')}
+        title={withShortcutHint(
+          isFullscreen ? 'Exit fullscreen' : 'Fullscreen',
+          keymap,
+          'toggleFullscreen',
+        )}
+      >
+        {isFullscreen ? (
+          <Minimize className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+        ) : (
+          <Maximize className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
+        )}
+      </button>
     </div>
   );
 });
@@ -228,8 +316,6 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
 }: PlayerControlsRowProps) {
   const keymap = usePlayerKeymap();
   const speedHeadingId = useId();
-  const volumeIsSilent = isMuted || volume === 0;
-  const displayedVolume = isMuted ? 0 : Math.round(volume);
   const speedKeys = [keymap.keys.speedDown[0], keymap.keys.speedUp[0]]
     .filter((key) => key !== undefined)
     .map(formatBindingKey);
@@ -272,55 +358,16 @@ export const PlayerControlsRow = memo(function PlayerControlsRow({
           )}
         </div>
 
-        {/* Always-visible volume rail reserves its space — hover/focus and pointer capture can't push adjacent controls. */}
-        <div
-          data-player-interactive
-          className={cn(CHROME_PILL_CLASS, 'gap-1.5 pr-3')}
-          // Interactive regions swallow the ambient wheel handler — scrolling here still adjusts volume.
-          onWheel={(e) => {
-            if (e.deltaY === 0) return;
-            e.stopPropagation();
-            void onVolumeWheel(e).catch(() => undefined);
-          }}
-        >
-          <PlayerMuteButton
-            variant='full'
-            keymap={keymap}
-            label={volumeIsSilent ? 'Unmute' : 'Mute'}
-            muted={volumeIsSilent}
-            volume={volume}
-            onClick={() => void onToggleMute().catch(() => undefined)}
-          />
-
-          <div className='relative group/volume w-20 shrink-0'>
-            <span
-              aria-hidden='true'
-              className={cn(
-                CHROME_VALUE_BUBBLE_CLASS,
-                'pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 opacity-0 transition-opacity group-hover/volume:opacity-100 group-has-[[data-keyboard-focus]]/volume:opacity-100 group-has-[:active]/volume:opacity-100 motion-reduce:transition-none',
-              )}
-            >
-              {displayedVolume}%
-            </span>
-            <PlayerSlider
-              variant='bar'
-              active={active}
-              value={[isMuted ? 0 : volume]}
-              max={100}
-              step={1}
-              aria-label='Volume'
-              aria-valuetext={isMuted ? 'Muted' : `${displayedVolume}%`}
-              title={isMuted ? 'Volume: muted' : `Volume: ${displayedVolume}%`}
-              onValueChange={(val) => void onVolumeChange(val[0]).catch(() => undefined)}
-              onKeyDown={(event) => {
-                if (event.key === 'ArrowUp' || event.key === 'ArrowDown') {
-                  event.stopPropagation();
-                }
-              }}
-              className='w-20 shrink-0'
-            />
-          </div>
-        </div>
+        <PlayerVolumeControl
+          variant='full'
+          active={active}
+          keymap={keymap}
+          volume={volume}
+          isMuted={isMuted}
+          onToggleMute={onToggleMute}
+          onVolumeChange={onVolumeChange}
+          onVolumeWheel={onVolumeWheel}
+        />
 
         <div className={CHROME_PILL_CLASS}>
           <PlayerTimeDisplay

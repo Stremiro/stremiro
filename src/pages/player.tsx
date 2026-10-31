@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { toLocalDate } from '@/lib/schedule-dates';
-import { Copy, Loader2 } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import {
   useCallback,
   type MouseEvent,
@@ -18,7 +18,12 @@ import { DesktopTitlebar } from '@/components/desktop-titlebar';
 import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import { MiniPlayer } from '@/components/mini-player';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
-import { PlayerControlsRow, PlayerTopChrome, SPEED_OPTIONS } from '@/components/player-chrome';
+import {
+  PlayerContextActions,
+  PlayerControlsRow,
+  PlayerTopChrome,
+  SPEED_OPTIONS,
+} from '@/components/player-chrome';
 import {
   CHROME_ENTER_TIMING_CLASS,
   CHROME_EXIT_TIMING_CLASS,
@@ -38,12 +43,7 @@ import {
   PlayerUpNextCard,
 } from '@/components/player-state-overlays';
 import { Sidebar } from '@/components/sidebar';
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from '@/components/ui/context-menu';
+import { ContextMenu, ContextMenuTrigger } from '@/components/ui/context-menu';
 import { useAppUiPreferences, usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useDocumentTitle } from '@/hooks/use-document-title';
@@ -585,10 +585,13 @@ export function Player() {
   const skipTimesEnabled =
     !!type &&
     !!id &&
-    !!(nonBlank(details?.imdbId) || nonBlank(id) || nonBlank(skipTimesStreamLookupId)) &&
     skipTimesDurationSecs !== undefined &&
+    // Series waits for details (imdbId) and resolved coordinates: firing early
+    // would spend a SkipDB request on a stale key, then refetch.
     (!isSeriesLike ||
-      (resolvedAbsoluteSeason !== undefined && resolvedAbsoluteEpisode !== undefined));
+      (!isLoadingDetails &&
+        resolvedAbsoluteSeason !== undefined &&
+        resolvedAbsoluteEpisode !== undefined));
 
   const { data: skipTimes } = useQuery<SkipTimesResult>({
     // SkipDB shifts segments to fit the reported duration, so the key buckets by it.
@@ -874,7 +877,10 @@ export function Player() {
     subTracks,
   });
 
-  const handleSettingsMenuOpenChange = (menu: 'audio' | 'subtitles' | 'speed', open: boolean) => {
+  const handleSettingsMenuOpenChange = (
+    menu: NonNullable<typeof openSettingsMenu>,
+    open: boolean,
+  ) => {
     // Ignore a late dismiss from the menu being replaced.
     setOpenSettingsMenu((current) => (open ? menu : current === menu ? null : current));
   };
@@ -2277,6 +2283,7 @@ export function Player() {
       error={showErrorOverlay ? error : null}
       clock={clock}
       duration={duration}
+      skipSegments={skipSegments}
       canGoPrevious={canGoPrevious}
       canGoNext={canGoNext}
       hasVideo={mpvSurfaceReady && !!activeStreamUrl && !isLoading && !showErrorOverlay}
@@ -2383,12 +2390,16 @@ export function Player() {
             onDoubleClick={handlePlayerDoubleClick}
           />
         </ContextMenuTrigger>
-        <ContextMenuContent data-player-popover onKeyDown={(event) => event.stopPropagation()}>
-          <ContextMenuItem disabled={!activeStreamUrl} onSelect={handleCopyStreamLink}>
-            <Copy className='h-4 w-4' />
-            Copy stream link
-          </ContextMenuItem>
-        </ContextMenuContent>
+        <PlayerContextActions
+          canGoPrevious={canGoPrevious}
+          canGoNext={canGoNext}
+          canCopy={!!activeStreamUrl}
+          previousLabel={previousEpisodeLabel}
+          nextLabel={nextEpisodeLabel}
+          onPrevious={playPreviousEpisode}
+          onNext={playNextEpisode}
+          onCopy={handleCopyStreamLink}
+        />
       </ContextMenu>
       {!isFullscreen && !isPip && (
         <div
@@ -2509,6 +2520,7 @@ export function Player() {
               episodeTitle={currentEpisode?.title}
               streamSourceName={activeStreamSourceName}
               onBack={navigateBack}
+              onOpenDetails={backToTitle}
               isFullscreen={isFullscreen}
               onToggleFullscreen={toggleFullscreen}
             />

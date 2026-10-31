@@ -7,7 +7,12 @@ import {
   HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
   HorizontalMediaRail,
 } from '@/components/horizontal-media-rail';
-import { mediaCardRailKey, renderMediaCardRailItem } from '@/components/media-card';
+import {
+  MediaCardSkeleton,
+  MEDIA_CARD_SLOT_CLASS_NAME,
+  mediaCardRailKey,
+  renderMediaCardRailItem,
+} from '@/components/media-card';
 import { MediaRow, RailTitleLink } from '@/components/media-row';
 import { ResumeSection } from '@/components/resume-section';
 import { RetryBanner } from '@/components/retry-banner';
@@ -112,14 +117,21 @@ function StreamAddonHint() {
 
 function HomeRowPlaceholder() {
   return (
-    <div aria-hidden='true'>
-      <HorizontalMediaRail
-        title={<Skeleton className='h-7 w-52 bg-white/[0.06]' />}
-        items={[]}
-        getItemKey={mediaCardRailKey}
-        renderItem={renderMediaCardRailItem}
-        isLoading
-      />
+    <div aria-hidden='true' className='relative py-5 md:py-6'>
+      <div className={`${HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS} mb-4`}>
+        <div className='flex min-h-10 items-center'>
+          <Skeleton className='h-7 w-52 bg-white/[0.06]' />
+        </div>
+      </div>
+      <div className={`${HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS} overflow-hidden`}>
+        <div className='flex gap-4 px-1 pt-1 pb-8'>
+          {Array.from({ length: 8 }, (_, index) => (
+            <div key={index} className={`flex-none ${MEDIA_CARD_SLOT_CLASS_NAME}`}>
+              <MediaCardSkeleton />
+            </div>
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -212,7 +224,10 @@ export function Home() {
 
   const heroSlice = (heroItems ?? []).slice(0, 5);
 
-  const genre = genreOptions.find((option) => sameSearchGenre(option, selectedGenre)) ?? ALL_GENRES;
+  // Until the genre list loads, keep the saved pick rather than fetching All first.
+  const genre = browseGenres
+    ? (genreOptions.find((option) => sameSearchGenre(option, selectedGenre)) ?? ALL_GENRES)
+    : selectedGenre;
   const activeGenre = genre === ALL_GENRES ? undefined : genre;
   const showHero = heroSlice.length > 0 || (isOnline && isHeroPending);
 

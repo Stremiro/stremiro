@@ -160,10 +160,11 @@ pub async fn add_to_list(
 fn add_list_items(
     store: &DurableStore,
     list_id: &str,
-    items: Vec<MediaItem>,
+    resolve_items: impl FnOnce() -> Result<Vec<MediaItem>, ListError>,
 ) -> Result<usize, ListError> {
     let mut list = load_list(store, list_id)?;
     list.require_manual()?;
+    let items = resolve_items()?;
     if items.is_empty() {
         return Ok(0);
     }
@@ -205,11 +206,11 @@ pub async fn bulk_add_to_list(
     run_typed_store_op(move || {
         let list_id = require_list_id(&list_id)?;
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
-        load_list(&store, &list_id)?.require_manual()?;
-        let library = super::open_store(&app, super::LIBRARY_STORE_FILE)?;
-        let items = super::library_commands::resolve_library_items(&library, item_ids)
-            .map_err(String::from)?;
-        add_list_items(&store, &list_id, items)
+        add_list_items(&store, &list_id, || {
+            let library = super::open_store(&app, super::LIBRARY_STORE_FILE)?;
+            super::library_commands::resolve_library_items(&library, item_ids)
+                .map_err(|error| String::from(error).into())
+        })
     })
     .await
 }
@@ -919,7 +920,10 @@ mod tests {
             ["a", " b ", "c", "b"].map(str::to_string).to_vec(),
         )
         .unwrap();
-        assert_eq!(add_list_items(&fixture.store, "list_a", items).unwrap(), 2);
+        assert_eq!(
+            add_list_items(&fixture.store, "list_a", || Ok(items)).unwrap(),
+            2
+        );
         assert_eq!(
             load_list(&fixture.store, "list_a").unwrap().item_ids,
             ["a", "b", "c"]
@@ -959,7 +963,7 @@ mod tests {
             test_media_item("id0", "movie"),
             test_media_item("new", "movie"),
         ];
-        let error = add_list_items(&fixture.store, "list_a", items).unwrap_err();
+        let error = add_list_items(&fixture.store, "list_a", || Ok(items)).unwrap_err();
         assert_eq!(error.kind, ListErrorKind::ListFull);
         assert_eq!(error.message, "A custom list cannot exceed 2000 items");
         fixture.store.save().unwrap();
@@ -977,13 +981,15 @@ mod tests {
         seed_list(&fixture.store, Vec::new());
         assert!(normalize_list_id("invalid:list").is_none());
         assert_eq!(
-            add_list_items(&fixture.store, "list_a", Vec::new()).unwrap(),
+            add_list_items(&fixture.store, "list_a", || Ok(Vec::new())).unwrap(),
             0
         );
         assert_eq!(
-            add_list_items(&fixture.store, "missing", Vec::new())
-                .unwrap_err()
-                .kind,
+            add_list_items(&fixture.store, "missing", || panic!(
+                "missing lists must fail before library resolution"
+            ))
+            .unwrap_err()
+            .kind,
             ListErrorKind::ListNotFound
         );
         fixture.store.save().unwrap();
@@ -999,11 +1005,9 @@ mod tests {
         });
         fixture.store.set(list_meta_key("list_a"), json!(list));
         assert_eq!(
-            add_list_items(
-                &fixture.store,
-                "list_a",
-                vec![test_media_item("a", "movie")]
-            )
+            add_list_items(&fixture.store, "list_a", || panic!(
+                "smart lists must fail before library resolution"
+            ))
             .unwrap_err()
             .kind,
             ListErrorKind::SmartListReadOnly,

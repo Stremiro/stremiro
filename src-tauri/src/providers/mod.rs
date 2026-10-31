@@ -234,7 +234,17 @@ pub(crate) struct MediaDetails {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub directors: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub writers: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub genres: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub country: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub awards: Option<String>,
+    /// Derived by `normalize_media_details` from type/id/genre+country — addon
+    /// input never sets it (parse writes `false`).
+    #[serde(rename = "isAnime")]
+    pub is_anime: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trailers: Option<Vec<Trailer>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -290,8 +300,11 @@ pub(crate) struct Episode {
 pub(crate) mod addon_manifest;
 pub(crate) mod addon_resource;
 pub(crate) mod addons;
+pub(crate) mod anime_ids;
+pub(crate) mod enrichment;
 pub(crate) mod fetch_policy;
 pub(crate) mod skip_times;
+pub(crate) mod title_credits;
 pub(crate) mod ttl_cache;
 
 pub(crate) fn normalize_media_year(
@@ -359,4 +372,53 @@ pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Cl
 
     // Fail closed: a fallback client would silently drop the SSRF redirect policy.
     builder.build().expect("provider HTTP client must build")
+}
+
+/// Bounded read of one disk-cache file; oversize files are a miss. Callers hold their disk gate.
+pub(crate) fn read_cache_file(path: &std::path::Path, max_bytes: usize) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)
+        .ok()?
+        .take(max_bytes as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= max_bytes).then_some(bytes)
+}
+
+/// Writes one `.json` disk-cache file after evicting the oldest siblings down to
+/// `max_entries`. Callers hold their disk gate. A victim that cannot be deleted
+/// (e.g. held open by a scanner) is skipped, never blocking eviction or the write.
+pub(crate) fn write_cache_file(
+    path: &std::path::Path,
+    bytes: &[u8],
+    max_entries: usize,
+) -> Option<()> {
+    let directory = path.parent()?;
+    std::fs::create_dir_all(directory).ok()?;
+    let mut files: Vec<_> = std::fs::read_dir(directory)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let file = entry.path();
+            (file != path && file.extension().is_some_and(|ext| ext == "json")).then(|| {
+                let modified = entry
+                    .metadata()
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                (modified, file)
+            })
+        })
+        .collect();
+    files.sort_unstable();
+    let mut excess = files.len().saturating_sub(max_entries.saturating_sub(1));
+    for (_, victim) in &files {
+        if excess == 0 {
+            break;
+        }
+        if std::fs::remove_file(victim).is_ok() {
+            excess -= 1;
+        }
+    }
+    std::fs::write(path, bytes).ok()
 }

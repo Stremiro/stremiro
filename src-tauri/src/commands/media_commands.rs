@@ -24,6 +24,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 use tauri::{command, AppHandle, Manager, State};
+use tauri_plugin_opener::OpenerExt;
 
 const MEDIA_SCHEDULE_FETCH_CONCURRENCY_LIMIT: usize = 6;
 // Per-burst bound on schedule fetches — every item fans out to a full meta fetch.
@@ -303,6 +304,48 @@ pub async fn get_media_details(
     }
 
     Ok(details)
+}
+
+/// Title credits/facts: AniList for anime, TVmaze for other
+/// series; movies return empty without a request. Lazy single query - the
+/// details prefetch bundle does not include it.
+#[command]
+pub async fn get_title_credits(
+    enrichment: State<'_, crate::providers::enrichment::EnrichmentClient>,
+    media_type: String,
+    id: String,
+    imdb_id: Option<String>,
+) -> Result<crate::providers::title_credits::TitleCredits, String> {
+    crate::providers::title_credits::get_title_credits(
+        &enrichment,
+        &media_type,
+        &id,
+        imdb_id.as_deref(),
+    )
+    .await
+}
+
+/// Opens verified credits links without broadening the renderer's opener scope.
+#[command]
+pub async fn open_title_credits_link(
+    app: AppHandle,
+    enrichment: State<'_, crate::providers::enrichment::EnrichmentClient>,
+    media_type: String,
+    id: String,
+    imdb_id: Option<String>,
+    url: String,
+) -> Result<(), String> {
+    crate::providers::title_credits::validate_title_link(
+        &enrichment,
+        &media_type,
+        &id,
+        imdb_id.as_deref(),
+        &url,
+    )
+    .await?;
+    app.opener()
+        .open_url(url, None::<&str>)
+        .map_err(|_| "Could not open this link in your browser.".to_string())
 }
 
 /// The two reads the details-route prefetch fires per hover/focus, in one IPC.

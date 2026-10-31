@@ -62,7 +62,7 @@ pub async fn set_watch_status(
     .await
 }
 
-fn write_watch_status(
+pub(super) fn write_watch_status(
     store: &DurableStore,
     library_store: &DurableStore,
     item: MediaItem,

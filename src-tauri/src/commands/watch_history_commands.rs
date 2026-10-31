@@ -7,6 +7,7 @@ use super::history_helpers::{
 };
 use super::playback_state::PlaybackStateService;
 use super::resume_store::{HistoryMergeError, MAX_RESUME_TOTAL_ENTRIES};
+use super::store_helpers::{load_watch_status_index, load_watch_statuses_map};
 use super::{normalize_media_id, normalize_watch_progress_type, now_unix_millis, WatchProgress};
 use crate::providers::MediaItem;
 use std::borrow::Cow;
@@ -430,6 +431,47 @@ pub struct WatchedEpisode {
     pub episode: u32,
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EpisodeWatchStatusChange {
+    previous_status: Option<String>,
+    status: String,
+}
+
+fn episode_watch_status(
+    id: &str,
+    title_episodes: Option<&[WatchedEpisode]>,
+    progress: &HashMap<String, WatchProgress>,
+    targets: &[WatchedEpisode],
+    watched: bool,
+    previous_status: Option<&str>,
+) -> Option<&'static str> {
+    if !watched && previous_status != Some("watched") {
+        return None;
+    }
+    // A history-card action has no full episode list and cannot prove completion.
+    if title_episodes.is_none() && watched && previous_status == Some("watched") {
+        return None;
+    }
+    let targets: HashSet<_> = targets.iter().map(|ep| (ep.season, ep.episode)).collect();
+    let mut regular = title_episodes
+        .unwrap_or_default()
+        .iter()
+        .filter(|ep| ep.season > 0)
+        .peekable();
+    let complete = regular.peek().is_some()
+        && regular.all(|ep| {
+            if targets.contains(&(ep.season, ep.episode)) {
+                watched
+            } else {
+                progress
+                    .get(&format!("{id}:{}:{}", ep.season, ep.episode))
+                    .is_some_and(|row| row.is_watched)
+            }
+        });
+    Some(if complete { "watched" } else { "watching" })
+}
+
 type EpisodeWatchChanges = (
     Vec<(String, WatchProgress)>,
     Vec<String>,
@@ -533,22 +575,65 @@ pub async fn set_episodes_watched(
     item: MediaItem,
     episodes: Vec<WatchedEpisode>,
     watched: bool,
-) -> Result<(TitleWatchProgress, Vec<WatchProgress>), String> {
+    title_episodes: Option<Vec<WatchedEpisode>>,
+) -> Result<
+    (
+        TitleWatchProgress,
+        Vec<WatchProgress>,
+        Option<EpisodeWatchStatusChange>,
+    ),
+    String,
+> {
     let start_epoch = playback_state.history_reset_epoch();
     let item = super::store_helpers::normalize_library_item(item)
         .filter(|item| item.type_ == "series")
         .ok_or_else(|| "Invalid series item for watch history.".to_string())?;
-    if episodes.len() > MAX_RESUME_TOTAL_ENTRIES as usize {
+    if episodes.len() > MAX_RESUME_TOTAL_ENTRIES as usize
+        || title_episodes
+            .as_ref()
+            .is_some_and(|episodes| episodes.len() > MAX_RESUME_TOTAL_ENTRIES as usize)
+    {
         return Err("Episode list exceeds the maximum row count.".to_string());
     }
-    for episode in &episodes {
+    for episode in episodes.iter().chain(title_episodes.iter().flatten()) {
         require_episode_coordinates(Some(episode.season), Some(episode.episode))?;
     }
     let service = playback_state.inner().clone();
     super::run_blocking_store_op(move || {
         let mut previous_rows = Vec::new();
-        if !watched || service.history_reset_epoch() == start_epoch {
+        let mut status_change = None;
+        if !episodes.is_empty() && (!watched || service.history_reset_epoch() == start_epoch) {
             let existing = service.load_resume_entries_for_title(&app, &item.type_, &item.id)?;
+            let rows: Vec<_> = existing.iter().map(|(_, row)| row.clone()).collect();
+            let progress = build_title_episode_progress(&build_title_watch_history_rows(rows), None);
+            let status_store = super::open_store(&app, super::WATCH_STATUS_STORE_FILE)?;
+            let library_store = super::open_store(&app, super::LIBRARY_STORE_FILE)?;
+            let mut statuses = load_watch_statuses_map(&status_store)?;
+            let previous_status = statuses.remove(&item.id);
+            let status = episode_watch_status(
+                &item.id,
+                title_episodes.as_deref(),
+                &progress,
+                &episodes,
+                watched,
+                previous_status.as_deref(),
+            );
+            if let Some(status) = status {
+                // Capacity/corruption errors must reject before changing episode history.
+                super::library_commands::prepare_library_write(&library_store, item.clone())
+                    .map_err(String::from)?;
+                let index = load_watch_status_index(&status_store)?;
+                if !index.contains(&item.id)
+                    && index.len() >= super::watch_status_commands::MAX_WATCH_STATUS_ITEMS
+                {
+                    return Err("Watch status list is full.".to_string());
+                }
+                // Undo's inverse unwatch can change status even when this mark didn't.
+                status_change = Some(EpisodeWatchStatusChange {
+                    previous_status,
+                    status: status.to_string(),
+                });
+            }
             let (writes, deletes, previous) =
                 prepare_episode_watch_changes(&item, &episodes, existing, watched, now_unix_millis())?;
             if watched {
@@ -563,6 +648,17 @@ pub async fn set_episodes_watched(
             } else {
                 service.remove_keys(&app, &deletes)?;
             }
+            if let Some(change) = &status_change {
+                super::watch_status_commands::write_watch_status(
+                    &status_store,
+                    &library_store,
+                    item.clone(),
+                    Some(change.status.clone()),
+                ).map_err(|error| format!(
+                    "Episodes updated, but the library couldn't be updated: {}",
+                    error.message,
+                ))?;
+            }
             previous_rows = previous;
         }
         let (rows, source_health_priorities) = entries_with_source_health(
@@ -573,6 +669,7 @@ pub async fn set_episodes_watched(
         Ok((
             build_title_watch_progress_with_priorities(rows, Some(&source_health_priorities)),
             previous_rows,
+            status_change,
         ))
     })
     .await
@@ -763,4 +860,111 @@ pub async fn set_continue_watching_dismissed(
         service.set_continue_watching_dismissed(&app, media_type, &id, dismissed)
     })
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn episode_completion_uses_all_regular_episodes_and_canonical_progress() {
+        let regular = [
+            WatchedEpisode {
+                season: 1,
+                episode: 1,
+            },
+            WatchedEpisode {
+                season: 1,
+                episode: 2,
+            },
+        ];
+        let special = WatchedEpisode {
+            season: 0,
+            episode: 1,
+        };
+        let later = WatchedEpisode {
+            season: 2,
+            episode: 1,
+        };
+        let all = [special, regular[0], regular[1]];
+        let mut progress = HashMap::new();
+        assert_eq!(
+            episode_watch_status("show", Some(&all), &progress, &regular, true, None),
+            Some("watched")
+        );
+        assert_eq!(
+            episode_watch_status(
+                "show",
+                Some(&all),
+                &progress,
+                &regular,
+                true,
+                Some("watched")
+            ),
+            Some("watched")
+        );
+        assert_eq!(
+            episode_watch_status(
+                "show",
+                Some(&[regular[0], regular[1], later]),
+                &progress,
+                &regular,
+                true,
+                None
+            ),
+            Some("watching")
+        );
+        assert_eq!(
+            episode_watch_status("show", Some(&[]), &progress, &[special], true, None),
+            Some("watching")
+        );
+        assert_eq!(
+            episode_watch_status("show", None, &progress, &regular, true, Some("watched")),
+            None
+        );
+        progress.insert(
+            "show:1:1".into(),
+            WatchProgress {
+                is_watched: true,
+                ..WatchProgress::default()
+            },
+        );
+        assert_eq!(
+            episode_watch_status(
+                "show",
+                Some(&all),
+                &progress,
+                &regular[1..],
+                true,
+                Some("watching")
+            ),
+            Some("watched")
+        );
+        assert_eq!(
+            episode_watch_status("other", Some(&all), &progress, &regular[1..], true, None),
+            Some("watching")
+        );
+        assert_eq!(
+            episode_watch_status(
+                "show",
+                Some(&all),
+                &progress,
+                &regular,
+                false,
+                Some("watched")
+            ),
+            Some("watching")
+        );
+        for previous in [
+            None,
+            Some("watching"),
+            Some("plan_to_watch"),
+            Some("dropped"),
+        ] {
+            assert_eq!(
+                episode_watch_status("show", Some(&all), &progress, &regular, false, previous),
+                None
+            );
+        }
+    }
 }

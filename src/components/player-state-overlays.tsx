@@ -2,6 +2,7 @@ import { ArrowLeft, Play, RotateCcw, TriangleAlert, X } from 'lucide-react';
 import { memo, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 import { RemoteImage } from '@/components/remote-image';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
+import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import type { Episode } from '@/lib/api';
 import { ariaKeyShortcuts, formatBindingKey, withShortcutHint } from '@/lib/player-keybindings';
@@ -259,12 +260,14 @@ export const PlayerIdleOverlay = memo(function PlayerIdleOverlay({
   overview,
 }: PlayerIdleOverlayProps) {
   const [logoSrc, onLogoError] = useFailedSrc(isHttpUrl(logo) ? logo : null);
+  const { mounted } = useDelayedUnmount(visible, 150);
+  if (!mounted) return null;
   return (
     <div
       aria-hidden={!visible}
       className={cn(
         'pointer-events-none absolute inset-0 z-30 transition-opacity duration-150 ease-out motion-reduce:transition-none',
-        visible ? 'opacity-100' : 'opacity-0',
+        visible ? 'animate-in fade-in duration-150 motion-reduce:animate-none' : 'opacity-0',
       )}
     >
       <div className='absolute inset-0 bg-black/25' />
@@ -370,7 +373,7 @@ interface PlayerUpNextCardProps {
   onPlayNext: () => void;
 }
 
-const UP_NEXT_RING_RADIUS = 13;
+const UP_NEXT_RING_RADIUS = 8.25;
 const UP_NEXT_RING_CIRCUMFERENCE = 2 * Math.PI * UP_NEXT_RING_RADIUS;
 
 // EOF "Up Next": one click (or the next-episode key) runs the silent auto-resolve. With auto-play on, a countdown ring arms the
@@ -412,7 +415,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
         }}
         className={cn(
           EOF_GLASS_CLASS,
-          'group/upnext flex min-w-0 max-w-md items-center gap-3 rounded-2xl p-3 text-left transition-colors hover:bg-zinc-900/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
+          'group/upnext flex min-w-0 max-w-md items-center gap-3 rounded-xl p-2.5 text-left transition-colors hover:bg-zinc-900/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
         )}
       >
         {thumbnail && <EofCardThumbnail src={thumbnail} />}
@@ -438,24 +441,19 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
             )}
           </p>
         </div>
-        <div className='relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full border border-white/15 bg-white/5 transition-colors group-hover/upnext:bg-white/15'>
+        <div className='relative flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-lg border border-white/12 bg-white/[0.04] transition-colors group-hover/upnext:bg-white/10'>
           {countingDown && (
-            <svg
-              aria-hidden='true'
-              className='absolute inset-0 h-full w-full -rotate-90'
-              viewBox='0 0 32 32'
-            >
+            <svg aria-hidden='true' className='absolute inset-[5px] -rotate-90' viewBox='0 0 22 22'>
               <circle
-                cx='16'
-                cy='16'
+                cx='11'
+                cy='11'
                 r={UP_NEXT_RING_RADIUS}
                 fill='none'
                 stroke='currentColor'
-                strokeWidth='2'
-                strokeLinecap='round'
+                strokeWidth='1.5'
                 strokeDasharray={UP_NEXT_RING_CIRCUMFERENCE}
                 strokeDashoffset={UP_NEXT_RING_CIRCUMFERENCE * (1 - ringProgress)}
-                className='text-white/70 transition-[stroke-dashoffset] duration-1000 ease-linear motion-reduce:transition-none'
+                className='text-white/75 transition-[stroke-dashoffset] duration-1000 ease-linear motion-reduce:transition-none'
               />
             </svg>
           )}
@@ -474,7 +472,7 @@ export const PlayerUpNextCard = memo(function PlayerUpNextCard({
           }}
           className={cn(
             EOF_GLASS_CLASS,
-            'flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-white/60 transition-colors hover:bg-zinc-900/85 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
+            'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-white/60 transition-colors hover:bg-zinc-900/90 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40',
           )}
         >
           <X className='h-3.5 w-3.5' />

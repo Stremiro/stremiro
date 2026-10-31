@@ -8,6 +8,26 @@ use crate::providers::MediaItem;
 use crate::test_helpers::test_media_item;
 
 #[test]
+fn title_search_folds_ascii_case_before_provider_requests() {
+    for query in [
+        "The Age of Shadows",
+        "the age of shadows",
+        "  THE AGE OF SHADOWS\n",
+    ] {
+        let criteria = super::build_search_criteria(
+            serde_json::from_value(serde_json::json!({"query": query})).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(criteria.query.as_deref(), Some("the age of shadows"));
+    }
+    let criteria = super::build_search_criteria(
+        serde_json::from_value(serde_json::json!({"query": "東京 Amélie"})).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(criteria.query.as_deref(), Some("東京 amélie"));
+}
+
+#[test]
 fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     let page = |ids: &[&str], next_skip| {
         Ok((
@@ -37,6 +57,7 @@ fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     );
     assert_eq!(merged.continuation.skip, None);
     assert!(!merged.exhausted);
+    assert!(!merged.partial);
 }
 
 #[test]
@@ -61,6 +82,7 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
     )
     .unwrap();
     assert!(merged.items.is_empty());
+    assert!(merged.partial);
     assert_eq!(
         merged.continuation.all_cursors,
         Some(super::AllBrowseCursors {

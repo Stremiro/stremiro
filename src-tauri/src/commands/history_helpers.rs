@@ -1,6 +1,6 @@
 use super::{
     normalize_media_id, normalize_media_image_url, normalize_watch_progress_type, now_unix_millis,
-    streaming_helpers::{is_persistable_stream_key, normalize_source_id, normalize_source_key},
+    streaming_helpers::{normalize_source_id, normalize_source_key, normalize_stream_key},
     WatchProgress, MEDIA_TITLE_MAX_CHARS,
 };
 use crate::providers::{bound_optional, non_blank, trim_to_max};
@@ -117,8 +117,9 @@ pub(crate) fn sanitize_watch_progress(mut progress: WatchProgress) -> Option<Wat
         .and_then(|id| normalize_media_id(&id));
     // Only opaque hash identities (`h:`/`uh:`/`s:`) may persist — legacy `u:` keys
     // embed the normalized URL verbatim, signed credentials included.
-    progress.last_stream_key = bound_optional(progress.last_stream_key, STREAM_KEY_MAX_CHARS)
-        .filter(|key| is_persistable_stream_key(key));
+    progress.last_stream_key = progress
+        .last_stream_key
+        .and_then(|key| normalize_stream_key(&key));
     progress.source_name = bound_optional(progress.source_name, SOURCE_NAME_MAX_CHARS);
     progress.source_id = progress
         .source_id

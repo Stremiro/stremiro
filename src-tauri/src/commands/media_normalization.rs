@@ -18,6 +18,8 @@ const MEDIA_DETAILS_RATING_MAX_CHARS: usize = 64;
 const MEDIA_DETAILS_CAST_MAX: usize = 64;
 const MEDIA_DETAILS_CREDITS_MAX: usize = 8;
 const MEDIA_DETAILS_CAST_NAME_MAX_CHARS: usize = 128;
+const MEDIA_DETAILS_COUNTRY_MAX_CHARS: usize = 128;
+const MEDIA_DETAILS_AWARDS_MAX_CHARS: usize = 256;
 const EPISODE_ID_MAX_CHARS: usize = 256;
 const EPISODE_TITLE_MAX_CHARS: usize = 512;
 const EPISODE_RELEASED_MAX_CHARS: usize = 64;
@@ -208,6 +210,34 @@ pub(crate) fn normalize_media_item(mut item: MediaItem) -> MediaItem {
     item
 }
 
+/// Anime classification is derived, never trusted from the payload: explicit
+/// anime types and anime-database ids always qualify; the generic `Animation`
+/// genre only does when paired with a Japanese `country` token. Titles are
+/// never matched — Japanese live action and US animation stay non-anime.
+fn is_anime_details(details: &MediaDetails) -> bool {
+    if details.type_.trim().eq_ignore_ascii_case("anime") {
+        return true;
+    }
+    if crate::providers::anime_ids::parse_anime_id(&details.id).is_some() {
+        return true;
+    }
+    let genres = details.genres.as_deref().unwrap_or_default();
+    let has_genre = |name: &str| {
+        genres
+            .iter()
+            .any(|genre| genre.trim().eq_ignore_ascii_case(name))
+    };
+    if has_genre("Anime") {
+        return true;
+    }
+    has_genre("Animation")
+        && details.country.as_deref().is_some_and(|country| {
+            country
+                .split([',', ';', '/'])
+                .any(|token| token.trim().eq_ignore_ascii_case("japan"))
+        })
+}
+
 pub(crate) fn with_requested_media_id(
     mut details: MediaDetails,
     requested_id: &str,
@@ -215,6 +245,7 @@ pub(crate) fn with_requested_media_id(
     // Addons may return an alias; persistence and navigation use the requested identity.
     if details.id != requested_id {
         details.id = requested_id.to_string();
+        details.is_anime |= crate::providers::anime_ids::parse_anime_id(requested_id).is_some();
     }
     details
 }
@@ -239,7 +270,15 @@ pub(crate) fn normalize_media_details(mut details: MediaDetails) -> MediaDetails
         MEDIA_DETAILS_CREDITS_MAX,
         MEDIA_DETAILS_CAST_NAME_MAX_CHARS,
     );
+    details.writers = bound_string_list(
+        details.writers,
+        MEDIA_DETAILS_CREDITS_MAX,
+        MEDIA_DETAILS_CAST_NAME_MAX_CHARS,
+    );
     details.genres = bound_string_list(details.genres, MEDIA_GENRES_MAX, MEDIA_GENRE_MAX_CHARS);
+    details.country = bound_optional(details.country, MEDIA_DETAILS_COUNTRY_MAX_CHARS);
+    details.awards = bound_optional(details.awards, MEDIA_DETAILS_AWARDS_MAX_CHARS);
+    details.is_anime = is_anime_details(&details);
     // Trailers need no bounding here: `parse_trailers` is the only producer
     // and already caps the list and admits strict 11-char YouTube ids only.
     let release_date = build_release_date(details.release_date.as_deref());

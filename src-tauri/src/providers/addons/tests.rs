@@ -14,7 +14,8 @@ impl AddonTransport {
         streams: Vec<AddonStream>,
     ) {
         let key = stream_cache_key(media_type, id, &config_cache_segment(addon_url), source);
-        self.cache_put(&key, streams, self.cache_generation());
+        let is_empty = streams.is_empty();
+        self.cache.put(&key, streams.into(), is_empty, || true);
     }
 }
 
@@ -753,6 +754,34 @@ fn decode_stream_items_caps_valid_rows_in_source_order() {
             Some(format!("stream-{index}").as_str())
         );
     }
+
+    // An invalid prefix never consumes valid-row capacity or discards the survivor.
+    let decoded =
+        decode_stream_items(br#"{"streams":[42,null,{"name":"survivor"}]}"#).expect("decodes");
+    assert_eq!(decoded.len(), 1);
+    assert_eq!(decoded[0].name.as_deref(), Some("survivor"));
+
+    // `]}` truncation reopens the array: the tail is validated, never decoded.
+    let capped_streams = || {
+        let mut bytes = serde_json::to_vec(&serde_json::json!({
+            "streams": (0..DECODED_STREAMS_MAX)
+                .map(|index| serde_json::json!({"name": format!("stream-{index}")}))
+                .collect::<Vec<_>>()
+        }))
+        .unwrap();
+        bytes.truncate(bytes.len() - 2);
+        bytes
+    };
+    let mut bytes = capped_streams();
+    bytes.extend_from_slice(
+        br#",{"name":42},{"overflow":1e999,"huge":999999999999999999999999999999}]}"#,
+    );
+    let decoded = decode_stream_items(&bytes).expect("well-formed tail is ignored");
+    assert_eq!(decoded.len(), DECODED_STREAMS_MAX);
+
+    let mut bytes = capped_streams();
+    bytes.extend_from_slice(b",{");
+    assert!(decode_stream_items(&bytes).is_err());
 }
 
 #[test]
@@ -766,6 +795,7 @@ fn decode_stream_items_keeps_missing_and_invalid_envelope_behavior() {
         br#"{"streams":{}}"#,
         br#"{"streams":"invalid"}"#,
         br#"{"streams":[{"name":42}]}"#,
+        br#"{"streams":[],"streams":[]}"#,
     ] {
         assert!(decode_stream_items(bytes).is_err());
     }
@@ -899,23 +929,6 @@ fn stream_resource_url_preserves_config_and_encodes_id() {
             format!("https://example.com/addon/v1/stream/movie/tt1234567.json?token={token}")
         );
     }
-}
-
-#[test]
-fn stream_cache_put_enforces_hard_entry_bound_and_keeps_newest() {
-    let transport = AddonTransport::new();
-    let stream = stream_fixture(None, Some("https://example.com/video.mp4"));
-    let generation = transport.generation.load(Ordering::SeqCst);
-
-    for index in 0..(STREAM_CACHE_MAX_ENTRIES + 5) {
-        transport.cache_put(&format!("key-{index}"), vec![stream.clone()], generation);
-    }
-
-    assert_eq!(transport.cache.len(), STREAM_CACHE_MAX_ENTRIES);
-    assert!(transport
-        .cache
-        .get(&format!("key-{}", STREAM_CACHE_MAX_ENTRIES + 4))
-        .is_some());
 }
 
 #[tokio::test]

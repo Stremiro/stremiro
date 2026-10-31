@@ -1,6 +1,19 @@
 import { expect, mock, spyOn, test } from 'bun:test';
-import type { ComponentProps, ComponentType, DependencyList, EffectCallback } from 'react';
-import type { CalendarSchedule, StreamSelectorData } from '../src/lib/api';
+import type {
+  ComponentProps,
+  ComponentType,
+  DependencyList,
+  EffectCallback,
+  KeyboardEvent,
+} from 'react';
+import type {
+  CalendarSchedule,
+  DetailsPrefetchBundle,
+  EpisodesWatchedResult,
+  MediaDetails,
+  StreamSelectorData,
+  TitleCredits,
+} from '../src/lib/api';
 import type { QueryObserverOptions } from '@tanstack/react-query';
 
 // Bun's navigator has no connectivity snapshot; render the pages as online.
@@ -41,8 +54,9 @@ const { QueryClient, QueryClientProvider, QueryObserver, onlineManager } =
   await import('@tanstack/react-query');
 const { renderToStaticMarkup } = await import('react-dom/server');
 const router = await import('react-router');
-const { MemoryRouter } = router;
+const { MemoryRouter, Route, Routes } = router;
 const { Search } = await import('../src/pages/search');
+const { Details } = await import('../src/pages/details');
 const { Calendar } = await import('../src/pages/calendar');
 const { Home, homeTrendingMoviesQueryOptions } = await import('../src/pages/home');
 const { api, DEFAULT_APP_UI_PREFERENCES } = await import('../src/lib/api');
@@ -51,15 +65,24 @@ const {
   APP_UI_PREFERENCES_QUERY_KEY,
   DETAILS_QUERY_KEY,
   RECENT_WATCH_SEED_QUERY_KEY,
+  detailsCardQueryKey,
+  invalidateDiscoveryQueries,
   profileLibraryQueryKey,
   streamSelectorQueryKey,
+  titleWatchProgressQueryKey,
 } = await import('../src/lib/query-invalidation');
+const { pendingDetailsPrefetch, prefetchDetailsRouteData } =
+  await import('../src/lib/details-prefetch');
 const { playerStreamRankingOptions } = await import('../src/lib/resolve-player-stream');
 const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-cache-key');
 
 const { StreamSelector } = await import('../src/components/stream-selector');
 const { AddTitlesDialog } = await import('../src/components/list/add-titles-dialog');
+const { DetailsSections, DetailsSectionTabs, NextAiringChip } =
+  await import('../src/components/details-sections');
+const { useNearViewport } = await import('../src/hooks/use-near-viewport');
 const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
+const { useMarkSeasonWatched } = await import('../src/hooks/use-media-library');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
 const tauriCore = await import('@tauri-apps/api/core');
@@ -221,6 +244,57 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     client.clear();
     fetch.mockRestore();
     matchLanguage.mockRestore();
+  }
+});
+
+test('Subtitle results stay available while mounted but leave the cache after playback', async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { gcTime: 30 * 60_000 } } });
+  const fetch = spyOn(api, 'getAddonSubtitles').mockResolvedValue([]);
+  let episode = 1;
+  const releases: (() => void)[] = [];
+  function Fixture() {
+    usePlayerAddonSubtitles({
+      activeStreamLoadKey: `episode-${episode}`,
+      announce: () => {},
+      autoLoadLanguage: null,
+      effectiveResolveMediaType: 'series',
+      id: 'tt1',
+      menuOpen: false,
+      mountedRef: { current: true },
+      resolvedStreamSeason: 1,
+      resolvedStreamEpisode: episode,
+      selectAddonSubtitle: async () => false,
+      setTrack: async () => false,
+      subTracks: [],
+    });
+    return null;
+  }
+  try {
+    for (; episode <= 24; episode++) {
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Fixture />
+        </QueryClientProvider>,
+      );
+      const key = ['addonSubtitles', 'series', 'tt1', 1, episode];
+      const query = client.getQueryCache().find({ queryKey: key })!;
+      const observer = new QueryObserver(client, query.options);
+      releases.push(observer.subscribe(() => {}));
+      client.setQueryData(
+        key,
+        Array.from({ length: 50 }, (_, id) => ({ id: `${id}` })),
+      );
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(client.getQueryCache().getAll()).toHaveLength(24);
+    expect(fetch).not.toHaveBeenCalled();
+    releases.splice(0).forEach((release) => release());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(client.getQueryCache().getAll()).toHaveLength(0);
+  } finally {
+    releases.forEach((release) => release());
+    client.clear();
+    fetch.mockRestore();
   }
 });
 
@@ -530,6 +604,19 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
     expect(await player.setTrack('sub', 3)).toBe(true);
     repeatedSnapshot.resolve([embedded]);
     expect(await repeatedRefresh).toEqual(confirmed);
+    player.notifyObservedTrackSelection('audio', null);
+    player.notifyObservedTrackSelection('sub', 1);
+    const observedSnapshot =
+      Promise.withResolvers<Awaited<ReturnType<typeof playerMpv.readPlayerTrackList>>>();
+    tracks.mockImplementationOnce(() => observedSnapshot.promise);
+    const observedRefresh = player.refreshTracks();
+    expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 1 });
+    player.notifyObservedTrackSelection('sub', 3);
+    observedSnapshot.resolve([{ ...embedded, selected: true }]);
+    expect(await observedRefresh).toEqual(confirmed);
+    tracks.mockResolvedValueOnce(confirmed);
+    expect(await player.refreshTracks()).toEqual(confirmed);
+    expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 3 });
     expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
     expect(change).toHaveBeenLastCalledWith('sub', 3);
     expect(add).toHaveBeenCalledTimes(1);
@@ -639,6 +726,67 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
     for (const spy of [nativeSeek, nativeCommand]) spy.mockRestore();
   }
 });
+
+test.each([null, 'watched'] as const)(
+  'Season completion refreshes library relations and Undo restores status %s',
+  async (previousStatus) => {
+    const client = new QueryClient({ defaultOptions: { queries: { gcTime: Infinity } } });
+    const item: MediaDetails = {
+      id: 'season-library',
+      title: 'One season',
+      type: 'series',
+      isAnime: false,
+      episodes: [{ id: 'e1', season: 1, episode: 1 }],
+    };
+    const progress = { episodeProgress: {}, watchedEpisodeCeiling: {} };
+    const mark = spyOn(api, 'setEpisodesWatched').mockResolvedValue([
+      progress,
+      [],
+      { previousStatus, status: 'watched' },
+    ] satisfies EpisodesWatchedResult);
+    const restored = Promise.withResolvers<void>();
+    const restoreStatus = spyOn(api, 'setWatchStatus').mockImplementation(async () => {
+      restored.resolve();
+      return null;
+    });
+    const notice = spyOn(toast, 'success').mockReturnValue('season-notice');
+    const controller = Promise.withResolvers<ReturnType<typeof useMarkSeasonWatched>>();
+    function Fixture() {
+      controller.resolve(useMarkSeasonWatched({ item }));
+      return null;
+    }
+    const keys = [
+      ['library'],
+      ['watch-statuses'],
+      ['profile-library'],
+      ['lists'],
+      ['list-summaries'],
+    ];
+    try {
+      for (const key of keys) client.setQueryData(key, []);
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Fixture />
+        </QueryClientProvider>,
+      );
+      await (await controller.promise).mutateAsync({ episodes: item.episodes!, watched: true });
+      expect(mark).toHaveBeenCalledWith(item, item.episodes, true);
+      for (const key of keys) expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+      const action = notice.mock.calls[0]?.[1]?.action;
+      if (!action || typeof action !== 'object' || !('onClick' in action))
+        throw new Error('Missing season Undo');
+      action.onClick({});
+      await restored.promise;
+      expect(mark).toHaveBeenLastCalledWith(item, item.episodes, false);
+      expect(restoreStatus).toHaveBeenCalledWith(item, previousStatus);
+    } finally {
+      mark.mockRestore();
+      restoreStatus.mockRestore();
+      notice.mockRestore();
+      client.clear();
+    }
+  },
+);
 
 test.each([false, true])(
   'Accepted resume seeks wait for settlement before retrying (tray paused=%s)',
@@ -892,12 +1040,81 @@ test.each([false, true])(
   },
 );
 
-test('Home keeps Animation beside Movies and Series in the same category control', () => {
-  const markup = renderPage(Home, '/home');
-  expect(markup).toMatch(/Movies<\/button>[\s\S]*Series<\/button>[\s\S]*Animation<\/button>/);
-  expect(markup).toContain('All genres');
-  expect(markup).not.toContain('Trending Animation');
-});
+test.each([false, true])(
+  'Details hero renders writer, country and awards facts only when metadata provides them (populated=%s)',
+  (populated) => {
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
+    });
+    const id = 'details-credits-test';
+    const details: MediaDetails = {
+      id,
+      type: 'movie',
+      title: 'Metadata film',
+      isAnime: true,
+      displayYear: '1999',
+      runtime: '2h 16m',
+      cast: ['Actor One', 'Actor Two', 'Actor Three', 'Actor Four', 'Actor Five'],
+      directors: ['Lana Wachowski', 'Lilly Wachowski'],
+      ...(populated
+        ? {
+            writers: ['Writer One', 'Writer Two'],
+            country: 'United States',
+            awards: 'Won 4 Oscars. 42 wins & 52 nominations total',
+          }
+        : {}),
+    };
+    client.setQueryData(api.detailsQueryOptions('movie', id).queryKey, details);
+    client.setQueryData(api.titleCreditsQueryOptions('anime', id).queryKey, {
+      source: 'anilist',
+      people: [],
+      facts: {},
+      streamingLinks: [],
+      nextAiringEpisode: { episode: 7, airingAt: 4_000_000_000 },
+    } satisfies TitleCredits);
+    client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+    let markup: string;
+    renderDialogPortal = true;
+    try {
+      markup = renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <MemoryRouter initialEntries={[`/details/movie/${id}`]}>
+            <PlayerSessionProvider>
+              <Routes>
+                <Route path='/details/:type/:id' element={<Details />} />
+              </Routes>
+            </PlayerSessionProvider>
+          </MemoryRouter>
+        </QueryClientProvider>,
+      );
+    } finally {
+      renderDialogPortal = false;
+      client.clear();
+    }
+
+    // The original rows keep their labels and the +N full-cast popover.
+    expect(markup).toContain('Starring');
+    expect(markup).toContain('Directors');
+    expect(markup).toContain('aria-label="Full cast"');
+    expect(markup).toContain('>+1</button>');
+    expect(markup).toContain('href="/search?q=Lilly%20Wachowski"');
+    expect(markup).not.toContain('Next: Episode');
+    expect(markup).not.toContain('Title sections');
+    if (populated) {
+      expect(markup).toContain('Writers');
+      expect(markup).toContain('href="/search?q=Writer%20One"');
+      expect(markup).toContain('United States');
+      expect(markup).toContain('Won 4 Oscars');
+      expect(markup).toContain('>Awards: </span>');
+    } else {
+      expect(markup).not.toContain('Writers');
+      expect(markup).not.toContain('United States');
+      expect(markup).not.toContain('Writer One');
+      expect(markup).not.toContain('Won 4 Oscars');
+      expect(markup).not.toContain('>Awards: </span>');
+    }
+  },
+);
 
 test.each([false, true])(
   'Home offers recommendation retry only for a failed seed (failed=%s)',
@@ -1107,5 +1324,370 @@ test('An active native read recovers on reconnect after exhausting its offline r
     queryClient.removeQueries({ queryKey, exact: true });
     queryClient.unmount();
     onlineManager.setOnline(wasOnline);
+  }
+});
+
+test('Discovery changes detach stale prefetches without breaking current single-flight', async () => {
+  const client = new QueryClient();
+  const mediaId = 'prefetch-generation-fixture';
+  const detailsKey = detailsCardQueryKey('movie', mediaId);
+  const progressKey = titleWatchProgressQueryKey(mediaId);
+  const bundles = [
+    Promise.withResolvers<DetailsPrefetchBundle>(),
+    Promise.withResolvers<DetailsPrefetchBundle>(),
+  ];
+  let bundleCall = 0;
+  const fetchBundle = spyOn(api, 'getDetailsPrefetchBundle').mockImplementation(
+    () => bundles[bundleCall++]!.promise,
+  );
+  const bundleFor = (title: string, ceiling: number): DetailsPrefetchBundle => ({
+    details: { id: mediaId, type: 'movie', title },
+    progress: {
+      episodeProgress: {},
+      watchedEpisodeCeiling: ceiling ? { '1': ceiling } : {},
+    },
+  });
+  const prefetch = () =>
+    prefetchDetailsRouteData(client, { mediaId, mediaType: 'movie', warmChunk: false });
+  const settled: Promise<unknown>[] = [];
+  try {
+    prefetch();
+    const firstPending = pendingDetailsPrefetch('movie', mediaId);
+    expect(firstPending).toBeDefined();
+    settled.push(firstPending!);
+    prefetch();
+    expect(fetchBundle).toHaveBeenCalledTimes(1);
+    expect(pendingDetailsPrefetch('movie', mediaId)).toBe(firstPending);
+
+    await invalidateDiscoveryQueries(client);
+    expect(pendingDetailsPrefetch('movie', mediaId)).toBeUndefined();
+
+    prefetch();
+    const secondPending = pendingDetailsPrefetch('movie', mediaId);
+    expect(secondPending).toBeDefined();
+    settled.push(secondPending!);
+    expect(secondPending).not.toBe(firstPending);
+    prefetch();
+    expect(fetchBundle).toHaveBeenCalledTimes(2);
+    expect(pendingDetailsPrefetch('movie', mediaId)).toBe(secondPending);
+
+    bundles[0]!.resolve(bundleFor('Old provider', 2));
+    expect(await firstPending).toBeUndefined();
+    expect(client.getQueryData(detailsKey)).toBeUndefined();
+    expect(client.getQueryData(progressKey)).toBeUndefined();
+    expect(pendingDetailsPrefetch('movie', mediaId)).toBe(secondPending);
+
+    const fresh = bundleFor('New provider', 4);
+    bundles[1]!.resolve(fresh);
+    expect(await secondPending).toEqual(fresh);
+    expect(client.getQueryData(detailsKey)).toEqual(fresh.details);
+    expect(client.getQueryData(progressKey)).toEqual(fresh.progress);
+    expect(pendingDetailsPrefetch('movie', mediaId)).toBeUndefined();
+  } finally {
+    for (const deferred of bundles) deferred.resolve(bundleFor('Cleanup', 0));
+    await Promise.allSettled(settled);
+    fetchBundle.mockRestore();
+    client.clear();
+  }
+});
+
+const SECTION_ITEM = {
+  id: 'tt0944947',
+  type: 'series',
+  title: 'Game of Thrones',
+  runtime: '60 min',
+} as MediaDetails;
+
+test('Credits links pass the title identity to their scoped Rust command', async () => {
+  const updater = await import('../src/lib/app-updater');
+  const runtime = spyOn(updater, 'isTauriDesktopRuntime').mockReturnValue(true);
+  const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(undefined);
+  try {
+    await api.openTitleCreditsLink('anime', 'kitsu:8671', 'tt2560140', 'https://anilist.co');
+    expect(invoke).toHaveBeenCalledTimes(1);
+    expect(invoke).toHaveBeenCalledWith(
+      'open_title_credits_link',
+      {
+        mediaType: 'anime',
+        id: 'kitsu:8671',
+        imdbId: 'tt2560140',
+        url: 'https://anilist.co',
+      },
+      undefined,
+    );
+  } finally {
+    invoke.mockRestore();
+    runtime.mockRestore();
+  }
+});
+
+const renderSections = (props: Partial<ComponentProps<typeof DetailsSections>> = {}) =>
+  renderToStaticMarkup(
+    <MemoryRouter>
+      <DetailsSections
+        item={SECTION_ITEM}
+        credits={SECTION_CREDITS}
+        value='episodes'
+        onValueChange={() => {}}
+        hasEpisodes
+        allowExtras
+        {...props}
+      >
+        <p data-episodes-children>Episode pane</p>
+      </DetailsSections>
+    </MemoryRouter>,
+  );
+const SECTION_CREDITS: TitleCredits = {
+  source: 'tvmaze',
+  people: [
+    {
+      name: 'Peter Dinklage',
+      imageUrl: 'https://static.tvmaze.com/p.jpg',
+      role: 'Cast',
+      character: 'Tyrion Lannister',
+    },
+  ],
+  facts: { network: 'HBO', status: 'Ended', runtimeMinutes: 60 },
+  streamingLinks: [{ site: 'Crunchyroll', url: 'http://crunchyroll.com/ep/1' }],
+};
+
+test('Details sections render ARIA tabs, always-mounted panes, and attribution', () => {
+  const episodesMarkup = renderSections();
+  expect(episodesMarkup).toContain('aria-selected="true"');
+  expect(episodesMarkup).not.toContain('id="details-section-panel-episodes" hidden=""');
+  const aboutMarkup = renderSections({ value: 'about' });
+  expect(aboutMarkup).toContain('id="details-section-panel-episodes" hidden=""');
+  expect(aboutMarkup).toContain('data-episodes-children');
+  expect(aboutMarkup).toContain('role="tabpanel" tabindex="0"');
+  const markup = renderSections({ value: 'cast' });
+  expect(markup).toContain('role="tablist"');
+  expect(markup).toContain('aria-label="Title sections"');
+  expect(markup).toContain('id="details-episodes-heading"');
+  expect(markup).toContain('id="details-section-tab-cast"');
+  expect(markup).toContain('id="details-section-tab-about"');
+  expect(markup).toContain('aria-selected="true"');
+  // The episodes pane stays mounted but hidden; children survive the switch.
+  expect(markup).toContain('id="details-section-panel-episodes" hidden=""');
+  expect(markup).toContain('data-episodes-children');
+  expect(markup).toContain('id="details-section-panel-cast"');
+  // Cast content: search links, initials fallback, facts, links, footer.
+  expect(markup).toContain('href="/search?q=Peter%20Dinklage"');
+  expect(markup).toContain('Tyrion Lannister');
+  expect(markup).toContain('>PD<');
+  expect(markup).toContain('HBO');
+  expect(markup).toContain('http://crunchyroll.com/ep/1');
+  expect(markup).toContain('https://www.tvmaze.com');
+  expect(markup).toContain('https://creativecommons.org/licenses/by-sa/4.0/');
+});
+
+test('Details sections hide unavailable panes and label anime cast Characters', () => {
+  const anime = {
+    ...SECTION_ITEM,
+    isAnime: true,
+    type: 'series',
+  } as MediaDetails;
+  const animeCredits: TitleCredits = {
+    ...SECTION_CREDITS,
+    source: 'anilist',
+    people: [
+      {
+        name: 'Eren Yeager',
+        role: 'Main',
+        voiceActor: 'Yuki Kaji',
+      },
+    ],
+  };
+  const markup = renderSections({ item: anime, credits: animeCredits, value: 'cast' });
+  expect(markup).toContain('Characters');
+  expect(markup).not.toContain('href="/search?q=Eren%20Yeager"');
+  expect(markup).toContain('href="/search?q=Yuki%20Kaji"');
+  expect(markup).toContain('href="https://anilist.co"');
+  expect(markup).not.toContain('tvmaze.com');
+  // Missing credits and no item runtime: no cast/about tabs, no attribution.
+  const bareItem = { ...SECTION_ITEM, runtime: undefined } as MediaDetails;
+  const sparse = renderSections({ item: bareItem, credits: undefined });
+  expect(sparse).toContain('Episodes');
+  expect(sparse).not.toContain('details-section-tab-cast');
+  expect(sparse).not.toContain('details-section-tab-about');
+  expect(sparse).not.toContain('creativecommons.org');
+  // A single Episodes tab keeps the original h2 (no tablist).
+  expect(sparse).not.toContain('role="tablist"');
+  expect(sparse).toContain('id="details-episodes-heading"');
+  // Movies never render the component.
+  expect(renderSections({ item: { ...SECTION_ITEM, type: 'movie' } })).toBe('');
+});
+
+test('Details section tabs navigate with arrows and edge keys', () => {
+  const tabs = [
+    { value: 'episodes', label: 'Episodes' },
+    { value: 'cast', label: 'Cast' },
+    { value: 'about', label: 'About' },
+  ] as const;
+  for (const [value, key, guard, expected] of [
+    ['episodes', 'ArrowRight', {}, 'cast'],
+    ['episodes', 'ArrowLeft', {}, 'about'],
+    ['episodes', 'End', {}, 'about'],
+    ['episodes', 'Home', {}, 'episodes'],
+    ['about', 'ArrowRight', {}, 'episodes'],
+    ['episodes', 'x', {}, null],
+    ['episodes', 'ArrowRight', { ctrlKey: true }, null],
+    ['episodes', 'ArrowRight', { defaultPrevented: true }, null],
+  ] as const) {
+    const change = mock((_next: string) => {});
+    const focus = mock(() => {});
+    const querySelector = mock((_selector: string) => ({ focus }));
+    const preventDefault = mock(() => {});
+    const element = DetailsSectionTabs({ tabs, value, onValueChange: change });
+    const onKeyDown = element.props.onKeyDown as (event: KeyboardEvent<HTMLDivElement>) => void;
+    onKeyDown({
+      key,
+      ...guard,
+      preventDefault,
+      currentTarget: { querySelector },
+    } as unknown as KeyboardEvent<HTMLDivElement>);
+    expect(change.mock.calls.map(([next]) => next)).toEqual(expected ? [expected] : []);
+    expect(preventDefault).toHaveBeenCalledTimes(expected ? 1 : 0);
+    expect(focus).toHaveBeenCalledTimes(expected ? 1 : 0);
+    if (expected) {
+      expect(querySelector).toHaveBeenCalledWith(
+        expected === 'episodes' ? '#details-episodes-heading' : `#details-section-tab-${expected}`,
+      );
+    }
+  }
+});
+
+test('Details viewport observer waits for the enabled late anchor', () => {
+  const observe = mock((_element: unknown) => {});
+  const disconnect = mock(() => {});
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
+  Object.defineProperty(globalThis, 'IntersectionObserver', {
+    configurable: true,
+    writable: true,
+    value: function () {
+      return { observe, disconnect };
+    },
+  });
+  capturedEffects = [];
+  const fakeAnchor = {} as HTMLDivElement;
+  const probeRefs: { current: HTMLDivElement | null }[] = [];
+  function ViewportProbe({ enabled }: { enabled: boolean }) {
+    probeRefs.push(useNearViewport(enabled).anchorRef);
+    return null;
+  }
+  try {
+    renderToStaticMarkup(<ViewportProbe enabled={false} />);
+    probeRefs.at(-1)!.current = fakeAnchor;
+    const disabledCleanup = capturedEffects.at(-1)?.();
+    expect(observe).not.toHaveBeenCalled();
+    expect(disabledCleanup).toBeUndefined();
+
+    renderToStaticMarkup(<ViewportProbe enabled />);
+    probeRefs.at(-1)!.current = fakeAnchor;
+    const cleanup = capturedEffects.at(-1)?.();
+    expect(observe).toHaveBeenCalledTimes(1);
+    expect(observe).toHaveBeenCalledWith(fakeAnchor);
+    cleanup?.();
+    expect(disconnect).toHaveBeenCalledTimes(1);
+  } finally {
+    if (original) Object.defineProperty(globalThis, 'IntersectionObserver', original);
+    else delete (globalThis as Record<string, unknown>).IntersectionObserver;
+    capturedEffects = null;
+  }
+});
+test('Next airing chip only renders future episodes with a dateTime', () => {
+  const past = renderToStaticMarkup(<NextAiringChip episode={{ episode: 7, airingAt: 1 }} />);
+  expect(past).toBe('');
+  const future = renderToStaticMarkup(
+    <NextAiringChip episode={{ episode: 7, airingAt: 4_000_000_000 }} />,
+  );
+  expect(future).toContain('Next: Episode 7');
+  expect(future).toContain('dateTime=');
+});
+
+test('Details lazily creates one title credits query without an SSR fetch', async () => {
+  const id = 'tt-sec';
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  client.setQueryData(api.detailsQueryOptions('series', id).queryKey, {
+    id,
+    type: 'series',
+    title: 'Series',
+    episodes: [],
+    isAnime: false,
+  });
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+  const spies = [spyOn(api, 'getTitleCredits'), spyOn(api, 'titleCreditsQueryOptions')];
+  try {
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[`/details/series/${id}`]}>
+          <PlayerSessionProvider>
+            <Routes>
+              <Route path='/details/:type/:id' element={<Details />} />
+            </Routes>
+          </PlayerSessionProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    // Cold SSR: exactly one title-credits query, created disabled and idle.
+    // (assert before mockRestore - restore clears the recorded calls)
+    expect(spies[1]).toHaveBeenCalledTimes(1);
+    expect(spies[1]).toHaveBeenCalledWith('series', id, undefined);
+    expect(spies[0]).not.toHaveBeenCalled();
+    const creditsQueries = client.getQueryCache().findAll({
+      queryKey: ['title-credits'],
+    });
+    expect(creditsQueries).toHaveLength(1);
+    const options = creditsQueries[0].options as QueryObserverOptions<TitleCredits>;
+    expect(options.enabled).toBe(false);
+    expect(creditsQueries[0].state.fetchStatus).toBe('idle');
+  } finally {
+    spies.forEach((spy) => spy.mockRestore());
+    client.clear();
+  }
+});
+
+test('Season completion remains available for the last unwatched episode', () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  const id = 'last-season-episode';
+  const details: MediaDetails = {
+    id,
+    type: 'series',
+    title: 'Season completion',
+    episodes: [1, 2].map((episode) => ({ id: `e${episode}`, season: 1, episode })),
+    seasons: [{ number: 1, episodeCount: 2 }],
+  };
+  client.setQueryData(api.detailsQueryOptions('series', id).queryKey, details);
+  client.setQueryData(titleWatchProgressQueryKey(id), {
+    episodeProgress: {
+      [`${id}:1:1`]: { id, type_: 'series', position: 1, duration: 1, is_watched: true },
+    },
+    watchedEpisodeCeiling: {},
+  });
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+  const render = () =>
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <MemoryRouter initialEntries={[`/details/series/${id}`]}>
+          <PlayerSessionProvider>
+            <Routes>
+              <Route path='/details/:type/:id' element={<Details />} />
+            </Routes>
+          </PlayerSessionProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+  try {
+    render();
+    const unaired = client
+      .getQueryCache()
+      .getAll()
+      .find((query) => query.queryKey.includes('unaired-episodes'));
+    if (!unaired) throw new Error('Missing episode air-state query');
+    client.setQueryData(unaired.queryKey, new Set());
+    expect(render()).toContain('Mark season watched');
+  } finally {
+    client.clear();
   }
 });

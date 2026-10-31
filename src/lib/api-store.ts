@@ -9,6 +9,8 @@ import type {
   AppUiPreferencesPatch,
   BootstrapSnapshot,
   DataStats,
+  Episode,
+  EpisodesWatchedResult,
   ImportResult,
   LibraryFilters,
   MediaItem,
@@ -19,10 +21,8 @@ import type {
   SmartListRules,
   StreamSelectorPreferencesPatch,
   StreamSelectorPreferencesState,
-  TitleWatchProgress,
   UserList,
   UserListSummary,
-  WatchProgress,
   WatchStatus,
 } from '@/lib/api';
 import {
@@ -199,15 +199,16 @@ export const storeApi = {
   bulkSetWatchStatus: (ids: string[], status: WatchStatus | null) =>
     write<number>('bulk_set_watch_status', { ids, status }),
   setEpisodesWatched: (
-    item: MediaItem,
+    item: MediaItem & { episodes?: readonly Episode[] },
     episodes: readonly { season: number; episode: number }[],
     watched: boolean,
   ) => {
     bumpWatchProgressEpoch();
-    return write<[TitleWatchProgress, WatchProgress[]]>('set_episodes_watched', {
+    return write<EpisodesWatchedResult>('set_episodes_watched', {
       item: toMediaItem(item),
       episodes: episodes.map(({ season, episode }) => ({ season, episode })),
       watched,
+      titleEpisodes: item.episodes?.map(({ season, episode }) => ({ season, episode })) ?? null,
     });
   },
   getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),

@@ -604,7 +604,8 @@ fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corru
         ]
     );
     assert!(store.load_latest_title_identities(&[]).unwrap().is_empty());
-    assert_eq!(store.counts().unwrap().0, 11);
+    // The text timestamp cannot be decoded, so it is not a history row.
+    assert_eq!(store.counts().unwrap().0, 10);
 }
 
 #[test]
@@ -1157,8 +1158,8 @@ fn upsert_drops_url_shaped_stream_keys() {
         ("u:https://cdn.example/legacy.mp4?sig=abc:0", None),
         ("uh:0123456789abcdef:0", Some("uh:0123456789abcdef:0")),
         (
-            "s:0123456789abcdef0123456789abcdef",
-            Some("s:0123456789abcdef0123456789abcdef"),
+            "s:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            Some("s:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"),
         ),
     ] {
         let mut progress = sample_progress(4000, 200.0);
@@ -1173,6 +1174,52 @@ fn upsert_drops_url_shaped_stream_keys() {
             expected
         );
     }
+}
+
+#[test]
+fn reopening_clears_legacy_url_keys_and_preserves_opaque_keys() {
+    let path = TempDbPath::new("legacykeys");
+    let mut store = ResumeStore::open(&path).expect("open db");
+    for (index, key) in [
+        "u:https://cdn.example/legacy.mp4?sig=secret:0",
+        "uh:0123456789abcdef:0",
+        "h:ABC123:1",
+        "s:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let history_key = format!("movie:tt{index}");
+        store
+            .upsert_progress(&history_key, &sample_progress(4000, 200.0))
+            .expect("write progress");
+        store
+            .connection
+            .execute(
+                "UPDATE watch_progress SET last_stream_key = ?1 WHERE history_key = ?2",
+                rusqlite::params![key, history_key],
+            )
+            .expect("seed legacy column");
+    }
+    drop(store);
+    let store = ResumeStore::open(&path).expect("reopen db");
+    let keys: Vec<Option<String>> = store
+        .connection
+        .prepare("SELECT last_stream_key FROM watch_progress ORDER BY history_key")
+        .expect("prepare keys")
+        .query_map([], |row| row.get(0))
+        .expect("read keys")
+        .collect::<Result<_, _>>()
+        .expect("decode keys");
+    assert_eq!(
+        keys,
+        [
+            None,
+            Some("uh:0123456789abcdef:0".to_string()),
+            Some("h:ABC123:1".to_string()),
+            Some("s:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string()),
+        ]
+    );
 }
 
 #[test]
@@ -1521,6 +1568,41 @@ fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
 
     let clamped = read_entry(&mut store, "movie:tt1234567");
     assert_eq!(clamped.position, 0.0);
+    // The text timestamp sorts above integers, so it must not replace the readable row.
+    assert_eq!(store.total_watch_time_secs().expect("watch time"), 3600);
+    assert_eq!(store.counts().expect("readable rows").0, 1);
+    store
+        .connection
+        .execute(
+            "INSERT INTO continue_watching_dismissals (media_type, media_id, dismissed_through)
+             VALUES ('movie', 'tt1234567', 1000), ('series', 'tt9', 'bogus')",
+            [],
+        )
+        .expect("seed dismissals");
+    let dismissals = store
+        .load_continue_watching_dismissals()
+        .expect("bad dismissal cell does not fail the read");
+    assert_eq!(dismissals.len(), 1);
+    assert_eq!(dismissals[0].media_id, "tt1234567");
+    store
+        .connection
+        .execute(
+            "UPDATE watch_progress SET last_stream_url = 'https://cdn.example/a.mkv?sig=secret'
+             WHERE history_key = 'movie:tt1234567'",
+            [],
+        )
+        .expect("plant legacy url");
+    drop(store);
+    let store = ResumeStore::open(&path).expect("reopen");
+    let url: Option<String> = store
+        .connection
+        .query_row(
+            "SELECT last_stream_url FROM watch_progress WHERE history_key = 'movie:tt1234567'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read legacy column");
+    assert_eq!(url, None);
 }
 
 #[test]

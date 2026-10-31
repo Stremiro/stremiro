@@ -6,7 +6,7 @@ use super::media_type::normalize_watch_progress_type;
 use super::playback_state::PLAYBACK_RESUME_STORE_FILE;
 use super::resume_store::ResumeStore;
 use super::search_commands::fetch_genre_catalog_pages;
-use super::store_helpers::load_watch_statuses_map;
+use super::store_helpers::{load_watch_statuses_map, normalize_library_item};
 use crate::operational_log::{field, log_warn};
 use crate::providers::{
     addon_resource::AddonResourceClient, first_ascii_year_run, MediaDetails, MediaItem,
@@ -381,14 +381,26 @@ pub async fn get_recent_watch_seed(
             super::media_commands::fetch_media_details_inner(&app, &client, media_type, id, false)
         })
         .collect();
+    let mut first_error = None;
+    let mut loaded_any = false;
     while let Some(result) = candidates.next().await {
-        if let Ok(details) = result {
-            if let Some(seed) = watch_seed(details) {
-                return Ok(Some(seed));
+        match result {
+            Ok(details) => {
+                if let Some(seed) = watch_seed(details) {
+                    return Ok(Some(seed));
+                }
+                loaded_any = true;
+            }
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
         }
     }
-    Ok(None)
+    // Only a total metadata outage is an error; titles without genres mean "nothing to seed".
+    match first_error {
+        Some(error) if !loaded_any => Err(error),
+        _ => Ok(None),
+    }
 }
 
 fn watched_title_ids(
@@ -416,9 +428,8 @@ pub async fn query_similar_titles(
     client: State<'_, AddonResourceClient>,
     source: MediaItem,
 ) -> Result<Vec<MediaItem>, String> {
-    // The source crosses IPC: bound its fields like any catalog item before
-    // they drive ranking and seed fetches.
-    let source = normalize_media_item(source);
+    let source = normalize_library_item(source)
+        .ok_or_else(|| "Invalid media item for similar titles.".to_string())?;
     let media_type = similar_titles_media_type(&source, &lower_genres(&source));
     let addons = load_enabled_addons_snapshot(&app).await?;
     let browse_genres = build_browse_genres(&addons);

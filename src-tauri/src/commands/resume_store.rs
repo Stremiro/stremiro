@@ -99,6 +99,7 @@ impl ResumeStore {
         connection
             .execute_batch(CONTINUE_WATCHING_DISMISSALS_SQL)
             .map_err(|error| format!("Failed to initialize playback resume database: {error}"))?;
+        clear_legacy_stream_urls(&connection)?;
 
         Ok(Self { connection })
     }
@@ -341,6 +342,8 @@ impl ResumeStore {
         self.connection
             .prepare(
                 "SELECT media_type, media_id, dismissed_through FROM continue_watching_dismissals
+                 WHERE typeof(media_type) = 'text' AND typeof(media_id) = 'text'
+                   AND typeof(dismissed_through) = 'integer'
                  ORDER BY media_type, media_id",
             )
             .and_then(|mut statement| {
@@ -392,6 +395,7 @@ impl ResumeStore {
                 "INSERT INTO continue_watching_dismissals (media_type, media_id, dismissed_through)
                  SELECT media_type, media_id, MAX(last_watched) FROM watch_progress
                  WHERE media_type = ?1 AND media_id = ?2
+                   AND typeof(last_watched) = 'integer'
                  GROUP BY media_type, media_id
                  ON CONFLICT(media_type, media_id)
                  DO UPDATE SET dismissed_through = excluded.dismissed_through",
@@ -495,10 +499,13 @@ impl ResumeStore {
         let mut statement = connection
             .prepare(
                 "SELECT media_type, media_id FROM watch_progress AS w
+                 WHERE typeof(media_type) = 'text' AND typeof(media_id) = 'text'
+                   AND typeof(last_watched) = 'integer'
                  GROUP BY media_type, media_id
                  ORDER BY MAX(last_watched) DESC, (
                      SELECT history_key FROM watch_progress AS latest
                      WHERE latest.media_type = w.media_type AND latest.media_id = w.media_id
+                       AND typeof(latest.last_watched) = 'integer'
                      ORDER BY last_watched DESC, history_key DESC LIMIT 1
                  ) DESC LIMIT 3",
             )
@@ -519,6 +526,7 @@ impl ResumeStore {
         let mut statement = connection
             .prepare(
                 "SELECT media_id FROM watch_progress WHERE media_type = ?1
+                   AND typeof(media_id) = 'text' AND typeof(last_watched) = 'integer'
                  GROUP BY media_id ORDER BY MAX(last_watched) DESC, media_id
                  LIMIT ?2",
             )
@@ -535,7 +543,12 @@ impl ResumeStore {
         self.connection
             .query_row(
                 "SELECT COALESCE(SUM(n), 0), COUNT(*) FROM (
-                    SELECT COUNT(*) AS n FROM watch_progress GROUP BY media_type, media_id
+                    SELECT COUNT(*) AS n FROM watch_progress
+                    WHERE typeof(media_type) = 'text' AND typeof(media_id) = 'text'
+                      AND typeof(last_watched) = 'integer'
+                      AND typeof(position) IN ('integer', 'real')
+                      AND typeof(duration) IN ('integer', 'real')
+                    GROUP BY media_type, media_id
                 )",
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
@@ -563,6 +576,10 @@ impl ResumeStore {
                                ORDER BY last_watched DESC, history_key DESC
                            ) AS episode_rank
                     FROM watch_progress
+                    WHERE typeof(media_type) = 'text' AND typeof(media_id) = 'text'
+                      AND typeof(last_watched) = 'integer'
+                      AND typeof(position) IN ('integer', 'real')
+                      AND typeof(duration) IN ('integer', 'real')
                 )
                 SELECT COALESCE(SUM(
                     CASE WHEN duration > 0.0 THEN MIN(MAX(position, 0.0), duration)
@@ -843,6 +860,7 @@ const EFFECTIVE_DISMISSAL: &str = "
     IFNULL((
         SELECT MAX(w.last_watched) FROM watch_progress AS w
         WHERE w.media_type = d.media_type AND w.media_id = d.media_id
+          AND typeof(w.last_watched) = 'integer'
     ), d.dismissed_through + 1) <= d.dismissed_through";
 
 pub(super) const MAX_CONTINUE_WATCHING_DISMISSALS: i64 = 500;
@@ -953,14 +971,41 @@ fn query_progress_rows(
     Ok(entries)
 }
 
+/// Drop legacy URLs, including URL-shaped stream keys. Resume re-resolves sources.
+fn clear_legacy_stream_urls(connection: &Connection) -> Result<(), String> {
+    // A damaged table is the quarantine path's job. Failing here would skip that repair.
+    let stored = match connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM watch_progress
+         WHERE last_stream_url IS NOT NULL OR last_stream_key GLOB 'u:*')",
+        [],
+        |row| row.get::<_, i64>(0),
+    ) {
+        Ok(stored) => stored,
+        Err(error) if ResumeStore::is_corruption(&error) => return Ok(()),
+        Err(error) => return Err(format!("Failed to inspect legacy stream URLs: {error}")),
+    };
+    if stored == 0 {
+        return Ok(());
+    }
+    match connection.execute(
+        "UPDATE watch_progress SET last_stream_url = NULL,
+         last_stream_key = CASE WHEN last_stream_key GLOB 'u:*' THEN NULL ELSE last_stream_key END
+         WHERE last_stream_url IS NOT NULL OR last_stream_key GLOB 'u:*'",
+        [],
+    ) {
+        Ok(_) => Ok(()),
+        Err(error) if ResumeStore::is_corruption(&error) => Ok(()),
+        Err(error) => Err(format!("Failed to clear legacy stream URLs: {error}")),
+    }
+}
+
 fn upsert_progress_stmt(
     statement: &mut Statement<'_>,
     key: &str,
     progress: &WatchProgress,
 ) -> Result<usize, String> {
-    // Stream URLs are credential-bearing: the legacy `last_stream_url` column is always
-    // NULL; resume re-resolves through opaque identities. The key column follows the same
-    // rule — only `h:`/`uh:`/`s:` hash identities persist; legacy `u:` keys embed the raw URL.
+    // Stream URLs are credential-bearing. The legacy column stays NULL; `open` clears
+    // leftovers. Only `h:`/`uh:`/`s:` hash identities persist — `u:` keys embed the URL.
     let no_persisted_url: Option<String> = None;
     let persisted_stream_key = progress
         .last_stream_key
@@ -1000,6 +1045,7 @@ fn upsert_progress_stmt(
 const IN_PROGRESS_TITLE_ROWS: &str = "
     FROM watch_progress
     WHERE media_type = ?1 AND media_id = ?2
+      AND typeof(last_watched) = 'integer'
       AND NOT (duration > 0.0 AND position >= duration * ?3)";
 
 /// Returns whether any row was deleted.
@@ -1062,6 +1108,7 @@ fn prune_total_history_tx(transaction: &Transaction<'_>) -> Result<bool, String>
             WHERE history_key NOT IN (
                 SELECT history_key
                 FROM watch_progress
+                WHERE typeof(last_watched) = 'integer'
                 ORDER BY last_watched DESC, history_key DESC
                 LIMIT ?1
             )
@@ -1102,7 +1149,9 @@ fn read_watch_progress_row(row: &Row<'_>) -> rusqlite::Result<(String, WatchProg
         backdrop: row.get(14)?,
         last_stream_format: row.get(15)?,
         last_stream_lookup_id: row.get(16)?,
-        last_stream_key: row.get(17)?,
+        last_stream_key: row
+            .get::<_, Option<String>>(17)?
+            .filter(|key| is_persistable_stream_key(key)),
         source_name: row.get(18)?,
         stream_family: row.get(19)?,
         source_id: row

@@ -386,6 +386,167 @@ fn normalize_media_details_bounds_lists_and_episode_fields() {
 }
 
 #[test]
+fn normalize_media_details_bounds_writers_country_and_awards() {
+    let details = MediaDetails {
+        writers: Some(
+            (0..16)
+                .map(|index| format!("{index}{}", "w".repeat(200)))
+                .chain(std::iter::once(" Writer ".into()))
+                .chain(std::iter::once("WRITER".into()))
+                .collect(),
+        ),
+        country: Some(format!(" {} ", "c".repeat(300))),
+        awards: Some(format!(" {} ", "a".repeat(300))),
+        ..test_details("tt1", "movie")
+    };
+
+    let normalized = normalize_media_details(details);
+
+    let writers = normalized.writers.unwrap();
+    assert_eq!(writers.len(), 8);
+    assert!(writers.iter().all(|name| name.chars().count() == 128));
+    assert_eq!(
+        normalized.country.as_deref().map(|c| c.chars().count()),
+        Some(128)
+    );
+    assert_eq!(
+        normalized.awards.as_deref().map(|a| a.chars().count()),
+        Some(256)
+    );
+    assert!(normalized.country.as_deref().is_some_and(|c| c == c.trim()));
+    assert!(normalized.awards.as_deref().is_some_and(|a| a == a.trim()));
+
+    // Writer lists dedupe by ASCII fold, same as directors.
+    let deduped = normalize_media_details(MediaDetails {
+        writers: Some(vec![" Writer ".into(), "WRITER".into(), "Other".into()]),
+        ..test_details("tt1", "movie")
+    });
+    assert_eq!(deduped.writers.as_deref().unwrap(), ["Writer", "Other"]);
+
+    // Bounding is idempotent.
+    let once = normalize_media_details(MediaDetails {
+        writers: deduped.writers,
+        country: normalized.country.clone(),
+        awards: normalized.awards,
+        ..test_details("tt1", "movie")
+    });
+    let twice = normalize_media_details(once.clone());
+    assert_eq!(
+        serde_json::to_value(&once).unwrap(),
+        serde_json::to_value(twice).unwrap()
+    );
+}
+
+#[test]
+fn is_anime_derives_from_type_id_genres_and_country_only() {
+    let details = |id: &str, type_: &str, genres: &[&str], country: Option<&str>| MediaDetails {
+        genres: Some(genres.iter().map(|genre| genre.to_string()).collect()),
+        country: country.map(str::to_string),
+        ..test_details(id, type_)
+    };
+    for (label, details, expected) in [
+        ("anime type", details("tt1", "anime", &[], None), true),
+        ("ANIME type", details("tt1", "ANIME", &[], None), true),
+        (
+            "kitsu id",
+            details("kitsu:44081", "series", &[], None),
+            true,
+        ),
+        ("mal id", details("mal:1", "series", &[], None), true),
+        (
+            "anilist id",
+            details("anilist:1535", "series", &[], None),
+            true,
+        ),
+        (
+            "kitsu episode id",
+            details("kitsu:1:1:1", "series", &[], None),
+            true,
+        ),
+        (
+            "non-numeric family",
+            details("kitsu:abc", "series", &[], None),
+            false,
+        ),
+        ("zero family", details("mal:0", "series", &[], None), false),
+        (
+            "empty family",
+            details("anilist:", "series", &[], None),
+            false,
+        ),
+        (
+            "Anime genre",
+            details("tt1", "series", &["Anime"], None),
+            true,
+        ),
+        (
+            "Animation + Japan",
+            details("tt1", "series", &["Animation"], Some("Japan")),
+            true,
+        ),
+        (
+            "Animation + multi-country Japan",
+            details(
+                "tt2560140",
+                "series",
+                &["Animation", "Action"],
+                Some("Japan, United States"),
+            ),
+            true,
+        ),
+        (
+            "Animation + delimited lowercase japan",
+            details("tt1", "series", &["Animation"], Some(" japan / korea ")),
+            true,
+        ),
+        (
+            "Animation + Japan movie",
+            details("tt0245429", "movie", &["Animation"], Some("Japan")),
+            true,
+        ),
+        (
+            "US Animation",
+            details("tt0133093", "movie", &["Animation"], Some("United States")),
+            false,
+        ),
+        (
+            "Animation without country",
+            details("tt1", "movie", &["Animation"], None),
+            false,
+        ),
+        (
+            "Animation + Japan suffix only",
+            details("tt1", "series", &["Animation"], Some("Japanimation")),
+            false,
+        ),
+        (
+            "Japan live action",
+            details("tt1", "series", &["Drama"], Some("Japan")),
+            false,
+        ),
+        ("plain series", details("tt1", "series", &[], None), false),
+    ] {
+        assert_eq!(
+            normalize_media_details(details).is_anime,
+            expected,
+            "{label}"
+        );
+    }
+
+    // A preset inbound flag never survives — every normalization re-derives it.
+    let mut preset = details("tt1", "movie", &[], None);
+    preset.is_anime = true;
+    assert!(!normalize_media_details(preset).is_anime);
+
+    // The flag serializes under its wire name.
+    let anime = normalize_media_details(details("kitsu:1", "series", &[], None));
+    assert_eq!(
+        serde_json::to_value(&anime).unwrap()["isAnime"],
+        serde_json::json!(true)
+    );
+}
+
+#[test]
 fn bounded_text_stays_idempotent_and_genres_dedupe_by_ascii_fold() {
     let padded = format!("A{}B", " ".repeat(31));
     let once = crate::providers::trim_to_max(&padded, 32);

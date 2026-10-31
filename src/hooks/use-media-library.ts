@@ -12,6 +12,8 @@ import {
   api,
   getListErrorMessage,
   type Episode,
+  type EpisodesWatchedResult,
+  type EpisodeWatchStatusChange,
   type LibraryFilters,
   type MediaItem,
   type ProfileLibrary,
@@ -153,11 +155,13 @@ async function revertEpisodesWatched(
   episodes: readonly Episode[],
   watched: boolean,
   previousRows: WatchProgress[],
+  statusChange: EpisodeWatchStatusChange | null,
   invalidate: () => Promise<void>,
 ) {
   try {
     if (watched) await api.setEpisodesWatched(item, episodes, false);
     if (previousRows.length > 0) await api.saveWatchProgressBatch(previousRows);
+    if (statusChange) await api.setWatchStatus(item, statusChange.previousStatus);
   } catch {
     toast.error('Could not undo the season change');
   } finally {
@@ -987,7 +991,7 @@ export function useRemoveFromContinueWatching({
 }
 
 interface UseToggleEpisodeWatchedOptions {
-  item?: MediaItem | null;
+  item?: (MediaItem & { episodes?: readonly Episode[] }) | null;
 }
 
 interface EpisodesWatchedVariables {
@@ -998,11 +1002,14 @@ interface EpisodesWatchedVariables {
 }
 
 // Variables paint instant watched checks; only Rust creates durable rows.
-function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAction: boolean) {
+function useEpisodesWatchedMutation(
+  item: UseToggleEpisodeWatchedOptions['item'],
+  seasonAction: boolean,
+) {
   const queryClient = useQueryClient();
   const progressKey = titleWatchProgressQueryKey(item?.id);
   return useMutation<
-    [TitleWatchProgress, WatchProgress[]],
+    EpisodesWatchedResult,
     unknown,
     EpisodesWatchedVariables,
     { previous?: TitleWatchProgress }
@@ -1048,15 +1055,15 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
       });
       return { previous };
     },
-    onSuccess: ([progress, previousRows], { episodes, watched, label }) => {
+    onSuccess: ([progress, previousRows, statusChange], { episodes, watched, label }) => {
       queryClient.setQueryData<TitleWatchProgress>(progressKey, progress);
       if (seasonAction && item) {
         toastRemovedWithUndo(
           label ?? (watched ? 'Season marked as watched' : 'Season marked as unwatched'),
           true,
           () =>
-            revertEpisodesWatched(item, episodes, watched, previousRows, () =>
-              invalidatePlaybackHistoryQueries(queryClient, item.id),
+            revertEpisodesWatched(item, episodes, watched, previousRows, statusChange, () =>
+              invalidatePlaybackHistoryQueries(queryClient, item.id, { libraryChanged: true }),
             ),
           pluralize(episodes.length, 'episode'),
         );
@@ -1077,9 +1084,10 @@ function useEpisodesWatchedMutation(item: MediaItem | null | undefined, seasonAc
         detail: error instanceof Error ? error.message : undefined,
       });
     },
-    onSettled: (_progress, error) =>
+    onSettled: (result, error) =>
       invalidatePlaybackHistoryQueries(queryClient, item?.id, {
         refetchTitleProgress: error != null,
+        libraryChanged: !!result?.[2] || error != null,
       }),
   });
 }

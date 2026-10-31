@@ -77,12 +77,13 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
     state.set_preferences(&preferences);
     state.initial_reveal_pending.store(true, Ordering::Relaxed);
 
-    let show = MenuItem::with_id(app, "show", "Show Stremiro", true, None::<&str>)?;
+    let app_name = app.config().product_name.as_deref().unwrap_or("Stremiro");
+    let show = MenuItem::with_id(app, "show", format!("Show {app_name}"), true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Stremiro", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", format!("Quit {app_name}"), true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &separator, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main")
-        .tooltip("Stremiro")
+        .tooltip(app_name)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

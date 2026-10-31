@@ -341,13 +341,18 @@ fn stream_family_migration_drops_legacy_reputation_and_preserves_other_state_onc
         playback_stream_family_snapshot_key, PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
         PLAYBACK_STREAM_FAMILY_INDEX_KEY,
     };
-    use crate::commands::streaming_helpers::{derive_stream_family, source_health_key};
+    use crate::commands::streaming_helpers::{prepare_addon_streams, source_health_key};
     use serde_json::json;
 
     let fixture = crate::test_helpers::test_store();
     let store = &fixture.store;
     let source_id = "https://user:secret@addon.example/manifest.json";
-    let family = derive_stream_family(&crate::test_helpers::test_stream(), source_id).unwrap();
+    let mut stream = crate::test_helpers::test_stream();
+    stream.url = Some("https://cdn.test/video".into());
+    let family = prepare_addon_streams(vec![stream], "Test", source_id)
+        .remove(0)
+        .stream_family
+        .unwrap();
     let current_key = playback_stream_family_snapshot_key("series:tt1|alternate", &family);
     let mut snapshot = json!(stream_family_snapshot(Some(source_id), Some(50_000), None));
     let legacy_keys = [

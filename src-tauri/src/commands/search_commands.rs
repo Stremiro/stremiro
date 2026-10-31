@@ -201,7 +201,15 @@ fn normalize_genres(genres: Option<Vec<String>>) -> Vec<String> {
 }
 
 fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogCriteria, String> {
-    let normalized_query = request.query.as_deref().and_then(normalize_query);
+    // Cinemeta's search is case-sensitive for some titles even though matching isn't.
+    let normalized_query = request
+        .query
+        .as_deref()
+        .and_then(normalize_query)
+        .map(|mut query| {
+            query.make_ascii_lowercase();
+            query
+        });
     let parsed_media_type = SearchMediaType::parse(request.media_type.as_deref());
     if request.media_type.is_some() && parsed_media_type.is_none() {
         return Err("Unsupported search media type.".into());
@@ -398,7 +406,8 @@ fn rank_search_results(
     }
     let year_query = normalized_query.rsplit_once(' ').and_then(|(query, year)| {
         let parsed = year.parse().ok()?;
-        (year.len() == 4 && (1888..=2100).contains(&parsed)).then_some((query, parsed))
+        (year.len() == 4 && (SEARCH_YEAR_MIN..=SEARCH_YEAR_MAX).contains(&parsed))
+            .then_some((query, parsed))
     });
     // Per-type catalog position preserves provider relevance across merged catalogs.
     let mut ranked_items: Vec<_> = items.into_iter().map(|item| (item, 0usize)).collect();
@@ -906,18 +915,13 @@ fn merge_all_browse_pages(
         items.extend(pair.0);
         items.extend(pair.1);
     }
-    Ok(finish_catalog_page(
-        items,
-        continuation,
-        None,
-        Some(next),
-        None,
-        claims,
-    ))
+    let mut page = finish_catalog_page(items, continuation, None, Some(next), None, claims);
+    page.partial = first_error.is_some();
+    Ok(page)
 }
 
 pub(super) fn finish_catalog_page(
-    items: Vec<MediaItem>,
+    mut items: Vec<MediaItem>,
     previous: SearchCatalogContinuation,
     next_skip: Option<u32>,
     all_cursors: Option<AllBrowseCursors>,
@@ -936,19 +940,16 @@ pub(super) fn finish_catalog_page(
     }
     let mut added_movie = search_cursors.is_none() && progress & 1 != 0;
     let mut added_series = search_cursors.is_none() && progress & 2 != 0;
-    let items: Vec<_> = items
-        .into_iter()
-        .filter(|item| {
-            if seen.len() >= MAX_CATALOG_SEEN_KEYS
-                || !seen.insert(catalog_dedup_key(&item.type_, &item.id))
-            {
-                return false;
-            }
-            added_movie |= item.type_.eq_ignore_ascii_case("movie");
-            added_series |= item.type_.eq_ignore_ascii_case("series");
-            true
-        })
-        .collect();
+    items.retain(|item| {
+        if seen.len() >= MAX_CATALOG_SEEN_KEYS
+            || !seen.insert(catalog_dedup_key(&item.type_, &item.id))
+        {
+            return false;
+        }
+        added_movie |= item.type_.eq_ignore_ascii_case("movie");
+        added_series |= item.type_.eq_ignore_ascii_case("series");
+        true
+    });
     // Filtered-out titles are remembered too, or an addon that ignores `skip` would
     // replay them as progress forever.
     for key in claims.into_keys() {

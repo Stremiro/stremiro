@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 
 import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
 import { type Episode, type MediaDetails } from '@/lib/api';
-import { boundedMapSet, clamp } from '@/lib/utils';
+import { boundedMapSet, clamp, isSeriesLikeMediaType } from '@/lib/utils';
 
 const EPISODE_DISPLAY_PAGE_SIZE = 9;
 const EMPTY_EPISODES: Episode[] = [];
@@ -86,7 +86,7 @@ export function useDetailsEpisodePane({
     });
 
   const resumeEpisodeForSelectedSeason =
-    item?.type === 'series' &&
+    isSeriesLikeMediaType(item?.type) &&
     typeof resumeEpisode === 'number' &&
     (selectedSeason === null || resumeSeason === selectedSeason)
       ? resumeEpisode

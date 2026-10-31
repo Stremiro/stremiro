@@ -532,19 +532,21 @@ pub async fn check_for_app_update(
     app: AppHandle,
     pending_update: State<'_, PendingAppUpdate>,
 ) -> Result<Option<AppUpdateMetadata>, AppUpdateCheckError> {
+    require_packaged_app_updates().map_err(|message| AppUpdateCheckError {
+        message,
+        retry_on_reconnect: false,
+    })?;
     let _check_guard = pending_update.check_lock.lock().await;
 
     // Replacing the pending handle mid-install would race the take.
     {
-        let mut state = pending_update.lock();
+        let state = pending_update.lock();
         if state.install_in_progress {
             return Err(AppUpdateCheckError {
                 message: "An update install is already in progress.".to_string(),
                 retry_on_reconnect: false,
             });
         }
-        state.downloaded_bytes = None;
-        state.download_operation_id = None;
     }
 
     let update = tokio::time::timeout(
@@ -575,8 +577,11 @@ pub async fn check_for_app_update(
 
     // A fresh check replaces the pending handle and clears the last install
     // failure: retry always requires this fresh handle, never a stale one.
+    // The downloaded pair stays usable when the check itself fails.
     let mut state = pending_update.lock();
     state.update = update;
+    state.downloaded_bytes = None;
+    state.download_operation_id = None;
     state.last_error = None;
 
     Ok(metadata)
@@ -590,6 +595,15 @@ fn no_pending_update_message(last_error: Option<&str>) -> String {
         ),
         None => "No pending update is available to install. Run another update check before retrying installation.".to_string(),
     }
+}
+
+fn require_packaged_app_updates() -> Result<(), String> {
+    if cfg!(dev) {
+        return Err(
+            "Application updates are only available inside the packaged desktop app.".to_string(),
+        );
+    }
+    Ok(())
 }
 
 fn validate_update_operation_id(operation_id: &str) -> Result<(), String> {
@@ -606,6 +620,7 @@ pub async fn download_app_update(
     version: String,
     operation_id: String,
 ) -> Result<(), String> {
+    require_packaged_app_updates()?;
     validate_update_operation_id(&operation_id)?;
     // Take the handle under check_lock so a remote check can't swap it.
     let update = {
@@ -713,6 +728,7 @@ pub async fn install_app_update(
     version: String,
     operation_id: String,
 ) -> Result<(), String> {
+    require_packaged_app_updates()?;
     validate_update_operation_id(&operation_id)?;
     let (update, bytes) = {
         let _check_guard = pending_update.check_lock.lock().await;

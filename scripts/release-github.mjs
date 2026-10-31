@@ -50,9 +50,6 @@ if (!['manifest', 'publish'].includes(mode)) {
   fail('Usage: bun ./scripts/release-github.mjs <manifest|publish> [--notes <file>] [--draft]');
 }
 
-// The updater consumes whichever bundle the toolchain signed: newer CLI
-// versions sign the -setup.exe directly, older ones wrap it in a
-// -setup.nsis.zip. Prefer the zip when both exist.
 function findInstallerAssets() {
   if (!fs.existsSync(bundleDir)) {
     fail(`No NSIS bundle directory at ${bundleDir} — run bun run tauri:build first.`);
@@ -71,16 +68,14 @@ function findInstallerAssets() {
   if (!installer) {
     fail(`No ${stem}*-setup.exe found in ${bundleDir}.`);
   }
-  const zipBundle = `${installer.slice(0, -'.exe'.length)}.nsis.zip`;
-  const updaterBundle = entries.includes(zipBundle) ? zipBundle : installer;
-  const updaterSignature = `${updaterBundle}.sig`;
+  const updaterSignature = `${installer}.sig`;
   if (!entries.includes(updaterSignature)) {
     fail(
       `Missing updater signature ${updaterSignature}. Signed artifacts require a signed build (bun run tauri:build, not :unsigned).`,
     );
   }
   const platform = installer.includes('_x64-setup.exe') ? 'windows-x86_64' : 'windows-aarch64';
-  return { updaterBundle, updaterSignature, installer, platform, entries };
+  return { updaterBundle: installer, updaterSignature, platform };
 }
 
 function writeManifest() {
@@ -88,6 +83,13 @@ function writeManifest() {
   const signatureText = fs.readFileSync(path.join(bundleDir, updaterSignature), 'utf8').trim();
   if (!signatureText) {
     fail(`Signature file is empty: ${updaterSignature}`);
+  }
+  const trustedComment = Buffer.from(signatureText, 'base64')
+    .toString('utf8')
+    .split('\n')
+    .find((line) => line.startsWith('trusted comment: '));
+  if (!trustedComment?.trimEnd().split('\t').includes(`version:${version}`)) {
+    fail(`Updater signature must include version:${version}. Rebuild the signed installer.`);
   }
 
   const notes =
@@ -110,7 +112,7 @@ function writeManifest() {
   const manifestPath = path.join(bundleDir, 'latest.json');
   fs.writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
   console.log(`Wrote ${path.relative(rootDir, manifestPath)} for ${tag} (${platform})`);
-  return manifestPath;
+  return { updaterBundle, updaterSignature };
 }
 
 function publishRelease() {
@@ -120,16 +122,10 @@ function publishRelease() {
     stdio: 'inherit',
   });
 
-  writeManifest();
-  const { updaterBundle, updaterSignature, installer, entries } = findInstallerAssets();
-  // Upload every bundle artifact: the updater consumes whichever bundle the
-  // manifest points at (nsis.zip when present, else the exe), and the raw
-  // installer serves manual installs.
-  const assets = [
-    ...new Set([updaterBundle, updaterSignature, installer, `${installer}.sig`, 'latest.json']),
-  ]
-    .filter((name) => entries.includes(name) || name === 'latest.json')
-    .map((name) => path.join(bundleDir, name));
+  const { updaterBundle, updaterSignature } = writeManifest();
+  const assets = [updaterBundle, updaterSignature, 'latest.json'].map((name) =>
+    path.join(bundleDir, name),
+  );
   const notesArgs = notesPath ? ['--notes-file', notesPath] : ['--notes', `Stremiro ${tag}`];
 
   let exists = false;

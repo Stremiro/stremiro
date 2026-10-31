@@ -385,34 +385,6 @@ fn snapshot_rejects_undeclared_search_extra() {
 }
 
 #[test]
-fn skip_is_transport_only_and_catalog_id_is_case_insensitive() {
-    let snapshot = snapshot();
-    snapshot_supports_catalog(&snapshot, "movie", "TOP", &[extra("genre", "Action")])
-        .expect("catalog id matches case-insensitively");
-
-    // Single-page addon declaring only `genre` must still serve page 2:
-    // `skip` is transport pagination, never a capability gate.
-    let genre_only_snapshot = parse_addon_manifest(
-        br#"{
-                "name": "SinglePage",
-                "resources": ["catalog"],
-                "types": ["movie"],
-                "catalogs": [
-                    {"type": "movie", "id": "top", "extra": [{"name": "genre"}]}
-                ]
-            }"#,
-    )
-    .expect("snapshot");
-    snapshot_supports_catalog(
-        &genre_only_snapshot,
-        "movie",
-        "top",
-        &[extra("genre", "Action"), extra("skip", "50")],
-    )
-    .expect("skip never gates routing");
-}
-
-#[test]
 fn parse_catalog_skips_malformed_siblings() {
     let response: CatalogResponse<'_> = serde_json::from_slice(
         br#"{"metas": [
@@ -661,6 +633,40 @@ fn parse_meta_skips_malformed_episode_siblings() {
 }
 
 #[test]
+fn unused_episode_and_credit_fields_do_not_discard_valid_metadata() {
+    let raw = RawValue::from_string(
+        r#"{
+            "id":"tt1","name":"Show","type":"series",
+            "videos":[{
+                "id":"tt1:1:1","name":false,"title":"Pilot","season":"1","number":"2",
+                "ep\u0069sode":3,"episode":4,"overview":"Synopsis",
+                "addonExtension":{"overflow":1e999,"rows":[{},null,42]}
+            }]
+        }"#
+        .into(),
+    )
+    .unwrap();
+    let details = super::parse_meta_item(&raw).unwrap();
+    let episodes = details.episodes.unwrap();
+    assert_eq!(episodes.len(), 1);
+    let episode = &episodes[0];
+    assert_eq!(episode.title.as_deref(), Some("Pilot"));
+    assert_eq!((episode.season, episode.episode), (1, 4));
+    assert_eq!(episode.overview.as_deref(), Some("Synopsis"));
+
+    for (category, expected) in [("Cast", true), ("Genres", false)] {
+        let links = RawValue::from_string(format!(
+            r#"[{{"category":"Cast","category":"{category}","name":"Tom Hanks","unused":1e999}}]"#
+        ))
+        .unwrap();
+        assert_eq!(
+            catalog_matches_search_credit(Some(&links), "tom hanks"),
+            expected
+        );
+    }
+}
+
+#[test]
 fn meta_decode_caps_valid_episodes_before_sorting_and_rejects_invalid_tail_json() {
     let videos: Vec<_> = (0..=MAX_EPISODES)
         .flat_map(|index| {
@@ -715,6 +721,79 @@ fn meta_credits_prefer_direct_fields_and_fall_back_to_link_names() {
     value.as_object_mut().unwrap().remove("director");
     let fallback = parse_meta_item(value).unwrap();
     assert_eq!(fallback.directors.unwrap(), ["Link Director"]);
+}
+
+#[test]
+fn meta_parses_writers_country_and_awards_without_coercing_scalars() {
+    // Live-shaped Cinemeta payload: writer array, string country/awards.
+    let details = parse_meta_item(serde_json::json!({
+        "id": "tt2560140", "name": "Show", "type": "series",
+        "writer": ["Yasuko Kobayashi", "Hiroshi Seko"],
+        "country": "Japan",
+        "awards": "42 wins & 88 nominations total",
+        "links": [{"name": "Link Writer", "category": "Writers"}]
+    }))
+    .expect("meta");
+    assert_eq!(
+        details.writers.as_deref().unwrap(),
+        ["Yasuko Kobayashi", "Hiroshi Seko"]
+    );
+    assert_eq!(details.country.as_deref(), Some("Japan"));
+    assert_eq!(
+        details.awards.as_deref(),
+        Some("42 wins & 88 nominations total")
+    );
+    // `is_anime` is derived by normalization, never by addon input.
+    assert!(!details.is_anime);
+    assert_eq!(
+        serde_json::to_value(&details).unwrap()["isAnime"],
+        serde_json::json!(false)
+    );
+
+    // `writer` wins over link names, matching the cast/director fallback.
+    let link_only = parse_meta_item(serde_json::json!({
+        "id": "tt1", "name": "Show", "type": "series",
+        "links": [{"name": "Link Writer", "category": "Writers"}]
+    }))
+    .unwrap();
+    assert_eq!(link_only.writers.as_deref().unwrap(), ["Link Writer"]);
+
+    // Non-string scalars/objects drop instead of stringifying into the hero.
+    for value in [
+        serde_json::json!(42),
+        serde_json::json!(true),
+        serde_json::json!({"name": "Japan"}),
+        serde_json::json!(["Japan"]),
+    ] {
+        let details = parse_meta_item(serde_json::json!({
+            "id": "tt1", "name": "Show", "type": "series",
+            "country": value, "awards": value
+        }))
+        .unwrap();
+        assert_eq!(details.country, None, "{value}");
+        assert_eq!(details.awards, None, "{value}");
+    }
+
+    // Absent fields omit their keys rather than serializing null.
+    let absent = parse_meta_item(serde_json::json!({
+        "id": "tt1", "name": "Show", "type": "movie"
+    }))
+    .unwrap();
+    assert!(absent.writers.is_none());
+    assert!(absent.country.is_none());
+    assert!(absent.awards.is_none());
+    let wire = serde_json::to_value(&absent).unwrap();
+    for key in ["writers", "country", "awards"] {
+        assert!(wire.get(key).is_none(), "{key} must be omitted");
+    }
+
+    // Lite and full shapes carry identical credit/origin fields.
+    let lite = meta_for_shape(&details, false);
+    let full = meta_for_shape(&details, true);
+    assert_eq!(lite.writers, full.writers);
+    assert_eq!(lite.country, full.country);
+    assert_eq!(lite.awards, full.awards);
+    assert_eq!(lite.is_anime, full.is_anime);
 }
 
 #[test]
@@ -777,8 +856,7 @@ fn parse_meta_orders_episodes_by_season_episode_with_stable_duplicates() {
 }
 
 #[test]
-fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
-    let client = AddonResourceClient::new();
+fn meta_card_shape_drops_episodes_and_seasons_only() {
     let details = parse_meta_item(serde_json::json!({
         "id": "tt1",
         "name": "Show",
@@ -793,37 +871,16 @@ fn meta_cache_shares_one_arc_and_lite_shape_drops_episodes() {
         ]
     }))
     .expect("meta");
-    assert!(details.episodes.as_ref().is_some_and(|e| !e.is_empty()));
-
-    client
-        .meta_cache
-        .put("meta:x", Arc::new(details), false, || true);
-
-    // Every hit hands back the same allocation — no deep clone per shape.
-    let hit = client.meta_cache.get("meta:x").expect("cached meta");
-    let hit_again = client.meta_cache.get("meta:x").expect("cached meta");
-    assert!(Arc::ptr_eq(&hit, &hit_again));
-
-    let lite = meta_for_shape(hit.as_ref(), false);
-    let full = meta_for_shape(hit.as_ref(), true);
+    let lite = meta_for_shape(&details, false);
+    let full = meta_for_shape(&details, true);
     assert!(lite.episodes.is_none());
     assert!(lite.seasons.is_none());
-    assert_eq!(lite.cast.as_deref().unwrap(), ["Actor"]);
-    assert_eq!(lite.directors.as_deref().unwrap(), ["Director"]);
-    assert_eq!(lite.runtime.as_deref(), Some("45 min"));
-    assert_eq!(full.cast.as_deref().unwrap(), ["Actor"]);
-    assert_eq!(full.directors.as_deref().unwrap(), ["Director"]);
     assert_eq!(full.episodes.as_ref().map(Vec::len), Some(2));
     // The parse-derived season summary rides the full shape only.
     assert_eq!(
         serde_json::to_value(&full.seasons).expect("serialize seasons"),
         serde_json::json!([{ "number": 1, "episodeCount": 2 }])
     );
-
-    // Shaping never mutates the cached entry — full hits stay servable.
-    let still_cached = client.meta_cache.get("meta:x").expect("cached meta");
-    assert!(Arc::ptr_eq(&hit, &still_cached));
-    assert!(still_cached.episodes.is_some());
 
     // Card shaping drops episodes, keeping all other fields.
     let lite_json = serde_json::to_value(&lite).expect("serialize lite");
@@ -849,26 +906,6 @@ fn episode_numbers_reject_u32_overflow_instead_of_wrapping() {
     let episode = &details.episodes.expect("episodes")[0];
     assert_eq!(episode.season, 0);
     assert_eq!(episode.episode, 0);
-}
-
-#[test]
-fn fetchable_http_gate_blocks_private_targets_and_userinfo() {
-    assert!(is_fetchable_http_url("https://cdn.test/video.m3u8"));
-    assert!(is_fetchable_http_url(
-        "https://[2606:4700:4700::1111]/video.m3u8"
-    ));
-    for blocked in [
-        "http://127.0.0.1:9999/video.mp4",
-        "http://169.254.169.254/latest/meta-data",
-        "http://192.168.1.1/video.mp4",
-        "http://[::1]/video.mp4",
-        "http://[::ffff:127.0.0.1]/video.mp4",
-        "http://[fc00::1]/video.mp4",
-        "file:///etc/passwd",
-        "https://user:pass@cdn.test/video.mp4",
-    ] {
-        assert!(!is_fetchable_http_url(blocked), "{blocked} must be blocked");
-    }
 }
 
 #[test]
@@ -1019,26 +1056,6 @@ fn trailers_merge_names_in_source_order_and_keep_unique_bounded_ids() {
 }
 
 #[test]
-fn resource_cache_roundtrips_and_stays_bounded() {
-    let cache = TtlCache::new(4, RESOURCE_CACHE_TTL, RESOURCE_CACHE_EMPTY_TTL);
-    for index in 0..4 {
-        cache.put(&format!("key-{index}"), index, false, || true);
-    }
-    assert_eq!(cache.get("key-0"), Some(0));
-    assert_eq!(cache.get("key-3"), Some(3));
-
-    // Overflow evicts a victim instead of growing past the cap.
-    cache.put("key-4", 4, false, || true);
-    assert_eq!(cache.len(), 4, "cache must stay at max_entries");
-    assert_eq!(cache.get("key-4"), Some(4));
-    cache.clear();
-    assert_eq!(cache.len(), 0);
-    for index in 0..5 {
-        assert_eq!(cache.get(&format!("key-{index}")), None);
-    }
-}
-
-#[test]
 fn resource_cache_key_is_stable_distinct_and_credential_free() {
     let key_a = resource_cache_key("meta", "https://user:pass@addon.test/meta/series/tt1.json");
     let key_b = resource_cache_key("meta", "https://addon.test/meta/series/tt1.json");
@@ -1061,18 +1078,19 @@ fn subtitle_item_rejects_private_targets_and_userinfo() {
     // Plain public subtitle URLs pass, but mpv-fetchable targets aiming at
     // loopback, LAN, metadata IPs, non-http schemes, or embedded
     // credentials are dropped at parse time.
-    assert!(subtitle_item(serde_json::json!({
-        "id": "en",
-        "url": "https://subs.test/en.srt",
-        "lang": "en"
-    }))
-    .is_some());
+    for url in [
+        "https://subs.test/en.srt",
+        "https://[2606:4700:4700::1111]/en.srt",
+    ] {
+        assert!(subtitle_item(serde_json::json!({"id": "en", "url": url})).is_some());
+    }
     for blocked in [
         "http://127.0.0.1:11470/subs/en.srt",
         "http://169.254.169.254/latest/meta-data",
         "http://192.168.1.1/subs/en.srt",
         "http://[::1]/subs/en.srt",
         "http://[::ffff:127.0.0.1]/subs/en.srt",
+        "http://[fc00::1]/subs/en.srt",
         "file:///etc/passwd",
         "https://user:pass@subs.test/en.srt",
     ] {
@@ -1084,58 +1102,39 @@ fn subtitle_item_rejects_private_targets_and_userinfo() {
 }
 
 #[test]
-fn catalogs_only_manifest_classifies_and_serves_catalogs() {
-    // `catalogs[]` alone is a complete capability declaration: a manifest
-    // that omits the redundant `resources` entry must still classify and
-    // route instead of sitting unclassified forever.
-    let snapshot =
-        parse_addon_manifest(br#"{"name": "Cat", "catalogs": [{"type": "movie", "id": "top"}]}"#)
-            .expect("snapshot");
-
+fn catalog_routing_requires_search_and_required_extras_but_not_advisory_extras() {
+    let snapshot = parse_addon_manifest(
+        br#"{
+            "name": "Catalogs only",
+            "catalogs": [
+                {"type": "movie", "id": "top", "extra": [{"name": "genre"}]},
+                {"type": "movie", "id": "gated", "extra": [{"name": "genre", "isRequired": true}]}
+            ]
+        }"#,
+    )
+    .expect("snapshot");
     assert!(snapshot_is_classified(&snapshot));
-    snapshot_supports_catalog(&snapshot, "movie", "top", &[]).expect("catalogs[] is authoritative");
-    snapshot_supports_catalog(&snapshot, "series", "top", &[])
-        .expect_err("undeclared type must still gate");
-}
-
-#[test]
-fn undeclared_advisory_extra_does_not_gate_catalog() {
-    // Servers drop extras they never declared and callers re-filter locally,
-    // so a missing `year`/`skip` declaration must not drop a servable
-    // source. `search` stays a hard gate: an addon that never declared it
-    // echoes its normal rows back as bogus results.
-    let snapshot = parse_addon_manifest(
-        br#"{
-            "name": "Advisory",
-            "catalogs": [{"type": "movie", "id": "top", "extra": [{"name": "genre"}]}]
-        }"#,
-    )
-    .expect("snapshot");
-
-    snapshot_supports_catalog(&snapshot, "movie", "top", &[extra("year", "2024")])
-        .expect("undeclared advisory extra must not gate");
-    snapshot_supports_catalog(&snapshot, "movie", "top", &[extra("search", "dune")])
-        .expect_err("undeclared search must still gate");
-}
-
-#[test]
-fn required_extra_still_gates_catalog() {
-    let snapshot = parse_addon_manifest(
-        br#"{
-            "name": "Required",
-            "catalogs": [{
-                "type": "movie",
-                "id": "gated",
-                "extra": [{"name": "genre", "isRequired": true}]
-            }]
-        }"#,
-    )
-    .expect("snapshot");
-
-    snapshot_supports_catalog(&snapshot, "movie", "gated", &[])
-        .expect_err("missing required extra must fail");
-    snapshot_supports_catalog(&snapshot, "movie", "gated", &[extra("genre", "Action")])
-        .expect("required extra satisfied");
+    for (media_type, catalog, extras, allowed) in [
+        ("movie", "top", vec![], true),
+        ("series", "top", vec![], false),
+        ("movie", "TOP", vec![extra("genre", "Action")], true),
+        (
+            "movie",
+            "top",
+            vec![extra("genre", "Action"), extra("skip", "50")],
+            true,
+        ),
+        ("movie", "top", vec![extra("year", "2024")], true),
+        ("movie", "top", vec![extra("search", "dune")], false),
+        ("movie", "gated", vec![], false),
+        ("movie", "gated", vec![extra("genre", "Action")], true),
+    ] {
+        assert_eq!(
+            snapshot_supports_catalog(&snapshot, media_type, catalog, &extras).is_ok(),
+            allowed,
+            "{media_type}/{catalog} {extras:?}"
+        );
+    }
 }
 
 #[test]

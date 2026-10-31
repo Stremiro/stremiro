@@ -261,6 +261,8 @@ fn staged_subtitle_preserves_encoding_identity_and_native_lifetime() {
     for bytes in [
         SRT.to_vec(),
         utf16,
+        b"\xef\xbb\xbfWEBVTT\n\n00:00.000 --> 00:05.000\nCue\n".to_vec(),
+        b"1\n00:00:00,000 --> 00:00:05,000\nSubtitle \xff\n".to_vec(),
         b"WEBVTT\n\n00:00.000 --> 00:05.000\nCue\n".to_vec(),
         b"WEBVTT\tcomment\n\n00:00.000 --> 00:05.000\nCue\n".to_vec(),
         b"[Script Info]\nTitle: Fixture\n[Events]\n".to_vec(),

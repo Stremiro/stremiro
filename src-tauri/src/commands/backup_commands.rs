@@ -8,7 +8,7 @@ use super::config_store::{
     save_profile_preferences_to_store, save_stream_selector_preferences_to_store, AddonConfig,
     AppUiPreferences, ProfilePreferences, StreamSelectorPreferences,
 };
-use super::history_helpers::{build_history_key, sanitize_watch_progress};
+use super::history_helpers::{build_history_key, resume_rows, sanitize_watch_progress};
 use super::library_commands::MAX_LIBRARY_ITEMS;
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
@@ -31,10 +31,9 @@ use super::store_helpers::{
 use super::watch_status_commands::MAX_WATCH_STATUS_ITEMS;
 use super::{
     normalize_media_id, normalize_non_empty, now_unix_millis, run_blocking_op, run_store_op_at,
-    streaming_helpers::is_persistable_stream_key, PlaybackLanguagePreferences, WatchProgress,
-    BLOCKING_OP_TIMEOUT, LIBRARY_STATUS_ADDED_KEY, LIBRARY_STORE_FILE, LISTS_STORE_FILE,
-    PERSISTENCE_TIMEOUT_MESSAGE, PROFILE_AVATAR_STORE_FILE, SETTINGS_STORE_FILE,
-    WATCH_STATUS_STORE_FILE,
+    PlaybackLanguagePreferences, WatchProgress, BLOCKING_OP_TIMEOUT, LIBRARY_STATUS_ADDED_KEY,
+    LIBRARY_STORE_FILE, LISTS_STORE_FILE, PERSISTENCE_TIMEOUT_MESSAGE, PROFILE_AVATAR_STORE_FILE,
+    SETTINGS_STORE_FILE, WATCH_STATUS_STORE_FILE,
 };
 use crate::operational_log::{field, log_warn};
 use crate::providers::{usize_to_u64_saturating, MediaItem};
@@ -461,16 +460,7 @@ async fn export_app_data(
         move || {
             // Only opaque stream-key identities may leave the app. A failed history read
             // must fail the export — a backup with zero history is only noticed on restore.
-            let history: Vec<WatchProgress> = service
-                .load_resume_entries(&app)?
-                .into_iter()
-                .map(|(_, mut item)| {
-                    item.last_stream_key = item
-                        .last_stream_key
-                        .filter(|key| is_persistable_stream_key(key));
-                    item
-                })
-                .collect();
+            let history = resume_rows(service.load_resume_entries(&app)?);
 
             let lib_store = super::open_store(&app, LIBRARY_STORE_FILE)?;
             let library: Vec<MediaItem> = load_library_map(&lib_store)?.into_values().collect();

@@ -9,7 +9,6 @@ import {
   RotateCcw,
   Search as SearchIcon,
   SearchX,
-  Shapes,
   Sparkles,
   Trash2,
   WifiOff,
@@ -24,6 +23,7 @@ import {
   useState,
 } from 'react';
 import { Link, NavigationType, useNavigationType } from 'react-router';
+import { GenreIcon } from '@/components/genre-icon';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -1011,10 +1011,7 @@ export function Search() {
                       activeGenre ? 'accent-lattice-soft' : SEARCH_FACET_IDLE_CLASS,
                     )}
                   >
-                    <Shapes
-                      aria-hidden='true'
-                      className={cn(FACET_ICON_CLASS, 'text-violet-300')}
-                    />
+                    <GenreIcon genre={activeGenre} className={FACET_ICON_CLASS} />
                     <span className='max-w-[120px] truncate'>{activeGenre ?? 'Genre'}</span>
                     <ChevronDown
                       aria-hidden='true'
@@ -1028,7 +1025,10 @@ export function Search() {
                   className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
                 >
                   <FacetMenuItem checked={!activeGenre} onSelect={clearGenre}>
-                    All genres
+                    <span className='flex min-w-0 items-center gap-2.5'>
+                      <GenreIcon />
+                      All genres
+                    </span>
                   </FacetMenuItem>
                   <div aria-hidden='true' className='mx-1 my-1 h-px bg-white/[0.06]' />
                   {!isOnline && !browseGenres ? (
@@ -1076,7 +1076,10 @@ export function Search() {
                       title={genre}
                       onSelect={() => handleGenreChange(genre)}
                     >
-                      <span className='truncate'>{genre}</span>
+                      <span className='flex min-w-0 items-center gap-2.5'>
+                        <GenreIcon genre={genre} />
+                        <span className='truncate'>{genre}</span>
+                      </span>
                     </FacetMenuItem>
                   ))}
                 </DropdownMenuContent>

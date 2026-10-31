@@ -343,6 +343,8 @@ fn intrinsic_normalization_is_idempotent_and_requested_identity_stays_outside_sh
     let requested = super::with_requested_media_id(super::meta_for_shape(&once, true), "kitsu:1");
     assert_eq!(requested.id, "kitsu:1");
     assert_eq!(requested.imdb_id.as_deref(), Some("tt1"));
+    assert!(requested.is_anime);
+    assert!(!once.is_anime);
     assert_eq!(once.id, "tt1");
     assert_eq!(once.episodes.as_ref().unwrap()[0].stream_lookup_id, None);
 

@@ -27,6 +27,7 @@ import {
 } from '@/components/player-chrome-styles';
 import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
+import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -296,14 +297,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
                 alt=''
               />
             )}
-            {progressPercent > 0 && (
-              <div className='absolute inset-x-0 bottom-0 h-[3px] bg-black/50'>
-                <div
-                  className='h-full w-full origin-left bg-(--accent-prog)'
-                  style={{ transform: `scaleX(${progressPercent / 100})` }}
-                />
-              </div>
-            )}
+            <WatchProgressStrip percent={progressPercent} className='bg-black/50' />
           </div>
 
           <div className='min-w-0 flex-1'>

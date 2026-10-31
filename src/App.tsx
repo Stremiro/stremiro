@@ -316,14 +316,7 @@ function AppUpdateManager() {
   );
 
   useEffect(() => {
-    if (
-      import.meta.env.DEV ||
-      !isSupported ||
-      isHydrating ||
-      !automaticUpdateChecks ||
-      isInstalling
-    )
-      return;
+    if (!isSupported || isHydrating || !automaticUpdateChecks || isInstalling) return;
 
     let disposed = false;
     let running = false;

@@ -128,6 +128,18 @@ fn probe_url_identity(url: &str) -> &str {
     url.split_once('#').map_or(url, |(request, _)| request)
 }
 
+/// A prepared `s:` failed key already pins the failed request, so the landed
+/// URL must not exclude too — aliased rows would be dropped. For legacy or
+/// absent keys the URL is the only failing identity and stays active.
+fn failed_url_exclusion_active(failed_key: Option<&str>) -> bool {
+    failed_key.is_none_or(|key| !has_prepared_stream_key_prefix(key.trim()))
+}
+
+/// The resolved URL does not land on the excluded request URL.
+fn resolved_url_escapes_exclusion(excluded: Option<&str>, resolved: &str) -> bool {
+    excluded.is_none_or(|url| probe_url_identity(url) != probe_url_identity(resolved))
+}
+
 #[derive(Eq)]
 pub(super) struct ProbeRequestIdentity {
     pub(super) url: reqwest::Url,
@@ -276,9 +288,7 @@ impl<'a> StreamExclusions<'a> {
             has_legacy_keys: keys.iter().any(|key| is_legacy_content_key(key)),
             keys,
             resolved_url: resolved_url
-                .filter(|_| {
-                    failed_key.is_none_or(|key| !has_prepared_stream_key_prefix(key.trim()))
-                })
+                .filter(|_| failed_url_exclusion_active(failed_key))
                 .and_then(crate::providers::addon_resource::parse_fetchable_http_url),
             requests: Mutex::new(Vec::new()),
         }
@@ -312,9 +322,10 @@ impl<'a> StreamExclusions<'a> {
             }
             ProbeRequestIdentity::from_stream(stream).is_none_or(|request| {
                 !requests.contains(&request)
-                    && self.resolved_url.as_ref().is_none_or(|url| {
-                        probe_url_identity(url.as_str()) != probe_url_identity(request.url.as_str())
-                    })
+                    && resolved_url_escapes_exclusion(
+                        self.resolved_url.as_ref().map(|url| url.as_str()),
+                        request.url.as_str(),
+                    )
             })
         });
     }
@@ -426,9 +437,7 @@ where
         let source_name = candidate.source_name.as_deref().unwrap_or("Unknown source");
         match result {
             Ok(Ok(resolved))
-                if excluded_resolved_url.is_none_or(|url| {
-                    probe_url_identity(url) != probe_url_identity(&resolved.url)
-                }) =>
+                if resolved_url_escapes_exclusion(excluded_resolved_url, &resolved.url) =>
             {
                 return Ok(candidate_resolved_stream(candidate, resolved));
             }
@@ -459,7 +468,7 @@ where
 }
 
 async fn resolve_probe_candidates<P, F>(
-    inputs: Vec<(StreamResolveCandidateInput, Duration)>,
+    inputs: Vec<(StreamResolveCandidateInput, Duration, ProbeRequestIdentity)>,
     excluded_stream_key: Option<&str>,
     excluded_resolved_url: Option<&str>,
     deadline: Instant,
@@ -471,19 +480,19 @@ where
     F: Future<Output = CandidateProbeResult>,
 {
     let started = Instant::now();
-    let excluded_resolved_url = excluded_resolved_url.filter(|_| {
-        excluded_stream_key.is_none_or(|key| !has_prepared_stream_key_prefix(key.trim()))
-    });
-    let mut inputs = inputs
-        .into_iter()
-        .enumerate()
-        .map(move |(rank, (candidate, delay))| {
-            if let Some(requests) = started_requests.as_deref_mut() {
-                requests.push(ProbeRequestIdentity::from_candidate(&candidate));
-            }
-            let probe = probe(candidate, delay.saturating_sub(started.elapsed()), deadline);
-            async move { (rank, probe.await) }
-        });
+    let excluded_resolved_url =
+        excluded_resolved_url.filter(|_| failed_url_exclusion_active(excluded_stream_key));
+    let mut inputs =
+        inputs
+            .into_iter()
+            .enumerate()
+            .map(move |(rank, (candidate, delay, identity))| {
+                if let Some(requests) = started_requests.as_deref_mut() {
+                    requests.push(identity);
+                }
+                let probe = probe(candidate, delay.saturating_sub(started.elapsed()), deadline);
+                async move { (rank, probe.await) }
+            });
     let mut pending = FuturesUnordered::new();
     pending.extend(inputs.by_ref().take(BEST_STREAM_PROBE_CONCURRENCY));
     let candidates = stream::unfold(
@@ -509,9 +518,10 @@ where
                     None => pending.next().await,
                 };
                 let (rank, result) = next?;
-                if matches!(&result.1, Ok(Ok(resolved)) if excluded_resolved_url.is_none_or(|url| {
-                    probe_url_identity(url) != probe_url_identity(&resolved.url)
-                })) {
+                if matches!(&result.1, Ok(Ok(resolved)) if resolved_url_escapes_exclusion(
+                    excluded_resolved_url,
+                    &resolved.url,
+                )) {
                     winner_at.get_or_insert_with(Instant::now);
                 } else if winner_at.is_none() && Instant::now() < deadline {
                     if let Some(next) = inputs.next() {
@@ -528,19 +538,18 @@ where
 fn build_probe_candidates(
     mut streams: Vec<AddonStream>,
     preferred: PreferredStreamHint<'_>,
-) -> Vec<(StreamResolveCandidateInput, Duration)> {
+) -> Vec<(StreamResolveCandidateInput, Duration, ProbeRequestIdentity)> {
     if let Some(position) = find_preferred_position(&streams, preferred) {
         streams[..=position].rotate_right(1);
     }
 
-    let mut candidates: Vec<(StreamResolveCandidateInput, Duration)> =
+    let mut candidates: Vec<(StreamResolveCandidateInput, Duration, ProbeRequestIdentity)> =
         Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
-    let mut identities = Vec::with_capacity(BEST_STREAM_MAX_CANDIDATES);
     let mut host_counts = HashMap::<String, u32>::new();
     for candidate in streams.into_iter().filter_map(build_candidate_input) {
         let identity = ProbeRequestIdentity::from_candidate(&candidate);
         // Equivalent requests share a probe; different auth headers stay separate even on the same URL.
-        if identities.contains(&identity) {
+        if candidates.iter().any(|(.., seen)| seen == &identity) {
             continue;
         }
         let host = candidate
@@ -550,8 +559,7 @@ fn build_probe_candidates(
         let count = host_counts.entry(host.to_string()).or_default();
         let delay = SAME_HOST_PROBE_SPACING * *count;
         *count += 1;
-        identities.push(identity);
-        candidates.push((candidate, delay));
+        candidates.push((candidate, delay, identity));
         if candidates.len() == BEST_STREAM_MAX_CANDIDATES {
             break;
         }

@@ -60,7 +60,7 @@ let activeCheckPromise: Promise<AppUpdateHandle | null> | null = null;
 const notifiedVersions = new Set<string>();
 
 export function getInitialAppUpdateState(): AppUpdateState {
-  const isSupported = isTauriDesktopRuntime();
+  const isSupported = supportsAppUpdates();
 
   return {
     isSupported,
@@ -107,6 +107,10 @@ export function isUpdateReady(state?: Pick<AppUpdateState, 'status' | 'update'> 
 
 export function isTauriDesktopRuntime(): boolean {
   return typeof window !== 'undefined' && '__TAURI_INTERNALS__' in window;
+}
+
+function supportsAppUpdates(): boolean {
+  return !import.meta.env.DEV && isTauriDesktopRuntime();
 }
 
 export function appUpdateProgressPercent(progress: AppUpdateProgress | null): number | null {
@@ -158,7 +162,7 @@ export async function getAppReleaseNotes(version: string): Promise<AppUpdateHand
 }
 
 export async function runAppUpdateCheck(queryClient: QueryClient): Promise<AppUpdateHandle | null> {
-  if (!isTauriDesktopRuntime()) {
+  if (!supportsAppUpdates()) {
     writeAppUpdateState(queryClient, () => getInitialAppUpdateState());
     return null;
   }
@@ -232,7 +236,7 @@ export async function runAppUpdateInstall(
     return activeInstallPromise;
   }
 
-  if (!isTauriDesktopRuntime()) {
+  if (!supportsAppUpdates()) {
     writeAppUpdateState(queryClient, () => getInitialAppUpdateState());
     throw new Error('Application updates are only available inside the packaged desktop app.');
   }

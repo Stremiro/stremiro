@@ -104,7 +104,9 @@ export function WindowVirtualizedStack<T>({
             key={virtualRow.key}
             data-index={virtualRow.index}
             ref={virtualize ? rowVirtualizer.measureElement : undefined}
-            onFocusCapture={() => setFocusedIndex(virtualRow.index)}
+            onFocusCapture={() => {
+              if (virtualize) setFocusedIndex(virtualRow.index);
+            }}
             onBlurCapture={(event) => {
               if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
             }}

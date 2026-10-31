@@ -55,7 +55,7 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
         code: "ja",
         label: "Japanese",
         aliases: &["ja", "jpn", "japanese"],
-        exact_aliases: &[],
+        exact_aliases: &["jp"],
     },
     SupportedLanguage {
         code: "es",
@@ -91,12 +91,12 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
         code: "ko",
         label: "Korean",
         aliases: &["ko", "kor", "korean"],
-        exact_aliases: &[],
+        exact_aliases: &["kr"],
     },
     SupportedLanguage {
         code: "zh",
         label: "Chinese",
-        aliases: &["zh", "zho", "chi", "chinese"],
+        aliases: &["zh", "zho", "chi", "chs", "cht", "chinese"],
         exact_aliases: &[],
     },
     SupportedLanguage {
@@ -181,7 +181,7 @@ const SUPPORTED_LANGUAGES: &[SupportedLanguage] = &[
         code: "he",
         label: "Hebrew",
         aliases: &["heb", "hebrew"],
-        exact_aliases: &["he"],
+        exact_aliases: &["he", "iw"],
     },
     SupportedLanguage {
         code: "th",
@@ -255,7 +255,7 @@ pub(crate) fn canonicalize_language_value(value: &str) -> Option<&'static str> {
                 .map(|language| language.code)
         })
         .or_else(|| {
-            let (language, region) = value.split_once('-')?;
+            let (language, region) = value.split_once(['-', '_'])?;
             (!region.is_empty())
                 .then(|| canonicalize_language_value(language))
                 .flatten()
@@ -489,7 +489,7 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
     let title_text = super::normalize_token_text(track.title.as_deref().unwrap_or_default());
     let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
     let mut score = if canonicalize_language_value(&lang).is_some() {
-        if lang.contains('-') {
+        if lang.contains(['-', '_']) {
             100
         } else {
             120

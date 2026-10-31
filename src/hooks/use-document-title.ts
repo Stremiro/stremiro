@@ -1,6 +1,6 @@
 import { useEffect } from 'react';
 
-const APP_TITLE = 'Stremiro';
+const APP_TITLE = import.meta.env.DEV ? 'Stremiro Dev' : 'Stremiro';
 
 /** Sets document.title (feeds OS taskbar/a11y despite the frameless window); restores the app title on unmount unless a later writer owns it. */
 export function useDocumentTitle(title?: string | null, enabled = true) {

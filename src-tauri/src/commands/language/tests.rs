@@ -131,22 +131,23 @@ fn expanded_mpv_languages_include_container_tags_and_brazilian_portuguese() {
         assert_eq!(options.get("alang").map(String::as_str), Some(expected));
         assert_eq!(options.get("slang").map(String::as_str), Some(expected));
     }
-    for token in ["pob", "pt-BR", "POR"] {
-        assert_eq!(canonicalize_language_value(token), Some("pt"));
+    for (token, expected) in [
+        ("pob", "pt"),
+        ("pt-BR", "pt"),
+        ("POR", "pt"),
+        ("JP", "ja"),
+        ("kr", "ko"),
+        ("iw", "he"),
+        ("CHS", "zh"),
+        ("nb_NO", "no"),
+        ("it_IT", "it"),
+    ] {
+        assert_eq!(
+            canonicalize_language_value(token),
+            Some(expected),
+            "{token}"
+        );
     }
-}
-
-#[test]
-fn normalize_language_token_canonicalizes_aliases() {
-    assert_eq!(
-        normalize_language_token(Some("English"), false).as_deref(),
-        Some("en")
-    );
-    assert_eq!(
-        normalize_language_token(Some("pt-BR"), false).as_deref(),
-        Some("pt")
-    );
-    assert_eq!(normalize_language_token(Some("commentary"), false), None);
 }
 
 #[test]

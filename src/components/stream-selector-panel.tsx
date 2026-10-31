@@ -1045,8 +1045,9 @@ export function StreamPackEpisodeList({
   );
 
   // Roving tabindex mirroring the stream list — headers never take the stop.
-  const [requestedFocusedIndex, setFocusedIndex] = useState(() =>
-    targetIndex >= 0 ? targetIndex : Math.max(0, firstEpisodeIndex),
+  const [requestedFocusedKey, setFocusedKey] = useState<string | null>(null);
+  const requestedFocusedIndex = rows.findIndex(
+    (row) => row.type === 'episode' && packRowKey(row) === requestedFocusedKey,
   );
   const focusedIndex =
     rows[requestedFocusedIndex]?.type === 'episode'
@@ -1071,10 +1072,10 @@ export function StreamPackEpisodeList({
   });
 
   // A virtual row mounts only after the scroll commit — retry one frame before giving up.
-  const scheduleRowFocus = useCallback((index: number, initial = false) => {
+  const scheduleRowFocus = useCallback((key: string, initial = false) => {
     whenRowMounted(
       () => listRef.current,
-      `[data-pack-row="${index}"]`,
+      `[data-pack-row="${CSS.escape(key)}"]`,
       (row) => {
         if (initial && document.activeElement !== panelRef.current) return;
         const list = listRef.current;
@@ -1096,13 +1097,14 @@ export function StreamPackEpisodeList({
 
   const focusRow = useCallback(
     (index: number) => {
-      setFocusedIndex(index);
+      const key = packRowKey(rows[index]);
+      setFocusedKey(key);
       if (isVirtualized) {
         virtualizer.scrollToIndex(index, { align: 'auto' });
       }
-      scheduleRowFocus(index);
+      scheduleRowFocus(key);
     },
-    [isVirtualized, scheduleRowFocus, virtualizer],
+    [isVirtualized, rows, scheduleRowFocus, virtualizer],
   );
 
   // Arrow nav steps over header rows — they never hold the roving stop.
@@ -1146,16 +1148,18 @@ export function StreamPackEpisodeList({
     const anchor = targetIndex >= 0 ? targetIndex : firstEpisodeIndex;
     if (anchor < 0) return;
     initialFocusDoneRef.current = true;
-    setFocusedIndex(anchor);
+    const key = packRowKey(rows[anchor]);
+    setFocusedKey(key);
     if (isVirtualized) {
       virtualizer.scrollToIndex(anchor, { align: 'center' });
     }
-    scheduleRowFocus(anchor, true);
+    scheduleRowFocus(key, true);
   }, [
     error,
     firstEpisodeIndex,
     isLoading,
     isVirtualized,
+    rows,
     scheduleRowFocus,
     targetIndex,
     virtualizer,
@@ -1203,7 +1207,7 @@ export function StreamPackEpisodeList({
       <div role='listitem'>
         <button
           type='button'
-          data-pack-row={index}
+          data-pack-row={packRowKey(row)}
           data-current-episode={isTarget ? '' : undefined}
           aria-current={isTarget ? 'true' : undefined}
           aria-label={`Play ${formatSeasonEpisode(ep.season, ep.episode)} — ${episodeTitle}`}
@@ -1211,7 +1215,7 @@ export function StreamPackEpisodeList({
           aria-disabled={disabled || undefined}
           aria-busy={isPending || undefined}
           tabIndex={index === focusedIndex ? 0 : -1}
-          onFocus={() => setFocusedIndex(index)}
+          onFocus={() => setFocusedKey(packRowKey(row))}
           onClick={() => {
             if (!disabled) onPick(ep);
           }}

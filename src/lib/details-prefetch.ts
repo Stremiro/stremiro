@@ -17,15 +17,17 @@ interface PrefetchDetailsRouteDataOptions {
   mediaType?: string | null;
 }
 
-// One bundle invoke per title at a time (in-flight leader pattern): the
-// resolved-data guard can't see an in-flight call, so followers share the leader.
+// Share one in-flight bundle per title and discovery generation; obsolete
+// provider work must not delay callers after addon settings change.
 const detailsPrefetchInFlight = new Map<
   string,
   Promise<Partial<DetailsPrefetchBundle> | undefined>
 >();
 
 export function pendingDetailsPrefetch(mediaType: string | undefined, id: string) {
-  return detailsPrefetchInFlight.get(`${resolvePlayerRouteMediaType(mediaType)}:${id.trim()}`);
+  return detailsPrefetchInFlight.get(
+    `${getDiscoveryEpoch()}:${resolvePlayerRouteMediaType(mediaType)}:${id.trim()}`,
+  );
 }
 
 export function prefetchDetailsRouteData(
@@ -62,7 +64,8 @@ export function prefetchDetailsRouteData(
     return;
   }
 
-  const inFlightKey = `${routeType}:${normalizedId}`;
+  const discoveryEpoch = getDiscoveryEpoch();
+  const inFlightKey = `${discoveryEpoch}:${routeType}:${normalizedId}`;
   if (detailsPrefetchInFlight.has(inFlightKey)) {
     return;
   }
@@ -73,7 +76,6 @@ export function prefetchDetailsRouteData(
   // next hover retries instead of blocking until GC.
   const progressEpoch = getWatchProgressEpoch();
   const progressRevision = getWatchProgressSnapshotRevision();
-  const discoveryEpoch = getDiscoveryEpoch();
   const request = api
     .getDetailsPrefetchBundle(routeType, normalizedId)
     .then((bundle) => {

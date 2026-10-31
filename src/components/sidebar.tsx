@@ -35,6 +35,7 @@ interface SidebarNavItem {
 const SETTINGS_HREF = '/settings';
 const PROFILE_HREF = '/profile';
 const SEARCH_HREF = '/search';
+const NAV_ACTIVE_SURFACE_CLASS = 'bg-white/[0.06] shadow-[inset_0_1px_0_rgb(255_255_255/0.08)]';
 
 const PRIMARY_NAV_ITEMS: SidebarNavItem[] = [
   { icon: Home, label: 'Home', href: '/' },
@@ -88,7 +89,10 @@ function SidebarNavIndicator({
     <>
       <span
         aria-hidden='true'
-        className='nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-xl border border-white/[0.12] bg-white/[0.09] shadow-[inset_0_1px_0_rgba(255,255,255,0.12)]'
+        className={cn(
+          'nav-sliding-pill pointer-events-none absolute left-0 top-0 rounded-lg',
+          NAV_ACTIVE_SURFACE_CLASS,
+        )}
         style={{
           width: indicator.width,
           height: indicator.height,
@@ -139,7 +143,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
   ) => {
     const showUpdate = item.href === SETTINGS_HREF && isUpdateAvailable;
     const avatar = item.href === PROFILE_HREF ? identity?.avatar : undefined;
-    const isActive = isNavItemActive(item, pathname);
+    const isActive = group.activeHref === item.href;
     const isSearch = item.href === SEARCH_HREF;
     return (
       <SidebarNavButton
@@ -205,25 +209,16 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         )}
       >
         <div className='w-full px-2 pb-5 pointer-events-auto'>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Link
-                to='/'
-                aria-label='Open Stremiro home'
-                className='group flex h-11 w-full items-center justify-center rounded-lg transition-transform duration-200 hover:scale-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:transform-none'
-              >
-                <img
-                  src='/stremiro.png'
-                  alt=''
-                  aria-hidden='true'
-                  loading='eager'
-                  decoding='async'
-                  className='h-7 w-7'
-                />
-              </Link>
-            </TooltipTrigger>
-            <TooltipContent side='right'>Stremiro</TooltipContent>
-          </Tooltip>
+          <div className='flex h-11 w-full items-center justify-center'>
+            <img
+              src='/stremiro.png'
+              alt='Stremiro'
+              loading='eager'
+              decoding='async'
+              draggable={false}
+              className='h-7 w-7'
+            />
+          </div>
         </div>
 
         <nav
@@ -249,7 +244,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
 });
 
 const NAV_DOT_CLASS =
-  'absolute right-[9px] top-[9px] h-[7px] w-[7px] rounded-full bg-emerald-400 ring-2 ring-black shadow-[0_0_8px_rgba(52,211,153,0.55)]';
+  'absolute right-2 top-2 h-1.5 w-1.5 rounded-full bg-emerald-400 ring-2 ring-black';
 
 interface SidebarNavButtonProps {
   icon?: ReactNode;
@@ -276,14 +271,6 @@ function SidebarNavButton({
   tooltip,
   updateAvailable,
 }: SidebarNavButtonProps) {
-  const content = (
-    <>
-      <span className='flex items-center justify-center transition-transform duration-150 ease-out group-hover:scale-[1.04] motion-reduce:transform-none'>
-        {icon ?? <item.icon aria-hidden='true' strokeWidth={1.75} />}
-      </span>
-      {updateAvailable && <span className={NAV_DOT_CLASS} />}
-    </>
-  );
   return (
     <div ref={itemRef} className='relative flex w-full justify-center'>
       <span
@@ -298,12 +285,11 @@ function SidebarNavButton({
             variant='ghost'
             size='icon'
             className={cn(
-              'nav-switch-item relative h-11 w-full overflow-hidden rounded-xl group [&_svg]:size-[22px]',
+              'nav-switch-item relative h-11 w-full overflow-hidden rounded-lg [&_svg]:size-[22px]',
               isActive && 'text-(--accent-nav) hover:bg-transparent hover:text-(--accent-nav)',
-              isActive &&
-                !sharedIndicator &&
-                'bg-white/[0.07] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)] hover:bg-white/[0.07]',
-              !isActive && 'text-white/50 hover:bg-white/[0.08] hover:text-white/90',
+              isActive && !sharedIndicator && NAV_ACTIVE_SURFACE_CLASS,
+              !isActive &&
+                'text-white/45 hover:bg-white/[0.04] hover:text-white/85 focus-visible:bg-white/[0.04] focus-visible:text-white/90',
             )}
           >
             <Link
@@ -314,7 +300,8 @@ function SidebarNavButton({
               onFocus={onIntent}
               onClick={onClick}
             >
-              {content}
+              {icon ?? <item.icon aria-hidden='true' strokeWidth={isActive ? 2 : 1.75} />}
+              {updateAvailable && <span className={NAV_DOT_CLASS} />}
             </Link>
           </Button>
         </TooltipTrigger>

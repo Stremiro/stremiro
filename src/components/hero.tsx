@@ -11,6 +11,7 @@ import {
 } from 'react';
 import { Link } from 'react-router';
 import { RemoteImage } from '@/components/remote-image';
+import { GenreIcon } from '@/components/genre-icon';
 import { Button, SaveIndicator } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
@@ -619,8 +620,9 @@ export const Hero = memo(function Hero({ items }: HeroProps) {
                         key={genre}
                         to={searchGenrePath(item.type, genre)}
                         title={`Browse ${genre}`}
-                        className={GENRE_LINK_CLASS}
+                        className={cn(GENRE_LINK_CLASS, 'inline-flex items-center gap-1.5')}
                       >
+                        <GenreIcon genre={genre} />
                         {genre}
                       </Link>
                     ))}

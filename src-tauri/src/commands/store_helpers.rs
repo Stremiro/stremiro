@@ -239,7 +239,7 @@ fn load_snapshot<T: serde::Serialize>(
 }
 
 pub(super) fn load_library_index(store: &DurableStore) -> Result<Vec<String>, String> {
-    load_index(store, LIBRARY_LAYOUT.index_key)
+    load_index(store, LIBRARY_LAYOUT.index_key).map(unique_sorted)
 }
 
 pub(super) fn load_library_map(store: &DurableStore) -> Result<HashMap<String, MediaItem>, String> {
@@ -248,14 +248,13 @@ pub(super) fn load_library_map(store: &DurableStore) -> Result<HashMap<String, M
 
 pub(super) fn load_library_item_identities(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
     let index = load_library_index(store)?;
-    let mut seen = HashSet::with_capacity(index.len());
     let mut items = Vec::with_capacity(index.len());
     for id in index {
         match store
             .get_typed::<super::list_helpers::ListItemIdentity>(library_item_key(&id))
             .and_then(|identity| identity.normalized_item())
         {
-            Some(item) if item.id == id && seen.insert(item.id.clone()) => items.push(item),
+            Some(item) if item.id == id => items.push(item),
             // Keep full snapshots and donor metadata intact when the index needs repair.
             _ => return load_library_map(store).map(|items| items.into_values().collect()),
         }
@@ -329,7 +328,15 @@ pub(crate) fn normalize_watch_status(value: &str) -> Option<String> {
 }
 
 pub(super) fn load_watch_status_index(store: &DurableStore) -> Result<Vec<String>, String> {
-    load_index(store, WATCH_STATUS_LAYOUT.index_key)
+    load_index(store, WATCH_STATUS_LAYOUT.index_key).map(unique_sorted)
+}
+
+/// Set indexes are stored sorted. A duplicate entry must not inflate a capacity
+/// check or count the same title twice; reads do not rewrite the file.
+fn unique_sorted(mut ids: Vec<String>) -> Vec<String> {
+    ids.sort_unstable();
+    ids.dedup();
+    ids
 }
 
 pub(super) fn load_watch_statuses_map(

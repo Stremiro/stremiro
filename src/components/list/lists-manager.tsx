@@ -628,11 +628,11 @@ function ListItemsView({ list }: { list: UserList }) {
   } = useTitleSearch(orderedItems, search);
 
   const visibleItems = filtered.slice(0, visibleLimit);
-  const visibleIds = visibleItems.map((item) => item.id);
+  const filteredIds = filtered.map((item) => item.id);
   const selectAllDisabled = isSearchPending || searchError;
   const { triggerRef: selectionTriggerRef, ...selection } = useCollectionSelection(
     list.item_ids,
-    visibleIds,
+    filteredIds,
     !readOnly,
     bulkRemove.isPending || reorderItems.isPending,
     false,
@@ -748,7 +748,7 @@ function ListItemsView({ list }: { list: UserList }) {
           }
           selectAllDisabled={selectAllDisabled}
           isBusy={bulkRemove.isPending || reorderItems.isPending}
-          onSelectAll={() => selection.selectAll(filtered.map((item) => item.id))}
+          onSelectAll={() => selection.selectAll(filteredIds)}
           onClear={selection.clear}
           onDone={selection.exit}
           onRemove={() => void removeSelected()}

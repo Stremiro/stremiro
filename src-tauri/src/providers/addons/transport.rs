@@ -17,7 +17,7 @@ use std::time::{Duration, Instant};
 
 static SEEDER_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"👤\s*(\d{1,3}(?:[,.]\d{3})+|\d+)").expect("valid seeder regex"));
-pub(crate) static STREAM_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+static STREAM_SIZE_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     // Exclude numeric punctuation at the left edge so malformed groups cannot match a suffix.
     Regex::new(r"(?i)(?:^|[^\w.,])([0-9]+(?:[.,][0-9]+)?)\s*([KMGT]i?B)\b")
         .expect("valid stream size regex")
@@ -50,30 +50,59 @@ pub(super) fn stream_cache_key(
 }
 
 #[derive(Debug, Deserialize, Default)]
-struct RawStreamResponse<'a> {
-    #[serde(borrow, default)]
-    streams: Vec<&'a RawValue>,
+struct RawStreamResponse {
+    #[serde(default, deserialize_with = "deserialize_stream_items")]
+    streams: Vec<AddonStream>,
+}
+
+fn deserialize_stream_items<'de, D>(deserializer: D) -> Result<Vec<AddonStream>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct StreamItems;
+
+    impl<'de> serde::de::Visitor<'de> for StreamItems {
+        type Value = Vec<AddonStream>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("a stream array")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut sequence: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut decoded = Vec::new();
+            let mut had_items = false;
+            while decoded.len() < DECODED_STREAMS_MAX {
+                let Some(raw) = sequence.next_element::<&RawValue>()? else {
+                    break;
+                };
+                had_items = true;
+                let Ok(mut stream) = serde_json::from_str::<AddonStream>(raw.get()) else {
+                    continue;
+                };
+                truncate_stream_item(&mut stream);
+                decoded.push(stream);
+            }
+            // Validate the rest without allocating discarded rows or a pointer per source entry.
+            while sequence.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+            if decoded.is_empty() && had_items {
+                return Err(serde::de::Error::custom("Invalid stream response format."));
+            }
+            Ok(decoded)
+        }
+    }
+
+    deserializer.deserialize_seq(StreamItems)
 }
 
 /// Decode item-by-item so a malformed sibling can't discard valid streams; applies per-field truncation.
 pub(super) fn decode_stream_items(bytes: &[u8]) -> Result<Vec<AddonStream>, String> {
     const INVALID_FORMAT: &str = "Invalid stream response format.";
-    let body: RawStreamResponse<'_> =
+    let body: RawStreamResponse =
         serde_json::from_slice(bytes).map_err(|_| INVALID_FORMAT.to_string())?;
-    let decoded: Vec<_> = body
-        .streams
-        .iter()
-        .filter_map(|item| serde_json::from_str::<AddonStream>(item.get()).ok())
-        .take(DECODED_STREAMS_MAX)
-        .map(|mut stream| {
-            truncate_stream_item(&mut stream);
-            stream
-        })
-        .collect();
-    if decoded.is_empty() && !body.streams.is_empty() {
-        return Err(INVALID_FORMAT.to_string());
-    }
-    Ok(decoded)
+    Ok(body.streams)
 }
 
 fn truncate_field(value: &mut Option<String>, max_chars: usize) {
@@ -284,19 +313,6 @@ impl AddonTransport {
             refresh_claims: Mutex::new(HashMap::new()),
             refresh_claim_seq: AtomicU64::new(0),
         }
-    }
-
-    /// TTL-cache insert; a superseded generation (mid-fetch `clear_cache`) drops the put.
-    #[cfg(test)]
-    pub(super) fn cache_put(&self, key: &str, streams: Vec<AddonStream>, generation: u64) {
-        let still_fresh = || self.generation.load(Ordering::SeqCst) == generation;
-        // Cheap pre-check; `put` re-checks under the entries lock.
-        if !still_fresh() {
-            return;
-        }
-        let is_empty = streams.is_empty();
-        self.cache
-            .put(key, Arc::from(streams), is_empty, still_fresh);
     }
 
     /// Clear caches on config change: the generation bump revokes in-flight

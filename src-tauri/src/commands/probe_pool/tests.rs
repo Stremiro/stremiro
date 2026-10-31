@@ -1,9 +1,9 @@
 use super::{
     build_candidate_input, build_probe_candidates, find_preferred_position, probe_candidate,
     resolve_candidate_results, resolve_probe_candidates, CandidateProbeResult, PreferredStreamHint,
-    ProbeError, ResolveStreamErrorKind, ResolvedStream, StreamExclusions, StreamPoolQuery,
-    StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES, BEST_STREAM_PROBE_CONCURRENCY,
-    SAME_HOST_PROBE_SPACING,
+    ProbeError, ProbeRequestIdentity, ResolveStreamErrorKind, ResolvedStream, StreamExclusions,
+    StreamPoolQuery, StreamResolveCandidateInput, BEST_STREAM_MAX_CANDIDATES,
+    BEST_STREAM_PROBE_CONCURRENCY, SAME_HOST_PROBE_SPACING,
 };
 use crate::commands::stream_fetcher::StreamRankingOverrides;
 use crate::providers::addons::{
@@ -96,7 +96,7 @@ fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
     assert_eq!(plan.len(), BEST_STREAM_MAX_CANDIDATES);
     assert_eq!(
         plan.iter()
-            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .map(|(candidate, ..)| candidate.stream_key.as_str())
             .collect::<Vec<_>>(),
         std::iter::once(10)
             .chain((0..BEST_STREAM_MAX_CANDIDATES + 4).filter(|index| *index != 10))
@@ -105,7 +105,7 @@ fn probe_plan_caps_preferred_pool_and_staggers_each_host() {
             .collect::<Vec<_>>()
     );
     assert_eq!(
-        plan.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
+        plan.iter().map(|(_, delay, ..)| *delay).collect::<Vec<_>>(),
         [0, 1, 0]
             .into_iter()
             .chain(2..BEST_STREAM_MAX_CANDIDATES as u32 - 1)
@@ -177,7 +177,7 @@ fn probe_plan_ignores_fragment_aliases_without_losing_player_hints_or_request_va
     let plan = build_probe_candidates(streams.clone(), PreferredStreamHint::default());
     assert_eq!(
         plan.iter()
-            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .map(|(candidate, ..)| candidate.stream_key.as_str())
             .collect::<Vec<_>>(),
         ["s:0", "s:healthy", "s:auth", "s:query"]
     );
@@ -189,7 +189,7 @@ fn probe_plan_ignores_fragment_aliases_without_losing_player_hints_or_request_va
     assert_eq!(
         recovery
             .iter()
-            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .map(|(candidate, ..)| candidate.stream_key.as_str())
             .collect::<Vec<_>>(),
         ["s:healthy", "s:auth", "s:query"]
     );
@@ -243,7 +243,7 @@ fn probe_plan_deduplicates_header_names_without_changing_values_or_duplicates() 
 
     assert_eq!(
         plan.iter()
-            .map(|(candidate, _)| candidate.stream_key.as_str())
+            .map(|(candidate, ..)| candidate.stream_key.as_str())
             .collect::<Vec<_>>(),
         [
             "s:first",
@@ -254,7 +254,7 @@ fn probe_plan_deduplicates_header_names_without_changing_values_or_duplicates() 
     );
     assert_eq!(plan[0].0.request_headers, original_headers);
     assert_eq!(
-        plan.iter().map(|(_, delay)| *delay).collect::<Vec<_>>(),
+        plan.iter().map(|(_, delay, ..)| *delay).collect::<Vec<_>>(),
         [0, 1, 2, 3].map(|slot| SAME_HOST_PROBE_SPACING * slot)
     );
 }
@@ -320,12 +320,12 @@ fn recovery_probe_plan_excludes_failed_requests_without_collapsing_auth_variants
         let plan = build_probe_candidates(admitted, PreferredStreamHint::default());
         assert_eq!(
             plan.iter()
-                .map(|(candidate, _)| candidate.stream_key.as_str())
+                .map(|(candidate, ..)| candidate.stream_key.as_str())
                 .collect::<Vec<_>>(),
             expected,
             "{failed_key:?}"
         );
-        for (candidate, _) in plan {
+        for (candidate, ..) in plan {
             let original = streams
                 .iter()
                 .find(|stream| stream.stream_key == candidate.stream_key)
@@ -825,7 +825,9 @@ impl Drop for ActiveProbe {
     }
 }
 
-fn refill_probe_plan(count: usize) -> Vec<(StreamResolveCandidateInput, Duration)> {
+fn refill_probe_plan(
+    count: usize,
+) -> Vec<(StreamResolveCandidateInput, Duration, ProbeRequestIdentity)> {
     let mut streams: Vec<_> = (0..count)
         .map(|index| {
             let mut stream = probeable_stream(&format!("s:{index}"), None);
@@ -1115,10 +1117,14 @@ async fn recovery_candidate_results_accept_same_url_for_a_different_prepared_req
         (Some("h:legacy:0"), "s:fallback"),
     ] {
         let winner = resolve_probe_candidates(
-            vec![
-                (candidate_input("alternate", "s:alternate"), Duration::ZERO),
-                (candidate_input("fallback", "s:fallback"), Duration::ZERO),
-            ],
+            ["alternate", "fallback"]
+                .into_iter()
+                .map(|source| {
+                    let candidate = candidate_input(source, &format!("s:{source}"));
+                    let identity = ProbeRequestIdentity::from_candidate(&candidate);
+                    (candidate, Duration::ZERO, identity)
+                })
+                .collect(),
             failed_key,
             Some("https://cdn.example/failed.mkv"),
             tokio::time::Instant::now() + Duration::from_secs(1),

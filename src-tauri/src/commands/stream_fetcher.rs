@@ -1323,7 +1323,14 @@ async fn run_progressive_fetch(
                         preview_rows.push((key, index, row));
                     }
                 }
-                preview_rows.sort_by_key(|(key, _, _)| std::cmp::Reverse(*key));
+                preview_rows.sort_by_key(|(key, index, row)| {
+                    (
+                        !outcomes[index].streams[*row]
+                            .presentation
+                            .is_instantly_playable,
+                        std::cmp::Reverse(*key),
+                    )
+                });
             }
             send_selector_snapshot(
                 channel,
@@ -1468,6 +1475,8 @@ async fn merge_selector_outcomes(
             ctx.recommendation_inputs(&stream_family_priorities),
             &mut signal_cache,
         );
+        // P2P rows cannot play in this build; the selector lists them after every playable row.
+        merged.sort_by_key(|stream| !stream.presentation.is_instantly_playable);
     }
 
     StreamSelectorData {

@@ -11,6 +11,7 @@ import type {
   MediaItem,
   SearchCatalogPage,
   SearchCatalogQuery,
+  TitleCredits,
   UnairedEpisodesRequest,
 } from '@/lib/api';
 import { safeInvoke } from '@/lib/api-core';
@@ -22,16 +23,9 @@ import {
   trendingRowQueryKey,
 } from '@/lib/query-invalidation';
 
-export function similarTitlesQueryKey({ id, title, type, year, genres, description }: MediaItem) {
-  return trendingRowQueryKey(
-    'similar',
-    type,
-    id,
-    title,
-    description ?? '',
-    year ?? '',
-    ...(genres ?? []),
-  );
+// The synopsis feeds ranking but stays out of the key, which also names the rail's scroll memory.
+export function similarTitlesQueryKey({ id, title, type, year, genres }: MediaItem) {
+  return trendingRowQueryKey('similar', type, id, title, year ?? '', ...(genres ?? []));
 }
 
 // Rust owns normalization/caching/fetch overlap; React Query owns view payloads and invalidation.
@@ -112,6 +106,33 @@ const getDetailsPrefetchBundle = (type: string, id: string) =>
 const getCalendarEvents = (range: CalendarRange, onCached: Channel<CalendarSchedule>) =>
   safeInvoke<CalendarSchedule>('get_calendar_events', { range, onCached });
 
+const getTitleCredits = (mediaType: string, id: string, imdbId?: string) =>
+  safeInvoke<TitleCredits>('get_title_credits', { mediaType, id, imdbId });
+
+const openTitleCreditsLink = (
+  mediaType: string,
+  id: string,
+  imdbId: string | undefined,
+  url: string,
+) => safeInvoke<void>('open_title_credits_link', { mediaType, id, imdbId, url });
+
+// Lazy single query: the Rust enrichment cache owns transport lifetime; the
+// view payload mirrors its 12h-populated / 1h-empty TTLs.
+const TITLE_CREDITS_FULL_STALE_TIME_MS = 12 * 60 * 60 * 1000;
+const TITLE_CREDITS_EMPTY_STALE_TIME_MS = 60 * 60 * 1000;
+const titleCreditsQueryOptions = (mediaType: string, id: string, imdbId?: string) =>
+  queryOptions({
+    queryKey: ['title-credits', mediaType, id, imdbId ?? ''],
+    queryFn: () => getTitleCredits(mediaType, id, imdbId),
+    staleTime: (query) =>
+      query.state.data && query.state.data.source
+        ? TITLE_CREDITS_FULL_STALE_TIME_MS
+        : TITLE_CREDITS_EMPTY_STALE_TIME_MS,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+
 const getBrowseGenres = () => safeInvoke<BrowseGenres>('get_browse_genres');
 
 const getRecentWatchSeed = () => safeInvoke<MediaItem | null>('get_recent_watch_seed');
@@ -138,6 +159,9 @@ export const discoveryApi = {
   searchEpisodes,
   searchTitles,
   getDetailsPrefetchBundle,
+  getTitleCredits,
+  openTitleCreditsLink,
+  titleCreditsQueryOptions,
   getCalendarEvents,
   getBrowseGenres,
   getRecentWatchSeed,

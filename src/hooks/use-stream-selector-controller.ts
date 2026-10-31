@@ -252,7 +252,7 @@ export function useStreamSelectorController({
   const lastStreamFamily = lastStreamEntry?.stream_family || undefined;
   // Per-episode watch rows — the pack picker reads resume points from the same snapshot as the badge.
   const episodeProgress = titleProgress?.episodeProgress;
-  // Rust already ranked these rows; a homogeneous delivery pool needs no partition/filter IPC.
+  // Rust already ranked these rows playable-first; the default view needs no filter IPC.
   const selectorViewResetKey = JSON.stringify([effectiveFilters, requestedSearchQuery]);
   const unfilteredView =
     effectiveFilters.quality === 'all' &&
@@ -260,8 +260,7 @@ export function useStreamSelectorController({
     effectiveFilters.addon === 'all' &&
     effectiveFilters.batch === 'all' &&
     effectiveFilters.sort === 'smart' &&
-    !requestedSearchQuery &&
-    (streamStats.p2pCount === 0 || streamStats.playableCount === 0)
+    !requestedSearchQuery
       ? { streams, resetKey: selectorViewResetKey }
       : undefined;
   const {

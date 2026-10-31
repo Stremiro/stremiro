@@ -141,16 +141,15 @@ export function usePlayerTrackController({
   const refreshTracksImmediate = useCallback(async () => {
     const generation = trackRefreshGenerationRef.current;
     const confirmedRevision = confirmedTrackRevisionRef.current;
-    const observedIds = observedTrackIdsRef.current;
-    const selection =
-      observedIds.audio !== undefined && observedIds.sub !== undefined
-        ? { audio: observedIds.audio, sub: observedIds.sub }
-        : undefined;
+    const { audio, sub } = observedTrackIdsRef.current;
+    const selection = audio !== undefined && sub !== undefined ? { audio, sub } : undefined;
     return (async () => {
       const nextTracks = await readPlayerTrackList(selection);
       if (
         generation !== trackRefreshGenerationRef.current ||
-        confirmedRevision !== confirmedTrackRevisionRef.current
+        confirmedRevision !== confirmedTrackRevisionRef.current ||
+        audio !== observedTrackIdsRef.current.audio ||
+        sub !== observedTrackIdsRef.current.sub
       ) {
         return trackListRef.current;
       }
@@ -225,6 +224,13 @@ export function usePlayerTrackController({
   // The save response writes the effective cache before its queue resolves — read it directly rather than folding global over it.
   const playbackLanguagePreferences =
     effectivePlaybackLanguagePreferences ?? EMPTY_PLAYBACK_LANGUAGE_PREFERENCES;
+  const pendingAddonSubtitleLanguage =
+    addonSubtitleLanguage?.key === resetKey &&
+    !!addonSubtitleLanguage.language &&
+    addonSubtitleLanguage.language !== 'off' &&
+    addonSubtitleLanguage.language === playbackLanguagePreferences.preferredSubtitleLanguage
+      ? addonSubtitleLanguage.language
+      : null;
 
   const resetAutoApplyState = useCallback((type: TrackType) => {
     autoAppliedTrackPrefsRef.current[type] = null;
@@ -482,8 +488,10 @@ export function usePlayerTrackController({
         return;
       }
       if (typeof resolution.matchedTrackId !== 'number') {
-        if (kind === 'sub')
+        if (kind === 'sub') {
+          autoAppliedTrackPrefsRef.current.sub = fingerprint;
           setAddonSubtitleLanguage({ key: resetKey, language: preferredLanguage });
+        }
         return;
       }
 
@@ -637,6 +645,8 @@ export function usePlayerTrackController({
     if (audioTracks.length === 0 && subTracks.length === 0) {
       return;
     }
+    // An unresolved addon subtitle handoff would record "no subtitle" over the learned language.
+    if (!activeSubTrack && pendingAddonSubtitleLanguage) return;
 
     const isTrackSelectionPending = () =>
       trackSwitchingRef.current.audio ||
@@ -697,6 +707,7 @@ export function usePlayerTrackController({
     isResolving,
     mediaId,
     mediaType,
+    pendingAddonSubtitleLanguage,
     preferenceSaveEpoch.audio,
     preferenceSaveEpoch.sub,
     subTracks.length,
@@ -725,13 +736,7 @@ export function usePlayerTrackController({
   }, [resetKey]);
 
   return {
-    addonSubtitleLanguage:
-      addonSubtitleLanguage?.key === resetKey &&
-      !!addonSubtitleLanguage.language &&
-      addonSubtitleLanguage.language !== 'off' &&
-      addonSubtitleLanguage.language === playbackLanguagePreferences.preferredSubtitleLanguage
-        ? addonSubtitleLanguage.language
-        : null,
+    addonSubtitleLanguage: pendingAddonSubtitleLanguage,
     audioTracks,
     cycleTrack,
     notifyObservedTrackSelection,

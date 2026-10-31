@@ -593,37 +593,11 @@ fn sanitize_profile_preferences_preserves_view_mode() {
 }
 
 #[test]
-fn stored_profile_ignores_legacy_bio_and_defaults_intensity() {
-    let stored = serde_json::json!({
-        "profile": {
-            "username": "Streamer",
-            "accentColor": "#ABCDEF",
-            "bio": "legacy write-only field",
-        },
-        "viewMode": "grid",
-    });
-
-    let parsed = serde_json::from_value::<super::StoredProfilePreferences>(stored)
-        .map(super::normalize_stored_profile_preferences)
-        .expect("legacy bio payload parses");
-
-    assert_eq!(parsed.profile.username, "Streamer");
-    assert_eq!(parsed.profile.accent_color, "#abcdef");
-    assert_eq!(
-        parsed.profile.accent_intensity,
-        super::PROFILE_ACCENT_INTENSITY_DEFAULT
-    );
-    // Stores written before tint targets existed keep every surface on.
-    assert_eq!(parsed.profile.accent_targets, AccentTargets::default());
-}
-
-#[test]
 fn stored_profile_accent_targets_default_per_flag() {
     let mut stored = serde_json::json!({
         "profile": {
             "username": "Streamer",
-            "accentColor": "#abcdef",
-            "accentIntensity": 60,
+            "accentColor": "#ABCDEF",
             "accentTargets": { "navigation": false, "artwork": "bogus" },
         },
         "viewMode": "grid",
@@ -632,6 +606,12 @@ fn stored_profile_accent_targets_default_per_flag() {
     let parsed = serde_json::from_value::<super::StoredProfilePreferences>(stored.clone())
         .map(super::normalize_stored_profile_preferences)
         .expect("partial targets payload parses");
+    assert_eq!(parsed.profile.username, "Streamer");
+    assert_eq!(parsed.profile.accent_color, "#abcdef");
+    assert_eq!(
+        parsed.profile.accent_intensity,
+        super::PROFILE_ACCENT_INTENSITY_DEFAULT
+    );
 
     // Explicit false survives; missing or malformed flags fall back to the pre-flag look.
     assert!(!parsed.profile.accent_targets.seekbar);
@@ -640,6 +620,18 @@ fn stored_profile_accent_targets_default_per_flag() {
     assert!(parsed.profile.accent_targets.progress);
     assert!(parsed.profile.accent_targets.artwork);
     assert!(parsed.profile.accent_targets.skip);
+    let mut missing_targets = stored.clone();
+    missing_targets["profile"]
+        .as_object_mut()
+        .unwrap()
+        .remove("accentTargets");
+    assert_eq!(
+        super::parse_profile_preferences(missing_targets)
+            .unwrap()
+            .profile
+            .accent_targets,
+        AccentTargets::default()
+    );
 
     for (value, expected) in [
         (serde_json::json!(null), true),

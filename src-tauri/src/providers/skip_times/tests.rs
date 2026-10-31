@@ -293,3 +293,21 @@ fn normalize_skip_segments_clamps_to_stream_duration() {
         ],
     );
 }
+
+#[test]
+fn normalize_skip_segments_rejects_timestamp_rounding_overflow() {
+    let valid = SkipSegment {
+        type_: "intro",
+        start_time: 10.0,
+        end_time: 90.0,
+    };
+    let mut segments = vec![valid.clone()];
+    for (start_time, end_time) in [(0.0, f64::MAX), (f64::MAX, f64::MAX)] {
+        segments.push(SkipSegment {
+            type_: "outro",
+            start_time,
+            end_time,
+        });
+    }
+    assert_eq!(normalize_skip_segments(segments, None), [valid]);
+}

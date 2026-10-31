@@ -12,6 +12,19 @@ use providers::skip_times::SkipTimesProvider;
 use tauri::Manager;
 
 pub fn run() {
+    let context = tauri::generate_context!();
+    #[cfg(dev)]
+    let context = {
+        let mut context = context;
+        context.config_mut().identifier.push_str(".dev");
+        context.config_mut().product_name = Some("Stremiro Dev".into());
+        context.package_info_mut().name = "Stremiro Dev".into();
+        if let Some(window) = context.config_mut().app.windows.first_mut() {
+            window.title = "Stremiro Dev".into();
+        }
+        context
+    };
+
     tauri::Builder::default()
         .plugin(tauri_plugin_single_instance::init(|app, argv, _| {
             commands::app_shell_commands::accept_app_link(app, argv);
@@ -57,6 +70,9 @@ pub fn run() {
             app.manage(PlaybackStateService::new());
             app.manage(PendingAppUpdate::default());
             app.manage(AddonResourceClient::with_subtitle_cache_dir(
+                app.path().app_cache_dir().ok(),
+            ));
+            app.manage(crate::providers::enrichment::EnrichmentClient::new(
                 app.path().app_cache_dir().ok(),
             ));
 
@@ -120,6 +136,8 @@ pub fn run() {
             commands::browse_genre_commands::get_browse_genres,
 
             commands::media_commands::get_media_details,
+            commands::media_commands::get_title_credits,
+            commands::media_commands::open_title_credits_link,
             commands::episode_navigation::get_episode_navigation,
             commands::episode_navigation::get_unaired_episode_indices,
             commands::media_commands::search_episodes,
@@ -211,7 +229,7 @@ pub fn run() {
             commands::backup_commands::export_app_data_to_file,
             commands::backup_commands::import_app_data_from_file,
         ])
-        .build(tauri::generate_context!())
+        .build(context)
         .unwrap_or_else(|error| {
             let message = format!("Failed to start Stremiro:\n{error}");
             eprintln!("{message}");

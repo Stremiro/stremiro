@@ -45,7 +45,7 @@ fn render_avatar(bytes: &[u8], format: ImageFormat) -> image::ImageResult<(&'sta
     let pixels = image
         .crop_imm((width - side) / 2, (height - side) / 2, side, side)
         .resize_exact(AVATAR_SIZE, AVATAR_SIZE, FilterType::Lanczos3)
-        .to_rgba8();
+        .into_rgba8();
     let mut encoded = Vec::new();
     let mime = if pixels.pixels().all(|pixel| pixel[3] == 255) {
         let rgb = DynamicImage::ImageRgba8(pixels).into_rgb8();

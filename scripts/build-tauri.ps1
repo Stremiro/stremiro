@@ -4,6 +4,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Bun can inherit PowerShell 7's module path while launching Windows PowerShell.
+Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -ErrorAction Stop
 Add-Type -AssemblyName System.Security
 
 $root = Split-Path -Parent $PSScriptRoot

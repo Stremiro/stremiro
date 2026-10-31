@@ -23,15 +23,16 @@ import { PlayerSkipButton } from '@/components/player-action-overlays';
 import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
 import {
   MINI_ICON_BUTTON_CLASS,
-  PlayerMuteButton,
   PlayerNextButton,
   PlayerPlayButton,
   PlayerPreviousButton,
+  PlayerVolumeControl,
 } from '@/components/player-control-buttons';
-import { PlayerSlider } from '@/components/player-slider';
+import { PlayerSlider, type PlayerSliderMark } from '@/components/player-slider';
 import { PlayerEndCard } from '@/components/player-state-overlays';
 import { RemoteImage } from '@/components/remote-image';
 import { useInlineMenu } from '@/hooks/use-inline-menu';
+import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePointerIdle } from '@/hooks/use-pointer-idle';
 import {
@@ -40,6 +41,7 @@ import {
   type MiniVideoRect,
 } from '@/hooks/use-player-surface-layout';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
+import type { SkipSegment } from '@/lib/api';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { createWheelSeekAccumulator } from '@/lib/player-dom';
 import {
@@ -55,7 +57,9 @@ import { clamp, clearTimer, cn, formatTime, prefersReducedMotion } from '@/lib/u
 const MINI_MIN_WIDTH_PX = 300;
 const MINI_MAX_WIDTH_PX = 420;
 const MINI_WIDTH_RATIO = 0.26;
-const MINI_BEZEL_PX = 3;
+const MINI_BEZEL_PX = 2;
+const MINI_FRAME_RADIUS_CLASS = 'rounded-lg';
+const MINI_SURFACE_RADIUS_CLASS = 'rounded-md';
 const MINI_EDGE_PAD_PX = 14;
 // Bounds derive from shared chrome constants so a rail/titlebar resize can't desync drag bounds from margin math.
 const MINI_LEFT_BOUND_PX = PLAYER_SIDEBAR_WIDTH_PX + 8;
@@ -213,16 +217,22 @@ interface MiniPlayerTickProps {
 }
 
 const MiniPlayerHairline = memo(function MiniPlayerHairline({
+  active,
   clock,
   duration,
   seekPreviewStore,
 }: MiniPlayerTickProps) {
-  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore);
+  const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
   const progressPct = duration > 0 ? clamp((displayTime / duration) * 100, 0, 100) : 0;
   return (
-    <div className='pointer-events-none absolute inset-x-0 bottom-0 z-10 h-[2px] bg-white/[0.08]'>
+    <div
+      className={cn(
+        'pointer-events-none absolute inset-x-2.5 bottom-1.5 z-10 h-[3px] overflow-hidden rounded-[1px] bg-white/10 transition-opacity motion-reduce:transition-none',
+        !active && 'opacity-0',
+      )}
+    >
       <div
-        className='h-full origin-left bg-white/75'
+        className='h-full w-full origin-left bg-(--accent-prog)'
         style={{ transform: `scaleX(${progressPct / 100})` }}
       />
     </div>
@@ -244,8 +254,24 @@ const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
   );
 });
 
+const MINI_SKIP_MARK: Record<string, string> = {
+  intro: 'bg-amber-200/90',
+  recap: 'bg-orange-200/90',
+  outro: 'bg-sky-200/90',
+  preview: 'bg-violet-200/90',
+};
+
+function miniSkipMarks(segments: readonly SkipSegment[]): PlayerSliderMark[] {
+  return segments.map((segment) => ({
+    start: segment.start_time,
+    end: segment.end_time,
+    className: MINI_SKIP_MARK[segment.type] ?? 'bg-white/70',
+  }));
+}
+
 interface MiniPlayerSeekSliderProps extends MiniPlayerTickProps {
   onSeek: (seconds: number) => void;
+  skipSegments?: readonly SkipSegment[];
 }
 
 const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
@@ -254,6 +280,7 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
   duration,
   seekPreviewStore,
   onSeek,
+  skipSegments,
 }: MiniPlayerSeekSliderProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active);
   const isDraggingRef = useRef(false);
@@ -273,6 +300,7 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
       step={0.5}
       aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
       disabled={duration <= 0}
+      marks={skipSegments?.length ? miniSkipMarks(skipSegments) : undefined}
       onPointerDown={(event) => {
         event.stopPropagation();
         if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
@@ -306,6 +334,7 @@ interface MiniPlayerProps {
   /** Playback clock — the mini player is a tick subscriber; the tree isn't. */
   clock: PlaybackClock;
   duration: number;
+  skipSegments?: readonly SkipSegment[];
   canGoPrevious: boolean;
   canGoNext: boolean;
   hasVideo: boolean;
@@ -351,6 +380,7 @@ export const MiniPlayer = memo(function MiniPlayer({
   error,
   clock,
   duration,
+  skipSegments,
   canGoPrevious,
   canGoNext,
   hasVideo,
@@ -855,7 +885,7 @@ export const MiniPlayer = memo(function MiniPlayer({
     !menu.presence.mounted &&
     (hasFocus || !isPlaying || isWorking || !!upNext || endOfMedia || (hovered && !pointerIdle));
   const effectivelyMuted = isMuted || volume === 0;
-  const displayedVolume = isMuted ? 0 : Math.round(volume);
+  const motionCover = useDelayedUnmount(isMoving || isSettling || isDocking, 150);
 
   const frame = (
     // eslint-disable-next-line jsx-a11y/no-noninteractive-element-interactions -- menu keys and right-click morph the docked chrome in place.
@@ -913,12 +943,13 @@ export const MiniPlayer = memo(function MiniPlayer({
           stays transparent — a fill would cover the mask hole below. */}
       <div
         className={cn(
-          'relative overflow-hidden rounded-[14px] transition-[scale,box-shadow] duration-200 ease-out motion-reduce:animate-none',
+          MINI_FRAME_RADIUS_CLASS,
+          'relative overflow-hidden transition-shadow duration-200 ease-out motion-reduce:animate-none',
           // A FLIPped mount already entered — the pop-in would restart at the dock rect and read as a second pop.
           exiting ? 'animate-mini-undock' : dockFlipFrom ? '' : 'animate-mini-dock',
           isMoving
-            ? 'scale-[1.025] shadow-[0_0_0_1px_rgba(255,255,255,0.14),0_40px_80px_-20px_rgba(0,0,0,0.95)]'
-            : 'shadow-[0_0_0_1px_rgba(255,255,255,0.09),0_24px_56px_-16px_rgba(0,0,0,0.9)] hover:shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_28px_64px_-16px_rgba(0,0,0,0.92)]',
+            ? 'shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_20px_44px_-16px_rgba(0,0,0,0.88)]'
+            : 'shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_16px_36px_-18px_rgba(0,0,0,0.78)]',
         )}
       >
         {/* Video surface: the transparent interior reveals mpv behind the webview; the painted border is the
@@ -931,37 +962,43 @@ export const MiniPlayer = memo(function MiniPlayer({
           role='application'
           tabIndex={0}
           aria-label={`Mini player: ${title}.${playKey !== undefined ? ` ${formatBindingKey(playKey)} to play or pause.` : ''}${expandKey !== undefined ? ` ${formatBindingKey(expandKey)} to expand.` : ''}`}
-          className='relative w-full cursor-pointer overflow-hidden rounded-[14px] border-[3px] border-[#08080d] bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40'
+          className={cn(
+            MINI_FRAME_RADIUS_CLASS,
+            'relative w-full cursor-pointer overflow-hidden border-2 border-black bg-transparent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/40',
+          )}
           style={{ height: metrics.videoHeight }}
         >
           {/* eslint-enable jsx-a11y/no-noninteractive-tabindex */}
           {/* Keep the cover opaque until the final native rectangle is verified. */}
-          <div
-            aria-hidden='true'
-            className={cn(
-              'pointer-events-none absolute inset-0 z-10 overflow-hidden rounded-[11px] bg-[#0a0a0e] transition-opacity',
-              isMoving || isSettling || isDocking
-                ? 'opacity-100 duration-0'
-                : 'opacity-0 duration-150',
-            )}
-          >
-            {backdrop && (
-              <RemoteImage
-                src={backdrop}
-                alt=''
-                className='absolute inset-0 h-full w-full object-cover opacity-45'
-              />
-            )}
-            <div className='absolute inset-0 bg-linear-to-t from-black/75 via-black/35 to-black/45' />
-            <p
+          {motionCover.mounted && (
+            <div
+              aria-hidden='true'
               className={cn(
-                'absolute inset-x-0 bottom-2 truncate px-3 text-[10px] font-medium text-white/70 drop-shadow',
-                isDocking && 'opacity-0',
+                MINI_SURFACE_RADIUS_CLASS,
+                'pointer-events-none absolute inset-0 z-10 overflow-hidden bg-[#0a0a0e] transition-opacity',
+                isMoving || isSettling || isDocking
+                  ? 'opacity-100 duration-0'
+                  : 'opacity-0 duration-150',
               )}
             >
-              <MiniTitle title={title} episodeLabel={episodeLabel} />
-            </p>
-          </div>
+              {backdrop && (
+                <RemoteImage
+                  src={backdrop}
+                  alt=''
+                  className='absolute inset-0 h-full w-full object-cover opacity-45'
+                />
+              )}
+              <div className='absolute inset-0 bg-linear-to-t from-black/75 via-black/35 to-black/45' />
+              <p
+                className={cn(
+                  'absolute inset-x-0 bottom-2 truncate px-3 text-[10px] font-medium text-white/70 drop-shadow',
+                  isDocking && 'opacity-0',
+                )}
+              >
+                <MiniTitle title={title} episodeLabel={episodeLabel} />
+              </p>
+            </div>
+          )}
 
           {/* Center icon flash on click-to-toggle — bare glyph, no circle. */}
           {flash && !upNext && !endOfMedia && (
@@ -980,6 +1017,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           {/* Always-on progress hairline pinned inside the bezel. */}
           {showLiveSurface && duration > 0 && (
             <MiniPlayerHairline
+              active={!controlsActive && !isMoving && !isSettling && !isDocking}
               clock={clock}
               duration={duration}
               seekPreviewStore={seekPreviewStore}
@@ -1096,6 +1134,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                     clock={clock}
                     duration={duration}
                     seekPreviewStore={seekPreviewStore}
+                    skipSegments={skipSegments}
                     onSeek={onSeek}
                   />
                   <div className='flex items-center gap-1'>
@@ -1130,30 +1169,15 @@ export const MiniPlayer = memo(function MiniPlayer({
                       <PlayerSkipButton action={skipAction} keymap={keymap} variant='icon' />
                     )}
 
-                    <div className='ml-auto flex shrink-0 items-center gap-2'>
-                      <PlayerMuteButton
-                        variant='mini'
-                        keymap={keymap}
-                        label={effectivelyMuted ? 'Unmute' : 'Mute'}
-                        muted={effectivelyMuted}
-                        volume={volume}
-                        onClick={onToggleMute}
-                      />
-                      <PlayerSlider
-                        variant='bar'
-                        active={controlsActive}
-                        aria-label='Volume'
-                        aria-valuetext={effectivelyMuted ? 'Muted' : `${displayedVolume}%`}
-                        value={[isMuted ? 0 : volume]}
-                        max={100}
-                        step={1}
-                        onValueChange={(value) => onVolumeChange(value[0] ?? 0)}
-                        className='h-8 w-14 shrink-0'
-                      />
-                      <span className='w-7 text-right text-[11px] tabular-nums text-white/75'>
-                        {displayedVolume}%
-                      </span>
-                    </div>
+                    <PlayerVolumeControl
+                      variant='mini'
+                      active={controlsActive}
+                      keymap={keymap}
+                      volume={volume}
+                      isMuted={isMuted}
+                      onToggleMute={onToggleMute}
+                      onVolumeChange={onVolumeChange}
+                    />
 
                     {isWorking && (
                       <Loader2 className='ml-1 h-3 w-3 shrink-0 animate-spin text-white/40' />
@@ -1167,7 +1191,8 @@ export const MiniPlayer = memo(function MiniPlayer({
           {!showLiveSurface && (
             <div
               className={cn(
-                'absolute inset-0 z-20 overflow-hidden rounded-[11px] bg-[#0a0a0e]',
+                MINI_SURFACE_RADIUS_CLASS,
+                'absolute inset-0 z-20 overflow-hidden bg-[#0a0a0e]',
                 error && 'cursor-pointer',
               )}
             >
@@ -1177,7 +1202,10 @@ export const MiniPlayer = memo(function MiniPlayer({
                   type='button'
                   aria-label='Back to player'
                   onClick={onExpand}
-                  className='absolute inset-0 rounded-[11px] focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-inset'
+                  className={cn(
+                    MINI_SURFACE_RADIUS_CLASS,
+                    'absolute inset-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-inset',
+                  )}
                 />
               )}
               {backdrop && (
@@ -1221,7 +1249,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           presence={menu.presence}
           orientation='horizontal'
           label='Mini player actions'
-          className='z-40 rounded-[14px] bg-zinc-950/85 backdrop-blur-md'
+          className={cn(MINI_FRAME_RADIUS_CLASS, 'z-40 bg-zinc-950/88 backdrop-blur-md')}
           onAction={menu.close}
           actions={[
             { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
@@ -1250,7 +1278,10 @@ export const MiniPlayer = memo(function MiniPlayer({
       {snapGhostAnchor && (
         <div
           aria-hidden='true'
-          className='pointer-events-none fixed left-0 top-0 z-[44] animate-mini-ghost rounded-[14px] border-[1.5px] border-dashed border-white/35 bg-white/[0.05] backdrop-blur-sm'
+          className={cn(
+            MINI_FRAME_RADIUS_CLASS,
+            'pointer-events-none fixed left-0 top-0 z-[44] animate-mini-ghost border border-dashed border-white/30 bg-white/[0.04]',
+          )}
           style={{
             width: metrics.frameWidth,
             height: metrics.videoHeight,

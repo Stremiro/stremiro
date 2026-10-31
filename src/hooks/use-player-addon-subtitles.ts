@@ -91,6 +91,8 @@ export function usePlayerAddonSubtitles({
     enabled: subtitlesEnabled,
     // Reopening rechecks Rust's cache without extending signed-link or empty-result lifetimes.
     staleTime: 0,
+    // Mounted menus keep their results; Rust owns cross-session caching.
+    gcTime: 0,
     retry: 1,
   });
 
@@ -149,13 +151,11 @@ export function usePlayerAddonSubtitles({
   const loadedAddonSubtitles =
     subtitlesQuery.isSuccess && !subtitlesQuery.isFetching ? subtitlesQuery.data : undefined;
   useEffect(() => {
-    if (
-      !autoLoadLanguage ||
-      !loadedAddonSubtitles?.length ||
-      autoLoadedLanguageRef.current === autoLoadLanguage
-    )
+    if (!autoLoadLanguage) {
+      autoLoadedLanguageRef.current = null;
       return;
-    autoLoadedLanguageRef.current = autoLoadLanguage;
+    }
+    if (!loadedAddonSubtitles?.length || autoLoadedLanguageRef.current === autoLoadLanguage) return;
     const epoch = subtitleSessionEpochRef.current;
     void api
       .resolvePreferredTrackSelection(
@@ -169,7 +169,12 @@ export function usePlayerAddonSubtitles({
       .then(({ matchedTrackId }) => {
         const subtitle =
           matchedTrackId === undefined ? undefined : loadedAddonSubtitles[matchedTrackId];
-        if (subtitle && epoch === subtitleSessionEpochRef.current) {
+        if (
+          subtitle &&
+          epoch === subtitleSessionEpochRef.current &&
+          autoLoadedLanguageRef.current !== autoLoadLanguage
+        ) {
+          autoLoadedLanguageRef.current = autoLoadLanguage;
           selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, autoLoadLanguage);
         }
       })

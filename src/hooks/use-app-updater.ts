@@ -66,7 +66,7 @@ export function useAppUpdater({ includeCurrentVersion = false } = {}) {
   const { data: currentVersion = null } = useQuery({
     queryKey: APP_VERSION_QUERY_KEY,
     queryFn: getCurrentAppVersion,
-    enabled: includeCurrentVersion && updateState.isSupported,
+    enabled: includeCurrentVersion && isTauriDesktopRuntime(),
     staleTime: 1000 * 60 * 60,
   });
 

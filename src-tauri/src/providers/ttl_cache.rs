@@ -514,6 +514,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cache_roundtrips_stays_bounded_and_clears() {
+        let cache = TtlCache::new(4, Duration::from_secs(60), Duration::from_secs(30));
+        for index in 0..4 {
+            cache.put(&format!("key-{index}"), index, false, || true);
+        }
+        assert_eq!(cache.get("key-0"), Some(0));
+        assert_eq!(cache.get("key-3"), Some(3));
+        cache.put("key-4", 4, false, || true);
+        assert_eq!(cache.len(), 4);
+        assert_eq!(cache.get("key-4"), Some(4));
+        cache.clear();
+        assert_eq!(cache.len(), 0);
+        for index in 0..5 {
+            assert_eq!(cache.get(&format!("key-{index}")), None);
+        }
+    }
+
+    #[test]
     fn transient_http_statuses_retry_without_changing_rate_limit_policy() {
         for status in [408, 500, 502, 503, 504] {
             let failure = FetchFailure::from_http_status(

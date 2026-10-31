@@ -74,6 +74,11 @@ export interface MediaDetails extends MediaItem {
   runtime?: string;
   cast?: string[];
   directors?: string[];
+  writers?: string[];
+  country?: string;
+  awards?: string;
+  /** Rust-derived anime classification; addon payloads never set it. */
+  isAnime?: boolean;
   /** Backend-validated 11-char YouTube video ids. */
   trailers?: { id: string; name?: string }[];
   /** Backend-ordered by (season, episode); coordinate ties preserve addon
@@ -764,6 +769,17 @@ export interface TitleWatchProgress {
   latestMovieEntry?: WatchProgress;
 }
 
+export interface EpisodeWatchStatusChange {
+  previousStatus: WatchStatus | null;
+  status: WatchStatus;
+}
+
+export type EpisodesWatchedResult = [
+  TitleWatchProgress,
+  WatchProgress[],
+  EpisodeWatchStatusChange | null,
+];
+
 /** Details-route prefetch in one IPC; `details` is the card shape (no episodes), null on fetch failure. */
 export interface DetailsPrefetchBundle {
   details?: MediaDetails | null;
@@ -790,4 +806,46 @@ export interface SkipTimesResult {
   segments: SkipSegment[];
   /** Seconds a manual "skip intro ~Xs" jumps when the episode has no usable intro. */
   intro_estimate_secs?: number;
+}
+
+/** One credited person (TVmaze cast member or AniList character). */
+export interface TitlePerson {
+  name: string;
+  imageUrl?: string;
+  role: string;
+  /** TVmaze character name. */
+  character?: string;
+  /** AniList first Japanese voice actor. */
+  voiceActor?: string;
+}
+
+/** Optional title facts; absent fields are simply omitted by the backend. */
+export interface TitleFacts {
+  network?: string;
+  studio?: string;
+  status?: string;
+  schedule?: string;
+  format?: string;
+  runtimeMinutes?: number;
+}
+
+/** Next airing episode for currently-airing anime. */
+export interface NextAiringEpisode {
+  episode: number;
+  airingAt: number;
+}
+
+/** Provider streaming link; first valid URL per site only. */
+export interface StreamingLink {
+  site: string;
+  url: string;
+}
+
+/** Credits payload from `get_title_credits`; empty shape on a definitive miss. */
+export interface TitleCredits {
+  source?: 'tvmaze' | 'anilist';
+  people: TitlePerson[];
+  facts: TitleFacts;
+  nextAiringEpisode?: NextAiringEpisode;
+  streamingLinks: StreamingLink[];
 }

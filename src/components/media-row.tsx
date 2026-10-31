@@ -2,6 +2,7 @@ import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { Check, ChevronDown, ChevronRight } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router';
+import { GenreIcon } from '@/components/genre-icon';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -142,6 +143,7 @@ export function MediaRow({
                     aria-label={`${title} genre: ${genreFilter.active}`}
                     className='ml-auto inline-flex min-h-9 max-w-full items-center gap-2 rounded-md border border-white/10 bg-white/[0.025] px-3 text-[13px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
                   >
+                    <GenreIcon genre={genreFilter.active} />
                     <span className='max-w-44 truncate'>
                       {genreFilter.active === genreFilter.allOption
                         ? 'All genres'
@@ -165,7 +167,12 @@ export function MediaRow({
                       }}
                       className='min-h-9 justify-between gap-3 rounded-md px-3 text-sm text-zinc-300 aria-checked:bg-white/[0.06] aria-checked:text-white'
                     >
-                      {genre === genreFilter.allOption ? 'All genres' : genre}
+                      <span className='flex min-w-0 items-center gap-2.5'>
+                        <GenreIcon genre={genre} />
+                        <span className='truncate'>
+                          {genre === genreFilter.allOption ? 'All genres' : genre}
+                        </span>
+                      </span>
                       {genreFilter.active === genre && (
                         <Check aria-hidden='true' className='size-4 shrink-0 text-(--accent-nav)' />
                       )}

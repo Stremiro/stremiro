@@ -84,6 +84,9 @@ impl Drop for TestStore {
 }
 
 /// Ordered loopback responses; keep recording requests after the script runs out.
+/// One scripted response: status, body, arbitrary headers.
+pub(crate) type ScriptedResponse = (u16, &'static str, Vec<(&'static str, &'static str)>);
+
 pub(crate) struct TestHttpServer {
     pub url: String,
     stop: std::sync::mpsc::Sender<()>,
@@ -92,6 +95,24 @@ pub(crate) struct TestHttpServer {
 
 impl TestHttpServer {
     pub(crate) fn new(responses: Vec<(u16, &'static str, Option<&'static str>)>) -> Self {
+        Self::with_headers(
+            responses
+                .into_iter()
+                .map(|(status, body, location)| {
+                    (
+                        status,
+                        body,
+                        location
+                            .map(|url| vec![("Location", url)])
+                            .unwrap_or_default(),
+                    )
+                })
+                .collect(),
+        )
+    }
+
+    /// Same ordered script with arbitrary response headers (Location included).
+    pub(crate) fn with_headers(responses: Vec<ScriptedResponse>) -> Self {
         use std::io::{BufRead, BufReader, Write};
         use std::sync::mpsc;
         use std::time::{Duration, Instant};
@@ -123,25 +144,28 @@ impl TestHttpServer {
                     .unwrap();
                 let mut line = String::new();
                 let mut reader = BufReader::new(&mut socket);
-                reader.read_line(&mut line).unwrap();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    continue;
+                }
                 loop {
                     let mut header = String::new();
-                    reader.read_line(&mut header).unwrap();
-                    if header == "\r\n" || header.is_empty() {
+                    if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
                         break;
                     }
                 }
-                let (status, body, location) = responses
-                    .get(paths.len())
-                    .copied()
-                    .unwrap_or((404, "{}", None));
-                paths.push(line.split_whitespace().nth(1).unwrap().to_string());
-                let location = location
-                    .map(|url| format!("Location: {url}\r\n"))
-                    .unwrap_or_default();
+                let (status, body, headers) =
+                    responses
+                        .get(paths.len())
+                        .cloned()
+                        .unwrap_or((404, "{}", Vec::new()));
+                paths.push(line.split_whitespace().nth(1).unwrap_or("/").to_string());
+                let headers = headers
+                    .iter()
+                    .map(|(name, value)| format!("{name}: {value}\r\n"))
+                    .collect::<String>();
                 write!(
                     socket,
-                    "HTTP/1.1 {status} Test\r\n{location}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    "HTTP/1.1 {status} Test\r\n{headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                     body.len()
                 )
                 .unwrap();

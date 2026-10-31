@@ -11,13 +11,20 @@ import {
   RotateCcw,
   Star,
 } from 'lucide-react';
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, NavigationType, useLocation, useNavigationType, useParams } from 'react-router';
 import {
   EpisodeCard,
   type EpisodeEmphasis,
   isEpisodeSpoiler,
 } from '@/components/details-episode-card';
+import { DetailsCredits } from '@/components/details-credits';
+import {
+  creditsMediaType,
+  DetailsSections,
+  NextAiringChip,
+  type DetailsSection,
+} from '@/components/details-sections';
 import {
   type SeasonEpisodeState,
   SeasonProgressRail,
@@ -41,6 +48,7 @@ import { useDetailsEpisodePane } from '@/hooks/use-details-episode-pane';
 import { useDocumentTitle } from '@/hooks/use-document-title';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useLocalDay } from '@/hooks/use-local-day';
+import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useDetailsStreamSelector } from '@/hooks/use-details-stream-selector';
 import { useDetailsWatchStatus } from '@/hooks/use-details-watch-status';
 import {
@@ -55,7 +63,6 @@ import {
   type Episode,
   getErrorMessage,
   isNoCapableAddonError,
-  type MediaDetails,
   WATCH_STATUSES,
   WATCH_STATUS_COLORS,
   WATCH_STATUS_LABELS,
@@ -81,6 +88,7 @@ import {
   createObjectIdentity,
   formatSeasonEpisode,
   GENRE_LINK_CLASS,
+  isSeriesLikeMediaType,
   mediaTypeLabel,
   pluralize,
   queryNeedsRetry,
@@ -112,101 +120,7 @@ function locationCoordinate(state: unknown, key: 'season' | 'episode'): number |
   return typeof value === 'number' && Number.isFinite(value) ? Math.trunc(value) : null;
 }
 
-const EMPTY_CREDIT_NAMES: string[] = [];
 const getEpisodeListId = createObjectIdentity();
-
-function CreditLink({ name }: { name: string }) {
-  return (
-    <Link
-      to={`/search?q=${encodeURIComponent(name)}`}
-      title={`Search for ${name}`}
-      className='rounded-sm text-white/80 decoration-white/30 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-    >
-      {name}
-    </Link>
-  );
-}
-
-function DetailsCredits({
-  cast = EMPTY_CREDIT_NAMES,
-  directors = EMPTY_CREDIT_NAMES,
-}: Pick<MediaDetails, 'cast' | 'directors'>) {
-  if (!cast.length && !directors.length) return null;
-
-  return (
-    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2 text-[13px] leading-6 sm:gap-x-4'>
-      {[cast, directors].map((names, groupIndex) => {
-        if (!names.length) return null;
-        const isCast = groupIndex === 0;
-        const links = (isCast ? names.slice(0, 4) : names).map((name, index) => (
-          <span key={name}>
-            {index > 0 && (
-              <span aria-hidden='true' className='text-zinc-500'>
-                {' '}
-                ·{' '}
-              </span>
-            )}
-            <CreditLink name={name} />
-          </span>
-        ));
-        return (
-          <Fragment key={isCast ? 'cast' : 'directors'}>
-            <dt className='text-[12px] font-medium text-zinc-400'>
-              {isCast ? 'Starring' : names.length === 1 ? 'Director' : 'Directors'}
-            </dt>
-            <dd
-              className={
-                isCast ? 'flex min-w-0 items-baseline gap-2 text-white/80' : 'min-w-0 break-words'
-              }
-            >
-              {isCast ? <span className='min-w-0 break-words'>{links}</span> : links}
-              {isCast && names.length > 4 && (
-                <Popover>
-                  <PopoverTrigger asChild>
-                    <button
-                      type='button'
-                      aria-label='Full cast'
-                      className='inline-flex min-h-6 shrink-0 items-center rounded-md border border-white/10 bg-white/[0.05] px-2 py-1 text-[11px] font-medium leading-none text-white/75 transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.1] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-                    >
-                      +{names.length - 4}
-                    </button>
-                  </PopoverTrigger>
-                  <PopoverContent
-                    align='start'
-                    sideOffset={8}
-                    tabIndex={0}
-                    aria-labelledby='details-full-cast-heading'
-                    className='max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
-                  >
-                    <h2
-                      id='details-full-cast-heading'
-                      className='mb-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-white/40'
-                    >
-                      Full cast
-                    </h2>
-                    <ul
-                      aria-labelledby='details-full-cast-heading'
-                      className='grid grid-cols-2 gap-x-4 gap-y-2'
-                    >
-                      {names.map((name) => (
-                        <li
-                          key={name}
-                          className='min-w-0 wrap-break-word text-[13px] leading-5 text-white/80'
-                        >
-                          <CreditLink name={name} />
-                        </li>
-                      ))}
-                    </ul>
-                  </PopoverContent>
-                </Popover>
-              )}
-            </dd>
-          </Fragment>
-        );
-      })}
-    </dl>
-  );
-}
 
 export function Details() {
   const { type, id } = useParams<{ type: string; id: string }>();
@@ -281,14 +195,13 @@ function DetailsContent() {
   // `last_watched` DESC history list.
   const latestSeriesProgress = titleProgress?.latestSeriesEntry ?? null;
 
-  const isLoadingWatchHistoryForItem =
-    item?.type === 'series' && isLoadingWatchHistory && !watchHistoryError;
+  const isSeriesLike = isSeriesLikeMediaType(item?.type);
+  const isLoadingWatchHistoryForItem = isSeriesLike && isLoadingWatchHistory && !watchHistoryError;
 
   // The resumable row owns "Continue S/E" — the pane must hint the same season.
   // The latest history row only wins when nothing is resumable; Rust only
   // lists rows with a playable resume point here.
-  const seriesProgress =
-    item?.type === 'series' ? (titleProgress?.seriesResumeEntry ?? null) : null;
+  const seriesProgress = isSeriesLike ? (titleProgress?.seriesResumeEntry ?? null) : null;
   const seriesCanResume = seriesProgress !== null;
   const seriesResumeSeason = seriesProgress?.absolute_season;
   const seriesResumeEpisode = seriesProgress?.absolute_episode;
@@ -308,7 +221,6 @@ function DetailsContent() {
   } = useDetailsWatchStatus(item, baseRouteId);
   const collectionActions = useMediaCollectionActions({ item, isInLibrary });
   const { toggleLibrary, addItemToNewList } = collectionActions;
-  const libraryStatusBusy = toggleLibrary.isPending || watchStatusMutation.isPending;
   const savePendingLabel = watchStateError ? 'Saved state unavailable' : 'Loading saved state';
   const [saveOpen, setSaveOpen] = useState(false);
   const [createListOpen, setCreateListOpen] = useState(false);
@@ -328,6 +240,19 @@ function DetailsContent() {
   const showTitleSkeleton = titlePending || (!!logoSrc && loadedLogo !== logoSrc);
   const [descriptionExpanded, setDescriptionExpanded] = useState(false);
   const [descriptionClamped, setDescriptionClamped] = useState(false);
+  const [detailsSection, setDetailsSection] = useState<DetailsSection>('episodes');
+  const creditsType = item ? creditsMediaType(item) : baseRouteType;
+  const canEnrich = !isPlaceholderData && !!item && (isSeriesLike || creditsType === 'anime');
+  const { anchorRef: creditsAnchorRef, nearViewport: creditsNearViewport } =
+    useNearViewport(canEnrich);
+  const { data: titleCredits } = useQuery({
+    ...api.titleCreditsQueryOptions(creditsType, baseRouteId, item?.imdbId),
+    enabled: canEnrich && creditsNearViewport,
+  });
+  const showEpisodes = () => {
+    setDetailsSection('episodes');
+    scrollToEpisodes();
+  };
   const localToday = toLocalDate(useLocalDay()).toString();
   const descriptionRef = useRef<HTMLParagraphElement | null>(null);
 
@@ -366,7 +291,7 @@ function DetailsContent() {
       resumeEpisodeCoords?.episode ?? latestSeriesProgress?.absolute_episode ?? undefined,
   });
 
-  const hasEpisodesSection = item?.type === 'series' && (item?.episodes?.length ?? 0) > 0;
+  const hasEpisodesSection = isSeriesLike && (item?.episodes?.length ?? 0) > 0;
 
   // Rust owns the aired-by-local-day rule. Unknown or stale air states never
   // label episodes unaired and never enable bulk completion.
@@ -448,6 +373,11 @@ function DetailsContent() {
     isPending: episodeWatchedPending,
     variables: episodeWatchedVariables,
   } = useToggleEpisodeWatched({ item });
+  const watchActionsBusy =
+    toggleLibrary.isPending ||
+    watchStatusMutation.isPending ||
+    episodeWatchedPending ||
+    markSeasonWatched.isPending;
   const pendingWatchedMutation = episodeWatchedPending
     ? episodeWatchedVariables
     : markSeasonWatched.isPending
@@ -587,7 +517,7 @@ function DetailsContent() {
   const firstUnwatchedEpisode = Math.min(...seasonWatchTargets.map((ep) => ep.episode));
   const { mutate: mutateSeasonWatched } = markSeasonWatched;
   const handleMarkWatchedThrough = (ep: Episode) => {
-    if (episodeWatchedPending || markSeasonWatched.isPending) return;
+    if (watchActionsBusy) return;
     const episodes = seasonWatchTargetsRef.current.filter(
       (target) => target.season === ep.season && target.episode <= ep.episode,
     );
@@ -603,7 +533,7 @@ function DetailsContent() {
   // Destructured `mutate` keeps this stable — the mutation object is
   // re-allocated per render and would defeat `EpisodeCard`'s memo.
   const handleToggleEpisodeWatched = (ep: Episode) => {
-    if (!item || !hasWatchProgress || episodeWatchedPending || markSeasonWatched.isPending) return;
+    if (!item || !hasWatchProgress || watchActionsBusy) return;
     const epProgress = episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)];
     retainEpisodePosition();
     mutateEpisodeWatched({
@@ -634,12 +564,11 @@ function DetailsContent() {
     historyEntry: primaryPlaybackHistoryEntry,
     item,
     onPlayMovieWithoutHistory: item?.type === 'movie' ? handleWatchMovie : undefined,
-    onSelectEpisode:
-      item?.type === 'series'
-        ? upNextEpisode
-          ? () => void openEpisodeStreamSelector(upNextEpisode)
-          : scrollToEpisodes
-        : undefined,
+    onSelectEpisode: isSeriesLike
+      ? upNextEpisode
+        ? () => void openEpisodeStreamSelector(upNextEpisode)
+        : showEpisodes
+      : undefined,
     surface: 'details',
   });
 
@@ -653,12 +582,10 @@ function DetailsContent() {
   const episodeActionPending =
     !primaryPlayback.canReturnToActivePlayer &&
     !primaryPlaybackHistoryEntry &&
-    item?.type === 'series' &&
+    isSeriesLike &&
     isPlaceholderData;
   const hasNoSeriesResume =
-    item?.type === 'series' &&
-    !primaryPlaybackHistoryEntry &&
-    !primaryPlayback.canReturnToActivePlayer;
+    isSeriesLike && !primaryPlaybackHistoryEntry && !primaryPlayback.canReturnToActivePlayer;
   const upNextPending =
     hasNoSeriesResume &&
     !!titleProgress?.upNextSource &&
@@ -921,7 +848,28 @@ function DetailsContent() {
                       </span>
                     </span>
                   )}
+
+                  {item.country && (
+                    <span className='inline-flex min-w-0 max-w-full items-center gap-3'>
+                      <span aria-hidden='true' className='text-white/25'>
+                        ·
+                      </span>
+                      <span className='min-w-0 break-words'>{item.country}</span>
+                    </span>
+                  )}
+                  {titleCredits?.nextAiringEpisode && (
+                    <NextAiringChip
+                      key={titleCredits.nextAiringEpisode.airingAt}
+                      episode={titleCredits.nextAiringEpisode}
+                    />
+                  )}
                 </div>
+                {item.awards && (
+                  <p className='mt-2 max-w-2xl break-words text-[13px] leading-5 text-zinc-400'>
+                    <span className='font-medium text-zinc-300'>Awards: </span>
+                    {item.awards}
+                  </p>
+                )}
                 {item.genres && item.genres.length > 0 && (
                   <div className='mt-3 flex flex-wrap items-center gap-1.5'>
                     {item.genres.slice(0, 3).map((genre) => (
@@ -960,7 +908,11 @@ function DetailsContent() {
                     {descriptionExpanded ? 'Show less' : 'Read more'}
                   </button>
                 )}
-                <DetailsCredits cast={item.cast} directors={item.directors} />
+                <DetailsCredits
+                  cast={item.cast}
+                  directors={item.directors}
+                  writers={item.writers}
+                />
               </div>
 
               <div className='flex flex-wrap items-center gap-2.5 pt-2'>
@@ -1036,7 +988,7 @@ function DetailsContent() {
                         }
                         aria-disabled={!isWatchStateReady || undefined}
                         aria-busy={
-                          libraryStatusBusy || (!isWatchStateReady && !watchStateError) || undefined
+                          watchActionsBusy || (!isWatchStateReady && !watchStateError) || undefined
                         }
                         title={
                           !isWatchStateReady ? savePendingLabel : isInLibrary ? 'Saved' : 'Save'
@@ -1067,7 +1019,7 @@ function DetailsContent() {
                         item={item}
                         isInLibrary={isInLibrary}
                         showLibrary
-                        libraryBusy={libraryStatusBusy || !isWatchStateReady}
+                        libraryBusy={watchActionsBusy || !isWatchStateReady}
                         actions={collectionActions}
                         onCreateList={() => {
                           setSaveOpen(false);
@@ -1155,7 +1107,7 @@ function DetailsContent() {
                   role='group'
                   aria-labelledby='details-watch-status-label'
                   aria-busy={
-                    libraryStatusBusy || (!isWatchStateReady && !watchStateError) || undefined
+                    watchActionsBusy || (!isWatchStateReady && !watchStateError) || undefined
                   }
                 >
                   {WATCH_STATUSES.map((status) => {
@@ -1166,13 +1118,13 @@ function DetailsContent() {
                         key={status}
                         type='button'
                         // aria-disabled, not disabled: disabled drops keyboard focus to <body> mid-mutation.
-                        aria-disabled={libraryStatusBusy || !isWatchStateReady || undefined}
+                        aria-disabled={watchActionsBusy || !isWatchStateReady || undefined}
                         aria-pressed={
                           isWatchStateReady || watchStatusMutation.isPending ? isActive : undefined
                         }
                         title={isActive ? 'Clear status' : undefined}
                         onClick={() => {
-                          if (!libraryStatusBusy && isWatchStateReady) {
+                          if (!watchActionsBusy && isWatchStateReady) {
                             watchStatusMutation.mutate(isActive ? null : status);
                           }
                         }}
@@ -1209,312 +1161,329 @@ function DetailsContent() {
         </div>
       </div>
 
-      {hasEpisodesSection && (
-        <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} pt-5 pb-8`}>
-          <div className='w-full flex flex-col gap-4'>
-            <h2
-              id='details-episodes-heading'
-              tabIndex={-1}
-              className='text-[17px] font-semibold tracking-[-0.02em] text-white focus:outline-hidden'
-            >
-              Episodes
-            </h2>
-            {seasons.length > 1 && (
-              <SeasonSwitcher
-                seasons={seasons}
-                activeSeason={selectedSeason}
-                watchedCounts={seasonWatchedCounts}
-                onSelectSeason={selectSeason}
-              />
-            )}
-            <div
-              id='details-episodes-panel'
-              className='min-w-0 space-y-3'
-              // Panel semantics only exist while the season tablist renders.
-              role={seasons.length > 1 ? 'tabpanel' : undefined}
-              aria-labelledby={
-                seasons.length > 1 && selectedSeason !== null
-                  ? `season-tab-${selectedSeason}`
-                  : undefined
-              }
-            >
-              {watchHistoryError && !hasWatchProgress && (
-                <RetryBanner
-                  className='px-3 py-2'
-                  message="Couldn't load watch history. Retry to change episode completion."
-                  onRetry={() => void retryWatchHistory()}
-                  isRetrying={isFetchingWatchHistory}
-                />
-              )}
-              {queryNeedsRetry(unairedEpisodesQuery) && (
-                <RetryBanner
-                  className='px-3 py-2'
-                  message="Couldn't check episode air dates. Retry to mark the season watched."
-                  onRetry={() => void unairedEpisodesQuery.refetch()}
-                  isRetrying={unairedEpisodesQuery.isFetching}
-                />
-              )}
-              {shouldShowEpisodeSearch && (
-                <SearchInput
-                  inputRef={episodeSearchInputRef}
-                  placeholder='Search episodes…'
-                  aria-label='Search episodes'
-                  value={episodeSearch}
-                  onValueChange={setEpisodeSearch}
-                  clearLabel='Clear episode search'
-                  onSubmit={() => {
-                    if (isEpisodeSearchPending || episodeSearchError || !visibleEpisodes.length)
-                      return;
-                    document
-                      .querySelector<HTMLButtonElement>('#details-episodes-grid button')
-                      ?.focus();
-                  }}
-                  className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-500 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
-                />
-              )}
-              {episodeSearchError && (
-                <RetryBanner
-                  className='px-3 py-2'
-                  message='Search failed.'
-                  isRetrying={isEpisodeSearchFetching}
-                  onRetry={retryEpisodeSearch}
-                />
-              )}
-              <div className='flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2'>
-                <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
-                  <p
-                    aria-live='polite'
-                    className='text-[12px] font-medium tabular-nums text-zinc-400'
-                  >
-                    {episodeRangeLabel}
-                    {visibleEpisodeStart > 0 && (
-                      <span className='text-zinc-500'>{` of ${totalEpisodeCount}`}</span>
-                    )}
-                  </p>
-                  {hasWatchProgress && (seasonWatchedCount > 0 || seasonHasStarted) && (
-                    <SeasonProgressRail segments={seasonRail} watchedCount={seasonWatchedCount} />
-                  )}
-                  {resumeEpisodeCoords &&
-                    (selectedSeason !== resumeEpisodeCoords.season ||
-                      (resumeEpisodePageIndex !== null &&
-                        activeEpisodePageIndex !== resumeEpisodePageIndex) ||
-                      episodeSearch.trim().length > 0) && (
-                      <button
-                        type='button'
-                        onClick={(event) => {
-                          holdEpisodeActionFocus(event.currentTarget, 'resume');
-                          jumpToEpisode(resumeEpisodeCoords.season, resumeEpisodeCoords.episode);
-                        }}
-                        className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
-                      >
-                        <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
-                        Jump to{' '}
-                        {formatSeasonEpisode(
-                          resumeEpisodeCoords.season,
-                          resumeEpisodeCoords.episode,
-                        )}
-                      </button>
-                    )}
-                  {!isLoadingWatchHistoryForItem &&
-                    (seasonActionTargets.length > 1 || markSeasonWatched.isPending) && (
-                      <button
-                        type='button'
-                        aria-disabled={
-                          !hasWatchProgress ||
-                          !airStatesReady ||
-                          markSeasonWatched.isPending ||
-                          episodeWatchedPending ||
-                          undefined
-                        }
-                        aria-busy={markSeasonWatched.isPending || undefined}
-                        onClick={(event) => {
-                          if (
-                            hasWatchProgress &&
-                            airStatesReady &&
-                            !markSeasonWatched.isPending &&
-                            !episodeWatchedPending
-                          ) {
-                            holdEpisodeActionFocus(event.currentTarget, 'heading');
-                            retainEpisodePosition();
-                            markSeasonWatched.mutate({
-                              episodes: seasonActionTargets,
-                              watched: seasonActionMarksWatched,
-                            });
-                          }
-                        }}
-                        className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
-                      >
-                        <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
-                        {seasonActionMarksWatched ? 'Mark season watched' : 'Mark season unwatched'}
-                      </button>
-                    )}
-                </div>
-
-                {totalEpisodePages > 1 && (
-                  <div
-                    className='ml-auto flex shrink-0 items-center gap-2'
-                    role='group'
-                    aria-label='Episode pages'
-                  >
-                    <button
-                      type='button'
-                      // aria-disabled, not disabled: an edge page would drop the focused button to <body>.
-                      aria-disabled={!hasPreviousEpisodes || undefined}
-                      onClick={() => {
-                        if (hasPreviousEpisodes) changeEpisodePage('previous');
-                      }}
-                      className={EPISODE_PAGE_BUTTON_CLASS}
-                      aria-label='Show previous episodes'
-                    >
-                      <ChevronLeft className='h-4 w-4' />
-                    </button>
-                    <div className='min-w-[64px] text-center text-[12px] text-zinc-400 tabular-nums'>
-                      {activeEpisodePageIndex + 1} / {totalEpisodePages}
-                    </div>
-                    <button
-                      type='button'
-                      aria-disabled={!hasMoreEpisodes || undefined}
-                      onClick={() => {
-                        if (hasMoreEpisodes) changeEpisodePage('next');
-                      }}
-                      className={EPISODE_PAGE_BUTTON_CLASS}
-                      aria-label='Show next episodes'
-                    >
-                      <ChevronRight className='h-4 w-4' />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {isLoadingWatchHistoryForItem && (
-                <span role='status' className='sr-only'>
-                  Loading episode watch history...
-                </span>
-              )}
-              <div
-                id='details-episodes-grid'
-                aria-busy={
-                  isLoadingWatchHistoryForItem || (!episodeSearchError && isEpisodeSearchPending)
-                }
-                className='grid grid-cols-1 gap-4 pb-2 sm:grid-cols-2 lg:grid-cols-3'
-              >
-                {!episodeSearchError && visibleEpisodes.length === 0 && isEpisodeSearchPending ? (
-                  <div
-                    role='status'
-                    className='col-span-full flex flex-col items-center gap-3 py-14 text-center'
-                  >
-                    <p className='text-sm text-zinc-400'>Searching episodes…</p>
-                  </div>
-                ) : !episodeSearchError && visibleEpisodes.length === 0 && episodeSearch.trim() ? (
-                  <div className='col-span-full flex flex-col items-center gap-3 py-14 text-center'>
-                    <p role='status' className='text-sm text-zinc-400'>
-                      No episodes match &ldquo;
-                      {episodeSearch}&rdquo;
-                    </p>
-                    <button
-                      type='button'
-                      onClick={(event) => {
-                        holdEpisodeActionFocus(event.currentTarget, 'search');
-                        setEpisodeSearch('');
-                      }}
-                      className='h-8 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
-                    >
-                      Clear search
-                    </button>
-                  </div>
-                ) : (
-                  visibleEpisodes.map((ep) => {
-                    const episodeKey = episodeProgressKey(baseRouteId, ep.season, ep.episode);
-                    const epProgress = hasWatchProgress ? episodeProgress?.[episodeKey] : undefined;
-                    const optimisticWatched = hasWatchProgress
-                      ? optimisticEpisodeWatched(ep)
-                      : undefined;
-                    const progressPercent =
-                      optimisticWatched !== undefined
-                        ? optimisticWatched
-                          ? 100
-                          : 0
-                        : getWatchProgressPercent(
-                            epProgress?.position ?? 0,
-                            epProgress?.duration ?? 0,
-                          );
-                    const emphasis = episodeEmphasis(ep);
-                    const isWatched = optimisticWatched ?? !!epProgress?.is_watched;
-                    const remainingText =
-                      epProgress && !isWatched && epProgress.has_started_watching
-                        ? formatWatchRemaining(epProgress.position, epProgress.duration)
-                        : null;
-
-                    return (
-                      <EpisodeCard
-                        key={`${ep.id}:${ep.season}:${ep.episode}`}
-                        episode={ep}
-                        emphasis={emphasis}
-                        isSpoiler={isEpisodeSpoiler(
-                          ep,
-                          isHydratingSpoilerProtection || spoilerProtection,
-                          titleProgress?.watchedEpisodeCeiling,
-                          epProgress,
-                        )}
-                        isWatched={isWatched}
-                        isAired={!unairedEpisodeKeys?.has(episodeKey)}
-                        isWatchedDisabled={episodeWatchedPending || markSeasonWatched.isPending}
-                        isWatchedPending={pendingEpisodeKeys.has(episodeKey)}
-                        progressPercent={progressPercent}
-                        remainingText={remainingText}
-                        resumeRef={emphasis === 'resume' ? resumeEpisodeRef : undefined}
-                        shareLink={buildEpisodeShareLink(
-                          baseRouteType,
-                          baseRouteId,
-                          ep.season,
-                          ep.episode,
-                        )}
-                        onPlay={handleWatchEpisode}
-                        onPlayFromStart={handlePlayEpisodeFromStart}
-                        onToggleWatched={hasWatchProgress ? handleToggleEpisodeWatched : undefined}
-                        onMarkWatchedThrough={
-                          hasWatchProgress && airStatesReady && firstUnwatchedEpisode < ep.episode
-                            ? handleMarkWatchedThrough
-                            : undefined
-                        }
-                      />
-                    );
-                  })
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {!hasEpisodesSection && !isPlaceholderData && item.type === 'series' && (
-        <div id='episodes-section' className={`${DETAILS_COLUMN_CLASS} py-8`}>
-          <section
-            id='details-episodes-heading'
-            tabIndex={-1}
-            aria-label='Episode information unavailable'
-            className='rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+      {(isSeriesLike || canEnrich) && (
+        <div
+          id='episodes-section'
+          ref={creditsAnchorRef}
+          className={cn(
+            DETAILS_COLUMN_CLASS,
+            (isSeriesLike || titleCredits?.source || item.runtime) && 'pt-5 pb-8',
+          )}
+        >
+          <DetailsSections
+            item={item}
+            credits={titleCredits}
+            value={detailsSection}
+            onValueChange={setDetailsSection}
+            hasEpisodes={isSeriesLike}
+            allowExtras={!isPlaceholderData}
           >
-            <RetryBanner
-              message='Episode information unavailable.'
-              isRetrying={isFetching}
-              onRetry={() => {
-                holdEpisodeActionFocus(document.activeElement, 'heading');
-                void handleRetryDetails();
-              }}
-            />
-          </section>
-        </div>
-      )}
+            {hasEpisodesSection && (
+              <div className='w-full flex flex-col gap-4'>
+                {seasons.length > 1 && (
+                  <SeasonSwitcher
+                    seasons={seasons}
+                    activeSeason={selectedSeason}
+                    watchedCounts={seasonWatchedCounts}
+                    onSelectSeason={selectSeason}
+                  />
+                )}
+                <div
+                  id='details-episodes-panel'
+                  className='min-w-0 space-y-3'
+                  // Panel semantics only exist while the season tablist renders.
+                  role={seasons.length > 1 ? 'tabpanel' : undefined}
+                  aria-labelledby={
+                    seasons.length > 1 && selectedSeason !== null
+                      ? `season-tab-${selectedSeason}`
+                      : undefined
+                  }
+                >
+                  {watchHistoryError && !hasWatchProgress && (
+                    <RetryBanner
+                      className='px-3 py-2'
+                      message="Couldn't load watch history. Retry to change episode completion."
+                      onRetry={() => void retryWatchHistory()}
+                      isRetrying={isFetchingWatchHistory}
+                    />
+                  )}
+                  {queryNeedsRetry(unairedEpisodesQuery) && (
+                    <RetryBanner
+                      className='px-3 py-2'
+                      message="Couldn't check episode air dates. Retry to mark the season watched."
+                      onRetry={() => void unairedEpisodesQuery.refetch()}
+                      isRetrying={unairedEpisodesQuery.isFetching}
+                    />
+                  )}
+                  {shouldShowEpisodeSearch && (
+                    <SearchInput
+                      inputRef={episodeSearchInputRef}
+                      placeholder='Search episodes…'
+                      aria-label='Search episodes'
+                      value={episodeSearch}
+                      onValueChange={setEpisodeSearch}
+                      clearLabel='Clear episode search'
+                      onSubmit={() => {
+                        if (isEpisodeSearchPending || episodeSearchError || !visibleEpisodes.length)
+                          return;
+                        document
+                          .querySelector<HTMLButtonElement>('#details-episodes-grid button')
+                          ?.focus();
+                      }}
+                      className='h-9 bg-white/[0.04] border-white/10 text-sm text-white placeholder:text-zinc-500 focus-visible:ring-white/20 focus-visible:border-white/20 rounded-lg'
+                    />
+                  )}
+                  {episodeSearchError && (
+                    <RetryBanner
+                      className='px-3 py-2'
+                      message='Search failed.'
+                      isRetrying={isEpisodeSearchFetching}
+                      onRetry={retryEpisodeSearch}
+                    />
+                  )}
+                  <div className='flex min-h-9 flex-wrap items-center justify-between gap-x-4 gap-y-2'>
+                    <div className='flex min-w-0 flex-wrap items-center gap-x-3 gap-y-2'>
+                      <p
+                        aria-live='polite'
+                        className='text-[12px] font-medium tabular-nums text-zinc-400'
+                      >
+                        {episodeRangeLabel}
+                        {visibleEpisodeStart > 0 && (
+                          <span className='text-zinc-500'>{` of ${totalEpisodeCount}`}</span>
+                        )}
+                      </p>
+                      {hasWatchProgress && (seasonWatchedCount > 0 || seasonHasStarted) && (
+                        <SeasonProgressRail
+                          segments={seasonRail}
+                          watchedCount={seasonWatchedCount}
+                        />
+                      )}
+                      {resumeEpisodeCoords &&
+                        (selectedSeason !== resumeEpisodeCoords.season ||
+                          (resumeEpisodePageIndex !== null &&
+                            activeEpisodePageIndex !== resumeEpisodePageIndex) ||
+                          episodeSearch.trim().length > 0) && (
+                          <button
+                            type='button'
+                            onClick={(event) => {
+                              holdEpisodeActionFocus(event.currentTarget, 'resume');
+                              jumpToEpisode(
+                                resumeEpisodeCoords.season,
+                                resumeEpisodeCoords.episode,
+                              );
+                            }}
+                            className='accent-lattice-soft flex h-8 items-center gap-1.5 rounded-md border px-2 text-[12px] font-medium transition-colors duration-150 hover:brightness-125 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+                          >
+                            <RotateCcw aria-hidden='true' className='h-3.5 w-3.5' />
+                            Jump to{' '}
+                            {formatSeasonEpisode(
+                              resumeEpisodeCoords.season,
+                              resumeEpisodeCoords.episode,
+                            )}
+                          </button>
+                        )}
+                      {!isLoadingWatchHistoryForItem &&
+                        (seasonActionTargets.length > 0 || markSeasonWatched.isPending) && (
+                          <button
+                            type='button'
+                            aria-disabled={
+                              !hasWatchProgress || !airStatesReady || watchActionsBusy || undefined
+                            }
+                            aria-busy={markSeasonWatched.isPending || undefined}
+                            onClick={(event) => {
+                              if (hasWatchProgress && airStatesReady && !watchActionsBusy) {
+                                holdEpisodeActionFocus(event.currentTarget, 'heading');
+                                retainEpisodePosition();
+                                markSeasonWatched.mutate({
+                                  episodes: seasonActionTargets,
+                                  watched: seasonActionMarksWatched,
+                                });
+                              }
+                            }}
+                            className='flex h-8 items-center gap-1.5 rounded-md px-2 text-[12px] font-medium text-zinc-400 transition-colors duration-150 not-aria-disabled:hover:bg-white/[0.06] not-aria-disabled:hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30 aria-disabled:cursor-default aria-disabled:opacity-60'
+                          >
+                            <Check aria-hidden='true' className='h-3.5 w-3.5' strokeWidth={2.5} />
+                            {seasonActionMarksWatched
+                              ? 'Mark season watched'
+                              : 'Mark season unwatched'}
+                          </button>
+                        )}
+                    </div>
 
-      {/* Shimmer the episode grid while the card placeholder's hero is up. */}
-      {!hasEpisodesSection && isPlaceholderData && item.type === 'series' && (
-        <div className={`${DETAILS_COLUMN_CLASS} flex flex-col gap-4 pt-5 pb-8`} aria-hidden='true'>
-          <h2 className='text-[17px] font-semibold tracking-[-0.02em] text-white'>Episodes</h2>
-          <Skeleton className='h-9 w-full max-w-md rounded-lg bg-zinc-800/40' />
-          <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3'>
-            {EPISODE_SKELETON_TILES}
-          </div>
+                    {totalEpisodePages > 1 && (
+                      <div
+                        className='ml-auto flex shrink-0 items-center gap-2'
+                        role='group'
+                        aria-label='Episode pages'
+                      >
+                        <button
+                          type='button'
+                          // aria-disabled, not disabled: an edge page would drop the focused button to <body>.
+                          aria-disabled={!hasPreviousEpisodes || undefined}
+                          onClick={() => {
+                            if (hasPreviousEpisodes) changeEpisodePage('previous');
+                          }}
+                          className={EPISODE_PAGE_BUTTON_CLASS}
+                          aria-label='Show previous episodes'
+                        >
+                          <ChevronLeft className='h-4 w-4' />
+                        </button>
+                        <div className='min-w-[64px] text-center text-[12px] text-zinc-400 tabular-nums'>
+                          {activeEpisodePageIndex + 1} / {totalEpisodePages}
+                        </div>
+                        <button
+                          type='button'
+                          aria-disabled={!hasMoreEpisodes || undefined}
+                          onClick={() => {
+                            if (hasMoreEpisodes) changeEpisodePage('next');
+                          }}
+                          className={EPISODE_PAGE_BUTTON_CLASS}
+                          aria-label='Show next episodes'
+                        >
+                          <ChevronRight className='h-4 w-4' />
+                        </button>
+                      </div>
+                    )}
+                  </div>
+
+                  {isLoadingWatchHistoryForItem && (
+                    <span role='status' className='sr-only'>
+                      Loading episode watch history...
+                    </span>
+                  )}
+                  <div
+                    id='details-episodes-grid'
+                    aria-busy={
+                      isLoadingWatchHistoryForItem ||
+                      (!episodeSearchError && isEpisodeSearchPending)
+                    }
+                    className='grid grid-cols-1 gap-4 pb-2 sm:grid-cols-2 lg:grid-cols-3'
+                  >
+                    {!episodeSearchError &&
+                    visibleEpisodes.length === 0 &&
+                    isEpisodeSearchPending ? (
+                      <div
+                        role='status'
+                        className='col-span-full flex flex-col items-center gap-3 py-14 text-center'
+                      >
+                        <p className='text-sm text-zinc-400'>Searching episodes…</p>
+                      </div>
+                    ) : !episodeSearchError &&
+                      visibleEpisodes.length === 0 &&
+                      episodeSearch.trim() ? (
+                      <div className='col-span-full flex flex-col items-center gap-3 py-14 text-center'>
+                        <p role='status' className='text-sm text-zinc-400'>
+                          No episodes match &ldquo;
+                          {episodeSearch}&rdquo;
+                        </p>
+                        <button
+                          type='button'
+                          onClick={(event) => {
+                            holdEpisodeActionFocus(event.currentTarget, 'search');
+                            setEpisodeSearch('');
+                          }}
+                          className='h-8 rounded-md border border-white/[0.08] bg-white/[0.04] px-3 text-[12.5px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.08] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25'
+                        >
+                          Clear search
+                        </button>
+                      </div>
+                    ) : (
+                      visibleEpisodes.map((ep) => {
+                        const episodeKey = episodeProgressKey(baseRouteId, ep.season, ep.episode);
+                        const epProgress = hasWatchProgress
+                          ? episodeProgress?.[episodeKey]
+                          : undefined;
+                        const optimisticWatched = hasWatchProgress
+                          ? optimisticEpisodeWatched(ep)
+                          : undefined;
+                        const progressPercent =
+                          optimisticWatched !== undefined
+                            ? optimisticWatched
+                              ? 100
+                              : 0
+                            : getWatchProgressPercent(
+                                epProgress?.position ?? 0,
+                                epProgress?.duration ?? 0,
+                              );
+                        const emphasis = episodeEmphasis(ep);
+                        const isWatched = optimisticWatched ?? !!epProgress?.is_watched;
+                        const remainingText =
+                          epProgress && !isWatched && epProgress.has_started_watching
+                            ? formatWatchRemaining(epProgress.position, epProgress.duration)
+                            : null;
+
+                        return (
+                          <EpisodeCard
+                            key={`${ep.id}:${ep.season}:${ep.episode}`}
+                            episode={ep}
+                            emphasis={emphasis}
+                            isSpoiler={isEpisodeSpoiler(
+                              ep,
+                              isHydratingSpoilerProtection || spoilerProtection,
+                              titleProgress?.watchedEpisodeCeiling,
+                              epProgress,
+                            )}
+                            isWatched={isWatched}
+                            isAired={!unairedEpisodeKeys?.has(episodeKey)}
+                            isWatchedDisabled={watchActionsBusy}
+                            isWatchedPending={pendingEpisodeKeys.has(episodeKey)}
+                            progressPercent={progressPercent}
+                            remainingText={remainingText}
+                            resumeRef={emphasis === 'resume' ? resumeEpisodeRef : undefined}
+                            shareLink={buildEpisodeShareLink(
+                              baseRouteType,
+                              baseRouteId,
+                              ep.season,
+                              ep.episode,
+                            )}
+                            onPlay={handleWatchEpisode}
+                            onPlayFromStart={handlePlayEpisodeFromStart}
+                            onToggleWatched={
+                              hasWatchProgress ? handleToggleEpisodeWatched : undefined
+                            }
+                            onMarkWatchedThrough={
+                              hasWatchProgress &&
+                              airStatesReady &&
+                              firstUnwatchedEpisode < ep.episode
+                                ? handleMarkWatchedThrough
+                                : undefined
+                            }
+                          />
+                        );
+                      })
+                    )}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {!hasEpisodesSection && !isPlaceholderData && isSeriesLike && (
+              <section
+                tabIndex={-1}
+                aria-label='Episode information unavailable'
+                className='rounded-xl focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30'
+              >
+                <RetryBanner
+                  message='Episode information unavailable.'
+                  isRetrying={isFetching}
+                  onRetry={() => {
+                    holdEpisodeActionFocus(document.activeElement, 'heading');
+                    void handleRetryDetails();
+                  }}
+                />
+              </section>
+            )}
+
+            {/* Shimmer the episode grid while the card placeholder's hero is up. */}
+            {!hasEpisodesSection && isPlaceholderData && isSeriesLike && (
+              <div className='flex flex-col gap-4' aria-hidden='true'>
+                <Skeleton className='h-9 w-full max-w-md rounded-lg bg-zinc-800/40' />
+                <div className='grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3'>
+                  {EPISODE_SKELETON_TILES}
+                </div>
+              </div>
+            )}
+          </DetailsSections>
         </div>
       )}
 

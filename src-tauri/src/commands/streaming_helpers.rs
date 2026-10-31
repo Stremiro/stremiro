@@ -92,18 +92,6 @@ fn join_words<'a>(words: impl Iterator<Item = &'a str>, separator: char) -> Stri
     joined
 }
 
-/// Test wrapper — production batches call `derive_stream_family_normalized` directly.
-#[cfg(test)]
-pub(crate) fn derive_stream_family(stream: &AddonStream, source_id: &str) -> Option<String> {
-    let source_key = stream_family_source_key(source_id)?;
-    let has_http_url = stream.url.as_deref().and_then(parse_http_url).is_some();
-    Some(derive_stream_family_normalized(
-        stream,
-        &source_key,
-        stream_delivery_kind(stream, has_http_url),
-    ))
-}
-
 fn stream_family_source_key(source_id: &str) -> Option<String> {
     let source_id = normalize_source_id(source_id)?;
     // URL ids already contain the original source digest; keep saved release-family matches.
@@ -225,12 +213,6 @@ fn parse_http_url(input: &str) -> Option<reqwest::Url> {
 #[cfg(test)]
 pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
     parse_http_url(input).map(|parsed| parsed.to_string())
-}
-
-#[cfg(test)]
-pub(crate) fn has_playable_stream_source(stream: &AddonStream) -> bool {
-    let has_http_url = stream.url.as_deref().and_then(parse_http_url).is_some();
-    has_playable_stream_source_with_http(stream, has_http_url)
 }
 
 fn has_playable_stream_source_with_http(stream: &AddonStream, has_http_url: bool) -> bool {
@@ -666,15 +648,7 @@ pub(crate) fn normalize_stream_key(input: &str) -> Option<String> {
         return None;
     }
     let key = input.trim();
-    if has_prepared_stream_key_prefix(key) {
-        let digest = &key[2..];
-        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return None;
-        }
-    } else if !is_legacy_content_key(key) {
-        return None;
-    }
-    Some(key.to_string())
+    is_persistable_stream_key(key).then(|| key.to_string())
 }
 
 /// Legacy `h:`/`uh:` dedup-key forms persisted before prepared keys existed.
@@ -687,7 +661,24 @@ pub(crate) fn is_legacy_content_key(key: &str) -> bool {
 /// only — the legacy `u:` form embedded the raw URL and stays excluded. Single owner so
 /// producers and resume/probe consumers can't drift.
 pub(crate) fn is_persistable_stream_key(key: &str) -> bool {
-    has_prepared_stream_key_prefix(key) || is_legacy_content_key(key)
+    if key.len() > STREAM_KEY_MAX_CHARS {
+        return false;
+    }
+    if let Some(digest) = key.strip_prefix("s:") {
+        return digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit());
+    }
+    let Some((kind, content)) = key.split_once(':') else {
+        return false;
+    };
+    let Some((hash, index)) = content.rsplit_once(':') else {
+        return false;
+    };
+    let valid_hash = match kind {
+        "h" => !hash.is_empty() && hash.bytes().all(|byte| byte.is_ascii_alphanumeric()),
+        "uh" => hash.len() == 16 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()),
+        _ => false,
+    };
+    valid_hash && index.parse::<u32>().is_ok()
 }
 
 /// Bounded per-source error aggregation shared by the fan-out merges: keep the first

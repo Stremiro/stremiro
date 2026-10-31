@@ -639,8 +639,11 @@ fn merge_presorted_unique(index: &mut Vec<String>, values: Vec<String>) -> bool 
 /// must not pay a store write to materialize an empty index. Advisory data degrades
 /// to empty rather than erroring; `store_helpers::load_index` is the strict counterpart.
 fn load_advisory_index(store: &DurableStore, index_key: &str) -> Vec<String> {
-    store
+    let mut index = store
         .get(index_key)
         .and_then(decode_string_list)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    index.sort_unstable();
+    index.dedup();
+    index
 }

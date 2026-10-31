@@ -187,10 +187,27 @@ async function invalidateHistoryCollections(
 export async function invalidatePlaybackHistoryQueries(
   queryClient: QueryClient,
   itemId?: string,
-  { refetchTitleProgress = true }: { refetchTitleProgress?: boolean } = {},
+  {
+    refetchTitleProgress = true,
+    libraryChanged = false,
+  }: {
+    refetchTitleProgress?: boolean;
+    libraryChanged?: boolean;
+  } = {},
 ) {
   refreshScheduleQueries(queryClient);
-  await invalidateHistoryCollections(queryClient, itemId, refetchTitleProgress);
+  await Promise.all([
+    invalidateHistoryCollections(queryClient, itemId, refetchTitleProgress),
+    ...(libraryChanged
+      ? [
+          LIBRARY_QUERY_KEY,
+          PROFILE_LIBRARY_QUERY_KEY,
+          WATCH_STATUSES_QUERY_KEY,
+          LISTS_QUERY_KEY,
+          LIST_SUMMARIES_QUERY_KEY,
+        ].map((key) => invalidateQuery(queryClient, key))
+      : []),
+  ]);
 }
 
 export async function invalidateListMetadataQueries(queryClient: QueryClient) {

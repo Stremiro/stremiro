@@ -537,6 +537,8 @@ export async function handlePreviewInvoke<T>(
     }
     case 'get_skip_times':
       return { segments: [] } as T;
+    case 'get_title_credits':
+      return { people: [], facts: {}, streamingLinks: [] } as T;
     case 'get_watch_history':
     case 'get_resume_rail':
     case 'query_similar_titles':
@@ -788,7 +790,7 @@ export async function handlePreviewInvoke<T>(
         watchedEpisodeCeiling: {},
       } as T;
     case 'set_episodes_watched':
-      return [{ episodeProgress: {}, watchedEpisodeCeiling: {} }, []] as T;
+      return [{ episodeProgress: {}, watchedEpisodeCeiling: {} }, [], null] as T;
     case 'get_details_prefetch_bundle':
       // No card payload in preview — the mounted details query fetches it.
       return {

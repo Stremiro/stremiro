@@ -1,7 +1,7 @@
 use super::list_helpers::normalize_smart_list_genre;
 use super::playback_state::PlaybackStateService;
 use super::store_helpers::{
-    library_item_key, load_library_index, load_library_map, load_watch_status_index,
+    library_item_key, load_index, load_library_index, load_library_map, load_watch_status_index,
     merge_library_item, normalize_bulk_ids, normalize_library_item, normalize_watch_status,
     read_library_snapshot, read_watch_status_snapshot, remove_index_ids, retain_status_added_ids,
     LIBRARY_LAYOUT, WATCH_STATUS_LAYOUT,
@@ -57,8 +57,28 @@ pub(super) fn resolve_library_items(
         return Ok(Vec::new());
     }
     let selected: HashSet<&str> = ids.iter().map(String::as_str).collect();
-    let mut library = HashMap::with_capacity(ids.len());
-    for stored_id in load_library_index(store)? {
+    let mut library = read_library_selection(store, load_library_index(store)?, &selected);
+    // Titles removed elsewhere since selection are skipped; only an all-stale
+    // selection fails, so callers never report success for zero matches.
+    let items: Vec<MediaItem> = ids.iter().filter_map(|id| library.remove(id)).collect();
+    if items.is_empty() {
+        return Err(LibraryWriteError::InvalidItem(
+            "Selected titles are no longer in your library.".to_string(),
+        ));
+    }
+    Ok(items)
+}
+
+fn read_library_selection(
+    store: &DurableStore,
+    index: Vec<String>,
+    selected: &HashSet<&str>,
+) -> HashMap<String, MediaItem> {
+    let mut library = HashMap::with_capacity(selected.len());
+    if selected.is_empty() {
+        return library;
+    }
+    for stored_id in index {
         let item = store.with_value(library_item_key(&stored_id), |value| {
             let value = value?;
             selected
@@ -71,15 +91,7 @@ pub(super) fn resolve_library_items(
             library.insert(item.id.clone(), item);
         }
     }
-    // Titles removed elsewhere since selection are skipped; only an all-stale
-    // selection fails, so callers never report success for zero matches.
-    let items: Vec<MediaItem> = ids.iter().filter_map(|id| library.remove(id)).collect();
-    if items.is_empty() {
-        return Err(LibraryWriteError::InvalidItem(
-            "Selected titles are no longer in your library.".to_string(),
-        ));
-    }
-    Ok(items)
+    library
 }
 
 /// Prepare without mutating either domain: status-set uses this preflight
@@ -398,14 +410,17 @@ pub async fn get_watchlist(
 ) -> Result<Vec<MediaItem>, String> {
     let service = playback_state.inner().clone();
     run_blocking_store_op(move || {
-        let items = read_library_snapshot(&super::open_store(&app, LIBRARY_STORE_FILE)?)?.items;
+        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
+        let index = load_index(&store, LIBRARY_INDEX_KEY)?;
         let statuses =
             read_watch_status_snapshot(&super::open_store(&app, WATCH_STATUS_STORE_FILE)?)?.items;
-        let planned: Vec<_> = statuses
+        let selected = statuses
             .iter()
-            .filter(|(id, status)| status.as_str() == "plan_to_watch" && items.contains_key(*id))
+            .filter(|(_, status)| status.as_str() == "plan_to_watch")
             .map(|(id, _)| id.as_str())
             .collect();
+        let items = read_library_selection(&store, index, &selected);
+        let planned: Vec<_> = items.keys().map(String::as_str).collect();
         let started = service
             .load_latest_resume_title_identities(&app, &planned)?
             .into_iter()
@@ -422,6 +437,67 @@ mod tests {
     use super::super::WATCH_STATUS_INDEX_KEY;
     use super::*;
     use crate::test_helpers::{test_media_item, test_store};
+
+    #[test]
+    fn selected_library_reads_preserve_snapshot_merging_without_repairing_the_store() {
+        let fixture = test_store();
+        fixture.store.set(
+            LIBRARY_INDEX_KEY,
+            json!(["z", "a", "a", "sequence", "invalid", "missing", "outside"]),
+        );
+        let mut donor = test_media_item(" selected ", "MOVIE");
+        donor.title = "Zulu".into();
+        donor.description = Some("Donor description".into());
+        donor.poster = Some("https://images.example/poster.jpg".into());
+        donor.year = Some("2024".into());
+        fixture.store.set(library_item_key("z"), json!(donor));
+        let mut replacement = test_media_item("selected", "movie");
+        replacement.title = "Alpha".into();
+        fixture.store.set(library_item_key("a"), json!(replacement));
+        fixture.store.set(
+            library_item_key("sequence"),
+            json!(["sequence", "Sequence", null, null, null, null, null, null, null, "series"]),
+        );
+        fixture.store.set(
+            library_item_key("invalid"),
+            json!({"id": "invalid", "title": [], "type": "movie"}),
+        );
+        for id in ["outside", "unindexed"] {
+            fixture
+                .store
+                .set(library_item_key(id), json!(test_media_item(id, "movie")));
+        }
+        fixture.store.save().unwrap();
+        let before = std::fs::read(&fixture.path).unwrap();
+        let selected: HashSet<_> = ["selected", "sequence", "invalid", "missing", "unindexed"]
+            .into_iter()
+            .collect();
+        let expected: HashMap<_, _> = read_library_snapshot(&fixture.store)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter(|(id, _)| selected.contains(id.as_str()))
+            .collect();
+        let actual = read_library_selection(
+            &fixture.store,
+            load_index(&fixture.store, LIBRARY_INDEX_KEY).unwrap(),
+            &selected,
+        );
+        assert_eq!(json!(actual), json!(expected));
+        assert_eq!(actual.len(), 2);
+        assert_eq!(actual["selected"].title, "Alpha");
+        assert_eq!(actual["selected"].description, donor.description);
+        assert_eq!(actual["selected"].primary_year, Some(2024));
+        assert!(read_library_selection(
+            &fixture.store,
+            load_index(&fixture.store, LIBRARY_INDEX_KEY).unwrap(),
+            &HashSet::new(),
+        )
+        .is_empty());
+        fixture.store.save().unwrap();
+        assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
+        assert_eq!(fixture.store.save_count(), 1);
+    }
 
     #[test]
     fn library_genres_are_sorted_deduplicated_and_keep_first_library_casing() {

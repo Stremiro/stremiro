@@ -35,27 +35,30 @@ fn normalize_skip_time(value: f64) -> Option<f64> {
         return None;
     }
 
-    Some((value.max(0.0) * 1000.0).round() / 1000.0)
+    let rounded = (value.max(0.0) * 1000.0).round() / 1000.0;
+    rounded.is_finite().then_some(rounded)
+}
+
+fn normalize_skip_segment(segment: &mut SkipSegment, duration_secs: Option<f64>) -> bool {
+    let Some((start_time, end_time)) =
+        normalize_skip_time(segment.start_time).zip(normalize_skip_time(segment.end_time))
+    else {
+        return false;
+    };
+    let end_time = duration_secs.map_or(end_time, |duration| end_time.min(duration));
+    if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
+        return false;
+    }
+    segment.start_time = start_time;
+    segment.end_time = end_time;
+    true
 }
 
 fn normalize_skip_segments(
     mut segments: Vec<SkipSegment>,
     duration_secs: Option<f64>,
 ) -> Vec<SkipSegment> {
-    segments.retain_mut(|segment| {
-        let Some((start_time, end_time)) =
-            normalize_skip_time(segment.start_time).zip(normalize_skip_time(segment.end_time))
-        else {
-            return false;
-        };
-        let end_time = duration_secs.map_or(end_time, |duration| end_time.min(duration));
-        if end_time - start_time < MIN_SKIP_SEGMENT_DURATION_SECS {
-            return false;
-        }
-        segment.start_time = start_time;
-        segment.end_time = end_time;
-        true
-    });
+    segments.retain_mut(|segment| normalize_skip_segment(segment, duration_secs));
     segments.sort_by(|left, right| {
         left.start_time
             .total_cmp(&right.start_time)
@@ -95,6 +98,8 @@ pub(crate) struct SkipTimesProvider {
     client: Client,
     cache: TtlCache<SkipTimesResult>,
     in_flight: InFlight,
+    #[cfg(test)]
+    segments_url: String,
 }
 
 const SKIP_TIMES_CACHE_ENTRIES: usize = 256;
@@ -148,7 +153,14 @@ impl SkipTimesProvider {
                 SKIP_TIMES_EMPTY_TTL,
             ),
             in_flight: InFlight::new(SKIP_TIMES_CACHE_ENTRIES),
+            #[cfg(test)]
+            segments_url: SKIPDB_SEGMENTS_URL.to_string(),
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_segments_url(&mut self, url: String) {
+        self.segments_url = url;
     }
 
     /// Cached, single-flight SkipDB lookup keyed by the normalized request:
@@ -198,11 +210,11 @@ impl SkipTimesProvider {
     ) -> Result<SkipTimesResult, String> {
         use std::fmt::Write as _;
 
-        let mut url = format!(
-            "{}?imdb_id={}",
-            SKIPDB_SEGMENTS_URL,
-            encode_uri_component(imdb_id)
-        );
+        #[cfg(test)]
+        let base = self.segments_url.as_str();
+        #[cfg(not(test))]
+        let base = SKIPDB_SEGMENTS_URL;
+        let mut url = format!("{}?imdb_id={}", base, encode_uri_component(imdb_id));
         if let (Some(season), Some(episode)) = (season, episode) {
             let _ = write!(url, "&season={season}&episode={episode}");
         }

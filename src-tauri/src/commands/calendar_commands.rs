@@ -229,41 +229,39 @@ fn calendar_requests(
     history: Vec<ResumeTitleIdentity>,
     statuses: &HashMap<String, String>,
 ) -> Vec<MediaScheduleRequest> {
-    let mut requests = HashMap::new();
-    for item in library {
-        if matches!(item.type_.as_str(), "movie" | "series")
-            && statuses
-                .get(&item.id)
-                .is_none_or(|status| status != "dropped")
-        {
-            requests.insert((item.type_, item.id), None);
-        }
-    }
     // Calendar needs only identity and recency, so skip donor hydration,
     // source-health reads and the full history wire payload.
-    for row in history {
-        if statuses
-            .get(&row.id)
-            .is_none_or(|status| status != "watching")
-        {
-            continue;
-        }
-        let canonical_type = match row.type_.as_str() {
+    let tracked = library
+        .into_iter()
+        .filter(|item| {
+            matches!(item.type_.as_str(), "movie" | "series")
+                && statuses
+                    .get(&item.id)
+                    .is_none_or(|status| status != "dropped")
+        })
+        .map(|item| (item.type_, item.id))
+        .chain(
+            history
+                .into_iter()
+                .filter(|row| {
+                    statuses
+                        .get(&row.id)
+                        .is_some_and(|status| status == "watching")
+                })
+                .map(|row| (row.type_, row.id)),
+        );
+    let mut requests = HashMap::new();
+    for (media_type, id) in tracked {
+        let canonical_type = match media_type.as_str() {
             "movie" => "movie",
             "series" | "anime" => "series",
             _ => continue,
         };
-        requests.insert(
-            (canonical_type.to_string(), row.id),
-            (row.type_ != canonical_type).then_some(row.type_),
-        );
+        requests.insert((canonical_type, id), media_type);
     }
     let mut requests: Vec<_> = requests
         .into_iter()
-        .map(|((media_type, id), raw_type)| MediaScheduleRequest {
-            media_type: raw_type.unwrap_or(media_type),
-            id,
-        })
+        .map(|((_, id), media_type)| MediaScheduleRequest { media_type, id })
         .collect();
     requests
         .sort_by(|left, right| (&left.media_type, &left.id).cmp(&(&right.media_type, &right.id)));

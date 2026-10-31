@@ -11,7 +11,6 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{value::RawValue, Value};
 use std::collections::{BTreeMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -72,17 +71,10 @@ struct SubtitleDiskEntry {
 }
 
 fn read_subtitle_disk(path: &Path) -> Option<Arc<[AddonSubtitle]>> {
-    let guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take((SUBTITLE_DISK_MAX_BYTES + 1) as u64)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    drop(guard);
-    if bytes.len() > SUBTITLE_DISK_MAX_BYTES {
-        return None;
-    }
+    let bytes = {
+        let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
+        super::read_cache_file(path, SUBTITLE_DISK_MAX_BYTES)?
+    };
     let entry: SubtitleDiskEntry = serde_json::from_slice(&bytes).ok()?;
     let remaining = entry.expires_at.duration_since(SystemTime::now()).ok()?;
     if remaining > RESOURCE_CACHE_TTL {
@@ -113,31 +105,7 @@ fn write_subtitle_disk(
     if generation.load(Ordering::SeqCst) != expected || SystemTime::now() >= expires_at {
         return None;
     }
-    let directory = path.parent()?;
-    std::fs::create_dir_all(directory).ok()?;
-    let mut files: Vec<_> = std::fs::read_dir(directory)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| {
-            entry.path() != path && entry.path().extension().is_some_and(|ext| ext == "json")
-        })
-        .map(|entry| {
-            let modified = entry
-                .metadata()
-                .and_then(|metadata| metadata.modified())
-                .unwrap_or(SystemTime::UNIX_EPOCH);
-            (modified, entry.path())
-        })
-        .collect();
-    files.sort_unstable();
-    for (_, victim) in files
-        .iter()
-        .take(files.len().saturating_sub(SUBTITLE_CACHE_MAX_ENTRIES - 1))
-    {
-        std::fs::remove_file(victim).ok()?;
-    }
-    // A torn write is just a cache miss, never a playback failure.
-    std::fs::write(path, bytes).ok()
+    super::write_cache_file(path, &bytes, SUBTITLE_CACHE_MAX_ENTRIES)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,7 +272,11 @@ pub(crate) fn meta_for_shape(details: &MediaDetails, include_episodes: bool) -> 
         runtime: details.runtime.clone(),
         cast: details.cast.clone(),
         directors: details.directors.clone(),
+        writers: details.writers.clone(),
         genres: details.genres.clone(),
+        country: details.country.clone(),
+        awards: details.awards.clone(),
+        is_anime: details.is_anime,
         trailers: details.trailers.clone(),
         episodes: None,
         seasons: None,
@@ -742,7 +714,8 @@ fn catalog_matches_search_credit(links: Option<&RawValue>, query: &str) -> bool 
         .into_iter()
         .take(MAX_CAST + MAX_CREDITS + MAX_GENRES)
         .any(|link| {
-            let Ok(link) = serde_json::from_str::<Value>(link.get()) else {
+            let Some(link) = parse_object_fields(link, |key| matches!(key, "category" | "name"))
+            else {
                 return false;
             };
             let is_credit = link
@@ -762,6 +735,36 @@ fn catalog_matches_search_credit(links: Option<&RawValue>, query: &str) -> bool 
                                 == query
                     })
         })
+}
+
+fn parse_object_fields(raw: &RawValue, keep: fn(&str) -> bool) -> Option<Value> {
+    struct Fields(fn(&str) -> bool);
+
+    impl<'de> serde::de::Visitor<'de> for Fields {
+        type Value = Value;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("an object")
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut fields: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut object = serde_json::Map::new();
+            while let Some(key) = fields.next_key::<String>()? {
+                if self.0(&key) {
+                    object.insert(key, fields.next_value()?);
+                } else {
+                    fields.next_value::<serde::de::IgnoredAny>()?;
+                }
+            }
+            Ok(Value::Object(object))
+        }
+    }
+
+    let mut deserializer = serde_json::Deserializer::from_str(raw.get());
+    serde::Deserializer::deserialize_map(&mut deserializer, Fields(keep)).ok()
 }
 
 fn parse_catalog_item(value: CatalogItemJson<'_>) -> Option<MediaItem> {
@@ -819,6 +822,9 @@ fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
                         | "genre"
                         | "genres"
                         | "links"
+                        | "writer"
+                        | "country"
+                        | "awards"
                         | "trailers"
                         | "trailerStreams"
                 )
@@ -868,9 +874,15 @@ fn parse_meta_item(raw: &RawValue) -> Option<MediaDetails> {
             .or_else(|| meta_link_names(&value, "Cast", MAX_CAST)),
         directors: json_string_list(value.get("director"), MAX_CREDITS)
             .or_else(|| meta_link_names(&value, "Directors", MAX_CREDITS)),
+        writers: json_string_list(value.get("writer"), MAX_CREDITS)
+            .or_else(|| meta_link_names(&value, "Writers", MAX_CREDITS)),
         genres: json_string_list(value.get("genre"), MAX_GENRES)
             .or_else(|| json_string_list(value.get("genres"), MAX_GENRES))
             .or_else(|| meta_link_names(&value, "Genres", MAX_GENRES)),
+        country: json_text_field(&value, "country"),
+        awards: json_text_field(&value, "awards"),
+        // Derived in `normalize_media_details`; inbound flags never land.
+        is_anime: false,
         trailers: parse_trailers(value.get("trailers"), value.get("trailerStreams")),
         // Lite-shape trimming happens post-cache in `meta_for_shape`.
         episodes,
@@ -891,6 +903,14 @@ fn media_seasons_from_episodes(episodes: &[Episode]) -> Vec<MediaSeason> {
 
 fn json_string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(json_string)
+}
+
+/// Display-only scalars accept strings as-is — never coerce numbers or objects.
+fn json_text_field(value: &Value, key: &str) -> Option<String> {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .and_then(|text| trim_to_max(text, MAX_STRING_CHARS))
 }
 
 /// Accept only 11-character YouTube tokens, never URL parameters or markup.
@@ -998,7 +1018,19 @@ fn parse_episodes(value: Option<&RawValue>) -> Option<Vec<Episode>> {
                 let Some(raw) = sequence.next_element::<&RawValue>()? else {
                     break;
                 };
-                let Ok(item) = serde_json::from_str::<Value>(raw.get()) else {
+                let Some(item) = parse_object_fields(raw, |key| {
+                    matches!(
+                        key,
+                        "id" | "name"
+                            | "title"
+                            | "season"
+                            | "episode"
+                            | "number"
+                            | "released"
+                            | "overview"
+                            | "thumbnail"
+                    )
+                }) else {
                     continue;
                 };
                 let Some(id) = item.get("id").and_then(json_media_id) else {

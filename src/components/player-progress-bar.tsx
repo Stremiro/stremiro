@@ -121,7 +121,7 @@ export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
     <div
       aria-hidden='true'
       className={cn(
-        'pointer-events-none absolute bottom-0 left-[60px] right-0 z-40 h-0.5 bg-white/15 transition-opacity motion-reduce:transition-none',
+        'pointer-events-none absolute bottom-0 left-[60px] right-0 z-40 h-[3px] bg-white/[0.08] transition-opacity motion-reduce:transition-none',
         // Hands off with the chrome: arrives on its slower exit, leaves on its quick entrance.
         visible
           ? cn(CHROME_EXIT_TIMING_CLASS, 'opacity-100')
@@ -129,7 +129,7 @@ export const PlayerEdgeProgress = memo(function PlayerEdgeProgress({
       )}
     >
       <div
-        className='absolute inset-0 origin-left bg-(--accent-seek)'
+        className='absolute inset-0 origin-left bg-white'
         style={{ transform: `scaleX(${progress})` }}
       />
     </div>
@@ -535,7 +535,7 @@ export function PlayerProgressBar({
         </div>
       )}
 
-      <div className='relative h-2 w-full overflow-hidden rounded-[3px] bg-white/[0.16]'>
+      <div className='relative h-2.5 w-full overflow-hidden rounded-[2px] bg-white/[0.14]'>
         {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
           <div
             className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'

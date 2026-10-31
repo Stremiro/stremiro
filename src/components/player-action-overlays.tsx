@@ -47,8 +47,8 @@ export function PlayerSkipButton({
         variant === 'icon'
           ? MINI_ICON_BUTTON_CLASS
           : variant === 'compact'
-            ? 'gap-1 px-2 py-1.5 text-xs'
-            : 'min-h-11 gap-2 px-4 py-2.5 text-[13px] font-semibold animate-in fade-in zoom-in-95 slide-in-from-bottom-1 duration-200 motion-reduce:animate-none',
+            ? 'gap-1.5 rounded-lg px-2.5 py-1.5 text-xs'
+            : 'min-h-10 gap-2 rounded-lg px-3.5 py-2 text-[13px] font-medium tracking-tight animate-in fade-in duration-200 motion-reduce:animate-none',
         CHROME_SKIP_BUTTON_CLASS,
         className,
       )}
@@ -87,12 +87,9 @@ function SkipSegmentProgress({
   return (
     <span
       aria-hidden='true'
-      className='pointer-events-none absolute inset-x-0 bottom-0 h-[2px] bg-white/10'
+      className='pointer-events-none absolute inset-x-2.5 bottom-1.5 h-[2px] overflow-hidden rounded-[1px] bg-white/15'
     >
-      <span
-        className='block h-full origin-left bg-(--accent-skip) transition-transform duration-200 ease-linear motion-reduce:transition-none'
-        style={{ transform: `scaleX(${pct / 100})` }}
-      />
+      <span className='block h-full bg-(--accent-skip)' style={{ width: `${pct}%` }} />
     </span>
   );
 }

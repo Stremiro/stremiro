@@ -334,6 +334,7 @@ pub struct PlaybackLanguagePreferences {
 #[allow(clippy::too_many_arguments)]
 pub async fn get_skip_times(
     skip_provider: State<'_, crate::providers::skip_times::SkipTimesProvider>,
+    enrichment: State<'_, crate::providers::enrichment::EnrichmentClient>,
     media_type: String,
     id: String,
     imdb_id: Option<String>,
@@ -344,31 +345,128 @@ pub async fn get_skip_times(
     stream_episode: Option<u32>,
     duration_secs: Option<f64>,
 ) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
-    let Some((imdb_id, season, episode)) = skip_times_anchor(
+    skip_times_for_request(
+        &enrichment,
+        &skip_provider,
+        &media_type,
         &id,
         imdb_id.as_deref(),
         stream_lookup_id.as_deref(),
         (season, episode),
         (stream_season, stream_episode),
-    ) else {
-        return Ok(crate::providers::skip_times::SkipTimesResult::default());
-    };
+        duration_secs,
+    )
+    .await
+}
 
-    // SkipDB wants both coordinates for an episode, neither for a movie. A lone
-    // coordinate can't name an episode — never silently default to S1.
-    let Some((season, episode)) = skip_times_coordinates(&media_type, season, episode) else {
-        return Ok(crate::providers::skip_times::SkipTimesResult::default());
-    };
+#[allow(clippy::too_many_arguments)]
+async fn skip_times_for_request(
+    enrichment: &crate::providers::enrichment::EnrichmentClient,
+    skip_provider: &crate::providers::skip_times::SkipTimesProvider,
+    media_type: &str,
+    id: &str,
+    imdb_id: Option<&str>,
+    stream_lookup_id: Option<&str>,
+    (season, episode): (Option<u32>, Option<u32>),
+    (stream_season, stream_episode): (Option<u32>, Option<u32>),
+    duration_secs: Option<f64>,
+) -> Result<crate::providers::skip_times::SkipTimesResult, String> {
+    use crate::providers::skip_times::SkipTimesResult;
 
-    // Bound duration so a malformed value never reaches the outbound query (24h covers any stream).
+    // Bound duration so a malformed value never reaches an outbound query (24h covers any stream).
     const MAX_STREAM_DURATION_SECS: f64 = 24.0 * 60.0 * 60.0;
     let duration_secs = duration_secs
         .filter(|d| d.is_finite() && *d > 0.0 && *d <= MAX_STREAM_DURATION_SECS)
         .map(|d| d.round());
 
+    let title_coordinates = (season, episode);
+    let Some((imdb_id, season, episode)) = skip_times_anchor(
+        id,
+        imdb_id,
+        stream_lookup_id,
+        title_coordinates,
+        (stream_season, stream_episode),
+    )
+    .and_then(|(imdb, s, e)| {
+        // SkipDB wants both coordinates for an episode, neither for a movie. A lone
+        // coordinate can't name an episode — never silently default to S1.
+        skip_times_coordinates(media_type, s, e).map(|(s, e)| (imdb, s, e))
+    }) else {
+        return Ok(SkipTimesResult::default());
+    };
+
+    // Anime-family canonical coordinates are the entry's own cour-local
+    // numbering, not the IMDb anchor's. When they reached the anchor unchanged
+    // — no stream remap supplied different coordinates — the only honest IMDb
+    // episode is a provably aligned one, never the raw family number.
+    let (season, episode) = if season.is_some()
+        && (season, episode) == title_coordinates
+        && crate::providers::anime_ids::parse_anime_id(id).is_some()
+    {
+        match anime_family_imdb_coordinates(enrichment, id, &imdb_id, title_coordinates).await? {
+            Some((season, episode)) => (Some(season), Some(episode)),
+            None => return Ok(SkipTimesResult::default()),
+        }
+    } else {
+        (season, episode)
+    };
+
     skip_provider
         .get_segments(&imdb_id, season, episode, duration_secs)
         .await
+}
+
+/// Remap a family-keyed (`kitsu:`/`mal:`/`anilist:`) episode onto its IMDb
+/// season through the title-cached ARM rows for the imdb anchor. `Ok(Some)` = provably aligned;
+/// `Ok(None)` = unprovable — a clean miss, never a guess; `Err` = transient.
+async fn anime_family_imdb_coordinates(
+    enrichment: &crate::providers::enrichment::EnrichmentClient,
+    id: &str,
+    imdb: &str,
+    (season, episode): (Option<u32>, Option<u32>),
+) -> Result<Option<(u32, u32)>, String> {
+    use crate::providers::anime_ids::{parse_anime_id, resolve_anime_ids, AnimeId};
+
+    let Some(family) = parse_anime_id(id) else {
+        return Ok(None);
+    };
+    // The family's cour-local episode: another local season or a zero/missing
+    // episode can't name an IMDb episode.
+    let episode = match (season, episode) {
+        (Some(1) | None, Some(episode)) if episode > 0 => episode,
+        _ => return Ok(None),
+    };
+    let rows = resolve_anime_ids(enrichment, imdb).await?;
+    // Rows naming this exact entry must agree on exactly one IMDb season;
+    // missing or contradictory season fields are unprovable.
+    let mut matched = rows
+        .iter()
+        .filter(|row| match family {
+            AnimeId::Mal(value) => row.mal_id == Some(value),
+            AnimeId::Kitsu(value) => row.kitsu_id == Some(value),
+            AnimeId::AniList(value) => row.anilist_id == Some(value),
+        })
+        .filter_map(|row| {
+            let mut seasons = [row.tvdb_season, row.tmdb_season].into_iter().flatten();
+            let season = seasons.next()?;
+            seasons.all(|other| other == season).then_some(season)
+        })
+        .collect::<Vec<_>>();
+    matched.sort_unstable();
+    matched.dedup();
+    let [imdb_season] = matched.as_slice() else {
+        return Ok(None);
+    };
+    // The cour-local episode number aligns with the IMDb season only when this
+    // entry is the sole cour mapped there — a shared season implies an offset
+    // the bridge data does not carry.
+    let cours_at_season = rows
+        .iter()
+        .filter(|row| {
+            row.tvdb_season == Some(*imdb_season) || row.tmdb_season == Some(*imdb_season)
+        })
+        .count();
+    Ok((cours_at_season == 1).then_some((*imdb_season, episode)))
 }
 
 /// SkipDB numbers episodes the IMDb way. An IMDb stream lookup id pairs with the stream
@@ -439,7 +537,7 @@ pub async fn get_data_stats(
 
             let status_store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
             let statuses = read_watch_status_snapshot(&status_store)?;
-            let watch_statuses_count = statuses.index.len();
+            let watch_statuses_count = statuses.items.len();
             let library_status_counts = library_commands::library_status_counts(
                 library_index.iter().map(String::as_str),
                 &statuses.items,

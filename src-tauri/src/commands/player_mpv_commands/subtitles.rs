@@ -5,6 +5,7 @@ use crate::providers::fetch_policy::{
     redirect_target_allowed, same_origin_for_proxy_headers, MAX_REDIRECT_HOPS,
 };
 use reqwest::{header::HeaderMap, Client, Url};
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
@@ -259,9 +260,9 @@ fn is_text_subtitle(bytes: &[u8]) -> bool {
                 }
             })
             .collect();
-        String::from_utf16_lossy(&units)
+        Cow::Owned(String::from_utf16_lossy(&units))
     } else {
-        String::from_utf8_lossy(prefix).into_owned()
+        String::from_utf8_lossy(prefix)
     };
     let text = text.trim_start_matches('\u{feff}').trim_start();
     let first = text.lines().next().unwrap_or_default().trim();
