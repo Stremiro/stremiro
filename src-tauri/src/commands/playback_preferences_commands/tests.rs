@@ -1,6 +1,6 @@
 use super::{
-    infer_selected_playback_language_preference, sanitize_language_pref,
-    PlaybackLanguagePreferenceKind, SavedPlaybackLanguagePreference,
+    infer_selected_playback_language_preference, PlaybackLanguagePreferenceKind,
+    SavedPlaybackLanguagePreference,
 };
 use crate::commands::language::TrackLanguageCandidate;
 use crate::commands::PlaybackLanguagePreferences;
@@ -21,37 +21,6 @@ fn saved_playback_language_preference_omits_scopeless_effective() {
     assert_eq!(value["preferences"]["preferredAudioLanguage"], "en");
     assert_eq!(value["preferences"]["preferredSubtitleLanguage"], "off");
     assert!(value.get("effective").is_none());
-}
-
-#[test]
-fn sanitize_language_pref_canonicalizes_known_aliases() {
-    assert_eq!(
-        sanitize_language_pref(Some("English"), false).as_deref(),
-        Some("en")
-    );
-    assert_eq!(
-        sanitize_language_pref(Some("jpn"), true).as_deref(),
-        Some("ja")
-    );
-    assert_eq!(
-        sanitize_language_pref(Some("pt-BR"), false).as_deref(),
-        Some("pt")
-    );
-}
-
-#[test]
-fn sanitize_language_pref_preserves_subtitle_off() {
-    assert_eq!(
-        sanitize_language_pref(Some("off"), true).as_deref(),
-        Some("off")
-    );
-    assert_eq!(sanitize_language_pref(Some("off"), false), None);
-}
-
-#[test]
-fn sanitize_language_pref_drops_empty_or_unknown_values() {
-    assert_eq!(sanitize_language_pref(Some("   "), false), None);
-    assert_eq!(sanitize_language_pref(Some("commentary"), true), None);
 }
 
 #[test]

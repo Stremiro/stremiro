@@ -25,11 +25,10 @@ import {
   useState,
 } from 'react';
 import { RemoteImage } from '@/components/remote-image';
-import { isEpisodeSpoiler } from '@/components/details-episode-card';
+import { EpisodeThumb } from '@/components/episode-thumb';
 import { Button } from '@/components/ui/button';
 import { DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
-import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useFailedSrc } from '@/hooks/use-failed-src';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -50,6 +49,7 @@ import {
 import { whenRowMounted } from '@/lib/dom';
 import {
   episodeMatchesCoordinates,
+  isEpisodeSpoiler,
   type NextEpisodeStreamCoordinates,
 } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent, MIN_RESUME_POSITION_SECS } from '@/lib/history-playback';
@@ -1246,23 +1246,15 @@ export function StreamPackEpisodeList({
               <div className='h-full w-1/3 bg-(--accent-prog) motion-safe:animate-[progress-slide_1.6s_linear_infinite]' />
             </div>
           )}
-          <div className='relative h-12 w-[84px] shrink-0 overflow-hidden rounded-md bg-zinc-900'>
-            <div className='absolute inset-0 flex items-center justify-center text-[11px] font-bold tracking-wide text-white/15 bg-zinc-800/50'>
-              E{ep.episode}
-            </div>
-            {artwork && (
-              <RemoteImage
-                src={artwork}
-                loading='lazy'
-                className={cn(
-                  'relative h-full w-full object-cover opacity-80 transition-opacity duration-200 group-hover:opacity-100',
-                  isSpoiler && 'scale-110 blur-md',
-                )}
-                alt=''
-              />
-            )}
-            <WatchProgressStrip percent={progressPercent} />
-          </div>
+          <EpisodeThumb
+            episode={ep.episode}
+            src={artwork}
+            isSpoiler={isSpoiler}
+            progressPercent={progressPercent}
+            className='h-12 w-[84px] rounded-md'
+            fallbackClassName='text-[11px] font-bold tracking-wide text-white/15 bg-zinc-800/50'
+            imageClassName='opacity-80 transition-opacity duration-200 group-hover:opacity-100'
+          />
 
           <div className='min-w-0 flex-1'>
             <div className='flex items-center gap-1.5'>

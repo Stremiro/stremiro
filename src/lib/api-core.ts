@@ -18,8 +18,6 @@ export function getListErrorMessage(error: unknown): string | undefined {
     case 'list_not_found':
     case 'too_many_lists':
     case 'list_full':
-    case 'invalid_rules':
-    case 'smart_list_read_only':
       return getErrorMessage(error);
     default:
       return undefined;

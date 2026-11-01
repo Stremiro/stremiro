@@ -375,6 +375,13 @@ fn normalize_recent_searches(searches: impl IntoIterator<Item = String>) -> Vec<
     let mut seen = HashSet::new();
     searches
         .into_iter()
+        .filter(|query| {
+            super::strip_ascii_prefix_ignore_case(
+                super::super::js_trim(query),
+                super::super::app_links::APP_LINK_SCHEME,
+            )
+            .is_none()
+        })
         .filter_map(|query| {
             let collapsed: String = query
                 .split_whitespace()

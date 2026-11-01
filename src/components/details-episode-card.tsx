@@ -1,6 +1,6 @@
 import { memo, useId, useRef, useState, type Ref } from 'react';
 import { Check, CheckCheck, ChevronLeft, Link2, Play, RotateCcw } from 'lucide-react';
-import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
+import type { Episode } from '@/lib/api';
 import { InlineMenu } from '@/components/inline-menu';
 import { RemoteImage } from '@/components/remote-image';
 import { WatchProgressStrip } from '@/components/watch-progress-strip';
@@ -14,22 +14,6 @@ import { cn, formatSeasonEpisode, getEpisodeTitle } from '@/lib/utils';
 // Clears the watched toggle and emphasis badge pinned to the card's top edge.
 const SYNOPSIS_TOP_CLEARANCE_PX = 48;
 const MIN_SYNOPSIS_LINES = 2;
-
-export function isEpisodeSpoiler(
-  episode: Episode,
-  spoilerProtection: boolean,
-  watchedEpisodeCeiling: TitleWatchProgress['watchedEpisodeCeiling'] | undefined,
-  progress: WatchProgress | undefined,
-  isCurrent = false,
-): boolean {
-  const ceiling = watchedEpisodeCeiling?.[episode.season];
-  return (
-    spoilerProtection &&
-    !isCurrent &&
-    !progress?.has_started_watching &&
-    (ceiling === undefined || episode.episode > ceiling)
-  );
-}
 
 export type EpisodeEmphasis = 'resume' | 'next' | null;
 

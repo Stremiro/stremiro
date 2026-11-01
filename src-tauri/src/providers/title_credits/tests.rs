@@ -76,6 +76,40 @@ async fn tvmaze_lookup_miss_is_empty_and_server_error_is_err() {
     assert_eq!(credits.facts.network.as_deref(), Some("HBO"));
 }
 
+#[tokio::test]
+async fn tvmaze_oversized_cast_keeps_people_and_caches_compacted() {
+    // Unpaged cast above the 256 KiB cache bound (long-running shows).
+    let row = r#"{"person":{"name":"Dan Castellaneta","image":{"medium":"https://static.tvmaze.com/d.jpg"},"bio":"PADDING"},"character":{"name":"Homer Simpson"}}"#
+        .replace("PADDING", &"x".repeat(400));
+    let cast: &'static str =
+        Box::leak(format!("[{}]", vec![row; 1_000].join(",")).into_boxed_str());
+    assert!(cast.len() > 256 * 1024);
+    let dir = std::env::temp_dir().join(format!("credits-test-{}", uuid::Uuid::new_v4()));
+    let server = TestHttpServer::new(vec![(200, TVMAZE_SHOW, None), (200, cast, None)]);
+    let mut client = EnrichmentClient::new(Some(dir.clone()));
+    client.set_base_url(Source::Tvmaze, server.url.clone());
+    let credits = get_title_credits(&client, "series", "tt0944947", None)
+        .await
+        .unwrap();
+    assert_eq!(credits.people.len(), MAX_PEOPLE);
+    assert_eq!(
+        credits.people[0].character.as_deref(),
+        Some("Homer Simpson")
+    );
+    assert_eq!(credits.facts.network.as_deref(), Some("HBO"));
+    assert_eq!(server.finish().len(), 2);
+    // The compacted cast fits the disk bound and replays without HTTP.
+    let trap = TestHttpServer::new(vec![]);
+    let mut restarted = EnrichmentClient::new(Some(dir.clone()));
+    restarted.set_base_url(Source::Tvmaze, trap.url.clone());
+    let replayed = get_title_credits(&restarted, "series", "tt0944947", None)
+        .await
+        .unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(replayed, credits);
+    assert!(trap.finish().is_empty());
+}
+
 #[test]
 fn tvmaze_schedule_and_runtime_validation() {
     // Running show: valid weekdays + HH:MM + timezone compose the schedule.

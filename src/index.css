@@ -271,7 +271,7 @@
     }
   }
 
-  /* Dock compresses the surface; undock dissolves it on expand. */
+  /* Dock compresses the surface. */
   @keyframes mini-dock {
     from {
       opacity: 0;
@@ -280,17 +280,6 @@
     to {
       opacity: 1;
       transform: none;
-    }
-  }
-
-  @keyframes mini-undock {
-    from {
-      opacity: 1;
-      transform: none;
-    }
-    to {
-      opacity: 0;
-      transform: scale(0.94);
     }
   }
 
@@ -363,11 +352,6 @@
   .animate-mini-dock {
     /* Match the JS dock FLIP curve. */
     animation: mini-dock 260ms cubic-bezier(0.33, 1, 0.68, 1);
-  }
-
-  /* Hold the exit frame until unmount. */
-  .animate-mini-undock {
-    animation: mini-undock 170ms ease-in forwards;
   }
 
   .animate-mini-ghost {

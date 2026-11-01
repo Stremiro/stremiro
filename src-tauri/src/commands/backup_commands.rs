@@ -12,8 +12,8 @@ use super::history_helpers::{build_history_key, resume_rows, sanitize_watch_prog
 use super::library_commands::MAX_LIBRARY_ITEMS;
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
-    normalize_list_id, normalize_list_name, validate_smart_list_rules, UserList, UserListWithItems,
-    LISTS_ORDER_KEY, MAX_LISTS, MAX_LIST_ITEMS,
+    normalize_list_id, normalize_list_name, UserList, UserListWithItems, LISTS_ORDER_KEY,
+    MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::playback_preferences_commands::{
     read_playback_language_preferences_from_store, sanitize_language_pref,
@@ -285,12 +285,9 @@ pub(super) fn prepare_import_lists(
         .cloned()
         .collect();
     let mut prepared = Vec::with_capacity(raw_lists.len());
-    for mut list in raw_lists {
-        let rules = list
-            .as_object_mut()
-            .and_then(|list| list.remove("rules"))
-            .and_then(|rules| serde_json::from_value(rules).ok())
-            .and_then(|rules| validate_smart_list_rules(rules).ok());
+    for list in raw_lists {
+        // serde ignores the legacy "rules" key — an old smart list imports
+        // as a manual list keeping its snapshot items.
         let Ok(list) = serde_json::from_value::<UserListWithItems>(list) else {
             continue;
         };
@@ -311,7 +308,7 @@ pub(super) fn prepare_import_lists(
         let import_icon = normalize_list_icon(Some(list.icon.as_str()));
         // Reuse live add-to-list normalization/dedupe; no truncation.
         let mut seen_ids: HashSet<String> = HashSet::with_capacity(list.items.len());
-        let mut valid_items: Vec<_> = list
+        let valid_items: Vec<_> = list
             .items
             .into_iter()
             .filter_map(normalize_library_item)
@@ -325,9 +322,6 @@ pub(super) fn prepare_import_lists(
                     MAX_LIST_ITEMS
                 ),
             ));
-        }
-        if rules.is_some() {
-            valid_items.clear();
         }
         let new_id = normalized_id
             .as_deref()
@@ -344,7 +338,6 @@ pub(super) fn prepare_import_lists(
             icon: import_icon,
             item_ids: valid_items.iter().map(|item| item.id.clone()).collect(),
             items: valid_items,
-            rules,
         });
     }
     validate_import_capacity(
@@ -742,7 +735,6 @@ fn import_app_data_entries(
                 name: list.name,
                 icon: list.icon,
                 item_ids: list.item_ids,
-                rules: list.rules,
             }),
         );
         for item in &list.items {

@@ -227,6 +227,7 @@ fn searchable_catalog_ids<'a>(addon: &'a AddonConfig, type_: &str) -> Vec<(&'a s
 pub struct CatalogFetchPage {
     pub items: Vec<MediaItem>,
     pub next_skip: Option<u32>,
+    pub partial: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -286,6 +287,7 @@ fn catalog_fetch_page_from_source(page: CatalogPage, skip: u32) -> CatalogFetchP
     CatalogFetchPage {
         next_skip: catalog_page_next_skip(skip, page.source_item_count),
         items: page.items,
+        partial: false,
     }
 }
 
@@ -297,11 +299,13 @@ pub(crate) fn merge_catalog_pages(
     let mut had_success = false;
     let mut last_error: Option<String> = None;
     let mut next_skip: Option<u32> = None;
+    let mut partial = false;
 
     for result in results {
         match result {
             Ok(page) => {
                 had_success = true;
+                partial |= page.partial;
                 next_skip = match (next_skip, page.next_skip) {
                     (Some(left), Some(right)) => Some(left.min(right)),
                     (None, Some(right)) => Some(right),
@@ -317,7 +321,11 @@ pub(crate) fn merge_catalog_pages(
         return Err(last_error.unwrap_or_else(|| empty_error.to_string()));
     }
 
-    Ok(CatalogFetchPage { items, next_skip })
+    Ok(CatalogFetchPage {
+        items,
+        next_skip,
+        partial: partial || last_error.is_some(),
+    })
 }
 
 /// What a catalog fetch needs from a selected addon — never the whole config

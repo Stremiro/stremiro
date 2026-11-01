@@ -29,7 +29,7 @@ export function SaveToCollectionPanel({
   onCreateList,
 }: SaveToCollectionPanelProps) {
   const listsQuery = useListSummaries(item.id);
-  const lists = (listsQuery.data ?? []).filter((list) => !list.is_smart);
+  const lists = listsQuery.data ?? [];
   const hasListsError = queryNeedsRetry(listsQuery);
   const { toggleLibrary, toggleListMembership, pendingListIds } = actions;
   const isLibraryBusy = libraryBusy || toggleLibrary.isPending;
@@ -138,10 +138,7 @@ export function SaveToCollectionPanel({
           })
         ) : listsQuery.data !== undefined ? (
           <p className='px-2.5 py-3 text-[11px] leading-relaxed text-zinc-500'>
-            No manual lists yet — create one to group titles.
-            {listsQuery.data.length > 0 && (
-              <span className='mt-1 block'>Smart lists fill automatically from their rules.</span>
-            )}
+            No lists yet — create one to group titles.
           </p>
         ) : null}
       </div>

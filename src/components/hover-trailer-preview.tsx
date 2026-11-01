@@ -8,6 +8,7 @@ import {
   parseYouTubePlayerState,
   postYouTubeCommand,
   postYouTubeListening,
+  retryYouTubeHandshake,
 } from '@/lib/youtube-player';
 import { cn } from '@/lib/utils';
 
@@ -18,8 +19,6 @@ interface HoverTrailerPreviewProps {
   onRevealChange: (revealed: boolean) => void;
 }
 
-const LISTENING_RETRY_MS = 250;
-const LISTENING_RETRY_BUDGET_MS = 4_000;
 // The embed's title bar and pause glyph auto-hide 3.5–4.1 s after PLAYING; no player command hides them sooner.
 const REVEAL_SETTLE_MS = 4_200;
 
@@ -195,25 +194,10 @@ export function HoverTrailerPreview({
     };
   }, [reveal, videoId]);
 
-  useEffect(() => {
-    const startedAt = Date.now();
-    const retryId = window.setInterval(() => {
-      if (
-        hasPlayedRef.current ||
-        connectedRef.current ||
-        Date.now() - startedAt >= LISTENING_RETRY_BUDGET_MS
-      ) {
-        window.clearInterval(retryId);
-        return;
-      }
-
-      handshake();
-    }, LISTENING_RETRY_MS);
-
-    return () => {
-      window.clearInterval(retryId);
-    };
-  }, [handshake, videoId]);
+  useEffect(
+    () => retryYouTubeHandshake(handshake, () => hasPlayedRef.current || connectedRef.current),
+    [handshake, videoId],
+  );
 
   // YouTube embeds require scripts+same-origin; the sandbox still bounds
   // top-level navigation, forms, and downloads.

@@ -30,6 +30,19 @@ const MOVIE_GENRE_FALLBACK: [&str; 19] = [
 const SERIES_ONLY_GENRES: [&str; 3] = ["Game-Show", "Reality-TV", "Talk-Show"];
 /// Animation is implied by the anime tab rather than offered as a genre.
 const ANIME_CATEGORY_GENRE: &str = "animation";
+/// Movie/series categories with effectively no anime catalog — the synthesized
+/// anime list borrows the union, so the dead borrow-throughs get removed.
+const ANIME_DEAD_GENRES: [&str; 9] = [
+    "Biography",
+    "Documentary",
+    "Game-Show",
+    "History",
+    "Reality-TV",
+    "Sport",
+    "Talk-Show",
+    "War",
+    "Western",
+];
 
 /// Genre menu entries per browse tab, in manifest-declared order.
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -99,7 +112,12 @@ pub(crate) fn build_browse_genres(addons: &[AddonConfig]) -> BrowseGenres {
         .collect();
     let anime = all
         .iter()
-        .filter(|genre| !genre.eq_ignore_ascii_case(ANIME_CATEGORY_GENRE))
+        .filter(|genre| {
+            !genre.eq_ignore_ascii_case(ANIME_CATEGORY_GENRE)
+                && !ANIME_DEAD_GENRES
+                    .iter()
+                    .any(|dead| genre.eq_ignore_ascii_case(dead))
+        })
         .cloned()
         .collect();
     BrowseGenres {
@@ -175,5 +193,9 @@ mod tests {
         assert!(genres.series.iter().any(|genre| genre == "Reality-TV"));
         assert!(!genres.movie.iter().any(|genre| genre == "Reality-TV"));
         assert!(!genres.anime.iter().any(|genre| genre == "Animation"));
+        assert!(!genres.anime.iter().any(|genre| genre == "Western"));
+        assert!(!genres.anime.iter().any(|genre| genre == "Reality-TV"));
+        assert!(genres.anime.iter().any(|genre| genre == "Action"));
+        assert!(genres.anime.iter().any(|genre| genre == "Fantasy"));
     }
 }

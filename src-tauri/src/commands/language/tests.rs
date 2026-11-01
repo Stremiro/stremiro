@@ -1,8 +1,7 @@
 use super::{
     build_mpv_language_selection_options, canonicalize_language_token, canonicalize_language_value,
     infer_track_preferred_language, normalize_language_token, resolve_preferred_track_selection,
-    supported_language_options, track_matches_preferred_language, TrackLanguageCandidate,
-    SUPPORTED_LANGUAGES,
+    track_matches_preferred_language, TrackLanguageCandidate, SUPPORTED_LANGUAGES,
 };
 
 #[test]
@@ -14,7 +13,6 @@ fn preferred_language_inputs_are_bounded_before_normalization() {
     );
     let oversized = format!(" {at_limit}");
     assert_eq!(normalize_language_token(Some(&oversized), false), None);
-    assert!(super::language_candidates(&oversized).is_empty());
     assert_eq!(
         normalize_language_token(Some(&"界".repeat(65)), false),
         None
@@ -64,12 +62,7 @@ fn mpv_language_selection_options_expand_aliases_and_handle_off() {
 
 #[test]
 fn common_languages_accept_exact_tags_and_safe_aliases_without_title_collisions() {
-    let options = supported_language_options();
-    assert_eq!(options.len(), 28);
     for language in &SUPPORTED_LANGUAGES[9..] {
-        assert!(options
-            .iter()
-            .any(|option| option.code == language.code && option.label == language.label));
         for alias in language.exact_aliases {
             assert_eq!(canonicalize_language_value(alias), Some(language.code));
             assert_eq!(canonicalize_language_token(alias), None);

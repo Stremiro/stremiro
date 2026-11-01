@@ -26,7 +26,6 @@ import {
   Pencil,
   Plus,
   Search,
-  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
@@ -42,8 +41,8 @@ import { PosterThumb } from '@/components/poster-thumb';
 import {
   CollectionBulkActionBar,
   useCollectionSelection,
-  ViewToggle,
 } from '@/components/profile-library-controls';
+import { ViewToggle } from '@/components/ui/segmented-control';
 import { RetryBanner } from '@/components/retry-banner';
 import { SelectionCheck } from '@/components/watch-status-icon';
 import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
@@ -55,13 +54,7 @@ import { useSortableSensors } from '@/hooks/use-sortable-sensors';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
-import {
-  api,
-  type MediaItem,
-  type SmartListRules,
-  type UserList,
-  WATCH_STATUS_LABELS,
-} from '@/lib/api';
+import { api, type MediaItem, type UserList } from '@/lib/api';
 import { navigateToDetails } from '@/lib/player-navigation';
 import { notifyAction } from '@/lib/notify';
 import { trackPendingAppWrite } from '@/lib/pending-app-writes';
@@ -76,22 +69,6 @@ import { AddTitlesDialog } from './add-titles-dialog';
 import { ListIconTile } from './list-icons';
 
 const LIST_ITEMS_PAGE_SIZE = 150;
-function smartRulesSummary(rules: SmartListRules) {
-  return [
-    rules.media_type === 'movie' ? 'Movies' : rules.media_type === 'series' ? 'Series' : null,
-    rules.genres.join(' / '),
-    rules.statuses.map((status) => WATCH_STATUS_LABELS[status]).join(' / '),
-    rules.year_from != null && rules.year_to != null
-      ? `${rules.year_from}–${rules.year_to}`
-      : rules.year_from != null
-        ? `From ${rules.year_from}`
-        : rules.year_to != null
-          ? `Until ${rules.year_to}`
-          : null,
-  ]
-    .filter(Boolean)
-    .join(' · ');
-}
 const DELETE_LIST_MUTATION_KEY = ['delete-list'] as const;
 const LIST_ORDER_MUTATION_KEY = ['list-order'] as const;
 const listViewStates = new Map<
@@ -99,11 +76,9 @@ const listViewStates = new Map<
   { viewMode: 'grid' | 'list'; search: string; visibleLimit: number }
 >();
 
-const LIST_MANAGER_SKELETON_KEYS = [
-  'list-manager-skeleton-1',
-  'list-manager-skeleton-2',
-  'list-manager-skeleton-3',
-] as const;
+// Skeleton rows mirror the last resolved list count instead of a fixed guess.
+let lastResolvedListCount: number | undefined;
+const LIST_SKELETON_CAP = 6;
 const SORTABLE_TRANSITION = { duration: 200, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' };
 
 function ListPosterStack({ items }: { items?: MediaItem[] }) {
@@ -158,7 +133,6 @@ function SortableListCard({
     rootRef: headerRef,
     returnFocus: () => headerRef.current?.querySelector('[aria-expanded]'),
   });
-  const rulesSummary = list.rules ? smartRulesSummary(list.rules) : undefined;
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: list.id,
     transition: SORTABLE_TRANSITION,
@@ -175,7 +149,7 @@ function SortableListCard({
       data-list-row={list.id}
       style={style}
       className={cn(
-        'rounded-lg border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        'rounded-xl border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
         isDragging
           ? 'opacity-40 border-white/20 bg-zinc-900/80'
           : isExpanded
@@ -209,27 +183,15 @@ function SortableListCard({
           >
             <ListIconTile iconId={list.icon} />
             <div className='flex-1 min-w-0 text-left'>
-              <div className='flex items-center gap-2'>
-                <span
-                  dir='auto'
-                  className='font-medium text-sm text-zinc-200 group-hover:text-white transition-colors truncate'
-                >
-                  {list.name}
-                </span>
-                {list.rules && (
-                  <Sparkles
-                    className='size-3 shrink-0 text-(--accent-nav)'
-                    role='img'
-                    aria-label='Smart list'
-                  />
-                )}
-              </div>
+              <span
+                dir='auto'
+                className='block truncate font-medium text-sm text-zinc-200 group-hover:text-white transition-colors'
+              >
+                {list.name}
+              </span>
               <p className='mt-0.5 text-[11px] tabular-nums text-zinc-500'>
                 {pluralize(list.item_ids.length, 'title')}
               </p>
-              {list.rules && (
-                <p className='mt-0.5 truncate text-[11px] text-zinc-500'>{rulesSummary}</p>
-              )}
             </div>
             <ListPosterStack items={list.items} />
             <div className='text-zinc-600 group-hover:text-zinc-400 transition-colors shrink-0 ml-2'>
@@ -253,7 +215,7 @@ function SortableListCard({
             { key: 'back', label: 'Back', icon: ChevronLeft, muted: true, onSelect: menu.close },
             {
               key: 'rename',
-              label: list.rules ? 'Edit' : 'Rename',
+              label: 'Edit',
               icon: Pencil,
               onWarm: warmListEditorDialog,
               onSelect: () => onRename(list),
@@ -298,7 +260,6 @@ function SortableListCard({
 interface SortableItemRowProps {
   item: MediaItem;
   listId: string;
-  readOnly: boolean;
   viewMode: 'grid' | 'list';
   onRemove: (itemId: string, button: HTMLButtonElement | null) => void;
   selectionMode: boolean;
@@ -310,7 +271,6 @@ interface SortableItemRowProps {
 const SortableItemRow = memo(function SortableItemRow({
   item,
   listId,
-  readOnly,
   viewMode,
   onRemove,
   selectionMode,
@@ -320,7 +280,7 @@ const SortableItemRow = memo(function SortableItemRow({
   const removeButtonRef = useRef<HTMLButtonElement>(null);
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: `${listId}::${item.id}`,
-    disabled: readOnly || selectionMode,
+    disabled: selectionMode,
     transition: SORTABLE_TRANSITION,
   });
 
@@ -387,33 +347,29 @@ const SortableItemRow = memo(function SortableItemRow({
           isDragging ? 'opacity-40' : 'hover:ring-1 hover:ring-white/20',
         )}
       >
-        {!readOnly && (
-          <button
-            type='button'
-            {...attributes}
-            {...listeners}
-            aria-label={`Reorder ${item.title}`}
-            className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-          >
-            <GripVertical className='w-3 h-3 text-white' />
-          </button>
-        )}
+        <button
+          type='button'
+          {...attributes}
+          {...listeners}
+          aria-label={`Reorder ${item.title}`}
+          className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+        >
+          <GripVertical className='w-3 h-3 text-white' />
+        </button>
 
-        {!readOnly && (
-          <button
-            ref={removeButtonRef}
-            data-list-remove={item.id}
-            type='button'
-            onClick={(e) => {
-              e.stopPropagation();
-              onRemove(item.id, removeButtonRef.current);
-            }}
-            aria-label={`Remove ${item.title} from list`}
-            className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
-          >
-            <X className='w-3 h-3' />
-          </button>
-        )}
+        <button
+          ref={removeButtonRef}
+          data-list-remove={item.id}
+          type='button'
+          onClick={(e) => {
+            e.stopPropagation();
+            onRemove(item.id, removeButtonRef.current);
+          }}
+          aria-label={`Remove ${item.title} from list`}
+          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+        >
+          <X className='w-3 h-3' />
+        </button>
 
         <button
           type='button'
@@ -456,17 +412,15 @@ const SortableItemRow = memo(function SortableItemRow({
         isDragging ? 'opacity-40 bg-zinc-800/80' : 'hover:bg-white/5',
       )}
     >
-      {!readOnly && (
-        <button
-          type='button'
-          {...attributes}
-          {...listeners}
-          aria-label={`Reorder ${item.title}`}
-          className='-ml-1 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
-        >
-          <GripVertical className='w-3.5 h-3.5' />
-        </button>
-      )}
+      <button
+        type='button'
+        {...attributes}
+        {...listeners}
+        aria-label={`Reorder ${item.title}`}
+        className='-ml-1 flex h-8 w-8 items-center justify-center rounded-md text-zinc-500 hover:text-zinc-200 hover:bg-white/[0.05] transition-colors cursor-grab active:cursor-grabbing touch-none shrink-0 focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/25'
+      >
+        <GripVertical className='w-3.5 h-3.5' />
+      </button>
 
       <button
         type='button'
@@ -502,25 +456,22 @@ const SortableItemRow = memo(function SortableItemRow({
         </span>
       </button>
 
-      {!readOnly && (
-        <Button
-          ref={removeButtonRef}
-          data-list-remove={item.id}
-          size='icon'
-          variant='ghost'
-          onClick={() => onRemove(item.id, removeButtonRef.current)}
-          aria-label={`Remove ${item.title} from list`}
-          className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
-        >
-          <X className='w-3.5 h-3.5' />
-        </Button>
-      )}
+      <Button
+        ref={removeButtonRef}
+        data-list-remove={item.id}
+        size='icon'
+        variant='ghost'
+        onClick={() => onRemove(item.id, removeButtonRef.current)}
+        aria-label={`Remove ${item.title} from list`}
+        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
+      >
+        <X className='w-3.5 h-3.5' />
+      </Button>
     </div>
   );
 });
 
 function ListItemsView({ list }: { list: UserList }) {
-  const readOnly = Boolean(list.rules);
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
 
@@ -633,7 +584,7 @@ function ListItemsView({ list }: { list: UserList }) {
   const { triggerRef: selectionTriggerRef, ...selection } = useCollectionSelection(
     list.item_ids,
     filteredIds,
-    !readOnly,
+    true,
     bulkRemove.isPending || reorderItems.isPending,
     false,
     addTitlesButtonRef,
@@ -706,40 +657,36 @@ function ListItemsView({ list }: { list: UserList }) {
               className='h-9 pl-8 rounded-lg bg-white/[0.03] border-white/[0.07] text-[13px] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
             />
             <ViewToggle viewMode={viewMode} onChange={setViewMode} />
-            {!readOnly && (
-              <Button
-                ref={selectionTriggerRef}
-                size='sm'
-                variant='outline'
-                aria-pressed={selection.selectionMode}
-                disabled={bulkRemove.isPending || reorderItems.isPending || activeId !== null}
-                onClick={selection.selectionMode ? selection.exit : selection.begin}
-                className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
-              >
-                <CheckSquare className='h-3.5 w-3.5' />
-                Select
-              </Button>
-            )}
+            <Button
+              ref={selectionTriggerRef}
+              size='sm'
+              variant='outline'
+              aria-pressed={selection.selectionMode}
+              disabled={bulkRemove.isPending || reorderItems.isPending || activeId !== null}
+              onClick={selection.selectionMode ? selection.exit : selection.begin}
+              className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300'
+            >
+              <CheckSquare className='h-3.5 w-3.5' />
+              Select
+            </Button>
           </>
         ) : (
           <p className='flex-1 pl-1 text-xs font-medium text-zinc-500'>Your titles</p>
         )}
-        {!readOnly && (
-          <Button
-            ref={addTitlesButtonRef}
-            variant='outline'
-            size='sm'
-            onClick={() => setAddTitlesOpen(true)}
-            disabled={bulkRemove.isPending}
-            className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-white'
-          >
-            <Plus className='h-3.5 w-3.5' />
-            Add titles
-          </Button>
-        )}
+        <Button
+          ref={addTitlesButtonRef}
+          variant='outline'
+          size='sm'
+          onClick={() => setAddTitlesOpen(true)}
+          disabled={bulkRemove.isPending}
+          className='h-9 rounded-lg border-white/10 bg-white/[0.03] text-xs text-zinc-300 hover:bg-white/[0.06] hover:text-white'
+        >
+          <Plus className='h-3.5 w-3.5' />
+          Add titles
+        </Button>
       </div>
 
-      {!readOnly && selection.selectionMode && (
+      {selection.selectionMode && (
         <CollectionBulkActionBar
           selectedCount={selection.selectedIds.size}
           filteredCount={filtered.length}
@@ -764,25 +711,19 @@ function ListItemsView({ list }: { list: UserList }) {
         <div className='flex flex-col items-center gap-3 px-4 py-7 text-center'>
           <ListIconTile iconId={list.icon} size='lg' />
           <div>
-            <p className='text-sm font-medium text-zinc-300'>
-              {readOnly ? 'No Library titles match yet' : 'Make this collection yours'}
-            </p>
+            <p className='text-sm font-medium text-zinc-300'>Make this collection yours</p>
             <p className='mt-1 max-w-sm text-xs leading-relaxed text-zinc-500'>
-              {readOnly
-                ? 'Save titles to your Library or edit the rules. This list updates automatically.'
-                : "Use “Add titles” to choose from your library, or the save button on a title's details page."}
+              Use “Add titles” to pick titles, or the save button on a title's details page.
             </p>
           </div>
-          {!readOnly && (
-            <Button
-              size='sm'
-              onClick={() => setAddTitlesOpen(true)}
-              className='bg-white text-black hover:bg-zinc-200'
-            >
-              <Plus className='h-3.5 w-3.5' />
-              Add titles
-            </Button>
-          )}
+          <Button
+            size='sm'
+            onClick={() => setAddTitlesOpen(true)}
+            className='bg-white text-black hover:bg-zinc-200'
+          >
+            <Plus className='h-3.5 w-3.5' />
+            Add titles
+          </Button>
         </div>
       )}
 
@@ -814,7 +755,6 @@ function ListItemsView({ list }: { list: UserList }) {
                   key={item.id}
                   item={item}
                   listId={list.id}
-                  readOnly={readOnly}
                   viewMode={viewMode}
                   onRemove={handleRemove}
                   selectionMode={selection.selectionMode}
@@ -900,7 +840,7 @@ function ListItemsView({ list }: { list: UserList }) {
           </div>
         )}
       </div>
-      {!readOnly && addTitlesOpen && (
+      {addTitlesOpen && (
         <AddTitlesDialog
           list={list}
           onOpenChange={setAddTitlesOpen}
@@ -922,7 +862,7 @@ function ListGhostCard({ list }: { list: UserList }) {
   );
 }
 
-export function ListsManager() {
+export function ListsManager({ expectedCount }: { expectedCount?: number }) {
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -984,6 +924,9 @@ export function ListsManager() {
   const sensors = useSortableSensors();
 
   const { data: lists = [], isLoading, isError, isFetched, isFetching, refetch } = useLists();
+  useLayoutEffect(() => {
+    if (isFetched) lastResolvedListCount = lists.length;
+  }, [isFetched, lists.length]);
   const retryBanner = (
     <RetryBanner
       message={lists.length > 0 ? "Couldn't refresh your lists." : "Couldn't load your lists."}
@@ -1102,7 +1045,7 @@ export function ListsManager() {
   const [deleteTarget, setDeleteTarget] = useState<UserList | null>(null);
   const handleDeleteConfirm = (list: UserList) => {
     if (pendingDeleteIds.includes(list.id)) return;
-    if (list.rules || list.item_ids.length > 0) {
+    if (list.item_ids.length > 0) {
       setDeleteTarget(list);
       return;
     }
@@ -1137,12 +1080,17 @@ export function ListsManager() {
         <div role='status' aria-busy='true'>
           <span className='sr-only'>Loading lists…</span>
           <div className='space-y-3' aria-hidden='true'>
-            {LIST_MANAGER_SKELETON_KEYS.map((skeletonKey) => (
-              <div
-                key={skeletonKey}
-                className='h-14 rounded-xl bg-zinc-900/40 border border-white/5 animate-pulse'
-              />
-            ))}
+            {Array.from(
+              {
+                length: Math.min((expectedCount || lastResolvedListCount) ?? 3, LIST_SKELETON_CAP),
+              },
+              (_, index) => (
+                <div
+                  key={index}
+                  className='h-14 rounded-xl bg-zinc-900/40 border border-white/5 animate-pulse'
+                />
+              ),
+            )}
           </div>
         </div>
       ) : (isError && lists.length === 0) || (isFetched && isLoading) ? (
@@ -1233,7 +1181,7 @@ export function ListsManager() {
         title='Delete list'
         description={
           deleteTarget &&
-          `"${deleteTarget.name}"${deleteTarget.rules ? ' and its rules' : ''} will be deleted. Titles in your Library won't be removed. This can't be undone.`
+          `"${deleteTarget.name}" will be deleted. Titles in your Library won't be removed. This can't be undone.`
         }
         footerClassName='gap-2 sm:space-x-0'
         cancelProps={{ variant: 'ghost' }}

@@ -54,6 +54,12 @@ export const SETTINGS_CAPTION_CLASS =
 
 export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-lg border border-white/[0.06] bg-black/20';
 
+/** Shared `SettingsRow` shells — used directly by rows with a custom label slot (clear-records). */
+export const SETTINGS_ROW_CLASS =
+  'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0';
+export const SETTINGS_ROW_DESCRIPTION_CLASS =
+  'mt-1 block max-w-[64ch] text-[13px] leading-relaxed text-zinc-400';
+
 export function settingsControlId(label: string) {
   return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 }
@@ -109,11 +115,7 @@ export function SettingsGroupHeader({
         ) : null}
         <div className='min-w-0 flex-1 self-center'>
           <h3 className='text-[15px] font-semibold tracking-tight text-white'>{title}</h3>
-          {description ? (
-            <p className='mt-1 max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'>
-              {description}
-            </p>
-          ) : null}
+          {description ? <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{description}</p> : null}
         </div>
       </div>
       {action ? <div className='shrink-0'>{action}</div> : null}
@@ -156,20 +158,11 @@ export function SettingsRow({
   label: string;
 }) {
   return (
-    <div
-      id={settingsControlId(label)}
-      className={cn(
-        'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0',
-        className,
-      )}
-    >
+    <div id={settingsControlId(label)} className={cn(SETTINGS_ROW_CLASS, className)}>
       <div className='min-w-0 flex-1 basis-32'>
         <span className='block text-[14px] font-medium leading-snug text-zinc-100'>{label}</span>
         {description ? (
-          <span
-            id={descriptionId}
-            className='mt-1 block max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'
-          >
+          <span id={descriptionId} className={SETTINGS_ROW_DESCRIPTION_CLASS}>
             {description}
           </span>
         ) : null}

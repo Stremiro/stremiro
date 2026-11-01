@@ -91,6 +91,23 @@ export function postYouTubeListening(iframe: HTMLIFrameElement): void {
   postYouTubePlayerMessage(iframe, { event: 'listening', id: 1 });
 }
 
+const HANDSHAKE_RETRY_MS = 250;
+const HANDSHAKE_BUDGET_MS = 4_000;
+
+// The player ignores the handshake until its script boots — re-post `tick`
+// every 250 ms until `isDone()` or the 4 s budget. Returns the cancel function.
+export function retryYouTubeHandshake(tick: () => void, isDone: () => boolean): () => void {
+  const startedAt = Date.now();
+  const interval = window.setInterval(() => {
+    if (isDone() || Date.now() - startedAt >= HANDSHAKE_BUDGET_MS) {
+      window.clearInterval(interval);
+      return;
+    }
+    tick();
+  }, HANDSHAKE_RETRY_MS);
+  return () => window.clearInterval(interval);
+}
+
 export function postYouTubeCommand(
   iframe: HTMLIFrameElement,
   func: YouTubePlayerCommand,

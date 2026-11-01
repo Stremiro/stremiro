@@ -1,9 +1,11 @@
 import { useEffect, useEffectEvent, useRef, useState } from 'react';
 import { toast } from 'sonner';
-
-import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import { type Episode, type MediaDetails, type TitleWatchProgress } from '@/lib/api';
-import { buildEpisodeStreamTarget, findEpisodeByCoordinates } from '@/lib/episode-stream-target';
+import {
+  buildEpisodeStreamTarget,
+  findEpisodeByCoordinates,
+  isEpisodeSpoiler,
+} from '@/lib/episode-stream-target';
 import {
   type DetailsHistoryRouteState,
   episodeProgressKey,

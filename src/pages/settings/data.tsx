@@ -24,6 +24,8 @@ import { cn, pluralize } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SETTINGS_CAPTION_CLASS,
+  SETTINGS_ROW_CLASS,
+  SETTINGS_ROW_DESCRIPTION_CLASS,
   SettingsBody,
   SettingsGroup,
   SettingsGroupHeader,
@@ -120,7 +122,7 @@ function BackupRestore() {
     <SettingsBody className='flex flex-wrap items-center justify-between gap-x-5 gap-y-3'>
       <div className='min-w-0 flex-1 basis-48'>
         <p className='text-[14px] font-medium text-zinc-100'>Backup & restore</p>
-        <p className='mt-1 max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'>
+        <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>
           Export your data to a JSON file, or merge one back in. Backups can contain addon keys, so
           keep them private.
         </p>
@@ -330,7 +332,7 @@ function DataManager() {
                 key={cat.key}
                 id={settingsControlId(cat.label)}
                 data-clear-row={cat.key}
-                className='flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0'
+                className={SETTINGS_ROW_CLASS}
               >
                 <div className='min-w-0 flex-1 basis-32'>
                   <span className='flex flex-wrap items-baseline gap-x-2'>
@@ -347,9 +349,7 @@ function DataManager() {
                         : pluralize(cat.count, cat.unitSingular, cat.unitPlural)}
                     </span>
                   </span>
-                  <p className='mt-1 max-w-[64ch] text-[13px] leading-relaxed text-zinc-400'>
-                    {cat.description}
-                  </p>
+                  <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{cat.description}</p>
                 </div>
 
                 <div className='flex max-w-full shrink-0 flex-wrap items-center gap-2'>

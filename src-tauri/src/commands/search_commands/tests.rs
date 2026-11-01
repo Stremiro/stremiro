@@ -28,11 +28,24 @@ fn title_search_folds_ascii_case_before_provider_requests() {
 }
 
 #[test]
+fn title_search_rejects_app_links_before_provider_requests() {
+    for query in [
+        "stremiro://addon.example/test-token/manifest.json",
+        "  STREMIRO://details/movie/tt1 ",
+        "\u{feff}stremiro://addon.example/test-token",
+    ] {
+        let request = serde_json::from_value(serde_json::json!({"query": query})).unwrap();
+        assert!(super::build_search_criteria(request).is_err(), "{query}");
+    }
+}
+
+#[test]
 fn all_browse_interleaves_without_cloning_and_stops_nonadvancing_cursors() {
     let page = |ids: &[&str], next_skip| {
         Ok((
             super::CatalogFetchPage {
                 items: ids.iter().map(|id| test_media_item(id, "movie")).collect(),
+                partial: false,
                 next_skip,
             },
             Default::default(),
@@ -75,6 +88,7 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![],
+                partial: false,
                 next_skip: None,
             },
             Default::default(),
@@ -117,6 +131,7 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![test_media_item("s", "series")],
+                partial: false,
                 next_skip: Some(200),
             },
             Default::default(),
@@ -130,6 +145,38 @@ fn all_browse_keeps_partial_success_and_retries_only_active_failed_branches() {
             series: Some(200)
         })
     );
+}
+
+#[test]
+fn all_browse_preserves_failures_inside_a_media_type() {
+    let page = super::super::addon_registry::merge_catalog_pages(
+        [
+            Ok(super::CatalogFetchPage {
+                items: vec![test_media_item("tt1", "movie")],
+                partial: false,
+                next_skip: None,
+            }),
+            Err("secondary catalog offline".into()),
+        ],
+        "catalog failed",
+    )
+    .unwrap();
+    let page =
+        super::super::addon_registry::merge_catalog_pages([Ok(page)], "catalog failed").unwrap();
+    let merged = super::merge_all_browse_pages(
+        super::SearchCatalogContinuation {
+            all_cursors: Some(super::AllBrowseCursors {
+                movie: Some(0),
+                series: None,
+            }),
+            ..Default::default()
+        },
+        Some(Ok((page, Default::default()))),
+        None,
+    )
+    .unwrap();
+    assert_eq!(ids(&merged.items), ["tt1"]);
+    assert!(merged.partial);
 }
 
 #[test]
@@ -246,6 +293,7 @@ fn search_catalog_duplicate_only_branch_stops_independently() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![test_media_item("TT1", "movie")],
+                partial: false,
                 next_skip: Some(200),
             },
             search_claims(&[("movie:tt1", Some(0))]),
@@ -253,6 +301,7 @@ fn search_catalog_duplicate_only_branch_stops_independently() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![test_media_item("tt2", "series")],
+                partial: false,
                 next_skip: Some(200),
             },
             search_claims(&[("series:tt2", Some(1))]),
@@ -304,6 +353,7 @@ fn browse_catalog_exhausts_duplicate_empty_and_nonadvancing_pages() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![],
+                partial: false,
                 next_skip: None,
             },
             Default::default(),
@@ -328,6 +378,7 @@ fn all_browse_overlapping_filtered_items_keep_both_cursors_until_replayed() {
             Some(Ok((
                 super::CatalogFetchPage {
                     items: vec![],
+                    partial: false,
                     next_skip: Some(skip),
                 },
                 search_claims(&[("movie:shared", Some(index))]),
@@ -381,6 +432,7 @@ fn browse_filtered_titles_advance_once_and_branches_stop_independently() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![],
+                partial: false,
                 next_skip: Some(200),
             },
             claims(),
@@ -388,6 +440,7 @@ fn browse_filtered_titles_advance_once_and_branches_stop_independently() {
         Some(Ok((
             super::CatalogFetchPage {
                 items: vec![],
+                partial: false,
                 next_skip: Some(200),
             },
             search_claims(&[("series:new", Some(1))]),
@@ -679,6 +732,7 @@ fn empty_primary_titles_do_not_hide_titled_fallbacks() {
         [vec![empty], vec![fallback, visible]].map(|items| {
             Ok(crate::commands::addon_registry::CatalogFetchPage {
                 items,
+                partial: false,
                 next_skip: None,
             })
         }),

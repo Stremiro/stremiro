@@ -227,7 +227,7 @@ function HeroTitle({
   if (settledLogo === undefined && !pending) setSettledLogo(isHttpUrl(logo) ? logo : null);
   const [logoUrl, onLogoError] = useFailedSrc(settledLogo);
   const [loadedLogoUrl, setLoadedLogoUrl] = useState<string | null>(null);
-  const showText = settledLogo !== undefined && !logoUrl;
+  const showText = !logoUrl || loadedLogoUrl !== logoUrl;
 
   return (
     <>
@@ -240,9 +240,6 @@ function HeroTitle({
       >
         {title}
       </h1>
-      {!showText && loadedLogoUrl !== logoUrl && (
-        <Skeleton aria-hidden='true' className='h-12 w-80 max-w-full bg-white/[0.08] md:h-16' />
-      )}
       {logoUrl && (
         <RemoteImage
           src={logoUrl}

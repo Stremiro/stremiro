@@ -717,7 +717,7 @@ fn stored_app_ui_preferences_drops_only_malformed_fields() {
 fn recent_searches_record_newest_first_deduplicated_and_bounded() {
     let long = "x".repeat(200);
     let full: Vec<String> = (1..=8).map(|index| format!("q{index}")).collect();
-    let cases: [(&str, Vec<String>, String, Vec<String>); 9] = [
+    let cases: [(&str, Vec<String>, String, Vec<String>); 10] = [
         (
             "prepends",
             vec!["dune".into()],
@@ -734,6 +734,12 @@ fn recent_searches_record_newest_first_deduplicated_and_bounded() {
             "blank is ignored",
             vec!["dune".into()],
             " \t ".into(),
+            vec!["dune".into()],
+        ),
+        (
+            "install links are not search history",
+            vec!["dune".into()],
+            " STREMIRO://addon.example/test-token/manifest.json ".into(),
             vec!["dune".into()],
         ),
         (
@@ -802,7 +808,7 @@ fn recent_searches_record_newest_first_deduplicated_and_bounded() {
         (serde_json::json!({}), Vec::<String>::new()),
         (serde_json::json!({"recentSearches": "dune"}), Vec::new()),
         (
-            serde_json::json!({"recentSearches": ["Dune", "dune", " x "]}),
+            serde_json::json!({"recentSearches": ["Dune", "stremiro://addon.example/test-token", "dune", " x "]}),
             vec!["Dune".to_string(), "x".to_string()],
         ),
     ] {

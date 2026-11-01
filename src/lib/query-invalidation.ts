@@ -3,7 +3,6 @@ import type { CalendarRange, LibraryFilters } from '@/lib/api';
 import { nonBlank } from '@/lib/utils';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
-export const LIBRARY_GENRES_QUERY_KEY = [...LIBRARY_QUERY_KEY, 'genres'] as const;
 export const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
 // Reads library, statuses and history; kept off the profile-library prefix, whose entries are ProfileLibrary.
 export const WATCHLIST_QUERY_KEY = ['watchlist'] as const;
@@ -138,7 +137,7 @@ export async function invalidateLibraryQueries(
     refetchLibrary = true,
   }: { watchStatusChanged?: boolean; refetchLibrary?: boolean } = {},
 ) {
-  // Watch status is a library attribute; refresh shared dependents once. Smart lists derive from both.
+  // Watch status is a library attribute; refresh shared dependents once.
   // The resume rail and similar titles read statuses, not library membership.
   if (watchStatusChanged) {
     refreshScheduleQueries(queryClient);
@@ -147,9 +146,7 @@ export async function invalidateLibraryQueries(
     void invalidateQuery(queryClient, CALENDAR_EVENTS_QUERY_KEY);
   }
   await Promise.all([
-    refetchLibrary
-      ? invalidateQuery(queryClient, LIBRARY_QUERY_KEY)
-      : invalidateQuery(queryClient, LIBRARY_GENRES_QUERY_KEY),
+    ...(refetchLibrary ? [invalidateQuery(queryClient, LIBRARY_QUERY_KEY)] : []),
     invalidateQuery(queryClient, PROFILE_LIBRARY_QUERY_KEY),
     invalidateQuery(queryClient, WATCHLIST_QUERY_KEY),
     invalidateQuery(queryClient, LISTS_QUERY_KEY),

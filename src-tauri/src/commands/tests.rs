@@ -2302,20 +2302,6 @@ fn choose_watch_history_entry_prefers_playable_resume_metadata() {
 }
 
 #[test]
-fn choose_watch_history_entry_hydrates_lookup_from_imdb_id_for_series() {
-    let mut latest = mk_watch_progress("tt7654321", "series", 200);
-    latest.season = Some(1);
-    latest.episode = Some(1);
-    latest.position = 180.0;
-    latest.duration = 1_200.0;
-
-    let chosen =
-        choose_entry(vec![latest], HistoryEntryQuery::Latest, None).expect("history entry");
-
-    assert_eq!(chosen.last_stream_lookup_id.as_deref(), Some("tt7654321"));
-}
-
-#[test]
 fn choose_watch_history_entry_prefers_same_episode_resume_donor() {
     let mut latest = mk_watch_progress("kitsu:42", "anime", 300);
     latest.season = Some(1);
@@ -2832,7 +2818,6 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
         name: "  My List  ".to_string(),
         icon: "🎬".to_string(),
         item_ids: vec!["tt999".to_string()],
-        rules: None,
         items: vec![
             test_media_item("tt1", "series"),
             test_media_item("tt1", "series"),
@@ -2855,7 +2840,6 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     let dup = || {
         serde_json::json!(UserListWithItems {
             id: "list_dup".to_string(),
-            rules: None,
             name: "Dup".to_string(),
             icon: "".to_string(),
             item_ids: vec![],
@@ -2871,7 +2855,6 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     store.set(LISTS_ORDER_KEY, serde_json::json!(existing));
     let incoming = vec![serde_json::json!(UserListWithItems {
         id: "  list_here ".to_string(),
-        rules: None,
         name: "Incoming".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2917,7 +2900,6 @@ fn backup_prepare_import_lists_normalizes_dedupes_and_skips_existing() {
     // Repeated invalid ids also fold into one list under a fresh safe id.
     let hostile = serde_json::json!(UserListWithItems {
         id: "bad id!!".to_string(),
-        rules: None,
         name: "Hostile".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2943,7 +2925,6 @@ fn backup_prepare_import_lists_enforces_live_limits() {
         .collect();
     let oversized = serde_json::json!(UserListWithItems {
         id: "list_big".to_string(),
-        rules: None,
         name: "Big".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2964,7 +2945,6 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     let full_order: Vec<String> = (0..MAX_LISTS).map(|i| format!("list_{i}")).collect();
     let same_id = vec![serde_json::json!(UserListWithItems {
         id: "list_0".to_string(),
-        rules: None,
         name: "Existing".to_string(),
         icon: "".to_string(),
         item_ids: vec![],
@@ -2982,7 +2962,6 @@ fn backup_prepare_import_lists_enforces_live_limits() {
     // One new id past the cap rejects.
     let extra = vec![serde_json::json!(UserListWithItems {
         id: "list_new".to_string(),
-        rules: None,
         name: "New".to_string(),
         icon: "".to_string(),
         item_ids: vec![],

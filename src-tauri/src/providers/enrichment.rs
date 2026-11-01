@@ -68,6 +68,7 @@ const DISK_MAX_ENTRIES: usize = 128;
 const DISK_MAX_BYTES: usize = MAX_BODY_BYTES + 1024;
 const DEFAULT_COOLDOWN: Duration = Duration::from_secs(30);
 const TRANSIENT_ERROR: &str = "Enrichment data is temporarily unavailable.";
+const TOO_LARGE_ERROR: &str = "Enrichment response too large.";
 
 // All filesystem work runs on blocking workers under this one gate.
 static DISK_GATE: Mutex<()> = Mutex::new(());
@@ -180,6 +181,22 @@ impl EnrichmentClient {
         request: RequestBuilder,
         decode: impl Fn(&[u8]) -> Result<(T, bool), String>,
     ) -> Result<T, String> {
+        self.load_compacted(key, source, request, MAX_BODY_BYTES, Ok, decode)
+            .await
+    }
+
+    /// `load` for upstream bodies above the cache bound: a fresh body of up to
+    /// `max_body` bytes passes through `compact`, and only its output - held
+    /// to the cache bound - is decoded and cached.
+    pub(crate) async fn load_compacted<T>(
+        &self,
+        key: &str,
+        source: Source,
+        request: RequestBuilder,
+        max_body: usize,
+        compact: impl Fn(Vec<u8>) -> Result<Vec<u8>, String>,
+        decode: impl Fn(&[u8]) -> Result<(T, bool), String>,
+    ) -> Result<T, String> {
         if let Some(hit) = self.cached(key) {
             return decode(&hit.bytes).map(|(value, _)| value);
         }
@@ -225,8 +242,14 @@ impl EnrichmentClient {
                 }
                 *gate = Instant::now() + gap;
             }
-            let fetched = self.fetch(request, source).await;
+            let fetched = self.fetch(request, source, max_body).await;
             drop(gate);
+            let fetched = fetched.and_then(compact).and_then(|body| {
+                if body.len() > MAX_BODY_BYTES {
+                    return Err(TOO_LARGE_ERROR.to_string());
+                }
+                Ok(Arc::<[u8]>::from(body))
+            });
             let failed = |error: String| {
                 crate::operational_log::log_warn(
                     "enrichment",
@@ -270,7 +293,12 @@ impl EnrichmentClient {
     /// Returns the raw body; the expiry stamp is assigned by `load` after
     /// decode, once definitive-empty is known. 404 maps to canonical `null`
     /// bytes so decoders see one "definitive miss" shape.
-    async fn fetch(&self, request: RequestBuilder, source: Source) -> Result<Arc<[u8]>, String> {
+    async fn fetch(
+        &self,
+        request: RequestBuilder,
+        source: Source,
+        max_body: usize,
+    ) -> Result<Vec<u8>, String> {
         let response = match request.send().await {
             Ok(response) => response,
             Err(_) => {
@@ -281,7 +309,7 @@ impl EnrichmentClient {
         let status = response.status();
         self.check_anilist_exhaustion(response.headers(), source);
         if status == StatusCode::NOT_FOUND {
-            return Ok(Arc::from("null".as_bytes()));
+            return Ok(b"null".to_vec());
         }
         if status == StatusCode::TOO_MANY_REQUESTS {
             self.note_cooldown(source, retry_after_until(response.headers()));
@@ -294,17 +322,14 @@ impl EnrichmentClient {
         if !status.is_success() {
             return Err(TRANSIENT_ERROR.to_string());
         }
-        let bytes = read_bounded_body(response, MAX_BODY_BYTES, |_| {
-            "Enrichment response too large.".to_string()
-        })
-        .await
-        .map_err(|error| {
-            if matches!(&error, super::BoundedBodyError::Read(_)) {
-                self.note_cooldown(source, cooldown_from_now(DEFAULT_COOLDOWN));
-            }
-            error.into_message()
-        })?;
-        Ok(Arc::from(bytes.into_boxed_slice()))
+        read_bounded_body(response, max_body, |_| TOO_LARGE_ERROR.to_string())
+            .await
+            .map_err(|error| {
+                if matches!(&error, super::BoundedBodyError::Read(_)) {
+                    self.note_cooldown(source, cooldown_from_now(DEFAULT_COOLDOWN));
+                }
+                error.into_message()
+            })
     }
 
     fn check_anilist_exhaustion(&self, headers: &reqwest::header::HeaderMap, source: Source) {

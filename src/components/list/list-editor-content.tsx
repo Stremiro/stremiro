@@ -1,220 +1,32 @@
-import { useQuery } from '@tanstack/react-query';
-import { Check, Loader2, Sparkles } from 'lucide-react';
+import { Loader2 } from 'lucide-react';
 import { type RefObject, useEffect, useEffectEvent, useId, useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { DialogFooter } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import { RetryBanner } from '@/components/retry-banner';
-import { api, type SmartListRules, WATCH_STATUSES, WATCH_STATUS_LABELS } from '@/lib/api';
-import { LIBRARY_GENRES_QUERY_KEY } from '@/lib/query-invalidation';
 import { cn } from '@/lib/utils';
 import { DEFAULT_LIST_ICON, LIST_ICONS, ListIconTile } from './list-icons';
-
-const EMPTY_RULES: SmartListRules = { genres: [], statuses: [] };
-
-function chipClass(selected: boolean) {
-  return cn(
-    'inline-flex h-7 items-center rounded-md border px-2.5 text-[12px] font-medium leading-none transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-50',
-    selected
-      ? 'border-white/20 bg-white/[0.08] text-white'
-      : 'border-white/10 text-zinc-400 hover:bg-white/[0.04] hover:text-zinc-200',
-  );
-}
 
 export interface ListEditorValues {
   icon: string;
   name: string;
-  rules?: SmartListRules;
-}
-
-function SmartRulesEditor({
-  rules,
-  onChange,
-  disabled,
-  open,
-  id,
-}: {
-  rules: SmartListRules;
-  onChange: (rules: SmartListRules) => void;
-  disabled: boolean;
-  open: boolean;
-  id: string;
-}) {
-  const libraryGenres = useQuery({
-    queryKey: LIBRARY_GENRES_QUERY_KEY,
-    queryFn: api.getLibraryGenres,
-    enabled: open,
-    staleTime: 1000 * 60 * 5,
-  });
-  const options = libraryGenres.data ?? [];
-  const genres = [
-    ...options,
-    ...rules.genres.filter(
-      (genre) => !options.some((option) => option.toLowerCase() === genre.toLowerCase()),
-    ),
-  ];
-  return (
-    <fieldset
-      disabled={disabled}
-      className='space-y-3 rounded-lg border border-white/[0.08] bg-white/[0.02] p-3'
-    >
-      <legend className='px-1 text-[13px] font-medium text-zinc-300'>Smart rules</legend>
-      <p className='text-[12px] leading-relaxed text-zinc-500'>
-        Updates automatically from your Library. All rule groups must match; any selected genre or
-        status can match.
-      </p>
-      <div className='space-y-1.5'>
-        <span id={`${id}-type`} className='block text-[13px] font-medium text-zinc-300'>
-          Type
-        </span>
-        <div
-          role='group'
-          aria-labelledby={`${id}-type`}
-          className='flex rounded-lg border border-white/[0.08] bg-black/25 p-0.5'
-        >
-          {(
-            [
-              ['', 'Any type'],
-              ['movie', 'Movies'],
-              ['series', 'Series'],
-            ] as const
-          ).map(([value, label]) => (
-            <button
-              key={value || 'any'}
-              type='button'
-              aria-pressed={(rules.media_type ?? '') === value}
-              onClick={() => onChange({ ...rules, media_type: value || null })}
-              className={cn(
-                'inline-flex h-8 flex-1 items-center justify-center rounded-md text-[12px] font-medium leading-none transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/35',
-                (rules.media_type ?? '') === value
-                  ? 'bg-white/[0.1] text-white'
-                  : 'text-zinc-400 hover:text-zinc-200',
-              )}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
-      </div>
-      <fieldset className='space-y-1.5'>
-        <legend className='mb-1.5 text-[13px] font-medium text-zinc-300'>
-          Genres <span className='font-normal text-zinc-500'>(any selected)</span>
-        </legend>
-        {libraryGenres.isError && (
-          <RetryBanner
-            message="Couldn't load Library genres."
-            isRetrying={libraryGenres.isFetching}
-            onRetry={() => void libraryGenres.refetch()}
-          />
-        )}
-        <div className='flex max-h-28 flex-wrap gap-1.5 overflow-y-auto'>
-          {genres.map((genre) => {
-            const selected = rules.genres.some(
-              (value) => value.toLowerCase() === genre.toLowerCase(),
-            );
-            return (
-              <button
-                key={genre.toLowerCase()}
-                type='button'
-                aria-pressed={selected}
-                disabled={!selected && rules.genres.length >= 12}
-                className={chipClass(selected)}
-                onClick={() =>
-                  onChange({
-                    ...rules,
-                    genres: selected
-                      ? rules.genres.filter((value) => value.toLowerCase() !== genre.toLowerCase())
-                      : [...rules.genres, genre],
-                  })
-                }
-              >
-                {genre}
-              </button>
-            );
-          })}
-        </div>
-        {!libraryGenres.isError && genres.length === 0 && (
-          <p className='text-[12px] text-zinc-500'>
-            {libraryGenres.isPending
-              ? 'Loading genres…'
-              : 'Genres appear as you save titles to your Library.'}
-          </p>
-        )}
-      </fieldset>
-      <fieldset>
-        <legend className='mb-1.5 text-[13px] font-medium text-zinc-300'>
-          Status <span className='font-normal text-zinc-500'>(any selected)</span>
-        </legend>
-        <div className='flex flex-wrap gap-1.5'>
-          {WATCH_STATUSES.map((status) => (
-            <button
-              key={status}
-              type='button'
-              aria-pressed={rules.statuses.includes(status)}
-              className={chipClass(rules.statuses.includes(status))}
-              onClick={() =>
-                onChange({
-                  ...rules,
-                  statuses: rules.statuses.includes(status)
-                    ? rules.statuses.filter((value) => value !== status)
-                    : [...rules.statuses, status],
-                })
-              }
-            >
-              {WATCH_STATUS_LABELS[status]}
-            </button>
-          ))}
-        </div>
-      </fieldset>
-      <div className='grid grid-cols-2 gap-3'>
-        {(['year_from', 'year_to'] as const).map((field) => (
-          <div key={field} className='space-y-1.5'>
-            <label htmlFor={`${id}-${field}`} className='text-[13px] font-medium text-zinc-300'>
-              {field === 'year_from' ? 'Year from' : 'Year to'}
-            </label>
-            <Input
-              id={`${id}-${field}`}
-              type='number'
-              min={1889}
-              max={2100}
-              step={1}
-              placeholder='Any year'
-              value={rules[field] ?? ''}
-              onChange={(event) =>
-                onChange({
-                  ...rules,
-                  [field]: event.target.value === '' ? null : event.target.valueAsNumber,
-                })
-              }
-              className='h-9 border-white/10 bg-zinc-950 text-[13px]'
-            />
-          </div>
-        ))}
-      </div>
-    </fieldset>
-  );
 }
 
 export interface ListEditorDialogProps {
   initialIcon?: string;
   initialName: string;
-  initialRules?: SmartListRules | null;
-  allowSmart?: boolean;
   isPending: boolean;
   onOpenChange: (open: boolean) => void;
   onSubmit: (values: ListEditorValues) => void;
   open: boolean;
   returnFocusRef?: RefObject<HTMLElement | null>;
   submitLabel: string;
-  submitReady: (values: { icon: string; trimmedName: string; rules?: SmartListRules }) => boolean;
+  submitReady: (values: { icon: string; trimmedName: string }) => boolean;
   title: string;
 }
 
 export function ListEditorContent({
   initialIcon = DEFAULT_LIST_ICON,
   initialName,
-  initialRules,
-  allowSmart = false,
   isPending,
   onOpenChange,
   onSubmit,
@@ -225,14 +37,10 @@ export function ListEditorContent({
 }: ListEditorDialogProps & { nameInputRef: RefObject<HTMLInputElement | null> }) {
   const [name, setName] = useState(initialName);
   const [selectedIcon, setSelectedIcon] = useState(initialIcon);
-  const [isSmart, setIsSmart] = useState(Boolean(initialRules));
-  const [rules, setRules] = useState(initialRules ?? EMPTY_RULES);
   const nameInputId = useId();
   const resetDraft = useEffectEvent(() => {
     setName(initialName);
     setSelectedIcon(initialIcon);
-    setIsSmart(Boolean(initialRules));
-    setRules(initialRules ?? EMPTY_RULES);
   });
 
   useEffect(() => {
@@ -249,14 +57,12 @@ export function ListEditorContent({
 
     if (!canSubmit || isPending) return;
 
-    onSubmit({ icon: selectedIcon, name: trimmedName, rules: isSmart ? rules : undefined });
+    onSubmit({ icon: selectedIcon, name: trimmedName });
   };
 
   const trimmedName = name.trim();
   const nameLength = [...name].length;
-  const canSubmit =
-    nameLength <= 64 &&
-    submitReady({ icon: selectedIcon, trimmedName, rules: isSmart ? rules : undefined });
+  const canSubmit = nameLength <= 64 && submitReady({ icon: selectedIcon, trimmedName });
 
   return (
     <form onSubmit={handleSubmit} className='space-y-5'>
@@ -293,45 +99,6 @@ export function ListEditorContent({
           disabled={isPending}
         />
       </div>
-
-      {allowSmart && (
-        <button
-          type='button'
-          aria-pressed={isSmart}
-          disabled={isPending}
-          onClick={() => setIsSmart(!isSmart)}
-          className={cn(
-            'flex w-full items-center gap-2.5 rounded-lg border px-3 py-2.5 text-left transition-colors duration-150 motion-reduce:transition-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
-            isSmart
-              ? 'border-white/20 bg-white/[0.05] text-white'
-              : 'border-white/10 text-zinc-300 hover:border-white/15 hover:text-white',
-          )}
-        >
-          <Sparkles aria-hidden='true' className='size-4 shrink-0 text-zinc-400' />
-          <span className='min-w-0 flex-1'>
-            <span className='block text-[13px] font-medium'>Smart list</span>
-            <span className='mt-0.5 block text-[12px] font-normal text-zinc-500'>
-              Automatically collect Library titles using rules
-            </span>
-          </span>
-          <Check
-            aria-hidden='true'
-            className={cn(
-              'size-4 shrink-0 text-zinc-200 transition-opacity duration-150 motion-reduce:transition-none',
-              isSmart ? 'opacity-100' : 'opacity-0',
-            )}
-          />
-        </button>
-      )}
-      {isSmart && (
-        <SmartRulesEditor
-          rules={rules}
-          onChange={setRules}
-          disabled={isPending}
-          open={open}
-          id={nameInputId}
-        />
-      )}
 
       <div className='space-y-2'>
         <div className='h-4 text-[13px] font-medium leading-4 text-zinc-300'>Icon</div>

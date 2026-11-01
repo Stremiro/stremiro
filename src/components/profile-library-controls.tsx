@@ -6,8 +6,6 @@ import {
   Check,
   CheckSquare,
   ChevronDown,
-  LayoutGrid,
-  List,
   ListPlus,
   type LucideIcon,
   Plus,
@@ -16,6 +14,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
+
 import { type RefObject, useCallback, useEffect, useId, useRef, useState } from 'react';
 import { CreateListDialog, warmListEditorDialog } from '@/components/list/list-editor-dialog';
 import { ListIconTile } from '@/components/list/list-icons';
@@ -30,6 +29,7 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/search-input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { SegmentedControl, ViewToggle } from '@/components/ui/segmented-control';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useListSummaries } from '@/hooks/use-media-library';
 import { useScrolledPastTitlebar } from '@/hooks/use-scroll-edge-indicators';
@@ -40,12 +40,7 @@ import {
   type WatchStatus,
 } from '@/lib/api';
 import { cn, pluralize, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
-import {
-  handleRadioGroupKeyDown,
-  isEditableTarget,
-  OPEN_DIALOG_SELECTOR,
-  RADIX_POPPER_CONTENT_SELECTOR,
-} from '@/lib/dom';
+import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 type LibrarySort = Exclude<NonNullable<LibraryFilters['sort']>, 'title-asc'>;
 type LibraryStatusFilter = WatchStatus | 'all' | 'none';
 
@@ -68,11 +63,6 @@ const FILTER_MENU_BUTTON_CLASS = cn(
   'h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0',
   LIBRARY_FOCUS_RING_CLASS,
 );
-
-const VIEW_MODES: { value: 'grid' | 'list'; label: string; icon: LucideIcon }[] = [
-  { value: 'grid', label: 'Grid view', icon: LayoutGrid },
-  { value: 'list', label: 'List view', icon: List },
-];
 
 export const TYPE_OPTIONS: { value: 'all' | 'movie' | 'series'; label: string }[] = [
   { value: 'all', label: 'All' },
@@ -386,105 +376,6 @@ function FilterMenuItem({
   );
 }
 
-export function SegmentPill({
-  index,
-  count,
-  inset,
-  className,
-}: {
-  index: number;
-  count: number;
-  inset: number;
-  className?: string;
-}) {
-  return (
-    <span
-      aria-hidden='true'
-      className={cn(
-        'nav-sliding-pill pointer-events-none absolute rounded-sm bg-(--accent-nav)',
-        className,
-      )}
-      style={{
-        top: inset,
-        bottom: inset,
-        left: inset,
-        width: `calc((100% - ${inset * 2}px) / ${count})`,
-        transform: `translateX(${index * 100}%)`,
-      }}
-    />
-  );
-}
-
-export function SegmentedControl<T extends string>({
-  label,
-  value,
-  options,
-  onChange,
-}: {
-  label: string;
-  value: T;
-  options: readonly { value: T; label: string; icon?: LucideIcon }[];
-  onChange: (value: T) => void;
-}) {
-  return (
-    <div
-      role='radiogroup'
-      aria-label={label}
-      className='relative isolate grid auto-cols-fr grid-flow-col p-0.5 rounded-md bg-white/[0.03] border border-white/[0.07] shrink-0'
-    >
-      <SegmentPill
-        index={options.findIndex((option) => option.value === value)}
-        count={options.length}
-        inset={2}
-      />
-      {options.map((option) => {
-        const Icon = option.icon;
-        const selected = option.value === value;
-        return (
-          <button
-            key={option.value}
-            type='button'
-            role='radio'
-            aria-checked={selected}
-            aria-label={Icon ? option.label : undefined}
-            title={Icon ? option.label : undefined}
-            tabIndex={selected ? 0 : -1}
-            onKeyDown={handleRadioGroupKeyDown}
-            onClick={() => {
-              if (!selected) onChange(option.value);
-            }}
-            className={cn(
-              'nav-switch-item relative z-10 flex h-8 items-center justify-center rounded-sm text-[12px] font-medium',
-              Icon ? 'w-8' : 'px-3',
-              LIBRARY_FOCUS_RING_CLASS,
-              selected ? 'text-(--on-accent-nav)' : 'text-zinc-400 hover:text-zinc-100',
-            )}
-          >
-            {Icon ? <Icon className='w-3.5 h-3.5' /> : option.label}
-          </button>
-        );
-      })}
-    </div>
-  );
-}
-
-export function ViewToggle({
-  viewMode,
-  onChange,
-}: {
-  viewMode: 'grid' | 'list';
-  onChange: (v: 'grid' | 'list') => void;
-}) {
-  return (
-    <SegmentedControl
-      label='Collection view'
-      value={viewMode}
-      options={VIEW_MODES}
-      onChange={onChange}
-    />
-  );
-}
-
 export function useCollectionSelection(
   ids: string[],
   visibleIds: string[],
@@ -753,7 +644,7 @@ export function LibraryBulkActionBar({
     isFetching: listsFetching,
     refetch: refetchLists,
   } = useListSummaries(undefined, { enabled: listsOpen });
-  const customLists = allLists.filter((list) => !list.is_smart);
+  const customLists = allLists;
   const selectedCount = selectedIds.length;
   const actionsDisabled = selectedCount === 0 || isBusy;
 
@@ -872,12 +763,7 @@ export function LibraryBulkActionBar({
             )}
             {!listsLoading && !listsError && customLists.length === 0 && (
               <p className='px-2.5 py-2 text-xs text-zinc-500'>
-                No manual lists yet — create one to group titles.
-                {allLists.length > 0 && (
-                  <span className='mt-1 block'>
-                    Smart lists fill automatically from their rules.
-                  </span>
-                )}
+                No lists yet — create one to group titles.
               </p>
             )}
             {customLists.map((list) => (

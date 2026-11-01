@@ -94,7 +94,7 @@ export function CreateListDialog({
   const mountedRef = useMountedRef();
 
   const createList = useMutation({
-    mutationFn: ({ icon, name, rules }: ListEditorValues) => api.createList(name, icon, rules),
+    mutationFn: ({ icon, name }: ListEditorValues) => api.createList(name, icon),
     onSuccess: (newList) => {
       notifyAction('List created', { detail: newList.name });
       // Refresh after any follow-up write (e.g. adding the item) settles, so lists don't refetch empty first.
@@ -112,7 +112,6 @@ export function CreateListDialog({
   return (
     <ListEditorDialog
       initialName=''
-      allowSmart={!onCreated}
       isPending={createList.isPending}
       onOpenChange={onOpenChange}
       onSubmit={(values) => createList.mutate(values)}
@@ -136,37 +135,29 @@ export function RenameListDialog({ list, open, onOpenChange }: RenameListDialogP
   const mountedRef = useMountedRef();
 
   const renameList = useMutation({
-    mutationFn: ({ icon, name, rules }: ListEditorValues) =>
-      api.renameList(list.id, name, icon, rules),
+    mutationFn: ({ icon, name }: ListEditorValues) => api.renameList(list.id, name, icon),
     onSuccess: (_result, variables) => {
       notifyAction('List updated', { detail: variables.name });
       if (mountedRef.current) onOpenChange(false);
     },
     onError: (error) =>
       notifyAction(getListErrorMessage(error) ?? 'Failed to rename list', { tone: 'error' }),
-    onSettled: (_data, _error, { rules }) =>
-      JSON.stringify(rules) === JSON.stringify(list.rules ?? undefined)
-        ? invalidateListMetadataQueries(queryClient)
-        : invalidateListQueries(queryClient),
+    onSettled: () => invalidateListMetadataQueries(queryClient),
   });
 
   return (
     <ListEditorDialog
       initialIcon={list.icon || undefined}
       initialName={list.name}
-      initialRules={list.rules}
       isPending={renameList.isPending}
       onOpenChange={onOpenChange}
       onSubmit={(values) => renameList.mutate(values)}
       open={open}
       submitLabel='Save Changes'
-      submitReady={({ icon, trimmedName, rules }) =>
-        Boolean(trimmedName) &&
-        (trimmedName !== list.name ||
-          icon !== list.icon ||
-          JSON.stringify(rules) !== JSON.stringify(list.rules ?? undefined))
+      submitReady={({ icon, trimmedName }) =>
+        Boolean(trimmedName) && (trimmedName !== list.name || icon !== list.icon)
       }
-      title={list.rules ? 'Edit Smart List' : 'Edit List'}
+      title='Edit List'
     />
   );
 }

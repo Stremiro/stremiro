@@ -18,7 +18,6 @@ import type {
   ProfilePreferences,
   ProfilePreferencesPatch,
   RemovedListItem,
-  SmartListRules,
   StreamSelectorPreferencesPatch,
   StreamSelectorPreferencesState,
   UserList,
@@ -169,15 +168,13 @@ export const storeApi = {
     return write<number>('bulk_remove_from_library', { ids });
   },
   getLibrary: () => safeInvoke<MediaItem[]>('get_library'),
-  getLibraryGenres: () => safeInvoke<string[]>('get_library_genres'),
   getProfileLibrary: (filters: LibraryFilters) =>
     safeInvoke<ProfileLibrary>('get_profile_library', { filters }),
   getWatchlist: () => safeInvoke<MediaItem[]>('get_watchlist'),
-  createList: (name: string, icon?: string, rules?: SmartListRules) =>
-    write<UserList>('create_list', { name, icon, rules }),
+  createList: (name: string, icon?: string) => write<UserList>('create_list', { name, icon }),
   deleteList: (listId: string) => write<void>('delete_list', { listId }),
-  renameList: (listId: string, name: string, icon?: string, rules?: SmartListRules) =>
-    write<void>('rename_list', { listId, name, icon, rules }),
+  renameList: (listId: string, name: string, icon?: string) =>
+    write<void>('rename_list', { listId, name, icon }),
   addToList: (listId: string, item: MediaItem) =>
     write<UserListSummary>('add_to_list', { listId, item: toMediaItem(item) }),
   bulkAddToList: (listId: string, itemIds: string[]) =>

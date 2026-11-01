@@ -293,7 +293,7 @@ export function useStreamSelectorController({
       (previousQuery?.queryKey[1] === selectorSessionKey ? previousData : undefined),
     enabled: open && streams.length > 0,
     staleTime: Infinity,
-    gcTime: STREAM_SELECTOR_GC_TIME_MS,
+    gcTime: unfilteredView ? 0 : STREAM_SELECTOR_GC_TIME_MS,
     retry: false,
     structuralSharing: false,
   });

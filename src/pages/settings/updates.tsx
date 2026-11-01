@@ -2,6 +2,7 @@ import { openUrl } from '@tauri-apps/plugin-opener';
 import { ArrowUpRight, Download, Loader2, RefreshCw } from 'lucide-react';
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { ReleaseNotes } from '@/components/release-notes';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -69,39 +70,25 @@ function AppChangelog({
     >
       {pendingUpdate && currentVersion ? (
         <div className='flex justify-end px-4 pt-3'>
-          <div
-            className='relative isolate grid grid-cols-2 rounded-md border border-white/[0.07] bg-white/[0.03] p-0.5'
-            role='group'
-            aria-label='Release version'
-          >
-            <span
-              aria-hidden='true'
-              className='pointer-events-none absolute bottom-0.5 left-0.5 top-0.5 rounded-sm bg-(--accent-nav) transition-transform duration-200 ease-out motion-reduce:transition-none'
-              style={{
-                width: 'calc((100% - 4px) / 2)',
-                transform: `translateX(${showNewRelease ? 0 : 100}%)`,
-              }}
-            />
-            {(['new', 'installed'] as const).map((option) => (
-              <button
-                key={option}
-                type='button'
-                aria-pressed={selectedRelease === option}
-                onClick={() => setSelectedRelease(option)}
-                className={cn(
-                  'nav-switch-item relative z-10 h-7 rounded-sm px-2.5 text-[11px] font-medium tabular-nums focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/25',
-                  selectedRelease === option
-                    ? 'text-(--on-accent-nav)'
-                    : option === 'new'
-                      ? 'text-emerald-300 hover:bg-white/[0.06] hover:text-emerald-200'
-                      : 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
-                )}
-              >
-                v{option === 'new' ? pendingUpdate.version : currentVersion} ·{' '}
-                {option === 'new' ? 'New' : 'Installed'}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl
+            compact
+            label='Release version'
+            value={selectedRelease}
+            options={[
+              {
+                value: 'new',
+                label: `v${pendingUpdate.version} · New`,
+                unselectedClassName:
+                  'text-emerald-300 hover:bg-white/[0.06] hover:text-emerald-200',
+              },
+              {
+                value: 'installed',
+                label: `v${currentVersion} · Installed`,
+                unselectedClassName: 'text-zinc-400 hover:bg-white/[0.06] hover:text-zinc-100',
+              },
+            ]}
+            onChange={setSelectedRelease}
+          />
         </div>
       ) : null}
       <div className='flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-white/[0.06] px-4 py-3'>

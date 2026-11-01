@@ -20,7 +20,7 @@ import {
 import { createPortal } from 'react-dom';
 import { InlineMenu } from '@/components/inline-menu';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
-import { CHROME_ICON_STROKE } from '@/components/player-chrome-styles';
+import { CHROME_ICON_STROKE, CHROME_VALUE_BUBBLE_CLASS } from '@/components/player-chrome-styles';
 import {
   MINI_ICON_BUTTON_CLASS,
   PlayerNextButton,
@@ -291,35 +291,53 @@ const MiniPlayerSeekSlider = memo(function MiniPlayerSeekSlider({
     isDraggingRef.current = false;
     seekPreviewStore.publish(null);
   };
+  const [aimedSeconds, setAimedSeconds] = useState<number | null>(null);
   return (
-    <PlayerSlider
-      variant='track'
-      aria-label='Seek'
-      value={[Math.max(0, displayTime)]}
-      max={Math.max(duration, 1)}
-      step={0.5}
-      aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
-      disabled={duration <= 0}
-      marks={skipSegments?.length ? miniSkipMarks(skipSegments) : undefined}
-      onPointerDown={(event) => {
-        event.stopPropagation();
-        if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
-        isDraggingRef.current = true;
-      }}
-      onValueChange={(value) => {
-        // Radix commits keyboard steps before firing onValueChange.
-        if (isDraggingRef.current) seekPreviewStore.publish(value[0] ?? null);
-      }}
-      onValueCommit={(value) => {
-        const target = value[0];
-        seekPreviewStore.publish(null);
-        if (typeof target === 'number') onSeek(target);
-      }}
-      onPointerUp={clearDragPreview}
-      onPointerCancel={clearDragPreview}
-      onLostPointerCapture={clearDragPreview}
-      className='h-6 w-full'
-    />
+    <div className='relative'>
+      {aimedSeconds !== null && duration > 0 && (
+        <span
+          aria-hidden='true'
+          className={cn(
+            CHROME_VALUE_BUBBLE_CLASS,
+            'pointer-events-none absolute bottom-full mb-1.5 -translate-x-1/2',
+          )}
+          style={{
+            left: `clamp(22px, ${(aimedSeconds / duration) * 100}%, calc(100% - 22px))`,
+          }}
+        >
+          {formatTime(aimedSeconds)}
+        </span>
+      )}
+      <PlayerSlider
+        variant='track'
+        aria-label='Seek'
+        value={[Math.max(0, displayTime)]}
+        max={Math.max(duration, 1)}
+        step={0.5}
+        aria-valuetext={`${formatTime(displayTime)} of ${formatTime(duration)}`}
+        disabled={duration <= 0}
+        marks={skipSegments?.length ? miniSkipMarks(skipSegments) : undefined}
+        onAimChange={setAimedSeconds}
+        onPointerDown={(event) => {
+          event.stopPropagation();
+          if (!event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+          isDraggingRef.current = true;
+        }}
+        onValueChange={(value) => {
+          // Radix commits keyboard steps before firing onValueChange.
+          if (isDraggingRef.current) seekPreviewStore.publish(value[0] ?? null);
+        }}
+        onValueCommit={(value) => {
+          const target = value[0];
+          seekPreviewStore.publish(null);
+          if (typeof target === 'number') onSeek(target);
+        }}
+        onPointerUp={clearDragPreview}
+        onPointerCancel={clearDragPreview}
+        onLostPointerCapture={clearDragPreview}
+        className='h-6 w-full'
+      />
+    </div>
   );
 });
 
@@ -347,8 +365,6 @@ interface MiniPlayerProps {
   endOfMedia?: boolean;
   /** Active skip-segment CTA — `s` fires it from the focused surface. */
   skipAction?: { label: string; onSkip: () => void } | null;
-  /** Rendered one extra beat after expand so the chrome dissolves out — inert while it plays. */
-  exiting?: boolean;
   getInitialPosition: () => MiniPlayerPosition | null;
   /** Expanded surface rect at dock time — the frame FLIPs from it into the docked corner. */
   dockOrigin?: MiniVideoRect | null;
@@ -389,7 +405,6 @@ export const MiniPlayer = memo(function MiniPlayer({
   upNext,
   endOfMedia,
   skipAction,
-  exiting,
   getInitialPosition,
   dockOrigin,
   claimFocusOnMount,
@@ -420,7 +435,6 @@ export const MiniPlayer = memo(function MiniPlayer({
   const { idle: pointerIdle, wake: wakePointer } = usePointerIdle();
   const menu = useInlineMenu({
     rootRef: frameRef,
-    enabled: !exiting,
     returnFocus: () => videoSurfaceRef.current,
   });
   useEffect(() => {
@@ -461,13 +475,12 @@ export const MiniPlayer = memo(function MiniPlayer({
   // External store, not state — per-pointermove publishes reach only the tick leaves.
   const [seekPreviewStore] = useState(() => createSubscribableStore<number | null>(null));
   const [isMoving, setIsMoving] = useState(false);
-  // Mount veiled when a live surface exists — the mask hole beats the first margin IPC, and an uncovered gap
-  // shows a wrong-cropped slice. The exiting instance dissolves over live video — never veiled.
-  const [isSettling, setIsSettling] = useState(hasVideo && !exiting);
+  // Cover the frame until its native rectangle and mask hole agree.
+  const [isSettling, setIsSettling] = useState(hasVideo);
   // One-shot dock entrance: FLIP the frame from the expanded rect so the surface doesn't visibly teleport later;
   // reduced-motion/videoless mounts use the plain keyframe.
   const [dockFlipFrom] = useState<MiniVideoRect | null>(() => {
-    if (exiting || !hasVideo || !dockOrigin || prefersReducedMotion()) return null;
+    if (!hasVideo || !dockOrigin || prefersReducedMotion()) return null;
     // A collapsed-surface margin (overlays shrink it to a sliver) is not a valid FLIP source.
     const fitted = fitRectToAspect(dockOrigin, metrics.frameWidth / metrics.videoHeight);
     return fitted.width > metrics.frameWidth ? fitted : null;
@@ -673,16 +686,15 @@ export const MiniPlayer = memo(function MiniPlayer({
 
   // Retain the mount-only claim through parent updates during docking.
   useEffect(() => {
-    if (exiting || !pendingFocusClaimRef.current || isDocking) return;
+    if (!pendingFocusClaimRef.current || isDocking) return;
     pendingFocusClaimRef.current = false;
     const active = document.activeElement;
     if (active === document.body || active === document.documentElement || active === null) {
       videoSurfaceRef.current?.focus({ preventScroll: true });
     }
-  }, [exiting, isDocking]);
+  }, [isDocking]);
 
-  // A live surface or resize keeps its cover until landing; the dock FLIP holds its own
-  // cover and the exiting instance never veils.
+  // A live surface or resize keeps its cover until landing; the dock FLIP owns its reveal.
   useEffect(() => {
     if (!hasVideo) clearTimer(settleTimerRef);
     // A just-landed FLIP owns its reveal via hole verification — arming the fixed cover would only extend it.
@@ -690,8 +702,8 @@ export const MiniPlayer = memo(function MiniPlayer({
       landingRef.current = false;
       return;
     }
-    if (hasVideo && !isDocking && !exiting) startSurfaceSettle();
-  }, [hasVideo, startSurfaceSettle, isDocking, exiting]);
+    if (hasVideo && !isDocking) startSurfaceSettle();
+  }, [hasVideo, startSurfaceSettle, isDocking]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -878,7 +890,6 @@ export const MiniPlayer = memo(function MiniPlayer({
   const showLiveSurface = hasVideo && !error;
   const controlsActive =
     showLiveSurface &&
-    !exiting &&
     !isMoving &&
     !isDocking &&
     !isSettling &&
@@ -894,14 +905,13 @@ export const MiniPlayer = memo(function MiniPlayer({
       data-mini-player
       role='region'
       aria-label='Mini player'
-      inert={exiting || isDocking}
+      inert={isDocking}
       className={cn(
         // will-change: the frame's transform is rewritten per pointermove via direct style writes.
         'fixed left-0 top-0 z-[45] touch-none select-none will-change-transform',
         isMoving ? 'cursor-grabbing' : 'cursor-grab',
-        (exiting || isDocking) && 'pointer-events-none',
+        isDocking && 'pointer-events-none',
       )}
-      aria-hidden={exiting || undefined}
       style={{
         width: metrics.frameWidth,
         height: metrics.videoHeight,
@@ -946,7 +956,7 @@ export const MiniPlayer = memo(function MiniPlayer({
           MINI_FRAME_RADIUS_CLASS,
           'relative overflow-hidden transition-shadow duration-200 ease-out motion-reduce:animate-none',
           // A FLIPped mount already entered — the pop-in would restart at the dock rect and read as a second pop.
-          exiting ? 'animate-mini-undock' : dockFlipFrom ? '' : 'animate-mini-dock',
+          !dockFlipFrom && 'animate-mini-dock',
           isMoving
             ? 'shadow-[0_0_0_1px_rgba(255,255,255,0.16),0_20px_44px_-16px_rgba(0,0,0,0.88)]'
             : 'shadow-[0_0_0_1px_rgba(255,255,255,0.08),0_16px_36px_-18px_rgba(0,0,0,0.78)]',

@@ -37,7 +37,10 @@ export function useSearchPageState() {
 
   const setQuery = (nextQuery: string) => setInput({ urlQuery, query: nextQuery });
   const trimmedQuery = query.trim();
-  const trimmedDebouncedQuery = isComposing || trimmedQuery ? urlQuery.trim() : '';
+  const trimmedDebouncedQuery =
+    !isLinkDraft && !isAppLinkText(urlQuery) && (isComposing || trimmedQuery)
+      ? urlQuery.trim()
+      : '';
 
   // Facets are URL-owned; only typing needs a local draft and debounce.
   const updateSearchParams = useCallback(
@@ -53,7 +56,7 @@ export function useSearchPageState() {
         setSearchParams(nextParams, { replace: true });
       }
     },
-    [isComposing, isLinkDraft, searchParams, setSearchParams, trimmedQuery],
+    [isComposing, isLinkDraft, searchParams, setSearchParams, setReflectedQuery, trimmedQuery],
   );
   const flushQuery = useCallback(() => {
     if (isComposing || isLinkDraft || window.location.pathname !== pathname) return;
@@ -63,9 +66,13 @@ export function useSearchPageState() {
   // Remember drafts immediately; commit typing without adding history.
   useEffect(() => {
     const rememberedParams = new URLSearchParams(searchParams);
-    if (!isLinkDraft) {
-      if (query) rememberedParams.set('q', query);
-      else rememberedParams.delete('q');
+    if (isLinkDraft) {
+      // A link draft leaves the committed query alone unless it is itself a link.
+      if (isAppLinkText(urlQuery)) rememberedParams.delete('q');
+    } else if (query) {
+      rememberedParams.set('q', query);
+    } else {
+      rememberedParams.delete('q');
     }
     rememberSearchParams(rememberedParams);
 

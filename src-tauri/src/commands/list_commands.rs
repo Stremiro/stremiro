@@ -1,15 +1,14 @@
 use super::list_helpers::{
     list_item_store_key, list_meta_key, load_list, load_lists_order, normalize_list_icon,
-    normalize_list_id, normalize_list_name, normalize_smart_list_library, reorder_known_ids,
-    smart_list_items, validate_smart_list_rules, ListError, ListErrorKind, ListItemIdentity,
-    SmartListRules, UserList, UserListSummary, UserListWithItems, LISTS_ORDER_KEY,
+    normalize_list_id, normalize_list_name, reorder_known_ids, ListError, ListErrorKind,
+    ListItemIdentity, UserList, UserListSummary, UserListWithItems, LISTS_ORDER_KEY,
     LIST_ITEM_KEY_PREFIX, MAX_LISTS, MAX_LIST_ITEMS,
 };
 use super::store_helpers::{merge_library_item, normalize_library_item};
 use super::{normalize_media_id, run_typed_store_op, with_store, DurableStore, LISTS_STORE_FILE};
 use crate::providers::MediaItem;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use tauri::{command, AppHandle};
 
 fn require_list_id(list_id: &str) -> Result<String, String> {
@@ -21,7 +20,6 @@ pub async fn create_list(
     app: AppHandle,
     name: String,
     icon: Option<String>,
-    rules: Option<SmartListRules>,
 ) -> Result<UserList, ListError> {
     // Store file IO is blocking: run the read-modify-write off the async
     // worker, matching the library/history command pattern.
@@ -36,7 +34,6 @@ pub async fn create_list(
             name,
             icon: normalize_list_icon(icon.as_deref()),
             item_ids: Vec::new(),
-            rules: rules.map(validate_smart_list_rules).transpose()?,
         };
 
         let mut order = load_lists_order(&store)?;
@@ -88,21 +85,11 @@ pub async fn rename_list(
     list_id: String,
     name: String,
     icon: Option<String>,
-    rules: Option<SmartListRules>,
 ) -> Result<(), ListError> {
     let list_id = require_list_id(&list_id)?;
     with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
 
-        if let Some(rules) = rules {
-            if list.rules.is_none() {
-                return Err(ListError::new(
-                    ListErrorKind::InvalidRules,
-                    "Only smart lists have rules.",
-                ));
-            }
-            list.rules = Some(validate_smart_list_rules(rules)?);
-        }
         list.name = normalize_list_name(&name).ok_or_else(|| {
             ListError::new(ListErrorKind::ListNameRequired, "List name is required.")
         })?;
@@ -127,7 +114,6 @@ pub async fn add_to_list(
     let list_id = require_list_id(&list_id)?;
     with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
-        list.require_manual()?;
         let item = normalize_library_item(item).ok_or_else(|| {
             "Invalid media item. Missing required id, title, or type.".to_string()
         })?;
@@ -151,7 +137,6 @@ pub async fn add_to_list(
             icon: list.icon,
             item_count: list.item_ids.len(),
             contains_item: true,
-            is_smart: false,
         })
     })
     .await
@@ -163,7 +148,6 @@ fn add_list_items(
     resolve_items: impl FnOnce() -> Result<Vec<MediaItem>, ListError>,
 ) -> Result<usize, ListError> {
     let mut list = load_list(store, list_id)?;
-    list.require_manual()?;
     let items = resolve_items()?;
     if items.is_empty() {
         return Ok(0);
@@ -231,7 +215,6 @@ fn remove_list_items(
     item_ids: Vec<String>,
 ) -> Result<Vec<RemovedListItem>, ListError> {
     let mut list = load_list(store, list_id)?;
-    list.require_manual()?;
     let ids: HashSet<String> = super::store_helpers::normalize_bulk_ids(item_ids)?
         .into_iter()
         .collect();
@@ -285,11 +268,10 @@ fn restore_list_entries(
     list_id: &str,
     entries: Vec<RemovedListItem>,
 ) -> Result<(), ListError> {
-    let mut list = load_list(store, list_id)?;
-    list.require_manual()?;
     if entries.len() > super::store_helpers::MAX_BULK_ITEMS {
         return Err("Too many titles.".to_string().into());
     }
+    let mut list = load_list(store, list_id)?;
     let mut prepared = Vec::with_capacity(entries.len());
     let mut seen = HashSet::with_capacity(entries.len());
     for entry in entries {
@@ -372,23 +354,7 @@ pub async fn remove_from_list(
 pub async fn get_lists(app: AppHandle) -> Result<Vec<UserListWithItems>, ListError> {
     run_typed_store_op(move || {
         let store = super::open_store(&app, LISTS_STORE_FILE)?;
-        let mut lists = read_lists(&store)?;
-        if lists.iter().any(|list| list.rules.is_some()) {
-            let (library, statuses) = read_smart_list_sources(
-                |file| super::open_store(&app, file),
-                lists.iter().filter_map(|list| list.rules.as_ref()),
-            )?;
-            let library = normalize_smart_list_library(&library);
-            for list in &mut lists {
-                if let Some(rules) = &list.rules {
-                    list.items = smart_list_items(rules, &library, &statuses)
-                        .cloned()
-                        .collect();
-                    list.item_ids = list.items.iter().map(|item| item.id.clone()).collect();
-                }
-            }
-        }
-        Ok(lists)
+        Ok(read_lists(&store)?)
     })
     .await
 }
@@ -411,67 +377,20 @@ pub async fn get_list_summaries(
             },
             |list, _| list,
         )?;
-        let (library, statuses) = if lists.iter().any(|list| list.rules.is_some()) {
-            read_smart_list_sources(
-                |file| super::open_store(&app, file),
-                lists.iter().filter_map(|list| list.rules.as_ref()),
-            )?
-        } else {
-            (Vec::new(), HashMap::new())
-        };
-        let library = normalize_smart_list_library(&library);
         Ok(lists
             .into_iter()
-            .map(|list| {
-                let (item_count, contains_item) = if let Some(rules) = &list.rules {
-                    smart_list_items(rules, &library, &statuses).fold(
-                        (0, false),
-                        |(count, contains), item| {
-                            (count + 1, contains || item_id.as_ref() == Some(&item.id))
-                        },
-                    )
-                } else {
-                    (
-                        list.item_ids.len(),
-                        item_id
-                            .as_ref()
-                            .is_some_and(|id| list.item_ids.contains(id)),
-                    )
-                };
-                UserListSummary {
-                    is_smart: list.rules.is_some(),
-                    item_count,
-                    contains_item,
-                    id: list.id,
-                    name: list.name,
-                    icon: list.icon,
-                }
+            .map(|list| UserListSummary {
+                item_count: list.item_ids.len(),
+                contains_item: item_id
+                    .as_ref()
+                    .is_some_and(|id| list.item_ids.contains(id)),
+                id: list.id,
+                name: list.name,
+                icon: list.icon,
             })
             .collect())
     })
     .await
-}
-
-fn read_smart_list_sources<'a>(
-    open_store: impl Fn(&str) -> Result<DurableStore, String>,
-    rules: impl IntoIterator<Item = &'a SmartListRules>,
-) -> Result<(Vec<MediaItem>, HashMap<String, String>), String> {
-    let library = open_store(super::LIBRARY_STORE_FILE)?;
-    let mut snapshot = super::store_helpers::read_library_snapshot(&library)?;
-    let items = snapshot
-        .index
-        .iter()
-        .filter_map(|id| normalize_media_id(id).and_then(|id| snapshot.items.remove(&id)))
-        .collect();
-    let statuses = if rules.into_iter().any(|rules| !rules.statuses.is_empty()) {
-        super::store_helpers::read_watch_status_snapshot(&open_store(
-            super::WATCH_STATUS_STORE_FILE,
-        )?)?
-        .items
-    } else {
-        HashMap::new()
-    };
-    Ok((items, statuses))
 }
 
 pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>, String> {
@@ -489,7 +408,6 @@ pub(super) fn read_lists(store: &DurableStore) -> Result<Vec<UserListWithItems>,
             icon: list.icon,
             item_ids: list.item_ids,
             items,
-            rules: list.rules,
         },
     )
 }
@@ -523,16 +441,6 @@ fn read_and_repair_lists_with<T, R>(
             continue;
         };
         surviving_ids.push(list_id.clone());
-        if list.rules.is_some() {
-            if list.id != *list_id {
-                list.id = list_id.clone();
-                store.set(list_meta_key(list_id), json!(list));
-                modified = true;
-            }
-            list.item_ids.clear();
-            result.push(build(list, Vec::new()));
-            continue;
-        }
         let mut seen = HashSet::with_capacity(list.item_ids.len());
         // Read every original row before repairing keys — swapped ids must not
         // overwrite an unread row; collisions keep the first valid item (backup import's dedupe policy).
@@ -606,7 +514,6 @@ pub async fn reorder_list_items(
     }
     with_store(app, LISTS_STORE_FILE, move |store| {
         let mut list = load_list(&store, &list_id)?;
-        list.require_manual()?;
 
         list.item_ids = reorder_known_ids(&list.item_ids, item_ids);
 
@@ -655,62 +562,9 @@ mod tests {
                 name: "List".into(),
                 icon: "list".into(),
                 item_ids: ids,
-                rules: None,
             }),
         );
         store.save().unwrap();
-    }
-
-    #[test]
-    fn smart_lists_require_status_reads_only_for_status_rules() {
-        let library = test_store();
-        let statuses = test_store();
-        library
-            .store
-            .set(super::super::LIBRARY_INDEX_KEY, json!(["a"]));
-        library.store.set(
-            super::super::store_helpers::library_item_key("a"),
-            json!(test_media_item("a", "movie")),
-        );
-        statuses.store.set(
-            super::super::WATCH_STATUS_INDEX_KEY,
-            json!({"corrupt": true}),
-        );
-        let status_rules = SmartListRules {
-            statuses: vec![super::super::list_helpers::WatchStatus::Watching],
-            ..Default::default()
-        };
-        let open = |file: &str| match file {
-            super::super::LIBRARY_STORE_FILE => Ok(library.store.clone()),
-            super::super::WATCH_STATUS_STORE_FILE => Ok(statuses.store.clone()),
-            _ => unreachable!(),
-        };
-        assert_eq!(
-            read_smart_list_sources(open, Some(&status_rules)).unwrap_err(),
-            "Invalid watch_status_index index."
-        );
-        let (items, statuses) = read_smart_list_sources(
-            |file| {
-                assert_eq!(file, super::super::LIBRARY_STORE_FILE);
-                Ok(library.store.clone())
-            },
-            None,
-        )
-        .unwrap();
-        assert_eq!(items.len(), 1);
-        assert!(statuses.is_empty());
-        let error = read_smart_list_sources(
-            |file| {
-                if file == super::super::LIBRARY_STORE_FILE {
-                    Ok(library.store.clone())
-                } else {
-                    Err("Status store unavailable.".into())
-                }
-            },
-            Some(&status_rules),
-        )
-        .unwrap_err();
-        assert_eq!(error, "Status store unavailable.");
     }
 
     #[test]
@@ -976,7 +830,7 @@ mod tests {
     }
 
     #[test]
-    fn bulk_list_missing_and_smart_lists_fail_without_mutations() {
+    fn bulk_list_missing_fails_without_mutations() {
         let fixture = test_store();
         seed_list(&fixture.store, Vec::new());
         assert!(normalize_list_id("invalid:list").is_none());
@@ -998,32 +852,5 @@ mod tests {
             .unwrap()
             .item_ids
             .is_empty());
-        let mut list = load_list(&fixture.store, "list_a").unwrap();
-        list.rules = Some(SmartListRules {
-            year_from: Some(2020),
-            ..Default::default()
-        });
-        fixture.store.set(list_meta_key("list_a"), json!(list));
-        assert_eq!(
-            add_list_items(&fixture.store, "list_a", || panic!(
-                "smart lists must fail before library resolution"
-            ))
-            .unwrap_err()
-            .kind,
-            ListErrorKind::SmartListReadOnly,
-        );
-        assert_eq!(
-            remove_list_items(&fixture.store, "list_a", Vec::new())
-                .unwrap_err()
-                .kind,
-            ListErrorKind::SmartListReadOnly,
-        );
-        assert_eq!(
-            restore_list_entries(&fixture.store, "list_a", Vec::new())
-                .unwrap_err()
-                .kind,
-            ListErrorKind::SmartListReadOnly,
-        );
-        assert_eq!(fixture.store.save_count(), 1);
     }
 }

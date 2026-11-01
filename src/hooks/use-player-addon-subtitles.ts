@@ -52,6 +52,7 @@ export function usePlayerAddonSubtitles({
 }: UsePlayerAddonSubtitlesOptions) {
   const [pickedAddonSubtitleId, setPickedAddonSubtitleId] = useState<string | null>(null);
   const [addonSubtitleLoadingId, setAddonSubtitleLoadingId] = useState<string | null>(null);
+  const subtitleLoadingRef = useRef(false);
   const subtitleSessionEpochRef = useRef(0);
   const autoLoadedLanguageRef = useRef<string | null>(null);
 
@@ -60,6 +61,7 @@ export function usePlayerAddonSubtitles({
     subtitleSessionEpochRef.current += 1;
     setPickedAddonSubtitleId(null);
     setAddonSubtitleLoadingId(null);
+    subtitleLoadingRef.current = false;
     autoLoadedLanguageRef.current = null;
     return () => {
       subtitleSessionEpochRef.current += 1;
@@ -112,13 +114,17 @@ export function usePlayerAddonSubtitles({
     subtitle: AddonSubtitle,
     { automatic }: { automatic?: boolean } = {},
   ) => {
-    if (addonSubtitleLoadingId || !mountedRef.current) return;
+    // Repeated input can arrive before the loading state commits.
+    if (subtitleLoadingRef.current || !mountedRef.current) return;
+    subtitleLoadingRef.current = true;
+    if (automatic) autoLoadedLanguageRef.current = autoLoadLanguage;
     const subtitleKey = subtitle.selectionKey;
     const epoch = subtitleSessionEpochRef.current;
+    let selected = false;
     setAddonSubtitleLoadingId(subtitleKey);
     return (async () => {
       // The controller owns track reuse and preferences; Rust owns download and native confirmation.
-      const selected = await selectAddonSubtitle(subtitle, { automatic });
+      selected = await selectAddonSubtitle(subtitle, { automatic });
       if (!mountedRef.current || epoch !== subtitleSessionEpochRef.current) return;
       if (!selected) {
         if (!automatic) toast.error('Failed to load addon subtitle');
@@ -134,6 +140,8 @@ export function usePlayerAddonSubtitles({
       })
       .finally(() => {
         if (mountedRef.current && epoch === subtitleSessionEpochRef.current) {
+          if (automatic && !selected) autoLoadedLanguageRef.current = null;
+          subtitleLoadingRef.current = false;
           setAddonSubtitleLoadingId(null);
         }
       });
@@ -157,6 +165,7 @@ export function usePlayerAddonSubtitles({
     }
     if (!loadedAddonSubtitles?.length || autoLoadedLanguageRef.current === autoLoadLanguage) return;
     const epoch = subtitleSessionEpochRef.current;
+    let cancelled = false;
     void api
       .resolvePreferredTrackSelection(
         loadedAddonSubtitles.map((subtitle, index) => ({
@@ -171,15 +180,18 @@ export function usePlayerAddonSubtitles({
           matchedTrackId === undefined ? undefined : loadedAddonSubtitles[matchedTrackId];
         if (
           subtitle &&
+          !cancelled &&
           epoch === subtitleSessionEpochRef.current &&
           autoLoadedLanguageRef.current !== autoLoadLanguage
         ) {
-          autoLoadedLanguageRef.current = autoLoadLanguage;
           selectAutoLoadedSubtitle(subtitle, activeStreamLoadKey, autoLoadLanguage);
         }
       })
       .catch(() => undefined);
-  }, [activeStreamLoadKey, autoLoadLanguage, loadedAddonSubtitles]);
+    return () => {
+      cancelled = true;
+    };
+  }, [activeStreamLoadKey, autoLoadLanguage, loadedAddonSubtitles, subtitlesQuery.dataUpdatedAt]);
 
   const handleSubTrackSelect = (trackId: number | 'no') => {
     const epoch = subtitleSessionEpochRef.current;

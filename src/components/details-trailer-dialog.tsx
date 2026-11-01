@@ -19,6 +19,7 @@ import {
   parseYouTubeMessage,
   postYouTubeCommand,
   postYouTubeListening,
+  retryYouTubeHandshake,
   YOUTUBE_EMBED_ORIGIN,
   youTubeThumbnailUrl,
 } from '@/lib/youtube-player';
@@ -27,8 +28,6 @@ import { cn, scrollBehavior } from '@/lib/utils';
 const TRAILER_ICON_BUTTON_CLASS =
   'inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-zinc-400 transition-colors duration-150 hover:bg-white/[0.08] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none';
 const TRAILER_START_VOLUME = 25;
-const PLAYER_HANDSHAKE_RETRY_MS = 250;
-const PLAYER_HANDSHAKE_BUDGET_MS = 4_000;
 
 interface DetailsTrailerProps {
   trailers: NonNullable<MediaDetails['trailers']>;
@@ -63,20 +62,21 @@ function revealTrailer(button: HTMLButtonElement) {
 function useTrailerStartVolume(frame: HTMLIFrameElement | null) {
   useEffect(() => {
     if (!frame) return;
-    // The player ignores the listening handshake until its script boots.
-    const retry = window.setInterval(() => postYouTubeListening(frame), PLAYER_HANDSHAKE_RETRY_MS);
-    const stop = window.setTimeout(() => window.clearInterval(retry), PLAYER_HANDSHAKE_BUDGET_MS);
+    let ready = false;
+    const stopRetry = retryYouTubeHandshake(
+      () => postYouTubeListening(frame),
+      () => ready,
+    );
     const handleMessage = (event: MessageEvent) => {
       if (event.source !== frame.contentWindow || !isYouTubePlayerOrigin(event.origin)) return;
       if (!isYouTubeReadyEvent(parseYouTubeMessage(event.data))) return;
-      window.clearInterval(retry);
+      ready = true;
       postYouTubeCommand(frame, 'setVolume', [TRAILER_START_VOLUME]);
     };
     window.addEventListener('message', handleMessage);
     postYouTubeListening(frame);
     return () => {
-      window.clearInterval(retry);
-      window.clearTimeout(stop);
+      stopRetry();
       window.removeEventListener('message', handleMessage);
     };
   }, [frame]);

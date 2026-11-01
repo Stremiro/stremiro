@@ -57,7 +57,6 @@ import { prefetchSearchCatalog, searchCatalogQueryOptions } from '@/lib/search-c
 import { sameSearchGenre, type SearchFeed, type SearchMediaType } from '@/lib/search-page-state';
 import {
   cn,
-  createObjectIdentity,
   pluralize,
   queryNeedsRetry,
   scrollBehavior,
@@ -108,8 +107,6 @@ const SEARCH_FEED_OPTIONS: ReadonlyArray<{
   { id: 'featured', label: 'Featured', icon: Sparkles, tint: 'text-amber-200' },
   { id: 'new', label: 'New', icon: Clock3, tint: 'text-sky-300' },
 ];
-
-const getResultPageId = createObjectIdentity();
 
 const SEARCH_SKELETON_COUNT = 21;
 const SEARCH_SKELETON_KEYS = Array.from(
@@ -191,7 +188,6 @@ interface SearchResultsProps {
   onClearSearch: () => void;
   refetch: () => Promise<unknown>;
   results: MediaItem[];
-  resultSetKey: number;
   partial: boolean;
   showSkeleton: boolean;
   trimmedDebouncedQuery: string;
@@ -215,7 +211,6 @@ function SearchResults({
   onClearSearch,
   refetch,
   results,
-  resultSetKey,
   partial,
   showSkeleton,
   trimmedDebouncedQuery,
@@ -400,10 +395,7 @@ function SearchResults({
           You&apos;re offline. Showing cached titles until you reconnect.
         </div>
       )}
-      <div
-        key={resultSetKey}
-        className='animate-in fade-in-0 slide-in-from-bottom-1 duration-300 ease-out motion-reduce:animate-none'
-      >
+      <div className='animate-in fade-in-0 slide-in-from-bottom-1 duration-300 ease-out motion-reduce:animate-none'>
         <WindowVirtualizedGrid
           items={results}
           getItemKey={mediaCardRailKey}
@@ -556,8 +548,6 @@ export function Search() {
     enabled: isOnline,
   });
   const results = data?.pages.flatMap((page) => page.items) ?? [];
-  // Paging keeps the first page's identity, so only a new result set replays the entrance.
-  const firstPage = data?.pages[0];
   const partial = data?.pages.some((page) => page.partial) ?? false;
 
   // Manifest-driven union of `genre` extra options the enabled addons declare
@@ -1282,7 +1272,6 @@ export function Search() {
             onClearSearch={handleClearSearch}
             refetch={refetch}
             results={results}
-            resultSetKey={firstPage ? getResultPageId(firstPage.items) : 0}
             partial={partial}
             showSkeleton={showSkeleton}
             trimmedDebouncedQuery={trimmedDebouncedQuery}

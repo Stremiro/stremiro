@@ -1,5 +1,5 @@
 import { replaceEqualDeep } from '@tanstack/react-query';
-import { useCallback, useEffect, useEffectEvent, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 
 import { usePlaybackLanguagePreferences } from '@/hooks/use-playback-language-preferences';
@@ -112,12 +112,6 @@ export function usePlayerTrackController({
     language: string;
   } | null>(null);
 
-  const resetTrackListState = useEffectEvent(() => {
-    trackListRef.current = [];
-    setAudioTracks([]);
-    setSubTracks([]);
-  });
-
   const activeAudioTrack = audioTracks.find((track) => !!track.selected) ?? null;
   const activeSubTrack = subTracks.find((track) => !!track.selected) ?? null;
   const subtitlesOff = subTracks.length > 0 && !activeSubTrack;
@@ -138,7 +132,7 @@ export function usePlayerTrackController({
     return tracks;
   }, []);
 
-  const refreshTracksImmediate = useCallback(async () => {
+  const refreshTracksImmediate = useCallback(() => {
     const generation = trackRefreshGenerationRef.current;
     const confirmedRevision = confirmedTrackRevisionRef.current;
     const { audio, sub } = observedTrackIdsRef.current;
@@ -717,7 +711,7 @@ export function usePlayerTrackController({
   ]);
 
   useEffect(() => {
-    resetTrackListState();
+    applyTrackList([]);
     lastRecordedTrackOutcomeRef.current = null;
     trackSwitchingRef.current = { audio: false, sub: false };
     // Drop stale bursts and selection observations from the previous session.
@@ -733,7 +727,7 @@ export function usePlayerTrackController({
       observedTrackIdsRef.current = { audio: undefined, sub: undefined };
     };
     // `resetKey` already carries the stream URL — it subsumes activeStreamUrl.
-  }, [resetKey]);
+  }, [applyTrackList, resetKey]);
 
   return {
     addonSubtitleLanguage: pendingAddonSubtitleLanguage,

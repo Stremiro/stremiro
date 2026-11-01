@@ -13,11 +13,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { Link, NavigationType, useLocation, useNavigationType, useParams } from 'react-router';
-import {
-  EpisodeCard,
-  type EpisodeEmphasis,
-  isEpisodeSpoiler,
-} from '@/components/details-episode-card';
+import { EpisodeCard, type EpisodeEmphasis } from '@/components/details-episode-card';
 import { DetailsCredits } from '@/components/details-credits';
 import {
   creditsMediaType,
@@ -69,7 +65,7 @@ import {
 } from '@/lib/api';
 import { buildEpisodeShareLink, buildTitleShareLink } from '@/lib/app-links';
 import { PLAYER_RESTART_START_TIME } from '@/lib/player-navigation';
-import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
+import { episodeMatchesCoordinates, isEpisodeSpoiler } from '@/lib/episode-stream-target';
 import { claimDetailsHero } from '@/lib/navigation';
 import { copyText } from '@/lib/notify';
 import {

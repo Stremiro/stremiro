@@ -86,8 +86,8 @@ export function PlayerPlayButton({
         variant === 'pip'
           ? 'bg-white/10 text-white hover:bg-white/20'
           : variant === 'mini'
-            ? 'h-9 w-9 rounded-lg bg-(--accent-act) text-(--on-accent-act) hover:bg-(--accent-act)/90'
-            : 'bg-(--accent-act) text-(--on-accent-act) hover:bg-(--accent-act)/90 [&_svg]:drop-shadow-none'
+            ? 'h-9 w-9 rounded-lg bg-(--accent-act) text-(--on-accent-act) hover:bg-(--accent-act)/90 hover:text-(--on-accent-act)'
+            : 'bg-(--accent-act) text-(--on-accent-act) hover:bg-(--accent-act)/90 hover:text-(--on-accent-act) [&_svg]:drop-shadow-none'
       }
       {...props}
     >

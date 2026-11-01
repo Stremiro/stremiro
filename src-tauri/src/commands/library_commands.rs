@@ -1,4 +1,3 @@
-use super::list_helpers::normalize_smart_list_genre;
 use super::playback_state::PlaybackStateService;
 use super::store_helpers::{
     library_item_key, load_index, load_library_index, load_library_map, load_watch_status_index,
@@ -14,7 +13,7 @@ use crate::providers::MediaItem;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use tauri::{command, AppHandle, State};
 
 /// Bound on the library index: every add rewrites the index key, so an
@@ -195,25 +194,6 @@ fn read_library_items(store: &DurableStore) -> Result<Vec<MediaItem>, String> {
     let mut items: Vec<MediaItem> = load_library_map(store)?.into_values().collect();
     items.sort_by_cached_key(|item| (item.title.to_lowercase(), item.id.clone()));
     Ok(items)
-}
-
-fn read_library_genres(store: &DurableStore) -> Result<Vec<String>, String> {
-    let mut items: Vec<_> = read_library_snapshot(store)?.items.into_values().collect();
-    items.sort_by_cached_key(|item| (item.title.to_lowercase(), item.id.clone()));
-    let mut genres = BTreeMap::new();
-    for item in items {
-        for genre in item.genres.into_iter().flatten() {
-            genres
-                .entry(normalize_smart_list_genre(&genre))
-                .or_insert(genre);
-        }
-    }
-    Ok(genres.into_values().collect())
-}
-
-#[command]
-pub async fn get_library_genres(app: AppHandle) -> Result<Vec<String>, String> {
-    with_store(app, LIBRARY_STORE_FILE, |store| read_library_genres(&store)).await
 }
 
 #[derive(Default, Deserialize)]
@@ -497,34 +477,6 @@ mod tests {
         fixture.store.save().unwrap();
         assert_eq!(std::fs::read(&fixture.path).unwrap(), before);
         assert_eq!(fixture.store.save_count(), 1);
-    }
-
-    #[test]
-    fn library_genres_are_sorted_deduplicated_and_keep_first_library_casing() {
-        let fixture = test_store();
-        assert!(read_library_genres(&fixture.store).unwrap().is_empty());
-        let index = json!(["z", "missing", "a"]);
-        fixture.store.set(LIBRARY_INDEX_KEY, index.clone());
-        for (id, title, genres) in [
-            ("z", "Zulu", vec!["DRAMA", "Comedy", "äpfel"]),
-            ("a", "Alpha", vec![" Drama ", "ÄPFEL", "Action"]),
-        ] {
-            let mut item = test_media_item(id, "movie");
-            item.title = title.into();
-            item.genres = Some(genres.into_iter().map(str::to_string).collect());
-            fixture.store.set(library_item_key(id), json!(item));
-        }
-        assert_eq!(
-            read_library_genres(&fixture.store).unwrap(),
-            ["Action", "Comedy", "Drama", "ÄPFEL"]
-        );
-        assert_eq!(fixture.store.get(LIBRARY_INDEX_KEY), Some(index));
-        assert_eq!(fixture.store.save_count(), 0);
-        fixture
-            .store
-            .set(LIBRARY_INDEX_KEY, json!({"corrupt": true}));
-        assert!(read_library_genres(&fixture.store).is_err());
-        assert_eq!(fixture.store.save_count(), 0);
     }
 
     #[test]

@@ -214,21 +214,6 @@ fn reputation_scoring_bounds_cooldowns_and_future_failures() {
 }
 
 #[test]
-fn stream_family_priority_rewards_recent_nearby_success() {
-    let now_ms = 100_000;
-    let snapshot = PlaybackStreamFamilySnapshot {
-        last_success_season: Some(1),
-        last_success_episode: Some(4),
-        ..stream_family_snapshot(None, Some(99_000), None)
-    };
-
-    assert_eq!(
-        score_stream_family_priority(Some(&snapshot), Some(1), Some(5), now_ms),
-        4
-    );
-}
-
-#[test]
 fn stream_family_priority_penalizes_recent_nearby_failure() {
     let now_ms = 100_000;
     let snapshot = PlaybackStreamFamilySnapshot {

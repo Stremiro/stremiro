@@ -1,4 +1,4 @@
-import type { Episode } from '@/lib/api';
+import type { Episode, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { nonBlank } from '@/lib/utils';
 
 type EpisodeCoordinates = Pick<
@@ -62,4 +62,21 @@ export function findEpisodeByCoordinates(
 ): Episode | undefined {
   if (season === undefined || episode === undefined) return undefined;
   return episodes?.find((candidate) => episodeMatchesCoordinates(candidate, season, episode));
+}
+
+/** Spoiler predicate: episodes past the watched ceiling hide their metadata, unless in progress or current. */
+export function isEpisodeSpoiler(
+  episode: Episode,
+  spoilerProtection: boolean,
+  watchedEpisodeCeiling: TitleWatchProgress['watchedEpisodeCeiling'] | undefined,
+  progress: WatchProgress | undefined,
+  isCurrent = false,
+): boolean {
+  const ceiling = watchedEpisodeCeiling?.[episode.season];
+  return (
+    spoilerProtection &&
+    !isCurrent &&
+    !progress?.has_started_watching &&
+    (ceiling === undefined || episode.episode > ceiling)
+  );
 }

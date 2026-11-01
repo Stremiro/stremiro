@@ -11,7 +11,6 @@ import {
   type ProfileLibrary,
   type ProfilePreferences,
   type ProfilePreferencesPatch,
-  type SmartListRules,
   type StreamSelectorData,
   type StreamSelectorPreferences,
   type StreamSelectorPreferencesState,
@@ -247,8 +246,6 @@ function removePreviewLibraryItems(ids: ReadonlySet<string>): number {
 function addPreviewListItems(listId: string, items: MediaItem[]): number {
   const list = previewLists.find((entry) => entry.id === listId);
   if (!list) throw { kind: 'list_not_found', message: 'List not found' };
-  if (list.rules)
-    throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
   const existingIds = new Set(list.item_ids);
   const additions = items.filter((item) => {
     if (existingIds.has(item.id)) return false;
@@ -559,21 +556,6 @@ export async function handlePreviewInvoke<T>(
       return null as T;
     case 'get_library':
       return previewLibrary as T;
-    case 'get_library_genres': {
-      const genres = new Map<string, string>();
-      for (const item of previewLibrary.toSorted(
-        (a, b) =>
-          a.title.toLowerCase().localeCompare(b.title.toLowerCase()) || a.id.localeCompare(b.id),
-      )) {
-        for (const genre of item.genres ?? []) {
-          const normalized = genre.trim().toLowerCase();
-          if (!genres.has(normalized)) genres.set(normalized, genre);
-        }
-      }
-      return [...genres.entries()]
-        .toSorted(([a], [b]) => (a < b ? -1 : Number(a > b)))
-        .map(([, genre]) => genre) as T;
-    }
     case 'get_profile_library': {
       const filters = (args?.filters ?? {}) as LibraryFilters;
       const query = filters.query?.trim().toLowerCase() ?? '';
@@ -670,7 +652,6 @@ export async function handlePreviewInvoke<T>(
         icon: list.icon,
         item_count: list.item_ids.length,
         contains_item: list.item_ids.includes(readStringArg(args, 'itemId', '').trim()),
-        is_smart: Boolean(list.rules),
       })) as T;
     case 'create_list': {
       previewListSeq += 1;
@@ -679,7 +660,6 @@ export async function handlePreviewInvoke<T>(
         name: readStringArg(args, 'name', 'Untitled list'),
         icon: readStringArg(args, 'icon', 'list'),
         item_ids: [],
-        rules: args?.rules as SmartListRules | undefined,
       };
       previewLists = [...previewLists, { ...list, items: [] }];
       return list as T;
@@ -694,9 +674,6 @@ export async function handlePreviewInvoke<T>(
               ...list,
               name: readStringArg(args, 'name', list.name),
               icon: readStringArg(args, 'icon', list.icon),
-              rules: list.rules
-                ? ((args?.rules as SmartListRules | undefined) ?? list.rules)
-                : undefined,
             }
           : list,
       );
@@ -712,7 +689,6 @@ export async function handlePreviewInvoke<T>(
         icon: list.icon,
         item_count: list.item_ids.length,
         contains_item: true,
-        is_smart: false,
       } as T;
     }
     case 'bulk_add_to_list':
@@ -726,8 +702,6 @@ export async function handlePreviewInvoke<T>(
       const ids = new Set(Array.isArray(args?.itemIds) ? args.itemIds : []);
       const list = previewLists.find((entry) => entry.id === args?.listId);
       if (!list) throw { kind: 'list_not_found', message: 'List not found' };
-      if (list.rules)
-        throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
       const entries = (list.items ?? []).flatMap((item) =>
         ids.has(item.id) ? [{ item, index: list.item_ids.indexOf(item.id) }] : [],
       );
@@ -746,8 +720,6 @@ export async function handlePreviewInvoke<T>(
       const entries = args?.entries as { item: MediaItem; index: number }[];
       previewLists = previewLists.map((list) => {
         if (list.id !== args?.listId) return list;
-        if (list.rules)
-          throw { kind: 'smart_list_read_only', message: 'Smart lists update automatically.' };
         const items = [...(list.items ?? [])];
         const itemIds = [...list.item_ids];
         for (const entry of entries.toSorted((a, b) => a.index - b.index)) {
@@ -761,7 +733,7 @@ export async function handlePreviewInvoke<T>(
     }
     case 'remove_from_list':
       previewLists = previewLists.map((list) =>
-        list.id === args?.listId && !list.rules
+        list.id === args?.listId
           ? {
               ...list,
               item_ids: list.item_ids.filter((id) => id !== args?.itemId),

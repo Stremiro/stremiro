@@ -6,7 +6,7 @@ import {
 } from '@tanstack/react-query';
 
 import { api, type SearchCatalogContinuation, type SearchCatalogPage } from '@/lib/api';
-import { canonicalizeSearchText } from '@/lib/api-cache';
+import { canonicalizeSearchText, foldAsciiCase } from '@/lib/api-cache';
 import { SEARCH_CATALOG_GC_TIME_MS, SEARCH_CATALOG_QUERY_KEY } from '@/lib/query-invalidation';
 import type { SearchFacets } from '@/lib/search-page-state';
 
@@ -20,7 +20,8 @@ type CachedSearchCatalogData = InfiniteData<
 
 export function searchCatalogQueryOptions(facets: SearchFacets, localYear: number) {
   // The UI key and request share the same bounded text; Rust validates it.
-  const normalizedQuery = canonicalizeSearchText(facets.query);
+  const query = canonicalizeSearchText(facets.query);
+  const normalizedQuery = query && foldAsciiCase(query);
   const normalizedGenre = canonicalizeSearchText(facets.genre);
   // Feeds pick a browse catalog; text search always hits the search catalog,
   // so a feed must neither filter it nor split its cache key.

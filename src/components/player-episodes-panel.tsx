@@ -18,16 +18,14 @@ import {
   useRef,
   useState,
 } from 'react';
-import { isEpisodeSpoiler } from '@/components/details-episode-card';
+import { EpisodeThumb } from '@/components/episode-thumb';
 import {
   CHROME_CLOSE_BUTTON_CLASS,
   CHROME_ICON_BUTTON_CLASS,
   CHROME_ICON_CLASS,
   CHROME_ICON_STROKE,
 } from '@/components/player-chrome-styles';
-import { RemoteImage } from '@/components/remote-image';
 import { RetryBanner } from '@/components/retry-banner';
-import { WatchProgressStrip } from '@/components/watch-progress-strip';
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -42,7 +40,7 @@ import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-prefer
 import { useLocalDay } from '@/hooks/use-local-day';
 import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
 import { ariaKeyShortcuts, withShortcutHint } from '@/lib/player-keybindings';
-import { episodeMatchesCoordinates } from '@/lib/episode-stream-target';
+import { episodeMatchesCoordinates, isEpisodeSpoiler } from '@/lib/episode-stream-target';
 import { getWatchProgressPercent } from '@/lib/history-playback';
 import { formatAirDate } from '@/lib/schedule-dates';
 import { cn, getEpisodeTitle, pluralize } from '@/lib/utils';
@@ -281,24 +279,16 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
               className='absolute left-0 top-3 bottom-3 w-0.5 rounded-r-full bg-(--accent-act)'
             />
           )}
-          <div className='relative aspect-video w-[120px] shrink-0 overflow-hidden rounded-[5px] bg-zinc-900 ring-1 ring-white/[0.06]'>
-            <div className='absolute inset-0 flex items-center justify-center text-[13px] font-semibold tabular-nums text-zinc-700'>
-              E{ep.episode}
-            </div>
-            {thumbnail && (
-              <RemoteImage
-                src={thumbnail}
-                loading='lazy'
-                className={cn(
-                  'relative h-full w-full object-cover',
-                  isSpoiler && 'scale-110 blur-md',
-                  isWatched && !isCurrent && 'opacity-60',
-                )}
-                alt=''
-              />
-            )}
-            <WatchProgressStrip percent={progressPercent} className='bg-black/50' />
-          </div>
+          <EpisodeThumb
+            episode={ep.episode}
+            src={thumbnail}
+            isSpoiler={isSpoiler}
+            progressPercent={progressPercent}
+            className='aspect-video w-[120px] rounded-[5px] ring-1 ring-white/[0.06]'
+            fallbackClassName='text-[13px] font-semibold tabular-nums text-zinc-700'
+            imageClassName={isWatched && !isCurrent ? 'opacity-60' : undefined}
+            stripClassName='bg-black/50'
+          />
 
           <div className='min-w-0 flex-1'>
             <p className='flex min-w-0 items-center gap-1.5 text-[11.5px] leading-4 tabular-nums text-zinc-500'>

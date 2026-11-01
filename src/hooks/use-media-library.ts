@@ -1207,7 +1207,7 @@ export function useMediaCollectionActions({ item, isInLibrary }: UseMediaCollect
   });
 
   const addItemToNewList = async (list: UserList) => {
-    if (!item || list.rules) return;
+    if (!item) return;
     try {
       const summary = await api.addToList(list.id, item);
       queryClient.setQueryData<UserListSummary[]>(listSummariesQueryKey(item.id), (old) => {

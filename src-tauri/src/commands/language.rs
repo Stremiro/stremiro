@@ -1,4 +1,4 @@
-use crate::providers::{bound_optional, push_unique};
+use crate::providers::bound_optional;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -341,12 +341,6 @@ fn flag_language(country: [u8; 2]) -> Option<&'static str> {
     })
 }
 
-fn is_exact_only_language_alias(value: &str) -> bool {
-    SUPPORTED_LANGUAGES
-        .iter()
-        .any(|language| language.exact_aliases.contains(&value))
-}
-
 fn normalize_lower(value: Option<&str>) -> Option<String> {
     let value = value?;
     if value.chars().nth(TRACK_LANG_MAX_CHARS).is_some() {
@@ -434,36 +428,6 @@ pub(crate) fn build_mpv_language_selection_options(
     options
 }
 
-pub(crate) fn language_candidates(preferred: &str) -> Vec<String> {
-    let Some(normalized) = normalize_lower(Some(preferred)) else {
-        return Vec::new();
-    };
-
-    let canonical =
-        normalize_language_token(Some(&normalized), false).unwrap_or_else(|| normalized.clone());
-    let mut candidates = Vec::new();
-
-    push_unique(&mut candidates, &canonical);
-    push_unique(&mut candidates, &normalized);
-
-    for alias in language_aliases(&canonical) {
-        push_unique(&mut candidates, *alias);
-    }
-
-    let token_text = super::normalize_token_text(&normalized);
-    for token in token_text.split_whitespace() {
-        if let Some(token_canonical) = canonicalize_language_token(token) {
-            push_unique(&mut candidates, token_canonical);
-
-            for alias in language_aliases(token_canonical) {
-                push_unique(&mut candidates, *alias);
-            }
-        }
-    }
-
-    candidates
-}
-
 fn contains_any_token(tokens: &[&str], needles: &[&str]) -> bool {
     needles.iter().any(|needle| tokens.contains(needle))
 }
@@ -476,11 +440,12 @@ fn contains_phrase(tokens: &[&str], phrase: &[&str]) -> bool {
     tokens.windows(phrase.len()).any(|window| window == phrase)
 }
 
-fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -> i32 {
+// The resolver canonicalizes preferences; prose titles match only the table's safe aliases.
+fn track_language_score(track: &TrackLanguageCandidate, preferred_language: &str) -> i32 {
     let tagged_language = normalize_language_token(track.lang.as_deref(), false);
     if tagged_language
         .as_ref()
-        .is_some_and(|language| !candidates.contains(language))
+        .is_some_and(|language| language != preferred_language)
     {
         return 0;
     }
@@ -498,17 +463,17 @@ fn track_language_score(track: &TrackLanguageCandidate, candidates: &[String]) -
         0
     };
 
-    for candidate in candidates {
+    for candidate in language_aliases(preferred_language) {
         if lang == *candidate {
             score = score.max(120);
         } else if lang
-            .strip_prefix(candidate.as_str())
+            .strip_prefix(candidate)
             .is_some_and(|rest| rest.starts_with('-'))
         {
             score = score.max(100);
         }
 
-        if !is_exact_only_language_alias(candidate) && title_tokens.contains(&candidate.as_str()) {
+        if title_tokens.contains(candidate) {
             score = score.max(80);
         }
     }
@@ -570,32 +535,28 @@ pub(crate) fn infer_track_preferred_language(
     })
 }
 
-pub(crate) fn track_matches_preferred_language(
+fn track_matches_preferred_language(
     lang: Option<&str>,
     title: Option<&str>,
     preferred_language: &str,
 ) -> bool {
-    let candidates = language_candidates(preferred_language);
-    if candidates.is_empty() {
-        return false;
-    }
-
     if let Some(language) = normalize_language_token(lang, false) {
-        return candidates.contains(&language);
+        return language == preferred_language;
     }
 
     let lang = normalize_lower(lang).unwrap_or_default();
     let title_text = title.map(super::normalize_token_text).unwrap_or_default();
     let title_tokens = title_text.split_whitespace().collect::<Vec<_>>();
 
-    candidates.iter().any(|candidate| {
-        lang == *candidate
-            || lang
-                .strip_prefix(candidate.as_str())
-                .is_some_and(|rest| rest.starts_with('-'))
-            || (!is_exact_only_language_alias(candidate)
-                && title_tokens.contains(&candidate.as_str()))
-    })
+    language_aliases(preferred_language)
+        .iter()
+        .any(|candidate| {
+            lang == *candidate
+                || lang
+                    .strip_prefix(candidate)
+                    .is_some_and(|rest| rest.starts_with('-'))
+                || title_tokens.contains(candidate)
+        })
 }
 
 fn find_track_by_language(
@@ -603,14 +564,9 @@ fn find_track_by_language(
     preferred_language: &str,
     selected_track_id: Option<i64>,
 ) -> Option<i64> {
-    let candidates = language_candidates(preferred_language);
-    if candidates.is_empty() {
-        return None;
-    }
-
     tracks
         .iter()
-        .map(|track| (track, track_language_score(track, &candidates)))
+        .map(|track| (track, track_language_score(track, preferred_language)))
         .filter(|(_, score)| *score > 0)
         .min_by_key(|(track, score)| {
             (

@@ -87,6 +87,7 @@ const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
 const tauriCore = await import('@tauri-apps/api/core');
 const { createPlaybackClock } = await import('../src/lib/player-clock');
+const { PlayerProgressBar } = await import('../src/components/player-progress-bar');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
@@ -94,10 +95,32 @@ const { usePlayerTrackController } = await import('../src/hooks/use-player-track
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
 const { useTitleSearch } = await import('../src/hooks/use-item-search');
 const { useSearchPageState } = await import('../src/hooks/use-search-page-state');
+const { searchCatalogQueryOptions } = await import('../src/lib/search-catalog');
 const { usePlayerAddonSubtitles } = await import('../src/hooks/use-player-addon-subtitles');
 const { useHistoryPlayback } = await import('../src/hooks/use-history-playback');
 const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
 const { toast } = await import('sonner');
+
+test('Case-only title edits share the catalog cache', async () => {
+  const client = new QueryClient();
+  const fetch = spyOn(api, 'querySearchCatalogPage').mockResolvedValue({
+    items: [],
+    exhausted: true,
+    partial: false,
+    continuation: { seenKeys: [] },
+  });
+  try {
+    const options = (query: string) =>
+      searchCatalogQueryOptions({ query, type: 'all', feed: 'popular' }, 2026);
+    await client.prefetchInfiniteQuery(options('Dune'));
+    await client.prefetchInfiniteQuery(options('DUNE'));
+    await client.prefetchInfiniteQuery(options('dune'));
+    expect(fetch).toHaveBeenCalledTimes(1);
+  } finally {
+    fetch.mockRestore();
+    client.clear();
+  }
+});
 
 test.each([
   ['genre', 'dune', false, 'dune'],
@@ -303,10 +326,12 @@ test.each([
   { automatic: true, cancelled: false },
   { automatic: false, cancelled: true },
 ])(
-  'Subtitle download failures explain only the current manual selection (%j)',
+  'Subtitle selections serialize rapid input and fence failures across stream resets (%j)',
   async ({ automatic, cancelled }) => {
     const client = new QueryClient();
     const native = Promise.withResolvers<boolean>();
+    const replacement = Promise.withResolvers<boolean>();
+    const select = mock(() => native.promise);
     const controller = Promise.withResolvers<ReturnType<typeof usePlayerAddonSubtitles>>();
     const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
     const cleanups: (() => void)[] = [];
@@ -320,7 +345,7 @@ test.each([
           id: 'tt1',
           menuOpen: false,
           mountedRef: { current: true },
-          selectAddonSubtitle: () => native.promise,
+          selectAddonSubtitle: select,
           setTrack: async () => false,
           subTracks: [],
         }),
@@ -341,26 +366,46 @@ test.each([
         if (cleanup) cleanups.push(cleanup);
       }
       const hook = await controller.promise;
-      const pending = hook.handleAddonSubtitleSelect(
-        {
-          id: 'sub',
-          selectionKey: 'sub',
-          url: 'https://example.com/sub',
-          mpvTitle: 'English',
-          sourceId: 'addon',
-          sourceName: 'Addon',
-        },
-        { automatic },
-      );
-      if (cancelled) cleanups.splice(0).forEach((cleanup) => cleanup());
+      const subtitle = {
+        id: 'sub',
+        selectionKey: 'sub',
+        url: 'https://example.com/sub',
+        mpvTitle: 'English',
+        sourceId: 'addon',
+        sourceName: 'Addon',
+      };
+      const pending = hook.handleAddonSubtitleSelect(subtitle, { automatic });
+      const duplicate = hook.handleAddonSubtitleSelect(subtitle, { automatic });
+      let replacementSelection: Promise<void> | undefined;
+      if (cancelled) {
+        cleanups.splice(0).forEach((cleanup) => cleanup());
+        for (const effect of effects) {
+          const cleanup = effect();
+          if (cleanup) cleanups.push(cleanup);
+        }
+        select.mockImplementationOnce(() => replacement.promise);
+        replacementSelection = hook.handleAddonSubtitleSelect(subtitle);
+      }
       native.reject(new Error('Subtitle exceeds the 8 MiB limit.'));
-      await pending;
+      await Promise.all([pending, duplicate]);
+      expect(select).toHaveBeenCalledTimes(cancelled ? 2 : 1);
       expect(notice).toHaveBeenCalledTimes(automatic || cancelled ? 0 : 1);
       if (!automatic && !cancelled)
         expect(notice).toHaveBeenCalledWith('Failed to load addon subtitle', {
           description: 'Subtitle exceeds the 8 MiB limit.',
         });
+      if (cancelled) {
+        // The old rejection must not release the new stream's selection gate.
+        await hook.handleAddonSubtitleSelect(subtitle);
+        expect(select).toHaveBeenCalledTimes(2);
+        replacement.resolve(true);
+        await replacementSelection;
+      } else {
+        await hook.handleAddonSubtitleSelect(subtitle, { automatic });
+        expect(select).toHaveBeenCalledTimes(2);
+      }
     } finally {
+      replacement.resolve(false);
       capturedEffects = null;
       cleanups.forEach((cleanup) => cleanup());
       notice.mockRestore();
@@ -619,6 +664,8 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
     expect(tracks).toHaveBeenLastCalledWith({ audio: null, sub: 3 });
     expect(await player.selectAddonSubtitle(subtitle)).toBe(true);
     expect(change).toHaveBeenLastCalledWith('sub', 3);
+    tracks.mockRejectedValueOnce(new Error('Native read unavailable'));
+    expect(await player.refreshTracks()).toEqual(confirmed);
     expect(add).toHaveBeenCalledTimes(1);
     expect(await player.cycleTrack('sub')).toBe(3);
     expect(change).toHaveBeenLastCalledWith('sub', 'cycle');
@@ -1594,6 +1641,33 @@ test('Details viewport observer waits for the enabled late anchor', () => {
     capturedEffects = null;
   }
 });
+const renderSeekbar = (
+  skipSegments: { type: 'intro' | 'outro'; start_time: number; end_time: number }[],
+) =>
+  renderToStaticMarkup(
+    <PlayerProgressBar
+      duration={1440}
+      clock={createPlaybackClock()}
+      bufferedClock={createPlaybackClock()}
+      skipSegments={skipSegments}
+      onSeek={() => {}}
+    />,
+  );
+
+test('Seekbar skip segments get see-through chapter cuts at interior edges only', () => {
+  const markup = renderSeekbar([
+    { type: 'intro', start_time: 0, end_time: 90 },
+    { type: 'outro', start_time: 1332, end_time: 1440 },
+  ]);
+  const mask = markup.match(/mask-image:([^;"]+)/)?.[1] ?? '';
+  // Edges at 0 and the duration stay uncut; each interior edge gets one 2px gap.
+  expect(mask.match(/transparent/g)).toHaveLength(2);
+  expect(mask).toContain('transparent calc(6.25% - 1px) calc(6.25% + 1px)');
+  expect(mask).toContain('transparent calc(92.5% - 1px) calc(92.5% + 1px)');
+  expect(markup).not.toContain('bg-black');
+  expect(renderSeekbar([])).not.toContain('mask-image');
+});
+
 test('Next airing chip only renders future episodes with a dateTime', () => {
   const past = renderToStaticMarkup(<NextAiringChip episode={{ episode: 7, airingAt: 1 }} />);
   expect(past).toBe('');

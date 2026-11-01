@@ -210,6 +210,12 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
             query.make_ascii_lowercase();
             query
         });
+    if normalized_query
+        .as_deref()
+        .is_some_and(|query| super::js_trim(query).starts_with(super::app_links::APP_LINK_SCHEME))
+    {
+        return Err("Stremiro links cannot be sent to catalog search.".into());
+    }
     let parsed_media_type = SearchMediaType::parse(request.media_type.as_deref());
     if request.media_type.is_some() && parsed_media_type.is_none() {
         return Err("Unsupported search media type.".into());
@@ -242,9 +248,6 @@ fn build_search_criteria(request: SearchCatalogRequest) -> Result<SearchCatalogC
     }
     if all_browse && continuation.all_cursors.is_none() {
         return Err("All-browse continuation requires branch cursors.".into());
-    }
-    if !all_browse && normalized_query.is_none() && parsed_media_type.is_none() {
-        return Err("Media type is required to browse the search catalog.".to_string());
     }
     if let Some(cursors) = &continuation.search_cursors {
         if normalized_query.is_none()
@@ -774,6 +777,7 @@ async fn fetch_browse_page(
     let mut skips = vec![skip];
     let mut deadline = None;
     let mut stride = 0;
+    let mut partial = false;
     let filtered = filter_type == SearchMediaType::Anime
         || criteria.year_range.is_active()
         || !criteria.genres.is_empty();
@@ -800,8 +804,12 @@ async fn fetch_browse_page(
                 // Keep the catalog's cursor space on failure: fail an empty
                 // browse, or serve gathered items with the last good next_skip.
                 Err(error) if claims.is_empty() => return Err(error),
-                Err(_) => break 'scan,
+                Err(_) => {
+                    partial = true;
+                    break 'scan;
+                }
             };
+            partial |= page.partial;
             next_skip = page.next_skip;
             stride = next_skip
                 .and_then(|next| next.checked_sub(skip))
@@ -859,7 +867,14 @@ async fn fetch_browse_page(
             .collect();
     }
 
-    Ok((CatalogFetchPage { items, next_skip }, claims))
+    Ok((
+        CatalogFetchPage {
+            items,
+            next_skip,
+            partial,
+        },
+        claims,
+    ))
 }
 
 fn merge_all_browse_pages(
@@ -872,6 +887,7 @@ fn merge_all_browse_pages(
     let mut pages = [Vec::new(), Vec::new()];
     let mut claims = HashMap::new();
     let mut succeeded = false;
+    let mut partial = false;
     let mut first_error = None;
     for (index, skip, outcome) in [(0, cursors.movie, movie), (1, cursors.series, series)] {
         let (Some(skip), Some(outcome)) = (skip, outcome) else {
@@ -885,6 +901,7 @@ fn merge_all_browse_pages(
         match outcome {
             Ok((page, page_claims)) => {
                 succeeded = true;
+                partial |= page.partial;
                 *cursor = page.next_skip.filter(|next_skip| *next_skip > skip);
                 pages[index] = page.items;
                 claims.reserve(page_claims.len());
@@ -916,7 +933,7 @@ fn merge_all_browse_pages(
         items.extend(pair.1);
     }
     let mut page = finish_catalog_page(items, continuation, None, Some(next), None, claims);
-    page.partial = first_error.is_some();
+    page.partial = partial || first_error.is_some();
     Ok(page)
 }
 
@@ -1053,14 +1070,16 @@ pub(crate) async fn query_search_catalog_for_request(
         .media_type
         .ok_or_else(|| "Media type is required to browse the search catalog.".to_string())?;
     let (page, claims) = fetch_browse_page(&snapshot, client, &criteria, media_type, skip).await?;
-    Ok(finish_catalog_page(
+    let mut result = finish_catalog_page(
         page.items,
         criteria.continuation,
         page.next_skip,
         None,
         None,
         claims,
-    ))
+    );
+    result.partial = page.partial;
+    Ok(result)
 }
 
 #[cfg(test)]

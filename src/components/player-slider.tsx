@@ -1,5 +1,6 @@
 import * as SliderPrimitive from '@radix-ui/react-slider';
 import React, { useRef, useState } from 'react';
+import { chapterCutMask } from '@/lib/player-chapter-cuts';
 import { clamp, cn } from '@/lib/utils';
 
 export interface PlayerSliderMark {
@@ -29,6 +30,9 @@ export function PlayerSlider({
   onPointerDown,
   onPointerMove,
   onPointerLeave,
+  onPointerUp,
+  onPointerCancel,
+  onLostPointerCapture,
   onFocus,
   onBlur,
   ...props
@@ -41,14 +45,41 @@ export function PlayerSlider({
   const max = typeof props.max === 'number' && props.max > 0 ? props.max : 100;
   const current = Array.isArray(props.value) ? props.value[0] : undefined;
   const valuePct = typeof current === 'number' ? clamp(current / max, 0, 1) : null;
-  const markerPct = aimPct ?? valuePct;
+  // `bar` keeps a resting value marker (volume); `track` is a hover line — the fill edge already marks position.
+  const markerPct = variant === 'track' ? aimPct : (aimPct ?? valuePct);
+  const marksMask = marks?.length
+    ? chapterCutMask(
+        max,
+        marks.flatMap((mark) => [mark.start, mark.end]),
+      )
+    : undefined;
   const aimFromPointer = (clientX: number) => {
-    if (variant !== 'bar') return;
+    if (variant === 'pill') return;
     const rect = rootRef.current?.getBoundingClientRect();
     if (!rect || rect.width <= 0) return;
     const next = clamp((clientX - rect.left) / rect.width, 0, 1);
     setAimPct(next);
     onAimChange?.(Math.round(next * max));
+  };
+  const clearAim = () => {
+    setAimPct(null);
+    if (variant !== 'pill') onAimChange?.(null);
+  };
+  // Pointer capture can swallow a leave that ends outside — recheck the rect on release.
+  const settleAim = (event: React.PointerEvent) => {
+    if (variant === 'pill') return;
+    const rect = rootRef.current?.getBoundingClientRect();
+    if (
+      rect &&
+      event.clientX >= rect.left &&
+      event.clientX <= rect.right &&
+      event.clientY >= rect.top &&
+      event.clientY <= rect.bottom
+    ) {
+      aimFromPointer(event.clientX);
+    } else {
+      clearAim();
+    }
   };
 
   return (
@@ -76,9 +107,20 @@ export function PlayerSlider({
         onPointerMove?.(event);
       }}
       onPointerLeave={(event) => {
-        setAimPct(null);
-        if (variant === 'bar') onAimChange?.(null);
+        clearAim();
         onPointerLeave?.(event);
+      }}
+      onPointerUp={(event) => {
+        settleAim(event);
+        onPointerUp?.(event);
+      }}
+      onPointerCancel={(event) => {
+        clearAim();
+        onPointerCancel?.(event);
+      }}
+      onLostPointerCapture={(event) => {
+        settleAim(event);
+        onLostPointerCapture?.(event);
       }}
       onFocus={(event) => {
         setKeyboardFocused(document.hasFocus() && event.target.matches(':focus-visible'));
@@ -94,30 +136,47 @@ export function PlayerSlider({
         className={cn(
           'relative w-full grow overflow-hidden',
           variant === 'bar'
-            ? 'h-1.5 rounded-[2px] bg-white/[0.16] group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60'
+            ? 'h-1.5 rounded-[2px] group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60'
             : variant === 'track'
-              ? 'h-2 rounded-[2px] bg-white/[0.18] group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60'
-              : 'h-[3px] rounded-full bg-white/20',
+              ? 'h-2 rounded-[2px] group-data-[keyboard-focus]/slider:ring-2 group-data-[keyboard-focus]/slider:ring-white/60'
+              : 'h-[3px] rounded-full',
         )}
       >
-        <SliderPrimitive.Range className='absolute h-full bg-white' />
-        {marks?.map((mark) => {
-          const left = clamp(mark.start / max, 0, 1) * 100;
-          const width = clamp((mark.end - mark.start) / max, 0, 1 - left / 100) * 100;
-          if (width <= 0) return null;
-          return (
-            <span
-              key={`${mark.start}:${mark.end}`}
-              aria-hidden='true'
-              className={cn('pointer-events-none absolute inset-y-0 z-10', mark.className)}
-              style={{ left: `${left}%`, width: `max(2px, ${width}%)` }}
-            />
-          );
-        })}
-        {variant === 'bar' && markerPct !== null && (
+        {/* Fill layers share the chapter mask; the marker stays uncut above it. */}
+        <div
+          aria-hidden='true'
+          className={cn(
+            'absolute inset-0',
+            variant === 'bar'
+              ? 'bg-white/[0.16]'
+              : variant === 'track'
+                ? 'bg-white/[0.18]'
+                : 'bg-white/20',
+          )}
+          style={marksMask ? { maskImage: marksMask } : undefined}
+        >
+          <SliderPrimitive.Range className='absolute h-full bg-white' />
+          {marks?.map((mark) => {
+            const left = clamp(mark.start / max, 0, 1) * 100;
+            const width = clamp((mark.end - mark.start) / max, 0, 1 - left / 100) * 100;
+            if (width <= 0) return null;
+            return (
+              <span
+                key={`${mark.start}:${mark.end}`}
+                aria-hidden='true'
+                className={cn('pointer-events-none absolute inset-y-0 z-10', mark.className)}
+                style={{ left: `${left}%`, width: `max(2px, ${width}%)` }}
+              />
+            );
+          })}
+        </div>
+        {variant !== 'pill' && markerPct !== null && !props.disabled && (
           <span
             aria-hidden='true'
-            className='pointer-events-none absolute inset-y-0 z-20 w-px -translate-x-1/2 bg-white shadow-[0_0_0_1px_rgba(0,0,0,0.55)]'
+            className={cn(
+              'pointer-events-none absolute z-20 w-px -translate-x-1/2 bg-white mix-blend-difference shadow-[0_0_0_1px_rgba(0,0,0,0.55)]',
+              variant === 'track' ? '-inset-y-1' : 'inset-y-0',
+            )}
             style={{ left: `${markerPct * 100}%` }}
           />
         )}

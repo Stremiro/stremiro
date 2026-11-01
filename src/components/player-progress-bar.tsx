@@ -1,6 +1,5 @@
 import {
   useCallback,
-  Fragment,
   memo,
   useEffect,
   useLayoutEffect,
@@ -14,6 +13,7 @@ import {
   CHROME_VALUE_BUBBLE_CLASS,
 } from '@/components/player-chrome-styles';
 import type { SkipSegment } from '@/lib/api';
+import { chapterCutMask } from '@/lib/player-chapter-cuts';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { SKIP_SEGMENT_LABELS } from '@/lib/player-skip';
 import { clamp, cn, formatTime } from '@/lib/utils';
@@ -150,47 +150,22 @@ const SkipNotches = memo(function SkipNotches({
 }: SkipNotchesProps) {
   if (duration <= 0) return null;
 
-  return (
-    <>
-      {skipSegments.map((seg) => {
-        const leftPct = clamp((seg.start_time / duration) * 100, 0, 100);
-        const widthPct = clamp(
-          ((seg.end_time - seg.start_time) / duration) * 100,
-          0,
-          100 - leftPct,
-        );
-        const endPct = clamp((seg.end_time / duration) * 100, 0, 100);
-        const segmentKey = `${seg.type}:${seg.start_time}:${seg.end_time}`;
-
-        return (
-          <Fragment key={segmentKey}>
-            {/* Uniform segment band — the playhead nub marks position inside it, so color stays consistent past it. */}
-            <div
-              className={cn(
-                'absolute inset-y-0 pointer-events-none overflow-hidden transition-opacity duration-100 z-10',
-                hoverSegment === seg ? 'opacity-100' : 'opacity-85',
-                getSegmentStyle(seg.type).color,
-              )}
-              style={{ left: `${leftPct}%`, width: `max(4px, ${widthPct}%)` }}
-            />
-            {/* Hard cuts that slice the bar at each segment edge. */}
-            {leftPct > 0 && (
-              <div
-                className='absolute inset-y-0 w-[3px] bg-black z-20'
-                style={{ left: `calc(${leftPct}% - 1.5px)` }}
-              />
-            )}
-            {endPct < 100 && (
-              <div
-                className='absolute inset-y-0 w-[3px] bg-black z-20'
-                style={{ left: `calc(${endPct}% - 1.5px)` }}
-              />
-            )}
-          </Fragment>
-        );
-      })}
-    </>
-  );
+  return skipSegments.map((seg) => {
+    const leftPct = clamp((seg.start_time / duration) * 100, 0, 100);
+    const widthPct = clamp(((seg.end_time - seg.start_time) / duration) * 100, 0, 100 - leftPct);
+    return (
+      // Uniform segment band — the playhead nub marks position inside it, so color stays consistent past it.
+      <div
+        key={`${seg.type}:${seg.start_time}:${seg.end_time}`}
+        className={cn(
+          'absolute inset-y-0 pointer-events-none transition-opacity duration-100',
+          hoverSegment === seg ? 'opacity-100' : 'opacity-85',
+          getSegmentStyle(seg.type).color,
+        )}
+        style={{ left: `${leftPct}%`, width: `max(4px, ${widthPct}%)` }}
+      />
+    );
+  });
 });
 
 interface PlayerProgressBarProps {
@@ -482,6 +457,10 @@ export function PlayerProgressBar({
   // clamped — fully-cached local-style streams report cache windows overshooting duration.
   const bufferedEndSecs =
     canSeek && bufferedAheadSecs > 0 ? Math.min(currentTime + bufferedAheadSecs, duration) : null;
+  const chapterMask = chapterCutMask(
+    duration,
+    skipSegments.flatMap((seg) => [seg.start_time, seg.end_time]),
+  );
 
   return (
     <div
@@ -535,22 +514,32 @@ export function PlayerProgressBar({
         </div>
       )}
 
-      <div className='relative h-2.5 w-full overflow-hidden rounded-[2px] bg-white/[0.14]'>
-        {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
-          <div
-            className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
-            style={{
-              transform: `translateX(${Math.min(100, (currentTime / duration) * 100)}%) scaleX(${(bufferedEndSecs - currentTime) / duration})`,
-            }}
-          />
-        )}
-
+      <div className='relative h-2.5 w-full overflow-hidden rounded-[2px]'>
+        {/* Fill layers share the chapter mask; the hover line and playhead stay uncut above it. */}
         <div
-          className='absolute inset-0 origin-left bg-(--accent-seek) pointer-events-none z-0'
-          style={{ transform: `scaleX(${progressPct / 100})` }}
-        />
+          className='absolute inset-0 bg-white/[0.14]'
+          style={chapterMask ? { maskImage: chapterMask } : undefined}
+        >
+          {bufferedEndSecs !== null && bufferedEndSecs > currentTime && (
+            <div
+              className='absolute inset-0 origin-left bg-white/[0.28] pointer-events-none'
+              style={{
+                transform: `translateX(${Math.min(100, (currentTime / duration) * 100)}%) scaleX(${(bufferedEndSecs - currentTime) / duration})`,
+              }}
+            />
+          )}
 
-        <SkipNotches duration={duration} skipSegments={skipSegments} hoverSegment={hoverSegment} />
+          <div
+            className='absolute inset-0 origin-left bg-(--accent-seek) pointer-events-none'
+            style={{ transform: `scaleX(${progressPct / 100})` }}
+          />
+
+          <SkipNotches
+            duration={duration}
+            skipSegments={skipSegments}
+            hoverSegment={hoverSegment}
+          />
+        </div>
 
         {hoverPct !== null && canSeek && (
           <div

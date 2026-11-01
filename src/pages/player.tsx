@@ -15,7 +15,6 @@ import {
   type WheelEvent,
 } from 'react';
 import { DesktopTitlebar } from '@/components/desktop-titlebar';
-import { isEpisodeSpoiler } from '@/components/details-episode-card';
 import { MiniPlayer } from '@/components/mini-player';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
 import {
@@ -87,6 +86,7 @@ import { getCachedResultRefreshDelayMs } from '@/lib/api-cache';
 import {
   buildEpisodeStreamTarget,
   findEpisodeByCoordinates,
+  isEpisodeSpoiler,
   type NextEpisodeStreamCoordinates,
   sameEpisodeCoordinates,
 } from '@/lib/episode-stream-target';
@@ -151,7 +151,6 @@ import {
   getEpisodeTitle,
   isSeriesLikeMediaType,
   nonBlank,
-  prefersReducedMotion,
   type TimerHandle,
   withTimeout,
 } from '@/lib/utils';
@@ -164,8 +163,6 @@ const NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS = 12_000;
 const CREDITS_NEXT_EPISODE_LEAD_SECS = 30;
 // An estimated intro skip is offered only over the opening stretch, never auto-applied.
 const INTRO_ESTIMATE_WINDOW_SECS = 600;
-// Mini chrome lingers so the undock dissolve plays under the fading-in player.
-const MINI_EXIT_MS = 180;
 type SelectedEpisodeStreamTarget = NextEpisodeStreamCoordinates & { startTime?: number };
 
 interface StreamSelectorState {
@@ -335,9 +332,6 @@ export function Player() {
   const selectedEpisodeStreamTarget = streamSelectorState.target;
 
   const [mpvSurfaceReady, setMpvSurfaceReady] = useState(false);
-  // One-beat linger for the undock dissolve (MINI_EXIT_MS).
-  const [miniExiting, setMiniExiting] = useState(false);
-  const miniExitTimerRef = useRef<TimerHandle | null>(null);
   const showErrorOverlay = !!error && !isResolving && !isLoading;
 
   const handleBeforeEnterFullscreen = () => {
@@ -373,7 +367,6 @@ export function Player() {
   const nextEpisodeRequestRef = useRef<AbortController | null>(null);
   // Must survive stream swaps so stale-link recovery can re-resolve on the same screen.
   const mountedRef = useMountedRef(() => {
-    clearTimer(miniExitTimerRef);
     nextEpisodeRequestRef.current?.abort();
   });
   const mpvInitializedRef = useRef(false);
@@ -1148,15 +1141,6 @@ export function Player() {
 
   const expandPlayer = () => {
     if (!session) return;
-    // One-beat linger (MINI_EXIT_MS) so it dissolves out; reduced-motion unmounts plainly.
-    if (!prefersReducedMotion()) {
-      setMiniExiting(true);
-      clearTimer(miniExitTimerRef);
-      miniExitTimerRef.current = window.setTimeout(() => {
-        miniExitTimerRef.current = null;
-        setMiniExiting(false);
-      }, MINI_EXIT_MS);
-    }
     // Re-apply launch state (no remount); `from` rewrites to the expand origin so Back returns here.
     navigateApp(session.playerPath, {
       state: {
@@ -2255,64 +2239,9 @@ export function Player() {
       />
     ) : null;
 
-  // Docked EOF gate: expanded-only panels can't cover the mini, but a resolve or the selector must not leave strips clickable beneath.
-  const miniEofOpen =
-    hasEnded && playbackIntact && !showStreamSelector && !isLoadingEpisodeNavigation;
   const nextEpisodeThumbnail = nextEpisode?.thumbnail ?? backdrop ?? poster;
   const canGoPrevious = !!previousEpisode && !isResolving;
   const canGoNext = !!nextEpisode && !isResolving;
-  const miniPlayerUpNext =
-    miniEofOpen && nextEpisode
-      ? {
-          label: formatEpisodeHeading(nextEpisode.season, nextEpisode.episode, nextEpisode.title),
-        }
-      : undefined;
-
-  // FLIP source for the dock entrance, memoized once per dock: the last expanded mpv rect.
-  const miniDockOrigin = isExpanded ? null : getExpandedVideoRect();
-
-  const miniPlayerNode = (exiting: boolean) => (
-    <MiniPlayer
-      exiting={exiting}
-      title={title}
-      episodeLabel={currentEpisodeLabel || undefined}
-      backdrop={backdrop ?? poster}
-      isPlaying={isPlaying}
-      isWorking={startupLoading || isBuffering}
-      statusText={startupLoading ? playerLoadingHeadline : 'Buffering'}
-      error={showErrorOverlay ? error : null}
-      clock={clock}
-      duration={duration}
-      skipSegments={skipSegments}
-      canGoPrevious={canGoPrevious}
-      canGoNext={canGoNext}
-      hasVideo={mpvSurfaceReady && !!activeStreamUrl && !isLoading && !showErrorOverlay}
-      isMuted={isMuted}
-      volume={volume}
-      upNext={miniPlayerUpNext}
-      endOfMedia={miniEofOpen && !nextEpisode}
-      skipAction={activeSkipAction}
-      onReplay={replayFromStart}
-      onBackToTitle={backToTitle}
-      getInitialPosition={getMiniPosition}
-      // FLIP source rect — null until a margin was sent (e.g. mount straight into mini → plain entrance).
-      dockOrigin={miniDockOrigin}
-      // Focus claims only on the dock transition — a docked session remount must not yank browse focus.
-      claimFocusOnMount={hasExpanded && !isExpanded}
-      onVideoRectChange={handleMiniVideoRectChange}
-      onPositionChange={setMiniPosition}
-      onTogglePlay={() => void togglePlay().catch(() => undefined)}
-      onToggleMute={() => void toggleMute().catch(() => undefined)}
-      onVolumeChange={(next) => void handleVolumeChange(next).catch(() => undefined)}
-      onVolumeWheel={handleVolumeWheel}
-      onSeek={(seconds) => void seek(seconds).catch(() => undefined)}
-      onSeekRelative={(delta) => void seekRelative(delta).catch(() => undefined)}
-      onExpand={expandPlayer}
-      onClose={close}
-      onPreviousEpisode={playPreviousEpisode}
-      onNextEpisode={playNextEpisode}
-    />
-  );
 
   useEffect(() => {
     // Panels and recovery selectors need the full app viewport.
@@ -2322,10 +2251,56 @@ export function Player() {
   }, [isPip, returnFromPip, showEpisodes, showShortcuts, showStreamSelector]);
 
   if (!isExpanded) {
-    // Docked: the app route keeps rendering while mpv plays in the corner surface.
+    // Docked EOF strips stay inert during resolution or stream selection.
+    const miniEofOpen =
+      hasEnded && playbackIntact && !showStreamSelector && !isLoadingEpisodeNavigation;
+    const miniPlayerUpNext =
+      miniEofOpen && nextEpisode
+        ? {
+            label: formatEpisodeHeading(nextEpisode.season, nextEpisode.episode, nextEpisode.title),
+          }
+        : undefined;
     return (
       <>
-        {miniPlayerNode(false)}
+        <MiniPlayer
+          title={title}
+          episodeLabel={currentEpisodeLabel || undefined}
+          backdrop={backdrop ?? poster}
+          isPlaying={isPlaying}
+          isWorking={startupLoading || isBuffering}
+          statusText={startupLoading ? playerLoadingHeadline : 'Buffering'}
+          error={showErrorOverlay ? error : null}
+          clock={clock}
+          duration={duration}
+          skipSegments={skipSegments}
+          canGoPrevious={canGoPrevious}
+          canGoNext={canGoNext}
+          hasVideo={mpvSurfaceReady && !!activeStreamUrl && !isLoading && !showErrorOverlay}
+          isMuted={isMuted}
+          volume={volume}
+          upNext={miniPlayerUpNext}
+          endOfMedia={miniEofOpen && !nextEpisode}
+          skipAction={activeSkipAction}
+          onReplay={replayFromStart}
+          onBackToTitle={backToTitle}
+          getInitialPosition={getMiniPosition}
+          // FLIP source rect — null until a margin was sent (e.g. mount straight into mini → plain entrance).
+          dockOrigin={getExpandedVideoRect()}
+          // Focus claims only on the dock transition — a docked session remount must not yank browse focus.
+          claimFocusOnMount={hasExpanded}
+          onVideoRectChange={handleMiniVideoRectChange}
+          onPositionChange={setMiniPosition}
+          onTogglePlay={() => void togglePlay().catch(() => undefined)}
+          onToggleMute={() => void toggleMute().catch(() => undefined)}
+          onVolumeChange={(next) => void handleVolumeChange(next).catch(() => undefined)}
+          onVolumeWheel={handleVolumeWheel}
+          onSeek={(seconds) => void seek(seconds).catch(() => undefined)}
+          onSeekRelative={(delta) => void seekRelative(delta).catch(() => undefined)}
+          onExpand={expandPlayer}
+          onClose={close}
+          onPreviousEpisode={playPreviousEpisode}
+          onNextEpisode={playNextEpisode}
+        />
         {streamSelectorNode}
       </>
     );
@@ -2733,8 +2708,6 @@ export function Player() {
             : 'opacity-0 duration-[180ms]',
         )}
       />
-      {/* Expand handoff: the mini chrome lingers one beat and dissolves out. */}
-      {miniExiting && miniPlayerNode(true)}
     </div>
   );
 }

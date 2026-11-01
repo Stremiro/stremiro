@@ -68,6 +68,7 @@ const MAX_FACT_CHARS: usize = 256;
 const MAX_LINK_URL_CHARS: usize = 2048;
 const MAX_STUDIOS: usize = 3;
 const ROW_SCAN_LIMIT: usize = 64;
+const TVMAZE_CAST_MAX_BYTES: usize = 4 * 1024 * 1024;
 const TRANSIENT_ERROR: &str = "Credits data is temporarily unavailable.";
 
 const ANILIST_CREDITS_FIELDS: &str = "id idMal status format duration studios(isMain: true) { nodes { name } } characters(perPage: 12, sort: [ROLE, RELEVANCE, ID]) { edges { role node { name { full } image { large } } voiceActors(language: JAPANESE) { name { full } } } } nextAiringEpisode { episode airingAt } externalLinks { site url type isDisabled }";
@@ -194,10 +195,12 @@ async fn tvmaze_credits(
     let cast_url = format!("{}/shows/{show_id}/cast", client.base_url(Source::Tvmaze));
     // A cast miss still leaves the lookup facts usable.
     let people = client
-        .load(
+        .load_compacted(
             &cast_key,
             Source::Tvmaze,
             client.get(&cast_url),
+            TVMAZE_CAST_MAX_BYTES,
+            compact_tvmaze_cast,
             decode_tvmaze_cast,
         )
         .await?
@@ -225,6 +228,21 @@ fn decode_tvmaze_show(bytes: &[u8]) -> Result<(Option<serde_json::Value>, bool),
     {
         Some(_) => Ok((Some(value), false)),
         None => Err(TRANSIENT_ERROR.to_string()),
+    }
+}
+
+/// TVmaze cast is unpaged: long-running shows exceed the enrichment cache bound
+/// (The Simpsons ~1 MB, South Park ~290 KB), so only the rows the decoder
+/// scans are kept, verbatim. Short arrays, `null` and malformed bodies pass
+/// through for the decoder to judge.
+fn compact_tvmaze_cast(body: Vec<u8>) -> Result<Vec<u8>, String> {
+    let compacted = serde_json::from_slice::<Vec<&serde_json::value::RawValue>>(&body)
+        .ok()
+        .filter(|rows| rows.len() > ROW_SCAN_LIMIT)
+        .map(|rows| serde_json::to_vec(&rows[..ROW_SCAN_LIMIT]));
+    match compacted {
+        Some(bytes) => bytes.map_err(|_| TRANSIENT_ERROR.to_string()),
+        None => Ok(body),
     }
 }
 

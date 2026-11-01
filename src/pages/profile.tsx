@@ -23,12 +23,10 @@ import {
   LibraryBulkActionBar,
   CollectionBulkActionBar,
   useCollectionSelection,
-  ViewToggle,
   isLibrarySort,
-  SegmentedControl,
-  SegmentPill,
   TYPE_OPTIONS,
 } from '@/components/profile-library-controls';
+import { SegmentPill, SegmentedControl, ViewToggle } from '@/components/ui/segmented-control';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
@@ -81,10 +79,7 @@ const ListsManager = lazy(() =>
 );
 const warmListsManager = () => void loadListsManager().catch(() => undefined);
 
-const PROFILE_MEDIA_GRID_SKELETON_KEYS = Array.from(
-  { length: 12 },
-  (_, index) => `profile-grid-skeleton-${index}`,
-);
+const PROFILE_SKELETON_CAP = 12;
 const EMPTY_LIBRARY_ITEMS: MediaItem[] = [];
 const EMPTY_LIBRARY_IDS: string[] = [];
 const EMPTY_HISTORY_ITEMS: WatchProgress[] = [];
@@ -314,13 +309,14 @@ export function Profile() {
                 </div>
               }
             >
-              <ListsManager />
+              <ListsManager expectedCount={dataStats?.lists_count} />
             </Suspense>
           </TabsContent>
 
           <TabsContent value='history'>
             <ProfileHistoryTab
               historyQuery={historyQuery}
+              expectedCount={historyCount}
               viewMode={viewMode}
               onViewModeChange={handleViewModeChange}
             />
@@ -588,6 +584,7 @@ function ProfileLibraryTab({
           <CollectionTabContent
             isError={queryNeedsRetry(profileLibraryQuery)}
             isLoading={profileLibraryQuery.isLoading}
+            expectedCount={libraryCount}
             items={filteredLibrary}
             errorLabel='your library'
             onRetry={() => void profileLibraryQuery.refetch()}
@@ -660,10 +657,12 @@ function ProfileLibraryTab({
 
 function ProfileHistoryTab({
   historyQuery,
+  expectedCount,
   viewMode,
   onViewModeChange,
 }: {
   historyQuery: ReturnType<typeof useWatchHistory>;
+  expectedCount?: number;
   viewMode: 'grid' | 'list';
   onViewModeChange: (mode: 'grid' | 'list') => void;
 }) {
@@ -864,6 +863,7 @@ function ProfileHistoryTab({
         <CollectionTabContent
           isError={queryNeedsRetry(historyQuery)}
           isLoading={historyLoading}
+          expectedCount={expectedCount}
           items={visibleHistory}
           errorLabel='your watch history'
           onRetry={() => void refetchHistory()}
@@ -1196,6 +1196,7 @@ function CollectionTabContent<T>({
   isError,
   isLoading,
   isRetrying,
+  expectedCount,
   items,
   errorLabel,
   onRetry,
@@ -1208,6 +1209,7 @@ function CollectionTabContent<T>({
   isError: boolean;
   isLoading: boolean;
   isRetrying: boolean;
+  expectedCount?: number;
   items: T[];
   errorLabel: string;
   onRetry: () => void;
@@ -1226,25 +1228,31 @@ function CollectionTabContent<T>({
   );
   if (isError && items.length === 0) return retryBanner;
   if (isLoading) {
+    // Skeletons mirror the known collection size (dataStats aggregates or the
+    // open tab's own rows) instead of speculating a fixed wall of cards; a
+    // resolved zero falls back so the loading pane never paints blank.
+    const skeletonCount = Math.min(expectedCount || PROFILE_SKELETON_CAP, PROFILE_SKELETON_CAP);
     return (
       <div role='status' aria-busy='true'>
         <span className='sr-only'>Loading…</span>
-        <div
-          aria-hidden='true'
-          className={
-            viewMode === 'grid'
-              ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
-              : 'flex flex-col gap-1.5'
-          }
-        >
-          {PROFILE_MEDIA_GRID_SKELETON_KEYS.map((key) =>
-            viewMode === 'grid' ? (
-              <MediaCardSkeleton key={key} />
-            ) : (
-              <Skeleton key={key} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
-            ),
-          )}
-        </div>
+        {skeletonCount > 0 && (
+          <div
+            aria-hidden='true'
+            className={
+              viewMode === 'grid'
+                ? 'grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4'
+                : 'flex flex-col gap-1.5'
+            }
+          >
+            {Array.from({ length: skeletonCount }, (_, index) =>
+              viewMode === 'grid' ? (
+                <MediaCardSkeleton key={index} />
+              ) : (
+                <Skeleton key={index} className='h-[70px] w-full rounded-md bg-zinc-900/50' />
+              ),
+            )}
+          </div>
+        )}
       </div>
     );
   }

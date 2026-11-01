@@ -79,10 +79,15 @@ export function HorizontalMediaRail<T>({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const slotRef = useRef<HTMLDivElement>(null);
   const lastScrollLeftRef = useRef(0);
-  const pendingFocusIndexRef = useRef<number | null>(null);
-  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const pendingFocusKeyRef = useRef<Key | null>(null);
+  const [focusedKey, setFocusedKey] = useState<Key | null>(null);
   const [slotWidth, setSlotWidth] = useState(190);
   const shouldVirtualize = !isLoading && !hasNotice && items.length > RAIL_VIRTUALIZATION_THRESHOLD;
+  const itemIndices = useMemo(
+    () => new Map(items.map((item, index) => [getItemKey(item, index), index])),
+    [getItemKey, items],
+  );
+  const focusedIndex = focusedKey === null ? -1 : (itemIndices.get(focusedKey) ?? -1);
   const rangeExtractor = useCallback(
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
@@ -105,21 +110,26 @@ export function HorizontalMediaRail<T>({
     rangeExtractor,
   });
 
-  const focusItem = useCallback((index: number) => {
-    const slot = scrollContainerRef.current?.querySelector<HTMLElement>(
-      `[data-media-rail-index="${index}"]`,
-    );
-    const target = slot?.querySelector<HTMLElement>(
-      '[data-media-card-poster], a[href], button:not([disabled])',
-    );
-    if (!target) return false;
-    target.focus({ preventScroll: true });
-    return true;
-  }, []);
+  const focusItem = useCallback(
+    (key: Key) => {
+      const index = itemIndices.get(key);
+      if (index === undefined) return false;
+      const slot = scrollContainerRef.current?.querySelector<HTMLElement>(
+        `[data-media-rail-index="${index}"]`,
+      );
+      const target = slot?.querySelector<HTMLElement>(
+        '[data-media-card-poster], a[href], button:not([disabled])',
+      );
+      if (!target) return false;
+      target.focus({ preventScroll: true });
+      return true;
+    },
+    [itemIndices],
+  );
 
   useLayoutEffect(() => {
-    const index = pendingFocusIndexRef.current;
-    if (index !== null && focusItem(index)) pendingFocusIndexRef.current = null;
+    const key = pendingFocusKeyRef.current;
+    if (key !== null && focusItem(key)) pendingFocusKeyRef.current = null;
   }, [focusItem, focusedIndex]);
 
   useLayoutEffect(() => {
@@ -141,11 +151,7 @@ export function HorizontalMediaRail<T>({
     ...scrollState
   } = useScrollEdgeIndicators(scrollContainerRef, lastScrollLeftRef);
 
-  const itemKeys = useMemo(() => {
-    if (isLoading) return new Set<string>();
-    return new Set(items.map((item, index) => String(getItemKey(item, index))));
-  }, [getItemKey, isLoading, items]);
-  const previousKeysRef = useRef<ReadonlySet<string> | null>(null);
+  const previousKeysRef = useRef<ReadonlyMap<Key, number> | null>(null);
   const activeRailIdRef = useRef<string | undefined>(undefined);
 
   useLayoutEffect(() => {
@@ -171,12 +177,12 @@ export function HorizontalMediaRail<T>({
     activeRailIdRef.current = railId;
     if (identityChanged) previousKeysRef.current = null;
     // Empty phases must not re-arm restoration within the same catalog.
-    if (itemKeys.size === 0) {
+    if (itemIndices.size === 0) {
       syncScrollState();
       return;
     }
     const previousKeys = previousKeysRef.current;
-    previousKeysRef.current = itemKeys;
+    previousKeysRef.current = itemIndices;
     if (!previousKeys) {
       if (railId) {
         const remembered = railScrollPositions.get(railId);
@@ -187,15 +193,15 @@ export function HorizontalMediaRail<T>({
     }
     // Reorders and pure insertions/removals preserve the user's position.
     let sharedKeys = 0;
-    for (const key of itemKeys) {
+    for (const key of itemIndices.keys()) {
       if (previousKeys.has(key)) sharedKeys += 1;
     }
-    const insertOrRemoveOnly = sharedKeys === previousKeys.size || sharedKeys === itemKeys.size;
+    const insertOrRemoveOnly = sharedKeys === previousKeys.size || sharedKeys === itemIndices.size;
     if (!insertOrRemoveOnly) {
       scrollContainer.scrollLeft = 0;
     }
     syncScrollState();
-  }, [hasNotice, isLoading, isPlaceholderData, itemKeys, railId, syncScrollState]);
+  }, [hasNotice, isLoading, isPlaceholderData, itemIndices, railId, syncScrollState]);
 
   useLayoutEffect(() => {
     const scrollContainer = scrollContainerRef;
@@ -312,7 +318,10 @@ export function HorizontalMediaRail<T>({
               if (!(event.target instanceof HTMLElement)) return;
               const slot = event.target.closest<HTMLElement>('[data-media-rail-index]');
               if (!slot) return;
-              if (shouldVirtualize) setFocusedIndex(Number(slot.dataset.mediaRailIndex));
+              if (shouldVirtualize) {
+                const index = Number(slot.dataset.mediaRailIndex);
+                setFocusedKey(getItemKey(items[index], index));
+              }
               if (!event.target.matches(':focus-visible')) return;
               const container = event.currentTarget;
               const bounds = container.getBoundingClientRect();
@@ -325,7 +334,7 @@ export function HorizontalMediaRail<T>({
               }
             }}
             onBlurCapture={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedIndex(-1);
+              if (!event.currentTarget.contains(event.relatedTarget)) setFocusedKey(null);
             }}
             onKeyDown={(event) => {
               if (
@@ -352,9 +361,10 @@ export function HorizontalMediaRail<T>({
                 else return;
                 event.preventDefault();
                 if (nextIndex === index) return;
-                if (!focusItem(nextIndex) && shouldVirtualize) {
-                  pendingFocusIndexRef.current = nextIndex;
-                  setFocusedIndex(nextIndex);
+                const nextKey = getItemKey(items[nextIndex], nextIndex);
+                if (!focusItem(nextKey) && shouldVirtualize) {
+                  pendingFocusKeyRef.current = nextKey;
+                  setFocusedKey(nextKey);
                 }
                 return;
               }

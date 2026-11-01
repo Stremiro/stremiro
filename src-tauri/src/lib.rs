@@ -201,7 +201,6 @@ pub fn run() {
             commands::library_commands::remove_from_library,
             commands::library_commands::bulk_remove_from_library,
             commands::library_commands::get_library,
-            commands::library_commands::get_library_genres,
             commands::library_commands::get_profile_library,
             commands::library_commands::get_watchlist,
             commands::library_commands::search_titles,

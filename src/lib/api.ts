@@ -122,20 +122,11 @@ export interface CalendarSchedule {
   upcoming: CalendarScheduleEvent[];
 }
 
-export interface SmartListRules {
-  media_type?: 'movie' | 'series' | null;
-  genres: string[];
-  statuses: WatchStatus[];
-  year_from?: number | null;
-  year_to?: number | null;
-}
-
 export interface UserList {
   id: string;
   name: string;
   icon: string;
   item_ids: string[];
-  rules?: SmartListRules | null;
   // Absent on `create_list` (metadata only); populated by list-with-items reads.
   items?: MediaItem[];
 }
@@ -152,7 +143,6 @@ export interface UserListSummary {
   icon: string;
   item_count: number;
   contains_item: boolean;
-  is_smart: boolean;
 }
 
 export type WatchStatus = 'watching' | 'watched' | 'plan_to_watch' | 'dropped';

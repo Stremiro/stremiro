@@ -1,3 +1,4 @@
+import { keepPreviousData, useQuery, useQueryClient } from '@tanstack/react-query';
 import { type Range, useVirtualizer } from '@tanstack/react-virtual';
 import { Check, Loader2, Plus } from 'lucide-react';
 import { type RefObject, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react';
@@ -13,18 +14,26 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
+import { SegmentedControl } from '@/components/ui/segmented-control';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useDebounce } from '@/hooks/use-debounce';
+import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useBulkAddToList, useProfileLibrary } from '@/hooks/use-media-library';
-import { getListErrorMessage, type MediaItem, type UserList } from '@/lib/api';
+import { api, getListErrorMessage, type MediaItem, type UserList } from '@/lib/api';
+import { canonicalizeSearchText, foldAsciiCase } from '@/lib/api-cache';
 import { whenRowMounted } from '@/lib/dom';
-import { navigateApp } from '@/lib/navigation';
 import { notifyAction } from '@/lib/notify';
+import { invalidateListQueries } from '@/lib/query-invalidation';
 import { cn, pluralize } from '@/lib/utils';
 import { ListIconTile } from './list-icons';
 
 const VISIBLE_PAGE_SIZE = 150;
 const EMPTY_ITEMS: MediaItem[] = [];
+const TITLE_SOURCE_OPTIONS = [
+  { value: 'library', label: 'Library' },
+  { value: 'discover', label: 'Discover' },
+] as const;
+type TitleSource = (typeof TITLE_SOURCE_OPTIONS)[number]['value'];
 
 export function AddTitlesDialog({
   list,
@@ -36,43 +45,64 @@ export function AddTitlesDialog({
   returnFocusRef: RefObject<HTMLElement | null>;
 }) {
   'use no memo';
+  const queryClient = useQueryClient();
+  const mountedRef = useMountedRef();
   const searchInputRef = useRef<HTMLInputElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const [source, setSource] = useState<TitleSource>('library');
   const [focusedId, setFocusedId] = useState<string | null>(null);
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(VISIBLE_PAGE_SIZE);
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const [selectedItems, setSelectedItems] = useState<Map<string, MediaItem>>(new Map());
   const debouncedSearch = useDebounce(search, 180);
   const matchingLibraryQuery = useProfileLibrary({
     query: debouncedSearch,
     sort: 'title-asc',
   });
+  const discoverSearchText = canonicalizeSearchText(debouncedSearch);
+  const discoverQueryText = discoverSearchText ? foldAsciiCase(discoverSearchText) : undefined;
+  const discoverQuery = useQuery({
+    queryKey: ['add-titles-discover', discoverQueryText],
+    queryFn: () => api.querySearchCatalogPage({ query: discoverQueryText }),
+    enabled: source === 'discover',
+    placeholderData: keepPreviousData,
+    staleTime: 30_000,
+  });
   const hasLibraryError =
     matchingLibraryQuery.isError ||
     (matchingLibraryQuery.isFetched &&
       (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
-  const isSearchPending = search !== debouncedSearch || matchingLibraryQuery.isPlaceholderData;
-  const matchingItems = matchingLibraryQuery.data?.items ?? EMPTY_ITEMS;
+  const sourceError = source === 'library' ? hasLibraryError : discoverQuery.isError;
+  const sourcePending =
+    source === 'library' ? matchingLibraryQuery.isPending : discoverQuery.isPending;
+  const sourcePlaceholder =
+    source === 'library' ? matchingLibraryQuery.isPlaceholderData : discoverQuery.isPlaceholderData;
+  const isSearchPending = search !== debouncedSearch || sourcePlaceholder;
+  const matchingItems =
+    source === 'library'
+      ? (matchingLibraryQuery.data?.items ?? EMPTY_ITEMS)
+      : (discoverQuery.data?.items ?? EMPTY_ITEMS);
   const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
+  // Selections survive filter changes: library mode intersects with the
+  // unfiltered allIds set, discover keeps the whole item for addToList.
   const selectedItemIds =
-    selectedIds.size === 0
+    selectedItems.size === 0
       ? []
-      : (matchingLibraryQuery.data?.allIds ?? []).filter(
-          (id) => selectedIds.has(id) && !existingIds.has(id),
-        );
+      : source === 'library'
+        ? (matchingLibraryQuery.data?.allIds ?? []).filter(
+            (id) => selectedItems.has(id) && !existingIds.has(id),
+          )
+        : [...selectedItems.keys()].filter((id) => !existingIds.has(id));
 
   const addTitles = useBulkAddToList();
-  const selectionDisabled =
-    addTitles.isPending ||
-    isSearchPending ||
-    matchingLibraryQuery.isPending ||
-    matchingLibraryQuery.isFetching;
+  const [discoverBusy, setDiscoverBusy] = useState(false);
+  const selectionDisabled = addTitles.isPending || discoverBusy || isSearchPending || sourcePending;
 
-  const toggleSelection = (id: string) => {
-    setSelectedIds((previous) => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
+  const toggleSelection = (item: MediaItem) => {
+    setSelectedItems((previous) => {
+      const next = new Map(previous);
+      if (next.has(item.id)) next.delete(item.id);
+      else next.set(item.id, item);
       return next;
     });
   };
@@ -109,7 +139,7 @@ export function AddTitlesDialog({
   useLayoutEffect(() => {
     scrollRef.current?.scrollTo(0, 0);
     setFocusedId(null);
-  }, [debouncedSearch]);
+  }, [debouncedSearch, source]);
   const rows = virtualize
     ? virtualizer.getVirtualItems()
     : matchingItems.slice(0, rowCount).map((item, index) => ({ key: item.id, index, start: 0 }));
@@ -118,7 +148,7 @@ export function AddTitlesDialog({
     <Dialog
       open
       onOpenChange={(nextOpen) => {
-        if (!addTitles.isPending) onOpenChange(nextOpen);
+        if (!addTitles.isPending && !discoverBusy) onOpenChange(nextOpen);
       }}
     >
       <DialogContent
@@ -141,74 +171,90 @@ export function AddTitlesDialog({
             <div className='min-w-0'>
               <DialogTitle className='text-white'>Add titles</DialogTitle>
               <DialogDescription className='mt-1 truncate text-zinc-400'>
-                From your library to <span dir='auto'>{list.name}</span>
+                {source === 'library' ? 'From your library to ' : 'Search and add to '}
+                <span dir='auto'>{list.name}</span>
               </DialogDescription>
             </div>
           </div>
         </DialogHeader>
 
-        <SearchInput
-          inputRef={searchInputRef}
-          value={search}
-          onValueChange={(value) => {
-            setSearch(value);
-            setVisibleLimit(VISIBLE_PAGE_SIZE);
-          }}
-          placeholder='Search your library…'
-          clearLabel='Clear library search'
-          wrapperClassName='shrink-0'
-          className='h-10 rounded-lg border-white/10 bg-white/[0.03] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
-        />
+        <div className='flex shrink-0 items-center gap-2'>
+          <SearchInput
+            inputRef={searchInputRef}
+            value={search}
+            onValueChange={(value) => {
+              setSearch(value);
+              setVisibleLimit(VISIBLE_PAGE_SIZE);
+            }}
+            placeholder={source === 'library' ? 'Search your library…' : 'Search movies & series…'}
+            clearLabel='Clear title search'
+            wrapperClassName='min-w-0 flex-1'
+            className='h-10 rounded-lg border-white/10 bg-white/[0.03] text-white placeholder:text-zinc-500 focus-visible:ring-white/20'
+          />
+          <SegmentedControl
+            label='Title source'
+            value={source}
+            options={TITLE_SOURCE_OPTIONS}
+            onChange={setSource}
+          />
+        </div>
 
         <span role='status' className='sr-only'>
-          {isSearchPending ? 'Searching library…' : ''}
+          {isSearchPending ? 'Searching titles…' : ''}
         </span>
-        {hasLibraryError && (
+        {sourceError && (
           <RetryBanner
-            message="Couldn't load your library."
-            onRetry={() => void matchingLibraryQuery.refetch()}
-            isRetrying={matchingLibraryQuery.isFetching}
+            message={source === 'library' ? "Couldn't load your library." : "Couldn't load titles."}
+            onRetry={() =>
+              void (source === 'library' ? matchingLibraryQuery.refetch() : discoverQuery.refetch())
+            }
+            isRetrying={
+              source === 'library' ? matchingLibraryQuery.isFetching : discoverQuery.isFetching
+            }
           />
         )}
         <div
           ref={scrollRef}
-          aria-busy={isSearchPending || matchingLibraryQuery.isPending}
+          aria-busy={isSearchPending || sourcePending}
           className={cn(
             'min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5 transition-opacity duration-200',
-            matchingLibraryQuery.isPlaceholderData && 'opacity-60',
+            sourcePlaceholder && 'opacity-60',
           )}
         >
-          {matchingLibraryQuery.isPending ? (
+          {sourcePending ? (
             <div
               role='status'
               className='flex items-center justify-center gap-2 py-12 text-sm text-zinc-500'
             >
               <Loader2 className='h-4 w-4 animate-spin' />
-              Loading your library…
+              {source === 'library' ? 'Loading your library…' : 'Loading titles…'}
             </div>
-          ) : !matchingLibraryQuery.data ? null : matchingLibraryQuery.data.allIds.length === 0 ? (
+          ) : source === 'library' && matchingLibraryQuery.data?.allIds.length === 0 ? (
             <div className='space-y-3 px-4 py-10 text-center'>
               <p className='text-sm font-medium text-zinc-300'>Your library is empty</p>
               <p className='text-xs leading-relaxed text-zinc-500'>
-                Save titles to your library first, or use the save button on a title's details page
-                to add it directly to a list.
+                Switch to Discover to search for titles and add them straight to this list.
               </p>
               <Button
                 variant='outline'
                 size='sm'
                 className='border-white/10 bg-white/[0.03] text-zinc-300 hover:bg-white/[0.06]'
-                onClick={() => {
-                  onOpenChange(false);
-                  navigateApp('/search');
-                }}
+                onClick={() => setSource('discover')}
               >
-                Find titles
+                Discover titles
               </Button>
             </div>
           ) : matchingItems.length === 0 ? (
-            <p className='py-10 text-center text-sm text-zinc-500'>No titles match your search.</p>
+            <p className='py-10 text-center text-sm text-zinc-500'>
+              {discoverQuery.data || matchingLibraryQuery.data
+                ? 'No titles match your search.'
+                : 'Nothing to show yet.'}
+            </p>
           ) : (
-            <div role='group' aria-label='Library titles'>
+            <div
+              role='group'
+              aria-label={source === 'library' ? 'Library titles' : 'Title results'}
+            >
               <div
                 className={cn('relative', !virtualize && 'space-y-0.5')}
                 style={virtualize ? { height: virtualizer.getTotalSize() } : undefined}
@@ -216,17 +262,17 @@ export function AddTitlesDialog({
                 {rows.map((row) => {
                   const item = matchingItems[row.index];
                   const inList = existingIds.has(item.id);
-                  const selected = selectedIds.has(item.id) && !inList;
+                  const selected = selectedItems.has(item.id) && !inList;
                   const year = item.displayYear || item.primaryYear || item.year;
                   return (
                     <button
                       key={row.key}
                       data-library-id={item.id}
                       type='button'
-                      disabled={inList || addTitles.isPending}
+                      disabled={inList || addTitles.isPending || discoverBusy}
                       aria-label={inList ? `${item.title}, already in list` : item.title}
                       aria-pressed={inList || selected}
-                      onClick={() => toggleSelection(item.id)}
+                      onClick={() => toggleSelection(item)}
                       onFocus={() => setFocusedId(item.id)}
                       onBlur={(event) => {
                         if (!scrollRef.current?.contains(event.relatedTarget)) setFocusedId(null);
@@ -325,10 +371,10 @@ export function AddTitlesDialog({
                 selectionDisabled || !matchingItems.some((item) => !existingIds.has(item.id))
               }
               onClick={() =>
-                setSelectedIds((previous) => {
-                  const next = new Set(previous);
+                setSelectedItems((previous) => {
+                  const next = new Map(previous);
                   for (const item of matchingItems) {
-                    if (!existingIds.has(item.id)) next.add(item.id);
+                    if (!existingIds.has(item.id)) next.set(item.id, item);
                   }
                   return next;
                 })
@@ -339,8 +385,8 @@ export function AddTitlesDialog({
             </button>
             <button
               type='button'
-              disabled={selectionDisabled || selectedIds.size === 0}
-              onClick={() => setSelectedIds(new Set())}
+              disabled={selectionDisabled || selectedItems.size === 0}
+              onClick={() => setSelectedItems(new Map())}
               className='rounded-md text-xs font-medium text-zinc-300 transition-colors hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 disabled:opacity-40'
             >
               Clear
@@ -349,15 +395,44 @@ export function AddTitlesDialog({
           <div className='flex items-center gap-2'>
             <Button
               variant='ghost'
-              disabled={addTitles.isPending}
+              disabled={addTitles.isPending || discoverBusy}
               onClick={() => onOpenChange(false)}
               className='text-zinc-400'
             >
               Cancel
             </Button>
             <Button
-              disabled={selectedItemIds.length === 0 || addTitles.isPending}
-              onClick={() =>
+              disabled={selectedItemIds.length === 0 || addTitles.isPending || discoverBusy}
+              onClick={() => {
+                if (source === 'discover') {
+                  const items = [...selectedItems.values()].filter(
+                    (item) => !existingIds.has(item.id),
+                  );
+                  setDiscoverBusy(true);
+                  void (async () => {
+                    const results = await Promise.allSettled(
+                      items.map((item) => api.addToList(list.id, item)),
+                    );
+                    const added = results.filter((result) => result.status === 'fulfilled').length;
+                    await invalidateListQueries(queryClient);
+                    if (added === 0) {
+                      const reason = results.find((result) => result.status === 'rejected')?.reason;
+                      notifyAction(getListErrorMessage(reason) ?? 'Failed to add titles', {
+                        tone: 'error',
+                      });
+                    } else {
+                      const failed = items.length - added;
+                      notifyAction(
+                        `Added ${pluralize(added, 'title')}${failed ? `, ${failed} failed` : ''}`,
+                        { detail: list.name },
+                      );
+                      onOpenChange(false);
+                    }
+                  })().finally(() => {
+                    if (mountedRef.current) setDiscoverBusy(false);
+                  });
+                  return;
+                }
                 addTitles.mutate(
                   { listId: list.id, itemIds: selectedItemIds },
                   {
@@ -372,11 +447,13 @@ export function AddTitlesDialog({
                         tone: 'error',
                       }),
                   },
-                )
-              }
+                );
+              }}
               className='bg-white font-semibold text-black hover:bg-zinc-200'
             >
-              {addTitles.isPending && <Loader2 className='h-4 w-4 animate-spin' />}
+              {(addTitles.isPending || discoverBusy) && (
+                <Loader2 className='h-4 w-4 animate-spin' />
+              )}
               Add {pluralize(selectedItemIds.length, 'title')}
             </Button>
           </div>

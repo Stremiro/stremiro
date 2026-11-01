@@ -89,7 +89,10 @@ function SkipSegmentProgress({
       aria-hidden='true'
       className='pointer-events-none absolute inset-x-2.5 bottom-1.5 h-[2px] overflow-hidden rounded-[1px] bg-white/15'
     >
-      <span className='block h-full bg-(--accent-skip)' style={{ width: `${pct}%` }} />
+      <span
+        className='block h-full origin-left bg-(--accent-skip)'
+        style={{ transform: `scaleX(${pct / 100})` }}
+      />
     </span>
   );
 }
