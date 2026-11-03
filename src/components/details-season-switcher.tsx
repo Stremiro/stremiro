@@ -2,6 +2,7 @@ import { ChevronLeft, ChevronRight } from 'lucide-react';
 import { useEffect, useRef } from 'react';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
 import { useSlidingIndicator } from '@/hooks/use-sliding-indicator';
+import type { SeasonEpisodeState } from '@/lib/details-episode-state';
 import { clamp, cn, pluralize, scrollBehavior } from '@/lib/utils';
 
 interface SeasonSwitcherProps {
@@ -10,8 +11,6 @@ interface SeasonSwitcherProps {
   watchedCounts: ReadonlyMap<number, number>;
   onSelectSeason: (season: number) => void;
 }
-
-export type SeasonEpisodeState = 'watched' | 'started' | 'next' | 'unwatched' | 'unaired';
 
 const RAIL_SEGMENT_CLASS: Record<SeasonEpisodeState, string> = {
   watched: 'bg-(--accent-prog)',

@@ -212,6 +212,29 @@ export function usePlayerTrackController({
     setTrackSwitching(next);
   }, []);
 
+  // Every native selection holds the same gate through confirmation and preference bookkeeping.
+  // Only the issuing load may apply its snapshot or release its gate.
+  const commitTrackChange = useCallback(
+    <T>(
+      type: TrackType,
+      change: () => Promise<Track[]>,
+      onConfirmed: (tracks: Track[]) => T,
+    ): Promise<T | null> => {
+      if (trackSwitchingRef.current[type]) return Promise.resolve(null);
+      const generation = trackRefreshGenerationRef.current;
+      setTrackSwitchingFlag(type, true);
+      return (async () => {
+        const revision = confirmedTrackRevisionRef.current;
+        const tracks = await change();
+        if (generation !== trackRefreshGenerationRef.current) return null;
+        return onConfirmed(applyConfirmedTracks(type, tracks, revision));
+      })().finally(() => {
+        if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag(type, false);
+      });
+    },
+    [applyConfirmedTracks, setTrackSwitchingFlag],
+  );
+
   const { effectivePlaybackLanguagePreferences, saveGlobalPlaybackLanguagePreferenceSelection } =
     usePlaybackLanguagePreferences({ mediaId, mediaType });
 
@@ -317,62 +340,45 @@ export function usePlayerTrackController({
       }
 
       const generation = trackRefreshGenerationRef.current;
-      setTrackSwitchingFlag(type, true);
-      return (async () => {
-        const revision = confirmedTrackRevisionRef.current;
-        const tracks = await changePlayerTrack(type, id);
-        if (generation !== trackRefreshGenerationRef.current) return false;
-        applyConfirmedTracks(type, tracks, revision);
-        if (persistPreference) persistTrackSelection(type, id);
-        return true;
-      })()
-        .catch(() => {
+      return (
+        (await commitTrackChange(
+          type,
+          () => changePlayerTrack(type, id),
+          () => {
+            if (persistPreference) persistTrackSelection(type, id);
+            return true;
+          },
+        ).catch(() => {
           if (!silent && generation === trackRefreshGenerationRef.current) {
             toast.error('Failed to switch track');
           }
           return false;
-        })
-        .finally(() => {
-          if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag(type, false);
-        });
+        })) ?? false
+      );
     },
     [
       activeAudioTrack?.id,
       activeSubTrack?.id,
-      applyConfirmedTracks,
+      commitTrackChange,
       persistTrackSelection,
-      setTrackSwitchingFlag,
       subtitlesOff,
     ],
   );
 
-  // Hold the switch gate through cycle, refresh and persist to prevent auto-apply reverting it.
   const cycleTrack = async (type: TrackType): Promise<number | 'no' | null> => {
-    if (trackSwitchingRef.current[type]) {
-      return null;
-    }
-
-    const generation = trackRefreshGenerationRef.current;
-    setTrackSwitchingFlag(type, true);
-    return (async () => {
-      const revision = confirmedTrackRevisionRef.current;
-      const tracks = await changePlayerTrack(type, 'cycle');
-      if (generation !== trackRefreshGenerationRef.current) return null;
-      const fresh = applyConfirmedTracks(type, tracks, revision);
-      const landedId = fresh.find((track) => track.type === type && track.selected)?.id ?? 'no';
-      persistTrackSelection(
-        type,
-        landedId,
-        fresh.find((track) => track.type === type && track.id === landedId),
-      );
-      return landedId;
-    })()
-      .catch(() => null)
-      .finally(() => {
-        if (generation === trackRefreshGenerationRef.current) {
-          setTrackSwitchingFlag(type, false);
-        }
-      });
+    return commitTrackChange(
+      type,
+      () => changePlayerTrack(type, 'cycle'),
+      (fresh) => {
+        const landedId = fresh.find((track) => track.type === type && track.selected)?.id ?? 'no';
+        persistTrackSelection(
+          type,
+          landedId,
+          fresh.find((track) => track.type === type && track.id === landedId),
+        );
+        return landedId;
+      },
+    ).catch(() => null);
   };
 
   // Automatic selections have no failure toast and no remembered preference.
@@ -381,10 +387,7 @@ export function usePlayerTrackController({
     { automatic }: { automatic?: boolean } = {},
   ): Promise<boolean> => {
     // Manual choices win before their preference update reaches the next render.
-    if (
-      trackSwitchingRef.current.sub ||
-      (automatic && manualTrackPreferencesRef.current.sub !== null)
-    ) {
+    if (automatic && manualTrackPreferencesRef.current.sub !== null) {
       return false;
     }
 
@@ -393,22 +396,21 @@ export function usePlayerTrackController({
       return setTrack('sub', existing.id, { silent: true, persistPreference: !automatic });
     }
 
-    const generation = trackRefreshGenerationRef.current;
-    setTrackSwitchingFlag('sub', true);
-    return (async () => {
-      const revision = confirmedTrackRevisionRef.current;
-      const fresh = await addSubtitleTrack(subtitle.url, subtitle.mpvTitle, subtitle.lang);
-      if (generation !== trackRefreshGenerationRef.current) return false;
-      const addedTrack = applyConfirmedTracks('sub', fresh, revision).find(
-        (track) => track.selected && isExternalSubtitleTrack(track, subtitle),
-      );
-      if (!addedTrack) return false;
+    return (
+      (await commitTrackChange(
+        'sub',
+        () => addSubtitleTrack(subtitle.url, subtitle.mpvTitle, subtitle.lang),
+        (fresh) => {
+          const addedTrack = fresh.find(
+            (track) => track.selected && isExternalSubtitleTrack(track, subtitle),
+          );
+          if (!addedTrack) return false;
 
-      if (!automatic) persistTrackSelection('sub', addedTrack.id, addedTrack);
-      return true;
-    })().finally(() => {
-      if (generation === trackRefreshGenerationRef.current) setTrackSwitchingFlag('sub', false);
-    });
+          if (!automatic) persistTrackSelection('sub', addedTrack.id, addedTrack);
+          return true;
+        },
+      )) ?? false
+    );
   };
 
   useEffect(() => {

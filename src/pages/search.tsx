@@ -383,7 +383,7 @@ function SearchResults({
       aria-busy={(isOnline && (isFetching || isRefining)) || undefined}
       className={cn(
         'transition-opacity duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
-        isRefining && 'opacity-60',
+        isRefining && 'opacity-60 delay-200',
       )}
     >
       {!isOnline && (
@@ -973,7 +973,7 @@ export function Search() {
                         }}
                         className={cn(
                           RECENT_SEARCH_ROW_BUTTON_CLASS,
-                          'w-9 shrink-0 justify-center opacity-0 transition-opacity duration-150 group-hover/recent:opacity-100 group-focus-within/recent:opacity-100 focus-visible:opacity-100',
+                          'w-9 shrink-0 justify-center opacity-0 transition-opacity duration-150 group-hover/recent:opacity-100 group-focus-within/recent:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none',
                         )}
                       >
                         <X aria-hidden='true' className='h-3.5 w-3.5' />
@@ -1012,7 +1012,7 @@ export function Search() {
                 <DropdownMenuContent
                   align='start'
                   sideOffset={6}
-                  className='max-h-72 w-52 overflow-y-auto scrollbar-hide'
+                  className='max-h-[min(18rem,var(--radix-dropdown-menu-content-available-height))] w-52 scrollbar-hide'
                 >
                   <FacetMenuItem checked={!activeGenre} onSelect={clearGenre}>
                     <span className='flex min-w-0 items-center gap-2.5'>

@@ -764,7 +764,7 @@ pub async fn install_app_update(
     })
     .await
     .map_err(|error| error.to_string())
-    .and_then(|result| result)
+    .flatten()
     .map_err(|message| pending_update.fail_install(message))
 }
 

@@ -73,15 +73,12 @@ impl SubtitleSession {
     }
 
     pub(super) fn original_url(&self, path: String) -> String {
-        let inputs = self
-            .original_urls
+        self.original_urls
             .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        if let Some(url) = inputs.get(&path) {
-            url.clone()
-        } else {
-            path
-        }
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&path)
+            .cloned()
+            .unwrap_or(path)
     }
 
     pub(super) fn discard(&self, path: &str) {

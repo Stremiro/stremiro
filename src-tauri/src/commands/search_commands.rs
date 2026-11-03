@@ -416,7 +416,7 @@ fn rank_search_results(
     let mut ranked_items: Vec<_> = items.into_iter().map(|item| (item, 0usize)).collect();
     let mut next_ranks = std::collections::HashMap::new();
     for (item, rank) in &mut ranked_items {
-        let next_rank = next_ranks.entry(item.type_.as_str()).or_insert(0);
+        let next_rank = next_ranks.entry(item.type_.as_str()).or_default();
         *rank = *next_rank;
         *next_rank += 1;
     }

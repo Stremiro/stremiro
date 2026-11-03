@@ -49,7 +49,11 @@ function Button({
 /** Membership feedback keeps the control's dimensions fixed. */
 function SaveIndicator({ saved, className }: { saved: boolean; className?: string }) {
   return (
-    <span aria-hidden='true' className={cn('relative size-4 shrink-0', className)}>
+    <span
+      aria-hidden='true'
+      data-saved={saved}
+      className={cn('relative size-4 shrink-0', className)}
+    >
       <Plus
         className={cn(
           'absolute inset-0 size-full transition-opacity duration-150 motion-reduce:transition-none',
@@ -58,7 +62,7 @@ function SaveIndicator({ saved, className }: { saved: boolean; className?: strin
       />
       <Check
         className={cn(
-          'absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
+          'save-check absolute inset-0 size-full transition-[opacity,transform] duration-150 motion-reduce:transition-none',
           saved ? 'translate-y-0 opacity-100' : 'translate-y-0.5 opacity-0',
         )}
       />

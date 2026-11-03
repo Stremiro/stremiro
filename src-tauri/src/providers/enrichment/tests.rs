@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_helpers::TestHttpServer;
+use crate::test_helpers::{TempPath, TestHttpServer};
 
 fn decode_json(bytes: &[u8]) -> Result<(serde_json::Value, bool), String> {
     let value: serde_json::Value =
@@ -9,9 +9,9 @@ fn decode_json(bytes: &[u8]) -> Result<(serde_json::Value, bool), String> {
 
 #[tokio::test]
 async fn load_caches_single_flight_and_replays_disk_with_original_expiry() {
-    let dir = std::env::temp_dir().join(format!("enrich-test-{}", uuid::Uuid::new_v4()));
+    let dir = TempPath::dir("enrich-cache");
     let server = TestHttpServer::new(vec![(200, r#"{"ok":1}"#, None)]);
-    let mut client = EnrichmentClient::new(Some(dir.clone()));
+    let mut client = EnrichmentClient::new(Some(dir.to_path_buf()));
     client.set_base_url(Source::Kitsu, server.url.clone());
     let url = format!("{}/v2/x", server.url);
     let key = "k:one";
@@ -26,14 +26,13 @@ async fn load_caches_single_flight_and_replays_disk_with_original_expiry() {
 
     // A fresh client on the same disk cache serves without HTTP, and the
     // original expiry rides the envelope rather than resetting to 12h.
-    let mut restarted = EnrichmentClient::new(Some(dir.clone()));
+    let mut restarted = EnrichmentClient::new(Some(dir.to_path_buf()));
     restarted.set_base_url(Source::Kitsu, server.url.clone());
     let hit = restarted
         .load(key, Source::Kitsu, restarted.get(&url), decode_json)
         .await
         .unwrap();
     assert_eq!(hit["ok"], 1);
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(server.finish().len(), 1);
 }
 
@@ -101,7 +100,7 @@ async fn retry_after_numeric_and_fixdate_drive_the_cooldown() {
 
 #[test]
 fn disk_envelopes_reject_mismatch_corruption_oversize_and_far_future() {
-    let dir = std::env::temp_dir().join(format!("enrich-env-{}", uuid::Uuid::new_v4()));
+    let dir = TempPath::dir("enrich-envelope");
     let path = dir.join("entry.json");
     let write = |envelope: &str| {
         std::fs::create_dir_all(&dir).unwrap();
@@ -143,18 +142,17 @@ fn disk_envelopes_reject_mismatch_corruption_oversize_and_far_future() {
         .unwrap(),
     );
     assert!(read_disk_envelope(&path, "k").is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]
 async fn empty_and_full_responses_keep_original_disk_expiry() {
-    let dir = std::env::temp_dir().join(format!("enrich-ttl-{}", uuid::Uuid::new_v4()));
+    let dir = TempPath::dir("enrich-ttl");
     let server = TestHttpServer::new(vec![
         (200, "null", None),
         (200, r#"{"ok":1}"#, None),
         (200, r#"{"ok":2}"#, None),
     ]);
-    let mut client = EnrichmentClient::new(Some(dir.clone()));
+    let mut client = EnrichmentClient::new(Some(dir.to_path_buf()));
     client.set_base_url(Source::Kitsu, server.url.clone());
     let url = format!("{}/v2/x", server.url);
 
@@ -179,7 +177,7 @@ async fn empty_and_full_responses_keep_original_disk_expiry() {
     assert!(full_ttl <= FULL_TTL && full_ttl >= FULL_TTL - Duration::from_secs(1));
 
     // A restarted client adopts the envelope stamp verbatim - no reset, no HTTP.
-    let mut restarted = EnrichmentClient::new(Some(dir.clone()));
+    let mut restarted = EnrichmentClient::new(Some(dir.to_path_buf()));
     restarted.set_base_url(Source::Kitsu, server.url.clone());
     restarted
         .load("empty:key", Source::Kitsu, restarted.get(&url), decode_json)
@@ -199,20 +197,19 @@ async fn empty_and_full_responses_keep_original_disk_expiry() {
     })
     .unwrap();
     std::fs::write(&path, &envelope).unwrap();
-    let mut fresh = EnrichmentClient::new(Some(dir.clone()));
+    let mut fresh = EnrichmentClient::new(Some(dir.to_path_buf()));
     fresh.set_base_url(Source::Kitsu, server.url.clone());
     fresh
         .load("empty:key", Source::Kitsu, fresh.get(&url), decode_json)
         .await
         .unwrap();
 
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(server.finish().len(), 3);
 }
 
 #[test]
 fn disk_eviction_and_body_bounds() {
-    let dir = std::env::temp_dir().join(format!("enrich-bound-{}", uuid::Uuid::new_v4()));
+    let dir = TempPath::dir("enrich-bound");
     // An undeletable oldest victim must not block later writes or eviction.
     std::fs::create_dir_all(dir.join("stuck.json")).unwrap();
     for index in 0..129 {
@@ -251,7 +248,6 @@ fn disk_eviction_and_body_bounds() {
     // A whole-envelope oversize is rejected too.
     std::fs::write(&path, vec![b'{'; DISK_MAX_BYTES + 1]).unwrap();
     assert!(read_disk_envelope(&path, "big").is_none());
-    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[tokio::test]

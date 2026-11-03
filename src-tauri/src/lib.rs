@@ -31,6 +31,11 @@ pub fn run() {
             commands::app_shell_commands::reveal_main_window(app);
         }))
         .on_page_load(|webview, payload| {
+            if webview.label() == "main"
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Started)
+            {
+                commands::app_shell_commands::frontend_loading(webview.app_handle());
+            }
             if matches!(payload.event(), tauri::webview::PageLoadEvent::Finished) {
                 let window = webview.window();
                 if let Some(icon) = webview.app_handle().default_window_icon().cloned() {

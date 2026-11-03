@@ -1,7 +1,7 @@
 {
   "name": "stremiro",
   "private": true,
-  "version": "0.9.1-beta",
+  "version": "0.9.2-beta",
   "type": "module",
   "packageManager": "bun@1.4.2",
   "engines": {
@@ -26,7 +26,7 @@
     "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check",
     "clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml --locked",
-    "test:ui": "bun test ./scripts/page-render.test.tsx",
+    "test:ui": "bun test ./scripts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun run test:ui && bun run release:version:check && bun run fmt:rust && bun run clippy",
     "release:version:check": "bun ./scripts/release-version.mjs check",
     "release:version:set": "bun ./scripts/release-version.mjs set",

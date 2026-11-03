@@ -1,5 +1,5 @@
 use super::*;
-use crate::test_helpers::TestHttpServer;
+use crate::test_helpers::{TempPath, TestHttpServer};
 
 const TVMAZE_SHOW: &str = r#"{"id":82,"name":"Game of Thrones","type":"Scripted","status":"Ended","runtime":60,"averageRuntime":61,"network":{"name":"HBO","country":{"timezone":"America/New_York"}},"webChannel":null,"schedule":{"days":["Sunday"],"time":"21:00"}}"#;
 const TVMAZE_CAST: &str = r#"[
@@ -84,9 +84,9 @@ async fn tvmaze_oversized_cast_keeps_people_and_caches_compacted() {
     let cast: &'static str =
         Box::leak(format!("[{}]", vec![row; 1_000].join(",")).into_boxed_str());
     assert!(cast.len() > 256 * 1024);
-    let dir = std::env::temp_dir().join(format!("credits-test-{}", uuid::Uuid::new_v4()));
+    let dir = TempPath::dir("credits");
     let server = TestHttpServer::new(vec![(200, TVMAZE_SHOW, None), (200, cast, None)]);
-    let mut client = EnrichmentClient::new(Some(dir.clone()));
+    let mut client = EnrichmentClient::new(Some(dir.to_path_buf()));
     client.set_base_url(Source::Tvmaze, server.url.clone());
     let credits = get_title_credits(&client, "series", "tt0944947", None)
         .await
@@ -100,12 +100,11 @@ async fn tvmaze_oversized_cast_keeps_people_and_caches_compacted() {
     assert_eq!(server.finish().len(), 2);
     // The compacted cast fits the disk bound and replays without HTTP.
     let trap = TestHttpServer::new(vec![]);
-    let mut restarted = EnrichmentClient::new(Some(dir.clone()));
+    let mut restarted = EnrichmentClient::new(Some(dir.to_path_buf()));
     restarted.set_base_url(Source::Tvmaze, trap.url.clone());
     let replayed = get_title_credits(&restarted, "series", "tt0944947", None)
         .await
         .unwrap();
-    let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(replayed, credits);
     assert!(trap.finish().is_empty());
 }

@@ -6,7 +6,7 @@ use crate::commands::watch_history_commands::{
     prepare_episode_watch_changes, validate_history_batch, WatchedEpisode,
 };
 use crate::commands::WatchProgress;
-use crate::test_helpers::test_progress;
+use crate::test_helpers::{test_progress, TempPath};
 use rusqlite::Connection;
 
 fn sample_progress(last_watched: u64, position: f64) -> WatchProgress {
@@ -19,80 +19,11 @@ fn sample_progress(last_watched: u64, position: f64) -> WatchProgress {
     }
 }
 
-fn temp_db_path(tag: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join(format!(
-        "stremiro-resume-version-{}-{}-{}.sqlite3",
-        std::process::id(),
-        tag,
-        uuid::Uuid::new_v4()
-    ))
-}
-
-/// Temp sqlite path that removes its file on drop, so a panicking test
-/// can't leak state into a later run. `Deref`s to `Path` so `&path` call
-/// sites keep working.
-struct TempDbPath(std::path::PathBuf);
-
-impl TempDbPath {
-    fn new(tag: &str) -> Self {
-        Self(temp_db_path(tag))
-    }
-}
-
-impl std::ops::Deref for TempDbPath {
-    type Target = std::path::Path;
-
-    fn deref(&self) -> &std::path::Path {
-        self.0.as_path()
-    }
-}
-
-impl AsRef<std::path::Path> for TempDbPath {
-    fn as_ref(&self) -> &std::path::Path {
-        self.0.as_path()
-    }
-}
-
-impl Drop for TempDbPath {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
-    }
-}
-
 fn user_version(path: &std::path::Path) -> i32 {
     Connection::open(path)
         .expect("reopen")
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .expect("read version")
-}
-
-/// Temp-dir variant of `TempDbPath` for quarantine tests that need sibling
-/// files: removes its whole tree on drop.
-struct TempDbDir(std::path::PathBuf);
-
-impl TempDbDir {
-    fn new() -> Self {
-        let dir = std::env::temp_dir().join(format!(
-            "stremiro-resume-quarantine-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&dir).expect("create temp dir");
-        Self(dir)
-    }
-}
-
-impl std::ops::Deref for TempDbDir {
-    type Target = std::path::Path;
-
-    fn deref(&self) -> &std::path::Path {
-        self.0.as_path()
-    }
-}
-
-impl Drop for TempDbDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
 }
 
 fn corrupt_siblings(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
@@ -114,7 +45,7 @@ fn read_entry(store: &mut ResumeStore, key: &str) -> WatchProgress {
 
 #[test]
 fn media_id_reads_keep_aliases_order_and_literal_ids() {
-    let path = TempDbPath::new("selected-titles");
+    let path = TempPath::file("selected-titles");
     let mut store = ResumeStore::open(&path).unwrap();
     for (key, id, type_, watched) in [
         ("movie:shared", "shared", "movie", 100),
@@ -160,7 +91,7 @@ fn media_id_reads_keep_aliases_order_and_literal_ids() {
 fn episode_prefilter_preserves_canonical_claims_raw_fallback_and_all_donors() {
     use crate::commands::history_helpers::{choose_entry, resume_rows, HistoryEntryQuery};
 
-    let path = TempDbPath::new("episode-candidates");
+    let path = TempPath::file("episode-candidates");
     let mut store = ResumeStore::open(&path).unwrap();
     store.connection.execute_batch(
         "INSERT INTO watch_progress
@@ -235,7 +166,7 @@ fn dismissal_rows(store: &ResumeStore) -> Vec<(String, String, i64)> {
 
 #[test]
 fn continue_watching_dismissals_hide_titles_until_newer_progress_or_restore() {
-    let path = TempDbPath::new("cw-dismissals");
+    let path = TempPath::file("cw-dismissals");
     let mut store = ResumeStore::open(&path).unwrap();
     let save = |store: &mut ResumeStore, type_: &str, id: &str, last_watched: u64| {
         let (season, episode) = if type_ == "series" {
@@ -354,7 +285,7 @@ fn continue_watching_dismissals_hide_titles_until_newer_progress_or_restore() {
 #[test]
 fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility() {
     use super::super::history_helpers::build_history_key;
-    let source_path = TempDbPath::new("backup-cw-source");
+    let source_path = TempPath::file("backup-cw-source");
     let mut source = ResumeStore::open(&source_path).unwrap();
     for (type_, id) in [
         ("movie", "shared"),
@@ -389,7 +320,7 @@ fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility()
     let markers =
         serde_json::to_value(source.load_continue_watching_dismissals().unwrap()).unwrap();
     for fresh in [true, false] {
-        let path = TempDbPath::new("backup-cw-destination");
+        let path = TempPath::file("backup-cw-destination");
         let mut destination = ResumeStore::open(&path).unwrap();
         if !fresh {
             for (id, last_watched) in [
@@ -456,7 +387,7 @@ fn backup_continue_watching_roundtrip_keeps_cutoffs_types_and_local_visibility()
 
 #[test]
 fn backup_continue_watching_rejects_invalid_orphans_and_keeps_local_marker_capacity() {
-    let path = TempDbPath::new("backup-cw-bound");
+    let path = TempPath::file("backup-cw-bound");
     let mut store = ResumeStore::open(&path).unwrap();
     store
         .connection
@@ -512,7 +443,7 @@ fn backup_continue_watching_rejects_invalid_orphans_and_keeps_local_marker_capac
 
 #[test]
 fn backup_continue_watching_marker_failure_rolls_back_history_and_dismissals() {
-    let path = TempDbPath::new("backup-cw-rollback");
+    let path = TempPath::file("backup-cw-rollback");
     let mut store = ResumeStore::open(&path).unwrap();
     store
         .connection
@@ -536,7 +467,7 @@ fn backup_continue_watching_marker_failure_rolls_back_history_and_dismissals() {
 
 #[test]
 fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corrupt_rows() {
-    let path = TempDbPath::new("title-identities");
+    let path = TempPath::file("title-identities");
     let mut store = ResumeStore::open(&path).unwrap();
     for (key, type_, id, last_watched) in [
         ("z-old", "series", "newer", 100),
@@ -610,7 +541,7 @@ fn latest_title_identities_keep_recency_alias_ties_and_skip_unrequested_or_corru
 
 #[test]
 fn recent_titles_break_limit_ties_by_latest_rows_history_key() {
-    let path = TempDbPath::new("recent-title-ties");
+    let path = TempPath::file("recent-title-ties");
     let store = ResumeStore::open(&path).unwrap();
     store
         .connection
@@ -638,7 +569,7 @@ fn recent_titles_break_limit_ties_by_latest_rows_history_key() {
 
 #[test]
 fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
-    let path = TempDbPath::new("recent-titles");
+    let path = TempPath::file("recent-titles");
     assert!(ResumeStore::load_recent_titles(&path).unwrap().is_empty());
     assert!(ResumeStore::load_watched_title_ids(&path, "movie")
         .unwrap()
@@ -702,7 +633,7 @@ fn recent_and_watched_titles_are_bounded_distinct_stable_and_read_only() {
 
 #[test]
 fn watched_title_query_bounds_oversized_history_to_newest_titles() {
-    let path = TempDbPath::new("watched-limit");
+    let path = TempPath::file("watched-limit");
     let mut store = ResumeStore::open(&path).unwrap();
     let transaction = store.connection.transaction().unwrap();
     for index in 0..=super::MAX_RESUME_TOTAL_ENTRIES {
@@ -724,7 +655,7 @@ fn watched_title_query_bounds_oversized_history_to_newest_titles() {
 
 #[test]
 fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
-    let path = TempDbPath::new("title-count");
+    let path = TempPath::file("title-count");
     let mut store = ResumeStore::open(&path).expect("open db");
     assert_eq!(store.counts().expect("empty count"), (0, 0));
     for (key, type_, episode) in [
@@ -746,7 +677,7 @@ fn history_title_count_collapses_episodes_but_keeps_media_types_distinct() {
 #[test]
 fn watched_marks_do_not_overwrite_another_canonical_episode_at_a_raw_key() {
     for requested in [vec![4], vec![4, 15], vec![14, 4], vec![4, 14]] {
-        let path = TempDbPath::new("remapped-key-collision");
+        let path = TempPath::file("remapped-key-collision");
         let mut store = ResumeStore::open(&path).expect("open db");
         let prior = WatchProgress {
             type_: "series".to_string(),
@@ -794,7 +725,7 @@ fn watched_marks_do_not_overwrite_another_canonical_episode_at_a_raw_key() {
 
 #[test]
 fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
-    let path = TempDbPath::new("remapped-watched");
+    let path = TempPath::file("remapped-watched");
     let mut store = ResumeStore::open(&path).expect("open db");
     let mut prior = sample_progress(1_000, 120.0);
     prior.type_ = "series".to_string();
@@ -870,7 +801,7 @@ fn watched_marks_preserve_remapped_storage_identity_and_unwatched_deletes_it() {
 #[test]
 fn season_watch_undo_restores_every_raw_episode_donor() {
     for watched in [false, true] {
-        let path = TempDbPath::new("season-donor-undo");
+        let path = TempPath::file("season-donor-undo");
         let mut store = ResumeStore::open(&path).expect("open db");
         let item = crate::test_helpers::test_media_item("tt1234567", "series");
         let episodes = [WatchedEpisode {
@@ -956,7 +887,7 @@ fn season_watch_undo_restores_every_raw_episode_donor() {
 
 #[test]
 fn undo_restores_more_than_500_rows_in_one_merge() {
-    let path = TempDbPath::new("large-undo");
+    let path = TempPath::file("large-undo");
     let mut store = ResumeStore::open(&path).expect("open db");
     let rows: Vec<_> = (1..=501)
         .map(|episode| {
@@ -989,7 +920,7 @@ fn undo_restores_more_than_500_rows_in_one_merge() {
 
 #[test]
 fn open_initializes_v3_and_rejects_future_versions_without_clobbering() {
-    let path = TempDbPath::new("future");
+    let path = TempPath::file("future");
     ResumeStore::open(&path).expect("fresh db opens as v3");
     let version = user_version(&path);
     assert_eq!(version, 3);
@@ -1029,7 +960,7 @@ fn open_initializes_v3_and_rejects_future_versions_without_clobbering() {
 
 #[test]
 fn torn_init_without_version_stamp_heals_instead_of_bricking() {
-    let path = TempDbPath::new("torninit");
+    let path = TempPath::file("torninit");
     {
         let mut store = ResumeStore::open(&path).expect("fresh db opens");
         store
@@ -1054,7 +985,7 @@ fn torn_init_without_version_stamp_heals_instead_of_bricking() {
 
 #[test]
 fn stale_progress_write_does_not_regress_resume() {
-    let path = TempDbPath::new("recency");
+    let path = TempPath::file("recency");
     let mut store = ResumeStore::open(&path).expect("fresh db opens");
     let wrote = store
         .upsert_progress("movie:tt1234567", &sample_progress(2000, 900.0))
@@ -1112,7 +1043,7 @@ fn explicit_live_completion_survives_reopening_without_a_schema_change() {
     use crate::commands::history_helpers::{
         prepare_live_watch_progress, with_progress_annotations,
     };
-    let path = TempDbPath::new("live-completion");
+    let path = TempPath::file("live-completion");
     let key = "movie:tt1234567";
     let mut store = ResumeStore::open(&path).unwrap();
     store
@@ -1152,7 +1083,7 @@ fn explicit_live_completion_survives_reopening_without_a_schema_change() {
 
 #[test]
 fn upsert_drops_url_shaped_stream_keys() {
-    let path = TempDbPath::new("keyshape");
+    let path = TempPath::file("keyshape");
     let mut store = ResumeStore::open(&path).expect("fresh db opens");
     for (key, expected) in [
         ("u:https://cdn.example/legacy.mp4?sig=abc:0", None),
@@ -1178,7 +1109,7 @@ fn upsert_drops_url_shaped_stream_keys() {
 
 #[test]
 fn reopening_clears_legacy_url_keys_and_preserves_opaque_keys() {
-    let path = TempDbPath::new("legacykeys");
+    let path = TempPath::file("legacykeys");
     let mut store = ResumeStore::open(&path).expect("open db");
     for (index, key) in [
         "u:https://cdn.example/legacy.mp4?sig=secret:0",
@@ -1224,7 +1155,7 @@ fn reopening_clears_legacy_url_keys_and_preserves_opaque_keys() {
 
 #[test]
 fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
-    let path = TempDbPath::new("mergecap");
+    let path = TempPath::file("mergecap");
     let mut store = ResumeStore::open(&path).unwrap();
     let rows = (0..super::MAX_RESUME_TOTAL_ENTRIES - 1)
         .map(|index| {
@@ -1298,7 +1229,7 @@ fn history_merge_rejects_capacity_growth_before_writing_any_rows() {
 
 #[test]
 fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
-    let path = TempDbPath::new("undocap");
+    let path = TempPath::file("undocap");
     let mut store = ResumeStore::open(&path).unwrap();
     let removed = (
         "movie:removed".to_string(),
@@ -1342,7 +1273,7 @@ fn history_undo_rejects_growth_after_other_titles_fill_the_store() {
 
 #[test]
 fn total_history_is_bounded_to_newest_entries() {
-    let path = TempDbPath::new("totalcap");
+    let path = TempPath::file("totalcap");
     {
         let mut store = ResumeStore::open(&path).expect("fresh db opens");
         store
@@ -1393,7 +1324,7 @@ fn total_history_is_bounded_to_newest_entries() {
 fn title_prune_keeps_every_watched_mark() {
     // A fully watched 24-episode season plus 14 partial rows: every watched
     // mark survives and only the in-progress overflow is evicted.
-    let path = TempDbPath::new("titlecap");
+    let path = TempPath::file("titlecap");
     let mut store = ResumeStore::open(&path).expect("open db");
     for episode in 1..=24u32 {
         let mut watched = sample_progress(u64::from(episode), 3_600.0);
@@ -1439,7 +1370,7 @@ fn total_watch_time_secs_caps_at_duration_and_keeps_unknown_runtime_rows() {
     // A row past its runtime is corrupt — count the runtime, not the
     // overrun; a row with no known runtime keeps its raw position; a
     // negative position floors at zero.
-    let path = TempDbPath::new("watchtime");
+    let path = TempPath::file("watchtime");
     let mut store = ResumeStore::open(&path).expect("open db");
     assert_eq!(store.total_watch_time_secs().expect("empty sum"), 0);
 
@@ -1523,7 +1454,7 @@ fn total_watch_time_secs_caps_at_duration_and_keeps_unknown_runtime_rows() {
 
 #[test]
 fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
-    let path = TempDbPath::new("corruptrow");
+    let path = TempPath::file("corruptrow");
     let mut store = ResumeStore::open(&path).expect("open db");
     store
         .upsert_progress("movie:tt1234567", &sample_progress(1_000, 300.0))
@@ -1607,7 +1538,7 @@ fn corrupt_row_drops_only_itself_and_non_finite_position_clamps() {
 
 #[test]
 fn query_step_error_fails_history_read() {
-    let path = TempDbPath::new("steperror");
+    let path = TempPath::file("steperror");
     let mut store = ResumeStore::open(&path).expect("open db");
     store
         .upsert_progress("movie:tt1234567", &sample_progress(1_000, 300.0))
@@ -1627,7 +1558,7 @@ fn query_step_error_fails_history_read() {
 
 #[test]
 fn unreadable_database_file_is_quarantined_and_recreated() {
-    let dir = TempDbDir::new();
+    let dir = TempPath::dir("resume-quarantine");
     let path = dir.join("playback_resume.sqlite3");
     let garbage = vec![0xABu8; 4096];
     std::fs::write(&path, &garbage).expect("write garbage db");
@@ -1649,7 +1580,7 @@ fn unreadable_database_file_is_quarantined_and_recreated() {
 fn corrupt_table_page_with_intact_header_is_quarantined_and_recreated() {
     use std::io::{Seek, SeekFrom, Write};
 
-    let dir = TempDbDir::new();
+    let dir = TempPath::dir("resume-quarantine");
     let path = dir.join("playback_resume.sqlite3");
     let mut store = ResumeStore::open(&path).expect("open db");
     for index in 0..400 {
@@ -1710,7 +1641,7 @@ fn corrupt_table_page_with_intact_header_is_quarantined_and_recreated() {
 
 #[test]
 fn unsupported_schema_version_fails_without_quarantine() {
-    let dir = TempDbDir::new();
+    let dir = TempPath::dir("resume-quarantine");
     let path = dir.join("playback_resume.sqlite3");
     ResumeStore::open(&path).expect("fresh db opens as v3");
     Connection::open(&path)

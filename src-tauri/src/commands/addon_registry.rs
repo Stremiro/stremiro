@@ -557,12 +557,20 @@ pub(crate) async fn fetch_catalog_pages_for_target_groups(
             {
                 Err("Catalog scan incomplete.".into())
             }
-            None => merge_catalog_pages(
-                bucket.into_iter().map(|(_, result)| {
-                    result.map(|page| catalog_fetch_page_from_source(page, skip))
-                }),
-                "Failed to load catalog.",
-            ),
+            None => {
+                // Dropped stragglers have no outcome to carry the partial flag.
+                let incomplete = bucket.len() != source_count;
+                merge_catalog_pages(
+                    bucket.into_iter().map(|(_, result)| {
+                        result.map(|page| catalog_fetch_page_from_source(page, skip))
+                    }),
+                    "Failed to load catalog.",
+                )
+                .map(|mut page| {
+                    page.partial |= incomplete;
+                    page
+                })
+            }
         })
         .collect()
 }

@@ -249,7 +249,10 @@ function SortableListCard({
       </div>
 
       {isExpanded && (
-        <div id={contentId} className='border-t border-white/[0.06]'>
+        <div
+          id={contentId}
+          className='border-t border-white/[0.06] animate-surface-in motion-reduce:animate-none'
+        >
           <ListItemsView key={list.id} list={list} />
         </div>
       )}
@@ -352,7 +355,7 @@ const SortableItemRow = memo(function SortableItemRow({
           {...attributes}
           {...listeners}
           aria-label={`Reorder ${item.title}`}
-          className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+          className='absolute top-2 left-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-opacity duration-150 cursor-grab active:cursor-grabbing bg-black/60 rounded-md touch-none focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none'
         >
           <GripVertical className='w-3 h-3 text-white' />
         </button>
@@ -366,7 +369,7 @@ const SortableItemRow = memo(function SortableItemRow({
             onRemove(item.id, removeButtonRef.current);
           }}
           aria-label={`Remove ${item.title} from list`}
-          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-opacity bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+          className='absolute top-2 right-2 z-20 flex h-8 w-8 items-center justify-center opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-[opacity,background-color] duration-150 bg-black/60 rounded-md hover:bg-red-500/80 text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40 motion-reduce:transition-none'
         >
           <X className='w-3 h-3' />
         </button>
@@ -463,7 +466,7 @@ const SortableItemRow = memo(function SortableItemRow({
         variant='ghost'
         onClick={() => onRemove(item.id, removeButtonRef.current)}
         aria-label={`Remove ${item.title} from list`}
-        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 transition-colors shrink-0'
+        className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 transition-[color,background-color,opacity] duration-150 shrink-0 motion-reduce:transition-none'
       >
         <X className='w-3.5 h-3.5' />
       </Button>
@@ -729,7 +732,10 @@ function ListItemsView({ list }: { list: UserList }) {
 
       <div
         aria-busy={isSearchPending}
-        className={cn('space-y-3 transition-opacity', isSearchPending && 'opacity-60')}
+        className={cn(
+          'space-y-3 transition-opacity duration-150 motion-reduce:transition-none',
+          isSearchPending && 'opacity-60 delay-200',
+        )}
       >
         <DndContext
           sensors={sensors}

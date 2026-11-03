@@ -111,17 +111,18 @@ pub(super) fn prepare_library_write(
         .and_then(normalize_library_item)
         .filter(|existing| existing.id == item.id);
     let item = merge_library_item(existing.as_ref(), item);
-    if index.contains(&item.id) {
-        return Ok((item, None));
+    match index.binary_search(&item.id) {
+        Ok(_) => Ok((item, None)),
+        Err(position) => {
+            if index.len() >= MAX_LIBRARY_ITEMS {
+                return Err(LibraryWriteError::CapacityExceeded(
+                    "Library is full.".to_string(),
+                ));
+            }
+            index.insert(position, item.id.clone());
+            Ok((item, Some(index)))
+        }
     }
-    if index.len() >= MAX_LIBRARY_ITEMS {
-        return Err(LibraryWriteError::CapacityExceeded(
-            "Library is full.".to_string(),
-        ));
-    }
-    index.push(item.id.clone());
-    index.sort();
-    Ok((item, Some(index)))
 }
 
 #[command]

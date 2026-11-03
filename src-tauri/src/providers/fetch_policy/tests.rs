@@ -23,6 +23,9 @@ fn blocked_ip_literals_cover_loopback_private_and_metadata_ranges() {
         "[::ffff:127.0.0.1]",
         "[fc00::1]",
         "[fe80::1%eth0]",
+        // IPv4-embedding transition prefixes: 6to4 and Teredo.
+        "[2002:7f00:1::]",
+        "[2001:0:4136:e378:8000:63bf:3fff:fdd2]",
     ] {
         assert!(is_blocked_ip_literal(host), "{host} must be blocked");
     }
@@ -39,6 +42,7 @@ fn public_hosts_and_ips_are_not_blocked() {
         "kitsu.io",
         "example-addon.test",
         "[2606:4700:4700::1111]",
+        "[2001:4860:4860::8888]",
         "[::ffff:8.8.8.8]",
         // Non-standard numerics routing to public space must also pass.
         "134744072", // 8.8.8.8 as a single decimal

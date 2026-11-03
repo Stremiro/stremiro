@@ -14,10 +14,6 @@ import { lastSearchPath } from '@/lib/search-page-state';
 const OWNED_LAYER_SELECTOR = `[role="dialog"], ${RADIX_POPPER_CONTENT_SELECTOR}, [data-media-card-expanded], [data-mini-player]`;
 const QUICK_SECTION_PATHS = ['/', '/search', '/calendar', '/library', '/settings'] as const;
 
-function isInsideOwnedLayer(target: EventTarget | null): boolean {
-  return target instanceof HTMLElement && !!target.closest(OWNED_LAYER_SELECTOR);
-}
-
 function hasOpenLayer(): boolean {
   if (document.querySelector(OPEN_DIALOG_SELECTOR)) return true;
   for (const wrapper of document.querySelectorAll(RADIX_POPPER_CONTENT_SELECTOR)) {
@@ -57,43 +53,30 @@ export function useBrowseHotkeys() {
       if (!event.repeat) openSearch();
       return;
     }
-    if (
-      event.altKey &&
-      !event.ctrlKey &&
-      !event.metaKey &&
-      !event.shiftKey &&
-      /^[1-5]$/.test(key)
-    ) {
-      if (isEditableTarget(event.target) || isInsideOwnedLayer(event.target) || hasOpenLayer()) {
-        return;
-      }
-      event.preventDefault();
-      const path = QUICK_SECTION_PATHS[Number(key) - 1];
-      if (event.repeat) return;
-      if (path === '/search') openSearch();
-      else if (window.location.pathname !== path) navigateApp(path);
-      return;
-    }
-    if ((key === 'arrowleft' || key === 'arrowright') && event.altKey) {
+    if (event.altKey) {
+      if (!/^[1-5]$/.test(key) && key !== 'arrowleft' && key !== 'arrowright') return;
       if (
         event.ctrlKey ||
         event.metaKey ||
         event.shiftKey ||
-        isEditableTarget(event.target) ||
-        isInsideOwnedLayer(event.target) ||
+        isEditableTarget(event.target, OWNED_LAYER_SELECTOR) ||
         hasOpenLayer()
       ) {
         return;
       }
       event.preventDefault();
-      if (!event.repeat) {
-        if (key === 'arrowleft') navigateBack();
-        else void navigateForward();
+      if (event.repeat) return;
+      if (key === 'arrowleft') navigateBack();
+      else if (key === 'arrowright') void navigateForward();
+      else {
+        const path = QUICK_SECTION_PATHS[Number(key) - 1];
+        if (path === '/search') openSearch();
+        else if (window.location.pathname !== path) navigateApp(path);
       }
       return;
     }
-    if (event.ctrlKey || event.altKey || event.metaKey || event.repeat) return;
-    if (isEditableTarget(event.target) || isInsideOwnedLayer(event.target)) return;
+    if (event.ctrlKey || event.metaKey || event.repeat) return;
+    if (isEditableTarget(event.target, OWNED_LAYER_SELECTOR)) return;
 
     switch (key) {
       case '/':

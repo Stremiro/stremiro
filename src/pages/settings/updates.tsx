@@ -5,6 +5,7 @@ import { toast } from 'sonner';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { ReleaseNotes } from '@/components/release-notes';
 import { RetryBanner } from '@/components/retry-banner';
+import { UpdateAccentHairline, UpdateProgressBar } from '@/components/update-chrome';
 import { Button } from '@/components/ui/button';
 import { useAppReleaseNotes, useAppUpdater, useMarkAppUpdateSeen } from '@/hooks/use-app-updater';
 import { useAppUiPreferences } from '@/hooks/use-app-ui-preferences';
@@ -233,13 +234,7 @@ export function UpdatesSection() {
 
   return (
     <SettingsGroup>
-      {/* Same accent vocabulary as the announce card: a hairline, not a tint. */}
-      {isUpdateAvailable ? (
-        <span
-          aria-hidden='true'
-          className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/50 to-transparent'
-        />
-      ) : null}
+      {isUpdateAvailable ? <UpdateAccentHairline /> : null}
       <SettingsGroupHeader icon={RefreshCw} title='Updates' action={headerStatus} />
 
       <SettingsBody className='space-y-4'>
@@ -280,28 +275,11 @@ export function UpdatesSection() {
 
         {isInstalling ? (
           <div className='space-y-2' role='status' aria-live='polite'>
-            <div
-              className='h-1.5 w-full overflow-hidden rounded-full bg-white/[0.07]'
-              role='progressbar'
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={installPercent ?? undefined}
-              aria-label='Update download progress'
-            >
-              <div
-                className={cn(
-                  'h-full rounded-full bg-emerald-300',
-                  installPercent === null
-                    ? 'w-1/3 animate-pulse'
-                    : 'w-full origin-left transition-transform duration-300',
-                )}
-                style={
-                  installPercent !== null
-                    ? { transform: `scaleX(${installPercent / 100})` }
-                    : undefined
-                }
-              />
-            </div>
+            <UpdateProgressBar
+              percent={installPercent}
+              className='h-1.5'
+              barClassName='bg-emerald-300'
+            />
             <p className='text-[12px] tabular-nums text-zinc-500'>
               {formatAppUpdateProgress(updateState.installProgress)}
             </p>

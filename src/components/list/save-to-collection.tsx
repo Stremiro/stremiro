@@ -41,6 +41,7 @@ export function SaveToCollectionPanel({
           <button
             type='button'
             className={ROW_CLASS}
+            aria-label={isInLibrary ? 'Remove from library' : 'Add to library'}
             aria-pressed={isInLibrary}
             aria-disabled={isLibraryBusy || undefined}
             aria-busy={isLibraryBusy || undefined}
@@ -105,6 +106,7 @@ export function SaveToCollectionPanel({
                 key={list.id}
                 type='button'
                 className={ROW_CLASS}
+                aria-label={`${list.contains_item ? 'Remove from' : 'Add to'} ${list.name}`}
                 aria-pressed={list.contains_item}
                 aria-disabled={pending || undefined}
                 aria-busy={pending || undefined}
@@ -118,12 +120,20 @@ export function SaveToCollectionPanel({
                 <span className='min-w-0 flex-1'>
                   <span
                     dir='auto'
+                    title={list.name}
                     className='block truncate text-[13px] font-medium leading-4 text-zinc-200'
                   >
                     {list.name}
                   </span>
-                  <span className='mt-0.5 block h-3.5 tabular-nums text-[12px] leading-[14px] text-zinc-500'>
-                    {pending ? 'Saving…' : pluralize(list.item_count, 'title')}
+                  <span
+                    className={cn(
+                      'mt-0.5 block h-3.5 truncate text-[12px] leading-[14px] tabular-nums transition-colors duration-150 motion-reduce:transition-none',
+                      list.contains_item && !pending ? 'text-(--accent-act)' : 'text-zinc-500',
+                    )}
+                  >
+                    {pending
+                      ? 'Saving…'
+                      : `${list.contains_item ? 'Added · ' : ''}${pluralize(list.item_count, 'title')}`}
                   </span>
                 </span>
                 <SaveIndicator

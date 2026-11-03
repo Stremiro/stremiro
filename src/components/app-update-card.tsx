@@ -1,6 +1,7 @@
 import { ArrowUpRight, CircleAlert, Download, RefreshCw, Sparkles, X } from 'lucide-react';
 import { useEffect } from 'react';
 import { toast } from 'sonner';
+import { UpdateAccentHairline, UpdateProgressBar } from '@/components/update-chrome';
 import { useAppUpdater, useMarkAppUpdateSeen } from '@/hooks/use-app-updater';
 import {
   type AppUpdateProgress,
@@ -43,10 +44,7 @@ function UpdateProgress({
 
   return (
     <div className={CARD_CHROME} role='status' aria-live='polite'>
-      <span
-        aria-hidden='true'
-        className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/50 to-transparent'
-      />
+      <UpdateAccentHairline />
       <div className='flex items-center gap-3'>
         <Download className='h-4.5 w-4.5 shrink-0 text-emerald-300/90' strokeWidth={2} />
         <div className='min-w-0 flex-1'>
@@ -63,22 +61,7 @@ function UpdateProgress({
           </span>
         ) : null}
       </div>
-      <div
-        className='mt-3 h-1 w-full overflow-hidden rounded-full bg-white/[0.07]'
-        role='progressbar'
-        aria-valuemin={0}
-        aria-valuemax={100}
-        aria-valuenow={percent ?? undefined}
-        aria-label='Update download progress'
-      >
-        <div
-          className={cn(
-            'h-full origin-left rounded-full bg-emerald-300/90 transition-transform duration-300 motion-reduce:transition-none',
-            percent === null && 'w-1/3 motion-safe:animate-pulse',
-          )}
-          style={percent !== null ? { transform: `scaleX(${percent / 100})` } : undefined}
-        />
-      </div>
+      <UpdateProgressBar percent={percent} className='mt-3' />
     </div>
   );
 }
@@ -187,10 +170,7 @@ export function AppUpdateCard({ onViewNotes }: { onViewNotes: () => void }) {
   return (
     <div className={CARD_CHROME}>
       {/* Release notes stay in Settings — the toast announces and hands off. */}
-      <span
-        aria-hidden='true'
-        className='absolute inset-x-5 top-0 h-px bg-linear-to-r from-transparent via-emerald-300/60 to-transparent'
-      />
+      <UpdateAccentHairline className='via-emerald-300/60' />
       <CloseButton onClose={dismissAppUpdateToast} />
 
       <div className='flex items-start gap-3'>

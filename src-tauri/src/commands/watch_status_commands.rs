@@ -103,15 +103,14 @@ pub(super) fn write_watch_status(
             .flatten());
     };
 
-    if !index.contains(&item_id) {
+    if let Err(position) = index.binary_search(&item_id) {
         if index.len() >= MAX_WATCH_STATUS_ITEMS {
             return Err(WatchStatusError::new(
                 WatchStatusErrorKind::StatusCapacity,
                 "Watch status list is full.",
             ));
         }
-        index.push(item_id.clone());
-        index.sort();
+        index.insert(position, item_id.clone());
     }
     let (item, library_index) =
         super::library_commands::prepare_library_write(library_store, item)?;

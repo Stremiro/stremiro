@@ -499,14 +499,14 @@ async fn fetch_prepared_streams_for_addon(
     let mut last_error: Option<String> = None;
     let mut any_succeeded = false;
     let mut unprobeable_streams = Vec::new();
-    let mut attempted_queries = 0;
+    let mut first_attempt = true;
 
     for (index, query_id) in query_ids.iter().enumerate() {
         if !addon_declares_stream(addon, effective_type, std::slice::from_ref(query_id)) {
             continue;
         }
-        let primary_attempt = attempted_queries == 0;
-        attempted_queries += 1;
+        let primary_attempt = first_attempt;
+        first_attempt = false;
         let timeout_secs = if primary_attempt {
             ADDON_STREAM_FETCH_TIMEOUT_SECS
         } else {

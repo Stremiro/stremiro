@@ -30,6 +30,7 @@ import { SegmentPill, SegmentedControl, ViewToggle } from '@/components/ui/segme
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
+import { ScrollToTop } from '@/components/scroll-to-top';
 import { Button } from '@/components/ui/button';
 import { ConfirmDialog } from '@/components/ui/dialog';
 import { SearchInput } from '@/components/ui/search-input';
@@ -208,6 +209,7 @@ export function Profile() {
 
   return (
     <div className='relative min-h-[calc(100vh-2rem)] page-enter'>
+      <ScrollToTop />
       <div
         className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-6 pb-16 space-y-6 relative z-10`}
       >
@@ -579,7 +581,10 @@ function ProfileLibraryTab({
         )}
         <div
           aria-busy={libraryResultsPending}
-          className={cn('transition-opacity', libraryResultsPending && 'opacity-60')}
+          className={cn(
+            'transition-opacity duration-150 motion-reduce:transition-none',
+            libraryResultsPending && 'opacity-60 delay-200',
+          )}
         >
           <CollectionTabContent
             isError={queryNeedsRetry(profileLibraryQuery)}
@@ -858,7 +863,10 @@ function ProfileHistoryTab({
       )}
       <div
         aria-busy={historySearchPending}
-        className={cn('transition-opacity', historySearchPending && 'opacity-60')}
+        className={cn(
+          'transition-opacity duration-150 motion-reduce:transition-none',
+          historySearchPending && 'opacity-60 delay-200',
+        )}
       >
         <CollectionTabContent
           isError={queryNeedsRetry(historyQuery)}

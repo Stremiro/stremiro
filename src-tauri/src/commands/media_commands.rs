@@ -256,10 +256,16 @@ pub(crate) async fn fetch_media_details_inner(
     ))
 }
 
-fn normalize_details_lookup(media_type: &str, id: &str) -> Result<(&'static str, String), String> {
+/// Shared id+type normalization for details/subtitle/mapping lookups; `context`
+/// names the lookup in the type error ("details lookup", "subtitle lookup").
+fn normalize_lookup_id_type(
+    media_type: &str,
+    id: &str,
+    context: &str,
+) -> Result<(&'static str, String), String> {
     let id = normalize_media_id(id).ok_or_else(|| "Media ID is required.".to_string())?;
     let media_type = normalize_stream_media_type(media_type, Some(&id))
-        .ok_or_else(|| "Invalid media type for details lookup.".to_string())?;
+        .ok_or_else(|| format!("Invalid media type for {context}."))?;
     Ok((media_type, id))
 }
 
@@ -272,7 +278,7 @@ pub async fn get_media_details(
     id: String,
     include_episodes: Option<bool>,
 ) -> Result<MediaDetails, super::addon_registry::AddonResourceError> {
-    let (media_type, id) = normalize_details_lookup(&media_type, &id)?;
+    let (media_type, id) = normalize_lookup_id_type(&media_type, &id, "details lookup")?;
     let include_episodes = include_episodes.unwrap_or(true);
 
     let mut details =
@@ -365,7 +371,7 @@ pub async fn get_details_prefetch_bundle(
     media_type: String,
     id: String,
 ) -> Result<DetailsPrefetchBundle, String> {
-    let (media_type, id) = normalize_details_lookup(&media_type, &id)?;
+    let (media_type, id) = normalize_lookup_id_type(&media_type, &id, "details lookup")?;
 
     // The card shape never carries episodes, so details skips the episode-enrichment
     // hop; the resume read joins the meta fetch with the same source-health join
@@ -408,9 +414,8 @@ fn subtitle_lookup_ids(
     season: Option<u32>,
     episode: Option<u32>,
 ) -> Result<(&'static str, Vec<String>), String> {
-    let id = normalize_media_id(js_trim(id)).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(js_trim(media_type), Some(&id))
-        .ok_or_else(|| "Invalid media type for subtitle lookup.".to_string())?;
+    let (media_type, id) =
+        normalize_lookup_id_type(js_trim(media_type), js_trim(id), "subtitle lookup")?;
     // Subtitle IDs follow stream IDs; anime resolves through series episodes.
     let effective_type = super::media_type::addon_episode_lookup_type(media_type);
     // A single colon can be a namespace (kitsu:48316); only two numeric
@@ -624,9 +629,7 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
     canonical_season: u32,
     canonical_episode: u32,
 ) -> Result<Option<PlaybackEpisodeMappingSnapshot>, String> {
-    let id = normalize_media_id(id).ok_or_else(|| "Media ID is required.".to_string())?;
-    let media_type = normalize_stream_media_type(media_type, Some(&id))
-        .ok_or_else(|| "Invalid media type for episode mapping lookup.".to_string())?;
+    let (media_type, id) = normalize_lookup_id_type(media_type, id, "episode mapping lookup")?;
 
     if media_type == "movie" {
         return Ok(None);

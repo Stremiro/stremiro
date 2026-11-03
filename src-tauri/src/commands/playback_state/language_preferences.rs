@@ -151,7 +151,7 @@ impl PlaybackStateService {
         if preferred_audio_language.is_none() && preferred_subtitle_language.is_none() {
             // Nothing stored for this title: clearing is already a no-op, so
             // skip the whole-file save.
-            if !preferences_index.iter().any(|entry| entry == &scope_key) {
+            if preferences_index.binary_search(&scope_key).is_err() {
                 return Ok(());
             }
             store.delete(playback_language_preferences_item_key(&scope_key));

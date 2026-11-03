@@ -437,13 +437,17 @@ export function Settings() {
     return () => window.removeEventListener('keydown', handleKeyDown);
   }, []);
 
+  // Same-path replaces are skipped by the route scroll manager — land at top.
+  const resetSectionScroll = () => {
+    sectionRef.current?.scrollTo({ top: 0 });
+    if (window.scrollY > 0) window.scrollTo(0, 0);
+  };
+
   const handleSectionChange = (sectionId: SectionId) => {
     if (sectionId === active && !query && !searchTarget) return;
     setQuery('');
     setSearchTarget(null);
-    // Same-path replaces are skipped by the route scroll manager — land at top.
-    sectionRef.current?.scrollTo({ top: 0 });
-    if (window.scrollY > 0) window.scrollTo(0, 0);
+    resetSectionScroll();
     setSearchParams(
       (currentParams) => {
         const nextParams = new URLSearchParams(currentParams);
@@ -499,8 +503,7 @@ export function Settings() {
               value={query}
               onValueChange={(value) => {
                 setQuery(value);
-                sectionRef.current?.scrollTo({ top: 0 });
-                if (window.scrollY > 0) window.scrollTo(0, 0);
+                resetSectionScroll();
               }}
               inputRef={searchInputRef}
               onSubmit={() => {

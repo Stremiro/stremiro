@@ -44,12 +44,13 @@ export function RetryBanner({
         }}
         aria-disabled={isRetrying || undefined}
         aria-busy={isRetrying}
-        className='h-8 shrink-0 gap-1.5 text-[14px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-wait aria-disabled:opacity-50'
+        className='h-8 min-w-28 shrink-0 gap-1.5 text-[14px] text-zinc-300 hover:bg-white/[0.06] hover:text-white aria-disabled:cursor-wait aria-disabled:opacity-50'
       >
         <RotateCcw
+          aria-hidden='true'
           className={cn('h-3.5 w-3.5', isRetrying && 'animate-spin motion-reduce:animate-none')}
         />
-        Retry
+        {isRetrying ? 'Retrying…' : 'Retry'}
       </Button>
     </div>
   );

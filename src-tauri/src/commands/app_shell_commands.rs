@@ -33,6 +33,32 @@ impl AppShellState {
         self.minimize_to_tray
             .store(preferences.minimize_to_tray, Ordering::Relaxed);
     }
+
+    fn begin_frontend_quit(&self) -> bool {
+        self.frontend_quit_ready.load(Ordering::Relaxed)
+            && !self.quit_pending.swap(true, Ordering::Relaxed)
+    }
+
+    fn reset_frontend(&self) {
+        self.frontend_quit_ready.store(false, Ordering::Relaxed);
+        self.quit_pending.store(false, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn frontend_loading(app: &AppHandle) {
+    app.state::<AppShellState>().reset_frontend();
+}
+
+fn request_quit(app: &AppHandle) {
+    if app.state::<AppShellState>().begin_frontend_quit()
+        && app
+            .get_webview_window("main")
+            .is_some_and(|window| window.emit("app://quit-requested", ()).is_ok())
+    {
+        return;
+    }
+    // A missing renderer or failed event delivery must not strand the tray app.
+    app.exit(0);
 }
 
 pub(crate) fn handle_run_event(app: &AppHandle, event: tauri::RunEvent) {
@@ -88,18 +114,7 @@ pub(crate) fn setup(app: &AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {
             "show" => reveal_main_window(app),
-            "quit" => {
-                let state = app.state::<AppShellState>();
-                if !state.frontend_quit_ready.load(Ordering::Relaxed)
-                    || state.quit_pending.swap(true, Ordering::Relaxed)
-                {
-                    app.exit(0);
-                } else if let Some(window) = app.get_webview_window("main") {
-                    if window.emit("app://quit-requested", ()).is_err() {
-                        state.quit_pending.store(false, Ordering::Relaxed);
-                    }
-                }
-            }
+            "quit" => request_quit(app),
             _ => {}
         })
         .on_tray_icon_event(|tray, event| {
@@ -386,5 +401,24 @@ fn release_background_memory(app: &AppHandle) {
     }
     if let Some(cache) = app.try_state::<super::calendar_commands::CalendarScheduleCache>() {
         cache.purge_expired();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tray_quit_only_waits_for_a_ready_renderer_once() {
+        let state = AppShellState::default();
+        assert!(!state.begin_frontend_quit());
+        state.frontend_quit_ready.store(true, Ordering::Relaxed);
+        assert!(state.begin_frontend_quit());
+        assert!(!state.begin_frontend_quit());
+
+        state.reset_frontend();
+        assert!(!state.begin_frontend_quit());
+        state.frontend_quit_ready.store(true, Ordering::Relaxed);
+        assert!(state.begin_frontend_quit());
     }
 }

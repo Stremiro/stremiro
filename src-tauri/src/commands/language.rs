@@ -604,11 +604,7 @@ pub(crate) fn resolve_preferred_track_selection(
         _ => false,
     };
 
-    let matched_track_id = if selected_matches {
-        None
-    } else {
-        matched_track_id
-    };
+    let matched_track_id = matched_track_id.filter(|_| !selected_matches);
 
     TrackLanguageSelectionResolution {
         selected_matches,

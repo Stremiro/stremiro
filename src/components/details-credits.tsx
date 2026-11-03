@@ -77,7 +77,7 @@ export function DetailsCredits({
                     sideOffset={8}
                     tabIndex={0}
                     aria-labelledby='details-full-cast-heading'
-                    className='max-h-64 w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
+                    className='max-h-[min(16rem,var(--radix-popover-content-available-height))] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto overscroll-contain rounded-lg border-white/10 p-4 shadow-xl focus-visible:ring-2 focus-visible:ring-white/40'
                   >
                     <h2
                       id='details-full-cast-heading'

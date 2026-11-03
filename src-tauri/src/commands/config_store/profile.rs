@@ -320,19 +320,29 @@ pub(crate) fn save_profile_preferences_to_store(
     avatars: &DurableStore,
     preferences: &ProfilePreferences,
 ) -> Result<(), String> {
-    let mut value = serde_json::json!(preferences);
-    let avatar = value
-        .get_mut("profile")
-        .and_then(Value::as_object_mut)
-        .and_then(|profile| profile.remove("avatar"));
+    let ProfilePreferences { profile, view_mode } = preferences;
+    let LocalProfile {
+        username,
+        accent_color,
+        accent_intensity,
+        accent_targets,
+        avatar,
+    } = profile;
     // Rollback snapshot only when the avatar changes; it can be hundreds of KiB.
     let rollback = avatars.with_value(PROFILE_AVATAR_KEY, |stored| {
-        (stored != avatar.as_ref()).then(|| stored.cloned())
+        let unchanged = match (stored, avatar) {
+            (Some(Value::String(stored)), Some(avatar)) => stored == avatar,
+            (None, None) => true,
+            _ => false,
+        };
+        (!unchanged).then(|| stored.cloned())
     });
-    match avatar {
-        Some(avatar) => avatars.set(PROFILE_AVATAR_KEY, avatar),
-        None => {
-            avatars.delete(PROFILE_AVATAR_KEY);
+    if rollback.is_some() {
+        match avatar {
+            Some(avatar) => avatars.set(PROFILE_AVATAR_KEY, Value::String(avatar.clone())),
+            None => {
+                avatars.delete(PROFILE_AVATAR_KEY);
+            }
         }
     }
     if let Err(error) = avatars.save() {
@@ -345,6 +355,17 @@ pub(crate) fn save_profile_preferences_to_store(
         }
         return Err(error);
     }
-    settings.set(PROFILE_PREFERENCES_KEY, value);
+    settings.set(
+        PROFILE_PREFERENCES_KEY,
+        serde_json::json!({
+            "profile": {
+                "username": username,
+                "accentColor": accent_color,
+                "accentIntensity": accent_intensity,
+                "accentTargets": accent_targets,
+            },
+            "viewMode": view_mode,
+        }),
+    );
     Ok(())
 }

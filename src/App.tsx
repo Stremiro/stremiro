@@ -1,6 +1,5 @@
 import { useQueryClient } from '@tanstack/react-query';
 import { listen } from '@tauri-apps/api/event';
-import { getCurrentWindow } from '@tauri-apps/api/window';
 import {
   lazy,
   type ReactNode,
@@ -23,6 +22,7 @@ import {
   useNavigationType,
 } from 'react-router';
 import { toast } from 'sonner';
+import { AppCloseManager } from '@/components/app-close-manager';
 import { AppUpdateCard, APP_UPDATE_TOAST_ID } from '@/components/app-update-card';
 import { Layout } from '@/components/layout';
 import { Toaster } from '@/components/ui/sonner';
@@ -32,10 +32,9 @@ import {
   registerAppUiPreferenceFlusher,
   useAppUiPreferences,
 } from '@/hooks/use-app-ui-preferences';
-import { api, type AppUiPreferences, getErrorMessage } from '@/lib/api';
+import { api, type AppUiPreferences } from '@/lib/api';
 import { openAppLink } from '@/lib/app-links';
 import { isTauriDesktopRuntime, runAppUpdateCheck } from '@/lib/app-updater';
-import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
 import {
@@ -46,9 +45,7 @@ import {
 } from '@/lib/player-session';
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import { routeChunks } from '@/lib/route-chunks';
-import { mpvDestroy, setMpvProperty } from '@/lib/player-mpv';
-import { isPlayerPip, returnFromPlayerPip, waitForViewportTransition } from '@/lib/player-pip';
-import { boundedMapSet, clearTimer, SIDEBAR_PAGE_COLUMN_INSETS, withTimeout } from '@/lib/utils';
+import { boundedMapSet, clearTimer, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 import { Home } from '@/pages/home';
 
 function createRoutePages() {
@@ -407,156 +404,6 @@ function AppUpdateManager() {
     queryClient,
     getUpdateState,
   ]);
-
-  return null;
-}
-
-// Close barrier: every awaited step is bounded — a wedged native op or viewport
-// transition must not trap the window open (the OS reclaims mpv at exit).
-const CLOSE_BARRIER_STEP_TIMEOUT_MS = 8_000;
-const CLOSE_MPV_TEARDOWN_TIMEOUT_MS = 2_000;
-
-function AppCloseManager() {
-  const isDesktopRuntime = isTauriDesktopRuntime();
-  const { session, trayPause } = usePlayerSession();
-  const hasSession = useEffectEvent(() => !!session);
-
-  useEffect(() => {
-    if (!isDesktopRuntime) return;
-
-    let isActive = true;
-    let closing = false;
-    let saveFailureVetoed = false;
-    let quitRequested = false;
-    let unlisten: (() => void) | undefined;
-    let unlistenQuit: (() => void) | undefined;
-
-    const settleCloseStep = <T,>(step: Promise<T>) =>
-      withTimeout(
-        step.then(
-          () => true,
-          () => true,
-        ),
-        CLOSE_BARRIER_STEP_TIMEOUT_MS,
-        () => false,
-      );
-
-    // onCloseRequested destroys the window itself unless vetoed: keep core:window:allow-destroy.
-    void getCurrentWindow()
-      .onCloseRequested(async (event) => {
-        if (closing) {
-          event.preventDefault();
-          return;
-        }
-        closing = true;
-        const close = async () => {
-          const transitionSettled = await settleCloseStep(waitForViewportTransition());
-          if (transitionSettled && isPlayerPip()) {
-            if (!quitRequested) {
-              event.preventDefault();
-              await settleCloseStep(returnFromPlayerPip());
-              return;
-            }
-            await settleCloseStep(returnFromPlayerPip());
-          }
-          if (!quitRequested) {
-            await settleCloseStep(flushPendingAppWrites());
-            try {
-              const hidden = await withTimeout(
-                api.closeMainWindowToTray(),
-                CLOSE_BARRIER_STEP_TIMEOUT_MS,
-                () => {
-                  throw new Error('Hiding the window timed out.');
-                },
-              );
-              if (hidden) {
-                event.preventDefault();
-                if (hasSession()) {
-                  trayPause.publish(true);
-                  await settleCloseStep(setMpvProperty('pause', true));
-                }
-                await settleCloseStep(flushPendingAppWrites());
-                return;
-              }
-            } catch {
-              // Without a working tray the window must stay closable.
-              event.preventDefault();
-              quitRequested = true;
-              toast.error('Could not minimize to the system tray.', {
-                description: 'Close again to quit.',
-              });
-              void settleCloseStep(flushPendingAppWrites());
-              return;
-            }
-          }
-          await withTimeout(flushPendingAppWrites(), CLOSE_BARRIER_STEP_TIMEOUT_MS, () => {
-            throw new Error('Pending writes did not settle.');
-          });
-          // A failed or slow native teardown still closes — vetoing would wedge
-          // the window behind an unkillable mpv call; exit reclaims it.
-          await withTimeout(
-            mpvDestroy().catch(() => undefined),
-            CLOSE_MPV_TEARDOWN_TIMEOUT_MS,
-            () => undefined,
-          );
-        };
-        await close()
-          .catch(() => {
-            // Veto once so the save retries; the next close quits anyway.
-            if (!saveFailureVetoed) {
-              saveFailureVetoed = true;
-              event.preventDefault();
-              toast.error('Could not save playback progress.', {
-                description: 'Close again to quit anyway.',
-              });
-            }
-          })
-          .finally(() => {
-            closing = false;
-          });
-      })
-      .then((dispose) => {
-        if (!isActive) {
-          dispose();
-          return;
-        }
-
-        unlisten = dispose;
-        void getCurrentWindow()
-          .listen('app://quit-requested', () => {
-            quitRequested = true;
-            void getCurrentWindow()
-              .close()
-              .catch((error) => {
-                toast.error('Could not quit Stremiro.', { description: getErrorMessage(error) });
-              });
-          })
-          .then((disposeQuit) => {
-            if (!isActive) {
-              disposeQuit();
-              return;
-            }
-            unlistenQuit = disposeQuit;
-            return api.markFrontendQuitReady();
-          })
-          .catch(() => {
-            if (import.meta.env.DEV) {
-              console.warn('[app] quit-requested listener setup failed');
-            }
-          });
-      })
-      .catch(() => {
-        if (import.meta.env.DEV) {
-          console.warn('[app] close-requested listener failed to register');
-        }
-      });
-
-    return () => {
-      isActive = false;
-      unlisten?.();
-      unlistenQuit?.();
-    };
-  }, [isDesktopRuntime, trayPause]);
 
   return null;
 }

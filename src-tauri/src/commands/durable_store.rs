@@ -86,9 +86,7 @@ impl DurableStoreRegistry {
         let mut first_error = None;
         for store in stores {
             if let Err(error) = store.save() {
-                if first_error.is_none() {
-                    first_error = Some(error);
-                }
+                first_error.get_or_insert(error);
             }
         }
         first_error.map_or(Ok(()), Err)

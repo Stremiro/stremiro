@@ -12,6 +12,7 @@ import {
   formatBindingKey,
   MAX_KEYS_PER_PLAYER_ACTION,
   PLAYER_ACTION_GROUPS,
+  PLAYER_ACTION_LABELS,
   PLAYER_ACTIONS,
   type PlayerActionId,
   type PlayerKeymap,
@@ -116,7 +117,7 @@ export function ShortcutsSection() {
     event.stopPropagation();
     if (event.repeat) return;
     const sequence = ++captureSequence.current;
-    const label = PLAYER_ACTIONS.find((action) => action.id === capture.action)?.label ?? '';
+    const label = PLAYER_ACTION_LABELS[capture.action];
 
     if (raw === 'escape') {
       cancelCapture();
@@ -151,7 +152,7 @@ export function ShortcutsSection() {
             clearing
               ? `Removed a key from ${label}.`
               : previousOwner && previousOwner !== capture.action
-                ? `${formatBindingKey(raw)} moved from ${PLAYER_ACTIONS.find((action) => action.id === previousOwner)?.label} to ${label}.`
+                ? `${formatBindingKey(raw)} moved from ${PLAYER_ACTION_LABELS[previousOwner]} to ${label}.`
                 : null,
           );
         },

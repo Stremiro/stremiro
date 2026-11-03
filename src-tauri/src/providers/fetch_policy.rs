@@ -120,7 +120,8 @@ fn is_non_routable_ip(ip: &IpAddr) -> bool {
             let segments = value.segments();
             // Unspecified, loopback, link-local fe80::/10, ULA fc00::/7,
             // doc 2001:db8::/32, benchmark 2001:2::/48, multicast, discard
-            // 100::/64, TEREDO/port-control leftovers.
+            // 100::/64, and the IPv4-embedding transition leftovers
+            // (6to4 2002::/16, Teredo 2001::/32).
             value.is_unspecified()
                 || value.is_loopback()
                 || value.is_multicast()
@@ -130,6 +131,8 @@ fn is_non_routable_ip(ip: &IpAddr) -> bool {
                 || (segments[0] == 0x2001 && segments[1] == 0x0002)
                 || (segments[0] == 0x0064 && segments[1] == 0xff9b)
                 || (segments[0] == 0x0100 && segments[1] == 0)
+                || segments[0] == 0x2002
+                || (segments[0] == 0x2001 && segments[1] == 0)
         }
     }
 }

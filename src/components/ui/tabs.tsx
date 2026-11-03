@@ -87,7 +87,16 @@ function TabsTrigger({ className, onClick, onKeyDown, value, ...props }: TabsTri
       }}
       onKeyDown={(event) => {
         onKeyDown?.(event);
-        if (event.defaultPrevented || !TAB_NAVIGATION_KEYS.has(event.key)) return;
+        if (
+          event.defaultPrevented ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey ||
+          event.nativeEvent.isComposing ||
+          !TAB_NAVIGATION_KEYS.has(event.key)
+        )
+          return;
 
         const tablist = event.currentTarget.closest('[role="tablist"]');
         const triggers = Array.from(
@@ -130,7 +139,7 @@ function TabsContent({ className, value, ...props }: TabsContentProps) {
       role='tabpanel'
       id={panelId}
       aria-labelledby={triggerId}
-      className={cn('mt-2', className)}
+      className={cn('mt-2 animate-surface-in motion-reduce:animate-none', className)}
       {...props}
     />
   );

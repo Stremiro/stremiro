@@ -771,7 +771,7 @@ pub(super) fn normalize_history_removals(
             .ok_or_else(|| "Invalid media id for watch history.".to_string())?;
         let media_type = normalize_watch_progress_type(&item.type_)
             .ok_or_else(|| "Invalid media type.".to_string())?;
-        *targets.entry(id).or_insert(0) |= if media_type == "movie" { 1 } else { 2 };
+        *targets.entry(id).or_default() |= if media_type == "movie" { 1 } else { 2 };
     }
     Ok(targets)
 }

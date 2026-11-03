@@ -353,6 +353,10 @@ pub async fn player_mpv_command(
         let label = window.label();
         mpv.command(&name, &args, label)
             .map_err(|error| format!("mpv command '{name}' failed: {error}"))?;
+        if name == "loadfile" {
+            // loadfile drops every external track; forget their staged-path URLs.
+            subtitles::SESSION.clear_tracks();
+        }
         if let ("set", [property, value, ..]) = (name.as_str(), args.as_slice()) {
             remember_stream_header_fields(property.as_str().unwrap_or_default(), value);
         }
@@ -501,8 +505,8 @@ fn apply_mpv_properties(
         }
         let result = set_property(name, value);
         volume_failed |= name == "volume" && result.is_err();
-        if first_error.is_none() {
-            first_error = result.err();
+        if let Err(error) = result {
+            first_error.get_or_insert(error);
         }
     }
     first_error.map_or(Ok(()), Err)

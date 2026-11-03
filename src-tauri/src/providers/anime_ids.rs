@@ -64,9 +64,7 @@ fn bounded_u32(value: Option<&serde_json::Value>) -> Option<u32> {
         serde_json::Value::String(text) => text.trim().parse::<u64>().ok()?,
         _ => return None,
     };
-    (raw > 0 && raw <= ANIME_ID_MAX)
-        .then(|| u32::try_from(raw).ok())
-        .flatten()
+    (raw > 0 && raw <= ANIME_ID_MAX).then_some(raw as u32)
 }
 
 /// Seasons include 0 (specials numbering) - a conflicting 0 must disagree
@@ -77,9 +75,7 @@ fn bounded_season(value: Option<&serde_json::Value>) -> Option<u32> {
         serde_json::Value::String(text) => text.trim().parse::<u64>().ok()?,
         _ => return None,
     };
-    (raw <= SEASON_MAX)
-        .then(|| u32::try_from(raw).ok())
-        .flatten()
+    (raw <= SEASON_MAX).then_some(raw as u32)
 }
 
 fn row_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Option<AnimeIds> {

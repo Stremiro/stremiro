@@ -135,6 +135,32 @@ enum ProbeLanding {
     DeadEnd,
 }
 
+/// Both probes fold a chain landing the same way; `context` is "HEAD" or the
+/// earlier probe's failure a range-GET retry prefixes, and `rate_limited`
+/// carries a HEAD 429 through the retry's dead end.
+fn landing_result(
+    landing: ProbeLanding,
+    direct_url: &reqwest::Url,
+    context: &str,
+    rate_limited: bool,
+) -> Result<String, ProbeError> {
+    match landing {
+        ProbeLanding::Landed(landed) => Ok(landed),
+        // Advisory terminal status: pass the original URL to libmpv like a direct advisory.
+        ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
+            Ok(direct_url.to_string())
+        }
+        ProbeLanding::TerminalStatus(status) => Err(ProbeError::status(
+            format!("{context} redirect chain ended with HTTP {status}"),
+            status,
+        )),
+        ProbeLanding::DeadEnd => Err(ProbeError {
+            message: format!("{context} redirect chain had no followable target"),
+            rate_limited,
+        }),
+    }
+}
+
 fn resolve_redirect_url(base: &reqwest::Url, location: &str) -> Result<reqwest::Url, String> {
     let mut target = base
         .join(location)
@@ -219,19 +245,12 @@ async fn resolve_final_direct_url(
         .await
     {
         Ok(resp) if resp.status().is_redirection() => {
-            return match follow_redirect_hop(direct_url, resp, &headers).await? {
-                ProbeLanding::Landed(landed) => Ok(landed),
-                ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
-                    Ok(direct_url.to_string())
-                }
-                ProbeLanding::TerminalStatus(status) => Err(ProbeError::status(
-                    format!("HEAD redirect chain ended with HTTP {status}"),
-                    status,
-                )),
-                ProbeLanding::DeadEnd => Err("HEAD redirect chain had no followable target."
-                    .to_string()
-                    .into()),
-            };
+            return landing_result(
+                follow_redirect_hop(direct_url, resp, &headers).await?,
+                direct_url,
+                "HEAD",
+                false,
+            );
         }
         // Some servers report a default type on HEAD only; the range GET decides.
         Ok(resp) if resp.status().is_success() => match validate_probe_content_type(resp.headers())
@@ -257,23 +276,12 @@ async fn resolve_final_direct_url(
         .send()
         .await
     {
-        Ok(resp) if resp.status().is_redirection() => {
-            match follow_redirect_hop(direct_url, resp, &headers).await? {
-                ProbeLanding::Landed(landed) => Ok(landed),
-                // Advisory terminal status: pass the original URL to libmpv like a direct advisory.
-                ProbeLanding::TerminalStatus(status) if is_advisory_probe_status(status) => {
-                    Ok(direct_url.to_string())
-                }
-                ProbeLanding::TerminalStatus(status) => Err(ProbeError::status(
-                    format!("{head_error}; redirect chain ended with HTTP {status}"),
-                    status,
-                )),
-                ProbeLanding::DeadEnd => Err(ProbeError {
-                    message: format!("{head_error}; redirect chain had no followable target"),
-                    rate_limited: head_rate_limited,
-                }),
-            }
-        }
+        Ok(resp) if resp.status().is_redirection() => landing_result(
+            follow_redirect_hop(direct_url, resp, &headers).await?,
+            direct_url,
+            &format!("{head_error};"),
+            head_rate_limited,
+        ),
         Ok(resp) if resp.status().is_success() => {
             validate_probe_content_type(resp.headers())?;
             Ok(direct_url.to_string())

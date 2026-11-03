@@ -304,9 +304,12 @@ export function Calendar() {
               aria-label='Previous month'
               aria-keyshortcuts='ArrowLeft'
               title='Previous month (←)'
-              className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
             >
-              <ChevronLeft className='w-3.5 h-3.5' />
+              <ChevronLeft
+                aria-hidden='true'
+                className='w-3.5 h-3.5 transition-transform duration-150 motion-safe:group-hover/month:-translate-x-px motion-safe:group-focus-visible/month:-translate-x-px motion-reduce:transition-none'
+              />
             </Button>
             <div
               className='px-1 font-medium text-[13px] flex-1 md:min-w-[130px] text-center text-zinc-200 tabular-nums'
@@ -321,9 +324,12 @@ export function Calendar() {
               aria-label='Next month'
               aria-keyshortcuts='ArrowRight'
               title='Next month (→)'
-              className='h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
             >
-              <ChevronRight className='w-3.5 h-3.5' />
+              <ChevronRight
+                aria-hidden='true'
+                className='w-3.5 h-3.5 transition-transform duration-150 motion-safe:group-hover/month:translate-x-px motion-safe:group-focus-visible/month:translate-x-px motion-reduce:transition-none'
+              />
             </Button>
             <Button
               variant='ghost'
@@ -793,14 +799,17 @@ const CalendarDayCell = memo(function CalendarDayCell({
               </button>
             </PopoverTrigger>
             <PopoverContent
-              className={cn(CALENDAR_POPOVER_CLASS, 'p-1.5')}
+              className={cn(
+                CALENDAR_POPOVER_CLASS,
+                'flex max-h-(--radix-popover-content-available-height) flex-col overflow-hidden p-1.5',
+              )}
               align='start'
               aria-label={`Releases on ${FULL_DATE_FORMATTER.format(day)}`}
             >
-              <p className='px-2 pt-1 pb-1.5 text-[11px] font-semibold text-zinc-400'>
+              <p className='shrink-0 px-2 pt-1 pb-1.5 text-[11px] font-semibold text-zinc-400'>
                 {WEEKDAY_DATE_FORMATTER.format(day)}
               </p>
-              <div className='max-h-72 overflow-y-auto overscroll-contain space-y-0.5 p-0.5'>
+              <div className='min-h-0 max-h-72 overflow-y-auto overscroll-contain space-y-0.5 p-0.5'>
                 {dayEvents.map((event) => (
                   <Link
                     key={calendarEventKey(event)}

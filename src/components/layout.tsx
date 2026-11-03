@@ -129,7 +129,7 @@ export function Layout({ onRouteRetry }: { onRouteRetry: () => void }) {
           className='relative flex min-h-[calc(100vh-2rem)] min-w-0 flex-col pt-8 overflow-x-clip'
         >
           {/* Route pushes land keyboard focus here (see RouteScrollManager). */}
-          <main id='app-main' tabIndex={-1} className='flex-1'>
+          <main id='app-main' tabIndex={-1} className='flex-1 focus:outline-none'>
             <div className='min-h-full'>
               <RouteOutlet onRetry={onRouteRetry} />
             </div>

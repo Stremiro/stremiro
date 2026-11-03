@@ -195,26 +195,31 @@ export function SettingsSelect<Value extends string>({
           aria-label={`${ariaLabel}: ${valueLabel}`}
           disabled={disabled}
           className={cn(
-            'h-9 w-40 min-w-0 max-w-full justify-between px-3 text-[14px] shadow-none',
+            'group/select h-9 w-40 min-w-0 max-w-full justify-between px-3 text-[14px] shadow-none',
             SETTINGS_OUTLINE_BUTTON_CLASS,
           )}
         >
           <span title={valueLabel} className='truncate'>
             {valueLabel}
           </span>
-          <ChevronDown aria-hidden='true' className='ml-3 h-4 w-4 shrink-0 text-zinc-500' />
+          <ChevronDown
+            aria-hidden='true'
+            className='ml-3 h-4 w-4 shrink-0 text-zinc-500 transition-transform duration-150 group-data-[state=open]/select:rotate-180 motion-reduce:transition-none'
+          />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align='end'
-        className='max-h-80 min-w-40 overflow-y-auto border-white/10 bg-zinc-950 backdrop-blur-none'
+        className='max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] min-w-40 border-white/10 bg-zinc-950 backdrop-blur-none'
       >
         {options.map((option) => (
           <DropdownMenuItem
             key={option.value}
             role='menuitemradio'
             aria-checked={option.value === value}
-            onClick={() => onChange(option.value)}
+            onSelect={() => {
+              if (option.value !== value) onChange(option.value);
+            }}
             className='cursor-pointer gap-2.5 px-3 py-2 text-sm text-zinc-200'
           >
             {option.value === value ? (

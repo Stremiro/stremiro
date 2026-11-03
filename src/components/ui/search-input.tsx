@@ -55,7 +55,7 @@ export function SearchInput({
   }, []);
 
   return (
-    <div className={cn('relative', wrapperClassName)}>
+    <div className={cn('group/search relative', wrapperClassName)}>
       {pending ? (
         <Loader2
           aria-hidden='true'
@@ -64,12 +64,15 @@ export function SearchInput({
       ) : (
         <Search
           aria-hidden='true'
-          className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none'
+          className='absolute left-3 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-zinc-600 pointer-events-none transition-colors duration-150 group-focus-within/search:text-zinc-300 motion-reduce:transition-none'
         />
       )}
       <Input
         ref={inputRef}
         value={value}
+        autoComplete='off'
+        autoCorrect='off'
+        spellCheck={false}
         onChange={(e) => onValueChange(e.target.value)}
         placeholder={placeholder}
         aria-label={ariaLabel ?? placeholder}
@@ -97,7 +100,7 @@ export function SearchInput({
           }}
           aria-label={clearLabel}
           title={clearLabel}
-          className='absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-zinc-400 transition-colors hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30'
+          className='absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-md text-zinc-400 animate-surface-in transition-colors duration-150 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 motion-reduce:animate-none motion-reduce:transition-none'
         >
           <X className='w-3.5 h-3.5' />
         </button>

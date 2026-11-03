@@ -68,21 +68,17 @@ export function DetailsSectionTabs({
           event.altKey ||
           event.ctrlKey ||
           event.metaKey ||
-          event.shiftKey
+          event.shiftKey ||
+          event.nativeEvent.isComposing
         )
           return;
         const index = tabs.findIndex((tab) => tab.value === value);
-        const nextIndex =
-          event.key === 'Home'
-            ? 0
-            : event.key === 'End'
-              ? tabs.length - 1
-              : event.key === 'ArrowRight'
-                ? (index + 1) % tabs.length
-                : event.key === 'ArrowLeft'
-                  ? (index + tabs.length - 1) % tabs.length
-                  : null;
-        if (nextIndex === null) return;
+        let nextIndex: number;
+        if (event.key === 'Home') nextIndex = 0;
+        else if (event.key === 'End') nextIndex = tabs.length - 1;
+        else if (event.key === 'ArrowRight') nextIndex = (index + 1) % tabs.length;
+        else if (event.key === 'ArrowLeft') nextIndex = (index + tabs.length - 1) % tabs.length;
+        else return;
         event.preventDefault();
         const next = tabs[nextIndex].value;
         onValueChange(next);

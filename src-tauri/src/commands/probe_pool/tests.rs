@@ -533,10 +533,10 @@ preferred_position_tests! {
 fn preferred_position_legacy_resume_family_falls_back_to_source_id() {
     use crate::commands::resume_store::ResumeStore;
     use crate::commands::streaming_helpers::prepare_addon_streams;
-    use crate::test_helpers::{test_progress, test_store};
+    use crate::test_helpers::{test_progress, TempPath};
 
-    let fixture = test_store();
-    let mut resume_store = ResumeStore::open(&fixture.path).unwrap();
+    let path = TempPath::file("preferred-resume");
+    let mut resume_store = ResumeStore::open(&path).unwrap();
     let progress = crate::commands::WatchProgress {
         last_stream_key: Some("s:expired".to_string()),
         source_id: Some("addon-b".to_string()),

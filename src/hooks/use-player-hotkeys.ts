@@ -268,8 +268,8 @@ export function usePlayerHotkeys(options: UsePlayerHotkeysOptions) {
   });
 
   useEffect(() => {
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
     // Effect event — listener binds once for the player's lifetime.
   }, []);
 }

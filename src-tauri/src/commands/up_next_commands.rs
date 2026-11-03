@@ -40,8 +40,8 @@ pub struct ResumeRailEntry<T = WatchProgress> {
 }
 
 /// A successor episode badges "New episode" for a week past its air date.
-const NEW_EPISODE_WINDOW_MS: u64 = 1000 * 60 * 60 * 24 * 7;
 const MS_PER_DAY: u64 = 86_400_000;
+const NEW_EPISODE_WINDOW_MS: u64 = 7 * MS_PER_DAY;
 const UP_NEXT_SCHEDULE_RESPONSE_TIMEOUT: Duration = Duration::from_secs(8);
 
 pub(crate) fn build_up_next_entries(

@@ -139,6 +139,56 @@ fn legacy_settings_avatar_moves_to_its_own_store_before_settings_drop_it() {
 }
 
 #[test]
+fn profile_setting_edits_preserve_split_storage_and_flush_pending_avatar_changes() {
+    let settings = crate::test_helpers::test_store();
+    let avatars = crate::test_helpers::test_store();
+    let mut preferences = ProfilePreferences {
+        profile: LocalProfile {
+            username: "Saved User".into(),
+            accent_color: "#abcdef".into(),
+            accent_intensity: 73,
+            accent_targets: AccentTargets {
+                navigation: false,
+                artwork: false,
+                seekbar: true,
+                ..AccentTargets::default()
+            },
+            avatar: Some(format!("data:image/png;base64,{}", "A".repeat(256 * 1024))),
+        },
+        view_mode: ProfileViewMode::List,
+    };
+    super::save_profile_preferences_to_store(&settings.store, &avatars.store, &preferences)
+        .unwrap();
+    let avatar_saves = avatars.store.save_count();
+    for username in ["Next User", "Final User"] {
+        preferences.profile.username = username.into();
+        preferences.view_mode = ProfileViewMode::Grid;
+        super::save_profile_preferences_to_store(&settings.store, &avatars.store, &preferences)
+            .unwrap();
+        let mut expected = serde_json::json!(preferences);
+        expected["profile"]
+            .as_object_mut()
+            .unwrap()
+            .remove("avatar");
+        assert_eq!(
+            settings.store.get(super::PROFILE_PREFERENCES_KEY),
+            Some(expected)
+        );
+        assert_eq!(
+            super::load_profile_preferences(&settings.store, &avatars.store),
+            preferences
+        );
+        assert_eq!(avatars.store.save_count(), avatar_saves);
+    }
+    // An unchanged avatar must still commit data left dirty by an earlier operation.
+    avatars.store.set("pending", serde_json::json!(true));
+    super::save_profile_preferences_to_store(&settings.store, &avatars.store, &preferences)
+        .unwrap();
+    assert!(!avatars.store.is_dirty());
+    assert_eq!(avatars.store.save_count(), avatar_saves + 1);
+}
+
+#[test]
 fn backup_profile_round_trip_restores_the_avatar_into_its_store() {
     let avatar = "data:image/webp;base64,UklGRg==";
     let preferences = ProfilePreferences {

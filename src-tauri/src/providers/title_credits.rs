@@ -379,12 +379,9 @@ async fn anilist_lookup_ids(
     id: &str,
     imdb_id: Option<&str>,
 ) -> Result<Option<(&'static str, u32)>, String> {
-    match parse_anime_id(id) {
+    let rows = match parse_anime_id(id) {
         Some(AnimeId::Mal(mal)) => return Ok(Some(("idMal", mal))),
         Some(AnimeId::AniList(anilist)) => return Ok(Some(("id", anilist))),
-        _ => {}
-    }
-    let rows = match parse_anime_id(id) {
         Some(AnimeId::Kitsu(_)) => resolve_anime_ids(client, id).await?,
         _ => match imdb_id
             .and_then(normalize_imdb_id)

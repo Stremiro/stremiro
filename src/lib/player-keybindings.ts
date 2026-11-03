@@ -34,6 +34,9 @@ export const PLAYER_ACTIONS = [
 }[];
 
 export type PlayerActionId = (typeof PLAYER_ACTIONS)[number]['id'];
+export const PLAYER_ACTION_LABELS = Object.fromEntries(
+  PLAYER_ACTIONS.map((action) => [action.id, action.label]),
+) as Record<PlayerActionId, string>;
 export const MAX_KEYS_PER_PLAYER_ACTION = 2;
 
 const REPEATABLE_ACTIONS = new Set<PlayerActionId>(

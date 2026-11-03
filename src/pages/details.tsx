@@ -21,11 +21,7 @@ import {
   NextAiringChip,
   type DetailsSection,
 } from '@/components/details-sections';
-import {
-  type SeasonEpisodeState,
-  SeasonProgressRail,
-  SeasonSwitcher,
-} from '@/components/details-season-switcher';
+import { SeasonProgressRail, SeasonSwitcher } from '@/components/details-season-switcher';
 import { DetailsSimilarTitles } from '@/components/details-similar-titles';
 import { DetailsTrailer } from '@/components/details-trailer-dialog';
 import { CreateListDialog } from '@/components/list/list-editor-dialog';
@@ -64,6 +60,7 @@ import {
   WATCH_STATUS_LABELS,
 } from '@/lib/api';
 import { buildEpisodeShareLink, buildTitleShareLink } from '@/lib/app-links';
+import { getDetailsEpisodeState } from '@/lib/details-episode-state';
 import { PLAYER_RESTART_START_TIME } from '@/lib/player-navigation';
 import { episodeMatchesCoordinates, isEpisodeSpoiler } from '@/lib/episode-stream-target';
 import { claimDetailsHero } from '@/lib/navigation';
@@ -255,7 +252,6 @@ function DetailsContent() {
   const {
     seasons,
     selectedSeason,
-    seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
     episodeSearchError,
@@ -379,21 +375,31 @@ function DetailsContent() {
     : markSeasonWatched.isPending
       ? markSeasonWatched.variables
       : undefined;
-  const pendingEpisodeKeys = new Set(
-    pendingWatchedMutation?.episodes.map((ep) =>
-      episodeProgressKey(baseRouteId, ep.season, ep.episode),
-    ),
-  );
+  // The resumable episode leads; otherwise Rust's aired successor of the furthest watched one.
+  const nextUpEpisode = seriesCanResume ? resumeEpisodeCoords : upNextEpisode;
+  const {
+    pendingEpisodeKeys,
+    seasonWatchedCounts,
+    seasonWatchTargets,
+    seasonUnwatchTargets,
+    seasonRail,
+    seasonWatchedCount,
+    seasonHasStarted,
+    firstUnwatchedEpisode,
+  } = getDetailsEpisodeState({
+    mediaId: baseRouteId,
+    episodes: item?.episodes,
+    selectedSeason,
+    titleProgress,
+    pendingWatchedMutation,
+    unairedEpisodeKeys,
+    nextUpEpisode,
+  });
   const optimisticEpisodeWatched = (ep: Episode) =>
     pendingEpisodeKeys.has(episodeProgressKey(baseRouteId, ep.season, ep.episode))
       ? pendingWatchedMutation?.watched
       : undefined;
 
-  const isEpisodeWatched = (ep: Episode) =>
-    optimisticEpisodeWatched(ep) ??
-    !!episodeProgress?.[episodeProgressKey(baseRouteId, ep.season, ep.episode)]?.is_watched;
-  // The resumable episode leads; otherwise Rust's aired successor of the furthest watched one.
-  const nextUpEpisode = seriesCanResume ? resumeEpisodeCoords : upNextEpisode;
   const episodeEmphasis = (ep: Episode): EpisodeEmphasis =>
     nextUpEpisode && episodeMatchesCoordinates(ep, nextUpEpisode.season, nextUpEpisode.episode)
       ? seriesCanResume
@@ -401,42 +407,6 @@ function DetailsContent() {
         : 'next'
       : null;
 
-  const seasonWatchedCounts = new Map<number, number>();
-  if (hasWatchProgress) {
-    for (const ep of item?.episodes ?? []) {
-      if (isEpisodeWatched(ep)) {
-        seasonWatchedCounts.set(ep.season, (seasonWatchedCounts.get(ep.season) ?? 0) + 1);
-      }
-    }
-  }
-
-  const seasonWatchTargets: Episode[] = [];
-  const seasonUnwatchTargets: Episode[] = [];
-  const seasonRail: { key: string; state: SeasonEpisodeState }[] = [];
-  let seasonWatchedCount = 0;
-  let seasonHasStarted = false;
-  for (const ep of seasonEpisodes) {
-    const key = episodeProgressKey(baseRouteId, ep.season, ep.episode);
-    if (isEpisodeWatched(ep)) {
-      seasonWatchedCount += 1;
-      seasonUnwatchTargets.push(ep);
-      seasonRail.push({ key, state: 'watched' });
-      continue;
-    }
-    const started = !!episodeProgress?.[key]?.has_started_watching;
-    seasonHasStarted = seasonHasStarted || started;
-    seasonRail.push({
-      key,
-      state: episodeEmphasis(ep)
-        ? 'next'
-        : started
-          ? 'started'
-          : unairedEpisodeKeys?.has(key)
-            ? 'unaired'
-            : 'unwatched',
-    });
-    if (unairedEpisodeKeys && !unairedEpisodeKeys.has(key)) seasonWatchTargets.push(ep);
-  }
   // Once every aired episode is watched the season action reverses; a pending
   // mutation keeps its own direction so the label can't flip mid-write.
   const seasonActionMarksWatched = markSeasonWatched.isPending
@@ -510,7 +480,6 @@ function DetailsContent() {
   useLayoutEffect(() => {
     seasonWatchTargetsRef.current = seasonWatchTargets;
   });
-  const firstUnwatchedEpisode = Math.min(...seasonWatchTargets.map((ep) => ep.episode));
   const { mutate: mutateSeasonWatched } = markSeasonWatched;
   const handleMarkWatchedThrough = (ep: Episode) => {
     if (watchActionsBusy) return;
@@ -991,7 +960,8 @@ function DetailsContent() {
                         }
                         className={cn(
                           ICON_ACTION_CLASS,
-                          'w-auto min-w-24 gap-2 px-3',
+                          'group/save w-auto min-w-24 gap-2 px-3 data-[state=open]:border-white/30 data-[state=open]:bg-white/[0.1]',
+                          isWatchStateReady && 'details-save',
                           isInLibrary &&
                             'border-white/30 bg-white/15 text-white hover:border-white/40 hover:bg-white/20',
                         )}
@@ -1000,13 +970,17 @@ function DetailsContent() {
                         <span className='min-w-9 text-left text-[13px] font-medium'>
                           {isInLibrary ? 'Saved' : 'Save'}
                         </span>
+                        <ChevronRight
+                          aria-hidden='true'
+                          className='size-3 shrink-0 text-white/40 transition-[rotate,color] duration-150 group-data-[state=open]/save:rotate-90 group-data-[state=open]/save:text-white/80 motion-reduce:transition-none'
+                        />
                       </button>
                     </PopoverTrigger>
                     <PopoverContent
                       align='start'
                       sideOffset={8}
                       aria-label='Save to'
-                      className='w-72 rounded-xl border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl'
+                      className='details-save max-h-(--radix-popover-content-available-height) w-72 overflow-y-auto overscroll-contain rounded-xl border-white/10 bg-zinc-950/95 p-1.5 shadow-2xl'
                     >
                       <h2 className='px-2.5 pb-1.5 pt-2 text-sm font-semibold text-white'>
                         Save to

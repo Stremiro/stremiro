@@ -16,11 +16,10 @@ pub(super) fn normalize_bulk_ids(ids: Vec<String>) -> Result<Vec<String>, String
     }
     let mut seen = HashSet::with_capacity(ids.len());
     ids.into_iter()
-        .map(|id| normalize_media_id(&id).ok_or_else(|| "Invalid media id.".to_string()))
-        .filter_map(|result| match result {
-            Ok(id) if seen.insert(id.clone()) => Some(Ok(id)),
-            Ok(_) => None,
-            Err(error) => Some(Err(error)),
+        .filter_map(|id| match normalize_media_id(&id) {
+            Some(id) if seen.insert(id.clone()) => Some(Ok(id)),
+            Some(_) => None,
+            None => Some(Err("Invalid media id.".to_string())),
         })
         .collect()
 }
@@ -144,32 +143,28 @@ pub(super) fn clear_index_domain(
 
 /// Index/order arrays decode member-by-member — one corrupt entry must not
 /// orphan every item row behind an empty index.
-pub(crate) fn decode_string_list(value: serde_json::Value) -> Option<Vec<String>> {
-    let serde_json::Value::Array(members) = value else {
-        return None;
-    };
-    Some(
+pub(crate) fn decode_string_list(value: &serde_json::Value) -> Option<Vec<String>> {
+    value.as_array().map(|members| {
         members
-            .into_iter()
-            .filter_map(|member| match member {
-                serde_json::Value::String(text) => Some(text),
-                _ => None,
-            })
-            .collect(),
-    )
+            .iter()
+            .filter_map(|member| member.as_str().map(str::to_owned))
+            .collect()
+    })
 }
 
 /// Index read: absent is an empty domain; a stored non-array or a non-empty array
 /// decoding to zero strings is corrupt — erroring keeps a later save from silently
 /// overwriting the corrupt index.
 pub(super) fn load_index(store: &DurableStore, index_key: &str) -> Result<Vec<String>, String> {
-    let Some(value) = store.get(index_key) else {
-        return Ok(Vec::new());
-    };
-    let member_count = value.as_array().map_or(0, Vec::len);
-    decode_string_list(value)
-        .filter(|index| member_count == 0 || !index.is_empty())
-        .ok_or_else(|| format!("Invalid {index_key} index."))
+    store.with_value(index_key, |value| {
+        let Some(value) = value else {
+            return Ok(Vec::new());
+        };
+        let member_count = value.as_array().map_or(0, Vec::len);
+        decode_string_list(value)
+            .filter(|index| member_count == 0 || !index.is_empty())
+            .ok_or_else(|| format!("Invalid {index_key} index."))
+    })
 }
 
 pub(super) struct IndexStoreSnapshot<T> {
@@ -275,8 +270,9 @@ pub(super) fn read_library_snapshot(
 
 pub(super) fn load_status_added_ids(store: &DurableStore) -> Vec<String> {
     store
-        .get(LIBRARY_STATUS_ADDED_KEY)
-        .and_then(decode_string_list)
+        .with_value(LIBRARY_STATUS_ADDED_KEY, |value| {
+            value.and_then(decode_string_list)
+        })
         .unwrap_or_default()
 }
 

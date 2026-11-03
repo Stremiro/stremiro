@@ -1,11 +1,12 @@
 use super::{
     add_subtitle_if_unique, addon_allows_catalog, addon_allows_resource,
     catalog_fetch_page_from_source, catalog_page_next_skip, catalog_search_extras,
-    collect_catalog_outcomes, collect_with_deadline, extra_skip_value, fetch_subtitles_for_addon,
-    merge_catalog_pages, merge_search_catalog_pages, run_catalog_work_pool, searchable_catalog_ids,
+    collect_catalog_outcomes, collect_with_deadline, extra_skip_value,
+    fetch_catalog_pages_for_target_groups, fetch_subtitles_for_addon, merge_catalog_pages,
+    merge_search_catalog_pages, run_catalog_work_pool, searchable_catalog_ids,
     select_search_catalog_work, AddonResourceError, AddonResourceErrorKind, CatalogFetchPage,
-    CatalogWorkItem, SearchCatalogSource, SearchSourceCursor, SourcedAddonSubtitle,
-    CATALOG_STRAGGLER_GRACE,
+    CatalogGroupSelection, CatalogTarget, CatalogWorkItem, SearchCatalogSource, SearchSourceCursor,
+    SourcedAddonSubtitle, CATALOG_STRAGGLER_GRACE,
 };
 use crate::commands::config_store::{resolve_addon_configs, AddonConfig};
 use crate::providers::addon_manifest::parse_addon_manifest;
@@ -234,6 +235,84 @@ async fn catalog_grace_preserves_unanswered_groups_and_drops_stragglers() {
             assert!(page.cursors[1].retry);
         }
     }
+}
+
+#[tokio::test]
+async fn catalog_group_merge_marks_dropped_straggler_partial() {
+    let ready = TestHttpServer::new(vec![
+        (
+            200,
+            r#"{"metas":[{"id":"fast-1","name":"Fast","type":"movie"}]}"#,
+            None,
+        ),
+        (
+            200,
+            r#"{"metas":[{"id":"fast-2","name":"Second","type":"movie"}]}"#,
+            None,
+        ),
+    ]);
+    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let stalled_url = format!("http://{}", stalled.local_addr().unwrap());
+    let client = AddonResourceClient::new();
+    let target = |url: &str, catalog_id: &str| CatalogTarget {
+        url: url.to_string(),
+        catalog_id: catalog_id.to_string(),
+        catalog_genre: None,
+    };
+    let groups = |targets: Vec<CatalogTarget>| -> Vec<CatalogGroupSelection> {
+        vec![Ok((targets, Vec::new()))]
+    };
+
+    // A source dropped by the straggler grace keeps the answered page but
+    // must flag it partial so browse surfaces the notice.
+    let mut results = tokio::time::timeout(
+        Duration::from_secs(10),
+        fetch_catalog_pages_for_target_groups(
+            &client,
+            "movie",
+            groups(vec![target(&ready.url, "top"), target(&stalled_url, "top")]),
+            None,
+        ),
+    )
+    .await
+    .expect("straggler grace must bound an unanswered catalog source");
+    assert_eq!(results.len(), 1);
+    let page = results.pop().unwrap().unwrap();
+    assert_eq!(page.next_skip, Some(1));
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].id, "fast-1");
+    assert!(page.partial, "unanswered source must mark the page partial");
+
+    // Every source answering leaves the merged page complete.
+    let mut results = fetch_catalog_pages_for_target_groups(
+        &client,
+        "movie",
+        groups(vec![
+            target(&ready.url, "top"),
+            target(&ready.url, "popular"),
+        ]),
+        None,
+    )
+    .await;
+    assert_eq!(results.len(), 1);
+    let page = results.pop().unwrap().unwrap();
+    assert_eq!(page.items.len(), 2);
+    assert!(!page.partial);
+
+    // A strict scan deadline still fails an incomplete bucket outright.
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(200);
+    let mut results = fetch_catalog_pages_for_target_groups(
+        &client,
+        "movie",
+        groups(vec![target(&ready.url, "top"), target(&stalled_url, "top")]),
+        Some(deadline),
+    )
+    .await;
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        results.pop().unwrap().unwrap_err(),
+        "Catalog scan incomplete."
+    );
 }
 
 #[test]

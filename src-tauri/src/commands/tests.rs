@@ -27,7 +27,7 @@ use crate::providers::addons::{
 };
 use crate::test_helpers::{
     cinemeta_addon, cinemeta_manifest, classified_cinemeta_addon, test_addon, test_media_item,
-    test_progress, test_store, test_stream,
+    test_progress, test_store, test_stream, TempPath,
 };
 use std::collections::HashMap;
 
@@ -240,7 +240,7 @@ fn string_list_decode_keeps_only_owned_string_array_members() {
                     .filter_map(|member| member.as_str().map(str::to_string))
                     .collect::<Vec<_>>()
             });
-        assert_eq!(store_helpers::decode_string_list(value), expected);
+        assert_eq!(store_helpers::decode_string_list(&value), expected);
     }
 }
 
@@ -2699,7 +2699,7 @@ fn backup_paths_must_be_absolute_json_files() {
 fn backup_export_rejects_store_directory_and_descendants_after_canonicalization() {
     use super::backup_commands::validate_backup_export_path;
 
-    let root = std::env::temp_dir().join(format!("stremiro-export-{}", uuid::Uuid::new_v4()));
+    let root = TempPath::dir("backup-export");
     let store_dir = root.join("app-data");
     let nested = store_dir.join("nested");
     std::fs::create_dir_all(&nested).unwrap();
@@ -2728,9 +2728,6 @@ fn backup_export_rejects_store_directory_and_descendants_after_canonicalization(
         &root.join("absent-app-data").join(SETTINGS_STORE_FILE),
     )
     .is_ok());
-    std::fs::remove_dir(nested).unwrap();
-    std::fs::remove_dir(store_dir).unwrap();
-    std::fs::remove_dir(root).unwrap();
 }
 
 #[test]

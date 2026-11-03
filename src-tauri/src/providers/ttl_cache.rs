@@ -18,10 +18,16 @@ struct TtlEntry<V> {
     expires_at: Instant,
 }
 
+struct CacheState<V> {
+    entries: HashMap<String, TtlEntry<V>>,
+    // A lower bound: removals/replacements may leave it early, never late.
+    next_expiry: Option<Instant>,
+}
+
 /// Bounded TTL map shared by the stream transport and the resource client.
 /// Eviction: expire-on-read/insert, then soonest-expiring victims (the entry that triggered the fetch stays).
 pub(crate) struct TtlCache<V> {
-    entries: Mutex<HashMap<String, TtlEntry<V>>>,
+    state: Mutex<CacheState<V>>,
     max_entries: usize,
     ttl: Duration,
     empty_ttl: Duration,
@@ -30,7 +36,10 @@ pub(crate) struct TtlCache<V> {
 impl<V: Clone> TtlCache<V> {
     pub(crate) fn new(max_entries: usize, ttl: Duration, empty_ttl: Duration) -> Self {
         Self {
-            entries: Mutex::new(HashMap::new()),
+            state: Mutex::new(CacheState {
+                entries: HashMap::new(),
+                next_expiry: None,
+            }),
             max_entries,
             ttl,
             empty_ttl,
@@ -42,8 +51,8 @@ impl<V: Clone> TtlCache<V> {
     }
 
     fn get_fresh(&self, key: &str, not_before: Option<Instant>) -> Option<V> {
-        let mut entries = lock_or_recover(&self.entries);
-        let entry = entries.get(key)?;
+        let mut state = lock_or_recover(&self.state);
+        let entry = state.entries.get(key)?;
         if entry.expires_at > Instant::now() {
             if not_before.is_some_and(|not_before| entry.inserted_at < not_before) {
                 None
@@ -51,7 +60,7 @@ impl<V: Clone> TtlCache<V> {
                 Some(entry.value.clone())
             }
         } else {
-            entries.remove(key);
+            state.entries.remove(key);
             None
         }
     }
@@ -60,19 +69,25 @@ impl<V: Clone> TtlCache<V> {
     /// stream-less title doesn't re-fan-out per request); `still_fresh` runs
     /// under the entries lock so a superseded write is dropped, not stored.
     pub(crate) fn put(&self, key: &str, value: V, is_empty: bool, still_fresh: impl Fn() -> bool) {
-        let mut entries = lock_or_recover(&self.entries);
+        let mut state = lock_or_recover(&self.state);
         if !still_fresh() {
             return;
         }
         // A cache below its capacity can still retain large, expired payloads.
         let now = Instant::now();
-        Self::retain_fresh(&mut entries, now);
+        Self::retain_fresh(&mut state, now);
         let ttl = if is_empty { self.empty_ttl } else { self.ttl };
         let entry = TtlEntry {
             value,
             inserted_at: now,
             expires_at: now + ttl,
         };
+        state.next_expiry = Some(
+            state
+                .next_expiry
+                .map_or(entry.expires_at, |expiry| expiry.min(entry.expires_at)),
+        );
+        let entries = &mut state.entries;
         if let Some(existing) = entries.get_mut(key) {
             *existing = entry;
         } else {
@@ -93,20 +108,27 @@ impl<V: Clone> TtlCache<V> {
     }
 
     pub(crate) fn purge_expired(&self) {
-        Self::retain_fresh(&mut lock_or_recover(&self.entries), Instant::now());
+        Self::retain_fresh(&mut lock_or_recover(&self.state), Instant::now());
     }
 
-    fn retain_fresh(entries: &mut HashMap<String, TtlEntry<V>>, now: Instant) {
-        entries.retain(|_, entry| entry.expires_at > now);
+    fn retain_fresh(state: &mut CacheState<V>, now: Instant) {
+        // Calendar keeps thousands of schedules; scanning on every insertion
+        // makes filling an entirely fresh cache quadratic.
+        if state.next_expiry.is_some_and(|expiry| expiry <= now) {
+            state.entries.retain(|_, entry| entry.expires_at > now);
+            state.next_expiry = state.entries.values().map(|entry| entry.expires_at).min();
+        }
     }
 
     pub(crate) fn clear(&self) {
-        lock_or_recover(&self.entries).clear();
+        let mut state = lock_or_recover(&self.state);
+        state.entries.clear();
+        state.next_expiry = None;
     }
 
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
-        lock_or_recover(&self.entries).len()
+        lock_or_recover(&self.state).entries.len()
     }
 }
 
@@ -558,7 +580,8 @@ mod tests {
         let cache = TtlCache::new(8, Duration::from_secs(60), Duration::from_secs(30));
         cache.put("populated", vec![1], false, || true);
         cache.put("empty", Vec::new(), true, || true);
-        let not_before = lock_or_recover(&cache.entries)
+        let not_before = lock_or_recover(&cache.state)
+            .entries
             .values()
             .map(|entry| entry.inserted_at)
             .max()
@@ -578,7 +601,7 @@ mod tests {
             Some(vec![2])
         );
         assert_eq!(cache.get_fresh("empty", Some(not_before)), Some(Vec::new()));
-        let inserted_at = lock_or_recover(&cache.entries)["populated"].inserted_at;
+        let inserted_at = lock_or_recover(&cache.state).entries["populated"].inserted_at;
         assert_eq!(
             cache.get_fresh("populated", Some(inserted_at)),
             Some(vec![2])
@@ -608,6 +631,75 @@ mod tests {
         );
         assert_eq!(cache.len(), 1);
         assert_eq!(cache.get("fresh").as_deref(), Some(&vec![1]));
+    }
+
+    #[test]
+    fn expiry_sweeps_preserve_deadlines_after_replacement_and_capacity_eviction() {
+        let cache = TtlCache::new(2, Duration::from_secs(60), Duration::from_secs(30));
+        cache.put("full", 1, false, || true);
+        cache.put("replaced", 2, true, || true);
+        let original_expiry = lock_or_recover(&cache.state).entries["replaced"].expires_at;
+        cache.put("replaced", 3, false, || true);
+        {
+            let mut state = lock_or_recover(&cache.state);
+            TtlCache::retain_fresh(&mut state, original_expiry);
+            assert_eq!(state.entries.len(), 2, "replacement must keep its full TTL");
+            assert_eq!(state.entries["replaced"].value, 3);
+            assert_eq!(
+                state.next_expiry,
+                state.entries.values().map(|entry| entry.expires_at).min()
+            );
+        }
+
+        cache.put("short", 4, true, || true);
+        let mut state = lock_or_recover(&cache.state);
+        assert_eq!(state.entries.len(), 2);
+        let short_expiry = state.entries["short"].expires_at;
+        assert_eq!(state.next_expiry, Some(short_expiry));
+        let survivor_expiry = state
+            .entries
+            .iter()
+            .find(|(key, _)| *key != "short")
+            .unwrap()
+            .1
+            .expires_at;
+        TtlCache::retain_fresh(&mut state, short_expiry);
+        assert_eq!(state.entries.len(), 1);
+        assert!(!state.entries.contains_key("short"));
+        assert_eq!(state.next_expiry, Some(survivor_expiry));
+        TtlCache::retain_fresh(&mut state, survivor_expiry);
+        assert!(state.entries.is_empty());
+        assert_eq!(state.next_expiry, None);
+    }
+
+    #[test]
+    fn expiry_hint_survives_expired_reads_and_rejected_writes_and_resets_on_clear() {
+        let cache = TtlCache::new(8, Duration::ZERO, Duration::from_secs(60));
+        cache.put("fresh", Arc::new(vec![1]), true, || true);
+        let fresh_expiry = lock_or_recover(&cache.state).entries["fresh"].expires_at;
+        let expired = Arc::new(vec![0_u8; 1024]);
+        let retained = Arc::downgrade(&expired);
+        cache.put("expired", expired, false, || true);
+        cache.put("rejected", Arc::new(vec![2]), true, || false);
+        assert!(
+            retained.upgrade().is_some(),
+            "a revoked write must not sweep"
+        );
+        assert_eq!(cache.len(), 2);
+        assert!(cache.get("expired").is_none());
+        assert!(retained.upgrade().is_none());
+        cache.purge_expired();
+        assert_eq!(
+            lock_or_recover(&cache.state).next_expiry,
+            Some(fresh_expiry)
+        );
+        assert_eq!(cache.get("fresh").as_deref(), Some(&vec![1]));
+        assert!(cache.get("rejected").is_none());
+        cache.clear();
+        assert_eq!(lock_or_recover(&cache.state).next_expiry, None);
+        cache.put("after-clear", Arc::new(vec![3]), false, || true);
+        cache.purge_expired();
+        assert_eq!(cache.len(), 0);
     }
 
     // Observation helpers must not clone the stored Arc — an extra strong

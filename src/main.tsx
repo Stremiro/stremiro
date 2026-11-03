@@ -5,6 +5,8 @@ import ReactDOM from 'react-dom/client';
 import { BrowserRouter } from 'react-router';
 import { api } from '@/lib/api';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
+import { enqueuePlayerLifecycle } from '@/lib/player-lifecycle';
+import { mpvDestroy } from '@/lib/player-mpv';
 import { queryClient } from '@/lib/query-client';
 import {
   APP_UI_PREFERENCES_QUERY_KEY,
@@ -120,7 +122,18 @@ void bootstrapSnapshot.then(() => {
   }
 });
 
-void Promise.race([bootstrapSnapshot, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]).then(() => {
+// A document reload loses the React session, but the window's native player survives.
+// Finish teardown before a new player can initialize on the restored route.
+const playerCleanup = isTauriDesktopRuntime()
+  ? enqueuePlayerLifecycle(mpvDestroy).catch(() => {
+      console.warn('[app] leftover player teardown failed');
+    })
+  : Promise.resolve();
+
+void Promise.all([
+  playerCleanup,
+  Promise.race([bootstrapSnapshot, sleep(BOOTSTRAP_PAINT_TIMEOUT_MS)]),
+]).then(() => {
   rendered = true;
   ReactDOM.createRoot(document.getElementById('root') as HTMLElement).render(
     <React.StrictMode>

@@ -1,4 +1,5 @@
 import { expect, mock, spyOn, test } from 'bun:test';
+import type { CloseRequestedEvent, Window as TauriWindow } from '@tauri-apps/api/window';
 import type {
   ComponentProps,
   ComponentType,
@@ -22,6 +23,7 @@ Object.defineProperty(navigator, 'onLine', { configurable: true, value: true });
 const react = await import('react');
 const readStore = react.useSyncExternalStore;
 const runEffect = react.useEffect;
+const runEffectEvent = react.useEffectEvent;
 let capturedEffects: EffectCallback[] | null = null;
 
 // Desktop stores omit SSR snapshots; use their real client snapshots for this smoke test.
@@ -30,6 +32,9 @@ mock.module('react', () => ({
   useEffect(effect: EffectCallback, deps?: DependencyList) {
     capturedEffects?.push(effect);
     runEffect(effect, deps);
+  },
+  useEffectEvent<T extends (...args: never[]) => unknown>(callback: T): T {
+    return capturedEffects ? callback : runEffectEvent(callback);
   },
   useSyncExternalStore<T>(
     subscribe: (onChange: () => void) => () => void,
@@ -67,6 +72,7 @@ const {
   RECENT_WATCH_SEED_QUERY_KEY,
   detailsCardQueryKey,
   invalidateDiscoveryQueries,
+  listSummariesQueryKey,
   profileLibraryQueryKey,
   streamSelectorQueryKey,
   titleWatchProgressQueryKey,
@@ -78,16 +84,21 @@ const { buildStreamRankingCacheKey } = await import('../src/lib/stream-ranking-c
 
 const { StreamSelector } = await import('../src/components/stream-selector');
 const { AddTitlesDialog } = await import('../src/components/list/add-titles-dialog');
+const { SaveToCollectionPanel } = await import('../src/components/list/save-to-collection');
 const { DetailsSections, DetailsSectionTabs, NextAiringChip } =
   await import('../src/components/details-sections');
 const { useNearViewport } = await import('../src/hooks/use-near-viewport');
 const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
-const { useMarkSeasonWatched } = await import('../src/hooks/use-media-library');
+const { useMarkSeasonWatched, useMediaCollectionActions } =
+  await import('../src/hooks/use-media-library');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
 const tauriCore = await import('@tauri-apps/api/core');
 const { createPlaybackClock } = await import('../src/lib/player-clock');
 const { PlayerProgressBar } = await import('../src/components/player-progress-bar');
+const { SettingsSelect } = await import('../src/pages/settings/chrome');
+const { RetryBanner } = await import('../src/components/retry-banner');
+const { Tabs, TabsTrigger } = await import('../src/components/ui/tabs');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
@@ -98,8 +109,320 @@ const { useSearchPageState } = await import('../src/hooks/use-search-page-state'
 const { searchCatalogQueryOptions } = await import('../src/lib/search-catalog');
 const { usePlayerAddonSubtitles } = await import('../src/hooks/use-player-addon-subtitles');
 const { useHistoryPlayback } = await import('../src/hooks/use-history-playback');
+const { useBrowseHotkeys } = await import('../src/hooks/use-browse-hotkeys');
+const appNavigation = await import('../src/lib/navigation');
+const searchPageState = await import('../src/lib/search-page-state');
 const { claimPlaybackLaunch } = await import('../src/lib/player-navigation');
 const { toast } = await import('sonner');
+const { AppCloseManager } = await import('../src/components/app-close-manager');
+const appUpdater = await import('../src/lib/app-updater');
+const playerSession = await import('../src/lib/player-session');
+const playerPip = await import('../src/lib/player-pip');
+const pendingWrites = await import('../src/lib/pending-app-writes');
+const tauriWindow = await import('@tauri-apps/api/window');
+const { createSubscribableStore } = await import('../src/lib/subscribable-store');
+
+test.each([false, true])(
+  'Reload keys and tray close respect the player session (active=%s)',
+  async (active) => {
+    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
+    const target = new EventTarget();
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: target });
+    let closeRequested: Parameters<TauriWindow['onCloseRequested']>[0] | undefined;
+    let quitRequested: (() => void) | undefined;
+    const disposeClose = mock(() => {});
+    const disposeQuit = mock(() => {});
+    const listenersReady = Promise.withResolvers<void>();
+    const appWindow = {
+      onCloseRequested: async (handler: typeof closeRequested) => {
+        closeRequested = handler;
+        await listenersReady.promise;
+        return disposeClose;
+      },
+      listen: async (_event: string, handler: () => void) => {
+        quitRequested = handler;
+        await listenersReady.promise;
+        return disposeQuit;
+      },
+      close: mock(async () => {}),
+    };
+    const trayPause = createSubscribableStore(false);
+    const context: ReturnType<typeof usePlayerSession> = {
+      session: active
+        ? { key: 'test', type: 'movie', id: 'tt1', playerPath: '/player/movie/tt1', state: {} }
+        : null,
+      presentation: 'mini',
+      trayPause,
+      launch: () => {},
+      close: () => {},
+      getMiniPosition: () => null,
+      setMiniPosition: () => {},
+    };
+    const saved = Promise.withResolvers<void>();
+    const spies = [
+      spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true),
+      spyOn(playerSession, 'usePlayerSession').mockReturnValue(context),
+      spyOn(tauriWindow, 'getCurrentWindow').mockReturnValue(appWindow),
+      spyOn(api, 'markFrontendQuitReady').mockResolvedValue(undefined),
+      spyOn(playerPip, 'waitForViewportTransition').mockResolvedValue(undefined),
+      spyOn(playerPip, 'isPlayerPip').mockReturnValue(false),
+    ];
+    const hide = spyOn(api, 'closeMainWindowToTray').mockResolvedValue(true);
+    const pause = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
+    const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue(undefined);
+    const flush = spyOn(pendingWrites, 'flushPendingAppWrites').mockReturnValue(saved.promise);
+    const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
+    const cleanups: ReturnType<EffectCallback>[] = [];
+    let closing: void | Promise<void>;
+    try {
+      capturedEffects = [];
+      renderToStaticMarkup(<AppCloseManager />);
+      const effects = capturedEffects;
+      capturedEffects = null;
+      for (const effect of effects) cleanups.push(effect());
+      if (active) listenersReady.resolve();
+      await Bun.sleep(0);
+      for (const presentation of ['expanded', 'mini'] as const) {
+        context.presentation = presentation;
+        for (const keys of [
+          { key: 'r', ctrlKey: true },
+          { key: 'R', ctrlKey: true, shiftKey: true },
+          { key: 'F5' },
+          { key: 'F5', ctrlKey: true },
+        ]) {
+          const event = Object.assign(new Event('keydown', { cancelable: true }), keys);
+          target.dispatchEvent(event);
+          expect(event.defaultPrevented).toBe(active);
+        }
+      }
+      const ordinaryKey = Object.assign(new Event('keydown', { cancelable: true }), { key: 'r' });
+      target.dispatchEvent(ordinaryKey);
+      expect(ordinaryKey.defaultPrevented).toBe(false);
+      if (!active) return;
+
+      const veto = mock(() => {});
+      if (!closeRequested) throw new Error('Missing close listener');
+      closing = closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+      await Bun.sleep(0);
+      expect(hide).toHaveBeenCalledTimes(1);
+      expect(veto).toHaveBeenCalledTimes(1);
+      expect(trayPause.getSnapshot()).toBe(true);
+      expect(pause).toHaveBeenCalledWith('pause', true);
+      expect(flush).toHaveBeenCalledTimes(1);
+      expect(destroy).not.toHaveBeenCalled();
+      const repeatVeto = mock(() => {});
+      await closeRequested({ preventDefault: repeatVeto } as CloseRequestedEvent);
+      expect(repeatVeto).toHaveBeenCalledTimes(1);
+      expect(flush).toHaveBeenCalledTimes(1);
+      saved.resolve();
+      await closing;
+
+      quitRequested?.();
+      expect(appWindow.close).toHaveBeenCalledTimes(1);
+      await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+      expect(hide).toHaveBeenCalledTimes(1);
+      expect(destroy).toHaveBeenCalledTimes(1);
+      expect(veto).toHaveBeenCalledTimes(1);
+
+      flush.mockRejectedValue(new Error('Disk unavailable'));
+      await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+      expect(veto).toHaveBeenCalledTimes(2);
+      expect(notice).toHaveBeenCalledWith('Could not save playback progress.', {
+        description: 'Close again to quit anyway.',
+      });
+      await closeRequested({ preventDefault: veto } as CloseRequestedEvent);
+      expect(veto).toHaveBeenCalledTimes(2);
+    } finally {
+      saved.resolve();
+      await closing;
+      capturedEffects = null;
+      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      for (const spy of [...spies, hide, pause, destroy, flush, notice]) spy.mockRestore();
+      if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor);
+      else Reflect.deleteProperty(globalThis, 'window');
+      listenersReady.resolve();
+      await Bun.sleep(0);
+      expect(disposeClose).toHaveBeenCalledTimes(1);
+      expect(disposeQuit).toHaveBeenCalledTimes(1);
+      const reload = Object.assign(new Event('keydown', { cancelable: true }), { key: 'F5' });
+      target.dispatchEvent(reload);
+      expect(reload.defaultPrevented).toBe(false);
+    }
+  },
+);
+
+function BrowseHotkeysFixture() {
+  useBrowseHotkeys();
+  return null;
+}
+
+test('Browse hotkeys map Alt sections/history and yield to owned contexts', async () => {
+  const descriptors = new Map(
+    ['window', 'document', 'Element', 'HTMLElement'].map(
+      (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
+    ),
+  );
+
+  class ElementStub {
+    isContentEditable = false;
+    constructor(private readonly hits: (selector: string) => unknown = () => null) {}
+    closest(selector: string): unknown {
+      return this.hits(selector);
+    }
+    querySelector(_selector: string): unknown {
+      return null;
+    }
+  }
+  class HTMLElementStub extends ElementStub {}
+
+  const windowTarget = new EventTarget();
+  const location = { pathname: '/browse' };
+  Object.assign(windowTarget, { location });
+  const searchInput = { focus: mock(() => {}), select: mock(() => {}) };
+  let dialogOpen = false;
+  let tooltipOpen = false;
+  let popperLayers: { querySelector: (selector: string) => unknown }[] = [];
+  const documentStub = {
+    activeElement: null,
+    querySelector(selector: string) {
+      if (selector === '[role="dialog"][data-state="open"]') return dialogOpen ? {} : null;
+      if (selector === '[data-search-input]') return searchInput;
+      if (selector === '[role="tooltip"]') return tooltipOpen ? {} : null;
+      return null;
+    },
+    querySelectorAll(selector: string) {
+      return selector === '[data-radix-popper-content-wrapper]' ? popperLayers : [];
+    },
+  };
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: windowTarget });
+  Object.defineProperty(globalThis, 'document', { configurable: true, value: documentStub });
+  Object.defineProperty(globalThis, 'Element', { configurable: true, value: ElementStub });
+  Object.defineProperty(globalThis, 'HTMLElement', {
+    configurable: true,
+    value: HTMLElementStub,
+  });
+
+  const navigateTo = spyOn(appNavigation, 'navigateApp').mockReturnValue(true);
+  const back = spyOn(appNavigation, 'navigateBack').mockReturnValue(true);
+  const forward = spyOn(appNavigation, 'navigateForward').mockReturnValue(true);
+  const searchPath = spyOn(searchPageState, 'lastSearchPath').mockReturnValue(
+    '/search?genre=Action',
+  );
+  const clearCalls = () => {
+    for (const spy of [navigateTo, back, forward, searchInput.focus, searchInput.select])
+      spy.mockClear();
+  };
+  const navigationCalls = () =>
+    navigateTo.mock.calls.length + back.mock.calls.length + forward.mock.calls.length;
+  const fireKey = ({ target, ...init }: Record<string, unknown>) => {
+    const event = Object.assign(new Event('keydown', { cancelable: true }), init);
+    if (target !== undefined)
+      Object.defineProperty(event, 'target', { value: target, configurable: true });
+    windowTarget.dispatchEvent(event);
+    return event.defaultPrevented;
+  };
+  const cleanups: ReturnType<EffectCallback>[] = [];
+  try {
+    capturedEffects = [];
+    renderToStaticMarkup(<BrowseHotkeysFixture />);
+    const effects = capturedEffects;
+    capturedEffects = null;
+    for (const effect of effects) cleanups.push(effect());
+
+    for (const [key, expected] of [
+      ['1', '/'],
+      ['2', '/search?genre=Action'],
+      ['3', '/calendar'],
+      ['4', '/library'],
+      ['5', '/settings'],
+    ] as const) {
+      expect(fireKey({ key, altKey: true })).toBe(true);
+      expect(navigateTo).toHaveBeenLastCalledWith(expected);
+      clearCalls();
+    }
+    expect(fireKey({ key: 'arrowleft', altKey: true })).toBe(true);
+    expect(back).toHaveBeenCalledTimes(1);
+    expect(fireKey({ key: 'arrowright', altKey: true })).toBe(true);
+    expect(forward).toHaveBeenCalledTimes(1);
+    clearCalls();
+
+    // Repeats consume the key without navigating again; foreign modifiers and
+    // non-shortcut keys pass through untouched.
+    for (const init of [
+      { key: '3', altKey: true, repeat: true },
+      { key: 'arrowleft', altKey: true, repeat: true },
+    ]) {
+      expect(fireKey(init)).toBe(true);
+      expect(navigationCalls()).toBe(0);
+    }
+    for (const init of [
+      { key: '2', altKey: true, ctrlKey: true },
+      { key: '2', altKey: true, metaKey: true },
+      { key: '2', altKey: true, shiftKey: true },
+      { key: 'f', altKey: true },
+      { key: '3' },
+    ]) {
+      expect(fireKey(init)).toBe(false);
+      expect(navigationCalls()).toBe(0);
+    }
+
+    // Editable/owned/key-capture targets, open interactive layers, IME
+    // composition, prior prevention and player routes keep their keys.
+    const editable = new HTMLElementStub();
+    editable.isContentEditable = true;
+    const ownedLayer = new HTMLElementStub((selector) =>
+      selector.includes('[data-mini-player]') ? {} : null,
+    );
+    const keyCapture = new ElementStub((selector) =>
+      selector === '[data-key-capture]' ? {} : null,
+    );
+    for (const target of [editable, ownedLayer, keyCapture])
+      expect(fireKey({ key: '1', altKey: true, target })).toBe(false);
+    dialogOpen = true;
+    expect(fireKey({ key: '1', altKey: true })).toBe(false);
+    dialogOpen = false;
+    popperLayers = [{ querySelector: () => null }];
+    expect(fireKey({ key: '1', altKey: true })).toBe(false);
+    popperLayers = [];
+    expect(fireKey({ key: '1', altKey: true, isComposing: true })).toBe(false);
+    const prevented = Object.assign(new Event('keydown', { cancelable: true }), {
+      key: '1',
+      altKey: true,
+    });
+    Object.defineProperty(prevented, 'defaultPrevented', { value: true });
+    windowTarget.dispatchEvent(prevented);
+    location.pathname = '/player/movie/tt1';
+    expect(fireKey({ key: '1', altKey: true })).toBe(false);
+    location.pathname = '/browse';
+    expect(navigationCalls()).toBe(0);
+
+    // Ctrl/Cmd+K still reaches Search from inside an input; unmodified keys
+    // keep their search/back behavior and tooltip-captured Escape.
+    location.pathname = '/search';
+    expect(fireKey({ key: 'k', ctrlKey: true, target: editable })).toBe(true);
+    expect(searchInput.focus).toHaveBeenCalledTimes(1);
+    expect(searchInput.select).toHaveBeenCalledTimes(1);
+    location.pathname = '/browse';
+    expect(fireKey({ key: 'k', metaKey: true })).toBe(true);
+    expect(navigateTo).toHaveBeenLastCalledWith('/search?genre=Action');
+    clearCalls();
+    expect(fireKey({ key: '/' })).toBe(true);
+    expect(navigateTo).toHaveBeenLastCalledWith('/search?genre=Action');
+    expect(fireKey({ key: 'escape' })).toBe(true);
+    expect(back).toHaveBeenCalledTimes(1);
+    tooltipOpen = true;
+    expect(fireKey({ key: 'escape' })).toBe(false);
+    tooltipOpen = false;
+  } finally {
+    capturedEffects = null;
+    for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+    for (const spy of [navigateTo, back, forward, searchPath]) spy.mockRestore();
+    for (const [name, descriptor] of descriptors) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  }
+});
 
 test('Case-only title edits share the catalog cache', async () => {
   const client = new QueryClient();
@@ -1261,6 +1584,12 @@ test.each([
       client,
     );
     expect(markup.includes('Search streams by release, codec or keyword')).toBe(available);
+    if (available) {
+      expect(markup).toContain('role="radiogroup" aria-label="Quality filter"');
+      expect(markup).toContain('role="radiogroup" aria-label="Sort order"');
+      expect(markup.match(/aria-checked="true" tabindex="0"/g)).toHaveLength(2);
+      expect(markup.match(/role="radio"/g)).toHaveLength(5);
+    }
     expect(markup).not.toContain('Addon configuration unavailable');
     expect(markup.includes(failure.message)).toBe(!available && selectorFailed);
     expect(markup.includes('Retry</button>')).toBe(!available && selectorFailed);
@@ -1578,6 +1907,7 @@ test('Details section tabs navigate with arrows and edge keys', () => {
     ['about', 'ArrowRight', {}, 'episodes'],
     ['episodes', 'x', {}, null],
     ['episodes', 'ArrowRight', { ctrlKey: true }, null],
+    ['episodes', 'ArrowRight', { nativeEvent: { isComposing: true } }, null],
     ['episodes', 'ArrowRight', { defaultPrevented: true }, null],
   ] as const) {
     const change = mock((_next: string) => {});
@@ -1588,6 +1918,7 @@ test('Details section tabs navigate with arrows and edge keys', () => {
     const onKeyDown = element.props.onKeyDown as (event: KeyboardEvent<HTMLDivElement>) => void;
     onKeyDown({
       key,
+      nativeEvent: { isComposing: false },
       ...guard,
       preventDefault,
       currentTarget: { querySelector },
@@ -1600,6 +1931,46 @@ test('Details section tabs navigate with arrows and edge keys', () => {
         expected === 'episodes' ? '#details-episodes-heading' : `#details-section-tab-${expected}`,
       );
     }
+  }
+});
+
+test('Profile tabs leave modified and composing keys alone', () => {
+  let onKeyDown!: NonNullable<ComponentProps<typeof TabsTrigger>['onKeyDown']>;
+  function TriggerProbe() {
+    const trigger = TabsTrigger({ value: 'library' });
+    onKeyDown = trigger.props.onKeyDown;
+    return trigger;
+  }
+  renderToStaticMarkup(
+    <Tabs value='library' onValueChange={() => {}}>
+      <TriggerProbe />
+    </Tabs>,
+  );
+  for (const guard of [
+    {},
+    { altKey: true },
+    { ctrlKey: true },
+    { metaKey: true },
+    { shiftKey: true },
+    { nativeEvent: { isComposing: true } },
+    { defaultPrevented: true },
+  ]) {
+    const focus = mock(() => {});
+    const click = mock(() => {});
+    const next = { focus, click };
+    const currentTarget = { closest: () => ({ querySelectorAll: () => [currentTarget, next] }) };
+    const preventDefault = mock(() => {});
+    onKeyDown({
+      key: 'ArrowRight',
+      nativeEvent: { isComposing: false },
+      ...guard,
+      currentTarget,
+      preventDefault,
+    } as unknown as KeyboardEvent<HTMLButtonElement>);
+    const shouldNavigate = Object.keys(guard).length === 0;
+    expect(preventDefault).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
+    expect(click).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
+    expect(focus).toHaveBeenCalledTimes(shouldNavigate ? 1 : 0);
   }
 });
 
@@ -1764,4 +2135,66 @@ test('Season completion remains available for the last unwatched episode', () =>
   } finally {
     client.clear();
   }
+});
+
+test('Settings menu selection skips the current value and accepts a different value', () => {
+  const onChange = mock((_value: string) => {});
+  const menu = SettingsSelect({
+    ariaLabel: 'Quality',
+    value: 'auto',
+    valueLabel: 'Auto',
+    options: [
+      { value: 'auto', label: 'Auto' },
+      { value: 'high', label: 'High' },
+    ],
+    onChange,
+  });
+  const [, content] = menu.props.children;
+  const [current, other] = content.props.children;
+  current.props.onSelect();
+  expect(onChange).not.toHaveBeenCalled();
+  other.props.onSelect();
+  expect(onChange.mock.calls).toEqual([['high']]);
+});
+
+test('Retry feedback blocks repeat activation while keeping the button focusable', () => {
+  const onRetry = mock(() => {});
+  const banner = RetryBanner({ message: 'Could not load titles.', isRetrying: true, onRetry });
+  const [, button] = banner.props.children;
+  button.props.onClick();
+  expect(onRetry).not.toHaveBeenCalled();
+  expect(button.props.disabled).toBeUndefined();
+  expect(renderToStaticMarkup(banner)).toContain('Retrying…');
+  const [, readyButton] = RetryBanner({ message: 'Could not load titles.', onRetry }).props
+    .children;
+  readyButton.props.onClick();
+  expect(onRetry).toHaveBeenCalledTimes(1);
+});
+
+test('Save picker distinguishes saved lists and names each membership action', () => {
+  const client = new QueryClient();
+  const item = { id: 'save-picker', type: 'movie' as const, title: 'A film' };
+  client.setQueryData(listSummariesQueryKey(item.id), [
+    { id: 'saved', name: 'Weekend cinema', icon: 'Film', item_count: 12, contains_item: true },
+    { id: 'other', name: 'Watch later', icon: 'Clock', item_count: 3, contains_item: false },
+  ]);
+  function Picker() {
+    const actions = useMediaCollectionActions({ item, isInLibrary: true });
+    return (
+      <SaveToCollectionPanel
+        item={item}
+        isInLibrary
+        showLibrary
+        actions={actions}
+        onCreateList={() => {}}
+      />
+    );
+  }
+  const markup = renderPage(Picker, '/details/movie/save-picker', client);
+  expect(markup).toContain('aria-label="Remove from library"');
+  expect(markup).toContain('aria-label="Remove from Weekend cinema"');
+  expect(markup).toContain('aria-label="Add to Watch later"');
+  expect(markup).toContain('Added · 12 titles');
+  expect(markup).toContain('>3 titles<');
+  expect(markup).toContain('title="Weekend cinema"');
 });

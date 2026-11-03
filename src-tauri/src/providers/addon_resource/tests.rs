@@ -1,6 +1,6 @@
 use super::*;
 use crate::providers::addon_manifest::{parse_addon_manifest, snapshot_is_classified};
-use crate::test_helpers::{cinemeta_manifest, TestHttpServer};
+use crate::test_helpers::{cinemeta_manifest, TempPath, TestHttpServer};
 
 fn snapshot() -> AddonManifest {
     cinemeta_manifest()
@@ -1185,18 +1185,15 @@ fn deterministic_failures_negative_cache_until_clear() {
     assert_eq!(client.failure_cache.get("meta:x"), None);
 }
 
-struct SubtitleDiskTest(PathBuf);
+struct SubtitleDiskTest(TempPath);
 
 impl SubtitleDiskTest {
     fn new() -> Self {
-        let path =
-            std::env::temp_dir().join(format!("stremiro-subtitles-{}", uuid::Uuid::new_v4()));
-        std::fs::create_dir_all(&path).unwrap();
-        Self(path)
+        Self(TempPath::dir("subtitles"))
     }
 
     fn client(&self) -> AddonResourceClient {
-        let mut client = AddonResourceClient::with_subtitle_cache_dir(Some(self.0.clone()));
+        let mut client = AddonResourceClient::with_subtitle_cache_dir(Some(self.0.to_path_buf()));
         client.client = Client::builder().no_proxy().build().unwrap();
         client
     }
@@ -1207,12 +1204,6 @@ impl SubtitleDiskTest {
             "{}.json",
             hash_segment(&resource_cache_key("subtitles", &url))
         ))
-    }
-}
-
-impl Drop for SubtitleDiskTest {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
     }
 }
 

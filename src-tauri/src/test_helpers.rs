@@ -83,6 +83,63 @@ impl Drop for TestStore {
     }
 }
 
+/// Temp path removed on drop so a panicking test can't leak state into a
+/// later run. `Deref`s to `Path`, so `&path` call sites keep working and
+/// `path.clone()` still yields a plain `PathBuf`.
+pub(crate) struct TempPath {
+    path: std::path::PathBuf,
+    dir: bool,
+}
+
+impl TempPath {
+    /// Unused file path — nothing is created; the file is removed on drop
+    /// only if the test wrote it.
+    pub(crate) fn file(tag: &str) -> Self {
+        Self {
+            path: temp_path(tag),
+            dir: false,
+        }
+    }
+
+    /// Fresh empty directory, removed recursively on drop.
+    pub(crate) fn dir(tag: &str) -> Self {
+        let this = Self {
+            path: temp_path(tag),
+            dir: true,
+        };
+        std::fs::create_dir_all(&this.path).expect("create temp dir");
+        this
+    }
+}
+
+fn temp_path(tag: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!("stremiro-test-{}-{}", tag, uuid::Uuid::new_v4()))
+}
+
+impl std::ops::Deref for TempPath {
+    type Target = std::path::Path;
+
+    fn deref(&self) -> &std::path::Path {
+        self.path.as_path()
+    }
+}
+
+impl AsRef<std::path::Path> for TempPath {
+    fn as_ref(&self) -> &std::path::Path {
+        self.path.as_path()
+    }
+}
+
+impl Drop for TempPath {
+    fn drop(&mut self) {
+        if self.dir {
+            let _ = std::fs::remove_dir_all(&self.path);
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
 /// Ordered loopback responses; keep recording requests after the script runs out.
 /// One scripted response: status, body, arbitrary headers.
 pub(crate) type ScriptedResponse = (u16, &'static str, Vec<(&'static str, &'static str)>);

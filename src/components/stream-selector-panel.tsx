@@ -46,7 +46,7 @@ import {
   type WatchProgress,
   type TitleWatchProgress,
 } from '@/lib/api';
-import { whenRowMounted } from '@/lib/dom';
+import { handleRadioGroupKeyDown, whenRowMounted } from '@/lib/dom';
 import {
   episodeMatchesCoordinates,
   isEpisodeSpoiler,
@@ -108,7 +108,7 @@ function SegmentGroup<T extends string>({
 }) {
   return (
     <div
-      role='group'
+      role='radiogroup'
       aria-label={label}
       className='flex shrink-0 items-center gap-px bg-black/50 rounded-lg p-0.5'
     >
@@ -117,8 +117,16 @@ function SegmentGroup<T extends string>({
         <button
           key={option.value}
           type='button'
-          aria-pressed={value === option.value}
+          role='radio'
+          aria-checked={value === option.value}
+          tabIndex={value === option.value ? 0 : -1}
           aria-disabled={isResolving || undefined}
+          onKeyDown={handleRadioGroupKeyDown}
+          onFocus={(event) => {
+            if (event.currentTarget.matches(':focus-visible')) {
+              event.currentTarget.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+            }
+          }}
           onClick={() => {
             if (isResolving || value === option.value) return;
             onChange(option.value);
@@ -268,13 +276,19 @@ export function StreamSelectorHeader({
                   <DialogTitle className='sr-only'>{title}</DialogTitle>
                 </>
               ) : (
-                <DialogTitle className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white [@media(max-height:800px)]:line-clamp-1 [@media(max-height:800px)]:text-[22px]'>
+                <DialogTitle
+                  title={title}
+                  className='line-clamp-2 text-[26px] font-bold leading-[1.08] tracking-[-0.02em] text-white [@media(max-height:800px)]:line-clamp-1 [@media(max-height:800px)]:text-[22px]'
+                >
                   {title}
                 </DialogTitle>
               )}
             </div>
             {episodeTitle && (
-              <p className='truncate text-[15px] font-medium leading-snug text-white/75'>
+              <p
+                title={episodeTitle}
+                className='truncate text-[15px] font-medium leading-snug text-white/75'
+              >
                 {episodeTitle}
               </p>
             )}

@@ -16,7 +16,6 @@ import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
 
-// One empty-list identity — a fresh `[]` per render would defeat the rail's items-identity scroll reset.
 const EMPTY_ITEMS: MediaItem[] = [];
 
 interface GenreFilterConfig {
@@ -48,7 +47,7 @@ export function RailTitleLink({ to, title }: { to: string; title: string }) {
       {title}
       <ChevronRight
         aria-hidden='true'
-        className='h-4 w-4 shrink-0 text-zinc-400 transition-[color,translate] duration-150 motion-reduce:transition-none group-hover/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-100'
+        className='h-4 w-4 shrink-0 text-zinc-400 transition-[color,translate] duration-150 motion-reduce:transition-none motion-safe:group-hover/rail-title:translate-x-0.5 motion-safe:group-focus-visible/rail-title:translate-x-0.5 group-hover/rail-title:text-zinc-100 group-focus-visible/rail-title:text-zinc-100'
       />
     </Link>
   );
@@ -141,7 +140,7 @@ export function MediaRow({
                   <button
                     type='button'
                     aria-label={`${title} genre: ${genreFilter.active}`}
-                    className='ml-auto inline-flex min-h-9 max-w-full items-center gap-2 rounded-md border border-white/10 bg-white/[0.025] px-3 text-[13px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
+                    className='group/genre ml-auto inline-flex min-h-9 max-w-full items-center gap-2 rounded-md border border-white/10 bg-white/[0.025] px-3 text-[13px] font-medium text-zinc-300 transition-colors hover:border-white/20 hover:bg-white/[0.06] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/60 motion-reduce:transition-none'
                   >
                     <GenreIcon genre={genreFilter.active} />
                     <span className='max-w-44 truncate'>
@@ -149,19 +148,23 @@ export function MediaRow({
                         ? 'All genres'
                         : genreFilter.active}
                     </span>
-                    <ChevronDown aria-hidden='true' className='size-3.5 shrink-0 text-zinc-400' />
+                    <ChevronDown
+                      aria-hidden='true'
+                      className='size-3.5 shrink-0 text-zinc-400 transition-transform duration-150 group-data-[state=open]/genre:rotate-180 motion-reduce:transition-none'
+                    />
                   </button>
                 </DropdownMenuTrigger>
                 <DropdownMenuContent
                   align='end'
                   aria-label={`${title} genres`}
-                  className='max-h-80 w-56 overflow-y-auto rounded-lg border-white/10 bg-zinc-950 p-1.5'
+                  className='max-h-[min(20rem,var(--radix-dropdown-menu-content-available-height))] w-56 rounded-lg border-white/10 bg-zinc-950 p-1.5'
                 >
                   {genreFilter.options.map((genre) => (
                     <DropdownMenuItem
                       key={genre}
                       role='menuitemradio'
                       aria-checked={genreFilter.active === genre}
+                      title={genre === genreFilter.allOption ? 'All genres' : genre}
                       onSelect={() => {
                         if (genreFilter.active !== genre) genreFilter.onChange(genre);
                       }}

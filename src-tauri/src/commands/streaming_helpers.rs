@@ -224,7 +224,7 @@ fn has_playable_stream_source_with_http(stream: &AddonStream, has_http_url: bool
             .is_some_and(|url| !url.is_empty() && (is_magnet_url(url) || has_http_url))
 }
 
-pub(crate) fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
+fn is_placeholder_no_stream(stream: &AddonStream) -> bool {
     let texts = stream.match_texts();
     let name = texts.name.as_deref().unwrap_or("");
     let title = texts.title.as_deref().unwrap_or("");

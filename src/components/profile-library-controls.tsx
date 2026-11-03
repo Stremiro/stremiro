@@ -60,7 +60,7 @@ export function isLibrarySort(value: string | null): value is LibrarySort {
 const LIBRARY_FOCUS_RING_CLASS =
   'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30';
 const FILTER_MENU_BUTTON_CLASS = cn(
-  'h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0',
+  'group/filter h-9 px-3 gap-1.5 text-[12px] bg-white/[0.02] border-white/[0.08] shadow-none hover:bg-white/[0.06] text-zinc-300 hover:text-white shrink-0',
   LIBRARY_FOCUS_RING_CLASS,
 );
 
@@ -183,7 +183,10 @@ export function LibraryToolbar({
                 <WatchStatusIcon status={statusFilter} className='size-3.5' strokeWidth={2.1} />
               )}
               <span>{statusLabel}</span>
-              <ChevronDown className='w-3 h-3 opacity-50' />
+              <ChevronDown
+                aria-hidden='true'
+                className='w-3 h-3 opacity-50 transition-transform duration-150 group-data-[state=open]/filter:rotate-180 motion-reduce:transition-none'
+              />
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align='start' className='w-44 bg-zinc-950/98 border-white/10'>
@@ -194,21 +197,19 @@ export function LibraryToolbar({
               All statuses
               <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>{libraryCount}</span>
             </FilterMenuItem>
-            {WATCH_STATUSES.map((s) => {
-              return (
-                <FilterMenuItem
-                  key={s}
-                  checked={statusFilter === s}
-                  onSelect={() => onStatusFilterChange(s)}
-                >
-                  <WatchStatusIcon status={s} className='size-3.5' strokeWidth={2.1} />
-                  {WATCH_STATUS_LABELS[s]}
-                  <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
-                    {statusesAvailable ? (statusCounts[s] ?? 0) : '—'}
-                  </span>
-                </FilterMenuItem>
-              );
-            })}
+            {WATCH_STATUSES.map((status) => (
+              <FilterMenuItem
+                key={status}
+                checked={statusFilter === status}
+                onSelect={() => onStatusFilterChange(status)}
+              >
+                <WatchStatusIcon status={status} className='size-3.5' strokeWidth={2.1} />
+                {WATCH_STATUS_LABELS[status]}
+                <span className='ml-auto text-[11px] tabular-nums text-zinc-600'>
+                  {statusesAvailable ? (statusCounts[status] ?? 0) : '—'}
+                </span>
+              </FilterMenuItem>
+            ))}
             <FilterMenuItem
               checked={statusFilter === 'none'}
               onSelect={() => onStatusFilterChange('none')}
@@ -247,7 +248,10 @@ export function LibraryToolbar({
               >
                 {ActiveSortIcon ? <ActiveSortIcon className='w-3 h-3' /> : null}
                 <span>{activeSortOption.label}</span>
-                <ChevronDown className='w-3 h-3 opacity-50' />
+                <ChevronDown
+                  aria-hidden='true'
+                  className='w-3 h-3 opacity-50 transition-transform duration-150 group-data-[state=open]/filter:rotate-180 motion-reduce:transition-none'
+                />
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align='end' className='w-36 bg-zinc-950/98 border-white/10'>

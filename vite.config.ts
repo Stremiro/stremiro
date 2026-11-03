@@ -6,8 +6,7 @@ import { defineConfig } from 'vite';
 
 const host = process.env.TAURI_DEV_HOST;
 
-// https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig({
   plugins: [react(), babel({ presets: [reactCompilerPreset()] }), tailwindcss()],
   resolve: {
     alias: {
@@ -38,12 +37,10 @@ export default defineConfig(async () => ({
     },
   },
 
-  // Vite options tailored for Tauri development
-  //
-  // 1. prevent Vite from obscuring rust errors
+  // Keep Rust compile errors visible instead of clearing the screen.
   clearScreen: false,
-  // 2. tauri expects a fixed port, fail if that port is not available
   server: {
+    // Tauri expects this fixed dev port; fail rather than fall back.
     port: 1430,
     strictPort: true,
     host: host || false,
@@ -55,8 +52,8 @@ export default defineConfig(async () => ({
         }
       : undefined,
     watch: {
-      // 3. tell Vite to ignore watching `src-tauri`
+      // Rust sources rebuild through Cargo, not Vite.
       ignored: ['**/src-tauri/**'],
     },
   },
-}));
+});

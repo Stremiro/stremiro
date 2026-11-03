@@ -139,22 +139,16 @@ fn is_series_like(item: &WatchProgress) -> bool {
     normalize_history_media_type(item) != "movie"
 }
 
-fn has_explicit_stream_episode_context(item: &WatchProgress) -> bool {
-    item.stream_season.is_some() && item.stream_episode.is_some()
-}
-
-/// Aliased series/anime can map to a different lookup id and source coordinates.
-fn is_mapped_history_item(item: &WatchProgress) -> bool {
-    is_series_like(item) && !item.id.trim().starts_with("tt")
-}
-
 /// WatchProgress-side twin of `episode_navigation::build_source_episode_coordinates`:
 /// aliases without saved source coordinates wait for their episode mapping.
 fn get_episode_context(item: &WatchProgress) -> HistoryEpisodeContext {
     let absolute_season = watch_progress_absolute_season(item);
     let absolute_episode = watch_progress_absolute_episode(item);
-    let should_defer_mapped_coordinates =
-        !has_explicit_stream_episode_context(item) && is_mapped_history_item(item);
+    // Aliased series/anime can map to a different lookup id and source coordinates.
+    let should_defer_mapped_coordinates = (item.stream_season.is_none()
+        || item.stream_episode.is_none())
+        && is_series_like(item)
+        && !item.id.trim().starts_with("tt");
     HistoryEpisodeContext {
         absolute_season,
         absolute_episode,
@@ -200,15 +194,15 @@ fn build_player_route(
     }
 }
 
-fn build_details_target(media_type: &str, media_id: &str) -> String {
-    format!("/details/{media_type}/{}", encode_uri_component(media_id))
-}
-
 fn build_details_plan(item: &WatchProgress, from: Option<String>) -> HistoryPlaybackPlan {
     HistoryPlaybackPlan {
         kind: HistoryPlaybackPlanKind::Details,
         reason: Some(HistoryPlaybackPlanReason::MissingEpisodeContext),
-        target: build_details_target(normalize_history_media_type(item), &item.id),
+        target: format!(
+            "/details/{}/{}",
+            normalize_history_media_type(item),
+            encode_uri_component(&item.id)
+        ),
         state: HistoryPlaybackRouteState {
             from,
             season: get_episode_context(item).absolute_season,
@@ -277,24 +271,24 @@ fn build_player_plan(
     }
 }
 
-fn merge_latest_history_metadata(item: &WatchProgress, latest: &mut WatchProgress) {
+fn merge_latest_history_metadata(item: WatchProgress, latest: &mut WatchProgress) {
     if !non_blank(&latest.title) {
-        latest.title = item.title.clone();
+        latest.title = item.title;
     }
     if latest.poster.is_none() {
-        latest.poster = item.poster.clone();
+        latest.poster = item.poster;
     }
     if latest.backdrop.is_none() {
-        latest.backdrop = item.backdrop.clone();
+        latest.backdrop = item.backdrop;
     }
 }
 
 fn get_latest_history_playback_item(
     app: &AppHandle,
     playback_state: &PlaybackStateService,
-    item: &WatchProgress,
+    item: WatchProgress,
 ) -> Result<WatchProgress, String> {
-    let context = get_episode_context(item);
+    let context = get_episode_context(&item);
     let items = resume_rows(match (context.absolute_season, context.absolute_episode) {
         (Some(season), Some(episode)) => playback_state.load_resume_entries_for_episode(
             app,
@@ -306,7 +300,7 @@ fn get_latest_history_playback_item(
         _ => playback_state.load_resume_entries_for_title(app, &item.type_, &item.id)?,
     });
     // Health only ranks series donors; movies and singleton titles have none.
-    let source_health = (items.len() > 1 && is_series_like_watch_progress(item)).then(|| {
+    let source_health = (items.len() > 1 && is_series_like_watch_progress(&item)).then(|| {
         playback_state.source_health_priorities_for_ids(
             app,
             items.iter().map(|entry| entry.source_id.as_deref()),
@@ -327,7 +321,7 @@ fn get_latest_history_playback_item(
         return Ok(latest);
     }
 
-    Ok(item.clone())
+    Ok(item)
 }
 
 async fn resolve_history_episode_context(
@@ -403,7 +397,7 @@ pub async fn build_history_playback_plan(
         let app_owned = app.clone();
         let service = playback_state.inner().clone();
         super::run_blocking_store_op(move || {
-            get_latest_history_playback_item(&app_owned, &service, &item)
+            get_latest_history_playback_item(&app_owned, &service, item)
         })
         .await?
     };
@@ -699,5 +693,33 @@ mod tests {
             assert_eq!(context.stream_episode, Some(5));
             assert_eq!(context_for(&item).stream_lookup_id, "tt9");
         }
+    }
+
+    #[test]
+    fn merge_latest_history_metadata_fills_only_missing_fields() {
+        let mut incoming = progress_item("tt9", "series");
+        incoming.title = "Incoming".to_string();
+        incoming.poster = Some("p".to_string());
+        incoming.backdrop = Some("b".to_string());
+
+        // Missing/blank latest fields take the incoming values.
+        let mut latest = progress_item("tt9", "series");
+        latest.title = " ".to_string();
+        latest.position = 42.0;
+        merge_latest_history_metadata(incoming.clone(), &mut latest);
+        assert_eq!(latest.title, "Incoming");
+        assert_eq!(latest.poster.as_deref(), Some("p"));
+        assert_eq!(latest.backdrop.as_deref(), Some("b"));
+        assert_eq!(latest.position, 42.0);
+
+        // Populated fields win; Some("") is present, not absent.
+        let mut latest = progress_item("tt9", "series");
+        latest.title = "Latest".to_string();
+        latest.poster = Some(String::new());
+        latest.backdrop = Some(String::new());
+        merge_latest_history_metadata(incoming, &mut latest);
+        assert_eq!(latest.title, "Latest");
+        assert_eq!(latest.poster.as_deref(), Some(""));
+        assert_eq!(latest.backdrop.as_deref(), Some(""));
     }
 }

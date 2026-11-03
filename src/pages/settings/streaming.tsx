@@ -112,6 +112,7 @@ function AddonRow({ addon, handle, isWorking, onToggle, onRemove }: AddonRowProp
           // A real logo speaks for itself; the tile treatment stays a letter fallback.
           <RemoteImage
             src={addonLogoSrc}
+            fadeIn
             alt=''
             loading='lazy'
             onError={onAddonLogoError}

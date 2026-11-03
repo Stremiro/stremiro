@@ -273,7 +273,7 @@ const HistoryListRow = memo(function HistoryListRow({
             size='icon'
             variant='ghost'
             data-history-remove={index}
-            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-colors opacity-100 md:opacity-0 md:group-hover/hrow:opacity-100 md:group-focus-within/hrow:opacity-100 focus-visible:opacity-100'
+            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-[color,background-color,opacity] duration-150 opacity-100 md:opacity-0 md:group-hover/hrow:opacity-100 md:group-focus-within/hrow:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none'
             onClick={(e) => {
               e.stopPropagation();
               if (removeItem.isPending) return;

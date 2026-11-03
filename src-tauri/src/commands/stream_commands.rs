@@ -48,6 +48,7 @@ const STREAM_LINK_CHANGED_MESSAGE: &str =
 const PACK_EPISODES_MAX: usize = 2_000;
 const PACK_COVERAGE_CLAIMS_MAX: usize = 2_000;
 const STREAM_SELECTOR_ROWS_MAX: usize = 2_000;
+const STREAM_SELECTOR_SEARCH_MAX_CHARS: usize = 4_096;
 /// Shared by resolves and recoveries; one per open player/selector plus overlap.
 const STREAM_REQUESTS_MAX: usize = 32;
 const STREAM_EARLY_CANCELS_MAX: usize = 32;
@@ -425,7 +426,12 @@ pub async fn get_stream_selector_indices(
     filters: StreamSelectorPreferences,
     search_query: String,
 ) -> Vec<usize> {
-    if rows.len() > STREAM_SELECTOR_ROWS_MAX {
+    if rows.len() > STREAM_SELECTOR_ROWS_MAX
+        || search_query
+            .chars()
+            .nth(STREAM_SELECTOR_SEARCH_MAX_CHARS)
+            .is_some()
+    {
         return Vec::new();
     }
     let query = search_query.to_lowercase();
@@ -607,10 +613,10 @@ pub async fn resolve_best_stream(
             source_name: preferred_source_name.as_deref(),
             stream_family: preferred_stream_family.as_deref(),
         };
-        let retry_unrestricted = preferred_stream_key
-            .as_deref()
-            .filter(|_| settled_early.load(Ordering::Relaxed))
-            .is_some_and(|key| streams.iter().any(|stream| stream.stream_key == key));
+        let retry_unrestricted = settled_early.load(Ordering::Relaxed)
+            && preferred_stream_key
+                .as_deref()
+                .is_some_and(|key| streams.iter().any(|stream| stream.stream_key == key));
         let mut started_requests = Vec::new();
         let error = match resolve_ranked_best_stream_candidate(
             streams,
