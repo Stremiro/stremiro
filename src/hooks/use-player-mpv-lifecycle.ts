@@ -898,7 +898,7 @@ export function usePlayerMpvLifecycle({
         });
         if (cancelled) return;
         if (mountedRef.current) {
-          setError('Failed to initialize player. Please try a different stream.');
+          setError(`Failed to initialize player: ${getErrorMessage(error)}`);
           getCallbacks().stopLoading();
         }
       });

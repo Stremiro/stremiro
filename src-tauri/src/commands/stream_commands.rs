@@ -47,7 +47,6 @@ const STREAM_LINK_CHANGED_MESSAGE: &str =
     "This stream changed — reopen the stream list and try again.";
 const PACK_EPISODES_MAX: usize = 2_000;
 const PACK_COVERAGE_CLAIMS_MAX: usize = 2_000;
-const STREAM_SELECTOR_ROWS_MAX: usize = 2_000;
 const STREAM_SELECTOR_SEARCH_MAX_CHARS: usize = 4_096;
 /// Shared by resolves and recoveries; one per open player/selector plus overlap.
 const STREAM_REQUESTS_MAX: usize = 32;
@@ -426,11 +425,10 @@ pub async fn get_stream_selector_indices(
     filters: StreamSelectorPreferences,
     search_query: String,
 ) -> Vec<usize> {
-    if rows.len() > STREAM_SELECTOR_ROWS_MAX
-        || search_query
-            .chars()
-            .nth(STREAM_SELECTOR_SEARCH_MAX_CHARS)
-            .is_some()
+    if search_query
+        .chars()
+        .nth(STREAM_SELECTOR_SEARCH_MAX_CHARS)
+        .is_some()
     {
         return Vec::new();
     }
