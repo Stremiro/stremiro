@@ -2,10 +2,6 @@ use super::*;
 use crate::providers::addon_manifest::{parse_addon_manifest, snapshot_is_classified};
 use crate::test_helpers::{cinemeta_manifest, TempPath, TestHttpServer};
 
-fn snapshot() -> AddonManifest {
-    cinemeta_manifest()
-}
-
 fn extra(name: &str, value: &str) -> CatalogExtra {
     CatalogExtra {
         name: name.to_string(),
@@ -376,7 +372,7 @@ fn build_resource_url_encodes_genre_and_skip_catalog_extras() {
 
 #[test]
 fn snapshot_rejects_undeclared_search_extra() {
-    let snapshot = snapshot();
+    let snapshot = cinemeta_manifest();
     let extras = [extra("search", "dune")];
     snapshot_supports_catalog(&snapshot, "movie", "top", &extras).expect("top allows search");
     let error = snapshot_supports_catalog(&snapshot, "movie", "imdbRating", &extras)
@@ -1242,6 +1238,15 @@ async fn subtitle_disk_cache_reuses_positive_response_after_restart_without_rewr
         );
         assert_eq!(std::fs::read(&path).unwrap(), original);
     }
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(
+        restarted
+            .fetch_subtitles(&server.url, "series", "tt1:1:2")
+            .await
+            .unwrap(),
+        first,
+        "a validated disk hit must be reused in memory"
+    );
     assert_eq!(server.finish(), ["/subtitles/series/tt1%3A1%3A2.json"]);
 }
 
@@ -1291,8 +1296,8 @@ async fn subtitle_disk_hits_do_not_extend_signed_url_lifetime_in_memory() {
         .await
         .unwrap();
     let path = disk.file(&server.url, "movie", "tt1");
-    let mut entry: SubtitleDiskEntry =
-        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    let bytes = std::fs::read(&path).unwrap();
+    let mut entry: DiskEnvelope = serde_json::from_slice(&bytes).unwrap();
     entry.expires_at = SystemTime::now() + Duration::from_millis(500);
     std::fs::write(&path, serde_json::to_vec(&entry).unwrap()).unwrap();
     let restarted = disk.client();
@@ -1321,7 +1326,8 @@ async fn subtitle_disk_corruption_oversize_and_unsafe_urls_fall_back_to_http() {
         .await
         .unwrap();
     let path = disk.file(&server.url, "movie", "tt1");
-    let unsafe_entry = serde_json::to_vec(&SubtitleDiskEntry {
+    let unsafe_entry = serde_json::to_vec(&DiskEnvelope {
+        key: None,
         expires_at: SystemTime::now() + RESOURCE_CACHE_TTL,
         response: serde_json::from_str(
             r#"{"subtitles":[{"id":"en","url":"http://127.0.0.1/private"}]}"#,
@@ -1329,7 +1335,8 @@ async fn subtitle_disk_corruption_oversize_and_unsafe_urls_fall_back_to_http() {
         .unwrap(),
     })
     .unwrap();
-    let future_entry = serde_json::to_vec(&SubtitleDiskEntry {
+    let future_entry = serde_json::to_vec(&DiskEnvelope {
+        key: None,
         expires_at: SystemTime::now() + RESOURCE_CACHE_TTL * 2,
         response: serde_json::from_str(DISK_SUBTITLE_RESPONSE).unwrap(),
     })

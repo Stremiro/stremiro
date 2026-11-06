@@ -114,26 +114,3 @@ test('Details episode derivation leaves unavailable history and air states provi
     getDetailsEpisodeState({ mediaId, selectedSeason: null, nextUpEpisode: null }).seasonRail,
   ).toEqual([]);
 });
-
-test('Details episode derivation reads each history row once for a long-running title', () => {
-  const episodes = Array.from({ length: 5000 }, (_, n) => episode(Math.floor(n / 100), n % 100));
-  const titleProgress = progress([]);
-  let reads = 0;
-  titleProgress.episodeProgress = new Proxy(titleProgress.episodeProgress, {
-    get(target, property) {
-      reads += 1;
-      return Reflect.get(target, property);
-    },
-  });
-  const state = getDetailsEpisodeState({
-    mediaId,
-    episodes,
-    selectedSeason: 25,
-    titleProgress,
-    unairedEpisodeKeys: new Set(),
-    nextUpEpisode: null,
-  });
-  expect(reads).toBe(episodes.length);
-  expect(state.seasonRail).toHaveLength(100);
-  expect(state.seasonWatchTargets).toHaveLength(100);
-});

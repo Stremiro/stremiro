@@ -9,6 +9,7 @@ import { flushPendingAppWrites } from '@/lib/pending-app-writes';
 import { APP_UI_PREFERENCES_QUERY_KEY } from '@/lib/query-invalidation';
 import {
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -80,56 +81,60 @@ export function GeneralSettings() {
     START_PAGES.find((option) => option.value === preferences.startupPage)?.label ?? 'Home';
 
   return (
-    <div className='@container/general space-y-4'>
+    <div className='@container/general space-y-8'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
-      <div className='grid items-start gap-4 @min-[54rem]/general:grid-cols-2'>
+      <div className='grid items-start gap-x-5 gap-y-8 @min-[54rem]/general:grid-cols-2'>
         <SettingsGroup>
           <SettingsGroupHeader
             icon={Power}
             title='Startup'
             description='Choose how Stremiro opens.'
           />
-          <SettingsBody rows>
-            <SettingsQueryError
-              query={launchQuery}
-              message='Could not read your login item setting.'
-            />
-            <SettingsRow label='Start page' description='Where Stremiro opens.'>
-              <SettingsSelect
-                ariaLabel='Start page'
-                valueLabel={startPageLabel}
-                value={preferences.startupPage}
-                options={START_PAGES}
-                disabled={isHydrating}
-                onChange={(startupPage) => updatePreferences({ startupPage })}
+          <SettingsCard>
+            <SettingsBody rows>
+              <SettingsQueryError
+                query={launchQuery}
+                message='Could not read your login item setting.'
               />
-            </SettingsRow>
-            <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
-              <SettingsSwitch
-                ariaLabel='Launch at login'
-                checked={launchEnabled}
-                disabled={launchQuery.data === undefined}
-                pending={launchPending}
-                onChange={() => launchMutation.mutate(!launchEnabled)}
-              />
-            </SettingsRow>
-            <SettingsRow
-              label='Start minimized'
-              description={
-                canStartMinimized
-                  ? 'Login launches start in the system tray. Manual launches stay visible.'
-                  : 'Needs Launch at login or a tray option.'
-              }
-            >
-              <SettingsSwitch
-                ariaLabel='Start minimized'
-                checked={preferences.startMinimized}
-                disabled={isHydrating || (!canStartMinimized && !preferences.startMinimized)}
-                pending={launchMutation.isPending}
-                onChange={() => updatePreferences({ startMinimized: !preferences.startMinimized })}
-              />
-            </SettingsRow>
-          </SettingsBody>
+              <SettingsRow label='Start page' description='Where Stremiro opens.'>
+                <SettingsSelect
+                  ariaLabel='Start page'
+                  valueLabel={startPageLabel}
+                  value={preferences.startupPage}
+                  options={START_PAGES}
+                  disabled={isHydrating}
+                  onChange={(startupPage) => updatePreferences({ startupPage })}
+                />
+              </SettingsRow>
+              <SettingsRow label='Launch at login' description='Open Stremiro when you sign in.'>
+                <SettingsSwitch
+                  ariaLabel='Launch at login'
+                  checked={launchEnabled}
+                  disabled={launchQuery.data === undefined}
+                  pending={launchPending}
+                  onChange={() => launchMutation.mutate(!launchEnabled)}
+                />
+              </SettingsRow>
+              <SettingsRow
+                label='Start minimized'
+                description={
+                  canStartMinimized
+                    ? 'Login launches start in the system tray. Manual launches stay visible.'
+                    : 'Needs Launch at login or a tray option.'
+                }
+              >
+                <SettingsSwitch
+                  ariaLabel='Start minimized'
+                  checked={preferences.startMinimized}
+                  disabled={isHydrating || (!canStartMinimized && !preferences.startMinimized)}
+                  pending={launchMutation.isPending}
+                  onChange={() =>
+                    updatePreferences({ startMinimized: !preferences.startMinimized })
+                  }
+                />
+              </SettingsRow>
+            </SettingsBody>
+          </SettingsCard>
         </SettingsGroup>
         <SettingsGroup>
           <SettingsGroupHeader
@@ -157,30 +162,34 @@ export function GeneralSettings() {
               ) : undefined
             }
           />
-          <SettingsBody rows>
-            <SettingsRow
-              label='Close to tray'
-              description='Keep running in the tray when the window closes.'
-            >
-              <SettingsSwitch
-                ariaLabel='Close to tray'
-                checked={preferences.closeToTray}
-                disabled={isHydrating}
-                onChange={() => updatePreferences({ closeToTray: !preferences.closeToTray })}
-              />
-            </SettingsRow>
-            <SettingsRow
-              label='Minimize to tray'
-              description='Hide to the tray instead of the taskbar.'
-            >
-              <SettingsSwitch
-                ariaLabel='Minimize to tray'
-                checked={preferences.minimizeToTray}
-                disabled={isHydrating}
-                onChange={() => updatePreferences({ minimizeToTray: !preferences.minimizeToTray })}
-              />
-            </SettingsRow>
-          </SettingsBody>
+          <SettingsCard>
+            <SettingsBody rows>
+              <SettingsRow
+                label='Close to tray'
+                description='Keep running in the tray when the window closes.'
+              >
+                <SettingsSwitch
+                  ariaLabel='Close to tray'
+                  checked={preferences.closeToTray}
+                  disabled={isHydrating}
+                  onChange={() => updatePreferences({ closeToTray: !preferences.closeToTray })}
+                />
+              </SettingsRow>
+              <SettingsRow
+                label='Minimize to tray'
+                description='Hide to the tray instead of the taskbar.'
+              >
+                <SettingsSwitch
+                  ariaLabel='Minimize to tray'
+                  checked={preferences.minimizeToTray}
+                  disabled={isHydrating}
+                  onChange={() =>
+                    updatePreferences({ minimizeToTray: !preferences.minimizeToTray })
+                  }
+                />
+              </SettingsRow>
+            </SettingsBody>
+          </SettingsCard>
         </SettingsGroup>
       </div>
     </div>

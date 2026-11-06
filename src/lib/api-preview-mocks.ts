@@ -1,3 +1,4 @@
+import { DEFAULT_PROFILE_PREFERENCES } from '@/hooks/use-local-profile';
 import {
   type AddonConfig,
   type AddonConfigsOp,
@@ -12,33 +13,24 @@ import {
   type ProfilePreferences,
   type ProfilePreferencesPatch,
   type StreamSelectorData,
-  type StreamSelectorPreferences,
   type StreamSelectorPreferencesState,
+  type TitleWatchProgress,
   type UserList,
   type WatchProgress,
   type WatchStatus,
 } from '@/lib/api';
 import { toMediaItem } from '@/lib/api-store';
+import {
+  SUBTITLE_COLOR_OPTIONS,
+  SUBTITLE_EDGE_OPTIONS,
+  SUBTITLE_FONT_OPTIONS,
+} from '@/lib/player-track-utils';
+import { DEFAULT_FILTERS } from '@/lib/stream-selector-utils';
 import { clamp } from '@/lib/utils';
 
 type PreviewInvokeArgs = Record<string, unknown> | undefined;
 
-let previewProfilePreferences: ProfilePreferences = {
-  profile: {
-    username: 'Guest User',
-    accentColor: '#ffffff',
-    accentIntensity: 100,
-    accentTargets: {
-      navigation: true,
-      actions: true,
-      progress: true,
-      artwork: true,
-      skip: true,
-      seekbar: false,
-    },
-  },
-  viewMode: 'grid',
-};
+let previewProfilePreferences: ProfilePreferences = structuredClone(DEFAULT_PROFILE_PREFERENCES);
 const PREVIEW_PLAYER_KEYBINDINGS: Record<string, string[]> = {
   togglePlay: [' ', 'k'],
   seekBackward: ['arrowleft', 'j'],
@@ -67,18 +59,11 @@ let previewAppUiPreferences: AppUiPreferences = structuredClone({
   effectivePlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
   defaultPlayerKeybindings: PREVIEW_PLAYER_KEYBINDINGS,
 });
-const PREVIEW_STREAM_SELECTOR_DEFAULTS: StreamSelectorPreferences = {
-  quality: 'all',
-  source: 'all',
-  addon: 'all',
-  sort: 'smart',
-  batch: 'all',
-};
 const PREVIEW_STREAM_SELECTOR_PREFERENCES: StreamSelectorPreferencesState = {
   initialized: false,
-  preferences: PREVIEW_STREAM_SELECTOR_DEFAULTS,
-  defaultPreferences: PREVIEW_STREAM_SELECTOR_DEFAULTS,
-  episodeDefaultPreferences: { ...PREVIEW_STREAM_SELECTOR_DEFAULTS, batch: 'episodes' },
+  preferences: DEFAULT_FILTERS,
+  defaultPreferences: DEFAULT_FILTERS,
+  episodeDefaultPreferences: { ...DEFAULT_FILTERS, batch: 'episodes' },
 };
 let previewLaunchAtLogin = false;
 let previewPlaybackLanguagePreferences: PlaybackLanguagePreferences = {};
@@ -132,6 +117,11 @@ const EMPTY_SEARCH_CATALOG_PAGE = {
   continuation: { seenKeys: [] },
   exhausted: true,
   partial: false,
+};
+
+const EMPTY_TITLE_WATCH_PROGRESS: TitleWatchProgress = {
+  episodeProgress: {},
+  watchedEpisodeCeiling: {},
 };
 
 const EMPTY_STREAM_SELECTOR_DATA: StreamSelectorData = {
@@ -280,6 +270,12 @@ function readFiniteNumber(source: Record<string, unknown>, key: string): number 
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 }
 
+const pickOption = <V extends string>(
+  value: unknown,
+  options: readonly { value: V }[],
+  fallback: V,
+): V => options.find((option) => option.value === value)?.value ?? fallback;
+
 // Mirrors `apply_app_ui_preferences_patch`: absent keys keep current value; invalid numerics fall to defaults.
 function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
   const current = previewAppUiPreferences;
@@ -341,45 +337,15 @@ function mergePreviewAppUiPreferences(patch: Record<string, unknown>) {
     subtitleFont:
       patch.subtitleFont === undefined
         ? current.subtitleFont
-        : ((
-            [
-              'modern',
-              'grotesk',
-              'humanist',
-              'classic',
-              'screen',
-              'serif',
-              'book',
-              'rounded',
-              'mono',
-            ] as const
-          ).find((font) => font === patch.subtitleFont) ?? 'default'),
+        : pickOption(patch.subtitleFont, SUBTITLE_FONT_OPTIONS, 'default'),
     subtitleColor:
       patch.subtitleColor === undefined
         ? current.subtitleColor
-        : ((
-            [
-              'ivory',
-              'lavender',
-              'mint',
-              'amber',
-              'gray',
-              'yellow',
-              'cyan',
-              'green',
-              'red',
-              'orange',
-              'blue',
-              'pink',
-              'white',
-            ] as const
-          ).find((color) => color === patch.subtitleColor) ?? 'white'),
+        : pickOption(patch.subtitleColor, SUBTITLE_COLOR_OPTIONS, 'white'),
     subtitleEdge:
       patch.subtitleEdge === undefined
         ? current.subtitleEdge
-        : ((['none', 'thick', 'shadow', 'box'] as const).find(
-            (edge) => edge === patch.subtitleEdge,
-          ) ?? 'outline'),
+        : pickOption(patch.subtitleEdge, SUBTITLE_EDGE_OPTIONS, 'outline'),
     playerKeybindings: overrides,
     recentSearches: Array.isArray(patch.recentSearches)
       ? (patch.recentSearches as string[])
@@ -757,20 +723,12 @@ export async function handlePreviewInvoke<T>(
     case 'get_calendar_events':
       return { trackedCount: 0, missingCount: 0, days: [], upcoming: [] } as T;
     case 'get_title_watch_progress':
-      return {
-        episodeProgress: {},
-        watchedEpisodeCeiling: {},
-      } as T;
+      return EMPTY_TITLE_WATCH_PROGRESS as T;
     case 'set_episodes_watched':
-      return [{ episodeProgress: {}, watchedEpisodeCeiling: {} }, [], null] as T;
+      return [EMPTY_TITLE_WATCH_PROGRESS, [], null] as T;
     case 'get_details_prefetch_bundle':
       // No card payload in preview — the mounted details query fetches it.
-      return {
-        progress: {
-          episodeProgress: {},
-          watchedEpisodeCeiling: {},
-        },
-      } as T;
+      return { progress: EMPTY_TITLE_WATCH_PROGRESS } as T;
     case 'get_stream_selector_data':
       return {
         ...EMPTY_STREAM_SELECTOR_DATA,

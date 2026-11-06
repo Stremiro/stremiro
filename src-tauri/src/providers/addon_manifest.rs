@@ -196,7 +196,7 @@ fn normalize_opaque_list(
         .into_iter()
         .filter_map(|value| normalize_opaque(value, max_chars))
         .filter(|item| seen.insert(item.clone()))
-        .take(max_items.max(1))
+        .take(max_items)
         .collect()
 }
 

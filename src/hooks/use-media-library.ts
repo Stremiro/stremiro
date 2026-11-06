@@ -313,11 +313,11 @@ export function useProfileLibrary(filters: LibraryFilters, options?: { enabled?:
   });
 }
 
-export function useWatchStatuses(options?: SharedCollectionQueryOptions) {
+export function useWatchStatuses() {
   return useQuery({
     queryKey: WATCH_STATUSES_QUERY_KEY,
     queryFn: api.getAllWatchStatuses,
-    ...resolveSharedCollectionQueryOptions(options, WATCH_STATUSES_STALE_TIME),
+    staleTime: WATCH_STATUSES_STALE_TIME,
   });
 }
 
@@ -331,13 +331,9 @@ export function useWatchHistory(options?: SharedCollectionQueryOptions) {
 
 /// Merged home rail: Rust interleaves continue-watching and Up Next from one
 /// snapshot; the channel delivers the local half before schedule fetches resolve.
-export function useResumeRail(
-  localToday: string | undefined,
-  localTodayMs: number | undefined,
-  options?: SharedCollectionQueryOptions,
-) {
+export function useResumeRail(localToday: string | undefined, localTodayMs: number | undefined) {
   const queryClient = useQueryClient();
-  const enabled = (options?.enabled ?? true) && Boolean(localToday) && Boolean(localTodayMs);
+  const enabled = Boolean(localToday) && Boolean(localTodayMs);
   return useQuery({
     queryKey: resumeRailQueryKey(localToday),
     // Keep caching after unmount; only the current fetch may publish channel snapshots.
@@ -371,25 +367,25 @@ export function useResumeRail(
       });
     },
     enabled,
-    staleTime: options?.staleTime ?? RESUME_SECTION_MIN_STALE_MS,
+    staleTime: RESUME_SECTION_MIN_STALE_MS,
   });
 }
 
 /// Saved playback seconds across canonical episodes.
-export function useTotalWatchTime(options?: SharedCollectionQueryOptions) {
+export function useTotalWatchTime() {
   return useQuery({
     queryKey: TOTAL_WATCH_TIME_QUERY_KEY,
     queryFn: api.getTotalWatchTimeSecs,
-    ...resolveSharedCollectionQueryOptions(options, WATCH_HISTORY_STALE_TIME_MS),
+    staleTime: WATCH_HISTORY_STALE_TIME_MS,
   });
 }
 
-export function useLists(options?: SharedCollectionQueryOptions) {
+export function useLists() {
   return useQuery({
     queryKey: LISTS_QUERY_KEY,
     queryFn: api.getLists,
-    // The shared 30s view policy is the default so callers can't drift on freshness.
-    ...resolveSharedCollectionQueryOptions(options, LISTS_VIEW_STALE_TIME_MS),
+    // The shared 30s view policy keeps every caller on the same freshness.
+    staleTime: LISTS_VIEW_STALE_TIME_MS,
   });
 }
 

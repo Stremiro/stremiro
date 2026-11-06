@@ -363,14 +363,17 @@ fn has_meaningful_resume_position(item: &WatchProgress) -> bool {
     item.position >= WATCH_PROGRESS_MIN_RESUME_POSITION_SECS
 }
 
-pub(crate) fn playable_resume_start_time(item: &WatchProgress) -> Option<f64> {
-    if !item.position.is_finite() || item.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS {
-        return None;
-    }
-
-    if item.duration.is_finite()
+fn at_resume_ceiling(item: &WatchProgress) -> bool {
+    item.position.is_finite()
+        && item.duration.is_finite()
         && item.duration > 0.0
         && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
+}
+
+pub(crate) fn playable_resume_start_time(item: &WatchProgress) -> Option<f64> {
+    if !item.position.is_finite()
+        || item.position < WATCH_PROGRESS_MIN_RESUME_POSITION_SECS
+        || at_resume_ceiling(item)
     {
         return None;
     }
@@ -379,10 +382,7 @@ pub(crate) fn playable_resume_start_time(item: &WatchProgress) -> Option<f64> {
 }
 
 fn is_watched_progress(item: &WatchProgress) -> bool {
-    item.position.is_finite()
-        && item.duration.is_finite()
-        && item.duration > 0.0
-        && item.position / item.duration >= WATCH_PROGRESS_MAX_RESUME_PROGRESS_RATIO
+    at_resume_ceiling(item)
 }
 
 pub(super) fn continue_watching_candidates(
@@ -401,7 +401,7 @@ pub(super) fn continue_watching_candidates(
         }
     }
     items.filter(move |row| {
-        is_continue_watching_candidate(row)
+        playable_resume_start_time(row).is_some()
             && !watch_progress_absolute_season(row)
                 .zip(watch_progress_absolute_episode(row))
                 .is_some_and(|(season, episode)| {
@@ -744,10 +744,6 @@ pub(crate) fn merge_watch_progress_donors<'a>(
 
     hydrate_watch_progress_lookup_id(&mut chosen);
     chosen
-}
-
-pub(crate) fn is_continue_watching_candidate(item: &WatchProgress) -> bool {
-    playable_resume_start_time(item).is_some()
 }
 
 #[cfg(test)]

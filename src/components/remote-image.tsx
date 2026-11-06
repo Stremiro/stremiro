@@ -12,8 +12,8 @@ interface RemoteImageProps {
   loading?: ImgHTMLAttributes<HTMLImageElement>['loading'];
   fetchPriority?: ImgHTMLAttributes<HTMLImageElement>['fetchPriority'];
   onLoad?: ImgHTMLAttributes<HTMLImageElement>['onLoad'];
-  /** Broken artwork hides by default; `null` leaves the element as-is, or pass a handler for a custom fallback. */
-  onError?: ImgHTMLAttributes<HTMLImageElement>['onError'] | null;
+  /** Broken artwork hides by default; pass a handler for a custom fallback. */
+  onError?: ImgHTMLAttributes<HTMLImageElement>['onError'];
 }
 
 function showCachedImage(image: HTMLImageElement | null) {

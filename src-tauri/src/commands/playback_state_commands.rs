@@ -26,22 +26,22 @@ pub async fn report_playback_stream_outcome(
     let normalized_outcome = PlaybackStreamOutcomeKind::parse(&outcome)
         .ok_or_else(|| "Invalid playback stream outcome.".to_string())?;
 
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        service.record_stream_outcome(
-            &app,
-            StreamOutcomeReport {
-                media_id: normalized_id,
-                media_type: normalized_type,
-                season,
-                episode,
-                source_id,
-                stream_family,
-                outcome: normalized_outcome,
-                timestamp_ms,
-            },
-            expected_generation,
-        )
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            service.record_stream_outcome(
+                app,
+                StreamOutcomeReport {
+                    media_id: normalized_id,
+                    media_type: normalized_type,
+                    season,
+                    episode,
+                    source_id,
+                    stream_family,
+                    outcome: normalized_outcome,
+                    timestamp_ms,
+                },
+                expected_generation,
+            )
+        })
+        .await
 }

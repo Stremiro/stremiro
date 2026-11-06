@@ -1203,8 +1203,6 @@ mod tests {
 
     #[tokio::test]
     async fn startup_refresh_retains_fallbacks_and_skips_disabled_or_already_refreshed_addons() {
-        use std::io::{BufRead, BufReader, Write};
-        use std::time::{Duration, Instant};
         let valid = r#"{"name":"Updated","resources":["meta","subtitles"],"types":["movie"],"idPrefixes":["kitsu:"],"catalogs":[{"type":"movie","id":"new"}],"behaviorHints":{"configurationRequired":true}}"#;
         for (status, body, refresh_classified) in [
             (200, valid, true),
@@ -1213,10 +1211,9 @@ mod tests {
             (503, "{}", true),
             (200, valid, false),
         ] {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
+            let server = crate::test_helpers::TestHttpServer::new(vec![(status, body, None)]);
             let addon = AddonConfig {
-                url: format!("http://{}", listener.local_addr().unwrap()),
+                url: server.url.clone(),
                 ..crate::test_helpers::classified_cinemeta_addon()
             };
             for (candidate, refresh) in [
@@ -1235,38 +1232,7 @@ mod tests {
                         .unwrap()
                         .is_empty()
                 );
-                assert_eq!(
-                    listener.accept().unwrap_err().kind(),
-                    std::io::ErrorKind::WouldBlock
-                );
             }
-            let server = std::thread::spawn(move || {
-                let deadline = Instant::now() + Duration::from_secs(5);
-                let mut socket = loop {
-                    match listener.accept() {
-                        Ok((socket, _)) => break socket,
-                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                            assert!(Instant::now() < deadline);
-                            std::thread::sleep(Duration::from_millis(1));
-                        }
-                        Err(error) => panic!("{error}"),
-                    }
-                };
-                // Windows accepted sockets inherit the listener's nonblocking mode.
-                socket.set_nonblocking(false).unwrap();
-                socket
-                    .set_read_timeout(Some(Duration::from_secs(1)))
-                    .unwrap();
-                let mut reader = BufReader::new(&mut socket);
-                loop {
-                    let mut line = String::new();
-                    reader.read_line(&mut line).unwrap();
-                    if line == "\r\n" || line.is_empty() {
-                        break;
-                    }
-                }
-                write!(socket, "HTTP/1.1 {status} Test\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
-            });
             let mut candidate = addon.clone();
             if !refresh_classified {
                 candidate.capabilities = None;
@@ -1274,7 +1240,8 @@ mod tests {
             let fetched = refresh_installed_addon_capabilities(vec![candidate], refresh_classified)
                 .await
                 .unwrap();
-            server.join().unwrap();
+            // The skipped candidates sent nothing; the refreshed one sent exactly one request.
+            assert_eq!(server.finish(), ["/manifest.json"]);
             let mut latest = vec![addon.clone()];
             let success = status == 200 && body == valid;
             assert_eq!(

@@ -22,6 +22,8 @@ export interface StreamSelectorTarget {
   logo?: string;
   /** Series episode list — lets a season-pack row open an episode picker. */
   episodes?: Episode[];
+  /** Resume position for the picked stream — hosts surface it via `getStartTime`. */
+  startTime?: number;
   /** Safe internal return path for the player's Back navigation. */
   from?: string;
   /** The selector host's own origin — carried through so Back→details→Back doesn't dead-end on the details route. */

@@ -1,9 +1,9 @@
 import { useQuery } from '@tanstack/react-query';
 import { useDebounce } from '@/hooks/use-debounce';
-import { api } from '@/lib/api';
+import { api, type Episode } from '@/lib/api';
 import { createObjectIdentity } from '@/lib/utils';
 
-const ITEM_SEARCH_DEBOUNCE_MS = 180;
+export const ITEM_SEARCH_DEBOUNCE_MS = 180;
 const getItemListId = createObjectIdentity();
 
 export function useItemSearch<T>(
@@ -75,4 +75,10 @@ export function useTitleSearch<T extends { title: string }>(
       ),
     (item) => item.title,
   );
+}
+
+export const EPISODE_SEARCH_MIN_COUNT = 5;
+
+export function useEpisodeSearch(episodes: Episode[], episodeSearch: string, enabled = true) {
+  return useItemSearch(episodes, episodeSearch, enabled, 'episode-search', api.searchEpisodes);
 }

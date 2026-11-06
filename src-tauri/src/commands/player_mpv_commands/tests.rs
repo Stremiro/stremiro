@@ -142,6 +142,7 @@ fn playback_position_probe_preserves_partial_results_and_frontend_shape() {
                 "nextEpisodePrefetchDue": prefetch_due,
                 "seekFailureWindowSecs": null,
                 "prematureEof": false,
+                "eofReached": false,
             })
         );
     }
@@ -160,15 +161,39 @@ fn failed_range_seek_is_not_natural_completion() {
         (None, 120.0, true, None),
     ] {
         let probe =
-            read_playback_position(120.0, target, false, |name, format| match (name, format) {
+            read_playback_position(120.0, target, true, |name, format| match (name, format) {
                 ("time-pos", "double") => Some(json!(position)),
                 ("eof-reached", "flag") => Some(json!(eof)),
+                ("core-idle", "flag") => Some(json!(eof)),
                 _ => None,
             });
         assert_eq!(
             probe.seek_failure_window_secs, window,
             "target={target:?}, position={position}, eof={eof}"
         );
+    }
+}
+
+#[test]
+fn eof_verdicts_wait_for_seek_settlement() {
+    for (check_eof, seeking, idle) in [
+        (false, false, true),
+        (true, true, true),
+        (true, false, false),
+    ] {
+        let probe = read_playback_position(120.0, Some(10.0), check_eof, |name, _| match name {
+            "time-pos" => Some(json!(120.0)),
+            "eof-reached" => Some(json!(true)),
+            "seeking" => Some(json!(seeking)),
+            "core-idle" => Some(json!(idle)),
+            _ => None,
+        });
+        assert_eq!(probe.seek_failure_window_secs, None);
+        assert!(!probe.premature_eof);
+        assert!(!probe.eof_reached);
+        assert_eq!(probe.time_pos, None);
+        assert!(!probe.near_completion);
+        assert!(!probe.next_episode_prefetch_due);
     }
 }
 
@@ -186,6 +211,7 @@ fn premature_eof_is_a_stream_failure_instead_of_completion() {
         let probe = read_playback_position(duration, None, true, |name, _| match name {
             "time-pos" => Some(json!(position)),
             "eof-reached" => Some(json!(eof)),
+            "core-idle" => Some(json!(eof)),
             _ => None,
         });
         assert_eq!(probe.premature_eof, premature, "{duration}/{position}");

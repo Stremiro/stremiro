@@ -784,7 +784,7 @@ async fn fetch_ranked_meta(
     (rank, result)
 }
 
-async fn fetch_meta_details_from_addons(
+pub(super) async fn fetch_meta_details_from_addons(
     client: &AddonResourceClient,
     snapshot: &[AddonConfig],
     type_: &str,

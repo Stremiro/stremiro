@@ -142,7 +142,7 @@ const StreamItem = memo(function StreamItem({
   const menu = useInlineMenu({ rootRef, returnFocus: () => rowRef.current });
   const { presentation } = stream;
   const isPlayable = presentation.isInstantlyPlayable;
-  const matchBadges = stream.matchBadgeKinds.map((kind) => MATCH_BADGES[kind]);
+  const matchBadges = stream.matchBadgeKinds.map((kind) => ({ kind, ...MATCH_BADGES[kind] }));
   const deliveryTile = DELIVERY_TILES[presentation.deliveryKind];
 
   const metaParts: { key: string; className?: string; text: string }[] = [];

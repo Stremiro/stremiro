@@ -3,7 +3,9 @@ use super::config_store::{
     load_app_ui_preferences, normalize_start_minimized, save_app_ui_preferences_to_store,
     AppUiPreferences,
 };
-use crate::providers::{addon_resource::AddonResourceClient, addons::AddonTransport};
+use crate::providers::{
+    addon_resource::AddonResourceClient, addons::AddonTransport, enrichment::EnrichmentClient,
+};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, PoisonError};
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -397,6 +399,9 @@ fn release_background_memory(app: &AppHandle) {
         transport.purge_expired_caches();
     }
     if let Some(client) = app.try_state::<AddonResourceClient>() {
+        client.purge_expired_caches();
+    }
+    if let Some(client) = app.try_state::<EnrichmentClient>() {
         client.purge_expired_caches();
     }
     if let Some(cache) = app.try_state::<super::calendar_commands::CalendarScheduleCache>() {

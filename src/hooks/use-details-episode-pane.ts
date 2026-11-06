@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 
-import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
+import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-item-search';
 import { type Episode, type MediaDetails } from '@/lib/api';
 import { boundedMapSet, clamp, isSeriesLikeMediaType } from '@/lib/utils';
 
@@ -214,7 +214,6 @@ export function useDetailsEpisodePane({
   return {
     seasons,
     selectedSeason,
-    seasonEpisodes,
     visibleEpisodes,
     episodeSearch,
     episodeSearchError,

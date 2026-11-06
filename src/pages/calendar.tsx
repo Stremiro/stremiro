@@ -1,8 +1,18 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Channel } from '@tauri-apps/api/core';
-import { CalendarDays, Check, ChevronLeft, ChevronRight, Eye, EyeOff, WifiOff } from 'lucide-react';
+import {
+  CalendarClock,
+  CalendarDays,
+  Check,
+  ChevronLeft,
+  ChevronRight,
+  Eye,
+  EyeOff,
+  WifiOff,
+} from 'lucide-react';
 import { Fragment, memo, useEffect, useEffectEvent, useRef } from 'react';
 import { Link, useLocation, useSearchParams } from 'react-router';
+import { PageCard, PageSection, PageSectionHeader } from '@/components/page-section';
 import { PosterThumb } from '@/components/poster-thumb';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -19,7 +29,6 @@ import {
   type CalendarSchedule,
   type CalendarScheduleEvent,
 } from '@/lib/api';
-import { calendarEventKey, type CalendarEvent } from '@/lib/calendar-events';
 import { prefetchDetailsRouteData } from '@/lib/details-prefetch';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
 import { buildDetailsRoute } from '@/lib/player-navigation';
@@ -29,11 +38,28 @@ import {
   cn,
   formatEpisodeHeading,
   formatSeasonEpisode,
+  ICON_CHIP_CLASS,
+  PAGE_NOTICE_CLASS,
   pluralize,
   queryNeedsRetry,
   scrollBehavior,
   SIDEBAR_PAGE_COLUMN_INSETS,
+  TITLE_ICON_CLASS,
 } from '@/lib/utils';
+
+interface CalendarEvent extends CalendarScheduleEvent {
+  date: Temporal.PlainDate;
+}
+
+function calendarEventKey(event: CalendarEvent): string {
+  return JSON.stringify([
+    event.type,
+    event.mediaId,
+    event.id,
+    event.season ?? null,
+    event.episode ?? null,
+  ]);
+}
 
 const MAX_VISIBLE_DAY_EVENTS = 3;
 // Shared empty fallback — a fresh `[]` would defeat the memoized cells' prop comparison.
@@ -264,11 +290,18 @@ export function Calendar() {
   return (
     <div className={`mx-auto w-full max-w-7xl ${SIDEBAR_PAGE_COLUMN_INSETS} pt-8 pb-16 page-enter`}>
       <div className='flex flex-col md:flex-row items-start md:items-center justify-between mb-6 gap-4'>
-        <div>
-          <h1 className='text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
-            Calendar
-          </h1>
-          <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
+        <div className='flex items-center gap-3'>
+          <CalendarDays
+            aria-hidden='true'
+            className={cn(TITLE_ICON_CLASS, 'size-5.5')}
+            strokeWidth={2}
+          />
+          <div>
+            <h1 className='text-[24px] font-semibold leading-none tracking-[-0.03em] text-white'>
+              Calendar
+            </h1>
+            <p className='mt-1.5 text-[13px] text-zinc-400'>Releases from your library and lists</p>
+          </div>
         </div>
 
         <div className='flex w-full md:w-auto items-stretch gap-2'>
@@ -279,7 +312,7 @@ export function Calendar() {
             onClick={() => updatePreferences({ calendarHideWatched: !hideWatched })}
             title={hideWatched ? 'Show watched releases' : 'Hide watched releases'}
             className={cn(
-              'h-auto shrink-0 gap-1.5 rounded-lg border px-3 text-[12px] font-medium',
+              'h-auto shrink-0 gap-1.5 rounded-xl border px-3 text-[12px] font-medium',
               hideWatched
                 ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
                 : 'border-white/[0.08] bg-white/[0.025] text-zinc-400 hover:bg-white/[0.06] hover:text-white',
@@ -295,7 +328,7 @@ export function Calendar() {
           <div
             role='group'
             aria-label='Calendar navigation'
-            className='flex flex-1 md:flex-none items-center gap-0.5 rounded-lg border border-white/[0.08] bg-white/[0.025] p-1'
+            className='flex flex-1 md:flex-none items-center gap-0.5 rounded-xl border border-white/[0.08] bg-white/[0.025] p-1'
           >
             <Button
               variant='ghost'
@@ -304,7 +337,7 @@ export function Calendar() {
               aria-label='Previous month'
               aria-keyshortcuts='ArrowLeft'
               title='Previous month (←)'
-              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-lg'
             >
               <ChevronLeft
                 aria-hidden='true'
@@ -324,7 +357,7 @@ export function Calendar() {
               aria-label='Next month'
               aria-keyshortcuts='ArrowRight'
               title='Next month (→)'
-              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-md'
+              className='group/month h-9 w-9 shrink-0 hover:bg-white/[0.06] rounded-lg'
             >
               <ChevronRight
                 aria-hidden='true'
@@ -339,7 +372,7 @@ export function Calendar() {
               onClick={handleToday}
               title='Jump to today (T)'
               className={cn(
-                'ml-1 text-[12px] font-medium rounded-md h-9 px-3 border',
+                'ml-1 text-[12px] font-medium rounded-lg h-9 px-3 border',
                 isCurrentMonthView
                   ? 'accent-lattice-soft hover:bg-(--accent-nav)/15 hover:text-(--accent-nav)'
                   : 'border-white/[0.08] text-zinc-400 hover:text-white hover:bg-white/[0.06]',
@@ -352,10 +385,7 @@ export function Calendar() {
       </div>
 
       {!isOnline && (
-        <div
-          role='status'
-          className='mb-4 flex items-center gap-2.5 rounded-lg border border-white/[0.08] bg-white/[0.025] px-4 py-3 text-[12px] text-zinc-400'
-        >
+        <div role='status' className={cn(PAGE_NOTICE_CLASS, 'mb-4')}>
           <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
           {schedule
             ? "You're offline. Showing saved release schedules until you reconnect."
@@ -373,8 +403,8 @@ export function Calendar() {
         />
       ) : (
         schedule?.trackedCount === 0 && (
-          <div className='mb-5 flex flex-col items-center rounded-lg border border-white/[0.07] bg-white/[0.02] px-6 py-8 text-center'>
-            <span className='mb-3 flex h-10 w-10 items-center justify-center'>
+          <PageCard className='mb-5 flex flex-col items-center px-6 py-8 text-center'>
+            <span className={cn(ICON_CHIP_CLASS, 'mb-3 size-10 rounded-xl')}>
               <CalendarDays className='h-5 w-5 text-zinc-400' />
             </span>
             <h2 className='text-[15px] font-semibold text-white'>Your schedule is empty</h2>
@@ -384,87 +414,92 @@ export function Calendar() {
             <Button asChild size='sm' className='mt-4 h-9 rounded-md px-3 text-[12px]'>
               <Link to='/search?type=series'>Find shows</Link>
             </Button>
-          </div>
+          </PageCard>
         )
       )}
 
       {(schedule?.trackedCount !== 0 || isScheduleError) && (
-        <div className='mb-5 rounded-lg border border-white/[0.07] bg-white/[0.015] p-3 sm:p-4'>
-          <div className='flex flex-wrap items-center justify-between mb-3 gap-2'>
-            <div className='flex flex-wrap items-baseline gap-x-2.5 gap-y-1'>
-              <h2 className='text-[15px] font-semibold text-white tracking-tight'>Upcoming</h2>
-              <span className='text-[12px] text-zinc-500'>Next 14 days · up to 8 releases</span>
-              {isFetchingSchedules && schedule && (
-                <span role='status' className='text-[11px] text-(--accent-nav)'>
-                  Updating…
+        <PageSection className='mb-5'>
+          <PageSectionHeader
+            icon={CalendarClock}
+            title='Upcoming'
+            description='Next 14 days · up to 8 releases'
+            action={
+              <div className='flex items-center gap-3 pt-1'>
+                {isFetchingSchedules && schedule && (
+                  <span role='status' className='text-[11px] text-(--accent-nav)'>
+                    Updating…
+                  </span>
+                )}
+                {airingTodayCount > 0 && (
+                  <button
+                    type='button'
+                    onClick={handleToday}
+                    title='Jump to today'
+                    className='rounded-md px-2 py-1 text-[12px] font-medium text-(--accent-nav) transition-colors duration-150 hover:bg-(--accent-nav)/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+                  >
+                    {airingTodayCount} today
+                  </button>
+                )}
+              </div>
+            }
+          />
+          <PageCard className='p-2 sm:p-3'>
+            {isLoadingSchedules && !schedule ? (
+              <>
+                <span role='status' className='sr-only'>
+                  Loading upcoming releases
                 </span>
-              )}
-            </div>
-            {airingTodayCount > 0 && (
-              <button
-                type='button'
-                onClick={handleToday}
-                title='Jump to today'
-                className='rounded-md px-2 py-1 text-[12px] font-medium text-(--accent-nav) transition-colors duration-150 hover:bg-(--accent-nav)/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
-              >
-                {airingTodayCount} today
-              </button>
-            )}
-          </div>
-          {isLoadingSchedules && !schedule ? (
-            <>
-              <span role='status' className='sr-only'>
-                Loading upcoming releases
-              </span>
-              <div aria-hidden='true' className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
-                {[0, 1, 2, 3].map((key) => (
-                  <div key={key} className='flex min-w-0 items-center gap-2.5 p-2'>
-                    <Skeleton className='h-[54px] w-9 shrink-0 animate-none rounded-sm bg-white/[0.06]' />
-                    <div className='min-w-0 flex-1 space-y-2'>
-                      <Skeleton className='h-3.5 w-3/4 animate-none bg-white/[0.06]' />
-                      <Skeleton className='h-3 w-1/2 animate-none bg-white/[0.06]' />
+                <div aria-hidden='true' className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
+                  {[0, 1, 2, 3].map((key) => (
+                    <div key={key} className='flex min-w-0 items-center gap-2.5 p-2'>
+                      <Skeleton className='h-[54px] w-9 shrink-0 animate-none rounded-sm bg-white/[0.06]' />
+                      <div className='min-w-0 flex-1 space-y-2'>
+                        <Skeleton className='h-3.5 w-3/4 animate-none bg-white/[0.06]' />
+                        <Skeleton className='h-3 w-1/2 animate-none bg-white/[0.06]' />
+                      </div>
                     </div>
-                  </div>
+                  ))}
+                </div>
+              </>
+            ) : upcomingEvents.length === 0 ? (
+              <div className='flex items-center gap-2 text-[13px] text-zinc-500 py-3' role='status'>
+                {!isOnline && !schedule
+                  ? 'Upcoming releases will appear when you reconnect.'
+                  : isFetchingSchedules
+                    ? 'Loading release schedules…'
+                    : isScheduleError || hasMissingSchedules
+                      ? 'Release data is incomplete or unavailable.'
+                      : 'No upcoming releases in the next two weeks.'}
+              </div>
+            ) : (
+              <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
+                {upcomingEvents.map((event, index) => (
+                  <Fragment key={calendarEventKey(event)}>
+                    {(index === 0 || !event.date.equals(upcomingEvents[index - 1].date)) && (
+                      <h3
+                        className={cn(
+                          'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
+                          event.date.equals(now) ? 'text-(--accent-nav)' : 'text-zinc-400',
+                        )}
+                      >
+                        <time dateTime={event.date.toString()}>
+                          {formatEventDayLabel(event.date, now)}
+                        </time>
+                      </h3>
+                    )}
+                    <UpcomingEventCard
+                      event={event}
+                      from={from}
+                      onPrefetch={prefetchEventDetails}
+                      hideSpoilers={hideSpoilers}
+                    />
+                  </Fragment>
                 ))}
               </div>
-            </>
-          ) : upcomingEvents.length === 0 ? (
-            <div className='flex items-center gap-2 text-[13px] text-zinc-500 py-3' role='status'>
-              {!isOnline && !schedule
-                ? 'Upcoming releases will appear when you reconnect.'
-                : isFetchingSchedules
-                  ? 'Loading release schedules…'
-                  : isScheduleError || hasMissingSchedules
-                    ? 'Release data is incomplete or unavailable.'
-                    : 'No upcoming releases in the next two weeks.'}
-            </div>
-          ) : (
-            <div className='grid gap-1 sm:grid-cols-2 lg:grid-cols-4'>
-              {upcomingEvents.map((event, index) => (
-                <Fragment key={calendarEventKey(event)}>
-                  {(index === 0 || !event.date.equals(upcomingEvents[index - 1].date)) && (
-                    <h3
-                      className={cn(
-                        'col-span-full px-2 pb-1 pt-2 text-[11px] font-medium',
-                        event.date.equals(now) ? 'text-(--accent-nav)' : 'text-zinc-400',
-                      )}
-                    >
-                      <time dateTime={event.date.toString()}>
-                        {formatEventDayLabel(event.date, now)}
-                      </time>
-                    </h3>
-                  )}
-                  <UpcomingEventCard
-                    event={event}
-                    from={from}
-                    onPrefetch={prefetchEventDetails}
-                    hideSpoilers={hideSpoilers}
-                  />
-                </Fragment>
-              ))}
-            </div>
-          )}
-        </div>
+            )}
+          </PageCard>
+        </PageSection>
       )}
 
       {schedule &&
@@ -502,69 +537,71 @@ export function Calendar() {
             </span>
           )}
           {/* eslint-disable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex -- Keyboard scrolling needs a focusable region. */}
-          <div
-            ref={calendarRef}
-            role='region'
-            aria-label={`${MONTH_YEAR_FORMATTER.format(currentMonth)} releases`}
-            aria-busy={isFetchingSchedules}
-            tabIndex={0}
-            onKeyDown={(event) => {
-              if (
-                event.target === event.currentTarget &&
-                (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
-              ) {
-                event.stopPropagation();
-              }
-            }}
-            className='overflow-x-auto rounded-lg border border-white/[0.07] bg-zinc-950/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/40'
-          >
-            <div className='min-w-[640px]'>
-              <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
-                {WEEKDAY_LABELS.map((day, dayIndex) => (
-                  <div
-                    key={day}
-                    className={cn(
-                      'py-3 text-center text-[11px] font-medium',
-                      isCurrentMonthView && dayIndex === now.dayOfWeek % 7
-                        ? 'text-[var(--accent-nav)]'
-                        : 'text-zinc-500',
-                    )}
-                  >
-                    {day}
-                  </div>
-                ))}
-              </div>
+          <PageCard>
+            <div
+              ref={calendarRef}
+              role='region'
+              aria-label={`${MONTH_YEAR_FORMATTER.format(currentMonth)} releases`}
+              aria-busy={isFetchingSchedules}
+              tabIndex={0}
+              onKeyDown={(event) => {
+                if (
+                  event.target === event.currentTarget &&
+                  (event.key === 'ArrowLeft' || event.key === 'ArrowRight')
+                ) {
+                  event.stopPropagation();
+                }
+              }}
+              className='overflow-x-auto focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40'
+            >
+              <div className='min-w-[640px]'>
+                <div className='grid grid-cols-7 border-b border-white/[0.05] bg-white/[0.02]'>
+                  {WEEKDAY_LABELS.map((day, dayIndex) => (
+                    <div
+                      key={day}
+                      className={cn(
+                        'py-3 text-center text-[11px] font-medium',
+                        isCurrentMonthView && dayIndex === now.dayOfWeek % 7
+                          ? 'text-[var(--accent-nav)]'
+                          : 'text-zinc-500',
+                      )}
+                    >
+                      {day}
+                    </div>
+                  ))}
+                </div>
 
-              <div className='grid grid-cols-7 auto-rows-fr'>
-                {days.map((day, dayIdx) => {
-                  const dayKey = day.toString();
-                  return (
-                    <CalendarDayCell
-                      key={dayKey}
-                      day={day}
-                      dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
-                      isToday={day.equals(now)}
-                      isCurrentMonth={day
-                        .toPlainYearMonth()
-                        .equals(currentMonth.toPlainYearMonth())}
-                      isLastColumn={dayIdx % 7 === 6}
-                      isLoading={isLoadingSchedules}
-                      isComplete={
-                        !!schedule &&
-                        !isPlaceholderData &&
-                        !isScheduleError &&
-                        !hasMissingSchedules &&
-                        !isFetchingSchedules
-                      }
-                      from={from}
-                      onPrefetch={prefetchEventDetails}
-                      hideSpoilers={hideSpoilers}
-                    />
-                  );
-                })}
+                <div className='grid grid-cols-7 auto-rows-fr'>
+                  {days.map((day, dayIdx) => {
+                    const dayKey = day.toString();
+                    return (
+                      <CalendarDayCell
+                        key={dayKey}
+                        day={day}
+                        dayEvents={eventsByDay.get(dayKey) ?? EMPTY_DAY_EVENTS}
+                        isToday={day.equals(now)}
+                        isCurrentMonth={day
+                          .toPlainYearMonth()
+                          .equals(currentMonth.toPlainYearMonth())}
+                        isLastColumn={dayIdx % 7 === 6}
+                        isLoading={isLoadingSchedules}
+                        isComplete={
+                          !!schedule &&
+                          !isPlaceholderData &&
+                          !isScheduleError &&
+                          !hasMissingSchedules &&
+                          !isFetchingSchedules
+                        }
+                        from={from}
+                        onPrefetch={prefetchEventDetails}
+                        hideSpoilers={hideSpoilers}
+                      />
+                    );
+                  })}
+                </div>
               </div>
             </div>
-          </div>
+          </PageCard>
           {/* eslint-enable jsx-a11y/no-noninteractive-element-interactions, jsx-a11y/no-noninteractive-tabindex */}
         </>
       )}

@@ -1,9 +1,10 @@
 import {
   closestCenter,
+  type CollisionDetection,
   DndContext,
   type DragEndEvent,
-  DragOverlay,
   type DragStartEvent,
+  pointerWithin,
   type UniqueIdentifier,
 } from '@dnd-kit/core';
 import {
@@ -43,6 +44,7 @@ import {
   useCollectionSelection,
 } from '@/components/profile-library-controls';
 import { ViewToggle } from '@/components/ui/segmented-control';
+import { CollectionRowActions } from '@/components/collection-row-actions';
 import { RetryBanner } from '@/components/retry-banner';
 import { SelectionCheck } from '@/components/watch-status-icon';
 import { useBulkRemoveFromList, useLists } from '@/hooks/use-media-library';
@@ -64,7 +66,7 @@ import {
   invalidateListQueries,
   LISTS_QUERY_KEY,
 } from '@/lib/query-invalidation';
-import { boundedMapSet, cn, pluralize } from '@/lib/utils';
+import { boundedMapSet, cn, orderByIds, pluralize } from '@/lib/utils';
 import { AddTitlesDialog } from './add-titles-dialog';
 import { ListIconTile } from './list-icons';
 
@@ -80,6 +82,13 @@ const listViewStates = new Map<
 let lastResolvedListCount: number | undefined;
 const LIST_SKELETON_CAP = 6;
 const SORTABLE_TRANSITION = { duration: 200, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' };
+
+// closestCenter flaps between variable-height rows; pointerWithin holds the row under the cursor.
+// The closestCenter fallback covers keyboard drags (no pointer coordinates) and gaps between rows.
+const sortableCollisionDetection: CollisionDetection = (args) => {
+  const within = pointerWithin(args);
+  return within.length > 0 ? within : closestCenter(args);
+};
 
 function ListPosterStack({ items }: { items?: MediaItem[] }) {
   const posters = items?.slice(0, 3) ?? [];
@@ -133,13 +142,21 @@ function SortableListCard({
     rootRef: headerRef,
     returnFocus: () => headerRef.current?.querySelector('[aria-expanded]'),
   });
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
     id: list.id,
     transition: SORTABLE_TRANSITION,
   });
 
   const style = {
-    transform: CSS.Transform.toString(transform),
+    transform: CSS.Translate.toString(transform),
     transition,
   };
 
@@ -149,9 +166,9 @@ function SortableListCard({
       data-list-row={list.id}
       style={style}
       className={cn(
-        'rounded-xl border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        'rounded-xl border transition-[background-color,border-color,opacity] duration-200 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none!',
         isDragging
-          ? 'opacity-40 border-white/20 bg-zinc-900/80'
+          ? 'relative z-10 border-white/20 bg-zinc-900 shadow-xl shadow-black/50'
           : isExpanded
             ? 'border-white/[0.12] bg-zinc-900/50'
             : 'border-white/[0.08] bg-zinc-900/40 hover:border-white/[0.12] hover:bg-zinc-900/60 focus-within:border-white/[0.12] focus-within:bg-zinc-900/60',
@@ -165,6 +182,7 @@ function SortableListCard({
           )}
         >
           <button
+            ref={setActivatorNodeRef}
             type='button'
             {...attributes}
             {...listeners}
@@ -281,14 +299,22 @@ const SortableItemRow = memo(function SortableItemRow({
   onToggleSelect,
 }: SortableItemRowProps) {
   const removeButtonRef = useRef<HTMLButtonElement>(null);
-  const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    setActivatorNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({
     id: `${listId}::${item.id}`,
     disabled: selectionMode,
     transition: SORTABLE_TRANSITION,
   });
 
   const style = {
-    transform: CSS.Transform.toString(transform),
+    transform: CSS.Translate.toString(transform),
     transition,
   };
 
@@ -299,6 +325,7 @@ const SortableItemRow = memo(function SortableItemRow({
       <button
         type='button'
         aria-label={`${isSelected ? 'Deselect' : 'Select'} ${item.title}`}
+        aria-pressed={isSelected}
         onClick={(event) => onToggleSelect(item.id, event.shiftKey)}
         className={cn(
           'relative group rounded-lg border text-left focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
@@ -346,11 +373,14 @@ const SortableItemRow = memo(function SortableItemRow({
         ref={setNodeRef}
         style={style}
         className={cn(
-          'relative group rounded-lg overflow-hidden bg-zinc-900/60 transition-[background-color,opacity,box-shadow] duration-200',
-          isDragging ? 'opacity-40' : 'hover:ring-1 hover:ring-white/20',
+          'relative group rounded-lg overflow-hidden bg-zinc-900/60 transition-[background-color,opacity,box-shadow] duration-200 motion-reduce:transition-none!',
+          isDragging
+            ? 'z-20 shadow-xl shadow-black/50 ring-1 ring-white/20'
+            : 'hover:ring-1 hover:ring-white/20',
         )}
       >
         <button
+          ref={setActivatorNodeRef}
           type='button'
           {...attributes}
           {...listeners}
@@ -411,11 +441,14 @@ const SortableItemRow = memo(function SortableItemRow({
       ref={setNodeRef}
       style={style}
       className={cn(
-        'flex items-center gap-3 px-3 py-2 rounded-lg group transition-[background-color,opacity] duration-150',
-        isDragging ? 'opacity-40 bg-zinc-800/80' : 'hover:bg-white/5',
+        'flex items-center gap-3 px-3 py-2 rounded-lg group transition-[background-color,opacity] duration-150 motion-reduce:transition-none!',
+        isDragging
+          ? 'relative z-10 bg-zinc-800 shadow-lg shadow-black/50 ring-1 ring-white/15'
+          : 'hover:bg-white/5',
       )}
     >
       <button
+        ref={setActivatorNodeRef}
         type='button'
         {...attributes}
         {...listeners}
@@ -459,6 +492,7 @@ const SortableItemRow = memo(function SortableItemRow({
         </span>
       </button>
 
+      <CollectionRowActions item={item} />
       <Button
         ref={removeButtonRef}
         data-list-remove={item.id}
@@ -497,17 +531,10 @@ function ListItemsView({ list }: { list: UserList }) {
   const addTitlesButtonRef = useRef<HTMLButtonElement>(null);
   const removalFocusRef = useRef<{ button: HTMLButtonElement; index: number } | null>(null);
 
-  const orderedItems = useMemo(() => {
-    const sourceItems = list.items ?? [];
-    if (!orderedIds) return sourceItems;
-    const itemMap = new Map(sourceItems.map((i) => [i.id, i]));
-    const ordered = orderedIds.flatMap((id) => {
-      const orderedItem = itemMap.get(id);
-      itemMap.delete(id);
-      return orderedItem ? [orderedItem] : [];
-    });
-    return [...ordered, ...itemMap.values()];
-  }, [orderedIds, list.items]);
+  const orderedItems = useMemo(
+    () => orderByIds(list.items ?? [], orderedIds),
+    [orderedIds, list.items],
+  );
 
   const bulkRemove = useBulkRemoveFromList();
   const removeMutate = bulkRemove.mutate;
@@ -630,8 +657,6 @@ function ListItemsView({ list }: { list: UserList }) {
     [visibleItems, list.id],
   );
 
-  const activeItem = activeId ? orderedItems.find((i) => `${list.id}::${i.id}` === activeId) : null;
-
   return (
     <div
       className='p-3 space-y-3'
@@ -739,7 +764,7 @@ function ListItemsView({ list }: { list: UserList }) {
       >
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCenter}
+          collisionDetection={sortableCollisionDetection}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onDragCancel={() => setActiveId(null)}
@@ -770,40 +795,6 @@ function ListItemsView({ list }: { list: UserList }) {
               ))}
             </div>
           </SortableContext>
-
-          <DragOverlay>
-            {activeItem ? (
-              <div
-                className={cn(
-                  'rounded-lg bg-zinc-800/90 border border-white/20 shadow-2xl shadow-black/60',
-                  viewMode === 'grid' ? 'w-20 opacity-90' : 'w-64 opacity-90',
-                )}
-              >
-                {viewMode === 'grid' ? (
-                  <PosterThumb
-                    poster={activeItem.poster}
-                    title={activeItem.title}
-                    mediaType={activeItem.type}
-                    className='aspect-2/3 h-auto w-full rounded-lg ring-0'
-                  />
-                ) : (
-                  <div className='flex items-center gap-3 px-3 py-2.5'>
-                    <GripVertical className='w-3.5 h-3.5 text-zinc-400' />
-                    <PosterThumb
-                      poster={activeItem.poster}
-                      title={activeItem.title}
-                      mediaType={activeItem.type}
-                      size='sm'
-                      className='rounded ring-0'
-                    />
-                    <span className='text-sm font-medium text-white truncate'>
-                      {activeItem.title}
-                    </span>
-                  </div>
-                )}
-              </div>
-            ) : null}
-          </DragOverlay>
         </DndContext>
 
         {filtered.length > visibleItems.length && (
@@ -857,17 +848,6 @@ function ListItemsView({ list }: { list: UserList }) {
   );
 }
 
-function ListGhostCard({ list }: { list: UserList }) {
-  return (
-    <div className='rounded-xl border border-white/20 bg-zinc-900/90 shadow-2xl shadow-black/60 px-4 py-3 flex items-center gap-3 opacity-90'>
-      <GripVertical className='w-4 h-4 text-zinc-500' />
-      <ListIconTile iconId={list.icon} />
-      <span className='font-semibold text-sm text-zinc-200'>{list.name}</span>
-      <span className='text-[12px] tabular-nums text-zinc-500 ml-1'>{list.item_ids.length}</span>
-    </div>
-  );
-}
-
 export function ListsManager({ expectedCount }: { expectedCount?: number }) {
   const queryClient = useQueryClient();
   const mountedRef = useMountedRef();
@@ -890,7 +870,8 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
   const [createOpen, setCreateOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<UserList | null>(null);
   const [activeListId, setActiveListId] = useState<UniqueIdentifier | null>(null);
-  const listOrderGenerationRef = useRef(0);
+  const [pendingListOrder, setPendingListOrder] = useState<string[] | null>(null);
+  const latestListOrderRef = useRef<string[] | null>(null);
   const listsContainerRef = useRef<HTMLDivElement>(null);
   const newListButtonRef = useRef<HTMLButtonElement>(null);
   const deleteDialogRef = useRef<HTMLDivElement>(null);
@@ -929,7 +910,8 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
 
   const sensors = useSortableSensors();
 
-  const { data: lists = [], isLoading, isError, isFetched, isFetching, refetch } = useLists();
+  const { data: savedLists = [], isLoading, isError, isFetched, isFetching, refetch } = useLists();
+  const lists = orderByIds(savedLists, pendingListOrder);
   useLayoutEffect(() => {
     if (isFetched) lastResolvedListCount = lists.length;
   }, [isFetched, lists.length]);
@@ -942,41 +924,36 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
   );
 
   const setCachedOrder = (ids: string[]) =>
-    queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) => {
-      if (!current) return current;
-      const remaining = new Map(current.map((list) => [list.id, list]));
-      const ordered = ids.flatMap((id) => {
-        const list = remaining.get(id);
-        remaining.delete(id);
-        return list ? [list] : [];
-      });
-      return [...ordered, ...remaining.values()];
-    });
+    queryClient.setQueryData<UserList[]>(LISTS_QUERY_KEY, (current) =>
+      current ? orderByIds(current, ids) : current,
+    );
   const reorderLists = useMutation({
     mutationKey: LIST_ORDER_MUTATION_KEY,
     scope: { id: LIST_ORDER_MUTATION_KEY[0] },
     mutationFn: (ids: string[]) => api.reorderLists(ids),
     onMutate: async (next) => {
-      const generation = ++listOrderGenerationRef.current;
       await queryClient.cancelQueries({ queryKey: LISTS_QUERY_KEY });
       const previous = queryClient.getQueryData<UserList[]>(LISTS_QUERY_KEY);
-      if (generation === listOrderGenerationRef.current) {
+      if (latestListOrderRef.current === next) {
         setCachedOrder(next);
       }
-      return { previousOrder: previous?.map((list) => list.id), generation };
+      return previous?.map((list) => list.id);
     },
-    onSettled: (_data, _error, _next, context) => {
+    onSettled: async (_data, _error, next) => {
       if (
-        context?.generation === listOrderGenerationRef.current &&
+        latestListOrderRef.current === next &&
         queryClient.isMutating({ mutationKey: LIST_ORDER_MUTATION_KEY, exact: true }) === 1
       ) {
-        return invalidateListMetadataQueries(queryClient);
+        await invalidateListMetadataQueries(queryClient);
+        if (latestListOrderRef.current === next) {
+          latestListOrderRef.current = null;
+          if (mountedRef.current) setPendingListOrder(null);
+        }
       }
     },
-    onError: (_, _next, context) => {
-      const previousOrder = context?.previousOrder;
+    onError: (_, next, previousOrder) => {
       if (
-        context?.generation === listOrderGenerationRef.current &&
+        latestListOrderRef.current === next &&
         queryClient.isMutating({ mutationKey: LIST_ORDER_MUTATION_KEY, exact: true }) === 1 &&
         previousOrder
       ) {
@@ -1024,16 +1001,17 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
     setActiveListId(event.active.id);
   };
 
-  const moveList = (from: number, to: number) =>
-    void trackPendingAppWrite(
-      reorderLists.mutateAsync(
-        arrayMove(
-          lists.map((list) => list.id),
-          from,
-          to,
-        ),
-      ),
-    ).catch(() => {});
+  const moveList = (from: number, to: number) => {
+    const next = arrayMove(
+      lists.map((list) => list.id),
+      from,
+      to,
+    );
+    // Commit in the drop render; query cancellation in onMutate is asynchronous.
+    latestListOrderRef.current = next;
+    setPendingListOrder(next);
+    void trackPendingAppWrite(reorderLists.mutateAsync(next)).catch(() => {});
+  };
 
   const handleDragEnd = (event: DragEndEvent) => {
     setActiveListId(null);
@@ -1046,8 +1024,6 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
     moveList(oldIdx, newIdx);
   };
 
-  const activeList = activeListId ? lists.find((l) => l.id === activeListId) : null;
-
   const [deleteTarget, setDeleteTarget] = useState<UserList | null>(null);
   const handleDeleteConfirm = (list: UserList) => {
     if (pendingDeleteIds.includes(list.id)) return;
@@ -1059,7 +1035,10 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
   };
 
   return (
-    <div className='space-y-6' data-escape-capture={activeListId !== null ? '' : undefined}>
+    <div
+      className='mx-auto max-w-3xl space-y-4'
+      data-escape-capture={activeListId !== null ? '' : undefined}
+    >
       <div className='flex items-center justify-between'>
         <div>
           <h2 className='text-[15px] font-medium tracking-tight text-white'>Lists</h2>
@@ -1125,7 +1104,7 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
       ) : (
         <DndContext
           sensors={sensors}
-          collisionDetection={closestCenter}
+          collisionDetection={sortableCollisionDetection}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onDragCancel={() => setActiveListId(null)}
@@ -1151,8 +1130,6 @@ export function ListsManager({ expectedCount }: { expectedCount?: number }) {
               ))}
             </div>
           </SortableContext>
-
-          <DragOverlay>{activeList ? <ListGhostCard list={activeList} /> : null}</DragOverlay>
         </DndContext>
       )}
 

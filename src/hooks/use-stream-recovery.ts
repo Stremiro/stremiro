@@ -163,6 +163,7 @@ export function useStreamRecovery({
     stream.activeStreamUrl,
     stream.activeStreamKey,
     stream.activeStreamMpvHttpHeaderFields,
+    stream.loadRevision,
   ]);
 
   useEffect(() => {

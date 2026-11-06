@@ -20,8 +20,7 @@ use std::time::Duration;
 use tauri::ipc::{Channel, InvokeResponseBody};
 use tauri::{command, AppHandle, State};
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct UpNextCandidate {
     pub(crate) row: WatchProgress,
     /// Aired within the past week and after the last watched timestamp — the
@@ -157,54 +156,53 @@ pub async fn get_resume_rail(
     if date_ordinal(&local_today).is_none() || local_today_ms == 0 {
         return Err("Invalid local schedule date.".to_string());
     }
-    let service = playback_state.inner().clone();
-    let store_app = app.clone();
-    let (continue_watching, sources) = super::run_blocking_store_op(move || {
-        let rows = resume_rows(service.load_continue_watching_entries(&store_app)?);
-        let continue_watching =
-            annotate_watch_progress_list(build_continue_watching_entries(&rows));
-        if !rows.iter().any(is_series_like_watch_progress) {
-            return Ok((continue_watching, Vec::new()));
-        }
-        let statuses = match super::open_store(&store_app, super::WATCH_STATUS_STORE_FILE)
-            .and_then(|store| load_watch_statuses_map(&store))
-        {
-            Ok(statuses) => statuses,
-            Err(error) => {
-                crate::operational_log::log_warn(
-                    "resume-rail",
-                    "load-watch-statuses",
-                    "degraded",
-                    &[crate::operational_log::field("error", error)],
-                );
+    let (continue_watching, sources) = playback_state
+        .run_store_op(&app, move |service, app| {
+            let rows = resume_rows(service.load_continue_watching_entries(app)?);
+            let continue_watching =
+                annotate_watch_progress_list(build_continue_watching_entries(&rows));
+            if !rows.iter().any(is_series_like_watch_progress) {
                 return Ok((continue_watching, Vec::new()));
             }
-        };
-        let resumable: HashSet<(&str, &str)> = continue_watching
-            .iter()
-            .map(|row| (row.type_.as_str(), row.id.as_str()))
-            .collect();
-        let source_health_priorities = service.source_health_priorities_for_ids(
-            &store_app,
-            rows.iter()
-                .filter(|row| {
-                    is_series_like_watch_progress(row)
-                        && !resumable.contains(&(row.type_.as_str(), row.id.as_str()))
-                        && statuses
-                            .get(&row.id)
-                            .is_none_or(|status| status != "dropped")
-                })
-                .map(|row| row.source_id.as_deref()),
-        );
-        let sources = build_up_next_sources(
-            rows,
-            &statuses,
-            &source_health_priorities,
-            now_unix_millis(),
-        );
-        Ok((continue_watching, sources))
-    })
-    .await?;
+            let statuses = match super::open_store(app, super::WATCH_STATUS_STORE_FILE)
+                .and_then(|store| load_watch_statuses_map(&store))
+            {
+                Ok(statuses) => statuses,
+                Err(error) => {
+                    crate::operational_log::log_warn(
+                        "resume-rail",
+                        "load-watch-statuses",
+                        "degraded",
+                        &[crate::operational_log::field("error", error)],
+                    );
+                    return Ok((continue_watching, Vec::new()));
+                }
+            };
+            let resumable: HashSet<(&str, &str)> = continue_watching
+                .iter()
+                .map(|row| (row.type_.as_str(), row.id.as_str()))
+                .collect();
+            let source_health_priorities = service.source_health_priorities_for_ids(
+                app,
+                rows.iter()
+                    .filter(|row| {
+                        is_series_like_watch_progress(row)
+                            && !resumable.contains(&(row.type_.as_str(), row.id.as_str()))
+                            && statuses
+                                .get(&row.id)
+                                .is_none_or(|status| status != "dropped")
+                    })
+                    .map(|row| row.source_id.as_deref()),
+            );
+            let sources = build_up_next_sources(
+                rows,
+                &statuses,
+                &source_health_priorities,
+                now_unix_millis(),
+            );
+            Ok((continue_watching, sources))
+        })
+        .await?;
     if sources.is_empty() {
         return Ok(build_resume_rail(continue_watching, Vec::new()));
     }

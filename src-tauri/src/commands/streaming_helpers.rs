@@ -210,11 +210,6 @@ fn parse_http_url(input: &str) -> Option<reqwest::Url> {
     matches!(parsed.scheme(), "http" | "https").then_some(parsed)
 }
 
-#[cfg(test)]
-pub(crate) fn normalize_http_url(input: &str) -> Option<String> {
-    parse_http_url(input).map(|parsed| parsed.to_string())
-}
-
 fn has_playable_stream_source_with_http(stream: &AddonStream, has_http_url: bool) -> bool {
     stream.content_hash.as_deref().is_some_and(non_blank)
         || stream

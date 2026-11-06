@@ -14,7 +14,8 @@ use crate::providers::addon_resource::{
     AddonResourceClient, AddonSubtitle, CatalogExtra, CatalogPage,
 };
 use crate::test_helpers::{
-    cinemeta_addon, classified_cinemeta_addon, test_addon, test_media_item, TestHttpServer,
+    cinemeta_addon, classified_cinemeta_addon, stalled_listener, test_addon, test_media_item,
+    TestHttpServer,
 };
 use futures_util::StreamExt;
 use std::collections::HashSet;
@@ -32,7 +33,7 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
     let collected = collect_with_deadline(outcomes, Duration::from_millis(10), Result::is_ok).await;
     assert_eq!(collected, vec![Err(()), Ok(())]);
 
-    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_stalled, stalled_url) = stalled_listener();
     let server = TestHttpServer::new(vec![(
         200,
         r#"{"meta":{"id":"tt1","name":"Fallback","type":"movie"}}"#,
@@ -40,7 +41,7 @@ async fn resource_grace_waits_for_success_after_fast_failure() {
     )]);
     let addons = [
         AddonConfig {
-            url: format!("http://{}", stalled.local_addr().unwrap()),
+            url: stalled_url,
             ..test_addon("primary", "Primary")
         },
         AddonConfig {
@@ -251,8 +252,7 @@ async fn catalog_group_merge_marks_dropped_straggler_partial() {
             None,
         ),
     ]);
-    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let stalled_url = format!("http://{}", stalled.local_addr().unwrap());
+    let (_stalled, stalled_url) = stalled_listener();
     let client = AddonResourceClient::new();
     let target = |url: &str, catalog_id: &str| CatalogTarget {
         url: url.to_string(),
@@ -1054,14 +1054,14 @@ async fn empty_subtitle_sources_do_not_cancel_the_first_usable_answer() {
         r#"{"subtitles":[{"id":"found","url":"https://subs.test/found.srt"}]}"#,
         None,
     )]);
-    let stalled = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let (_stalled, stalled_url) = stalled_listener();
     let addons = [
         AddonConfig {
             url: ready.url.clone(),
             ..subtitle_addon()
         },
         AddonConfig {
-            url: format!("http://{}", stalled.local_addr().unwrap()),
+            url: stalled_url,
             ..subtitle_addon()
         },
     ];

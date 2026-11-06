@@ -5,6 +5,21 @@ export function cn(...inputs: ClassNameValue[]) {
   return twMerge(inputs);
 }
 
+// Unknown IDs are ignored; unlisted rows keep their original order at the end.
+export function orderByIds<T extends { id: string }>(
+  source: T[],
+  orderedIds?: readonly string[] | null,
+): T[] {
+  if (!orderedIds) return source;
+  const remaining = new Map(source.map((item) => [item.id, item]));
+  const ordered = orderedIds.flatMap((id) => {
+    const item = remaining.get(id);
+    remaining.delete(id);
+    return item ? [item] : [];
+  });
+  return [...ordered, ...remaining.values()];
+}
+
 export function queryNeedsRetry(query: {
   isError: boolean;
   isFetched: boolean;
@@ -54,6 +69,18 @@ export const HEX_COLOR_PATTERN = /^#([0-9a-fA-F]{6})$/;
 
 /** Content-column insets clearing the fixed sidebar; never `cn()`-merge — `lg:px-*` would override `lg:pl-[92px]` under tailwind-merge. */
 export const SIDEBAR_PAGE_COLUMN_INSETS = 'pr-4 pl-[84px] sm:pr-6 lg:pl-[92px] lg:pr-8';
+
+/** Inline status strip for offline/capability notices — lighter than `RetryBanner`. */
+export const PAGE_NOTICE_CLASS =
+  'flex items-center gap-2.5 rounded-xl border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-[13px] leading-relaxed text-zinc-400';
+
+/** Gradient icon tile next to section headers and empty states — callers add size + radius. */
+export const ICON_CHIP_CLASS =
+  'flex items-center justify-center bg-linear-to-b from-white/[0.08] to-white/[0.02] ring-1 ring-inset ring-white/[0.08]';
+
+/** Bare title icons (rails, page h1s) settle in just after the page fade — callers add size. */
+export const TITLE_ICON_CLASS =
+  'shrink-0 text-white motion-safe:animate-in motion-safe:fade-in-0 motion-safe:zoom-in-95 motion-safe:duration-500 motion-safe:fill-mode-backwards motion-safe:[animation-delay:120ms]';
 
 export const GENRE_LINK_CLASS =
   'rounded-md border border-white/10 bg-white/[0.08] px-2.5 py-1 text-[13px] font-medium text-white/85 backdrop-blur-md transition-colors duration-150 hover:border-white/25 hover:bg-white/[0.14] hover:text-white focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40';
@@ -154,6 +181,16 @@ export function createSerialTaskQueue() {
       return result;
     },
     pending: () => tail,
+  };
+}
+
+/** Monotonic counter for latest-writer-wins guards — `bump` returns the new value. */
+export function createGeneration() {
+  let value = 0;
+  return {
+    get: () => value,
+    bump: () => ++value,
+    isCurrent: (generation: number) => generation === value,
   };
 }
 
@@ -265,4 +302,15 @@ export function primaryGenrePills(
   max = 2,
 ): string[] {
   return (catalogGenres?.length ? catalogGenres : (detailsGenres ?? [])).slice(0, max);
+}
+
+/** Addon runtimes arrive as bare minutes ("142") or prose ("45 min") — collapse numeric to "2h 22m". */
+export function formatRuntime(runtime?: string | null): string | undefined {
+  const trimmed = runtime?.trim();
+  if (!trimmed) return undefined;
+  const mins = Number(trimmed);
+  if (!Number.isInteger(mins) || mins <= 0) return trimmed;
+  const hours = Math.floor(mins / 60);
+  const rest = mins % 60;
+  return hours === 0 ? `${mins}m` : rest === 0 ? `${hours}h` : `${hours}h ${rest}m`;
 }

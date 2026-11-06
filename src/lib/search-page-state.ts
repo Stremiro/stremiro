@@ -1,31 +1,16 @@
 import { foldAsciiCase } from '@/lib/api-cache';
 import { nonBlank } from '@/lib/utils';
 
-// `all` is a frontend-only facet: it browses the movie and series catalogs in
-// parallel and lets the backend's untyped text search fan out to both, so it
-// is never sent over IPC as a media type.
+// `all` omits the IPC media type so Rust fetches both movie and series catalogs.
 export type SearchMediaType = 'all' | 'movie' | 'series' | 'anime';
-// `new` is a UI feed: it maps to the provider `year` catalog (single pinned
-// year) via yearFrom/yearTo, not a manifest catalog id.
+// `new` pins yearFrom/yearTo instead of naming a provider catalog.
 export type SearchFeed = 'popular' | 'featured' | 'new';
 
-function resolveSearchUrlType(value: string | null): SearchMediaType {
-  return value === 'movie' || value === 'series' || value === 'anime' ? value : 'all';
-}
-
-function resolveSearchUrlFeed(value: string | null): SearchFeed {
-  return value === 'featured' || value === 'new' ? value : 'popular';
-}
-
-/** ASCII-folded genre equality — the single comparison the menu checkmark,
-    the URL toggle-off, and the deep-link dedupe share so casing can't drift
-    (mirrors the backend's ASCII-folding match). */
+// Match Rust's ASCII-only genre comparison.
 export function sameSearchGenre(a: string | undefined, b: string | undefined): boolean {
   return a !== undefined && b !== undefined && foldAsciiCase(a) === foldAsciiCase(b);
 }
 
-/** Genre badge → filtered search route — one owner so call sites can't drift
-    on param names or encoding. */
 export function searchGenrePath(mediaType: string, genre: string): string {
   return `/search?type=${mediaType}&genre=${encodeURIComponent(genre)}`;
 }
@@ -38,10 +23,12 @@ export interface SearchFacets {
 }
 
 export function readSearchFacets(params: URLSearchParams): SearchFacets {
+  const type = params.get('type');
+  const feed = params.get('feed');
   return {
     query: params.get('q') ?? '',
-    type: resolveSearchUrlType(params.get('type')),
-    feed: resolveSearchUrlFeed(params.get('feed')),
+    type: type === 'movie' || type === 'series' || type === 'anime' ? type : 'all',
+    feed: feed === 'featured' || feed === 'new' ? feed : 'popular',
     genre: nonBlank(params.get('genre')),
   };
 }

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Database, Download, Loader2, type LucideIcon, Upload } from 'lucide-react';
+import { Download, Eraser, Loader2, type LucideIcon, Upload } from 'lucide-react';
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -23,10 +23,10 @@ import {
 import { cn, pluralize } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
-  SETTINGS_CAPTION_CLASS,
   SETTINGS_ROW_CLASS,
   SETTINGS_ROW_DESCRIPTION_CLASS,
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -121,10 +121,9 @@ function BackupRestore() {
   return (
     <SettingsBody className='flex flex-wrap items-center justify-between gap-x-5 gap-y-3'>
       <div className='min-w-0 flex-1 basis-48'>
-        <p className='text-[14px] font-medium text-zinc-100'>Backup & restore</p>
+        <p className='text-[14px] font-medium text-zinc-100'>Backup file</p>
         <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>
-          Export your data to a JSON file, or merge one back in. Backups can contain addon keys, so
-          keep them private.
+          Backups can contain addon keys, so keep them private.
         </p>
       </div>
       <div className='flex shrink-0 items-center gap-2'>
@@ -311,110 +310,118 @@ function DataManager() {
 
   return (
     <>
-      <div className='border-t border-white/[0.06]'>
-        <div className='flex flex-wrap items-baseline justify-between gap-3 px-4 pt-4 pb-1 sm:px-5'>
-          <p className={SETTINGS_CAPTION_CLASS}>Clear local records</p>
-        </div>
-        <SettingsQueryError
-          query={statsQuery}
-          className='mx-4 mt-3 sm:mx-5'
-          message="Couldn't load local record counts."
-        />
+      <SettingsQueryError
+        query={statsQuery}
+        className='mx-4 mt-4 sm:mx-5'
+        message="Couldn't load local record counts."
+      />
 
-        <SettingsBody rows>
-          {categories.map((cat) => {
-            const isPending = clearMutation.isPending && clearMutation.variables?.key === cat.key;
-            const isConfirming = confirmKey === cat.key;
-            const isEmpty = cat.isEmpty ?? cat.count === 0;
+      <SettingsBody rows>
+        {categories.map((cat) => {
+          const isPending = clearMutation.isPending && clearMutation.variables?.key === cat.key;
+          const isConfirming = confirmKey === cat.key;
+          const isEmpty = cat.isEmpty ?? cat.count === 0;
 
-            return (
-              <div
-                key={cat.key}
-                id={settingsControlId(cat.label)}
-                data-clear-row={cat.key}
-                className={SETTINGS_ROW_CLASS}
-              >
-                <div className='min-w-0 flex-1 basis-32'>
-                  <span className='flex flex-wrap items-baseline gap-x-2'>
-                    <h3
-                      data-clear-heading
-                      tabIndex={-1}
-                      className='text-[14px] font-medium leading-snug text-zinc-100 focus:outline-hidden'
-                    >
-                      {cat.label}
-                    </h3>
-                    <span className='text-[12px] tabular-nums text-zinc-500'>
-                      {cat.count === undefined
-                        ? '—'
-                        : pluralize(cat.count, cat.unitSingular, cat.unitPlural)}
-                    </span>
+          return (
+            <div
+              key={cat.key}
+              id={settingsControlId(cat.label)}
+              data-clear-row={cat.key}
+              className={SETTINGS_ROW_CLASS}
+            >
+              <div className='min-w-0 flex-1 basis-32'>
+                <span className='flex flex-wrap items-baseline gap-x-2'>
+                  <h3
+                    data-clear-heading
+                    tabIndex={-1}
+                    className='text-[14px] font-medium leading-snug text-zinc-100 focus:outline-hidden'
+                  >
+                    {cat.label}
+                  </h3>
+                  <span className='text-[12px] tabular-nums text-zinc-500'>
+                    {cat.count === undefined
+                      ? '—'
+                      : pluralize(cat.count, cat.unitSingular, cat.unitPlural)}
                   </span>
-                  <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{cat.description}</p>
-                </div>
+                </span>
+                <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{cat.description}</p>
+              </div>
 
-                <div className='flex max-w-full shrink-0 flex-wrap items-center gap-2'>
-                  {isConfirming ? (
-                    <>
-                      <Button
-                        size='sm'
-                        variant='outline'
-                        data-clear-cancel
-                        aria-label={`Cancel clearing ${cat.label.toLowerCase()}`}
-                        onClick={() => setConfirmKey(null)}
-                        disabled={clearMutation.isPending}
-                        className={cn('h-8 px-3 text-[12px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        size='sm'
-                        aria-label={`Clear permanently: ${cat.label.toLowerCase()}`}
-                        onClick={() => clearMutation.mutate(cat)}
-                        disabled={clearMutation.isPending || cat.count === undefined}
-                        className='h-8 rounded-lg border-0 bg-red-500 px-3 text-[12px] font-semibold text-white hover:bg-red-600'
-                      >
-                        {isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
-                        Clear permanently
-                      </Button>
-                    </>
-                  ) : (
+              <div className='flex max-w-full shrink-0 flex-wrap items-center gap-2'>
+                {isConfirming ? (
+                  <>
                     <Button
                       size='sm'
                       variant='outline'
-                      data-clear-arm
-                      aria-label={`Clear ${cat.label.toLowerCase()}`}
-                      onClick={() => setConfirmKey(cat.key)}
-                      disabled={cat.count === undefined || isEmpty || clearMutation.isPending}
-                      className={cn(
-                        'h-8 rounded-lg px-3 text-[12px] font-medium',
-                        isEmpty
-                          ? 'cursor-not-allowed opacity-30'
-                          : 'border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-300',
-                      )}
+                      data-clear-cancel
+                      aria-label={`Cancel clearing ${cat.label.toLowerCase()}`}
+                      onClick={() => setConfirmKey(null)}
+                      disabled={clearMutation.isPending}
+                      className={cn('h-8 px-3 text-[12px]', SETTINGS_OUTLINE_BUTTON_CLASS)}
                     >
-                      Clear
+                      Cancel
                     </Button>
-                  )}
-                </div>
+                    <Button
+                      size='sm'
+                      aria-label={`Clear permanently: ${cat.label.toLowerCase()}`}
+                      onClick={() => clearMutation.mutate(cat)}
+                      disabled={clearMutation.isPending || cat.count === undefined}
+                      className='h-8 rounded-lg border-0 bg-red-500 px-3 text-[12px] font-semibold text-white hover:bg-red-600'
+                    >
+                      {isPending && <Loader2 className='h-3.5 w-3.5 animate-spin' />}
+                      Clear permanently
+                    </Button>
+                  </>
+                ) : (
+                  <Button
+                    size='sm'
+                    variant='outline'
+                    data-clear-arm
+                    aria-label={`Clear ${cat.label.toLowerCase()}`}
+                    onClick={() => setConfirmKey(cat.key)}
+                    disabled={cat.count === undefined || isEmpty || clearMutation.isPending}
+                    className={cn(
+                      'h-8 rounded-lg px-3 text-[12px] font-medium',
+                      isEmpty
+                        ? 'cursor-not-allowed opacity-30'
+                        : 'border-red-500/20 text-red-400 hover:bg-red-500/10 hover:text-red-300',
+                    )}
+                  >
+                    Clear
+                  </Button>
+                )}
               </div>
-            );
-          })}
-        </SettingsBody>
-      </div>
+            </div>
+          );
+        })}
+      </SettingsBody>
     </>
   );
 }
 
 export function DataSection() {
   return (
-    <SettingsGroup>
-      <SettingsGroupHeader
-        icon={Database}
-        title='Data & storage'
-        description='Backups live on your machine. Record counts are stored locally.'
-      />
-      <BackupRestore />
-      <DataManager />
-    </SettingsGroup>
+    <div className='space-y-8'>
+      <SettingsGroup>
+        <SettingsGroupHeader
+          icon={Download}
+          title='Backup & restore'
+          description='Export your data to a JSON file, or merge one back in.'
+        />
+        <SettingsCard>
+          <BackupRestore />
+        </SettingsCard>
+      </SettingsGroup>
+      <SettingsGroup>
+        <SettingsGroupHeader
+          icon={Eraser}
+          title='Clear local records'
+          description='Permanently remove stored records by category.'
+        />
+        <SettingsCard>
+          <DataManager />
+        </SettingsCard>
+      </SettingsGroup>
+    </div>
   );
 }

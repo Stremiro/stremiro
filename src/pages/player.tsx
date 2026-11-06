@@ -72,6 +72,7 @@ import { usePlayerViewportMode } from '@/hooks/use-player-viewport-mode';
 import { usePlayerVolumeControls } from '@/hooks/use-player-volume-controls';
 import { useStreamRecovery } from '@/hooks/use-stream-recovery';
 import { useSubtitleAdjustments } from '@/hooks/use-subtitle-adjustments';
+import { useWindowRelease } from '@/hooks/use-window-release';
 import {
   api,
   type AppUiPreferences,
@@ -137,6 +138,7 @@ import {
   detailsQueryKey,
   invalidatePlaybackHistoryQueries,
   DETAILS_GC_TIME_MS,
+  placeholderWhileKeyPrefixMatches,
   SKIP_TIMES_EMPTY_STALE_TIME_MS,
   SKIP_TIMES_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
@@ -156,7 +158,7 @@ import {
 } from '@/lib/utils';
 
 const PLAYBACK_READY_AUTO_HIDE_DELAY_MS = 2600;
-const POINTER_CONTROLS_IDLE_MS = 1200;
+const POINTER_CONTROLS_IDLE_MS = 2400;
 // A cold addon resolve can take ~14s — past this the picker beats a blank loader.
 const NEXT_EPISODE_AUTO_RESOLVE_TIMEOUT_MS = 12_000;
 // Remaining seconds that count as credits when SkipDB has no tail segment.
@@ -289,6 +291,7 @@ export function Player() {
     null,
   );
   const [isLoading, setIsLoading] = useState(true);
+  const [retryPosition, setRetryPosition] = useState<number | null>(null);
   const [hasPlaybackStarted, setHasPlaybackStarted] = useState(false);
   const [hasPlaybackAdvanced, setHasPlaybackAdvanced] = useState(false);
   /** Reactive mirror of playbackEndedRef so the EOF "Up Next" card can render. */
@@ -379,7 +382,14 @@ export function Player() {
   const manualSelectionGenerationRef = useRef<number | null>(null);
   const errorRef = useRef<string | null>(error);
   const recoverableStreamErrorRef = useRef<string | null>(null);
+  const retryInFlightRef = useRef(false);
+  const seekRetryAttemptedRef = useRef(false);
+  const seekWasPlayingRef = useRef(false);
   const setError = (value: string | null) => {
+    if (value !== null) {
+      retryInFlightRef.current = false;
+      setRetryPosition(null);
+    }
     errorRef.current = value;
     recoverableStreamErrorRef.current = null;
     setErrorState(value);
@@ -419,6 +429,18 @@ export function Player() {
         document.querySelector('[data-player-popover][data-state="open"]') !== null)
     );
   };
+  const isPlayerChromeTarget = (
+    target: EventTarget | null,
+    includePopover = false,
+  ): target is Element =>
+    target instanceof Element &&
+    (topChromeRef.current?.contains(target) === true ||
+      bottomChromeRef.current?.contains(target) === true ||
+      target.closest(
+        includePopover
+          ? '[data-player-pip-chrome], [data-player-popover]'
+          : '[data-player-pip-chrome]',
+      ) !== null);
   const {
     announce,
     clearControlsAutoHide,
@@ -527,10 +549,7 @@ export function Player() {
       }),
     // Movies never chain: no Next, no warming, no auto-play.
     enabled: isSeriesLike && !!episodes && !!currentEpisode,
-    placeholderData: (previous, previousQuery) =>
-      episodeNavigationScopeKey.every((part, index) => previousQuery?.queryKey[index] === part)
-        ? previous
-        : undefined,
+    placeholderData: placeholderWhileKeyPrefixMatches(episodeNavigationScopeKey),
     staleTime: Infinity,
     gcTime: DETAILS_GC_TIME_MS,
   });
@@ -665,13 +684,15 @@ export function Player() {
   const openingSelectedStream = openingStreamName && activeStreamKey === routeSelectedStreamKey;
   const playerLoadingHeadline =
     resolveStatus ||
-    (!activeStreamUrl
-      ? 'Finding the best stream'
-      : openingSelectedStream
-        ? 'Opening selected stream'
-        : resumesFromStartTime
-          ? 'Resuming playback'
-          : 'Starting playback');
+    (retryPosition !== null
+      ? 'Reconnecting playback'
+      : !activeStreamUrl
+        ? 'Finding the best stream'
+        : openingSelectedStream
+          ? 'Opening selected stream'
+          : resumesFromStartTime
+            ? 'Resuming playback'
+            : 'Starting playback');
   const playerLoadingDetail =
     !resolveStatus && activeStreamUrl && openingSelectedStream
       ? nonBlank(openingStreamSource) || openingStreamName.trim()
@@ -709,7 +730,7 @@ export function Player() {
   const playerLoadingContext = formatPlaybackLanding(
     resolvedAbsoluteSeason,
     resolvedAbsoluteEpisode,
-    startTime,
+    retryPosition ?? startTime,
   );
   const currentEpisodeHeading = formatEpisodeHeading(
     resolvedAbsoluteSeason,
@@ -802,11 +823,8 @@ export function Player() {
 
   useEffect(() => {
     playbackLanguagePreferencesRef.current = playbackLanguagePreferences;
-  }, [playbackLanguagePreferences]);
-
-  useEffect(() => {
     saveProgressRef.current = saveProgress;
-  }, [saveProgress]);
+  }, [playbackLanguagePreferences, saveProgress]);
 
   // Invalidate after the save so Continue Watching refetches the final position;
   // overlapping flushes dedupe in the save queue. Capped at 2s — a slow save still lands after.
@@ -829,6 +847,8 @@ export function Player() {
   }, [navigationGuardEnabled, flushPlaybackBeforeNavigation]);
 
   const handleUserSeek = () => {
+    seekRetryAttemptedRef.current = false;
+    seekWasPlayingRef.current = isPlayingRef.current;
     cancelAutomaticResume();
     if (playbackEndedRef.current) cancelAutoPlayNext();
   };
@@ -1046,6 +1066,8 @@ export function Player() {
   });
 
   const cancelAutomaticStreamSelection = () => {
+    retryInFlightRef.current = false;
+    setRetryPosition(null);
     autoResolveGenRef.current += 1;
     manualSelectionGenerationRef.current = cancelRecovery();
     setResolveStatus(null);
@@ -1082,6 +1104,8 @@ export function Player() {
   };
 
   const markPlaybackReady = () => {
+    retryInFlightRef.current = false;
+    setRetryPosition(null);
     stopLoading(true);
     setHasPlaybackStarted(true);
     clearTimer(forceShowTimeoutRef);
@@ -1263,6 +1287,18 @@ export function Player() {
     observeTimeUpdate,
     isSeekPending,
     getSeekTarget: () => getSeekTarget() ?? getResumeSeekTarget(),
+    retryFailedSeek: (position) => {
+      if (retryInFlightRef.current) return true;
+      if (
+        seekRetryAttemptedRef.current ||
+        !seekWasPlayingRef.current ||
+        trayPause.getSnapshot() ||
+        panelsOwnSurface
+      )
+        return false;
+      retryPlayback(position, false);
+      return true;
+    },
     isResumePending,
     onObservedTrackSelection: notifyObservedTrackSelection,
     refreshTracks,
@@ -1327,6 +1363,7 @@ export function Player() {
     // Mid-startup, init re-applies its start pause after this consumed the resume pause, stranding playback
     // paused at the resume point. An errored instance has nothing to toggle.
     if (isLoading || error) return;
+    if (isPlayingRef.current) seekWasPlayingRef.current = false;
     trayPause.publish(false);
     takeResumePause();
     return isTerminalEof() ? restartPlayback() : mpvCommand('cycle', ['pause']);
@@ -1730,13 +1767,31 @@ export function Player() {
     openPreparedStreamSelector(null);
   };
 
-  // Clear the failed stream and error so auto-resolve re-ranks and retries in place.
+  const retryPlayback = (position: number, refreshSource: boolean) => {
+    if (retryInFlightRef.current) return;
+    cancelAutomaticStreamSelection();
+    retryInFlightRef.current = true;
+    seekRetryAttemptedRef.current = true;
+    failoverResumePositionRef.current = position;
+    setRetryPosition(position);
+    setIsLoading(true);
+    if (refreshSource) {
+      trayPause.publish(false);
+      retryStreamResolve();
+    } else {
+      setError(null);
+      stream.reloadStream();
+    }
+  };
+
   const handleRetryFailedStream = () => {
-    trayPause.publish(false);
-    // A manual retry is a same-title failover — preserve the live playhead so the re-resolve resumes here.
-    failoverResumePositionRef.current = currentTimeRef.current;
-    setActiveStreamUrl(undefined);
-    setError(null);
+    // Failed range reads can jump time-pos to duration; retry the intended target instead.
+    const position =
+      getSeekTarget()?.seconds ??
+      getResumeSeekTarget()?.seconds ??
+      observedPositionRef.current ??
+      currentTimeRef.current;
+    retryPlayback(position, true);
   };
 
   // `cycleTrack` runs switch-flag + persist bookkeeping a bare `cycle` skips — without it the language auto-apply reverts.
@@ -1861,7 +1916,7 @@ export function Player() {
 
   // -- Effects --
 
-  usePlayerAutoResolve({
+  const retryStreamResolve = usePlayerAutoResolve({
     stream,
     autoResolveGenRef,
     effectiveResolveMediaType,
@@ -1903,12 +1958,7 @@ export function Player() {
     const now = performance.now();
     if (showControls && now - lastControlsWakeAtRef.current < 100) return;
     lastControlsWakeAtRef.current = now;
-    if (
-      event.target instanceof Node &&
-      (topChromeRef.current?.contains(event.target) ||
-        bottomChromeRef.current?.contains(event.target) ||
-        (event.target instanceof Element && event.target.closest('[data-player-pip-chrome]')))
-    ) {
+    if (isPlayerChromeTarget(event.target)) {
       showControlsWithAutoHide();
     } else {
       showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
@@ -1928,34 +1978,32 @@ export function Player() {
     setShowControls(false);
   };
 
+  // Docked mounts skip the expanded-chrome release entirely.
   const releaseInactiveControls = useEffectEvent(() => {
+    if (!isExpanded) return;
     windowActiveRef.current = false;
     handleMouseLeave();
   });
-  const releaseOutsideControls = useEffectEvent(() => handleMouseLeave());
+  const releaseOutsideControls = useEffectEvent(() => {
+    if (!isExpanded) return;
+    handleMouseLeave();
+  });
+  useWindowRelease(releaseInactiveControls, releaseOutsideControls);
   useEffect(() => {
-    const handleBlur = () => releaseInactiveControls();
+    if (!isExpanded) return;
     const handleFocus = () => {
       windowActiveRef.current = document.visibilityState !== 'hidden';
     };
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') releaseInactiveControls();
-      else windowActiveRef.current = document.hasFocus();
+      if (document.visibilityState !== 'hidden') windowActiveRef.current = document.hasFocus();
     };
-    const handlePointerOut = (event: PointerEvent) => {
-      if (event.relatedTarget === null) releaseOutsideControls();
-    };
-    window.addEventListener('blur', handleBlur);
     window.addEventListener('focus', handleFocus);
     document.addEventListener('visibilitychange', handleVisibilityChange);
-    document.addEventListener('pointerout', handlePointerOut);
     return () => {
-      window.removeEventListener('blur', handleBlur);
       window.removeEventListener('focus', handleFocus);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      document.removeEventListener('pointerout', handlePointerOut);
     };
-  }, []);
+  }, [isExpanded]);
 
   const [accumulateWheelSeek] = useState(createWheelSeekAccumulator);
   const handlePlayerWheel = (event: WheelEvent<HTMLElement>) => {
@@ -2031,10 +2079,7 @@ export function Player() {
       windowActiveRef.current &&
       document.hasFocus() &&
       document.visibilityState !== 'hidden' &&
-      event.target instanceof Element &&
-      (topChromeRef.current?.contains(event.target) ||
-        bottomChromeRef.current?.contains(event.target) ||
-        event.target.closest('[data-player-pip-chrome]')) &&
+      isPlayerChromeTarget(event.target) &&
       event.target.matches(':focus-visible')
     ) {
       showControlsWithAutoHide();
@@ -2049,12 +2094,7 @@ export function Player() {
   };
   const handleControlsPointerCapture = (event: ReactPointerEvent<HTMLDivElement>) => {
     if (!windowActiveRef.current || document.visibilityState === 'hidden') return;
-    if (
-      event.target instanceof Element &&
-      (topChromeRef.current?.contains(event.target) ||
-        bottomChromeRef.current?.contains(event.target) ||
-        event.target.closest('[data-player-pip-chrome], [data-player-popover]'))
-    ) {
+    if (isPlayerChromeTarget(event.target, true)) {
       capturedControlsPointerRef.current = { target: event.target, pointerId: event.pointerId };
       showControlsWithAutoHide(POINTER_CONTROLS_IDLE_MS);
     }

@@ -17,7 +17,7 @@ import {
 import { sleep } from '@/lib/utils';
 import { prefetchSearchCatalog } from '@/lib/search-catalog';
 import { readSearchFacets } from '@/lib/search-page-state';
-import { homeTrendingMoviesQueryOptions } from '@/pages/home';
+import { homeTrendingQueryOptions } from '@/pages/home';
 import App from './App';
 import './index.css';
 
@@ -113,7 +113,7 @@ const bootstrapSnapshot = api.getBootstrapSnapshot().then(
 void bootstrapSnapshot.then(() => {
   if (!navigator.onLine) return;
   if (window.location.pathname === '/') {
-    void queryClient.prefetchQuery(homeTrendingMoviesQueryOptions);
+    void queryClient.prefetchQuery(homeTrendingQueryOptions);
   } else if (window.location.pathname === '/search') {
     void prefetchSearchCatalog(
       queryClient,

@@ -233,7 +233,7 @@ export const Sidebar = memo(function Sidebar({ className }: SidebarProps) {
         <nav
           ref={secondaryNavRef}
           aria-label='Secondary'
-          className='relative isolate flex flex-col gap-2.5 mt-auto w-full px-2 pb-4 pointer-events-auto'
+          className='relative isolate flex flex-col gap-2.5 mt-auto w-full px-2 pointer-events-auto'
         >
           <SidebarNavIndicator {...secondaryNav} />
           {SECONDARY_NAV_ITEMS.map((item) => renderItem(item, secondaryNav))}

@@ -1,6 +1,6 @@
 import { getCurrentWindow } from '@tauri-apps/api/window';
 import { AppWindow, ArrowDownRight, GripHorizontal, Loader2 } from 'lucide-react';
-import { memo, useEffect, useState, useSyncExternalStore } from 'react';
+import { memo, useCallback, useState, useSyncExternalStore } from 'react';
 import { PlayerSkipButton } from '@/components/player-action-overlays';
 import {
   CHROME_ENTER_TIMING_CLASS,
@@ -16,6 +16,7 @@ import {
 import { PlayerProgressBar, PlayerTimeDisplay } from '@/components/player-progress-bar';
 import { usePlayerKeymap } from '@/hooks/use-app-ui-preferences';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
+import { useWindowRelease } from '@/hooks/use-window-release';
 import type { SkipSegment } from '@/lib/api';
 import type { PlaybackClock } from '@/lib/player-clock';
 import { snapPlayerPip } from '@/lib/player-pip';
@@ -65,18 +66,7 @@ export const PlayerPipChrome = memo(function PlayerPipChrome(props: PlayerPipChr
   const keymap = usePlayerKeymap();
   const [snapping, setSnapping] = useState(false);
   const [focused, setFocused] = useState(false);
-  useEffect(() => {
-    const clearFocus = () => setFocused(false);
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') clearFocus();
-    };
-    window.addEventListener('blur', clearFocus);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    return () => {
-      window.removeEventListener('blur', clearFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-    };
-  }, []);
+  useWindowRelease(useCallback(() => setFocused(false), []));
   const chromeVisible =
     !leaving && (visible || !props.isPlaying || !!status || !!error || ended || focused);
   const leavingClass = cn(

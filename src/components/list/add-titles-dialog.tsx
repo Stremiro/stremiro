@@ -17,13 +17,14 @@ import { SearchInput } from '@/components/ui/search-input';
 import { SegmentedControl } from '@/components/ui/segmented-control';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useDebounce } from '@/hooks/use-debounce';
+import { ITEM_SEARCH_DEBOUNCE_MS } from '@/hooks/use-item-search';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { useBulkAddToList, useProfileLibrary } from '@/hooks/use-media-library';
 import { api, getListErrorMessage, type MediaItem, type UserList } from '@/lib/api';
 import { canonicalizeSearchText, foldAsciiCase } from '@/lib/api-cache';
 import { whenRowMounted } from '@/lib/dom';
 import { notifyAction } from '@/lib/notify';
-import { invalidateListQueries } from '@/lib/query-invalidation';
+import { invalidateListQueries, SEARCH_CATALOG_QUERY_KEY } from '@/lib/query-invalidation';
 import { cn, pluralize } from '@/lib/utils';
 import { ListIconTile } from './list-icons';
 
@@ -54,34 +55,28 @@ export function AddTitlesDialog({
   const [search, setSearch] = useState('');
   const [visibleLimit, setVisibleLimit] = useState(VISIBLE_PAGE_SIZE);
   const [selectedItems, setSelectedItems] = useState<Map<string, MediaItem>>(new Map());
-  const debouncedSearch = useDebounce(search, 180);
-  const matchingLibraryQuery = useProfileLibrary({
-    query: debouncedSearch,
-    sort: 'title-asc',
-  });
+  const debouncedSearch = useDebounce(search, ITEM_SEARCH_DEBOUNCE_MS);
+  const matchingLibraryQuery = useProfileLibrary(
+    { query: debouncedSearch, sort: 'title-asc' },
+    { enabled: source === 'library' },
+  );
   const discoverSearchText = canonicalizeSearchText(debouncedSearch);
   const discoverQueryText = discoverSearchText ? foldAsciiCase(discoverSearchText) : undefined;
   const discoverQuery = useQuery({
-    queryKey: ['add-titles-discover', discoverQueryText],
+    queryKey: [...SEARCH_CATALOG_QUERY_KEY, 'add-titles-discover', discoverQueryText],
     queryFn: () => api.querySearchCatalogPage({ query: discoverQueryText }),
     enabled: source === 'discover',
     placeholderData: keepPreviousData,
     staleTime: 30_000,
   });
+  const sourceQuery = source === 'library' ? matchingLibraryQuery : discoverQuery;
   const hasLibraryError =
     matchingLibraryQuery.isError ||
     (matchingLibraryQuery.isFetched &&
       (matchingLibraryQuery.isPending || matchingLibraryQuery.isPlaceholderData));
   const sourceError = source === 'library' ? hasLibraryError : discoverQuery.isError;
-  const sourcePending =
-    source === 'library' ? matchingLibraryQuery.isPending : discoverQuery.isPending;
-  const sourcePlaceholder =
-    source === 'library' ? matchingLibraryQuery.isPlaceholderData : discoverQuery.isPlaceholderData;
-  const isSearchPending = search !== debouncedSearch || sourcePlaceholder;
-  const matchingItems =
-    source === 'library'
-      ? (matchingLibraryQuery.data?.items ?? EMPTY_ITEMS)
-      : (discoverQuery.data?.items ?? EMPTY_ITEMS);
+  const isSearchPending = search !== debouncedSearch || sourceQuery.isPlaceholderData;
+  const matchingItems = sourceQuery.data?.items ?? EMPTY_ITEMS;
   const existingIds = useMemo(() => new Set(list.item_ids), [list.item_ids]);
   // Selections survive filter changes: library mode intersects with the
   // unfiltered allIds set, discover keeps the whole item for addToList.
@@ -96,7 +91,8 @@ export function AddTitlesDialog({
 
   const addTitles = useBulkAddToList();
   const [discoverBusy, setDiscoverBusy] = useState(false);
-  const selectionDisabled = addTitles.isPending || discoverBusy || isSearchPending || sourcePending;
+  const selectionDisabled =
+    addTitles.isPending || discoverBusy || isSearchPending || sourceQuery.isPending;
 
   const toggleSelection = (item: MediaItem) => {
     setSelectedItems((previous) => {
@@ -205,23 +201,19 @@ export function AddTitlesDialog({
         {sourceError && (
           <RetryBanner
             message={source === 'library' ? "Couldn't load your library." : "Couldn't load titles."}
-            onRetry={() =>
-              void (source === 'library' ? matchingLibraryQuery.refetch() : discoverQuery.refetch())
-            }
-            isRetrying={
-              source === 'library' ? matchingLibraryQuery.isFetching : discoverQuery.isFetching
-            }
+            onRetry={() => void sourceQuery.refetch()}
+            isRetrying={sourceQuery.isFetching}
           />
         )}
         <div
           ref={scrollRef}
-          aria-busy={isSearchPending || sourcePending}
+          aria-busy={isSearchPending || sourceQuery.isPending}
           className={cn(
             'min-h-0 overflow-y-auto rounded-xl border border-white/[0.06] bg-white/[0.02] p-1.5 transition-opacity duration-200',
-            sourcePlaceholder && 'opacity-60',
+            sourceQuery.isPlaceholderData && 'opacity-60',
           )}
         >
-          {sourcePending ? (
+          {sourceQuery.isPending ? (
             <div
               role='status'
               className='flex items-center justify-center gap-2 py-12 text-sm text-zinc-500'
@@ -414,19 +406,31 @@ export function AddTitlesDialog({
                       items.map((item) => api.addToList(list.id, item)),
                     );
                     const added = results.filter((result) => result.status === 'fulfilled').length;
+                    const failure = results.find((result) => result.status === 'rejected');
                     await invalidateListQueries(queryClient);
+                    if (mountedRef.current) {
+                      setSelectedItems((previous) => {
+                        const next = new Map(previous);
+                        for (const [index, result] of results.entries()) {
+                          if (result.status === 'fulfilled') next.delete(items[index].id);
+                        }
+                        return next;
+                      });
+                    }
                     if (added === 0) {
-                      const reason = results.find((result) => result.status === 'rejected')?.reason;
-                      notifyAction(getListErrorMessage(reason) ?? 'Failed to add titles', {
+                      notifyAction(getListErrorMessage(failure?.reason) ?? 'Failed to add titles', {
                         tone: 'error',
                       });
                     } else {
                       const failed = items.length - added;
                       notifyAction(
                         `Added ${pluralize(added, 'title')}${failed ? `, ${failed} failed` : ''}`,
-                        { detail: list.name },
+                        {
+                          detail: failure ? getListErrorMessage(failure.reason) : list.name,
+                          tone: failed ? 'error' : undefined,
+                        },
                       );
-                      onOpenChange(false);
+                      if (!failed && mountedRef.current) onOpenChange(false);
                     }
                   })().finally(() => {
                     if (mountedRef.current) setDiscoverBusy(false);

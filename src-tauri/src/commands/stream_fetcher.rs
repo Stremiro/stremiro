@@ -322,6 +322,11 @@ fn log_fetcher_error(action: &str, outcome: &str, error: &str) {
     log_warn("stream-fetcher", action, outcome, &[field("error", error)]);
 }
 
+fn logged_fallback<T>(action: &'static str, outcome: &'static str, error: &str, fallback: T) -> T {
+    log_fetcher_error(action, outcome, error);
+    fallback
+}
+
 fn load_effective_playback_language_preferences(
     defaults: PlaybackLanguagePreferences,
     app: &AppHandle,
@@ -337,12 +342,12 @@ fn load_effective_playback_language_preferences(
             defaults.clone(),
         )
         .unwrap_or_else(|error| {
-            log_fetcher_error(
+            logged_fallback(
                 "load_effective_playback_language_preferences",
                 "language-preferences-fallback",
                 &error,
-            );
-            defaults
+                defaults,
+            )
         })
 }
 
@@ -703,12 +708,12 @@ fn episode_video_key(ranking: &StreamRankingScope) -> Option<(String, String, u3
 }
 
 fn episode_video_id_fallback(error: String) -> Option<String> {
-    log_fetcher_error(
+    logged_fallback(
         "cached_episode_video_id",
         "episode-video-id-fallback",
         &error,
-    );
-    None
+        None,
+    )
 }
 
 async fn cached_episode_video_id(
@@ -717,13 +722,12 @@ async fn cached_episode_video_id(
     ranking: &StreamRankingScope,
 ) -> Option<String> {
     let (media_type, media_id, season, episode) = episode_video_key(ranking)?;
-    let app = app.clone();
-    let service = playback_state.clone();
-    super::run_blocking_store_op(move || {
-        service.get_episode_video_id(&app, &media_type, &media_id, season, episode)
-    })
-    .await
-    .unwrap_or_else(episode_video_id_fallback)
+    playback_state
+        .run_store_op(app, move |service, app| {
+            service.get_episode_video_id(app, &media_type, &media_id, season, episode)
+        })
+        .await
+        .unwrap_or_else(episode_video_id_fallback)
 }
 
 #[derive(Default)]
@@ -787,12 +791,12 @@ impl SelectorStoreRead {
 }
 
 fn selector_inputs_fallback<T: Default>(error: String) -> T {
-    log_fetcher_error(
+    logged_fallback(
         "snapshot_selector_inputs",
         "selector-inputs-fallback",
         &error,
-    );
-    T::default()
+        T::default(),
+    )
 }
 
 /// Store reads before the fan-out: the episode video id plus the fixed ranking inputs

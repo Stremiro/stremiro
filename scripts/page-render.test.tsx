@@ -63,17 +63,20 @@ const { MemoryRouter, Route, Routes } = router;
 const { Search } = await import('../src/pages/search');
 const { Details } = await import('../src/pages/details');
 const { Calendar } = await import('../src/pages/calendar');
-const { Home, homeTrendingMoviesQueryOptions } = await import('../src/pages/home');
+const { Home, homeTrendingQueryOptions } = await import('../src/pages/home');
 const { api, DEFAULT_APP_UI_PREFERENCES } = await import('../src/lib/api');
 const { queryClient } = await import('../src/lib/query-client');
 const {
   APP_UI_PREFERENCES_QUERY_KEY,
+  DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
   DETAILS_QUERY_KEY,
   RECENT_WATCH_SEED_QUERY_KEY,
   detailsCardQueryKey,
   invalidateDiscoveryQueries,
   listSummariesQueryKey,
   profileLibraryQueryKey,
+  invalidateAddonCapabilityQueries,
+  SEARCH_CATALOG_QUERY_KEY,
   streamSelectorQueryKey,
   titleWatchProgressQueryKey,
 } = await import('../src/lib/query-invalidation');
@@ -88,19 +91,23 @@ const { SaveToCollectionPanel } = await import('../src/components/list/save-to-c
 const { DetailsSections, DetailsSectionTabs, NextAiringChip } =
   await import('../src/components/details-sections');
 const { useNearViewport } = await import('../src/hooks/use-near-viewport');
-const { useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
+const { useWindowRelease } = await import('../src/hooks/use-window-release');
+const { usePlayerKeymap, useRecentSearches } = await import('../src/hooks/use-app-ui-preferences');
 const { useMarkSeasonWatched, useMediaCollectionActions } =
   await import('../src/hooks/use-media-library');
 const { flushPendingAppWrites } = await import('../src/lib/pending-app-writes');
 const playerMpv = await import('../src/lib/player-mpv');
 const tauriCore = await import('@tauri-apps/api/core');
 const { createPlaybackClock } = await import('../src/lib/player-clock');
-const { PlayerProgressBar } = await import('../src/components/player-progress-bar');
 const { SettingsSelect } = await import('../src/pages/settings/chrome');
 const { RetryBanner } = await import('../src/components/retry-banner');
 const { Tabs, TabsTrigger } = await import('../src/components/ui/tabs');
 const { PlayerSessionProvider, usePlayerSession } = await import('../src/lib/player-session');
 const { useOptimisticSeek } = await import('../src/hooks/use-optimistic-seek');
+const { usePlayerAutoResolve } = await import('../src/hooks/use-player-auto-resolve');
+const { getPlayerStreamLoadKey, usePlayerMpvLifecycle } =
+  await import('../src/hooks/use-player-mpv-lifecycle');
+const mpvEvents = await import('tauri-plugin-libmpv-api');
 const { usePlayerResumeController } = await import('../src/hooks/use-player-resume-controller');
 const { usePlayerTrackController } = await import('../src/hooks/use-player-track-controller');
 const { useMpvSetScheduler } = await import('../src/hooks/use-mpv-set-scheduler');
@@ -122,12 +129,107 @@ const pendingWrites = await import('../src/lib/pending-app-writes');
 const tauriWindow = await import('@tauri-apps/api/window');
 const { createSubscribableStore } = await import('../src/lib/subscribable-store');
 
+// Stubs a global for the test's duration; the returned restore puts back the original descriptor.
+function stubGlobal(name: string, value: unknown): () => void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, name);
+  Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  return () => {
+    if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+    else delete (globalThis as Record<string, unknown>)[name];
+  };
+}
+
+// Runs the effects a render captured and collects their cleanups.
+function runEffects(effects: EffectCallback[] | null, cleanups: (() => void)[]) {
+  capturedEffects = null;
+  for (const effect of effects ?? []) {
+    const cleanup = effect();
+    if (cleanup) cleanups.push(cleanup);
+  }
+}
+
+// Resolves a hook's return value through `captured` during a server render.
+function captureHook<T>(use: () => T): {
+  Fixture: () => null;
+  captured: PromiseWithResolvers<T>;
+} {
+  const captured = Promise.withResolvers<T>();
+  function Fixture() {
+    captured.resolve(use());
+    return null;
+  }
+  return { Fixture, captured } as const;
+}
+
+const testClient = (retryOnMount = true) =>
+  new QueryClient({
+    defaultOptions: { queries: { retry: false, retryOnMount, gcTime: Infinity } },
+  });
+
+type AddonSubtitleArgs = Parameters<typeof usePlayerAddonSubtitles>[0];
+function addonSubtitleArgs(overrides: Partial<AddonSubtitleArgs>): AddonSubtitleArgs {
+  return {
+    activeStreamLoadKey: 'stream',
+    announce: () => {},
+    autoLoadLanguage: null,
+    effectiveResolveMediaType: 'movie',
+    id: 'tt1',
+    menuOpen: false,
+    mountedRef: { current: true },
+    selectAddonSubtitle: async () => false,
+    setTrack: async () => false,
+    subTracks: [],
+    ...overrides,
+  };
+}
+
+test.each([false, true])(
+  'Window release preserves optional pointer-exit behavior (%s)',
+  (pointerExit) => {
+    const appWindow = new EventTarget();
+    const doc = Object.assign(new EventTarget(), { visibilityState: 'visible' });
+    const restoreWindow = stubGlobal('window', appWindow);
+    const restoreDocument = stubGlobal('document', doc);
+    const release = mock(() => {});
+    const onPointerOut = mock(() => {});
+    function Probe() {
+      useWindowRelease(release, pointerExit ? onPointerOut : undefined);
+      return null;
+    }
+    const cleanups: (() => void)[] = [];
+    capturedEffects = [];
+    try {
+      renderToStaticMarkup(<Probe />);
+      runEffects(capturedEffects, cleanups);
+      appWindow.dispatchEvent(new Event('blur'));
+      doc.dispatchEvent(new Event('visibilitychange'));
+      expect(release).toHaveBeenCalledTimes(1);
+      doc.visibilityState = 'hidden';
+      doc.dispatchEvent(new Event('visibilitychange'));
+      expect(release).toHaveBeenCalledTimes(2);
+      doc.dispatchEvent(Object.assign(new Event('pointerout'), { relatedTarget: appWindow }));
+      expect(onPointerOut).not.toHaveBeenCalled();
+      doc.dispatchEvent(Object.assign(new Event('pointerout'), { relatedTarget: null }));
+      expect(onPointerOut).toHaveBeenCalledTimes(pointerExit ? 1 : 0);
+      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      cleanups.length = 0;
+      appWindow.dispatchEvent(new Event('blur'));
+      doc.dispatchEvent(new Event('visibilitychange'));
+      expect(release).toHaveBeenCalledTimes(2);
+    } finally {
+      capturedEffects = null;
+      for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+      restoreWindow();
+      restoreDocument();
+    }
+  },
+);
+
 test.each([false, true])(
   'Reload keys and tray close respect the player session (active=%s)',
   async (active) => {
-    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
     const target = new EventTarget();
-    Object.defineProperty(globalThis, 'window', { configurable: true, value: target });
+    const restoreWindow = stubGlobal('window', target);
     let closeRequested: Parameters<TauriWindow['onCloseRequested']>[0] | undefined;
     let quitRequested: (() => void) | undefined;
     const disposeClose = mock(() => {});
@@ -172,14 +274,12 @@ test.each([false, true])(
     const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue(undefined);
     const flush = spyOn(pendingWrites, 'flushPendingAppWrites').mockReturnValue(saved.promise);
     const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
-    const cleanups: ReturnType<EffectCallback>[] = [];
+    const cleanups: (() => void)[] = [];
     let closing: void | Promise<void>;
     try {
       capturedEffects = [];
       renderToStaticMarkup(<AppCloseManager />);
-      const effects = capturedEffects;
-      capturedEffects = null;
-      for (const effect of effects) cleanups.push(effect());
+      runEffects(capturedEffects, cleanups);
       if (active) listenersReady.resolve();
       await Bun.sleep(0);
       for (const presentation of ['expanded', 'mini'] as const) {
@@ -238,8 +338,7 @@ test.each([false, true])(
       capturedEffects = null;
       for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
       for (const spy of [...spies, hide, pause, destroy, flush, notice]) spy.mockRestore();
-      if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor);
-      else Reflect.deleteProperty(globalThis, 'window');
+      restoreWindow();
       listenersReady.resolve();
       await Bun.sleep(0);
       expect(disposeClose).toHaveBeenCalledTimes(1);
@@ -257,12 +356,6 @@ function BrowseHotkeysFixture() {
 }
 
 test('Browse hotkeys map Alt sections/history and yield to owned contexts', async () => {
-  const descriptors = new Map(
-    ['window', 'document', 'Element', 'HTMLElement'].map(
-      (name) => [name, Object.getOwnPropertyDescriptor(globalThis, name)] as const,
-    ),
-  );
-
   class ElementStub {
     isContentEditable = false;
     constructor(private readonly hits: (selector: string) => unknown = () => null) {}
@@ -294,13 +387,12 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
       return selector === '[data-radix-popper-content-wrapper]' ? popperLayers : [];
     },
   };
-  Object.defineProperty(globalThis, 'window', { configurable: true, value: windowTarget });
-  Object.defineProperty(globalThis, 'document', { configurable: true, value: documentStub });
-  Object.defineProperty(globalThis, 'Element', { configurable: true, value: ElementStub });
-  Object.defineProperty(globalThis, 'HTMLElement', {
-    configurable: true,
-    value: HTMLElementStub,
-  });
+  const restores = [
+    stubGlobal('window', windowTarget),
+    stubGlobal('document', documentStub),
+    stubGlobal('Element', ElementStub),
+    stubGlobal('HTMLElement', HTMLElementStub),
+  ];
 
   const navigateTo = spyOn(appNavigation, 'navigateApp').mockReturnValue(true);
   const back = spyOn(appNavigation, 'navigateBack').mockReturnValue(true);
@@ -321,13 +413,11 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
     windowTarget.dispatchEvent(event);
     return event.defaultPrevented;
   };
-  const cleanups: ReturnType<EffectCallback>[] = [];
+  const cleanups: (() => void)[] = [];
   try {
     capturedEffects = [];
     renderToStaticMarkup(<BrowseHotkeysFixture />);
-    const effects = capturedEffects;
-    capturedEffects = null;
-    for (const effect of effects) cleanups.push(effect());
+    runEffects(capturedEffects, cleanups);
 
     for (const [key, expected] of [
       ['1', '/'],
@@ -417,14 +507,11 @@ test('Browse hotkeys map Alt sections/history and yield to owned contexts', asyn
     capturedEffects = null;
     for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
     for (const spy of [navigateTo, back, forward, searchPath]) spy.mockRestore();
-    for (const [name, descriptor] of descriptors) {
-      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
-      else Reflect.deleteProperty(globalThis, name);
-    }
+    for (const restore of restores) restore();
   }
 });
 
-test('Case-only title edits share the catalog cache', async () => {
+test('Case-only title and genre edits share the catalog cache', async () => {
   const client = new QueryClient();
   const fetch = spyOn(api, 'querySearchCatalogPage').mockResolvedValue({
     items: [],
@@ -433,11 +520,11 @@ test('Case-only title edits share the catalog cache', async () => {
     continuation: { seenKeys: [] },
   });
   try {
-    const options = (query: string) =>
-      searchCatalogQueryOptions({ query, type: 'all', feed: 'popular' }, 2026);
-    await client.prefetchInfiniteQuery(options('Dune'));
-    await client.prefetchInfiniteQuery(options('DUNE'));
-    await client.prefetchInfiniteQuery(options('dune'));
+    const options = (query: string, genre: string) =>
+      searchCatalogQueryOptions({ query, genre, type: 'all', feed: 'popular' }, 2026);
+    await client.prefetchInfiniteQuery(options('Dune', 'Drama'));
+    await client.prefetchInfiniteQuery(options('DUNE', 'DRAMA'));
+    await client.prefetchInfiniteQuery(options('dune', 'drama'));
     expect(fetch).toHaveBeenCalledTimes(1);
   } finally {
     fetch.mockRestore();
@@ -523,18 +610,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   const matchLanguage = spyOn(api, 'resolvePreferredTrackSelection').mockResolvedValue({});
   let menuOpen = false;
   function Subtitles() {
-    usePlayerAddonSubtitles({
-      activeStreamLoadKey: 'stream',
-      announce: () => {},
-      autoLoadLanguage: 'eng',
-      effectiveResolveMediaType: 'movie',
-      id: key[2],
-      menuOpen,
-      mountedRef: { current: true },
-      selectAddonSubtitle: async () => false,
-      setTrack: async () => false,
-      subTracks: [],
-    });
+    usePlayerAddonSubtitles(addonSubtitleArgs({ autoLoadLanguage: 'eng', id: key[2], menuOpen }));
     return null;
   }
   let unsubscribe: (() => void) | undefined;
@@ -547,12 +623,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
   try {
     capturedEffects = [];
     renderToStaticMarkup(view);
-    const effects = capturedEffects;
-    capturedEffects = null;
-    for (const effect of effects) {
-      const cleanup = effect();
-      if (cleanup) cleanups.push(cleanup);
-    }
+    runEffects(capturedEffects, cleanups);
     expect(matchLanguage).not.toHaveBeenCalled();
     const query = client.getQueryCache().find({ queryKey: key })!;
     const observer = new QueryObserver(client, query.options);
@@ -562,12 +633,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     menuOpen = true;
     capturedEffects = [];
     renderToStaticMarkup(view);
-    const openEffects = capturedEffects;
-    capturedEffects = null;
-    for (const effect of openEffects) {
-      const cleanup = effect();
-      if (cleanup) cleanups.push(cleanup);
-    }
+    runEffects(capturedEffects, cleanups);
     await query.promise;
     expect(fetch).toHaveBeenCalledTimes(2);
     menuOpen = false;
@@ -576,12 +642,7 @@ test('Reopening addon subtitles rechecks Rust before automatic selection', async
     client.setQueryData(key, cached);
     capturedEffects = [];
     renderToStaticMarkup(view);
-    const readyEffects = capturedEffects;
-    capturedEffects = null;
-    for (const effect of readyEffects) {
-      const cleanup = effect();
-      if (cleanup) cleanups.push(cleanup);
-    }
+    runEffects(capturedEffects, cleanups);
     expect(matchLanguage).toHaveBeenCalledTimes(1);
   } finally {
     capturedEffects = null;
@@ -599,20 +660,14 @@ test('Subtitle results stay available while mounted but leave the cache after pl
   let episode = 1;
   const releases: (() => void)[] = [];
   function Fixture() {
-    usePlayerAddonSubtitles({
-      activeStreamLoadKey: `episode-${episode}`,
-      announce: () => {},
-      autoLoadLanguage: null,
-      effectiveResolveMediaType: 'series',
-      id: 'tt1',
-      menuOpen: false,
-      mountedRef: { current: true },
-      resolvedStreamSeason: 1,
-      resolvedStreamEpisode: episode,
-      selectAddonSubtitle: async () => false,
-      setTrack: async () => false,
-      subTracks: [],
-    });
+    usePlayerAddonSubtitles(
+      addonSubtitleArgs({
+        activeStreamLoadKey: `episode-${episode}`,
+        effectiveResolveMediaType: 'series',
+        resolvedStreamSeason: 1,
+        resolvedStreamEpisode: episode,
+      }),
+    );
     return null;
   }
   try {
@@ -655,26 +710,11 @@ test.each([
     const native = Promise.withResolvers<boolean>();
     const replacement = Promise.withResolvers<boolean>();
     const select = mock(() => native.promise);
-    const controller = Promise.withResolvers<ReturnType<typeof usePlayerAddonSubtitles>>();
+    const { Fixture, captured: controller } = captureHook(() =>
+      usePlayerAddonSubtitles(addonSubtitleArgs({ selectAddonSubtitle: select })),
+    );
     const notice = spyOn(toast, 'error').mockImplementation(() => 'notice');
     const cleanups: (() => void)[] = [];
-    function Fixture() {
-      controller.resolve(
-        usePlayerAddonSubtitles({
-          activeStreamLoadKey: 'stream',
-          announce: () => {},
-          autoLoadLanguage: null,
-          effectiveResolveMediaType: 'movie',
-          id: 'tt1',
-          menuOpen: false,
-          mountedRef: { current: true },
-          selectAddonSubtitle: select,
-          setTrack: async () => false,
-          subTracks: [],
-        }),
-      );
-      return null;
-    }
     try {
       capturedEffects = [];
       renderToStaticMarkup(
@@ -683,11 +723,7 @@ test.each([
         </QueryClientProvider>,
       );
       const effects = capturedEffects;
-      capturedEffects = null;
-      for (const effect of effects) {
-        const cleanup = effect();
-        if (cleanup) cleanups.push(cleanup);
-      }
+      runEffects(effects, cleanups);
       const hook = await controller.promise;
       const subtitle = {
         id: 'sub',
@@ -702,10 +738,7 @@ test.each([
       let replacementSelection: Promise<void> | undefined;
       if (cancelled) {
         cleanups.splice(0).forEach((cleanup) => cleanup());
-        for (const effect of effects) {
-          const cleanup = effect();
-          if (cleanup) cleanups.push(cleanup);
-        }
+        runEffects(effects, cleanups);
         select.mockImplementationOnce(() => replacement.promise);
         replacementSelection = hook.handleAddonSubtitleSelect(subtitle);
       }
@@ -743,35 +776,29 @@ test.each([
   { cancelled: true, failed: false },
   { cancelled: true, failed: true },
 ])('Play next reports only the current lookup result (%j)', async ({ cancelled, failed }) => {
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
-  Object.defineProperty(globalThis, 'window', {
-    configurable: true,
-    value: { location: { pathname: '/profile', search: '' } },
+  const restoreWindow = stubGlobal('window', {
+    location: { pathname: '/profile', search: '' },
   });
   const client = new QueryClient();
   const lookup = Promise.withResolvers<Awaited<ReturnType<typeof api.getNextEpisodeRow>>>();
   const next = spyOn(api, 'getNextEpisodeRow').mockImplementation(() => lookup.promise);
   const info = spyOn(toast, 'info').mockImplementation(() => 'notice');
   const error = spyOn(toast, 'error').mockImplementation(() => 'error');
-  const controller = Promise.withResolvers<ReturnType<typeof useHistoryPlayback>>();
-  function History() {
-    controller.resolve(
-      useHistoryPlayback(
-        {
-          id: 'tt1',
-          type_: 'series',
-          season: 1,
-          episode: 1,
-          position: 100,
-          duration: 1000,
-          last_watched: 1,
-          title: 'Series',
-        },
-        'Failed to resume',
-      ),
-    );
-    return null;
-  }
+  const { Fixture: History, captured: controller } = captureHook(() =>
+    useHistoryPlayback(
+      {
+        id: 'tt1',
+        type_: 'series',
+        season: 1,
+        episode: 1,
+        position: 100,
+        duration: 1000,
+        last_watched: 1,
+        title: 'Series',
+      },
+      'Failed to resume',
+    ),
+  );
   try {
     renderToStaticMarkup(
       <MemoryRouter>
@@ -795,8 +822,7 @@ test.each([
     lookup.resolve(null);
     for (const spy of [next, info, error]) spy.mockRestore();
     client.clear();
-    if (descriptor) Object.defineProperty(globalThis, 'window', descriptor);
-    else Reflect.deleteProperty(globalThis, 'window');
+    restoreWindow();
   }
 });
 
@@ -832,29 +858,21 @@ test.each([
 );
 
 test('Volume and unmute share one native batch with no delayed unmute after a newer mute', async () => {
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
   const frames: FrameRequestCallback[] = [];
-  Object.defineProperty(globalThis, 'window', {
-    configurable: true,
-    value: {
-      requestAnimationFrame: (callback: FrameRequestCallback) => {
-        frames.push(callback);
-        return 1;
-      },
-      cancelAnimationFrame: () => {},
+  const restoreWindow = stubGlobal('window', {
+    requestAnimationFrame: (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return 1;
     },
+    cancelAnimationFrame: () => {},
   });
   const pending = Promise.withResolvers<[]>();
   const batch = spyOn(playerMpv, 'setMpvProperties')
     .mockImplementationOnce(() => pending.promise)
     .mockResolvedValue([]);
   const single = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
-  const controller = Promise.withResolvers<ReturnType<typeof useMpvSetScheduler>>();
+  const { Fixture: AudioFixture, captured: controller } = captureHook(useMpvSetScheduler);
   const writes: Promise<unknown>[] = [];
-  function AudioFixture() {
-    controller.resolve(useMpvSetScheduler());
-    return null;
-  }
   try {
     renderToStaticMarkup(<AudioFixture />);
     const schedule = await controller.promise;
@@ -875,8 +893,7 @@ test('Volume and unmute share one native batch with no delayed unmute after a ne
     await Promise.allSettled(writes);
     batch.mockRestore();
     single.mockRestore();
-    if (descriptor) Object.defineProperty(globalThis, 'window', descriptor);
-    else Reflect.deleteProperty(globalThis, 'window');
+    restoreWindow();
   }
 });
 
@@ -930,21 +947,17 @@ test('Manual subtitles Off wins, and stale refreshes cannot erase a confirmed ad
   const save = spyOn(api, 'saveSelectedPlaybackLanguagePreference').mockResolvedValue({
     preferences: { preferredSubtitleLanguage: 'off' },
   });
-  const controller = Promise.withResolvers<ReturnType<typeof usePlayerTrackController>>();
-  function TrackFixture() {
-    controller.resolve(
-      usePlayerTrackController({
-        mediaId: 'local',
-        mediaType: 'movie',
-        activeStreamUrl: 'https://example.com/video',
-        hasPlaybackStarted: true,
-        isLoading: false,
-        isResolving: false,
-        resetKey: 'manual-off',
-      }),
-    );
-    return null;
-  }
+  const { Fixture: TrackFixture, captured: controller } = captureHook(() =>
+    usePlayerTrackController({
+      mediaId: 'local',
+      mediaType: 'movie',
+      activeStreamUrl: 'https://example.com/video',
+      hasPlaybackStarted: true,
+      isLoading: false,
+      isResolving: false,
+      resetKey: 'manual-off',
+    }),
+  );
   try {
     renderToStaticMarkup(
       <QueryClientProvider client={client}>
@@ -1045,19 +1058,15 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
   clock.publish(900);
   const durationRef = { current: 0 };
   const mpvInitializedRef = { current: false };
-  const controller = Promise.withResolvers<ReturnType<typeof useOptimisticSeek>>();
-  function SeekFixture() {
-    controller.resolve(
-      useOptimisticSeek({
-        clock,
-        durationRef,
-        mpvInitializedRef,
-        onUserSeek,
-        triggerOsd: () => {},
-      }),
-    );
-    return null;
-  }
+  const { Fixture: SeekFixture, captured: controller } = captureHook(() =>
+    useOptimisticSeek({
+      clock,
+      durationRef,
+      mpvInitializedRef,
+      onUserSeek,
+      triggerOsd: () => {},
+    }),
+  );
   try {
     renderToStaticMarkup(<SeekFixture />);
     const seeking = await controller.promise;
@@ -1081,11 +1090,16 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
     expect(seeking.getSeekTarget()).toBeNull();
     mpvInitializedRef.current = true;
     durationRef.current = 3600;
-    await seeking.seekRelative(10);
+    await Promise.all([
+      seeking.seekRelative(10),
+      seeking.seekRelative(10),
+      seeking.seekRelative(-10),
+    ]);
+    expect(nativeSeek.mock.calls).toEqual([[910], [920], [910]]);
+    expect(nativeCommand).not.toHaveBeenCalled();
     await seeking.seek(950);
-    expect(nativeCommand).toHaveBeenCalledWith('seek', ['10', 'relative']);
     expect(nativeSeek).toHaveBeenCalledWith(950);
-    expect(onUserSeek).toHaveBeenCalledTimes(2);
+    expect(onUserSeek).toHaveBeenCalledTimes(4);
     expect(clock.getSnapshot()).toBe(950);
     expect(seeking.observeTimeUpdate(950, performance.now())).toBe(false);
     expect(seeking.isSeekPending()).toBe(false);
@@ -1094,6 +1108,306 @@ test('Startup seeks leave pending resume and the playback clock untouched until 
     expect(seeking.getSeekTarget()).toBeNull();
   } finally {
     for (const spy of [nativeSeek, nativeCommand]) spy.mockRestore();
+  }
+});
+
+test('manual stream retry bypasses the cached URL and rejects a late resolve winner', async () => {
+  const runtime = spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true);
+  const initial = { url: 'https://example.com/old', streamKey: 's:retry', cacheTtlMs: 60_000 };
+  const fresh = { ...initial, url: 'https://example.com/fresh' };
+  const late = Promise.withResolvers<typeof initial>();
+  const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(initial);
+  const stream: Parameters<typeof usePlayerAutoResolve>[0]['stream'] = {
+    reloadStream: () => {},
+    activeStreamSourceIdRef: { current: undefined },
+    activeStreamSourceNameRef: { current: undefined },
+    activeStreamFamilyRef: { current: undefined },
+    selectedStreamKeyRef: { current: undefined },
+    streamLookupIdRef: { current: 'tt-retry' },
+    committedStreamUrlRef: { current: undefined },
+    setActiveStreamUrl: mock((url) => {
+      stream.activeStreamUrl = url;
+    }),
+  };
+  const setError = mock(() => {});
+  const effects: EffectCallback[] = [];
+  const cleanups: ReturnType<EffectCallback>[] = [];
+  const { Fixture, captured: controller } = captureHook(() =>
+    usePlayerAutoResolve({
+      stream,
+      autoResolveGenRef: { current: 0 },
+      effectiveResolveMediaType: 'movie',
+      error: null,
+      id: 'tt-retry',
+      isResolving: false,
+      mountedRef: { current: true },
+      routeSelectedStreamKey: 's:retry',
+      setError,
+      setResolveStatus: () => {},
+      shouldWaitForResolvedLookupId: false,
+      showStreamSelector: false,
+      stopLoading: () => {},
+      type: 'movie',
+    }),
+  );
+  try {
+    capturedEffects = effects;
+    renderToStaticMarkup(<Fixture />);
+    capturedEffects = null;
+    const retry = await controller.promise;
+    const resolve = effects.at(-1)!;
+    cleanups.push(resolve());
+    await Bun.sleep(0);
+    expect(stream.activeStreamUrl).toBe(initial.url);
+    const firstLoadKey = getPlayerStreamLoadKey(stream);
+    stream.loadRevision = 1;
+    expect(getPlayerStreamLoadKey(stream)).not.toBe(firstLoadKey);
+    invoke.mockReturnValueOnce(late.promise);
+    retry!();
+    expect(stream.activeStreamUrl).toBeUndefined();
+    expect(setError).toHaveBeenLastCalledWith(null);
+    cleanups.push(resolve());
+    await Bun.sleep(0);
+    expect(invoke.mock.calls.filter(([name]) => name === 'resolve_best_stream')).toHaveLength(2);
+    retry!();
+    invoke.mockResolvedValueOnce(fresh);
+    cleanups.push(resolve());
+    await Bun.sleep(0);
+    late.resolve({ ...initial, url: 'https://example.com/late' });
+    await Bun.sleep(0);
+    expect(stream.activeStreamUrl).toBe(fresh.url);
+    expect(invoke.mock.calls.filter(([name]) => name === 'resolve_best_stream')).toHaveLength(3);
+  } finally {
+    late.resolve(initial);
+    capturedEffects = null;
+    for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
+    await Bun.sleep(0);
+    runtime.mockRestore();
+    invoke.mockRestore();
+  }
+});
+
+test('seek lifecycle discards old probes and waits for confirmed EOF before failing or ending', async () => {
+  const restoreWindow = stubGlobal('window', {
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame: (callback: FrameRequestCallback) =>
+      setTimeout(() => callback(performance.now()), 0),
+    cancelAnimationFrame: clearTimeout,
+  });
+  const restoreDocument = stubGlobal(
+    'document',
+    Object.assign(new EventTarget(), { hidden: false }),
+  );
+  const client = new QueryClient();
+  client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
+  let emit: Parameters<typeof mpvEvents.listenEvents>[0] | undefined;
+  const listen = spyOn(mpvEvents, 'listenEvents').mockImplementation(async (callback) => {
+    emit = callback;
+    return () => {};
+  });
+  const command = spyOn(playerMpv, 'mpvCommand').mockResolvedValue();
+  const init = spyOn(playerMpv, 'mpvInit').mockResolvedValue('ready');
+  const destroy = spyOn(playerMpv, 'mpvDestroy').mockResolvedValue();
+  const properties = spyOn(playerMpv, 'setMpvProperties').mockResolvedValue([]);
+  const audio = spyOn(playerMpv, 'setMpvAudioSettings').mockResolvedValue();
+  const subtitles = spyOn(playerMpv, 'setMpvSubtitleAppearance').mockResolvedValue();
+  const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
+  const snapshot = {
+    timePos: 20,
+    bufferedAhead: 1,
+    nearCompletion: false,
+    nextEpisodePrefetchDue: false,
+    seekFailed: false,
+    prematureEof: false,
+    eofReached: false,
+  };
+  const probe = spyOn(playerMpv, 'readPlaybackPositionProbe').mockResolvedValue(snapshot);
+  const now = spyOn(performance, 'now').mockReturnValue(1000);
+  const clock = createPlaybackClock();
+  const durationRef = { current: 120 };
+  const mpvInitializedRef = { current: false };
+  const errorRef = { current: null as string | null };
+  const onEndedChange = mock(() => {});
+  const setStreamError = mock((value: string) => {
+    errorRef.current = value;
+  });
+  const save = mock(async () => {});
+  const retryFailedSeek = mock((_position: number) => false);
+  const forceShowTimeoutRef = { current: null as ReturnType<typeof setTimeout> | null };
+  const effects: EffectCallback[] = [];
+  const cleanups: (() => void)[] = [];
+  const controller = Promise.withResolvers<ReturnType<typeof useOptimisticSeek>>();
+  function Fixture() {
+    const seeking = useOptimisticSeek({
+      clock,
+      durationRef,
+      mpvInitializedRef,
+      onUserSeek: () => {},
+      triggerOsd: () => {},
+    });
+    controller.resolve(seeking);
+    usePlayerMpvLifecycle({
+      stream: {
+        reloadStream: () => {},
+        activeStreamUrl: 'https://example.com/seek',
+        activeStreamKey: 'seek',
+        committedStreamUrlRef: { current: 'https://example.com/seek' },
+        selectedStreamKeyRef: { current: 'seek' },
+        streamLookupIdRef: { current: 'tt1' },
+        activeStreamSourceIdRef: { current: undefined },
+        activeStreamSourceNameRef: { current: undefined },
+        activeStreamFamilyRef: { current: undefined },
+        setActiveStreamUrl: () => {},
+      },
+      isHistoryResume: false,
+      playbackSpeedRef: { current: 1 },
+      subtitleSettingsRef: { current: { delay: 0, pos: 100, scale: 1 } },
+      playbackLanguagePreferencesRef: { current: {} },
+      volumeRef: { current: 100 },
+      isMutedRef: { current: false },
+      mountedRef: { current: true },
+      isDestroyedRef: { current: false },
+      mpvInitializedRef,
+      isLoading: false,
+      isPlayingRef: { current: true },
+      clock,
+      observedPositionRef: { current: null },
+      bufferedClock: createPlaybackClock(),
+      durationRef,
+      playbackVerifiedAtRef: { current: 1000 },
+      errorRef,
+      recoverableStreamErrorRef: { current: null },
+      forceShowTimeoutRef,
+      saveProgressRef: { current: save },
+      setIsLoading: () => {},
+      setError: () => {},
+      setStreamError,
+      setDuration: () => {},
+      setIsPlaying: () => {},
+      applyNativeVolume: () => {},
+      applyNativeMute: () => {},
+      setPlaybackSpeed: () => {},
+      setMpvSurfaceReady: () => {},
+      requestSurfaceRefresh: () => {},
+      isResolvingRef: { current: false },
+      clearUiTimers: () => {},
+      clearResumeRetryTimer: () => {},
+      clearRecoveryTimers: () => {},
+      prepareForStreamLoad: () => false,
+      markPlaybackReady: () => {},
+      markPlaybackVerified: () => {},
+      applyResumeIfReady: async () => {},
+      onEndedChange,
+      observeTimeUpdate: seeking.observeTimeUpdate,
+      isSeekPending: seeking.isSeekPending,
+      getSeekTarget: seeking.getSeekTarget,
+      retryFailedSeek,
+      isResumePending: () => false,
+      onObservedTrackSelection: () => false,
+      refreshTracks: async () => {},
+      reportStreamFailure: () => {},
+      recoverFromSlowStartup: async () => false,
+      reopenSelectorForSavedStreamFailure: () => {},
+      stopLoading: () => {},
+      setTransparent: () => {},
+      restorePlayerSurface: () => {},
+      revealControls: () => {},
+    });
+    return null;
+  }
+  const property = (name: string, data: number | boolean) =>
+    emit?.({ event: 'property-change', name, data });
+  try {
+    capturedEffects = effects;
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <MemoryRouter>
+          <PlayerSessionProvider>
+            <Fixture />
+          </PlayerSessionProvider>
+        </MemoryRouter>
+      </QueryClientProvider>,
+    );
+    capturedEffects = null;
+    const seeking = await controller.promise;
+    runEffects(effects, cleanups);
+    await Bun.sleep(0);
+    expect(mpvInitializedRef.current).toBe(true);
+    property('duration', 120);
+    await seeking!.seek(90);
+    const old = Promise.withResolvers<typeof snapshot>();
+    probe.mockReturnValueOnce(old.promise);
+    property('eof-reached', true);
+    await seeking!.seek(30);
+    old.resolve({ ...snapshot, timePos: 120, seekFailed: true, eofReached: true });
+    await Bun.sleep(0);
+    expect(setStreamError).not.toHaveBeenCalled();
+    expect(clock.ref.current).toBe(30);
+    const ack = Promise.withResolvers<void>();
+    nativeSeek.mockReturnValueOnce(ack.promise);
+    const slowSeek = seeking.seek(40);
+    emit?.({ event: 'seek' });
+    now.mockReturnValue(5000);
+    expect(seeking.isSeekPending()).toBe(false);
+    expect(seeking.getSeekTarget()?.commandPending).toBe(true);
+    probe.mockResolvedValue({ ...snapshot, timePos: 120, seekFailed: true });
+    property('eof-reached', true);
+    await Bun.sleep(0);
+    expect(probe.mock.calls.at(-1)?.[2]).toBe(false);
+    expect(setStreamError).not.toHaveBeenCalled();
+    expect(save).not.toHaveBeenCalled();
+    ack.resolve();
+    await slowSeek;
+    expect(seeking.getSeekTarget()?.commandPending).toBe(false);
+    // A late EOF event alone cannot end playback when the native probe no longer confirms EOF.
+    probe.mockResolvedValue({ ...snapshot, timePos: 120 });
+    emit?.({ event: 'playback-restart' });
+    await Bun.sleep(0);
+    expect(onEndedChange).not.toHaveBeenCalledWith(true);
+    // One recovery attempt keeps the error/end cards hidden; a failed retry stays actionable.
+    retryFailedSeek.mockReturnValueOnce(true);
+    probe.mockResolvedValue({ ...snapshot, timePos: 120, seekFailed: true, eofReached: true });
+    property('eof-reached', true);
+    await Bun.sleep(0);
+    expect(retryFailedSeek).toHaveBeenLastCalledWith(40);
+    expect(setStreamError).not.toHaveBeenCalled();
+    property('eof-reached', true);
+    await Bun.sleep(0);
+    expect(setStreamError).toHaveBeenCalledWith(
+      'Could not resume at 00:40. Retry playback or choose another stream.',
+    );
+    expect(save).not.toHaveBeenCalled();
+    expect(onEndedChange).not.toHaveBeenCalledWith(true);
+    errorRef.current = null;
+    await seeking!.seek(120);
+    seeking!.observeTimeUpdate(120, performance.now());
+    probe.mockResolvedValue({ ...snapshot, timePos: 120, nearCompletion: true, eofReached: true });
+    property('eof-reached', true);
+    await Bun.sleep(0);
+    expect(onEndedChange).toHaveBeenCalledWith(true);
+    expect(save).toHaveBeenCalledTimes(1);
+  } finally {
+    capturedEffects = null;
+    for (const cleanup of cleanups.toReversed()) if (typeof cleanup === 'function') cleanup();
+    if (forceShowTimeoutRef.current !== null) clearTimeout(forceShowTimeoutRef.current);
+    await Bun.sleep(170);
+    for (const spy of [
+      listen,
+      command,
+      init,
+      destroy,
+      properties,
+      audio,
+      subtitles,
+      nativeSeek,
+      probe,
+      now,
+    ])
+      spy.mockRestore();
+    client.clear();
+    restoreWindow();
+    restoreDocument();
   }
 });
 
@@ -1120,11 +1434,7 @@ test.each([null, 'watched'] as const)(
       return null;
     });
     const notice = spyOn(toast, 'success').mockReturnValue('season-notice');
-    const controller = Promise.withResolvers<ReturnType<typeof useMarkSeasonWatched>>();
-    function Fixture() {
-      controller.resolve(useMarkSeasonWatched({ item }));
-      return null;
-    }
+    const { Fixture, captured: controller } = captureHook(() => useMarkSeasonWatched({ item }));
     const keys = [
       ['library'],
       ['watch-statuses'],
@@ -1161,8 +1471,7 @@ test.each([null, 'watched'] as const)(
 test.each([false, true])(
   'Accepted resume seeks wait for settlement before retrying (tray paused=%s)',
   async (trayPaused) => {
-    const windowDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'window');
-    Object.defineProperty(globalThis, 'window', { configurable: true, value: globalThis });
+    const restoreWindow = stubGlobal('window', globalThis);
     const nativeSeek = spyOn(playerMpv, 'seekAbsoluteSeconds').mockResolvedValue();
     const pauseWrite = spyOn(playerMpv, 'setMpvProperty').mockResolvedValue([]);
     const now = spyOn(performance, 'now').mockReturnValue(0);
@@ -1177,7 +1486,7 @@ test.each([false, true])(
     const currentTimeRef = { current: 0 };
     const durationRef = { current: 0 };
     const effects: EffectCallback[] = [];
-    const cleanups: ReturnType<EffectCallback>[] = [];
+    const cleanups: (() => void)[] = [];
     const controller = Promise.withResolvers<ReturnType<typeof usePlayerResumeController>>();
     function ResumeFixture() {
       usePlayerSession().trayPause.publish(trayPaused);
@@ -1211,7 +1520,7 @@ test.each([false, true])(
       );
       capturedEffects = null;
       const resume = await controller.promise;
-      for (const effect of effects) cleanups.push(effect());
+      runEffects(effects, cleanups);
       expect(resume.prepareForStreamLoad()).toBe(true);
       durationRef.current = 3600;
       await resume.applyResumeIfReady();
@@ -1245,8 +1554,7 @@ test.each([false, true])(
       capturedEffects = null;
       for (const cleanup of cleanups) if (typeof cleanup === 'function') cleanup();
       for (const spy of [nativeSeek, pauseWrite, now, invoke]) spy.mockRestore();
-      if (windowDescriptor) Object.defineProperty(globalThis, 'window', windowDescriptor);
-      else Reflect.deleteProperty(globalThis, 'window');
+      restoreWindow();
     }
   },
 );
@@ -1267,11 +1575,7 @@ test('Recent-search clear waits for a pending record and leaves cache and storag
     persisted = { ...persisted, ...patch };
     return persisted;
   });
-  const history = Promise.withResolvers<ReturnType<typeof useRecentSearches>>();
-  function SearchHistory() {
-    history.resolve(useRecentSearches());
-    return null;
-  }
+  const { Fixture: SearchHistory, captured: history } = captureHook(useRecentSearches);
   try {
     renderToStaticMarkup(
       <QueryClientProvider client={client}>
@@ -1297,15 +1601,9 @@ test('Recent-search clear waits for a pending record and leaves cache and storag
   }
 });
 
-function renderPage(
-  Page: ComponentType,
-  route: string,
-  client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
-  }),
-) {
+function renderPage(Page: ComponentType, route: string, client = testClient()) {
   // The Hero reads native window location; keep this server fixture on the rails.
-  client.setQueryData(homeTrendingMoviesQueryOptions.queryKey, []);
+  client.setQueryData(homeTrendingQueryOptions.queryKey, []);
   renderDialogPortal = true;
   try {
     return renderToStaticMarkup(
@@ -1321,6 +1619,21 @@ function renderPage(
   }
 }
 
+// Details renders through its route so nested player-session context resolves like the app's.
+function renderDetails(client: QueryClient, route: string) {
+  return renderToStaticMarkup(
+    <QueryClientProvider client={client}>
+      <MemoryRouter initialEntries={[route]}>
+        <PlayerSessionProvider>
+          <Routes>
+            <Route path='/details/:type/:id' element={<Details />} />
+          </Routes>
+        </PlayerSessionProvider>
+      </MemoryRouter>
+    </QueryClientProvider>,
+  );
+}
+
 test.each(['/search', '/search?q=matrix', '/search?type=anime&genre=Action'])(
   'Search renders its own tooltip provider at %s',
   (route) => {
@@ -1329,6 +1642,33 @@ test.each(['/search', '/search?q=matrix', '/search?type=anime&genre=Action'])(
     expect(markup).toContain('About unified catalog results');
   },
 );
+
+test.each([false, true])('Incomplete Search results remain retryable (empty=%j)', (empty) => {
+  const client = new QueryClient();
+  const options = searchCatalogQueryOptions(
+    { query: 'dune', type: 'movie', feed: 'popular' },
+    2026,
+  );
+  client.setQueryData(options.queryKey, {
+    pages: [
+      {
+        items: empty ? [] : [{ id: 'tt1160419', type: 'movie', title: 'Dune' }],
+        partial: true,
+        exhausted: true,
+        continuation: { seenKeys: [] },
+      },
+    ],
+    pageParams: [undefined],
+  });
+  const markup = renderPage(Search, '/search?q=dune&type=movie', client);
+  expect(markup).toContain('Retry missing results');
+  expect(markup).toContain('Some sources didn');
+  const retry = Array.from(markup.matchAll(/<button\b[^>]*>[\s\S]*?<\/button>/g)).find(([button]) =>
+    button.includes('Retry missing results'),
+  )?.[0];
+  expect(retry).toBeDefined();
+  expect(retry).not.toContain('aria-disabled="true"');
+});
 
 test('Calendar keeps upcoming placeholders only for the same watched filter', () => {
   const client = new QueryClient();
@@ -1376,9 +1716,7 @@ test('Calendar keeps upcoming placeholders only for the same watched filter', ()
 test.each([false, true])(
   'Add Titles keeps cached rows available after a refresh failure (cached=%s)',
   async (cached) => {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
-    });
+    const client = testClient(false);
     const queryKey = profileLibraryQueryKey({ query: '', sort: 'title-asc' });
     if (cached) {
       client.setQueryData(queryKey, {
@@ -1410,12 +1748,140 @@ test.each([false, true])(
   },
 );
 
+test('Discover additions keep failed titles selected for retry', async () => {
+  const client = new QueryClient();
+  const items = [
+    { id: 'added', title: 'Added title', type: 'movie' },
+    { id: 'retry', title: 'Retry title', type: 'movie' },
+  ];
+  let selected = new Map(items.map((item) => [item.id, item]));
+  const originalState = react.useState;
+  const state = spyOn(react, 'useState').mockImplementation((initial: unknown) => {
+    if (initial instanceof Map) {
+      return [
+        selected,
+        (update: (current: typeof selected) => typeof selected) => {
+          selected = update(selected);
+        },
+      ];
+    }
+    return originalState(initial === 'library' ? 'discover' : initial);
+  });
+  const summary = {
+    id: 'test-list',
+    name: 'Test list',
+    icon: 'list',
+    item_count: 1,
+    contains_item: true,
+  };
+  const add = spyOn(api, 'addToList')
+    .mockResolvedValueOnce(summary)
+    .mockRejectedValueOnce({ kind: 'list_full', message: 'List is full.' })
+    .mockResolvedValue(summary);
+  let notified = Promise.withResolvers<void>();
+  const notice = spyOn(toast, 'custom').mockImplementation(() => {
+    notified.resolve();
+    return 'add-notice';
+  });
+  const close = mock(() => {});
+  let submit!: () => void;
+  function Fixture() {
+    const dialog = AddTitlesDialog({
+      list: { id: 'test-list', name: 'Test list', icon: 'list', item_ids: [] },
+      onOpenChange: close,
+      returnFocusRef: { current: null },
+    });
+    const footer = dialog.props.children.props.children.at(-1);
+    const [, actions] = footer.props.children;
+    const [, addButton] = actions.props.children;
+    submit = addButton.props.onClick;
+    return null;
+  }
+  const render = () =>
+    renderToStaticMarkup(
+      <QueryClientProvider client={client}>
+        <Fixture />
+      </QueryClientProvider>,
+    );
+  try {
+    render();
+    submit();
+    await notified.promise;
+    expect(close).not.toHaveBeenCalled();
+    expect([...selected.keys()]).toEqual(['retry']);
+    const feedback = notice.mock.calls[0][0]('add-notice');
+    expect(feedback.props.tone).toBe('error');
+    expect(feedback.props.detail).toBe('List is full.');
+    notified = Promise.withResolvers<void>();
+    render();
+    submit();
+    await notified.promise;
+    expect(add.mock.calls.map(([, item]) => item.id)).toEqual(['added', 'retry', 'retry']);
+    expect(close).toHaveBeenCalledTimes(1);
+    expect(selected.size).toBe(0);
+  } finally {
+    for (const spy of [state, add, notice]) spy.mockRestore();
+    client.clear();
+  }
+});
+
+test.each(['library', 'discover'])(
+  'Add Titles queries only its %s source and refreshes Discover with addon routing',
+  async (source) => {
+    const client = testClient();
+    const library = spyOn(api, 'getProfileLibrary').mockResolvedValue({ items: [], allIds: [] });
+    const discover = spyOn(api, 'querySearchCatalogPage').mockResolvedValue({
+      items: [],
+      exhausted: true,
+      partial: false,
+      continuation: { seenKeys: [] },
+    });
+    const originalState = react.useState;
+    const state = spyOn(react, 'useState').mockImplementation(((initial: unknown) =>
+      originalState(initial === 'library' ? source : initial)) as typeof react.useState);
+    const observers: InstanceType<typeof QueryObserver>[] = [];
+    const unsubscribes: (() => void)[] = [];
+    try {
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <AddTitlesDialog
+            list={{ id: 'source-test', name: 'Source test', icon: 'list', item_ids: [] }}
+            onOpenChange={() => {}}
+            returnFocusRef={{ current: null }}
+          />
+        </QueryClientProvider>,
+      );
+      for (const query of client.getQueryCache().getAll()) {
+        const observer = new QueryObserver(client, query.options);
+        observers.push(observer);
+        unsubscribes.push(observer.subscribe(() => {}));
+      }
+      await client.refetchQueries({ type: 'active' });
+      expect(library).toHaveBeenCalledTimes(source === 'library' ? 1 : 0);
+      expect(discover).toHaveBeenCalledTimes(source === 'discover' ? 1 : 0);
+      const discoverQuery = client.getQueryCache().findAll({
+        queryKey: [...SEARCH_CATALOG_QUERY_KEY, 'add-titles-discover'],
+      });
+      expect(discoverQuery).toHaveLength(1);
+      await invalidateDiscoveryQueries(client);
+      expect(discover).toHaveBeenCalledTimes(source === 'discover' ? 2 : 0);
+      expect(discoverQuery[0].state.isInvalidated).toBe(source === 'library');
+      await invalidateAddonCapabilityQueries(client, true);
+      expect(discover).toHaveBeenCalledTimes(source === 'discover' ? 3 : 0);
+      expect(discoverQuery[0].state.isInvalidated).toBe(source === 'library');
+    } finally {
+      for (const unsubscribe of unsubscribes) unsubscribe();
+      for (const observer of observers) observer.destroy();
+      for (const spy of [state, library, discover]) spy.mockRestore();
+      client.clear();
+    }
+  },
+);
+
 test.each([false, true])(
   'Details hero renders writer, country and awards facts only when metadata provides them (populated=%s)',
   (populated) => {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
-    });
+    const client = testClient(false);
     const id = 'details-credits-test';
     const details: MediaDetails = {
       id,
@@ -1446,17 +1912,7 @@ test.each([false, true])(
     let markup: string;
     renderDialogPortal = true;
     try {
-      markup = renderToStaticMarkup(
-        <QueryClientProvider client={client}>
-          <MemoryRouter initialEntries={[`/details/movie/${id}`]}>
-            <PlayerSessionProvider>
-              <Routes>
-                <Route path='/details/:type/:id' element={<Details />} />
-              </Routes>
-            </PlayerSessionProvider>
-          </MemoryRouter>
-        </QueryClientProvider>,
-      );
+      markup = renderDetails(client, `/details/movie/${id}`);
     } finally {
       renderDialogPortal = false;
       client.clear();
@@ -1504,6 +1960,30 @@ test.each([false, true])(
   },
 );
 
+test('Home enables recommendation observation when its cold seed arrives', async () => {
+  const viewport = await import('../src/hooks/use-near-viewport');
+  const observation = spyOn(viewport, 'useNearViewport').mockImplementation((enabled = true) => ({
+    anchorRef: { current: null },
+    nearViewport: enabled,
+  }));
+  const client = testClient();
+  try {
+    renderPage(Home, '/home', client);
+    expect(observation.mock.calls.at(-1)?.[0]).toBe(false);
+    client.setQueryData(RECENT_WATCH_SEED_QUERY_KEY, {
+      type: 'movie',
+      id: 'tt123',
+      title: 'Seed movie',
+    });
+    const markup = renderPage(Home, '/home', client);
+    expect(observation.mock.calls.at(-1)?.[0]).toBe(true);
+    expect(markup).toContain('Because you watched Seed movie');
+  } finally {
+    observation.mockRestore();
+    client.clear();
+  }
+});
+
 test.each([
   { available: true, selectorFailed: true, hasEnabledAddons: true },
   { available: false, selectorFailed: true, hasEnabledAddons: true },
@@ -1512,9 +1992,7 @@ test.each([
 ])(
   'Stream selector preserves its available/error/no-addons state (%j)',
   async ({ available, selectorFailed, hasEnabledAddons }) => {
-    const client = new QueryClient({
-      defaultOptions: { queries: { retry: false, retryOnMount: false, gcTime: Infinity } },
-    });
+    const client = testClient(false);
     const target = { type: 'movie' as const, id: 'selector-test' };
     const failure = new Error('Stream source unavailable');
     await client.prefetchQuery({
@@ -1600,6 +2078,51 @@ test.each([
       !available && !selectorFailed && hasEnabledAddons,
     );
     expect(markup.includes('Manage addons')).toBe(!available && !selectorFailed);
+  },
+);
+
+test.each([false, true])(
+  'Player keymap falls back only after an initial preference failure (stored=%s)',
+  async (stored) => {
+    const client = testClient(false);
+    const defaults = { togglePlay: [' '] };
+    const saved = {
+      ...DEFAULT_APP_UI_PREFERENCES,
+      effectivePlayerKeybindings: { togglePlay: ['p'] },
+      playerKeybindings: { togglePlay: ['p'] },
+    };
+    try {
+      if (stored) client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, saved);
+      await client
+        .fetchQuery({
+          queryKey: APP_UI_PREFERENCES_QUERY_KEY,
+          queryFn: async () => {
+            throw new Error('Preference read failed');
+          },
+        })
+        .catch(() => {});
+      const { Fixture, captured } = captureHook(usePlayerKeymap);
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Fixture />
+        </QueryClientProvider>,
+      );
+      expect(
+        client.getQueryCache().find({ queryKey: DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY })?.options
+          .enabled,
+      ).toBe(!stored);
+      client.setQueryData(DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY, defaults);
+      const { Fixture: Loaded, captured: loaded } = captureHook(usePlayerKeymap);
+      renderToStaticMarkup(
+        <QueryClientProvider client={client}>
+          <Loaded />
+        </QueryClientProvider>,
+      );
+      expect((await loaded.promise).keys.togglePlay).toEqual(stored ? ['p'] : [' ']);
+      expect((await captured.promise).overrides).toEqual(stored ? saved.playerKeybindings : {});
+    } finally {
+      client.clear();
+    }
   },
 );
 
@@ -1775,8 +2298,7 @@ const SECTION_ITEM = {
 } as MediaDetails;
 
 test('Credits links pass the title identity to their scoped Rust command', async () => {
-  const updater = await import('../src/lib/app-updater');
-  const runtime = spyOn(updater, 'isTauriDesktopRuntime').mockReturnValue(true);
+  const runtime = spyOn(appUpdater, 'isTauriDesktopRuntime').mockReturnValue(true);
   const invoke = spyOn(tauriCore, 'invoke').mockResolvedValue(undefined);
   try {
     await api.openTitleCreditsLink('anime', 'kitsu:8671', 'tt2560140', 'https://anilist.co');
@@ -1977,13 +2499,8 @@ test('Profile tabs leave modified and composing keys alone', () => {
 test('Details viewport observer waits for the enabled late anchor', () => {
   const observe = mock((_element: unknown) => {});
   const disconnect = mock(() => {});
-  const original = Object.getOwnPropertyDescriptor(globalThis, 'IntersectionObserver');
-  Object.defineProperty(globalThis, 'IntersectionObserver', {
-    configurable: true,
-    writable: true,
-    value: function () {
-      return { observe, disconnect };
-    },
+  const restoreObserver = stubGlobal('IntersectionObserver', function () {
+    return { observe, disconnect };
   });
   capturedEffects = [];
   const fakeAnchor = {} as HTMLDivElement;
@@ -2007,38 +2524,10 @@ test('Details viewport observer waits for the enabled late anchor', () => {
     cleanup?.();
     expect(disconnect).toHaveBeenCalledTimes(1);
   } finally {
-    if (original) Object.defineProperty(globalThis, 'IntersectionObserver', original);
-    else delete (globalThis as Record<string, unknown>).IntersectionObserver;
+    restoreObserver();
     capturedEffects = null;
   }
 });
-const renderSeekbar = (
-  skipSegments: { type: 'intro' | 'outro'; start_time: number; end_time: number }[],
-) =>
-  renderToStaticMarkup(
-    <PlayerProgressBar
-      duration={1440}
-      clock={createPlaybackClock()}
-      bufferedClock={createPlaybackClock()}
-      skipSegments={skipSegments}
-      onSeek={() => {}}
-    />,
-  );
-
-test('Seekbar skip segments get see-through chapter cuts at interior edges only', () => {
-  const markup = renderSeekbar([
-    { type: 'intro', start_time: 0, end_time: 90 },
-    { type: 'outro', start_time: 1332, end_time: 1440 },
-  ]);
-  const mask = markup.match(/mask-image:([^;"]+)/)?.[1] ?? '';
-  // Edges at 0 and the duration stay uncut; each interior edge gets one 2px gap.
-  expect(mask.match(/transparent/g)).toHaveLength(2);
-  expect(mask).toContain('transparent calc(6.25% - 1px) calc(6.25% + 1px)');
-  expect(mask).toContain('transparent calc(92.5% - 1px) calc(92.5% + 1px)');
-  expect(markup).not.toContain('bg-black');
-  expect(renderSeekbar([])).not.toContain('mask-image');
-});
-
 test('Next airing chip only renders future episodes with a dateTime', () => {
   const past = renderToStaticMarkup(<NextAiringChip episode={{ episode: 7, airingAt: 1 }} />);
   expect(past).toBe('');
@@ -2062,17 +2551,7 @@ test('Details lazily creates one title credits query without an SSR fetch', asyn
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
   const spies = [spyOn(api, 'getTitleCredits'), spyOn(api, 'titleCreditsQueryOptions')];
   try {
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/details/series/${id}`]}>
-          <PlayerSessionProvider>
-            <Routes>
-              <Route path='/details/:type/:id' element={<Details />} />
-            </Routes>
-          </PlayerSessionProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
+    renderDetails(client, `/details/series/${id}`);
     // Cold SSR: exactly one title-credits query, created disabled and idle.
     // (assert before mockRestore - restore clears the recorded calls)
     expect(spies[1]).toHaveBeenCalledTimes(1);
@@ -2092,9 +2571,7 @@ test('Details lazily creates one title credits query without an SSR fetch', asyn
 });
 
 test('Season completion remains available for the last unwatched episode', () => {
-  const client = new QueryClient({
-    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
-  });
+  const client = testClient();
   const id = 'last-season-episode';
   const details: MediaDetails = {
     id,
@@ -2111,18 +2588,7 @@ test('Season completion remains available for the last unwatched episode', () =>
     watchedEpisodeCeiling: {},
   });
   client.setQueryData(APP_UI_PREFERENCES_QUERY_KEY, DEFAULT_APP_UI_PREFERENCES);
-  const render = () =>
-    renderToStaticMarkup(
-      <QueryClientProvider client={client}>
-        <MemoryRouter initialEntries={[`/details/series/${id}`]}>
-          <PlayerSessionProvider>
-            <Routes>
-              <Route path='/details/:type/:id' element={<Details />} />
-            </Routes>
-          </PlayerSessionProvider>
-        </MemoryRouter>
-      </QueryClientProvider>,
-    );
+  const render = () => renderDetails(client, `/details/series/${id}`);
   try {
     render();
     const unaired = client

@@ -7,6 +7,9 @@ use crate::providers::bound_optional;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+const PROFILE_NAME_DEFAULT: &str = "Guest User";
+const PROFILE_ACCENT_COLOR_DEFAULT: &str = "#ffffff";
+
 /// Which surfaces follow the profile accent — defaults keep pre-flag stores' look (on, seekbar white).
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -49,8 +52,8 @@ pub struct LocalProfile {
 impl Default for LocalProfile {
     fn default() -> Self {
         Self {
-            username: "Guest User".to_string(),
-            accent_color: "#ffffff".to_string(),
+            username: PROFILE_NAME_DEFAULT.to_string(),
+            accent_color: PROFILE_ACCENT_COLOR_DEFAULT.to_string(),
             accent_intensity: PROFILE_ACCENT_INTENSITY_DEFAULT,
             accent_targets: AccentTargets::default(),
             avatar: None,
@@ -136,7 +139,7 @@ pub(super) struct StoredProfilePreferences {
 
 fn normalize_profile_username(value: Option<String>) -> String {
     bound_optional(value, PROFILE_NAME_MAX_CHARS)
-        .unwrap_or_else(|| LocalProfile::default().username)
+        .unwrap_or_else(|| PROFILE_NAME_DEFAULT.to_string())
 }
 
 fn normalize_profile_accent_intensity(value: Option<u8>) -> u8 {
@@ -144,7 +147,7 @@ fn normalize_profile_accent_intensity(value: Option<u8>) -> u8 {
 }
 
 fn normalize_profile_accent_color(value: Option<String>) -> String {
-    let candidate = value
+    value
         .as_deref()
         .map(str::trim)
         .filter(|value| {
@@ -152,9 +155,8 @@ fn normalize_profile_accent_color(value: Option<String>) -> String {
                 && value.starts_with('#')
                 && value.chars().skip(1).all(|c| c.is_ascii_hexdigit())
         })
-        .map(str::to_ascii_lowercase);
-
-    candidate.unwrap_or_else(|| LocalProfile::default().accent_color)
+        .unwrap_or(PROFILE_ACCENT_COLOR_DEFAULT)
+        .to_ascii_lowercase()
 }
 
 fn normalize_profile_view_mode(value: Option<&str>) -> ProfileViewMode {

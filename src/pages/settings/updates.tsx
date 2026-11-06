@@ -24,6 +24,7 @@ import {
   SETTINGS_INSET_SURFACE_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -234,126 +235,128 @@ export function UpdatesSection() {
 
   return (
     <SettingsGroup>
-      {isUpdateAvailable ? <UpdateAccentHairline /> : null}
       <SettingsGroupHeader icon={RefreshCw} title='Updates' action={headerStatus} />
 
-      <SettingsBody className='space-y-4'>
-        <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
-        <SettingsRow
-          label='Check for updates automatically'
-          description='After launch and every six hours. You choose when to install.'
-        >
-          <SettingsSwitch
-            ariaLabel='Check for updates automatically'
-            checked={automaticUpdateChecks}
-            disabled={isHydrating || !isSupported}
-            onChange={() => updatePreferences({ automaticUpdateChecks: !automaticUpdateChecks })}
-          />
-        </SettingsRow>
-        <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-400'>
-          <span>
-            Installed{' '}
-            <span className='font-semibold tabular-nums text-zinc-100'>
-              {currentVersion ? `v${currentVersion}` : 'Unknown'}
-            </span>
-          </span>
-          {pendingUpdate ? (
-            <>
-              <span aria-hidden='true' className='text-zinc-700'>
-                →
-              </span>
-              <span>
-                Latest{' '}
-                <span className='font-semibold tabular-nums text-emerald-300'>
-                  v{pendingUpdate.version}
-                </span>
-              </span>
-            </>
-          ) : null}
-          <span>· Last checked {lastCheckedLabel}</span>
-        </div>
-
-        {isInstalling ? (
-          <div className='space-y-2' role='status' aria-live='polite'>
-            <UpdateProgressBar
-              percent={installPercent}
-              className='h-1.5'
-              barClassName='bg-emerald-300'
+      <SettingsCard>
+        {isUpdateAvailable ? <UpdateAccentHairline /> : null}
+        <SettingsBody className='space-y-4'>
+          <SettingsQueryError query={preferencesQuery} message="Couldn't load your preferences." />
+          <SettingsRow
+            label='Check for updates automatically'
+            description='After launch and every six hours. You choose when to install.'
+          >
+            <SettingsSwitch
+              ariaLabel='Check for updates automatically'
+              checked={automaticUpdateChecks}
+              disabled={isHydrating || !isSupported}
+              onChange={() => updatePreferences({ automaticUpdateChecks: !automaticUpdateChecks })}
             />
-            <p className='text-[12px] tabular-nums text-zinc-500'>
-              {formatAppUpdateProgress(updateState.installProgress)}
-            </p>
+          </SettingsRow>
+          <div className='flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-zinc-400'>
+            <span>
+              Installed{' '}
+              <span className='font-semibold tabular-nums text-zinc-100'>
+                {currentVersion ? `v${currentVersion}` : 'Unknown'}
+              </span>
+            </span>
+            {pendingUpdate ? (
+              <>
+                <span aria-hidden='true' className='text-zinc-700'>
+                  →
+                </span>
+                <span>
+                  Latest{' '}
+                  <span className='font-semibold tabular-nums text-emerald-300'>
+                    v{pendingUpdate.version}
+                  </span>
+                </span>
+              </>
+            ) : null}
+            <span>· Last checked {lastCheckedLabel}</span>
           </div>
-        ) : null}
 
-        {updateState.errorMessage ? (
-          <div className='rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3'>
-            <p className='text-[12px] font-medium text-red-300'>
-              {updateState.errorOperation === 'install'
-                ? 'Update install failed'
-                : 'Update check failed'}
-            </p>
-            <p className='mt-1 text-[12px] leading-relaxed text-red-200/80'>
-              {updateState.errorMessage}
-            </p>
-          </div>
-        ) : null}
+          {isInstalling ? (
+            <div className='space-y-2' role='status' aria-live='polite'>
+              <UpdateProgressBar
+                percent={installPercent}
+                className='h-1.5'
+                barClassName='bg-emerald-300'
+              />
+              <p className='text-[12px] tabular-nums text-zinc-500'>
+                {formatAppUpdateProgress(updateState.installProgress)}
+              </p>
+            </div>
+          ) : null}
 
-        <AppChangelog
-          key={pendingUpdate?.version ?? 'installed'}
-          currentVersion={currentVersion}
-          pendingUpdate={pendingUpdate}
-        />
+          {updateState.errorMessage ? (
+            <div className='rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3'>
+              <p className='text-[12px] font-medium text-red-300'>
+                {updateState.errorOperation === 'install'
+                  ? 'Update install failed'
+                  : 'Update check failed'}
+              </p>
+              <p className='mt-1 text-[12px] leading-relaxed text-red-200/80'>
+                {updateState.errorMessage}
+              </p>
+            </div>
+          ) : null}
 
-        <div
-          id='setting-update-actions'
-          className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'
-        >
-          {pendingUpdate ? (
+          <AppChangelog
+            key={pendingUpdate?.version ?? 'installed'}
+            currentVersion={currentVersion}
+            pendingUpdate={pendingUpdate}
+          />
+
+          <div
+            id='setting-update-actions'
+            className='flex flex-wrap items-center gap-2.5 border-t border-white/[0.06] pt-4'
+          >
+            {pendingUpdate ? (
+              <Button
+                size='sm'
+                onClick={handleInstall}
+                aria-disabled={isInstalling || isChecking || undefined}
+                aria-busy={isInstalling || undefined}
+                className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-default aria-disabled:opacity-50'
+              >
+                {isInstalling ? (
+                  <Loader2
+                    aria-hidden='true'
+                    className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
+                  />
+                ) : (
+                  <Download className='h-3.5 w-3.5' />
+                )}
+                Update & restart
+              </Button>
+            ) : null}
             <Button
               size='sm'
-              onClick={handleInstall}
-              aria-disabled={isInstalling || isChecking || undefined}
-              aria-busy={isInstalling || undefined}
-              className='h-9 gap-2 rounded-lg bg-white px-3.5 text-[13px] font-semibold text-black hover:bg-zinc-200 aria-disabled:cursor-default aria-disabled:opacity-50'
+              variant='outline'
+              onClick={handleCheck}
+              disabled={!isSupported}
+              aria-disabled={isChecking || isInstalling || undefined}
+              aria-busy={isChecking || undefined}
+              className={cn(
+                'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-default aria-disabled:opacity-50',
+                SETTINGS_OUTLINE_BUTTON_CLASS,
+              )}
             >
-              {isInstalling ? (
+              {isChecking ? (
                 <Loader2
                   aria-hidden='true'
                   className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
                 />
               ) : (
-                <Download className='h-3.5 w-3.5' />
+                <RefreshCw className='h-3.5 w-3.5' />
               )}
-              Update & restart
+              {pendingUpdate ? 'Check again' : 'Check for updates'}
             </Button>
-          ) : null}
-          <Button
-            size='sm'
-            variant='outline'
-            onClick={handleCheck}
-            disabled={!isSupported}
-            aria-disabled={isChecking || isInstalling || undefined}
-            aria-busy={isChecking || undefined}
-            className={cn(
-              'h-9 gap-2 px-3.5 text-[13px] aria-disabled:cursor-default aria-disabled:opacity-50',
-              SETTINGS_OUTLINE_BUTTON_CLASS,
-            )}
-          >
-            {isChecking ? (
-              <Loader2
-                aria-hidden='true'
-                className='h-3.5 w-3.5 animate-spin motion-reduce:animate-none'
-              />
-            ) : (
-              <RefreshCw className='h-3.5 w-3.5' />
-            )}
-            {pendingUpdate ? 'Check again' : 'Check for updates'}
-          </Button>
-        </div>
+          </div>
 
-        {statusNote ? <p className='text-[13px] text-zinc-400'>{statusNote}</p> : null}
-      </SettingsBody>
+          {statusNote ? <p className='text-[13px] text-zinc-400'>{statusNote}</p> : null}
+        </SettingsBody>
+      </SettingsCard>
     </SettingsGroup>
   );
 }

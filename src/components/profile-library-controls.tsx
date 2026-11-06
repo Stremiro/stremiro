@@ -1,5 +1,6 @@
 import {
   ArrowDownAZ,
+  ArrowDownZA,
   ArrowUp,
   CalendarArrowDown,
   CalendarArrowUp,
@@ -41,12 +42,13 @@ import {
 } from '@/lib/api';
 import { cn, pluralize, SIDEBAR_PAGE_COLUMN_INSETS } from '@/lib/utils';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR, RADIX_POPPER_CONTENT_SELECTOR } from '@/lib/dom';
-type LibrarySort = Exclude<NonNullable<LibraryFilters['sort']>, 'title-asc'>;
+type LibrarySort = NonNullable<LibraryFilters['sort']>;
 type LibraryStatusFilter = WatchStatus | 'all' | 'none';
 
 const LIBRARY_SORT_OPTIONS: Record<LibrarySort, { label: string; icon: LucideIcon | null }> = {
   default: { label: 'Default', icon: null },
-  'title-desc': { label: 'Z → A', icon: ArrowDownAZ },
+  'title-asc': { label: 'A → Z', icon: ArrowDownAZ },
+  'title-desc': { label: 'Z → A', icon: ArrowDownZA },
   'year-desc': { label: 'Newest', icon: CalendarArrowDown },
   'year-asc': { label: 'Oldest', icon: CalendarArrowUp },
 };

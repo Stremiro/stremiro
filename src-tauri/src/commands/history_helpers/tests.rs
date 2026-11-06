@@ -147,6 +147,15 @@ fn progress_annotations_share_the_backend_thresholds_and_never_persist() {
         })
     };
 
+    for (position, resume) in [
+        (4.0, None),
+        (5.0, Some(5.0)),
+        (940.0, Some(940.0)),
+        (950.0, None),
+    ] {
+        assert_eq!(annotate(position, 1_000.0).resume_start_time, resume);
+    }
+
     let fresh = annotate(20.0, 600.0);
     assert!(!fresh.has_started_watching && !fresh.is_watched);
     assert_eq!(fresh.resume_start_time, Some(20.0));

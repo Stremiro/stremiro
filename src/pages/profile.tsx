@@ -26,7 +26,8 @@ import {
   isLibrarySort,
   TYPE_OPTIONS,
 } from '@/components/profile-library-controls';
-import { SegmentPill, SegmentedControl, ViewToggle } from '@/components/ui/segmented-control';
+import { SegmentedControl, ViewToggle } from '@/components/ui/segmented-control';
+import { PageCard } from '@/components/page-section';
 import { ProfileAvatarEditor } from '@/components/profile-avatar';
 import { ProfileSettingsPopover } from '@/components/profile-settings-popover';
 import { RetryBanner } from '@/components/retry-banner';
@@ -238,8 +239,8 @@ export function Profile() {
           }
           onRetryHeader={() => {
             if (profilePreferencesError) void profilePreferencesQuery.refetch();
-            if (dataStatsQuery.isError) void dataStatsQuery.refetch();
-            if (totalWatchTimeQuery.isError) void totalWatchTimeQuery.refetch();
+            if (queryNeedsRetry(dataStatsQuery)) void dataStatsQuery.refetch();
+            if (queryNeedsRetry(totalWatchTimeQuery)) void totalWatchTimeQuery.refetch();
           }}
           libraryCount={libraryCount}
           listsCount={dataStats?.lists_count}
@@ -253,38 +254,34 @@ export function Profile() {
         />
 
         <Tabs value={activeTab} onValueChange={setActiveTab} className='space-y-4'>
-          <TabsList
-            aria-label='Profile collections'
-            className='relative isolate inline-grid grid-cols-3 max-w-full overflow-x-auto rounded-lg border border-white/[0.07] bg-white/[0.03] p-1 h-auto gap-0 scrollbar-hide'
-          >
-            <SegmentPill
-              index={PROFILE_TABS.findIndex((tab) => tab.id === activeTab)}
-              count={PROFILE_TABS.length}
-              inset={4}
-              className='rounded-md'
-            />
-            {PROFILE_TABS.map((tab) => (
-              <TabsTrigger
-                key={tab.id}
-                ref={tab.id === 'library' ? libraryTabRef : undefined}
-                value={tab.id}
-                onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
-                onFocus={tab.id === 'lists' ? warmListsManager : undefined}
-                className={cn(
-                  'nav-switch-item relative z-10 shrink-0 gap-1.5 rounded-md bg-transparent px-3 py-2 text-[13px] font-medium shadow-none transition-colors',
-                  tab.id === activeTab
-                    ? 'text-(--on-accent-nav)'
-                    : 'text-zinc-400 hover:text-zinc-100',
-                )}
-              >
-                <tab.icon className='w-3 h-3' />
-                <span>{tab.label}</span>
-                <span className='w-[5ch] shrink-0 text-left text-[10px] tabular-nums leading-none opacity-60'>
-                  {tabCounts[tab.id]}
-                </span>
-              </TabsTrigger>
-            ))}
-          </TabsList>
+          <div className='flex justify-center border-b border-white/[0.07]'>
+            <TabsList
+              aria-label='Profile collections'
+              className='inline-flex h-auto max-w-full gap-5 overflow-x-auto rounded-none bg-transparent p-0 scrollbar-hide'
+            >
+              {PROFILE_TABS.map((tab) => (
+                <TabsTrigger
+                  key={tab.id}
+                  ref={tab.id === 'library' ? libraryTabRef : undefined}
+                  value={tab.id}
+                  onPointerEnter={tab.id === 'lists' ? warmListsManager : undefined}
+                  onFocus={tab.id === 'lists' ? warmListsManager : undefined}
+                  className={cn(
+                    'shrink-0 gap-1.5 rounded-none border-b-2 bg-transparent px-0 py-3 text-[13px] font-medium shadow-none transition-colors focus-visible:ring-inset focus-visible:ring-offset-0 motion-reduce:transition-none',
+                    tab.id === activeTab
+                      ? 'border-(--accent-nav) text-white'
+                      : 'border-transparent text-zinc-400 hover:text-zinc-100',
+                  )}
+                >
+                  <tab.icon aria-hidden='true' className='size-3.5' />
+                  <span>{tab.label}</span>
+                  <span className='w-[4ch] shrink-0 text-left text-[11px] tabular-nums leading-none text-zinc-500'>
+                    {tabCounts[tab.id]}
+                  </span>
+                </TabsTrigger>
+              ))}
+            </TabsList>
+          </div>
 
           <TabsContent value='library'>
             <ProfileLibraryTab
@@ -300,7 +297,7 @@ export function Profile() {
           <TabsContent value='lists'>
             <Suspense
               fallback={
-                <div role='status' aria-busy='true' className='space-y-6'>
+                <div role='status' aria-busy='true' className='mx-auto max-w-3xl space-y-4'>
                   <span className='sr-only'>Loading lists…</span>
                   <Skeleton className='h-[46px] w-full' />
                   <div aria-hidden='true' className='space-y-3'>
@@ -500,7 +497,7 @@ function ProfileLibraryTab({
 
   return (
     <div
-      className='space-y-4'
+      className={cn('space-y-4', viewMode === 'list' && 'mx-auto max-w-3xl')}
       data-collection-selection=''
       data-escape-capture={selectionMode ? '' : undefined}
     >
@@ -769,7 +766,7 @@ function ProfileHistoryTab({
       ref={historyContentRef}
       data-collection-selection=''
       data-escape-capture={historySelection.selectionMode ? '' : undefined}
-      className='space-y-4'
+      className={cn('space-y-4', viewMode === 'list' && 'mx-auto max-w-3xl')}
     >
       {historySearchPending && (
         <span role='status' className='sr-only'>
@@ -991,12 +988,16 @@ function ProfileHeader({
   onToggleStatus: (status: WatchStatus) => void;
 }) {
   return (
-    <div className='rounded-xl border border-white/[0.06] bg-white/[0.02] px-5 py-4 sm:px-6'>
-      <div className='flex flex-col gap-5 lg:flex-row lg:items-center lg:gap-8'>
-        <div
-          className='flex min-w-0 items-center gap-4 lg:w-80 lg:shrink-0'
-          aria-busy={isHydrating}
-        >
+    <PageCard className='px-5 py-4 sm:px-6'>
+      <span
+        aria-hidden='true'
+        className='pointer-events-none absolute inset-0'
+        style={{
+          background: `radial-gradient(480px 180px at 10% 0%, ${profile.accentColor}14, transparent 70%)`,
+        }}
+      />
+      <div className='relative flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between lg:gap-6'>
+        <div className='flex min-w-0 items-center gap-4 lg:flex-1' aria-busy={isHydrating}>
           {isIdentityReady ? (
             <>
               <ProfileAvatarEditor profile={profile} />
@@ -1035,7 +1036,7 @@ function ProfileHeader({
           )}
         </div>
 
-        <div className='grid w-full max-w-2xl grid-cols-4 gap-3 self-center lg:mx-auto lg:flex-1'>
+        <div className='grid w-full grid-cols-4 gap-2 lg:w-auto lg:shrink-0 lg:gap-4 lg:border-l lg:border-white/[0.07] lg:pl-6'>
           <StatChip
             value={libraryCount}
             isLoading={statsLoading}
@@ -1068,14 +1069,14 @@ function ProfileHeader({
       </div>
       {headerError && (
         <RetryBanner
-          className='mt-4 px-3 py-2'
+          className='relative mt-4 px-3 py-2'
           message="Couldn't load some profile information."
           onRetry={onRetryHeader}
           isRetrying={headerRetrying}
         />
       )}
       {(statusCountsLoading || WATCH_STATUSES.some((status) => statusCounts[status] > 0)) && (
-        <div className='mt-4 flex flex-wrap justify-center gap-x-6 gap-y-1 border-t border-white/[0.06] pt-2'>
+        <div className='relative mt-3 flex flex-wrap gap-x-6 gap-y-1 border-t border-white/[0.06] pt-2'>
           {statusCountsLoading ? (
             <Skeleton aria-hidden='true' className='h-4.5 w-48' />
           ) : (
@@ -1109,7 +1110,7 @@ function ProfileHeader({
           )}
         </div>
       )}
-    </div>
+    </PageCard>
   );
 }
 
@@ -1142,7 +1143,7 @@ function StatChip({
       onClick={onClick}
       title={title ?? (onClick ? `Open ${label}` : undefined)}
       className={cn(
-        'flex min-w-0 flex-col items-center gap-1.5 rounded-lg py-1.5 text-center',
+        'flex min-w-0 flex-col items-center gap-1.5 rounded-lg px-2 py-1.5 text-center',
         onClick &&
           'transition-colors hover:bg-white/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30',
       )}

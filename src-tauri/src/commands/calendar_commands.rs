@@ -442,41 +442,36 @@ pub async fn get_calendar_events(
     on_cached: Channel<CalendarSchedule>,
 ) -> Result<CalendarSchedule, String> {
     let upcoming = range.validate()?;
-    let store_app = app.clone();
-    let service = playback_state.inner().clone();
-    let (requests, progress) = super::run_blocking_store_op(move || {
-        let library = load_library_item_identities(&super::open_store(
-            &store_app,
-            super::LIBRARY_STORE_FILE,
-        )?)?;
-        let statuses = load_watch_statuses_map(&super::open_store(
-            &store_app,
-            super::WATCH_STATUS_STORE_FILE,
-        )?)?;
-        let list_items = super::list_commands::read_list_item_identities(&super::open_store(
-            &store_app,
-            super::LISTS_STORE_FILE,
-        )?)?;
-        let watching_ids: Vec<_> = statuses
-            .iter()
-            .filter_map(|(id, status)| (status == "watching").then_some(id.as_str()))
-            .collect();
-        let history = service.load_latest_resume_title_identities(&store_app, &watching_ids)?;
-        let tracked = library.into_iter().chain(list_items);
-        let requests = calendar_requests(tracked, history, &statuses);
-        // Loaded before fetching so streamed snapshots carry the same spoiler flags as the result.
-        let ids: Vec<_> = requests.iter().map(|request| request.id.as_str()).collect();
-        let mut rows_by_id: HashMap<String, Vec<_>> = HashMap::new();
-        for (_, row) in service.load_resume_entries_for_media_ids(&store_app, &ids)? {
-            rows_by_id.entry(row.id.clone()).or_default().push(row);
-        }
-        let progress = rows_by_id
-            .into_iter()
-            .map(|(id, rows)| (id, build_title_watch_progress_with_priorities(rows, None)))
-            .collect();
-        Ok((requests, progress))
-    })
-    .await?;
+    let (requests, progress) = playback_state
+        .run_store_op(&app, move |service, app| {
+            let library =
+                load_library_item_identities(&super::open_store(app, super::LIBRARY_STORE_FILE)?)?;
+            let statuses =
+                load_watch_statuses_map(&super::open_store(app, super::WATCH_STATUS_STORE_FILE)?)?;
+            let list_items = super::list_commands::read_list_item_identities(&super::open_store(
+                app,
+                super::LISTS_STORE_FILE,
+            )?)?;
+            let watching_ids: Vec<_> = statuses
+                .iter()
+                .filter_map(|(id, status)| (status == "watching").then_some(id.as_str()))
+                .collect();
+            let history = service.load_latest_resume_title_identities(app, &watching_ids)?;
+            let tracked = library.into_iter().chain(list_items);
+            let requests = calendar_requests(tracked, history, &statuses);
+            // Loaded before fetching so streamed snapshots carry the same spoiler flags as the result.
+            let ids: Vec<_> = requests.iter().map(|request| request.id.as_str()).collect();
+            let mut rows_by_id: HashMap<String, Vec<_>> = HashMap::new();
+            for (_, row) in service.load_resume_entries_for_media_ids(app, &ids)? {
+                rows_by_id.entry(row.id.clone()).or_default().push(row);
+            }
+            let progress = rows_by_id
+                .into_iter()
+                .map(|(id, rows)| (id, build_title_watch_progress_with_priorities(rows, None)))
+                .collect();
+            Ok((requests, progress))
+        })
+        .await?;
     let tracked_count = requests.len();
     let schedules = cache
         .fetch(&app, client.inner(), requests, |cached| {

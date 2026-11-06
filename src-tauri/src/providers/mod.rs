@@ -35,10 +35,14 @@ pub(crate) fn usize_to_u64_saturating(value: usize) -> u64 {
 
 /// Trim + char-bound + empty-reject for untrusted provider fields.
 pub(crate) fn trim_to_max(value: &str, max_chars: usize) -> Option<String> {
-    let mut trimmed: String = value.trim().chars().take(max_chars).collect();
+    let trimmed = value.trim();
+    let end = trimmed
+        .char_indices()
+        .nth(max_chars)
+        .map_or(trimmed.len(), |(index, _)| index);
     // Truncation can expose trailing whitespace; trimming it keeps normalization idempotent.
-    trimmed.truncate(trimmed.trim_end().len());
-    (!trimmed.is_empty()).then_some(trimmed)
+    let trimmed = trimmed[..end].trim_end();
+    (!trimmed.is_empty()).then(|| trimmed.to_string())
 }
 
 /// `trim_to_max` for optional fields — an all-empty result becomes `None`.
@@ -372,6 +376,17 @@ pub(crate) fn build_provider_http_client(max_idle_per_host: Option<usize>) -> Cl
 
     // Fail closed: a fallback client would silently drop the SSRF redirect policy.
     builder.build().expect("provider HTTP client must build")
+}
+
+/// Shared disk-cache payload: `key` binds an enrichment file to its logical cache
+/// key; subtitle entries omit it and keep their existing on-disk shape.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct DiskEnvelope<'a> {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub expires_at: std::time::SystemTime,
+    #[serde(borrow)]
+    pub response: &'a serde_json::value::RawValue,
 }
 
 /// Bounded read of one disk-cache file; oversize files are a miss. Callers hold their disk gate.

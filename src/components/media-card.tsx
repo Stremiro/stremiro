@@ -63,6 +63,7 @@ import { searchGenrePath } from '@/lib/search-page-state';
 import {
   clearTimer,
   cn,
+  formatRuntime,
   isHttpUrl,
   mediaTypeLabel,
   prefersReducedMotion,
@@ -101,11 +102,11 @@ export const MEDIA_CARD_SLOT_CLASS_NAME = 'w-[170px] md:w-[190px]';
 
 // Includes the 6px top margin; reserve room for status before its query resolves.
 export const MEDIA_CARD_TEXT_BLOCK_HEIGHT_PX = 82;
-const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-[76px] px-0.5 space-y-1';
+const MEDIA_CARD_TEXT_BLOCK_CLASS_NAME = 'mt-1.5 min-h-[76px] px-0.5 space-y-0.5';
 const CARD_ICON_BUTTON_CLASS_NAME =
-  'group/collection flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 not-aria-disabled:active:bg-white/[0.16] motion-reduce:transition-none';
+  'group/collection flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 not-aria-disabled:hover:border-white/30 not-aria-disabled:active:bg-white/[0.14] motion-reduce:transition-none';
 const CARD_INACTIVE_ICON_BUTTON_CLASS_NAME =
-  'border-white/[0.08] bg-white/[0.06] text-zinc-300 hover:bg-white/[0.12] hover:text-white';
+  'border-white/15 bg-white/[0.05] text-zinc-300 not-aria-disabled:hover:bg-white/[0.11] not-aria-disabled:hover:text-white';
 type CardPanel = 'details' | 'menu' | 'lists';
 
 // Shared rail callbacks for plain MediaCard rows — stable identities keep HorizontalMediaRail's memo from re-running.
@@ -185,6 +186,10 @@ function ResumeProgressBar({
     </>
   );
 }
+
+/** "X left" meta lines surface as the popout's remaining-time chip. */
+const remainingLabel = (metaLine: string | undefined, hidden: boolean) =>
+  metaLine?.endsWith('left') ? { label: metaLine, hidden } : undefined;
 
 function NewEpisodeBadge({ hidden = false }: { hidden?: boolean }) {
   return (
@@ -274,7 +279,8 @@ function MediaCardPoster({
   const poster = (
     <div
       className={cn(
-        'relative rounded-lg bg-zinc-900',
+        'relative rounded-lg bg-zinc-900 ring-1 ring-white/[0.08] transition-shadow duration-150 motion-reduce:transition-none',
+        !selectionMode && 'group-hover/card:ring-white/20 group-focus-within/card:ring-white/20',
         selectionMode &&
           isSelected &&
           'ring-2 ring-(--accent-nav) ring-offset-2 ring-offset-zinc-950',
@@ -328,7 +334,7 @@ function MediaCardPoster({
           progress={progress}
           animateEntrance={Boolean(onPlay) && !selectionMode}
           hidden={isPlayPending}
-          remaining={metaLine?.endsWith('left') ? { label: metaLine, hidden: false } : undefined}
+          remaining={remainingLabel(metaLine, false)}
         />
         {!selectionMode && !expanded && isPlayPending && <PlaybackPendingOverlay />}
       </div>
@@ -346,7 +352,7 @@ function MediaCardPoster({
       <p
         dir='auto'
         title={item.title}
-        className='line-clamp-2 min-h-9 [overflow-wrap:anywhere] text-[14px] font-medium leading-[18px] tracking-[-0.01em] text-zinc-100'
+        className='line-clamp-2 min-h-10 [overflow-wrap:anywhere] text-[14px] font-medium leading-5 text-zinc-100'
       >
         {item.title}
       </p>
@@ -361,12 +367,12 @@ function MediaCardPoster({
         <p className='text-[13px] font-normal leading-4 text-zinc-400'>{item.displayYear}</p>
       ) : null}
       {currentStatus ? (
-        <p className='flex items-center gap-1.5 text-[13px] font-medium leading-4 text-zinc-400'>
+        <p className='flex items-center gap-1.5 text-[13px] leading-4 text-zinc-400'>
           <WatchStatusIcon status={currentStatus} className='size-3.5' strokeWidth={2.1} />
           {WATCH_STATUS_LABELS[currentStatus]}
         </p>
       ) : inLibrary ? (
-        <p className='flex items-center gap-1.5 text-[13px] font-medium leading-4 text-zinc-400'>
+        <p className='flex items-center gap-1.5 text-[13px] leading-4 text-zinc-400'>
           <Library aria-hidden='true' className='size-3.5' strokeWidth={2.1} />
           In Library
         </p>
@@ -379,6 +385,7 @@ function MediaCardPoster({
       <button
         type='button'
         aria-label={`${isSelected ? 'Deselect' : 'Select'} ${item.title}`}
+        aria-pressed={isSelected}
         className='group block w-full rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 focus-visible:ring-offset-2 focus-visible:ring-offset-background'
         onClick={(event) => {
           event.preventDefault();
@@ -609,9 +616,17 @@ function MediaCardOverlay({
   });
   const artworkRef = useRef<HTMLDivElement>(null);
 
+  const openDetails = (event: ReactMouseEvent<HTMLAnchorElement>) =>
+    navigateToDetails(event, detailsPath, { state: { from } }, artworkRef.current);
+
   const { data: lists } = useListSummaries(item.id);
 
   const ratingScore = details?.ratingPercent;
+  const runtime = formatRuntime(details?.runtime);
+  const genrePills = primaryGenrePills(item.genres, details?.genres);
+  const synopsis = details?.description || item.description;
+  // Catalog genres paint with the card; details-sourced ones arrive late like the rating badge.
+  const lateGenrePills = genrePills.length > 0 && !item.genres?.length;
 
   const [trailerIndex, setTrailerIndex] = useState(0);
   const skipTrailer = useCallback(() => setTrailerIndex((index) => index + 1), []);
@@ -657,7 +672,7 @@ function MediaCardOverlay({
         aria-label={`Actions for ${item.title}`}
         inert={exiting}
         className={cn(
-          'absolute top-0 z-20 flex max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.08] bg-zinc-950 shadow-[0_24px_70px_-12px_rgba(0,0,0,0.85)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
+          'absolute top-0 z-20 flex max-w-[86vw] origin-top select-none flex-col overflow-hidden rounded-xl border border-white/[0.12] bg-zinc-950 shadow-[0_16px_40px_-12px_rgb(0_0_0/0.7)] ring-1 ring-black/40 -outline-offset-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-2 group-has-[[data-media-card-poster]:focus-visible]/card:outline-white/40 motion-reduce:animate-none',
           exiting ? 'pointer-events-none animate-surface-out' : 'animate-surface-in',
           popoverAlign === 'left' && 'left-0',
           popoverAlign === 'right' && 'right-0',
@@ -665,7 +680,8 @@ function MediaCardOverlay({
         )}
         style={{
           width: POPOUT_WIDTH_PX,
-          marginLeft: popoverAlign === 'center' ? -POPOUT_WIDTH_PX / 2 : undefined,
+          marginLeft:
+            popoverAlign === 'center' ? `calc(min(${POPOUT_WIDTH_PX}px, 86vw) / -2)` : undefined,
         }}
         onPointerMove={wakePointer}
       >
@@ -691,7 +707,13 @@ function MediaCardOverlay({
               onRevealChange={setTrailerShowing}
             />
           )}
-          <div className='pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-linear-to-t from-zinc-950 via-zinc-950/60 to-transparent' />
+          <div
+            aria-hidden='true'
+            className={cn(
+              'pointer-events-none absolute inset-x-0 bottom-0 h-14 bg-linear-to-t from-zinc-950 via-zinc-950/30 to-transparent transition-opacity duration-300 motion-reduce:transition-none',
+              hideArtworkChrome && 'opacity-0',
+            )}
+          />
           {isNewEpisode && <NewEpisodeBadge hidden={hideArtworkChrome} />}
           <a
             href={detailsPath}
@@ -700,7 +722,7 @@ function MediaCardOverlay({
             aria-hidden
             onClick={(event) => {
               void onPlay?.(event);
-              navigateToDetails(event, detailsPath, { state: { from } }, artworkRef.current);
+              openDetails(event);
             }}
           />
           {isPrimaryPending ? (
@@ -708,11 +730,7 @@ function MediaCardOverlay({
           ) : (
             <ResumeProgressBar
               progress={progress}
-              remaining={
-                metaLine?.endsWith('left')
-                  ? { label: metaLine, hidden: hideArtworkChrome }
-                  : undefined
-              }
+              remaining={remainingLabel(metaLine, hideArtworkChrome)}
             />
           )}
           {onRemoveFromContinue && (
@@ -768,60 +786,105 @@ function MediaCardOverlay({
               <div
                 inert={panel === 'menu'}
                 className={cn(
-                  'relative z-10 flex flex-col gap-2 p-3 pt-2.5 transition-opacity duration-150 ease-out motion-reduce:transition-none',
+                  'relative z-10 flex flex-col gap-2 bg-linear-to-b from-white/[0.025] to-transparent p-3 pt-2.5 transition-opacity duration-150 ease-out motion-reduce:transition-none',
                   menu.mounted && 'opacity-0 duration-0',
                 )}
               >
-                <div className='flex items-start justify-between gap-2'>
-                  <h3 className='min-w-0 flex-1 text-[14px] font-semibold leading-5 tracking-[-0.01em] text-white line-clamp-1'>
-                    {currentStatus && (
-                      <WatchStatusIcon
-                        status={currentStatus}
-                        className='mr-1.5 inline-block size-3.5 align-[-2px]'
-                        strokeWidth={2.1}
-                      />
-                    )}
-                    {/* Every other target on a resume card plays — the title link is the non-play path to details. */}
-                    <a
-                      href={detailsPath}
-                      className='transition-colors hover:text-white/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40 rounded-xs'
-                      onClick={(event) =>
-                        navigateToDetails(
-                          event,
-                          detailsPath,
-                          { state: { from } },
-                          artworkRef.current,
-                        )
-                      }
+                {/* Facts hug the title so a one-line title leaves no dead band above the actions. */}
+                <div className='flex flex-col gap-1.5'>
+                  <div className='flex items-start justify-between gap-2'>
+                    <h3
+                      dir='auto'
+                      className='min-w-0 flex-1 text-[15px] font-semibold leading-5 text-white line-clamp-2 [overflow-wrap:anywhere]'
                     >
-                      {item.title}
-                    </a>
-                  </h3>
-                  {ratingScore !== undefined && (
-                    <span
-                      className={cn(
-                        'flex h-5 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold leading-none tabular-nums ring-1 ring-inset animate-in fade-in duration-300',
-                        ratingToneClassName(ratingScore),
+                      {currentStatus && (
+                        <WatchStatusIcon
+                          status={currentStatus}
+                          className='me-1.5 inline-block size-3.5 align-[-2px]'
+                          strokeWidth={2.1}
+                        />
                       )}
-                    >
-                      <Star aria-hidden='true' className='size-2.5 fill-current' />
-                      {ratingScore}%
-                    </span>
-                  )}
+                      {/* Every other target on a resume card plays — the title link is the non-play path to details. */}
+                      <a
+                        href={detailsPath}
+                        title={item.title}
+                        className='rounded-xs decoration-white/30 underline-offset-4 hover:underline focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
+                        onClick={openDetails}
+                      >
+                        {item.title}
+                      </a>
+                    </h3>
+                    {ratingScore !== undefined && (
+                      <span
+                        className={cn(
+                          'flex h-5 shrink-0 items-center gap-1 rounded-md px-1.5 text-[11px] font-semibold leading-none tabular-nums ring-1 ring-inset animate-in fade-in duration-300',
+                          ratingToneClassName(ratingScore),
+                        )}
+                      >
+                        <Star aria-hidden='true' className='size-2.5 fill-current' />
+                        {ratingScore}%
+                      </span>
+                    )}
+                  </div>
+
+                  {/* One fixed-height line: runtime/genres arrive async, so a growing row would shift
+                    the actions out from under the cursor. A genre that doesn't fit wraps out of view whole. */}
+                  <div className='flex h-4 flex-wrap content-start items-center gap-x-1.5 overflow-hidden text-[13px] font-medium leading-4 whitespace-nowrap text-zinc-400'>
+                    <span className='text-zinc-200'>{mediaTypeLabel(item.type)}</span>
+                    {item.displayYear && (
+                      <>
+                        <span className='text-zinc-700'>·</span>
+                        <span>{item.displayYear}</span>
+                      </>
+                    )}
+                    {runtime && (
+                      <>
+                        <span className='text-zinc-700'>·</span>
+                        <span className='tabular-nums animate-in fade-in duration-300'>
+                          {runtime}
+                        </span>
+                      </>
+                    )}
+                    {metaLine && (
+                      <>
+                        <span className='text-zinc-700'>·</span>
+                        <span className='tabular-nums text-(--accent-prog)'>{metaLine}</span>
+                      </>
+                    )}
+                    {genrePills.map((genre) => {
+                      const genrePath = searchGenrePath(item.type, genre);
+                      return (
+                        <a
+                          key={genre}
+                          href={genrePath}
+                          onClick={(event) => navigateOnAnchorClick(event, genrePath)}
+                          className={cn(
+                            'flex items-center gap-x-1.5 rounded-xs transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40',
+                            lateGenrePills && 'animate-in fade-in duration-300',
+                          )}
+                        >
+                          <span aria-hidden='true' className='text-zinc-700'>
+                            ·
+                          </span>
+                          {genre}
+                        </a>
+                      );
+                    })}
+                  </div>
                 </div>
 
                 <div className='flex items-center gap-1.5'>
                   <button
                     type='button'
                     data-media-card-primary
-                    className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[14px] font-semibold tracking-[-0.005em] transition-colors duration-150 hover:brightness-105 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/30 active:scale-[0.98] aria-disabled:cursor-default aria-disabled:opacity-80'
+                    className='accent-lattice flex h-9 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg px-2.5 text-[14px] font-semibold tracking-[-0.005em] not-aria-disabled:hover:brightness-110 not-aria-disabled:active:brightness-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-act)/60 focus-visible:ring-offset-2 focus-visible:ring-offset-zinc-950 aria-disabled:cursor-default aria-disabled:opacity-70 motion-reduce:transition-none'
                     onPointerEnter={warmPlayerChunk}
                     onFocus={warmPlayerChunk}
                     onClick={handlePrimaryAction}
                     aria-disabled={isPrimaryPending || undefined}
                     aria-busy={isPrimaryPending || undefined}
                   >
-                    <Play aria-hidden='true' className='h-3.5 w-3.5 shrink-0 fill-current' />
+                    <Play aria-hidden='true' className='h-4 w-4 shrink-0 fill-current' />
                     <span className='truncate'>
                       {isPrimaryPending ? 'Opening…' : primaryActionLabel}
                     </span>
@@ -836,6 +899,7 @@ function MediaCardOverlay({
                         : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
                     )}
                     aria-label={libraryActionLabel}
+                    title={libraryActionLabel}
                     aria-busy={
                       toggleLibrary.isPending || (!libraryReady && !libraryError) || undefined
                     }
@@ -843,7 +907,7 @@ function MediaCardOverlay({
                     aria-disabled={!libraryReady || toggleLibrary.isPending || undefined}
                     onClick={handleToggleLibrary}
                   >
-                    <SaveIndicator saved={isInLibrary} className='size-3.5' />
+                    <SaveIndicator saved={isInLibrary} className='size-4' />
                   </button>
 
                   <button
@@ -855,8 +919,8 @@ function MediaCardOverlay({
                         : CARD_INACTIVE_ICON_BUTTON_CLASS_NAME,
                     )}
                     aria-label='Add to List'
+                    title='Add to list'
                     aria-pressed={isInAnyList}
-                    aria-expanded={false}
                     onPointerEnter={warmSaveToCollectionPanel}
                     onFocus={warmSaveToCollectionPanel}
                     onClick={onToggleListPicker}
@@ -864,7 +928,7 @@ function MediaCardOverlay({
                     <Bookmark
                       aria-hidden='true'
                       className={cn(
-                        'h-3.5 w-3.5 transition-[fill,color] duration-150 motion-reduce:transition-none',
+                        'h-4 w-4 transition-[fill,color] duration-150 motion-reduce:transition-none',
                         isInAnyList
                           ? 'fill-current'
                           : 'fill-transparent group-hover/collection:fill-white/10',
@@ -873,42 +937,14 @@ function MediaCardOverlay({
                   </button>
                 </div>
 
-                {/* One fixed-height line: genres arrive async, so a growing row would shift the
-                  actions out from under the cursor. A genre that doesn't fit wraps out of view whole. */}
-                <div className='flex h-4 flex-wrap content-start items-center gap-x-1.5 overflow-hidden text-[13px] font-medium leading-4 whitespace-nowrap text-zinc-400'>
-                  <span className='text-zinc-200'>{mediaTypeLabel(item.type)}</span>
-                  {item.displayYear && (
-                    <>
-                      <span className='text-zinc-700'>·</span>
-                      <span>{item.displayYear}</span>
-                    </>
+                <p
+                  dir='auto'
+                  className={cn(
+                    'min-h-10 text-[13px] leading-5 line-clamp-2',
+                    synopsis ? 'text-zinc-300' : 'text-zinc-500',
                   )}
-                  {metaLine && (
-                    <>
-                      <span className='text-zinc-700'>·</span>
-                      <span className='tabular-nums text-zinc-200'>{metaLine}</span>
-                    </>
-                  )}
-                  {primaryGenrePills(item.genres, details?.genres).map((genre) => {
-                    const genrePath = searchGenrePath(item.type, genre);
-                    return (
-                      <a
-                        key={genre}
-                        href={genrePath}
-                        onClick={(event) => navigateOnAnchorClick(event, genrePath)}
-                        className='flex items-center gap-x-1.5 rounded-xs transition-colors hover:text-zinc-200 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-white/40'
-                      >
-                        <span aria-hidden='true' className='text-zinc-700'>
-                          ·
-                        </span>
-                        {genre}
-                      </a>
-                    );
-                  })}
-                </div>
-
-                <p className='min-h-[60px] text-[13px] leading-5 text-zinc-400 line-clamp-3'>
-                  {details?.description || item.description || 'No synopsis available yet.'}
+                >
+                  {synopsis || 'No synopsis available yet.'}
                 </p>
               </div>
               {/* Right-click crossfades the info panel into actions in place; the panel keeps its height. */}
@@ -953,13 +989,7 @@ function MediaCardOverlay({
                     label: 'Open details',
                     icon: Info,
                     href: detailsPath,
-                    onSelect: (event) =>
-                      navigateToDetails(
-                        event,
-                        detailsPath,
-                        { state: { from } },
-                        artworkRef.current,
-                      ),
+                    onSelect: openDetails,
                   },
                   !hasResumeActions && {
                     key: 'library',
@@ -1379,7 +1409,7 @@ export function MediaCardSkeleton() {
     <div aria-hidden='true' className='animate-pulse motion-reduce:animate-none'>
       <div className='aspect-2/3 rounded-lg border border-white/5 bg-zinc-900/50' />
       <div className={MEDIA_CARD_TEXT_BLOCK_CLASS_NAME}>
-        <div className='h-9 space-y-1'>
+        <div className='h-10 space-y-1'>
           <div className='h-4 w-3/4 rounded-md bg-zinc-900/40' />
           <div className='h-4 w-1/2 rounded-md bg-zinc-900/30' />
         </div>

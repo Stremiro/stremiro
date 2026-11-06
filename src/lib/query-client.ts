@@ -2,6 +2,7 @@ import { QueryClient, replaceEqualDeep } from '@tanstack/react-query';
 import {
   DETAILS_GC_TIME_MS,
   DETAILS_QUERY_KEY,
+  TITLE_WATCH_PROGRESS_QUERY_KEY,
   WATCH_STATUSES_QUERY_KEY,
 } from '@/lib/query-invalidation';
 
@@ -19,6 +20,11 @@ export const queryClient = new QueryClient({
   },
 });
 queryClient.setQueryDefaults(DETAILS_QUERY_KEY, { gcTime: DETAILS_GC_TIME_MS });
+// Prefetched watch-progress payloads share the details window — they warm the
+// same pages, so they shouldn't outlive them under the 30min default.
+queryClient.setQueryDefaults(TITLE_WATCH_PROGRESS_QUERY_KEY, {
+  gcTime: DETAILS_GC_TIME_MS,
+});
 queryClient.setQueryDefaults(WATCH_STATUSES_QUERY_KEY, {
   // The default deep copy loses an own "__proto__" media ID through the prototype setter.
   structuralSharing: (previous, current) =>

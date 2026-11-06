@@ -251,6 +251,13 @@ impl Drop for TestHttpServer {
     }
 }
 
+/// Bound-but-never-accepting listener: connections stall forever at the HTTP layer.
+pub(crate) fn stalled_listener() -> (std::net::TcpListener, String) {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    (listener, url)
+}
+
 /// Canonical Cinemeta-shaped manifest: `catalog` + `meta` resources with the
 /// `top` (search/genre/skip extras) and `imdbRating` movie catalogs. Single
 /// source so parse, URL-build, and registry tests cannot drift apart. The

@@ -168,7 +168,7 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
       >
         <ArrowLeft className='h-5 w-5' strokeWidth={CHROME_ICON_STROKE} />
       </button>
-      <div className='min-w-0 px-3 text-center [text-shadow:0_1px_2px_rgba(0,0,0,0.55)]'>
+      <div className='min-w-0 px-3 text-center [text-shadow:0_0_2px_rgba(0,0,0,0.9),0_1px_4px_rgba(0,0,0,0.8),0_4px_16px_rgba(0,0,0,0.45)]'>
         <h1 className='truncate text-center text-[16px] leading-6 font-semibold tracking-[-0.015em] text-white'>
           <button
             type='button'
@@ -185,20 +185,20 @@ export const PlayerTopChrome = memo(function PlayerTopChrome({
         {(seasonEpisode || episodeTitle || streamSourceName) && (
           <p className='flex min-w-0 items-center justify-center gap-1.5 text-[12.5px] leading-5'>
             {seasonEpisode && (
-              <span className='shrink-0 font-medium tabular-nums tracking-tight text-white/85'>
+              <span className='shrink-0 font-medium tabular-nums tracking-tight text-white/90'>
                 {seasonEpisode}
                 {episodeCountInSeason ? (
-                  <span className='font-normal text-white/40'> / {episodeCountInSeason}</span>
+                  <span className='font-normal text-white/50'> / {episodeCountInSeason}</span>
                 ) : null}
               </span>
             )}
             {seasonEpisode && episodeTitle && separator}
             {episodeTitle && (
-              <span className='min-w-0 truncate font-medium text-white/80'>{episodeTitle}</span>
+              <span className='min-w-0 truncate font-medium text-white/85'>{episodeTitle}</span>
             )}
             {(seasonEpisode || episodeTitle) && streamSourceName && separator}
             {streamSourceName && (
-              <span className='max-w-[40%] shrink-0 truncate text-white/50'>
+              <span className='max-w-[40%] shrink-0 truncate text-white/60'>
                 via {streamSourceName}
               </span>
             )}

@@ -35,6 +35,7 @@ import { useInlineMenu } from '@/hooks/use-inline-menu';
 import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 import { usePointerIdle } from '@/hooks/use-pointer-idle';
+import { useWindowRelease } from '@/hooks/use-window-release';
 import {
   PLAYER_SIDEBAR_WIDTH_PX,
   PLAYER_TITLEBAR_HEIGHT_PX,
@@ -247,9 +248,9 @@ const MiniPlayerTimeLabel = memo(function MiniPlayerTimeLabel({
 }: MiniPlayerTickProps) {
   const displayTime = useMiniDisplayTime(clock, duration, seekPreviewStore, active, true);
   return (
-    <span className='shrink-0 text-[11px] tabular-nums text-white/80'>
+    <span className='shrink-0 text-[11px] font-medium tabular-nums text-white [text-shadow:0_1px_2px_rgba(0,0,0,0.8)]'>
       {formatTime(displayTime)}
-      {duration > 0 && <span className='text-white/55'> / {formatTime(duration)}</span>}
+      {duration > 0 && <span className='font-normal text-white/65'> / {formatTime(duration)}</span>}
     </span>
   );
 });
@@ -437,26 +438,12 @@ export const MiniPlayer = memo(function MiniPlayer({
     rootRef: frameRef,
     returnFocus: () => videoSurfaceRef.current,
   });
-  useEffect(() => {
-    const releaseInteraction = () => {
-      setHovered(false);
-      setHasFocus(false);
-    };
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') releaseInteraction();
-    };
-    const handlePointerOut = (event: PointerEvent) => {
-      if (event.relatedTarget === null) setHovered(false);
-    };
-    window.addEventListener('blur', releaseInteraction);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    document.addEventListener('pointerout', handlePointerOut);
-    return () => {
-      window.removeEventListener('blur', releaseInteraction);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      document.removeEventListener('pointerout', handlePointerOut);
-    };
+  const releaseInteraction = useCallback(() => {
+    setHovered(false);
+    setHasFocus(false);
   }, []);
+  const releaseHover = useCallback(() => setHovered(false), []);
+  useWindowRelease(releaseInteraction, releaseHover);
   const [metrics, setMetrics] = useState<MiniPlayerMetrics>(computeMiniMetrics);
   const [renderPosition] = useState(() =>
     clampMiniPosition(getInitialPosition() ?? defaultMiniPosition(metrics), metrics),
@@ -1001,7 +988,7 @@ export const MiniPlayer = memo(function MiniPlayer({
               <div className='absolute inset-0 bg-linear-to-t from-black/75 via-black/35 to-black/45' />
               <p
                 className={cn(
-                  'absolute inset-x-0 bottom-2 truncate px-3 text-[10px] font-medium text-white/70 drop-shadow',
+                  'absolute inset-x-0 bottom-2 truncate px-3 text-[11px] font-medium text-white/80 [text-shadow:0_1px_3px_rgba(0,0,0,0.85),0_0_1px_rgba(0,0,0,0.9)]',
                   isDocking && 'opacity-0',
                 )}
               >
@@ -1098,7 +1085,7 @@ export const MiniPlayer = memo(function MiniPlayer({
                 )}
               >
                 <MiniExpandButton keymap={keymap} onClick={onExpand} />
-                <p className='min-w-0 flex-1 truncate px-1 text-xs font-medium leading-tight text-white drop-shadow'>
+                <p className='min-w-0 flex-1 truncate px-1 text-xs font-semibold leading-tight text-white [text-shadow:0_1px_3px_rgba(0,0,0,0.85),0_0_1px_rgba(0,0,0,0.9)]'>
                   <MiniTitle title={title} episodeLabel={episodeLabel} />
                 </p>
                 <MiniCloseButton onClick={onClose} />

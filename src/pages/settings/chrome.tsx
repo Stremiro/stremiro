@@ -1,4 +1,4 @@
-import { Check, ChevronDown, type LucideIcon } from 'lucide-react';
+import { Check, ChevronDown } from 'lucide-react';
 import type { ReactNode } from 'react';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
@@ -52,76 +52,23 @@ export const SETTINGS_OUTLINE_BUTTON_CLASS =
 export const SETTINGS_CAPTION_CLASS =
   'text-[13px] font-semibold uppercase leading-5 tracking-[0.08em] text-zinc-400';
 
-export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-lg border border-white/[0.06] bg-black/20';
+export const SETTINGS_INSET_SURFACE_CLASS = 'rounded-xl border border-white/[0.06] bg-black/20';
 
 /** Shared `SettingsRow` shells — used directly by rows with a custom label slot (clear-records). */
 export const SETTINGS_ROW_CLASS =
   'flex flex-wrap items-center justify-between gap-x-5 gap-y-3 py-3.5 first:pt-0 last:pb-0';
 export const SETTINGS_ROW_DESCRIPTION_CLASS =
-  'mt-1 block max-w-[64ch] text-[13px] leading-relaxed text-zinc-400';
+  'mt-1 block max-w-[64ch] text-[13px] leading-normal text-zinc-400';
 
 export function settingsControlId(label: string) {
   return `setting-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-')}`;
 }
 
-export function SettingsGroup({
-  children,
-  className,
-  id,
-}: {
-  children: ReactNode;
-  className?: string;
-  id?: string;
-}) {
-  return (
-    <section
-      id={id}
-      className={cn(
-        'relative isolate min-w-0 overflow-hidden rounded-xl border border-white/[0.07] bg-zinc-950/70 bg-linear-to-b from-white/[0.04] to-transparent shadow-[0_2px_6px_-2px_rgba(0,0,0,0.4),0_16px_36px_-20px_rgba(0,0,0,0.65),inset_0_1px_0_rgba(255,255,255,0.04)] transition-colors duration-300 hover:border-white/[0.1] motion-reduce:transition-none',
-        className,
-      )}
-    >
-      <span
-        aria-hidden='true'
-        className='pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(24rem_12rem_at_top_left,rgb(var(--accent-nav-rgb)/calc(0.07*var(--app-glow,1))),transparent_75%)]'
-      />
-      <span
-        aria-hidden='true'
-        className='pointer-events-none absolute inset-x-6 top-0 h-px bg-linear-to-r from-transparent via-white/[0.14] to-transparent'
-      />
-      {children}
-    </section>
-  );
-}
-
-export function SettingsGroupHeader({
-  action,
-  description,
-  icon: Icon,
-  title,
-}: {
-  action?: ReactNode;
-  description?: string;
-  icon?: LucideIcon;
-  title: string;
-}) {
-  return (
-    <div className='flex flex-wrap items-start justify-between gap-3 border-b border-white/[0.06] px-4 py-4 sm:px-5'>
-      <div className='flex min-w-0 flex-1 basis-48 items-start gap-3'>
-        {Icon ? (
-          <span className='flex size-8 shrink-0 items-center justify-center rounded-lg bg-linear-to-b from-white/[0.08] to-white/[0.02] ring-1 ring-inset ring-white/[0.08]'>
-            <Icon aria-hidden='true' className='size-4 text-(--accent-nav)' strokeWidth={1.75} />
-          </span>
-        ) : null}
-        <div className='min-w-0 flex-1 self-center'>
-          <h3 className='text-[15px] font-semibold tracking-tight text-white'>{title}</h3>
-          {description ? <p className={SETTINGS_ROW_DESCRIPTION_CLASS}>{description}</p> : null}
-        </div>
-      </div>
-      {action ? <div className='shrink-0'>{action}</div> : null}
-    </div>
-  );
-}
+export {
+  PageCard as SettingsCard,
+  PageSection as SettingsGroup,
+  PageSectionHeader as SettingsGroupHeader,
+} from '@/components/page-section';
 
 export function SettingsBody({
   children,

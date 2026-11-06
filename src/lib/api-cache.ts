@@ -1,4 +1,6 @@
 import type { BestResolvedStream } from '@/lib/api';
+import { trackPendingAppWrite } from '@/lib/pending-app-writes';
+import { createGeneration } from '@/lib/utils';
 
 const API_CACHE_MAX_ENTRIES = 200;
 
@@ -225,19 +227,27 @@ export function buildStreamCacheKey(
 
 // Watch-history delete epoch mirroring the backend's history generation: a save queued before
 // a remove/clear must not resurrect the row — the persistence hook snapshots at enqueue and skips crossed writes.
-let watchProgressEpoch = 0;
-export function getWatchProgressEpoch(): number {
-  return watchProgressEpoch;
-}
-export function bumpWatchProgressEpoch(): void {
-  watchProgressEpoch += 1;
-}
+const watchProgressEpoch = createGeneration();
+export const getWatchProgressEpoch = watchProgressEpoch.get;
+export const bumpWatchProgressEpoch = watchProgressEpoch.bump;
 
 // Save revisions fence stale snapshots without discarding queued progress writes.
-let watchProgressSnapshotRevision = 0;
-export function getWatchProgressSnapshotRevision(): number {
-  return watchProgressSnapshotRevision;
+const watchProgressSnapshotRevision = createGeneration();
+export const getWatchProgressSnapshotRevision = watchProgressSnapshotRevision.get;
+export const bumpWatchProgressSnapshotRevision = watchProgressSnapshotRevision.bump;
+
+/** Bump the delete epoch before the IPC lands — a queued save must not resurrect the row. */
+export function trackWatchProgressEpochWrite<T>(write: Promise<T>): Promise<T> {
+  watchProgressEpoch.bump();
+  return trackPendingAppWrite(write);
 }
-export function bumpWatchProgressSnapshotRevision(): void {
-  watchProgressSnapshotRevision += 1;
+
+/** Saves bump the snapshot revision as they land so stale snapshots can't republish. */
+export function trackWatchProgressSave<T>(write: Promise<T>): Promise<T> {
+  return trackPendingAppWrite(
+    write.then((saved) => {
+      watchProgressSnapshotRevision.bump();
+      return saved;
+    }),
+  );
 }

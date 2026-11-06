@@ -4,6 +4,8 @@ import { nonBlank } from '@/lib/utils';
 
 /** Stream-identity bundle one playback session owns — passed downstream as a single arg so new identity state can't drift across signatures. */
 export interface PlayerStreamSession extends ResolvedStreamSession {
+  loadRevision?: number;
+  reloadStream: () => void;
   activeStreamUrl?: string;
   activeStreamMpvHttpHeaderFields?: string;
   activeStreamKey?: string;
@@ -30,6 +32,7 @@ interface StreamSecrets {
 }
 
 interface SessionStreamOverride {
+  loadRevision?: number;
   streamKey?: string;
   sourceName?: string;
   routeSeed: string;
@@ -107,6 +110,15 @@ export function usePlayerStreamSession({
     setSessionStreamOverride(override);
   };
 
+  const reloadStream = () => {
+    setSessionStreamOverride((current) => {
+      if (!current || current.routeSeed !== routeSeedRef.current) return current;
+      const next = { ...current, loadRevision: (current.loadRevision ?? 0) + 1 };
+      streamSecrets.set(next, streamSecrets.get(current) ?? {});
+      return next;
+    });
+  };
+
   useEffect(() => {
     committedStreamUrlRef.current = activeStreamUrl;
   }, [activeStreamUrl]);
@@ -126,6 +138,8 @@ export function usePlayerStreamSession({
 
   // Compiler-cached so `stream` stays dep-safe.
   return {
+    loadRevision: activeOverride?.loadRevision ?? 0,
+    reloadStream,
     activeStreamUrl,
     activeStreamMpvHttpHeaderFields,
     activeStreamKey,

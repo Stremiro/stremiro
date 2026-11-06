@@ -47,22 +47,18 @@ struct AddonConfigIdentity {
     enabled: bool,
 }
 
-impl From<AddonConfigIdentity> for AddonConfig {
-    fn from(identity: AddonConfigIdentity) -> Self {
-        Self {
-            id: identity.id,
-            url: identity.url,
-            name: identity.name,
-            enabled: identity.enabled,
-            capabilities: None,
-        }
-    }
-}
-
 impl AddonConfig {
     pub(crate) fn from_identity(value: &Value) -> Option<Self> {
         if value.is_object() {
-            AddonConfigIdentity::deserialize(value).ok().map(Self::from)
+            AddonConfigIdentity::deserialize(value)
+                .ok()
+                .map(|identity| Self {
+                    id: identity.id,
+                    url: identity.url,
+                    name: identity.name,
+                    enabled: identity.enabled,
+                    capabilities: None,
+                })
         } else {
             Self::deserialize(value).ok().map(|mut config| {
                 config.capabilities = None;
@@ -300,16 +296,7 @@ pub(crate) fn parse_stored_addon_configs(value: &Value) -> Vec<AddonConfig> {
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|item| {
-            if !item.is_object() {
-                return AddonConfig::deserialize(item).ok();
-            }
-            let mut config = AddonConfig::from_identity(item)?;
-            config.capabilities = item
-                .get("capabilities")
-                .and_then(|value| AddonManifest::deserialize(value).ok());
-            Some(config)
-        })
+        .filter_map(|item| AddonConfig::deserialize(item).ok())
         .collect()
 }
 

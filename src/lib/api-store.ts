@@ -27,6 +27,7 @@ import type {
 import {
   bumpWatchProgressEpoch,
   clearProviderDataCaches,
+  trackWatchProgressEpochWrite,
   withStreamingCacheClear,
 } from '@/lib/api-cache';
 import { safeInvoke, type InvokeApi } from '@/lib/api-core';
@@ -199,15 +200,15 @@ export const storeApi = {
     item: MediaItem & { episodes?: readonly Episode[] },
     episodes: readonly { season: number; episode: number }[],
     watched: boolean,
-  ) => {
-    bumpWatchProgressEpoch();
-    return write<EpisodesWatchedResult>('set_episodes_watched', {
-      item: toMediaItem(item),
-      episodes: episodes.map(({ season, episode }) => ({ season, episode })),
-      watched,
-      titleEpisodes: item.episodes?.map(({ season, episode }) => ({ season, episode })) ?? null,
-    });
-  },
+  ) =>
+    trackWatchProgressEpochWrite(
+      safeInvoke<EpisodesWatchedResult>('set_episodes_watched', {
+        item: toMediaItem(item),
+        episodes: episodes.map(({ season, episode }) => ({ season, episode })),
+        watched,
+        titleEpisodes: item.episodes?.map(({ season, episode }) => ({ season, episode })) ?? null,
+      }),
+    ),
   getAllWatchStatuses: () => safeInvoke<Record<string, WatchStatus>>('get_all_watch_statuses'),
   dataStatsQueryOptions: () =>
     queryOptions({
@@ -215,24 +216,19 @@ export const storeApi = {
       queryFn: getDataStats,
       staleTime: DATA_STATS_STALE_TIME_MS,
     }),
-  // Bump before the IPC lands — a queued progress save must not resurrect a wiped row.
-  clearWatchHistory: () => {
-    bumpWatchProgressEpoch();
-    return trackPendingAppWrite(withStreamingCacheClear(safeInvoke<void>('clear_watch_history')));
-  },
+  clearWatchHistory: () =>
+    trackWatchProgressEpochWrite(withStreamingCacheClear(safeInvoke<void>('clear_watch_history'))),
   clearLibrary: () => write<void>('clear_library'),
   clearAllLists: () => write<void>('clear_all_lists'),
   clearAllWatchStatuses: () => write<void>('clear_all_watch_statuses'),
   exportAppDataToFile: () => write<boolean>('export_app_data_to_file'),
   // Bump on both edges: a prefetch bundle started before or during the import
   // must not publish a pre-import resume snapshot.
-  importAppDataFromFile: () => {
-    bumpWatchProgressEpoch();
-    return trackPendingAppWrite(
+  importAppDataFromFile: () =>
+    trackWatchProgressEpochWrite(
       safeInvoke<ImportResult | null>('import_app_data_from_file').finally(() => {
         bumpWatchProgressEpoch();
         clearProviderDataCaches();
       }),
-    );
-  },
+    ),
 };

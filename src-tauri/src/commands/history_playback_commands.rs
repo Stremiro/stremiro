@@ -393,14 +393,11 @@ pub async fn build_history_playback_plan(
 
     // SQLite + store reads are blocking: run the latest-item lookup on the
     // dedicated blocking pool, never on the async worker.
-    let latest_item = {
-        let app_owned = app.clone();
-        let service = playback_state.inner().clone();
-        super::run_blocking_store_op(move || {
-            get_latest_history_playback_item(&app_owned, &service, item)
+    let latest_item = playback_state
+        .run_store_op(&app, move |service, app| {
+            get_latest_history_playback_item(app, service, item)
         })
-        .await?
-    };
+        .await?;
     if !has_episode_context(&latest_item) {
         return Ok(build_details_plan(&latest_item, from));
     }

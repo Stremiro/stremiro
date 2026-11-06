@@ -227,6 +227,30 @@ async fn anilist_graphql_and_shape_failures_are_errors_not_misses() {
     assert_eq!(server.finish().len(), 1);
 }
 
+#[test]
+fn incomplete_anilist_airing_data_preserves_other_credits() {
+    use serde_json::json;
+
+    for airing in [
+        json!({}),
+        json!({"episode": 7}),
+        json!({"airingAt": 1_900_000_000}),
+        json!({"episode": null, "airingAt": 1_900_000_000}),
+        json!({"episode": "7", "airingAt": 1_900_000_000}),
+        json!({"episode": 7, "airingAt": 4_102_444_801_u64}),
+        json!({"episode": u64::MAX, "airingAt": 1_900_000_000}),
+    ] {
+        let bytes = serde_json::to_vec(&json!({
+            "data": {"Media": {"id": 1, "status": "RELEASING", "nextAiringEpisode": airing}}
+        }))
+        .unwrap();
+        let (credits, empty) = decode_anilist_credits(&bytes, "id", 1).unwrap();
+        assert!(!empty);
+        assert_eq!(credits.facts.status.as_deref(), Some("Airing"));
+        assert_eq!(credits.next_airing_episode, None, "{airing}");
+    }
+}
+
 #[tokio::test]
 async fn empty_payloads_serialize_without_source() {
     // Facts-less, people-less Media is normalized to the default shape so the

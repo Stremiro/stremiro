@@ -19,7 +19,7 @@ import {
   type TitleCredits,
 } from '@/lib/api';
 import { isTauriDesktopRuntime } from '@/lib/app-updater';
-import { cn, scrollBehavior } from '@/lib/utils';
+import { cn, formatRuntime, scrollBehavior } from '@/lib/utils';
 
 export type DetailsSection = 'episodes' | 'cast' | 'about';
 
@@ -280,7 +280,7 @@ function About({ item, credits }: { item: MediaDetails; credits?: TitleCredits }
     ['Status', facts?.status],
     ['Schedule', facts?.schedule],
     ['Format', facts?.format],
-    ['Runtime', facts?.runtimeMinutes ? `${facts.runtimeMinutes} min` : item.runtime],
+    ['Runtime', formatRuntime(facts?.runtimeMinutes ? String(facts.runtimeMinutes) : item.runtime)],
   ].filter((row) => row[1]);
   return (
     <div className='max-w-3xl space-y-5'>
@@ -388,7 +388,7 @@ export function DetailsSections({
               <ExternalLink
                 item={item}
                 href='https://www.tvmaze.com'
-                className='underline-offset-4 hover:text-white/65 hover:underline'
+                className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
               >
                 TVmaze
               </ExternalLink>
@@ -396,7 +396,7 @@ export function DetailsSections({
               <ExternalLink
                 item={item}
                 href='https://creativecommons.org/licenses/by-sa/4.0/'
-                className='underline-offset-4 hover:text-white/65 hover:underline'
+                className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
               >
                 CC BY-SA
               </ExternalLink>
@@ -405,7 +405,7 @@ export function DetailsSections({
             <ExternalLink
               item={item}
               href='https://anilist.co'
-              className='underline-offset-4 hover:text-white/65 hover:underline'
+              className='rounded-xs underline-offset-4 hover:text-white/65 hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
             >
               AniList
             </ExternalLink>

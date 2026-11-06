@@ -1,6 +1,6 @@
 import { hashKey, type QueryClient, type QueryFilters } from '@tanstack/react-query';
 import type { CalendarRange, LibraryFilters } from '@/lib/api';
-import { nonBlank } from '@/lib/utils';
+import { createGeneration, nonBlank } from '@/lib/utils';
 
 export const LIBRARY_QUERY_KEY = ['library'] as const;
 export const PROFILE_LIBRARY_QUERY_KEY = ['profile-library'] as const;
@@ -16,8 +16,13 @@ export function resumeRailQueryKey(localToday: string | undefined) {
 }
 export const WATCH_HISTORY_QUERY_KEY = ['watch-history'] as const;
 export const RECENT_WATCH_SEED_QUERY_KEY = [...WATCH_HISTORY_QUERY_KEY, 'recent-seed'] as const;
-const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
+export const TITLE_WATCH_PROGRESS_QUERY_KEY = ['title-watch-progress'] as const;
 export const TOTAL_WATCH_TIME_QUERY_KEY = ['total-watch-time'] as const;
+// Keep previous data only while the query's stable scope prefix matches.
+export function placeholderWhileKeyPrefixMatches(scope: readonly unknown[]) {
+  return <TData>(previous: TData | undefined, previousQuery?: { queryKey: readonly unknown[] }) =>
+    scope.every((part, index) => previousQuery?.queryKey[index] === part) ? previous : undefined;
+}
 export const LISTS_QUERY_KEY = ['lists'] as const;
 export const LIST_SUMMARIES_QUERY_KEY = ['list-summaries'] as const;
 export function listSummariesQueryKey(itemId?: string) {
@@ -270,14 +275,12 @@ export async function invalidateStreamQueries(queryClient: QueryClient) {
   await invalidateQuery(queryClient, STREAMS_QUERY_KEY, 'inactive');
 }
 
-let discoveryEpoch = 0;
+const discoveryEpoch = createGeneration();
 
-export function getDiscoveryEpoch() {
-  return discoveryEpoch;
-}
+export const getDiscoveryEpoch = discoveryEpoch.get;
 
 export async function invalidateDiscoveryQueries(queryClient: QueryClient, refreshSeed = true) {
-  discoveryEpoch += 1;
+  discoveryEpoch.bump();
   // Drop abandoned fetches, but keep mounted selectors attached to a refreshed query.
   queryClient.removeQueries({ queryKey: STREAMS_QUERY_KEY, type: 'inactive' });
   await Promise.all([

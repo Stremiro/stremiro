@@ -1,5 +1,5 @@
 import { Slot } from '@radix-ui/react-slot';
-import { Check, Link2, Plus } from 'lucide-react';
+import { Bookmark, Check, Link2 } from 'lucide-react';
 import * as React from 'react';
 import { useMountedRef } from '@/hooks/use-mounted-ref';
 
@@ -54,7 +54,7 @@ function SaveIndicator({ saved, className }: { saved: boolean; className?: strin
       data-saved={saved}
       className={cn('relative size-4 shrink-0', className)}
     >
-      <Plus
+      <Bookmark
         className={cn(
           'absolute inset-0 size-full transition-opacity duration-150 motion-reduce:transition-none',
           saved ? 'opacity-0' : 'opacity-100',

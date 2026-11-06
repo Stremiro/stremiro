@@ -43,6 +43,16 @@ pub(super) struct PlaybackSourceHealthSnapshot {
     pub cooldown_until: Option<u64>,
 }
 
+impl PlaybackSourceHealthSnapshot {
+    fn activity(&self) -> SnapshotActivity {
+        SnapshotActivity {
+            last_success_at: self.last_success_at,
+            last_failure_at: self.last_failure_at,
+            cooldown_until: self.cooldown_until,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct PlaybackStreamFamilySnapshot {
@@ -61,6 +71,16 @@ pub(super) struct PlaybackStreamFamilySnapshot {
     pub last_failure_episode: Option<u32>,
     pub consecutive_failures: u32,
     pub cooldown_until: Option<u64>,
+}
+
+impl PlaybackStreamFamilySnapshot {
+    fn activity(&self) -> SnapshotActivity {
+        SnapshotActivity {
+            last_success_at: self.last_success_at,
+            last_failure_at: self.last_failure_at,
+            cooldown_until: self.cooldown_until,
+        }
+    }
 }
 
 /// One playback stream outcome report: normalized title scope plus the resolved
@@ -235,6 +255,14 @@ pub(super) fn load_source_health_snapshot(
     store.get_typed(playback_source_health_item_key(key))
 }
 
+/// Skew-tolerant "timestamp inside recent window" shared by the reputation scores.
+fn recent_activity(at: Option<u64>, now_ms: u64, window_ms: u64) -> bool {
+    at.is_some_and(|at| {
+        at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
+            && now_ms.saturating_sub(at) <= window_ms
+    })
+}
+
 pub(super) fn score_source_health_priority(
     snapshot: Option<&PlaybackSourceHealthSnapshot>,
     now_ms: u64,
@@ -251,18 +279,20 @@ pub(super) fn score_source_health_priority(
         return 0;
     }
 
-    if snapshot.last_failure_at.is_some_and(|last_failure_at| {
-        last_failure_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
-            && now_ms.saturating_sub(last_failure_at) <= SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS
-            && snapshot.consecutive_failures >= 1
-    }) {
+    if recent_activity(
+        snapshot.last_failure_at,
+        now_ms,
+        SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS,
+    ) && snapshot.consecutive_failures >= 1
+    {
         return 1;
     }
 
-    if snapshot.last_success_at.is_some_and(|last_success_at| {
-        last_success_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
-            && now_ms.saturating_sub(last_success_at) <= SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS
-    }) {
+    if recent_activity(
+        snapshot.last_success_at,
+        now_ms,
+        SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS,
+    ) {
         return 3;
     }
 
@@ -297,16 +327,16 @@ pub(super) fn score_stream_family_priority(
         return DEFAULT_STREAM_FAMILY_PRIORITY;
     };
 
-    let recent_nearby_failure = snapshot.last_failure_at.is_some_and(|last_failure_at| {
-        last_failure_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
-            && now_ms.saturating_sub(last_failure_at) <= STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS
-            && is_nearby_episode(
-                season,
-                episode,
-                snapshot.last_failure_season,
-                snapshot.last_failure_episode,
-            )
-    });
+    let recent_nearby_failure = recent_activity(
+        snapshot.last_failure_at,
+        now_ms,
+        STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS,
+    ) && is_nearby_episode(
+        season,
+        episode,
+        snapshot.last_failure_season,
+        snapshot.last_failure_episode,
+    );
 
     if snapshot.cooldown_until.is_some_and(|cooldown_until| {
         cooldown_until > now_ms
@@ -321,16 +351,16 @@ pub(super) fn score_stream_family_priority(
         return 1;
     }
 
-    if snapshot.last_success_at.is_some_and(|last_success_at| {
-        last_success_at <= now_ms.saturating_add(REPUTATION_FUTURE_SKEW_MS)
-            && now_ms.saturating_sub(last_success_at) <= STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS
-            && is_nearby_episode(
-                season,
-                episode,
-                snapshot.last_success_season,
-                snapshot.last_success_episode,
-            )
-    }) {
+    if recent_activity(
+        snapshot.last_success_at,
+        now_ms,
+        STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS,
+    ) && is_nearby_episode(
+        season,
+        episode,
+        snapshot.last_success_season,
+        snapshot.last_success_episode,
+    ) {
         return 4;
     }
 
@@ -358,15 +388,20 @@ fn upsert_outcome_snapshot<S: Default + Serialize>(
     timestamp_ms: u64,
     allow_prune: bool,
     load_snapshot: impl Fn(&DurableStore, &str) -> Option<S>,
-    outcome_times: impl Fn(&S) -> (Option<u64>, Option<u64>),
+    activity: impl Fn(&S) -> SnapshotActivity,
     apply_outcome: impl FnOnce(&mut S),
     item_key: impl Fn(&str) -> String,
     index_key: &str,
     max_entries: usize,
-    prune_index: impl Fn(&DurableStore, &mut Vec<String>),
+    recent_success_window_ms: u64,
+    recent_failure_window_ms: u64,
 ) {
     let mut snapshot = load_snapshot(store, key).unwrap_or_default();
-    let (last_success_at, last_failure_at) = outcome_times(&snapshot);
+    let SnapshotActivity {
+        last_success_at,
+        last_failure_at,
+        ..
+    } = activity(&snapshot);
     if !accepts_outcome(last_success_at, last_failure_at, timestamp_ms) {
         return;
     }
@@ -385,7 +420,15 @@ fn upsert_outcome_snapshot<S: Default + Serialize>(
     store.set(item_key(key), json!(snapshot));
     // Hard bound: IPC-supplied identities could grow the index between the cadence-gated sweeps.
     if allow_prune || index.len() > max_entries {
-        prune_index(store, &mut index);
+        prune_by_recency(
+            store,
+            &mut index,
+            max_entries,
+            recent_success_window_ms,
+            recent_failure_window_ms,
+            |store, key| load_snapshot(store, key).map(|snapshot| activity(&snapshot)),
+            item_key,
+        );
     }
     store.set(index_key, json!(index));
 }
@@ -403,7 +446,7 @@ pub(super) fn upsert_source_health_snapshot(
         timestamp_ms,
         allow_prune,
         load_source_health_snapshot,
-        |snapshot| (snapshot.last_success_at, snapshot.last_failure_at),
+        PlaybackSourceHealthSnapshot::activity,
         |snapshot| match outcome {
             PlaybackStreamOutcomeKind::Verified => {
                 snapshot.last_success_at = Some(timestamp_ms);
@@ -436,7 +479,8 @@ pub(super) fn upsert_source_health_snapshot(
         playback_source_health_item_key,
         PLAYBACK_SOURCE_HEALTH_INDEX_KEY,
         SOURCE_HEALTH_INDEX_MAX_ENTRIES,
-        prune_stale_source_health_entries,
+        SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS,
+        SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS,
     )
 }
 
@@ -457,7 +501,7 @@ pub(super) fn upsert_stream_family_snapshot(
         report.timestamp_ms,
         allow_prune,
         load_playback_stream_family_snapshot,
-        |snapshot| (snapshot.last_success_at, snapshot.last_failure_at),
+        PlaybackStreamFamilySnapshot::activity,
         |snapshot| {
             // `|` is legal inside a media id, so the body records the owning scope — key-prefix checks can't prove title.
             snapshot.scope_key = Some(scope_key.to_string());
@@ -493,7 +537,8 @@ pub(super) fn upsert_stream_family_snapshot(
         playback_stream_family_item_key,
         PLAYBACK_STREAM_FAMILY_INDEX_KEY,
         STREAM_FAMILY_INDEX_MAX_ENTRIES,
-        prune_stale_stream_family_entries,
+        STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS,
+        STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS,
     )
 }
 
@@ -558,45 +603,6 @@ fn prune_by_recency(
         let overflow = survivors.len() - max_entries;
         evict_least_active(store, index, survivors, overflow, item_key);
     }
-}
-
-pub(super) fn prune_stale_source_health_entries(
-    store: &DurableStore,
-    source_health_index: &mut Vec<String>,
-) {
-    prune_by_recency(
-        store,
-        source_health_index,
-        SOURCE_HEALTH_INDEX_MAX_ENTRIES,
-        SOURCE_HEALTH_RECENT_SUCCESS_WINDOW_MS,
-        SOURCE_HEALTH_RECENT_FAILURE_WINDOW_MS,
-        |store, key| {
-            load_source_health_snapshot(store, key).map(|snapshot| SnapshotActivity {
-                last_success_at: snapshot.last_success_at,
-                last_failure_at: snapshot.last_failure_at,
-                cooldown_until: snapshot.cooldown_until,
-            })
-        },
-        playback_source_health_item_key,
-    );
-}
-
-fn prune_stale_stream_family_entries(store: &DurableStore, stream_family_index: &mut Vec<String>) {
-    prune_by_recency(
-        store,
-        stream_family_index,
-        STREAM_FAMILY_INDEX_MAX_ENTRIES,
-        STREAM_FAMILY_RECENT_SUCCESS_WINDOW_MS,
-        STREAM_FAMILY_RECENT_FAILURE_WINDOW_MS,
-        |store, key| {
-            load_playback_stream_family_snapshot(store, key).map(|snapshot| SnapshotActivity {
-                last_success_at: snapshot.last_success_at,
-                last_failure_at: snapshot.last_failure_at,
-                cooldown_until: snapshot.cooldown_until,
-            })
-        },
-        playback_stream_family_item_key,
-    );
 }
 
 impl PlaybackStateService {

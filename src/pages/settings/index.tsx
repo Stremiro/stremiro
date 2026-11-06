@@ -4,10 +4,10 @@ import {
   Keyboard,
   type LucideIcon,
   Palette,
+  Puzzle,
   RefreshCw,
   Settings2,
   SlidersHorizontal,
-  Zap,
 } from 'lucide-react';
 import {
   type ComponentType,
@@ -36,7 +36,7 @@ import {
 } from '@/lib/player-track-utils';
 import { cn, pluralize, scrollBehavior } from '@/lib/utils';
 import { AppearanceSettings, TINT_TARGETS } from './appearance';
-import { settingsControlId, SettingsBody, SettingsGroup } from './chrome';
+import { settingsControlId, SettingsBody, SettingsCard } from './chrome';
 import { DataSection } from './data';
 import { GeneralSettings, START_PAGES } from './general';
 import { PlaybackSettings } from './playback';
@@ -90,7 +90,7 @@ const NAV_ITEMS = [
     id: 'addons',
     component: AddonSettings,
     label: 'Addons',
-    icon: Zap,
+    icon: Puzzle,
     description: 'Install, enable and reorder addons.',
     controls: [
       {
@@ -606,7 +606,9 @@ export function Settings() {
           <div
             ref={sectionRef}
             tabIndex={-1}
-            aria-label={searchWords.length ? 'Settings search results' : `${active} settings`}
+            aria-label={
+              searchWords.length ? 'Settings search results' : `${shownSection.label} settings`
+            }
             role='region'
             className='w-full min-w-0 scroll-mt-48 rounded-xl focus:outline-none focus-visible:ring-2 focus-visible:ring-(--accent-nav)/25 lg:scroll-mt-16 lg:min-h-0 lg:h-full lg:overflow-y-auto lg:overscroll-contain'
           >
@@ -627,14 +629,14 @@ export function Settings() {
                   {matches.length > 0 ? ' · Enter opens the first' : ''}
                 </output>
                 {matches.map((item) => (
-                  <SettingsGroup
+                  <SettingsCard
                     key={`${item.section.id}-${item.target ?? 'section'}`}
                     className='focus-within:border-white/[0.14]'
                   >
                     <button
                       type='button'
                       onClick={() => openSearchResult(item)}
-                      className='group flex w-full items-center gap-3.5 rounded-xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
+                      className='group flex w-full items-center gap-3.5 rounded-2xl px-5 py-4 text-left transition-colors hover:bg-white/[0.03] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-(--accent-nav)/40 motion-reduce:transition-none'
                     >
                       <span className='flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-white/[0.06] bg-white/[0.03]'>
                         <item.section.icon
@@ -656,10 +658,10 @@ export function Settings() {
                         className='h-3.5 w-3.5 shrink-0 text-zinc-500 group-hover:text-zinc-300'
                       />
                     </button>
-                  </SettingsGroup>
+                  </SettingsCard>
                 ))}
                 {matches.length === 0 && (
-                  <SettingsGroup>
+                  <SettingsCard>
                     <SettingsBody className='py-8 text-center'>
                       <p className='text-[14px] font-medium text-zinc-200'>No matching settings</p>
                       <p className='mt-2 text-[13px] leading-relaxed text-zinc-400'>
@@ -676,7 +678,7 @@ export function Settings() {
                         Clear search
                       </button>
                     </SettingsBody>
-                  </SettingsGroup>
+                  </SettingsCard>
                 )}
               </div>
             ) : (
@@ -685,7 +687,7 @@ export function Settings() {
                   <Skeleton
                     role='status'
                     aria-label='Loading settings'
-                    className='h-72 rounded-xl'
+                    className='h-72 rounded-2xl'
                   />
                 }
               >

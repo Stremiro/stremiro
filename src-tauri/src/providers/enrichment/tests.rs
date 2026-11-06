@@ -65,6 +65,49 @@ async fn not_found_is_a_definitive_miss_and_failures_cool_down_per_source() {
 }
 
 #[tokio::test]
+async fn disk_body_ownership_ends_at_the_original_expiration() {
+    for response in ["null", r#"{"old":1}"#] {
+        let dir = TempPath::dir("enrich-retention");
+        let client = EnrichmentClient::new(Some(dir.to_path_buf()));
+        let server = TestHttpServer::new(vec![(200, r#"{"fresh":1}"#, None)]);
+        let key = "near-expiry";
+        let expires_at = SystemTime::now() + Duration::from_secs(1);
+        client
+            .write_disk(key, Arc::from(response.as_bytes()), expires_at)
+            .await;
+        client
+            .load(key, Source::Kitsu, client.get(&server.url), decode_json)
+            .await
+            .unwrap();
+        let body = client.cached(key).unwrap();
+        assert_eq!(body.expires_at, expires_at);
+        let retained = Arc::downgrade(&body);
+        drop(body);
+        client.cache.put(
+            "fresh-sibling",
+            Arc::new(CachedBody {
+                bytes: Arc::from(&b"{}"[..]),
+                expires_at: SystemTime::now() + FULL_TTL,
+            }),
+            false,
+            || true,
+        );
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        client.purge_expired_caches();
+        assert!(retained.upgrade().is_none(), "{response}");
+        assert!(client.cached("fresh-sibling").is_some());
+        assert_eq!(
+            client
+                .load(key, Source::Kitsu, client.get(&server.url), decode_json)
+                .await
+                .unwrap()["fresh"],
+            1
+        );
+        assert_eq!(server.finish().len(), 1);
+    }
+}
+
+#[tokio::test]
 async fn retry_after_numeric_and_fixdate_drive_the_cooldown() {
     let server = TestHttpServer::with_headers(vec![
         (429, "{}", vec![("Retry-After", "45")]),
@@ -106,14 +149,10 @@ fn disk_envelopes_reject_mismatch_corruption_oversize_and_far_future() {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&path, envelope).unwrap();
     };
-    let valid = serde_json::json!({
-        "key": "k", "expires_at": "2050-01-01T00:00:00.000Z", "response": {"v": 1}
-    });
-    // SystemTime serde emits an object; build the real envelope instead.
     let valid = serde_json::to_vec(&DiskEnvelope {
-        key: "k".into(),
+        key: Some("k".into()),
         expires_at: SystemTime::now() + Duration::from_secs(60),
-        response: serde_json::value::RawValue::from_string(valid["response"].to_string()).unwrap(),
+        response: &serde_json::value::RawValue::from_string(r#"{"v":1}"#.into()).unwrap(),
     })
     .unwrap();
     write(std::str::from_utf8(&valid).unwrap());
@@ -124,9 +163,9 @@ fn disk_envelopes_reject_mismatch_corruption_oversize_and_far_future() {
     assert!(read_disk_envelope(&path, "k").is_none());
     write(
         &serde_json::to_vec(&DiskEnvelope {
-            key: "k".into(),
+            key: Some("k".into()),
             expires_at: SystemTime::now() - Duration::from_secs(60),
-            response: serde_json::value::RawValue::from_string("null".into()).unwrap(),
+            response: &serde_json::value::RawValue::from_string("null".into()).unwrap(),
         })
         .map(|b| String::from_utf8(b).unwrap())
         .unwrap(),
@@ -134,9 +173,9 @@ fn disk_envelopes_reject_mismatch_corruption_oversize_and_far_future() {
     assert!(read_disk_envelope(&path, "k").is_none());
     write(
         &serde_json::to_vec(&DiskEnvelope {
-            key: "k".into(),
+            key: Some("k".into()),
             expires_at: SystemTime::now() + FULL_TTL + Duration::from_secs(3600),
-            response: serde_json::value::RawValue::from_string("null".into()).unwrap(),
+            response: &serde_json::value::RawValue::from_string("null".into()).unwrap(),
         })
         .map(|b| String::from_utf8(b).unwrap())
         .unwrap(),
@@ -191,9 +230,9 @@ async fn empty_and_full_responses_keep_original_disk_expiry() {
     // Rewriting the stamp into the past forces one fresh fetch after restart.
     let path = client.disk_path("empty:key").unwrap();
     let envelope = serde_json::to_vec(&DiskEnvelope {
-        key: "empty:key".to_string(),
+        key: Some("empty:key".to_string()),
         expires_at: SystemTime::now() - Duration::from_secs(60),
-        response: serde_json::value::RawValue::from_string("null".to_string()).unwrap(),
+        response: &serde_json::value::RawValue::from_string("null".to_string()).unwrap(),
     })
     .unwrap();
     std::fs::write(&path, &envelope).unwrap();
@@ -215,9 +254,9 @@ fn disk_eviction_and_body_bounds() {
     for index in 0..129 {
         let key = format!("bound-{index}");
         let envelope = serde_json::to_vec(&DiskEnvelope {
-            key: key.clone(),
+            key: Some(key.clone()),
             expires_at: SystemTime::now() + Duration::from_secs(3600),
-            response: serde_json::value::RawValue::from_string(format!("{{\"i\":{index}}}"))
+            response: &serde_json::value::RawValue::from_string(format!("{{\"i\":{index}}}"))
                 .unwrap(),
         })
         .unwrap();
@@ -235,9 +274,9 @@ fn disk_eviction_and_body_bounds() {
     // legal-size envelope.
     let big = "x".repeat(MAX_BODY_BYTES + 500);
     let envelope = serde_json::to_vec(&DiskEnvelope {
-        key: "big".to_string(),
+        key: Some("big".to_string()),
         expires_at: SystemTime::now() + Duration::from_secs(3600),
-        response: serde_json::value::RawValue::from_string(format!("\"{big}\"")).unwrap(),
+        response: &serde_json::value::RawValue::from_string(format!("\"{big}\"")).unwrap(),
     })
     .unwrap();
     assert!(envelope.len() <= DISK_MAX_BYTES);

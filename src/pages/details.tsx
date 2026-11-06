@@ -73,12 +73,14 @@ import {
 import {
   detailsQueryKey,
   DETAILS_GC_TIME_MS,
+  placeholderWhileKeyPrefixMatches,
   WATCH_HISTORY_VIEW_STALE_TIME_MS,
 } from '@/lib/query-invalidation';
 import { searchGenrePath } from '@/lib/search-page-state';
 import {
   cn,
   createObjectIdentity,
+  formatRuntime,
   formatSeasonEpisode,
   GENRE_LINK_CLASS,
   isSeriesLikeMediaType,
@@ -107,6 +109,12 @@ const DETAILS_HERO_CLASS =
   'relative -mt-8 flex min-h-[70vh] w-full items-end pb-12 pt-24 lg:pb-16 lg:pt-28';
 const DETAILS_STATUS_STRIP_CLASS =
   'inline-grid max-w-full grid-cols-2 gap-1 rounded-xl border border-white/[0.08] bg-white/[0.02] p-1 sm:inline-flex sm:flex-wrap';
+const HERO_META_GROUP_CLASS = 'inline-flex items-center gap-3 whitespace-nowrap';
+const HERO_META_DOT = (
+  <span aria-hidden='true' className='text-white/25'>
+    ·
+  </span>
+);
 
 function locationCoordinate(state: unknown, key: 'season' | 'episode'): number | null {
   const value = (state as Record<string, unknown> | null)?.[key];
@@ -303,10 +311,7 @@ function DetailsContent() {
       );
     },
     enabled: hasEpisodesSection && !isPlaceholderData,
-    placeholderData: (previous, previousQuery) =>
-      unairedScopeKey.every((part, index) => previousQuery?.queryKey[index] === part)
-        ? previous
-        : undefined,
+    placeholderData: placeholderWhileKeyPrefixMatches(unairedScopeKey),
     staleTime: Infinity,
     gcTime: DETAILS_GC_TIME_MS,
   });
@@ -395,11 +400,6 @@ function DetailsContent() {
     unairedEpisodeKeys,
     nextUpEpisode,
   });
-  const optimisticEpisodeWatched = (ep: Episode) =>
-    pendingEpisodeKeys.has(episodeProgressKey(baseRouteId, ep.season, ep.episode))
-      ? pendingWatchedMutation?.watched
-      : undefined;
-
   const episodeEmphasis = (ep: Episode): EpisodeEmphasis =>
     nextUpEpisode && episodeMatchesCoordinates(ep, nextUpEpisode.season, nextUpEpisode.episode)
       ? seriesCanResume
@@ -697,6 +697,8 @@ function DetailsContent() {
     );
   }
 
+  const formattedRuntime = formatRuntime(item.runtime);
+
   return (
     <div className='relative pb-20 page-enter'>
       <ScrollToTop />
@@ -776,31 +778,23 @@ function DetailsContent() {
                   {item.displayYear && (
                     <span className='whitespace-nowrap tabular-nums'>{item.displayYear}</span>
                   )}
-                  <span className='inline-flex items-center gap-3 whitespace-nowrap'>
-                    {item.displayYear && (
-                      <span aria-hidden='true' className='text-white/25'>
-                        ·
-                      </span>
-                    )}
+                  <span className={HERO_META_GROUP_CLASS}>
+                    {item.displayYear && HERO_META_DOT}
                     {hasEpisodesSection && seasons.length > 0
                       ? pluralize(seasons.length, 'Season')
                       : mediaTypeLabel(item.type)}
                   </span>
 
-                  {item.runtime && (
-                    <span className='inline-flex items-center gap-3 whitespace-nowrap'>
-                      <span aria-hidden='true' className='text-white/25'>
-                        ·
-                      </span>
-                      <span className='tabular-nums'>{item.runtime}</span>
+                  {formattedRuntime && (
+                    <span className={HERO_META_GROUP_CLASS}>
+                      {HERO_META_DOT}
+                      <span className='tabular-nums'>{formattedRuntime}</span>
                     </span>
                   )}
 
                   {item.rating && (
-                    <span className='inline-flex items-center gap-3 whitespace-nowrap'>
-                      <span aria-hidden='true' className='text-white/25'>
-                        ·
-                      </span>
+                    <span className={HERO_META_GROUP_CLASS}>
+                      {HERO_META_DOT}
                       <span className='inline-flex items-baseline gap-1.5'>
                         <Star
                           aria-hidden='true'
@@ -816,9 +810,7 @@ function DetailsContent() {
 
                   {item.country && (
                     <span className='inline-flex min-w-0 max-w-full items-center gap-3'>
-                      <span aria-hidden='true' className='text-white/25'>
-                        ·
-                      </span>
+                      {HERO_META_DOT}
                       <span className='min-w-0 break-words'>{item.country}</span>
                     </span>
                   )}
@@ -1014,7 +1006,6 @@ function DetailsContent() {
                   )}
 
                   <CopyButton
-                    key={`${baseRouteType}:${baseRouteId}`}
                     aria-label='Copy link to this title'
                     title='Copy link'
                     className={cn(ICON_ACTION_CLASS, '[&>span]:size-5')}
@@ -1363,9 +1354,10 @@ function DetailsContent() {
                         const epProgress = hasWatchProgress
                           ? episodeProgress?.[episodeKey]
                           : undefined;
-                        const optimisticWatched = hasWatchProgress
-                          ? optimisticEpisodeWatched(ep)
-                          : undefined;
+                        const optimisticWatched =
+                          hasWatchProgress && pendingEpisodeKeys.has(episodeKey)
+                            ? pendingWatchedMutation?.watched
+                            : undefined;
                         const progressPercent =
                           optimisticWatched !== undefined
                             ? optimisticWatched

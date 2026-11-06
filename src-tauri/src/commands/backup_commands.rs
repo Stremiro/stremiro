@@ -252,24 +252,39 @@ pub struct ImportResult {
     pub settings_restored: bool,
 }
 
-/// Live-capacity guard for every import domain: counts unique normalized
-/// ids; rejects growth past `limit`, permits no-growth restores over-cap.
-pub(super) fn validate_import_capacity<'a>(
-    existing: &'a [String],
-    incoming: impl IntoIterator<Item = &'a str>,
+/// Reject growth past `limit`, but permit no-growth restores of over-cap stores.
+pub(super) fn validate_import_capacity(
+    existing_count: usize,
+    merged_count: usize,
     limit: usize,
     domain: &str,
 ) -> Result<(), BackupError> {
-    let mut known: HashSet<&str> = existing.iter().map(String::as_str).collect();
-    let existing_count = known.len();
-    known.extend(incoming);
-    if known.len() > limit && known.len() > existing_count {
+    if merged_count > limit && merged_count > existing_count {
         return Err(BackupError::new(
             BackupErrorKind::CapacityExceeded,
             format!("Backup import would exceed the {domain} limit of {limit}."),
         ));
     }
     Ok(())
+}
+
+// Prepare canonical maps before mutating any store; local records always win.
+fn merge_import_records<T>(
+    records: &mut HashMap<String, T>,
+    incoming: impl IntoIterator<Item = (String, T)>,
+    limit: usize,
+    domain: &str,
+) -> Result<HashSet<String>, BackupError> {
+    let existing_count = records.len();
+    let mut added = HashSet::new();
+    for (id, value) in incoming {
+        if let std::collections::hash_map::Entry::Vacant(entry) = records.entry(id) {
+            added.insert(entry.key().clone());
+            entry.insert(value);
+        }
+    }
+    validate_import_capacity(existing_count, records.len(), limit, domain)?;
+    Ok(added)
 }
 
 /// Parses the backup's list section before any store mutation: malformed records skip,
@@ -340,12 +355,11 @@ pub(super) fn prepare_import_lists(
             items: valid_items,
         });
     }
-    validate_import_capacity(
-        existing_order,
-        prepared.iter().map(|list| list.id.as_str()),
-        MAX_LISTS,
-        "list",
-    )?;
+    // Ghost order slots remain reserved so restoring one does not count as growth.
+    let mut order_ids: HashSet<&str> = existing_order.iter().map(String::as_str).collect();
+    let existing_count = order_ids.len();
+    order_ids.extend(prepared.iter().map(|list| list.id.as_str()));
+    validate_import_capacity(existing_count, order_ids.len(), MAX_LISTS, "list")?;
     Ok(prepared)
 }
 
@@ -640,27 +654,22 @@ fn import_app_data_entries(
     super::open_store(app, PROFILE_AVATAR_STORE_FILE)?;
     super::open_store(app, super::playback_state::PLAYBACK_STATE_STORE_FILE)?;
 
-    // Normalize incoming records once — they serve both the capacity check and the merge.
-    let incoming_library: Vec<MediaItem> = export
-        .library
-        .into_iter()
-        .filter_map(|item| {
-            serde_json::from_value::<MediaItem>(item)
+    let mut lib_map = library_snapshot.items;
+    let new_library_ids = merge_import_records(
+        &mut lib_map,
+        export.library.into_iter().filter_map(|item| {
+            let item = serde_json::from_value::<MediaItem>(item)
                 .ok()
-                .and_then(normalize_library_item)
-        })
-        .collect();
-    validate_import_capacity(
-        &library_snapshot.index,
-        incoming_library.iter().map(|item| item.id.as_str()),
+                .and_then(normalize_library_item)?;
+            Some((item.id.clone(), item))
+        }),
         MAX_LIBRARY_ITEMS,
         "library",
     )?;
-
-    let incoming_statuses = prepare_import_watch_statuses(export.watch_statuses);
-    validate_import_capacity(
-        &status_snapshot.index,
-        incoming_statuses.keys().map(String::as_str),
+    let mut statuses = status_snapshot.items;
+    let imported_status_ids = merge_import_records(
+        &mut statuses,
+        prepare_import_watch_statuses(export.watch_statuses),
         MAX_WATCH_STATUS_ITEMS,
         "watch status",
     )?;
@@ -703,19 +712,6 @@ fn import_app_data_entries(
         .collect();
     let history_imported = service.import_history_entries(app, history_entries, dismissals)?;
 
-    let mut lib_map = library_snapshot.items;
-    let previous_library_count = lib_map.len();
-    let mut new_library_ids = HashSet::new();
-    for normalized in incoming_library {
-        if let std::collections::hash_map::Entry::Vacant(entry) =
-            lib_map.entry(normalized.id.clone())
-        {
-            new_library_ids.insert(normalized.id.clone());
-            entry.insert(normalized);
-        }
-    }
-    let library_imported = lib_map.len() - previous_library_count;
-
     persist_index_map(
         &lib_store,
         LIBRARY_LAYOUT,
@@ -747,17 +743,6 @@ fn import_app_data_entries(
     lists_store.set(LISTS_ORDER_KEY, json!(new_order));
     lists_store.save()?;
 
-    let mut statuses = status_snapshot.items;
-    let previous_status_count = statuses.len();
-    let mut imported_status_ids = HashSet::new();
-    for (clean_id, clean_status) in incoming_statuses {
-        if let std::collections::hash_map::Entry::Vacant(entry) = statuses.entry(clean_id.clone()) {
-            imported_status_ids.insert(clean_id);
-            entry.insert(clean_status);
-        }
-    }
-    let statuses_imported = statuses.len() - previous_status_count;
-
     persist_index_map(
         &status_store,
         WATCH_STATUS_LAYOUT,
@@ -779,9 +764,9 @@ fn import_app_data_entries(
 
     Ok(ImportResult {
         history_imported,
-        library_imported,
+        library_imported: new_library_ids.len(),
         lists_imported,
-        statuses_imported,
+        statuses_imported: imported_status_ids.len(),
         addons_imported,
         settings_restored,
     })
@@ -938,6 +923,92 @@ fn read_backup_file(source_path: &str) -> Result<String, BackupError> {
 mod tests {
     use super::*;
     use std::io::Write as _;
+
+    #[test]
+    fn backup_preflight_counts_canonical_records_not_raw_index_slots() {
+        use super::super::store_helpers::{library_item_key, watch_status_item_key};
+        use crate::test_helpers::{test_media_item, test_store};
+
+        let library = test_store();
+        for (key, title) in [(" a ", "Alias"), ("a", "Local"), ("b", "Other")] {
+            let mut item = test_media_item(key, "movie");
+            item.title = title.into();
+            library.store.set(library_item_key(key), json!(item));
+        }
+        library.store.set(library_item_key("invalid"), Value::Null);
+        for index in [
+            json!([" a ", "b"]),
+            json!([" a ", "a", "b", "missing", "invalid"]),
+        ] {
+            library.store.set(LIBRARY_LAYOUT.index_key, index);
+            library.store.save().unwrap();
+            let before = std::fs::read(&library.path).unwrap();
+            let mut records = read_library_snapshot(&library.store).unwrap().items;
+            assert_eq!(records.len(), 2);
+            let original = serde_json::to_value(&records).unwrap();
+            for limit in [2, 1] {
+                let incoming = test_media_item("a", "movie");
+                let added =
+                    merge_import_records(&mut records, [("a".into(), incoming)], limit, "library")
+                        .unwrap();
+                assert!(added.is_empty());
+                assert_eq!(serde_json::to_value(&records).unwrap(), original);
+            }
+            let incoming = test_media_item("new", "movie");
+            let error =
+                merge_import_records(&mut records, [("new".into(), incoming)], 2, "library")
+                    .unwrap_err();
+            assert_eq!(error.kind, BackupErrorKind::CapacityExceeded);
+            assert_eq!(std::fs::read(&library.path).unwrap(), before);
+            assert_eq!(
+                read_library_snapshot(&library.store).unwrap().items.len(),
+                2
+            );
+        }
+
+        let statuses = test_store();
+        statuses
+            .store
+            .set(WATCH_STATUS_LAYOUT.index_key, json!([" a ", "b"]));
+        statuses
+            .store
+            .set(watch_status_item_key(" a "), json!("watching"));
+        statuses
+            .store
+            .set(watch_status_item_key("b"), json!("watched"));
+        let mut records = read_watch_status_snapshot(&statuses.store).unwrap().items;
+        assert_eq!(records.len(), 2);
+        let added = merge_import_records(
+            &mut records,
+            [("a".into(), "dropped".into())],
+            2,
+            "watch status",
+        )
+        .unwrap();
+        assert!(added.is_empty());
+        assert_eq!(records["a"], "watching");
+    }
+
+    #[test]
+    fn backup_merge_keeps_local_records_and_first_incoming_duplicate() {
+        let mut records = HashMap::from([("local".into(), "local value")]);
+        let added = merge_import_records(
+            &mut records,
+            [
+                ("local".into(), "replaced"),
+                ("new".into(), "first"),
+                ("new".into(), "second"),
+            ],
+            2,
+            "library",
+        )
+        .unwrap();
+        assert_eq!(added, HashSet::from(["new".into()]));
+        assert_eq!(
+            records,
+            HashMap::from([("local".into(), "local value"), ("new".into(), "first"),])
+        );
+    }
 
     #[test]
     fn backup_serialization_preserves_pretty_json_bytes() {

@@ -217,16 +217,12 @@ fn canonicalize_language_prefs(
     CanonicalLanguagePrefs { audio, subtitle }
 }
 
-struct CachedStreamSignals {
-    key: StreamRecommendationKey,
-}
-
 /// Per-fetch memo of the recommendation key's fetch-constant half: a re-sort is a
 /// memo hit + the still-growing family-map lookup + tuple compare. Sound only
 /// because the cache dies with the fetch that captured its inputs.
 #[derive(Default)]
 pub(crate) struct StreamSignalCache {
-    by_stream_key: HashMap<String, CachedStreamSignals>,
+    by_stream_key: HashMap<String, StreamRecommendationKey>,
     reference: Option<ReferenceTitle>,
     /// Also marks the fetch context initialized when the reference title is absent.
     language_prefs: Option<CanonicalLanguagePrefs>,
@@ -237,7 +233,7 @@ impl StreamSignalCache {
         &mut self,
         stream: &AddonStream,
         inputs: &StreamRecommendationInputs<'_>,
-    ) -> &CachedStreamSignals {
+    ) -> &StreamRecommendationKey {
         if self.language_prefs.is_none() {
             self.reference = build_reference_title(inputs.match_context.title);
             self.language_prefs = Some(canonicalize_language_prefs(
@@ -264,7 +260,7 @@ fn compute_cached_signals(
     inputs: &StreamRecommendationInputs<'_>,
     reference: Option<&ReferenceTitle>,
     language_prefs: CanonicalLanguagePrefs,
-) -> CachedStreamSignals {
+) -> StreamRecommendationKey {
     let texts = stream.match_texts();
     let flags = texts.flags;
     let source_id = stream.source_id.as_deref().and_then(normalize_source_id);
@@ -277,35 +273,33 @@ fn compute_cached_signals(
         reference,
     );
 
-    CachedStreamSignals {
-        key: StreamRecommendationKey {
-            episode_match: episode_match.kind,
-            season_claim_verified: episode_match.season_claim_verified,
-            title_match: stream_title_relevance_score(
-                stream,
-                inputs.match_context.media_type,
-                reference,
-            ),
-            viability: resolution.viability,
-            audio_language_conflict: std::cmp::Reverse(audio_language_conflict),
-            language,
-            health: source_id
-                .and_then(|id| inputs.source_health_priorities.get(id).copied())
-                .unwrap_or(DEFAULT_SOURCE_HEALTH_PRIORITY),
-            family: 0,
-            title_source_affinity: u8::from(
-                inputs.preferred_title_source_id.is_some()
-                    && source_id == inputs.preferred_title_source_id,
-            ) * 3,
-            quality: resolution.quality,
-            language_bonus: resolution.language_bonus,
-            source_priority: source_id
-                .and_then(|id| inputs.addon_source_priorities.get(id).copied())
-                .unwrap_or(0),
-            oversize: std::cmp::Reverse(resolution.oversize),
-            seeders: resolution.seeders,
-            size_bytes: resolution.size_bytes,
-        },
+    StreamRecommendationKey {
+        episode_match: episode_match.kind,
+        season_claim_verified: episode_match.season_claim_verified,
+        title_match: stream_title_relevance_score(
+            stream,
+            inputs.match_context.media_type,
+            reference,
+        ),
+        viability: resolution.viability,
+        audio_language_conflict: std::cmp::Reverse(audio_language_conflict),
+        language,
+        health: source_id
+            .and_then(|id| inputs.source_health_priorities.get(id).copied())
+            .unwrap_or(DEFAULT_SOURCE_HEALTH_PRIORITY),
+        family: 0,
+        title_source_affinity: u8::from(
+            inputs.preferred_title_source_id.is_some()
+                && source_id == inputs.preferred_title_source_id,
+        ) * 3,
+        quality: resolution.quality,
+        language_bonus: resolution.language_bonus,
+        source_priority: source_id
+            .and_then(|id| inputs.addon_source_priorities.get(id).copied())
+            .unwrap_or(0),
+        oversize: std::cmp::Reverse(resolution.oversize),
+        seeders: resolution.seeders,
+        size_bytes: resolution.size_bytes,
     }
 }
 
@@ -322,7 +316,7 @@ fn stream_recommendation_key(
             .as_deref()
             .and_then(|family| inputs.stream_family_priorities.get(family).copied())
             .unwrap_or(DEFAULT_STREAM_FAMILY_PRIORITY),
-        ..cached.key
+        ..*cached
     }
 }
 

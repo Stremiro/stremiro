@@ -29,7 +29,7 @@ import {
 } from '@/lib/player-mpv';
 import { isNearMediaEnd } from '@/lib/player-skip';
 import { usePlayerSession } from '@/lib/player-session';
-import { sleep, type TimerHandle } from '@/lib/utils';
+import { formatTime, sleep, type TimerHandle } from '@/lib/utils';
 
 const TIME_UPDATE_THROTTLE_MS = 350;
 const HIDDEN_TIME_UPDATE_THROTTLE_MS = 1000;
@@ -55,6 +55,7 @@ export function getPlayerStreamLoadKey(stream: PlayerStreamSession): string {
     stream.activeStreamUrl,
     stream.activeStreamKey,
     stream.activeStreamMpvHttpHeaderFields,
+    stream.loadRevision ?? 0,
   ]);
 }
 
@@ -110,6 +111,7 @@ interface UsePlayerMpvLifecycleArgs {
   /** True while an optimistic seek is pending — keeps the probe alive past the idle gate. */
   isSeekPending: () => boolean;
   getSeekTarget: () => PlayerSeekTarget | null;
+  retryFailedSeek: (position: number) => boolean;
   /** Resume seeks bypass optimistic seeking and need observed positions while paused. */
   isResumePending: () => boolean;
   /** True when a native track change owns the confirmed snapshot. */
@@ -210,6 +212,7 @@ export function usePlayerMpvLifecycle({
       }),
   );
 
+  // Per-key partial patches: a combined write would re-set `af` on every delay nudge, rebuilding mpv's filter chain.
   useEffect(() => {
     if (mpvInitializedRef.current && !isDestroyedRef.current) {
       void applyAudioSettings({ audioDelay });
@@ -432,17 +435,18 @@ export function usePlayerMpvLifecycle({
         previousNativePosition = null;
       }
       // A pending optimistic seek owns the displayed position — swallow stale pre-seek ticks.
-      if (getCallbacks().observeTimeUpdate(data, now)) return;
+      if (getCallbacks().observeTimeUpdate(data, now) || seeking) return;
       if (seekFailed || prematureEof) {
         const target = getCallbacks().getSeekTarget();
         if (target && seekFailed) target.failed = true;
         pendingEof = false;
         eofGeneration += 1;
+        if (target && getCallbacks().retryFailedSeek(target.seconds)) return;
         if (!errorRef.current)
           setStreamError(
-            prematureEof
-              ? 'This stream ended unexpectedly. Try another stream.'
-              : 'This stream could not seek to that position. Try another stream.',
+            target
+              ? `Could not resume at ${formatTime(target.seconds)}. Retry playback or choose another stream.`
+              : 'This stream ended unexpectedly. Retry playback or choose another stream.',
           );
         if (prematureEof)
           getCallbacks().reportStreamFailure('disconnected', activeStreamUrl, activeStreamKey);
@@ -589,12 +593,13 @@ export function usePlayerMpvLifecycle({
           nextEpisodePrefetchDue: prefetchDue,
           seekFailed,
           prematureEof,
+          eofReached,
         } = await readPlaybackPositionProbe(
           durationRef.current,
           seekTarget,
           pendingEof &&
             !isLoadingNow() &&
-            !seeking &&
+            !seekTarget?.commandPending &&
             !getCallbacks().isSeekPending() &&
             !getCallbacks().isResumePending(),
         );
@@ -607,12 +612,14 @@ export function usePlayerMpvLifecycle({
           streamError !== recoverableStreamErrorRef.current
         )
           return;
+        if (eofReached) seeking = false;
         if (typeof timePos === 'number' && Number.isFinite(timePos)) {
           handleTimePos(timePos, nearCompletion, prefetchDue, generation, seekFailed, prematureEof);
         }
         if (typeof bufferedAhead === 'number') handleBufferedAhead(bufferedAhead);
         if (
           pendingEof &&
+          eofReached &&
           !seekFailed &&
           generation === positionGeneration &&
           !isLoadingNow() &&

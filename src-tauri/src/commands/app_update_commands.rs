@@ -1,9 +1,8 @@
-use crate::providers::ttl_cache::InFlight;
+use crate::providers::ttl_cache::{InFlight, TtlCache};
 use crate::providers::{
     build_provider_http_client, encode_uri_component, lock_or_recover, read_bounded_body,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{command, AppHandle, Emitter, Manager, State};
@@ -72,12 +71,19 @@ const RELEASE_VERSION_MAX_LENGTH: usize = 128;
 const RELEASE_NOTES_MAX_BYTES: usize = 512 * 1024;
 const RELEASE_NOTES_CACHE_CAPACITY: usize = 8;
 const RELEASE_NOTES_FAILURE_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+/// Found/missing answers keep until capacity eviction — a year is "forever".
+const RELEASE_NOTES_HIT_TTL: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 const RELEASE_NOTES_UNAVAILABLE: &str = "Release notes are unavailable right now.";
 const RELEASE_NOTES_RATE_LIMITED: &str = "GitHub rate limit reached; try again later.";
 static RELEASE_NOTES_CLIENT: LazyLock<reqwest::Client> =
     LazyLock::new(|| build_provider_http_client(None));
-static RELEASE_NOTES_CACHE: LazyLock<tokio::sync::Mutex<HashMap<String, ReleaseNotesCacheEntry>>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(HashMap::new()));
+static RELEASE_NOTES_CACHE: LazyLock<TtlCache<ReleaseNotesCacheEntry>> = LazyLock::new(|| {
+    TtlCache::new(
+        RELEASE_NOTES_CACHE_CAPACITY,
+        RELEASE_NOTES_HIT_TTL,
+        RELEASE_NOTES_HIT_TTL,
+    )
+});
 static RELEASE_NOTES_IN_FLIGHT: LazyLock<InFlight> =
     LazyLock::new(|| InFlight::new(RELEASE_NOTES_CACHE_CAPACITY));
 /// reqwest's timeout is total-duration and can't bound a legit long download —
@@ -332,6 +338,7 @@ struct GitHubRelease {
     published_at: Option<String>,
 }
 
+#[derive(Clone)]
 enum ReleaseNotesCacheEntry {
     Found(AppUpdateMetadata),
     Missing,
@@ -354,6 +361,13 @@ impl ReleaseNotesCacheEntry {
             Self::Found(metadata) => Ok(Some(metadata.clone())),
             Self::Missing => Ok(None),
             Self::Failed { message, .. } => Err((*message).to_string()),
+        }
+    }
+
+    fn ttl(&self) -> Duration {
+        match self {
+            Self::Failed { retry_at, .. } => retry_at.saturating_duration_since(Instant::now()),
+            _ => RELEASE_NOTES_HIT_TTL,
         }
     }
 }
@@ -499,27 +513,16 @@ pub async fn get_app_release_notes(version: String) -> Result<Option<AppUpdateMe
     let key_lock = RELEASE_NOTES_IN_FLIGHT.claim(&version);
     let result = {
         let _fetch_permit = key_lock.lock().await;
-        let cached = {
-            let cache = RELEASE_NOTES_CACHE.lock().await;
-            cache
-                .get(&version)
-                .filter(|entry| {
-                    !matches!(entry, ReleaseNotesCacheEntry::Failed { retry_at, .. } if *retry_at <= Instant::now())
-                })
-                .map(ReleaseNotesCacheEntry::result)
-        };
-        if let Some(result) = cached {
+        if let Some(result) = RELEASE_NOTES_CACHE
+            .get(&version)
+            .as_ref()
+            .map(ReleaseNotesCacheEntry::result)
+        {
             result
         } else {
             let entry = fetch_app_release_notes(&version).await;
             let result = entry.result();
-            let mut cache = RELEASE_NOTES_CACHE.lock().await;
-            if cache.len() >= RELEASE_NOTES_CACHE_CAPACITY && !cache.contains_key(&version) {
-                if let Some(victim) = cache.keys().next().cloned() {
-                    cache.remove(&victim);
-                }
-            }
-            cache.insert(version.clone(), entry);
+            RELEASE_NOTES_CACHE.put_for(&version, entry.clone(), entry.ttl(), || true);
             result
         }
     };

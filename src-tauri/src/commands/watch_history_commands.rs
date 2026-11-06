@@ -25,13 +25,12 @@ where
         + Send
         + 'static,
 {
-    let app = app.clone();
-    let service = playback_state.clone();
-    super::run_blocking_store_op(move || {
-        let entries = load(&service, &app)?;
-        Ok(entries_with_source_health(&app, &service, entries))
-    })
-    .await
+    playback_state
+        .run_store_op(app, move |service, app| {
+            let entries = load(service, app)?;
+            Ok(entries_with_source_health(app, service, entries))
+        })
+        .await
 }
 
 fn entries_with_source_health(
@@ -208,27 +207,27 @@ pub async fn save_watch_progress(
     }
 
     // One blocking round-trip for read-check-write; the SQL recency guard keeps it safe.
-    let service = playback_state.inner().clone();
-    let start_generation = service.history_generation();
-    super::run_blocking_store_op(move || {
-        // Drop writes that raced a clear/remove — else an in-flight save can resurrect history.
-        if service.history_generation() != start_generation {
-            return Ok(());
-        }
-        let skip = match service.cached_history_write_decision(&key, &progress) {
-            Some(skip) => skip,
-            None => {
-                let persisted = service.get_resume_entry(&app, &key)?;
-                service.should_skip_history_write(&key, &progress, persisted.as_ref())
+    let start_generation = playback_state.history_generation();
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            // Drop writes that raced a clear/remove — else an in-flight save can resurrect history.
+            if service.history_generation() != start_generation {
+                return Ok(());
             }
-        };
-        if skip {
-            return Ok(());
-        }
-        // Re-checks this generation under the resume lock and marks the coalescing cache there.
-        service.track_progress_guarded(&app, key, progress, start_generation)
-    })
-    .await
+            let skip = match service.cached_history_write_decision(&key, &progress) {
+                Some(skip) => skip,
+                None => {
+                    let persisted = service.get_resume_entry(app, &key)?;
+                    service.should_skip_history_write(&key, &progress, persisted.as_ref())
+                }
+            };
+            if skip {
+                return Ok(());
+            }
+            // Re-checks this generation under the resume lock and marks the coalescing cache there.
+            service.track_progress_guarded(app, key, progress, start_generation)
+        })
+        .await
 }
 
 /// Bounds Undo restores before sanitizing or merging rows.
@@ -275,17 +274,17 @@ pub async fn save_watch_progress_batch(
     }
 
     // The store gate serializes the epoch check and merge against clear/import.
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        if service.history_reset_epoch() != start_epoch {
-            return Ok(());
-        }
-        service
-            .merge_history_entries(&app, prepared, false, Vec::new())
-            .map(|_| ())
-            .map_err(String::from)
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            if service.history_reset_epoch() != start_epoch {
+                return Ok(());
+            }
+            service
+                .merge_history_entries(app, prepared, false, Vec::new())
+                .map(|_| ())
+                .map_err(String::from)
+        })
+        .await
 }
 
 #[command]
@@ -598,16 +597,16 @@ pub async fn set_episodes_watched(
     for episode in episodes.iter().chain(title_episodes.iter().flatten()) {
         require_episode_coordinates(Some(episode.season), Some(episode.episode))?;
     }
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        let mut previous_rows = Vec::new();
-        let mut status_change = None;
-        if !episodes.is_empty() && (!watched || service.history_reset_epoch() == start_epoch) {
-            let existing = service.load_resume_entries_for_title(&app, &item.type_, &item.id)?;
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            let mut previous_rows = Vec::new();
+            let mut status_change = None;
+            if !episodes.is_empty() && (!watched || service.history_reset_epoch() == start_epoch) {
+            let existing = service.load_resume_entries_for_title(app, &item.type_, &item.id)?;
             let rows: Vec<_> = existing.iter().map(|(_, row)| row.clone()).collect();
             let progress = build_title_episode_progress(&build_title_watch_history_rows(rows), None);
-            let status_store = super::open_store(&app, super::WATCH_STATUS_STORE_FILE)?;
-            let library_store = super::open_store(&app, super::LIBRARY_STORE_FILE)?;
+            let status_store = super::open_store(app, super::WATCH_STATUS_STORE_FILE)?;
+            let library_store = super::open_store(app, super::LIBRARY_STORE_FILE)?;
             let mut statuses = load_watch_statuses_map(&status_store)?;
             let previous_status = statuses.remove(&item.id);
             let status = episode_watch_status(
@@ -638,7 +637,7 @@ pub async fn set_episodes_watched(
                 prepare_episode_watch_changes(&item, &episodes, existing, watched, now_unix_millis())?;
             if watched {
                 service
-                    .merge_history_entries(&app, writes, false, Vec::new())
+                    .merge_history_entries(app, writes, false, Vec::new())
                     .map_err(|error| match error {
                         HistoryMergeError::CapacityExceeded(_) => format!(
                             "Watch history is full ({MAX_RESUME_TOTAL_ENTRIES} entries). Remove some entries to mark more episodes watched."
@@ -646,7 +645,7 @@ pub async fn set_episodes_watched(
                         error => String::from(error),
                     })?;
             } else {
-                service.remove_keys(&app, &deletes)?;
+                service.remove_keys(app, &deletes)?;
             }
             if let Some(change) = &status_change {
                 super::watch_status_commands::write_watch_status(
@@ -662,17 +661,17 @@ pub async fn set_episodes_watched(
             previous_rows = previous;
         }
         let (rows, source_health_priorities) = entries_with_source_health(
-            &app,
-            &service,
-            service.load_resume_entries_for_media_ids(&app, &[&item.id])?,
+            app,
+            service,
+            service.load_resume_entries_for_media_ids(app, &[&item.id])?,
         );
         Ok((
             build_title_watch_progress_with_priorities(rows, Some(&source_health_priorities)),
             previous_rows,
             status_change,
         ))
-    })
-    .await
+        })
+        .await
 }
 
 #[command]
@@ -748,8 +747,9 @@ pub async fn get_total_watch_time_secs(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<u64, String> {
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || service.total_watch_time_secs(&app)).await
+    playback_state
+        .run_store_op(&app, |service, app| service.total_watch_time_secs(app))
+        .await
 }
 
 #[derive(serde::Deserialize)]
@@ -807,15 +807,16 @@ async fn remove_history_items(
     if targets.is_empty() {
         return Ok(Vec::new());
     }
-    super::run_blocking_store_op(move || {
-        let ids: Vec<_> = targets.keys().map(String::as_str).collect();
-        let rows = service.load_resume_entries_for_media_ids(&app, &ids)?;
-        let (keys, removed) = select_history_removals(rows, &targets);
-        // remove_keys fences periodic saves without advancing the clear/import reset epoch.
-        service.remove_keys(&app, &keys)?;
-        Ok(removed)
-    })
-    .await
+    service
+        .run_store_op(&app, move |service, app| {
+            let ids: Vec<_> = targets.keys().map(String::as_str).collect();
+            let rows = service.load_resume_entries_for_media_ids(app, &ids)?;
+            let (keys, removed) = select_history_removals(rows, &targets);
+            // remove_keys fences periodic saves without advancing the clear/import reset epoch.
+            service.remove_keys(app, &keys)?;
+            Ok(removed)
+        })
+        .await
 }
 
 #[command]
@@ -855,11 +856,11 @@ pub async fn set_continue_watching_dismissed(
         normalize_media_id(&id).ok_or_else(|| "Invalid media id for watch history.".to_string())?;
     let media_type =
         normalize_watch_progress_type(&type_).ok_or_else(|| "Invalid media type.".to_string())?;
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        service.set_continue_watching_dismissed(&app, media_type, &id, dismissed)
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            service.set_continue_watching_dismissed(app, media_type, &id, dismissed)
+        })
+        .await
 }
 
 #[cfg(test)]

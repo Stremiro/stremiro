@@ -266,8 +266,10 @@ async fn resolve_final_direct_url(
         // reqwest errors embed the full URL (possibly a signed token) — drop it before IPC.
         Err(error) => format!("HEAD probe failed: {}", error.without_url()).into(),
     };
-    let head_rate_limited = head_error.rate_limited;
-    let head_error = head_error.message;
+    let ProbeError {
+        rate_limited: head_rate_limited,
+        message: head_error,
+    } = head_error;
 
     match client
         .get(direct_url.clone())

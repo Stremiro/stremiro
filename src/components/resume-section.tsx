@@ -1,3 +1,4 @@
+import { History } from 'lucide-react';
 import { memo } from 'react';
 import { RetryBanner } from '@/components/retry-banner';
 import { WatchProgressCard } from '@/components/watch-progress-card';
@@ -48,6 +49,7 @@ export function ResumeSection() {
         <div className={cn(HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS, 'mb-2')}>{retryBanner}</div>
       ) : !isLoading && entries.length === 0 ? null : (
         <HorizontalMediaRail
+          icon={History}
           title='Continue Watching'
           railId='continue-watching'
           items={entries}

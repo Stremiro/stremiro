@@ -7,6 +7,7 @@ use crate::providers::{
     addon_resource::{AddonResourceClient, CatalogExtra},
     MediaItem,
 };
+use futures_util::stream::{self, StreamExt};
 use icu_normalizer::{
     properties::CanonicalCombiningClassMapBorrowed, DecomposingNormalizerBorrowed,
 };
@@ -23,6 +24,9 @@ const BROWSE_PAGE_TARGET: usize = 24;
 const BROWSE_LOOKAHEAD_PAGES: usize = 4;
 const BROWSE_SCAN_BUDGET: std::time::Duration = std::time::Duration::from_millis(500);
 const MAX_CATALOG_SEEN_KEYS: usize = 10_000;
+const SEARCH_GENRE_CONCURRENCY: usize = 4;
+// Missing catalog tags must not turn a filtered search into an unbounded metadata scan.
+const SEARCH_GENRE_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 const MAX_SEARCH_SOURCE_CURSORS: usize =
     MAX_GENRE_FILTERS * super::addon_registry::MAX_CATALOG_SOURCES;
 const _: () = assert!(MAX_SEARCH_SOURCE_CURSORS <= u64::BITS as usize);
@@ -331,6 +335,7 @@ pub(crate) fn normalize_search_text(value: &str) -> String {
                 'ł' => normalized.push('l'),
                 'đ' | 'ð' => normalized.push('d'),
                 'ı' => normalized.push('i'),
+                'ς' => normalized.push('σ'),
                 _ => normalized.push(ch),
             }
             separator_pending = false;
@@ -529,11 +534,20 @@ async fn fetch_query_results(
         criteria.continuation.search_cursors.as_deref(),
     )
     .await?;
-    let items = retain_search_items_matching_genres(
-        retain_titled_catalog_items(page.items),
-        &criteria.genres,
-        criteria.media_type,
-    );
+    let mut items = retain_titled_catalog_items(page.items);
+    if !criteria.continuation.seen_keys.is_empty() {
+        let seen: HashSet<_> = criteria.continuation.seen_keys.iter().collect();
+        items.retain(|item| !seen.contains(&catalog_dedup_key(&item.type_, &item.id)));
+    }
+    let needs_genres =
+        !criteria.genres.is_empty() || criteria.media_type == Some(SearchMediaType::Anime);
+    let unverified = if needs_genres && items.iter().any(|item| item.genres.is_none()) {
+        let snapshot = super::addon_registry::load_enabled_addons_snapshot(app).await?;
+        resolve_search_genres(&snapshot, client, &mut items).await
+    } else {
+        false
+    };
+    let items = retain_search_items_matching_genres(items, &criteria.genres, criteria.media_type);
     let mut result = finish_catalog_page(
         rank_search_results(query, items, criteria.year_range),
         criteria.continuation,
@@ -542,7 +556,7 @@ async fn fetch_query_results(
         Some(page.cursors),
         page.claims,
     );
-    result.partial = page.partial;
+    result.partial = page.partial || unverified;
     Ok(result)
 }
 
@@ -551,9 +565,33 @@ fn retain_titled_catalog_items(mut items: Vec<MediaItem>) -> Vec<MediaItem> {
     items
 }
 
-/// Genre enforcement for text search, where a provider may honor `search` while
-/// ignoring `genre`. Hits often carry no genres (Cinemeta returns none), so only a
-/// declared list can disqualify — strict matching would empty every filtered search.
+async fn resolve_search_genres(
+    snapshot: &[AddonConfig],
+    client: &AddonResourceClient,
+    items: &mut [MediaItem],
+) -> bool {
+    let work = stream::iter(items.iter_mut()).for_each_concurrent(
+        SEARCH_GENRE_CONCURRENCY,
+        |item| async move {
+            if item.genres.is_none() {
+                if let Ok(details) = super::addon_registry::fetch_meta_details_from_addons(
+                    client,
+                    snapshot,
+                    &item.type_,
+                    &item.id,
+                )
+                .await
+                {
+                    item.genres.clone_from(&details.genres);
+                }
+            }
+        },
+    );
+    let _ = tokio::time::timeout(SEARCH_GENRE_BUDGET, work).await;
+    items.iter().any(|item| item.genres.is_none())
+}
+
+// Search providers can ignore genre extras; only verified tags satisfy a filter.
 fn retain_search_items_matching_genres(
     mut items: Vec<MediaItem>,
     genres: &[String],
@@ -564,9 +602,8 @@ fn retain_search_items_matching_genres(
         return items;
     }
     items.retain(|item| {
-        item.genres.is_none()
-            || ((!require_animation || item_has_genre(item, CINEMETA_ANIME_GENRE))
-                && genres.iter().all(|genre| item_has_genre(item, genre)))
+        (!require_animation || item_has_genre(item, CINEMETA_ANIME_GENRE))
+            && genres.iter().all(|genre| item_has_genre(item, genre))
     });
     items
 }

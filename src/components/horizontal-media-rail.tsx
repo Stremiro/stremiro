@@ -1,5 +1,5 @@
 import { type Range, useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronLeft, ChevronRight } from 'lucide-react';
+import { ChevronLeft, ChevronRight, type LucideIcon } from 'lucide-react';
 import {
   type Key,
   type ReactNode,
@@ -13,7 +13,7 @@ import {
 import { Button } from '@/components/ui/button';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
 import { useScrollEdgeIndicators } from '@/hooks/use-scroll-edge-indicators';
-import { boundedMapSet, cn, scrollBehavior } from '@/lib/utils';
+import { boundedMapSet, cn, scrollBehavior, TITLE_ICON_CLASS } from '@/lib/utils';
 import { MediaCardSkeleton, MEDIA_CARD_SLOT_CLASS_NAME } from './media-card';
 
 export const HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS =
@@ -38,8 +38,8 @@ interface HorizontalMediaRailProps<T> {
   /** Concatenated, never `cn()`-merged — tailwind-merge would collapse `lg:pl-*`+`lg:px-*` pairs. */
   contentInsetsClassName?: string;
   getItemKey: (item: T, index: number) => Key;
-  headerActions?: ReactNode;
   headerContent?: ReactNode;
+  icon?: LucideIcon;
   isLoading: boolean;
   isPlaceholderData?: boolean;
   items: readonly T[];
@@ -57,8 +57,8 @@ interface HorizontalMediaRailProps<T> {
 export function HorizontalMediaRail<T>({
   contentInsetsClassName = HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS,
   getItemKey,
-  headerActions,
   headerContent,
+  icon: Icon,
   isLoading,
   isPlaceholderData = false,
   items,
@@ -234,22 +234,24 @@ export function HorizontalMediaRail<T>({
   return (
     <section
       aria-busy={isLoading || isPlaceholderData || undefined}
-      className={cn('relative py-5 md:py-6', sectionClassName)}
+      className={cn('relative py-4 md:py-5', sectionClassName)}
     >
-      <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-4'}`}>
+      <div className={`${contentInsetsClassName} ${hasNotice ? 'mb-1' : 'mb-3'}`}>
         <div className='flex min-h-10 flex-wrap items-center gap-x-6 gap-y-3'>
           <h2
             id={titleId}
-            className='mr-auto min-w-0 text-xl font-semibold leading-7 tracking-[-0.025em] text-zinc-100'
+            className='mr-auto flex min-w-0 items-center gap-2.5 text-lg font-semibold leading-7 tracking-[-0.02em] text-zinc-100'
           >
-            {title}
+            {Icon ? (
+              <Icon
+                aria-hidden='true'
+                className={cn(TITLE_ICON_CLASS, 'size-4')}
+                strokeWidth={2.25}
+              />
+            ) : null}
+            <span className='min-w-0 truncate'>{title}</span>
           </h2>
 
-          {headerActions && (
-            <div className='order-last w-full md:order-none md:min-w-0 md:flex-1'>
-              {headerActions}
-            </div>
-          )}
           {!hasNotice && !isLoading && scrollState.hasOverflow && (
             <div className='ml-auto flex shrink-0 items-center gap-2'>
               <Button

@@ -552,6 +552,24 @@ fn bounded_text_stays_idempotent_and_genres_dedupe_by_ascii_fold() {
     let once = crate::providers::trim_to_max(&padded, 32);
     assert_eq!(once.as_deref(), Some("A"));
     assert_eq!(crate::providers::trim_to_max("A", 32), once);
+    for (input, bound, expected) in [
+        ("", usize::MAX, None),
+        ("x", 0, None),
+        (" \u{2003} ", 2, None),
+        (" \u{2003}É界🦀\u{a0} ", 2, Some("É界")),
+        ("a\u{301}b", 2, Some("a\u{301}")),
+        ("A\u{2003}B", 2, Some("A")),
+        ("界🦀", usize::MAX, Some("界🦀")),
+    ] {
+        let normalized = crate::providers::trim_to_max(input, bound);
+        assert_eq!(normalized.as_deref(), expected, "{input:?}/{bound}");
+        if let Some(normalized) = normalized {
+            assert_eq!(
+                crate::providers::trim_to_max(&normalized, bound).as_deref(),
+                expected
+            );
+        }
+    }
 
     let item = normalize_media_item(MediaItem {
         genres: Some(

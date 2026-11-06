@@ -42,7 +42,6 @@ export function useSearchPageState() {
       ? urlQuery.trim()
       : '';
 
-  // Facets are URL-owned; only typing needs a local draft and debounce.
   const updateSearchParams = useCallback(
     (update?: (params: URLSearchParams) => void) => {
       const nextParams = new URLSearchParams(searchParams);

@@ -3,7 +3,10 @@ import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api, type MediaItem } from '@/lib/api';
 import { similarTitlesQueryKey } from '@/lib/api-discovery';
-import { MEDIA_ROW_STALE_TIME_MS } from '@/lib/query-invalidation';
+import {
+  MEDIA_ROW_STALE_TIME_MS,
+  placeholderWhileKeyPrefixMatches,
+} from '@/lib/query-invalidation';
 import { HorizontalMediaRail } from './horizontal-media-rail';
 import { mediaCardRailKey, renderMediaCardRailItem } from './media-card';
 import { RetryBanner } from './retry-banner';
@@ -36,10 +39,7 @@ export function DetailsSimilarTitles({ item, contentInsetsClassName }: DetailsSi
     queryFn: () => api.querySimilarTitles(item),
     enabled: queryEnabled && nearViewport,
     // Match the trending/similar/type/id scope, not the changing ranking inputs.
-    placeholderData: (previous, previousQuery) =>
-      queryKey.slice(0, 4).every((part, index) => previousQuery?.queryKey[index] === part)
-        ? previous
-        : undefined,
+    placeholderData: placeholderWhileKeyPrefixMatches(queryKey.slice(0, 4)),
     staleTime: MEDIA_ROW_STALE_TIME_MS,
   });
 

@@ -34,8 +34,8 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { SearchInput } from '@/components/ui/search-input';
 import { focusedRowRange } from '@/components/window-virtualized-stack';
-import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-episode-search';
-import { useDebounce } from '@/hooks/use-debounce';
+import { EPISODE_SEARCH_MIN_COUNT, useEpisodeSearch } from '@/hooks/use-item-search';
+import { useDelayedUnmount } from '@/hooks/use-delayed-unmount';
 import { usePlayerKeymap, useSpoilerProtection } from '@/hooks/use-app-ui-preferences';
 import { useLocalDay } from '@/hooks/use-local-day';
 import type { Episode, MediaDetails, TitleWatchProgress, WatchProgress } from '@/lib/api';
@@ -143,7 +143,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const shouldVirtualize = visibleEpisodes.length >= EPISODE_LIST_VIRTUALIZE_THRESHOLD;
   // Keep rows through the exit fade, then stop observing the hidden viewport.
-  const listExiting = useDebounce(open, 180);
+  const { mounted: listAlive } = useDelayedUnmount(open, 180);
   const rangeExtractor = useCallback(
     (range: Range) => focusedRowRange(range, focusedIndex),
     [focusedIndex],
@@ -153,7 +153,7 @@ export const PlayerEpisodesPanel = memo(function PlayerEpisodesPanel({
     getScrollElement: () => scrollViewportRef.current,
     estimateSize: () => EPISODE_ROW_ESTIMATE_PX + EPISODE_ROW_GAP_PX,
     overscan: 6,
-    enabled: shouldVirtualize && (open || listExiting),
+    enabled: shouldVirtualize && listAlive,
     rangeExtractor,
   });
 

@@ -1,6 +1,7 @@
 import { Check, CircleAlert } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { cn, hideBrokenImage } from '@/lib/utils';
+import { RemoteImage } from '@/components/remote-image';
+import { cn } from '@/lib/utils';
 
 export interface ActionToastOptions {
   /** Secondary context rendered muted under the label (e.g. the title). */
@@ -27,13 +28,9 @@ export function ActionToast({
   return (
     <div className='flex w-full items-center gap-2.5 rounded-[10px] border border-white/[0.1] bg-[#17171b]/98 p-2.5 shadow-[0_8px_24px_-10px_rgb(0_0_0/0.65),0_1px_2px_rgb(0_0_0/0.35),inset_0_1px_0_rgb(255_255_255/0.04)]'>
       {thumb ? (
-        <img
-          key={thumb}
+        <RemoteImage
           src={thumb}
           alt=''
-          draggable={false}
-          referrerPolicy='no-referrer'
-          onError={hideBrokenImage}
           className='h-10 w-7 shrink-0 rounded-[4px] object-cover ring-1 ring-white/10'
         />
       ) : (

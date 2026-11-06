@@ -13,6 +13,7 @@ import {
   CHROME_VALUE_BUBBLE_CLASS,
 } from '@/components/player-chrome-styles';
 import type { SkipSegment } from '@/lib/api';
+import { useWindowRelease } from '@/hooks/use-window-release';
 import { chapterCutMask } from '@/lib/player-chapter-cuts';
 import { subscribeWhileHidden, type PlaybackClock } from '@/lib/player-clock';
 import { SKIP_SEGMENT_LABELS } from '@/lib/player-skip';
@@ -88,7 +89,7 @@ export const PlayerTimeDisplay = memo(function PlayerTimeDisplay({
       aria-label={`${displayedTime} of ${totalTime}, ${toggleLabel}`}
       className={cn(
         // Cap-height trimming centers the digits optically; line-box centering leaves them sitting low.
-        'flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-full px-3.5 text-[13px] font-semibold leading-none tabular-nums tracking-tight text-white transition-colors hover:bg-white/12 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 [&>span]:[text-box:trim-both_cap_alphabetic]',
+        'flex h-10 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3.5 text-[13px] font-semibold leading-none tabular-nums tracking-tight text-white transition-colors hover:bg-white/12 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/40 [&>span]:[text-box:trim-both_cap_alphabetic]',
         className,
       )}
       title={endsAtText ? `${toggleLabel} · Ends at ${endsAtText}` : toggleLabel}
@@ -275,28 +276,20 @@ export function PlayerProgressBar({
     return clearHoverState;
   }, [resetKey, cancelDrag, clearHoverState]);
 
+  const releaseInteraction = useCallback(() => {
+    cancelDrag();
+    clearHoverState();
+    setKeyboardFocused(false);
+  }, [cancelDrag, clearHoverState]);
   useEffect(() => {
-    const releaseInteraction = () => {
-      cancelDrag();
-      clearHoverState();
-      setKeyboardFocused(false);
-    };
     if (!active) releaseInteraction();
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === 'hidden') releaseInteraction();
-    };
-    const handlePointerOut = (event: PointerEvent) => {
-      if (event.relatedTarget === null && dragPointerIdRef.current === null) clearHoverState();
-    };
-    window.addEventListener('blur', releaseInteraction);
-    document.addEventListener('visibilitychange', handleVisibilityChange);
-    document.addEventListener('pointerout', handlePointerOut);
-    return () => {
-      window.removeEventListener('blur', releaseInteraction);
-      document.removeEventListener('visibilitychange', handleVisibilityChange);
-      document.removeEventListener('pointerout', handlePointerOut);
-    };
-  }, [active, cancelDrag, clearHoverState]);
+  }, [active, releaseInteraction]);
+  useWindowRelease(
+    releaseInteraction,
+    useCallback(() => {
+      if (dragPointerIdRef.current === null) clearHoverState();
+    }, [clearHoverState]),
+  );
 
   const handleMouseMove = (e: React.MouseEvent<HTMLDivElement>) => {
     if (dragPointerIdRef.current !== null) return;

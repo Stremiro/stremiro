@@ -160,7 +160,7 @@ pub(crate) enum StreamPackRow {
     },
 }
 
-#[command]
+#[command(async)]
 pub fn get_stream_pack_rows(
     coverage: Option<StreamPackCoverage>,
     episodes: Vec<PackEpisodeCoordinates>,
@@ -465,8 +465,12 @@ pub async fn get_stream_selector_indices(
                     }
                     search_text.push(' ');
                 }
-                let lowered = search_text.to_lowercase();
-                if !terms.iter().all(|term| lowered.contains(term)) {
+                if search_text.is_ascii() {
+                    search_text.make_ascii_lowercase();
+                } else {
+                    search_text = search_text.to_lowercase();
+                }
+                if !terms.iter().all(|term| search_text.contains(term)) {
                     return None;
                 }
             }
@@ -651,9 +655,6 @@ pub async fn resolve_best_stream(
         };
         retain_unprobed_streams(&mut streams, &started_requests);
         streams.retain(is_probeable_stream);
-        if streams.is_empty() {
-            return Err(error);
-        }
         resolve_ranked_best_stream_candidate(streams, None, None, preferred, deadline, None)
             .await
             .map_err(|fallback| preferred_probe_error(error, fallback))
@@ -757,23 +758,24 @@ pub async fn recover_playback_stream(
                 let outcome_source_id = failed_source_id.clone();
                 let outcome_stream_family = failed_stream_family.clone();
                 tauri::async_runtime::spawn(async move {
-                    let outcome_result = super::run_blocking_store_op(move || {
-                        outcome_service.record_stream_outcome(
-                            &outcome_app,
-                            StreamOutcomeReport {
-                                media_id: outcome_normalized_id,
-                                media_type: normalized_history_type,
-                                season: absolute_season,
-                                episode: absolute_episode,
-                                source_id: outcome_source_id,
-                                stream_family: outcome_stream_family,
-                                outcome: normalized_outcome,
-                                timestamp_ms,
-                            },
-                            expected_generation,
-                        )
-                    })
-                    .await;
+                    let outcome_result = outcome_service
+                        .run_store_op(&outcome_app, move |service, app| {
+                            service.record_stream_outcome(
+                                app,
+                                StreamOutcomeReport {
+                                    media_id: outcome_normalized_id,
+                                    media_type: normalized_history_type,
+                                    season: absolute_season,
+                                    episode: absolute_episode,
+                                    source_id: outcome_source_id,
+                                    stream_family: outcome_stream_family,
+                                    outcome: normalized_outcome,
+                                    timestamp_ms,
+                                },
+                                expected_generation,
+                            )
+                        })
+                        .await;
                     if let Err(error) = outcome_result {
                         log_warn(
                             "stream-recovery",

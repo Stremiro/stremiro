@@ -92,7 +92,7 @@ fn player_episode_navigation(
     }
 }
 
-#[command]
+#[command(async)]
 pub(crate) fn get_episode_navigation(
     request: EpisodeNavigationRequest,
 ) -> Result<EpisodeNavigation, String> {
@@ -108,7 +108,7 @@ pub(crate) fn get_episode_navigation(
 }
 
 /// Indices of episodes that have not aired by the caller's local day.
-#[command]
+#[command(async)]
 pub(crate) fn get_unaired_episode_indices(
     request: UnairedEpisodesRequest,
 ) -> Result<Vec<usize>, String> {

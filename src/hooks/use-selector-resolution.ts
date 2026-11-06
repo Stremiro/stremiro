@@ -91,11 +91,6 @@ export function useSelectorResolution({
   const openRef = useRef(open);
   // Read at resolve time so the selector never subscribes to the playback clock.
   const getStartTimeRef = useRef(getStartTime);
-  // Latest-render binding for the resolve body — `handleSelectStream` is an
-  // event handler, so a per-render ref gives latest-closure semantics.
-  const resolveStreamRef = useRef<((attempt: SelectorResolveAttempt) => Promise<void>) | undefined>(
-    undefined,
-  );
   const isCurrentResolve = useCallback(
     (attempt: SelectorResolveAttempt) => openRef.current && activeResolveRef.current === attempt,
     [],
@@ -236,8 +231,7 @@ export function useSelectorResolution({
 
   useLayoutEffect(() => {
     getStartTimeRef.current = getStartTime;
-    resolveStreamRef.current = resolveStream;
-  });
+  }, [getStartTime]);
 
   // A cancelled resolve may still be settling, but the user must be able to pick again.
   const isAnyResolving = sessionResolve !== null;
@@ -277,7 +271,7 @@ export function useSelectorResolution({
     };
     activeResolveRef.current = attempt;
     setActiveResolve(attempt);
-    void resolveStreamRef.current?.(attempt);
+    void resolveStream(attempt);
   };
 
   return {

@@ -52,16 +52,13 @@ impl<V: Clone> TtlCache<V> {
 
     fn get_fresh(&self, key: &str, not_before: Option<Instant>) -> Option<V> {
         let mut state = lock_or_recover(&self.state);
+        // Any read can release expired siblings; the next-expiry hint skips fresh scans.
+        Self::retain_fresh(&mut state, Instant::now());
         let entry = state.entries.get(key)?;
-        if entry.expires_at > Instant::now() {
-            if not_before.is_some_and(|not_before| entry.inserted_at < not_before) {
-                None
-            } else {
-                Some(entry.value.clone())
-            }
-        } else {
-            state.entries.remove(key);
+        if not_before.is_some_and(|not_before| entry.inserted_at < not_before) {
             None
+        } else {
+            Some(entry.value.clone())
         }
     }
 
@@ -69,6 +66,19 @@ impl<V: Clone> TtlCache<V> {
     /// stream-less title doesn't re-fan-out per request); `still_fresh` runs
     /// under the entries lock so a superseded write is dropped, not stored.
     pub(crate) fn put(&self, key: &str, value: V, is_empty: bool, still_fresh: impl Fn() -> bool) {
+        let ttl = if is_empty { self.empty_ttl } else { self.ttl };
+        self.put_for(key, value, ttl, still_fresh);
+    }
+
+    /// Disk hits keep their remaining lifetime rather than restarting a full TTL.
+    pub(crate) fn put_for(
+        &self,
+        key: &str,
+        value: V,
+        ttl: Duration,
+        still_fresh: impl Fn() -> bool,
+    ) {
+        let expires_at = Instant::now() + ttl;
         let mut state = lock_or_recover(&self.state);
         if !still_fresh() {
             return;
@@ -76,11 +86,10 @@ impl<V: Clone> TtlCache<V> {
         // A cache below its capacity can still retain large, expired payloads.
         let now = Instant::now();
         Self::retain_fresh(&mut state, now);
-        let ttl = if is_empty { self.empty_ttl } else { self.ttl };
         let entry = TtlEntry {
             value,
             inserted_at: now,
-            expires_at: now + ttl,
+            expires_at,
         };
         state.next_expiry = Some(
             state
@@ -611,15 +620,18 @@ mod tests {
     #[test]
     fn expired_reads_and_inserts_release_payloads_below_capacity() {
         let cache = TtlCache::new(8, Duration::ZERO, Duration::from_secs(60));
+        cache.put("fresh", Arc::new(vec![1]), true, || true);
         let expired = Arc::new(vec![0_u8; 1024]);
         let retained = Arc::downgrade(&expired);
         cache.put("read-expired", expired, false, || true);
         assert!(retained.upgrade().is_some());
-        assert!(cache.get("read-expired").is_none());
+        assert!(cache.get("missing").is_none());
         assert!(
             retained.upgrade().is_none(),
             "expired read must free the payload"
         );
+        assert!(cache.get("read-expired").is_none());
+        assert_eq!(cache.get("fresh").as_deref(), Some(&vec![1]));
 
         let expired = Arc::new(vec![0_u8; 1024]);
         let retained = Arc::downgrade(&expired);

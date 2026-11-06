@@ -20,6 +20,7 @@ import {
   APP_UI_PREFERENCES_QUERY_KEY,
   DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
 } from '@/lib/query-invalidation';
+import { createGeneration } from '@/lib/utils';
 
 // A fixed window persists held gestures without waiting for their release.
 const APP_UI_PREFERENCE_FLUSH_MS = 350;
@@ -28,7 +29,7 @@ let pendingPatch: AppUiPreferencesPatch | null = null;
 let flushTimer: ReturnType<typeof setTimeout> | null = null;
 let flushPendingPreferences: (() => Promise<void>) | null = null;
 let recentSearchTail: Promise<void> = Promise.resolve();
-let recentSearchGeneration = 0;
+const recentSearchGeneration = createGeneration();
 
 export function registerAppUiPreferenceFlusher(flush: () => void): () => void {
   preferenceFlushers.add(flush);
@@ -90,10 +91,11 @@ export function usePlayerKeymap(): PlayerKeymap {
     bindings: preferences.effectivePlayerKeybindings,
     overrides: preferences.playerKeybindings,
   }));
+  // Initial failures have no data; refetch failures retain the user's saved bindings.
   const defaultBindingsQuery = useQuery({
     queryKey: DEFAULT_PLAYER_KEYBINDINGS_QUERY_KEY,
     queryFn: api.getDefaultPlayerKeybindings,
-    enabled: preferencesQuery.isError && preferencesQuery.data === undefined,
+    enabled: preferencesQuery.isLoadingError,
     staleTime: Number.POSITIVE_INFINITY,
     gcTime: Number.POSITIVE_INFINITY,
   });
@@ -204,15 +206,15 @@ export function useRecentSearches() {
   const recordRecentSearch = useCallback(
     (query: string) => {
       if (!query.trim()) return;
-      const generation = recentSearchGeneration;
+      const generation = recentSearchGeneration.get();
       // Best-effort: a failed record only loses one history entry.
       recentSearchTail = recentSearchTail
         .then(async () => {
           await flushPendingPreferences?.().catch(() => undefined);
           await settleOptimisticQueryWrites([APP_UI_PREFERENCES_QUERY_KEY]).catch(() => undefined);
-          if (generation !== recentSearchGeneration) return;
+          if (!recentSearchGeneration.isCurrent(generation)) return;
           const saved = await api.recordRecentSearch(query);
-          if (generation !== recentSearchGeneration) return;
+          if (!recentSearchGeneration.isCurrent(generation)) return;
           claimOptimisticQueryWrite(APP_UI_PREFERENCES_QUERY_KEY);
           queryClient.setQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY, (current) =>
             current ? { ...current, recentSearches: saved.recentSearches } : saved,
@@ -224,8 +226,8 @@ export function useRecentSearches() {
   );
 
   const updateRecentSearches = (query: string | null) => {
-    if (query === null) ++recentSearchGeneration;
-    const generation = recentSearchGeneration;
+    if (query === null) recentSearchGeneration.bump();
+    const generation = recentSearchGeneration.get();
     const patch = () => {
       const current =
         queryClient.getQueryData<AppUiPreferences>(APP_UI_PREFERENCES_QUERY_KEY) ??
@@ -237,7 +239,7 @@ export function useRecentSearches() {
     };
     updatePreferences(patch(), false);
     const write = recentSearchTail.then(() =>
-      generation === recentSearchGeneration ? savePreferences(patch()) : undefined,
+      recentSearchGeneration.isCurrent(generation) ? savePreferences(patch()) : undefined,
     );
     recentSearchTail = write.catch(() => undefined);
     return write;

@@ -159,7 +159,6 @@ export const discoveryApi = {
   searchEpisodes,
   searchTitles,
   getDetailsPrefetchBundle,
-  getTitleCredits,
   openTitleCreditsLink,
   titleCreditsQueryOptions,
   getCalendarEvents,

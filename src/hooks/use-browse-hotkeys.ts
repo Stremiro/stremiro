@@ -8,6 +8,7 @@ import {
   RADIX_POPPER_CONTENT_SELECTOR,
 } from '@/lib/dom';
 import { navigateApp, navigateBack, navigateForward } from '@/lib/navigation';
+import { isPlayerRoutePath } from '@/lib/player-navigation';
 import { lastSearchPath } from '@/lib/search-page-state';
 
 // Focused floating layers own their keys, including the nonmodal mini player.
@@ -31,7 +32,7 @@ export function useBrowseHotkeys() {
       event.defaultPrevented ||
       event.isComposing ||
       isKeyCaptureTarget(event.target, event.key) ||
-      window.location.pathname.startsWith('/player')
+      isPlayerRoutePath(window.location.pathname)
     ) {
       return;
     }
@@ -95,10 +96,7 @@ export function useBrowseHotkeys() {
   });
 
   const handleMouseNavigation = useEffectEvent((event: MouseEvent) => {
-    if (
-      window.location.pathname.startsWith('/player') ||
-      (event.button !== 3 && event.button !== 4)
-    ) {
+    if (isPlayerRoutePath(window.location.pathname) || (event.button !== 3 && event.button !== 4)) {
       return;
     }
     event.preventDefault();

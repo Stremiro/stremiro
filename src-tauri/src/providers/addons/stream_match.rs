@@ -227,6 +227,13 @@ fn bare_episode_suffix_is_metadata(suffix: &str) -> bool {
     BARE_EPISODE_METADATA_SUFFIX_REGEX.is_match(suffix)
 }
 
+/// Trailing size/resolution metadata is not an episode-range claim.
+fn range_claim_not_metadata(text: &str) -> impl FnMut(&regex::Captures<'_>) -> bool + '_ {
+    move |captures| {
+        !bare_episode_suffix_is_metadata(&text[captures.get(0).expect("range match").end()..])
+    }
+}
+
 fn bare_episode_ranges(text: &str) -> impl Iterator<Item = regex::Captures<'_>> {
     BARE_EPISODE_RANGE_REGEX
         .captures_iter(text)
@@ -265,9 +272,7 @@ fn explicit_season_ranges(text: &str) -> impl Iterator<Item = (u32, u32)> + '_ {
         });
     let x_ranges = X_SEASON_EPISODE_RANGE_REGEX
         .captures_iter(text)
-        .filter(|captures| {
-            !bare_episode_suffix_is_metadata(&text[captures.get(0).expect("range match").end()..])
-        })
+        .filter(range_claim_not_metadata(text))
         .filter_map(|captures| {
             let start = parse_captured_u32(&captures, 1)?;
             let end = captures
@@ -361,9 +366,7 @@ fn strip_episode_ranges(text: &str) -> Cow<'_, str> {
 fn episode_range_claims(text: &str) -> impl Iterator<Item = (Option<(u32, u32)>, u32, u32)> + '_ {
     let seasons = SEASON_EPISODE_RANGE_REGEX
         .captures_iter(text)
-        .filter(|captures| {
-            !bare_episode_suffix_is_metadata(&text[captures.get(0).expect("range match").end()..])
-        })
+        .filter(range_claim_not_metadata(text))
         .filter_map(|captures| {
             let season = parse_captured_u32(&captures, 1)?;
             Some((
@@ -374,9 +377,7 @@ fn episode_range_claims(text: &str) -> impl Iterator<Item = (Option<(u32, u32)>,
         });
     let x_seasons = X_SEASON_EPISODE_RANGE_REGEX
         .captures_iter(text)
-        .filter(|captures| {
-            !bare_episode_suffix_is_metadata(&text[captures.get(0).expect("range match").end()..])
-        })
+        .filter(range_claim_not_metadata(text))
         .filter_map(|captures| {
             let start = parse_captured_u32(&captures, 1)?;
             let end = captures
@@ -390,9 +391,7 @@ fn episode_range_claims(text: &str) -> impl Iterator<Item = (Option<(u32, u32)>,
         });
     let loose = EPISODE_RANGE_REGEX
         .captures_iter(text)
-        .filter(|captures| {
-            !bare_episode_suffix_is_metadata(&text[captures.get(0).expect("range match").end()..])
-        })
+        .filter(range_claim_not_metadata(text))
         .chain(bare_episode_ranges(text))
         .filter_map(|captures| {
             Some((

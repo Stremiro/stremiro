@@ -233,47 +233,46 @@ export function SeasonSwitcher({
         })}
       </div>
 
-      {hasOverflow && (
-        <div
-          className={cn(
-            'pointer-events-none absolute inset-y-0 left-0 z-10 flex w-12 items-center bg-linear-to-r from-background via-background/80 to-transparent focus-within:opacity-100',
-            !canScrollLeft && 'opacity-0',
-          )}
-        >
-          <button
-            type='button'
-            onClick={() => {
-              if (canScrollLeft) scroll('left');
-            }}
-            className={`${SCROLL_BUTTON_CLASS} ml-1`}
-            aria-label='Scroll seasons left'
-            aria-disabled={!canScrollLeft || undefined}
+      {hasOverflow &&
+        (
+          [
+            {
+              side: 'left',
+              canScroll: canScrollLeft,
+              Icon: ChevronLeft,
+              edgeClass: 'left-0 bg-linear-to-r',
+              buttonClass: 'ml-1',
+            },
+            {
+              side: 'right',
+              canScroll: canScrollRight,
+              Icon: ChevronRight,
+              edgeClass: 'right-0 justify-end bg-linear-to-l',
+              buttonClass: 'mr-1',
+            },
+          ] as const
+        ).map(({ side, canScroll, Icon, edgeClass, buttonClass }) => (
+          <div
+            key={side}
+            className={cn(
+              'pointer-events-none absolute inset-y-0 z-10 flex w-12 items-center from-background via-background/80 to-transparent focus-within:opacity-100',
+              edgeClass,
+              !canScroll && 'opacity-0',
+            )}
           >
-            <ChevronLeft className='h-4 w-4' />
-          </button>
-        </div>
-      )}
-
-      {hasOverflow && (
-        <div
-          className={cn(
-            'pointer-events-none absolute inset-y-0 right-0 z-10 flex w-12 items-center justify-end bg-linear-to-l from-background via-background/80 to-transparent focus-within:opacity-100',
-            !canScrollRight && 'opacity-0',
-          )}
-        >
-          <button
-            type='button'
-            onClick={() => {
-              if (canScrollRight) scroll('right');
-            }}
-            className={`${SCROLL_BUTTON_CLASS} mr-1`}
-            aria-label='Scroll seasons right'
-            aria-disabled={!canScrollRight || undefined}
-          >
-            <ChevronRight className='h-4 w-4' />
-          </button>
-        </div>
-      )}
+            <button
+              type='button'
+              onClick={() => {
+                if (canScroll) scroll(side);
+              }}
+              className={`${SCROLL_BUTTON_CLASS} ${buttonClass}`}
+              aria-label={`Scroll seasons ${side}`}
+              aria-disabled={!canScroll || undefined}
+            >
+              <Icon className='h-4 w-4' />
+            </button>
+          </div>
+        ))}
     </div>
   );
 }

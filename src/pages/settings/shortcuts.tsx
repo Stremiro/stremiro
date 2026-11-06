@@ -23,6 +23,7 @@ import {
   SETTINGS_CAPTION_CLASS,
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -164,9 +165,9 @@ export function ShortcutsSection() {
   };
 
   return (
-    <div className='space-y-4'>
+    <div className='space-y-8'>
       <SettingsQueryError query={preferencesQuery} message="Couldn't load your shortcuts." />
-      <SettingsGroup id='setting-player-shortcuts'>
+      <SettingsGroup>
         <SettingsGroupHeader
           icon={Keyboard}
           title='Player shortcuts'
@@ -188,67 +189,71 @@ export function ShortcutsSection() {
             </Button>
           }
         />
-        <p
-          aria-live='polite'
-          className={cn(
-            'border-b border-white/[0.06] px-4 sm:px-5 text-[12.5px] text-zinc-300',
-            notice ? 'py-2.5' : 'hidden',
-          )}
-        >
-          {notice}
-        </p>
-        <SettingsBody className='@container/shortcuts'>
-          <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
-            {PLAYER_ACTION_GROUPS.map((group) => (
-              <section key={group} aria-label={group} className='min-w-0'>
-                <h3 className={SHORTCUT_CAPTION_CLASS}>{group}</h3>
-                <ul className='divide-y divide-white/[0.06]'>
-                  {PLAYER_ACTIONS.filter((action) => action.group === group).map((action) => (
-                    <PlayerBindingRow
-                      key={action.id}
-                      action={action.id}
-                      label={action.label}
-                      keymap={keymap}
-                      capture={capture}
-                      disabled={isHydrating}
-                      isSaving={isSaving}
-                      onStartCapture={startCapture}
-                      onCaptureKey={handleCaptureKey}
-                      onCancelCapture={cancelCapture}
-                      onReset={() => {
-                        cancelCapture();
-                        const next = { ...keymap.overrides };
-                        delete next[action.id];
-                        void save(next);
-                      }}
-                    />
-                  ))}
-                </ul>
-              </section>
-            ))}
-          </div>
-        </SettingsBody>
+        <SettingsCard id='setting-player-shortcuts'>
+          <p
+            aria-live='polite'
+            className={cn(
+              'border-b border-white/[0.06] px-4 sm:px-5 text-[12.5px] text-zinc-300',
+              notice ? 'py-2.5' : 'hidden',
+            )}
+          >
+            {notice}
+          </p>
+          <SettingsBody className='@container/shortcuts'>
+            <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
+              {PLAYER_ACTION_GROUPS.map((group) => (
+                <section key={group} aria-label={group} className='min-w-0'>
+                  <h3 className={SHORTCUT_CAPTION_CLASS}>{group}</h3>
+                  <ul className='divide-y divide-white/[0.06]'>
+                    {PLAYER_ACTIONS.filter((action) => action.group === group).map((action) => (
+                      <PlayerBindingRow
+                        key={action.id}
+                        action={action.id}
+                        label={action.label}
+                        keymap={keymap}
+                        capture={capture}
+                        disabled={isHydrating}
+                        isSaving={isSaving}
+                        onStartCapture={startCapture}
+                        onCaptureKey={handleCaptureKey}
+                        onCancelCapture={cancelCapture}
+                        onReset={() => {
+                          cancelCapture();
+                          const next = { ...keymap.overrides };
+                          delete next[action.id];
+                          void save(next);
+                        }}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              ))}
+            </div>
+          </SettingsBody>
+        </SettingsCard>
       </SettingsGroup>
       <SettingsGroup>
         <SettingsGroupHeader
           icon={Lock}
           title='Fixed shortcuts'
-          description='Built-in player, browsing and Calendar shortcuts. These cannot be reassigned.'
+          description='Built-in player, browsing and Calendar keys that cannot be reassigned.'
         />
-        <SettingsBody className='@container/shortcuts'>
-          <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
-            {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
-              <section key={title} aria-label={title} className='min-w-0'>
-                <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
-                <ShortcutTable
-                  shortcuts={shortcuts}
-                  idPrefix={`setting-fixed-${title}`}
-                  className='grid-cols-1 divide-y divide-white/[0.06] @xl:grid-cols-1 [&>div]:h-auto [&>div]:min-h-9 [&>div]:py-1.5 [&_dt]:whitespace-normal [&_dt]:overflow-visible [&_dd]:max-w-[60%] [&_dd]:flex-wrap [&_dd]:justify-end'
-                />
-              </section>
-            ))}
-          </div>
-        </SettingsBody>
+        <SettingsCard>
+          <SettingsBody className='@container/shortcuts'>
+            <div className='grid items-start gap-6 @min-[42rem]/shortcuts:grid-cols-2 @min-[64rem]/shortcuts:grid-cols-3'>
+              {FIXED_SHORTCUT_SECTIONS.map(([title, shortcuts]) => (
+                <section key={title} aria-label={title} className='min-w-0'>
+                  <h3 className={SHORTCUT_CAPTION_CLASS}>{title}</h3>
+                  <ShortcutTable
+                    shortcuts={shortcuts}
+                    idPrefix={`setting-fixed-${title}`}
+                    className='grid-cols-1 divide-y divide-white/[0.06] @xl:grid-cols-1 [&>div]:h-auto [&>div]:min-h-9 [&>div]:py-1.5 [&_dt]:whitespace-normal [&_dt]:overflow-visible [&_dd]:max-w-[60%] [&_dd]:flex-wrap [&_dd]:justify-end'
+                  />
+                </section>
+              ))}
+            </div>
+          </SettingsBody>
+        </SettingsCard>
       </SettingsGroup>
     </div>
   );

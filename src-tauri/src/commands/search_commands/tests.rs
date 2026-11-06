@@ -930,6 +930,7 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
             ("Fast Five", None),
         ),
         ("spiderman", ("Spider-Man", None), ("Superman", None)),
+        ("ΟΣ", ("ος", None), ("Οσμή", None)),
         ("dune 2021", ("Dune", Some("2021")), ("Dune", Some("1984"))),
         (
             "blade runner 2049",
@@ -973,6 +974,7 @@ fn search_ranking_prioritizes_exact_titles_and_provider_relevance() {
         ("Łódź", "lodz"),
         ("Fast & Furious", "fast and furious"),
         ("ガンダム", "カ\u{3099}ンタ\u{3099}ム"),
+        ("ΟΣ ος οσ", "οσ οσ οσ"),
     ] {
         assert_eq!(super::normalize_search_text(title), expected);
     }
@@ -1235,7 +1237,7 @@ async fn browse_trusts_only_declared_provider_genres_and_enforces_other_filters(
                 &genres,
                 Some(SearchMediaType::Movie),
             )),
-            ["both", "unknown"],
+            ["both"],
         );
         let single =
             apply_browse_filters(page.items, SearchMediaType::Movie, &genres[..1], NO_RANGE);
@@ -1336,14 +1338,14 @@ fn genre_and_year_filters_preserve_browse_and_search_contracts() {
             &["tt4"],
         ),
         (
-            "unlabeled search hits",
+            "unverified search hits do not bypass filters",
             (true, Anime, &["Action"][..], NO_RANGE),
             vec![
                 item("tt1", "Solo Leveling", current, &[]),
                 item("tt2", "Anime Action", current, &["Animation", "Action"]),
                 item("tt3", "Live Action", current, &["Action"]),
             ],
-            &["tt1", "tt2"],
+            &["tt2"],
         ),
         (
             "active-year exclusion",
@@ -1408,7 +1410,7 @@ fn genre_and_year_filters_preserve_browse_and_search_contracts() {
 }
 
 #[test]
-fn anime_search_requires_animation_without_dropping_unlabeled_hits() {
+fn anime_search_requires_verified_animation() {
     for genres in [vec![], vec!["animation".to_string()]] {
         let items = vec![
             test_media_item("unknown", "series"),
@@ -1427,7 +1429,7 @@ fn anime_search_requires_animation_without_dropping_unlabeled_hits() {
                 &genres,
                 Some(SearchMediaType::Anime)
             )),
-            ["unknown", "anime"],
+            ["anime"],
         );
     }
 }
@@ -1446,6 +1448,100 @@ fn catalog_browse_extras_send_skip_only_when_advancing() {
 
     assert!(catalog_browse_extras(None, 0).is_empty());
     assert_eq!(catalog_browse_extras(None, 24)[0].value, "24");
+}
+
+#[tokio::test]
+async fn filtered_search_resolves_missing_genres_once_and_preserves_tagged_hits() {
+    use crate::test_helpers::{test_addon, TestHttpServer};
+
+    let server = TestHttpServer::new(vec![(
+        200,
+        r#"{"meta":{"id":"tt1","name":"Naruto","type":"series","genres":["Animation","Action"]}}"#,
+        None,
+    )]);
+    let snapshot = [super::AddonConfig {
+        url: server.url.clone(),
+        ..test_addon("meta", "Metadata")
+    }];
+    let client = super::AddonResourceClient::new();
+    let mut items = vec![
+        test_media_item("tt1", "series"),
+        MediaItem {
+            genres: Some(vec!["Drama".into()]),
+            ..test_media_item("live-action", "series")
+        },
+    ];
+    assert!(!super::resolve_search_genres(&snapshot, &client, &mut items).await);
+    assert_eq!(
+        ids(&retain_search_items_matching_genres(
+            items.clone(),
+            &[],
+            Some(SearchMediaType::Anime)
+        )),
+        ["tt1"]
+    );
+    assert_eq!(
+        ids(&retain_search_items_matching_genres(
+            items.clone(),
+            &["Drama".into()],
+            Some(SearchMediaType::Series)
+        )),
+        ["live-action"]
+    );
+    items[0].genres = None;
+    assert!(!super::resolve_search_genres(&snapshot, &client, &mut items).await);
+    assert_eq!(server.finish(), ["/meta/series/tt1.json"]);
+
+    let mut unknown = vec![test_media_item("missing", "movie")];
+    assert!(super::resolve_search_genres(&[], &client, &mut unknown).await);
+    assert!(
+        retain_search_items_matching_genres(unknown.clone(), &["Drama".into()], None).is_empty()
+    );
+    assert_eq!(
+        ids(&retain_search_items_matching_genres(unknown, &[], None)),
+        ["missing"]
+    );
+}
+
+#[tokio::test]
+async fn filtered_search_bounds_stalled_metadata_and_keeps_completed_hits() {
+    use crate::test_helpers::{stalled_listener, test_addon};
+
+    let (_stalled, stalled_url) = stalled_listener();
+    let snapshot = [super::AddonConfig {
+        url: stalled_url,
+        ..test_addon("stalled", "Stalled")
+    }];
+    let mut items = vec![
+        test_media_item("tt1", "movie"),
+        MediaItem {
+            genres: Some(vec!["Action".into()]),
+            ..test_media_item("tagged", "movie")
+        },
+    ];
+    tokio::time::timeout(
+        super::SEARCH_GENRE_BUDGET + std::time::Duration::from_secs(1),
+        async {
+            assert!(
+                super::resolve_search_genres(
+                    &snapshot,
+                    &super::AddonResourceClient::new(),
+                    &mut items
+                )
+                .await
+            );
+        },
+    )
+    .await
+    .expect("metadata verification must respect the batch budget");
+    assert_eq!(
+        ids(&retain_search_items_matching_genres(
+            items,
+            &["Action".into()],
+            None
+        )),
+        ["tagged"]
+    );
 }
 
 #[test]

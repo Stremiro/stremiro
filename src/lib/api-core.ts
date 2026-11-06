@@ -12,28 +12,26 @@ export type InvokeApi = <T>(
   options?: InvokeOptions,
 ) => Promise<T>;
 
+function getKindErrorMessage(error: unknown, kinds: readonly string[]): string | undefined {
+  return kinds.includes(getErrorKind(error) ?? '') ? getErrorMessage(error) : undefined;
+}
+
 export function getListErrorMessage(error: unknown): string | undefined {
-  switch (getErrorKind(error)) {
-    case 'list_name_required':
-    case 'list_not_found':
-    case 'too_many_lists':
-    case 'list_full':
-      return getErrorMessage(error);
-    default:
-      return undefined;
-  }
+  return getKindErrorMessage(error, [
+    'list_name_required',
+    'list_not_found',
+    'too_many_lists',
+    'list_full',
+  ]);
 }
 
 export function getWatchStatusErrorMessage(error: unknown): string | undefined {
-  switch (getErrorKind(error)) {
-    case 'invalid_item':
-    case 'invalid_status':
-    case 'status_capacity':
-    case 'library_capacity':
-      return getErrorMessage(error);
-    default:
-      return undefined;
-  }
+  return getKindErrorMessage(error, [
+    'invalid_item',
+    'invalid_status',
+    'status_capacity',
+    'library_capacity',
+  ]);
 }
 
 /** Rust `AddonResourceError`: no enabled addon serves the request, so Retry cannot help. */

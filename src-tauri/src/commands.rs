@@ -520,22 +520,21 @@ pub async fn get_data_stats(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<DataStats, String> {
-    run_blocking_store_op({
-        let service = playback_state.inner().clone();
-        move || {
-            let (history_count, history_title_count) = service.resume_counts(&app)?;
-            let has_learned_playback_data = service.has_learned_playback_data(&app)?;
+    playback_state
+        .run_store_op(&app, |service, app| {
+            let (history_count, history_title_count) = service.resume_counts(app)?;
+            let has_learned_playback_data = service.has_learned_playback_data(app)?;
 
             // Index headers alone answer the count — `load_*_map` parses every record
             // and can repair-write inside a read-only endpoint.
-            let library_store = open_store(&app, LIBRARY_STORE_FILE)?;
+            let library_store = open_store(app, LIBRARY_STORE_FILE)?;
             let library_index = load_library_index(&library_store)?;
             let library_count = library_index.len();
 
-            let lists_store = open_store(&app, LISTS_STORE_FILE)?;
+            let lists_store = open_store(app, LISTS_STORE_FILE)?;
             let lists_count = load_lists_order(&lists_store)?.len();
 
-            let status_store = open_store(&app, WATCH_STATUS_STORE_FILE)?;
+            let status_store = open_store(app, WATCH_STATUS_STORE_FILE)?;
             let statuses = read_watch_status_snapshot(&status_store)?;
             let watch_statuses_count = statuses.items.len();
             let library_status_counts = library_commands::library_status_counts(
@@ -552,9 +551,8 @@ pub async fn get_data_stats(
                 lists_count,
                 watch_statuses_count,
             })
-        }
-    })
-    .await
+        })
+        .await
 }
 
 /// Wipes all watch history entries and resets the index.
@@ -563,8 +561,9 @@ pub async fn clear_watch_history(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<(), String> {
-    let service = playback_state.inner().clone();
-    run_blocking_store_op(move || service.clear(&app)).await
+    playback_state
+        .run_store_op(&app, |service, app| service.clear(app))
+        .await
 }
 
 /// Wipes all library entries and their watch statuses — a leftover status row would

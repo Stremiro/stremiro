@@ -86,10 +86,15 @@ fn anilist_request_body(argument: &'static str, value: u32) -> Vec<u8> {
 }
 
 fn bound_text(value: Option<&serde_json::Value>, max: usize) -> Option<String> {
-    let text = value?.as_str()?.trim();
-    (!text.is_empty())
-        .then(|| text.chars().take(max).collect())
-        .filter(|text: &String| !text.is_empty())
+    value?
+        .as_str()
+        .and_then(|text| super::trim_to_max(text, max))
+}
+
+fn bounded_numeric_id(value: &serde_json::Value) -> bool {
+    value
+        .as_u64()
+        .is_some_and(|id| id > 0 && id <= ANIME_ID_MAX)
 }
 
 /// External http(s) link: bounded, no credentials, no non-routable host;
@@ -100,10 +105,6 @@ fn safe_link_url(value: Option<&serde_json::Value>) -> Option<String> {
         return None;
     }
     super::addon_resource::parse_fetchable_http_url(raw).map(Into::into)
-}
-
-fn image_url(value: Option<&serde_json::Value>) -> Option<String> {
-    super::addon_resource::normalize_image_url(value?.as_str()?)
 }
 
 /// `get_title_credits` IPC entry point: movie returns empty without HTTP;
@@ -222,12 +223,10 @@ fn decode_tvmaze_show(bytes: &[u8]) -> Result<(Option<serde_json::Value>, bool),
         return Ok((None, true));
     }
     // A valid show carries a positive bounded numeric id.
-    match value["id"]
-        .as_u64()
-        .filter(|id| *id > 0 && *id <= ANIME_ID_MAX)
-    {
-        Some(_) => Ok((Some(value), false)),
-        None => Err(TRANSIENT_ERROR.to_string()),
+    if bounded_numeric_id(&value["id"]) {
+        Ok((Some(value), false))
+    } else {
+        Err(TRANSIENT_ERROR.to_string())
     }
 }
 
@@ -263,7 +262,9 @@ fn decode_tvmaze_cast(bytes: &[u8]) -> Result<(Option<Vec<TitlePerson>>, bool), 
             let name = bound_text(person.get("name"), MAX_NAME_CHARS)?;
             Some(TitlePerson {
                 name,
-                image_url: image_url(person.get("image").and_then(|i| i.get("medium"))),
+                image_url: super::addon_resource::sanitize_image_url(
+                    person.get("image").and_then(|i| i.get("medium")),
+                ),
                 role: "Cast".to_string(),
                 character: bound_text(
                     row.get("character").and_then(|c| c.get("name")),
@@ -404,7 +405,15 @@ fn pick_bridge_pair(rows: &[AnimeIds]) -> Option<(&'static str, u32)> {
             .map(|id| ("id", id))
             .or_else(|| row.mal_id.map(|id| ("idMal", id)))
     }
-    let mut season_one: Vec<_> = rows
+    fn distinct_pair(mut pairs: Vec<(&'static str, u32)>) -> Option<(&'static str, u32)> {
+        pairs.sort_unstable();
+        pairs.dedup();
+        match pairs.as_slice() {
+            [pair] => Some(*pair),
+            _ => None,
+        }
+    }
+    let season_one = rows
         .iter()
         .filter(|row| {
             [row.tvdb_season, row.tmdb_season]
@@ -415,18 +424,10 @@ fn pick_bridge_pair(rows: &[AnimeIds]) -> Option<(&'static str, u32)> {
         })
         .filter_map(preferred)
         .collect();
-    season_one.sort_unstable();
-    season_one.dedup();
-    if let [pair] = season_one.as_slice() {
-        return Some(*pair);
+    if let Some(pair) = distinct_pair(season_one) {
+        return Some(pair);
     }
-    let mut all: Vec<_> = rows.iter().filter_map(preferred).collect();
-    all.sort_unstable();
-    all.dedup();
-    match all.as_slice() {
-        [pair] => Some(*pair),
-        _ => None,
-    }
+    distinct_pair(rows.iter().filter_map(preferred).collect())
 }
 
 fn decode_anilist_credits(
@@ -458,12 +459,8 @@ fn decode_anilist_credits(
         return Err(INVALID.to_string());
     }
     // A queried Media must carry its non-null bounded id.
-    match media["id"]
-        .as_u64()
-        .filter(|id| *id > 0 && *id <= ANIME_ID_MAX)
-    {
-        Some(_) => {}
-        None => return Err(INVALID.to_string()),
+    if !bounded_numeric_id(&media["id"]) {
+        return Err(INVALID.to_string());
     }
     let credits = TitleCredits {
         people: anilist_people(media),
@@ -500,8 +497,8 @@ fn decode_anilist_credits(
             ..TitleFacts::default()
         },
         next_airing_episode: media["nextAiringEpisode"].as_object().and_then(|episode| {
-            let number = episode["episode"].as_u64().filter(|n| *n > 0)?;
-            let airing_at = episode["airingAt"].as_u64().filter(|t| *t > 0)?;
+            let number = episode.get("episode")?.as_u64().filter(|n| *n > 0)?;
+            let airing_at = episode.get("airingAt")?.as_u64().filter(|t| *t > 0)?;
             // Unix seconds bounded to year 2100.
             (airing_at <= 4_102_444_800).then_some(NextAiringEpisode {
                 episode: u32::try_from(number).ok()?,
@@ -531,7 +528,7 @@ fn anilist_people(media: &serde_json::Value) -> Vec<TitlePerson> {
             let node = edge.get("node")?;
             Some(TitlePerson {
                 name: bound_text(node["name"].get("full"), MAX_NAME_CHARS)?,
-                image_url: image_url(node["image"].get("large")),
+                image_url: super::addon_resource::sanitize_image_url(node["image"].get("large")),
                 role: role.to_string(),
                 character: None,
                 voice_actor: edge["voiceActors"]

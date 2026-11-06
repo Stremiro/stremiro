@@ -10,7 +10,7 @@ export function CreditLink({ name }: { name: string }) {
     <Link
       to={`/search?q=${encodeURIComponent(name)}`}
       title={`Search for ${name}`}
-      className='rounded-sm text-white/80 decoration-white/30 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
+      className='rounded-sm font-medium text-white/90 decoration-white/30 underline-offset-4 transition-colors hover:text-white hover:underline focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/40'
     >
       {name}
     </Link>
@@ -27,24 +27,18 @@ export function DetailsCredits({
   if (!cast.length && !directors.length && !writers.length) return null;
 
   return (
-    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2 text-[13px] leading-6 sm:gap-x-4'>
+    <dl className='mt-4 grid max-w-2xl grid-cols-[max-content_minmax(0,1fr)] items-baseline gap-x-3 gap-y-2.5 text-[13px] leading-6 sm:gap-x-4'>
       {[cast, directors, writers].map((names, groupIndex) => {
         if (!names.length) return null;
         const isCast = groupIndex === 0;
         const groupKey = CREDIT_GROUP_KEYS[groupIndex];
         const label = isCast
           ? 'Starring'
-          : names.length === 1
-            ? groupIndex === 1
-              ? 'Director'
-              : 'Writer'
-            : groupIndex === 1
-              ? 'Directors'
-              : 'Writers';
+          : `${groupIndex === 1 ? 'Director' : 'Writer'}${names.length === 1 ? '' : 's'}`;
         const links = (isCast ? names.slice(0, 4) : names).map((name, index) => (
           <span key={name}>
             {index > 0 && (
-              <span aria-hidden='true' className='text-zinc-500'>
+              <span aria-hidden='true' className='text-zinc-600'>
                 {' '}
                 ·{' '}
               </span>
@@ -54,7 +48,9 @@ export function DetailsCredits({
         ));
         return (
           <Fragment key={groupKey}>
-            <dt className='text-[12px] font-medium text-zinc-400'>{label}</dt>
+            <dt className='text-[10.5px] font-semibold uppercase tracking-[0.14em] text-zinc-500'>
+              {label}
+            </dt>
             <dd
               className={
                 isCast ? 'flex min-w-0 items-baseline gap-2 text-white/80' : 'min-w-0 break-words'

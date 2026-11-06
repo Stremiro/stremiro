@@ -37,6 +37,7 @@ import { openAppLink } from '@/lib/app-links';
 import { isTauriDesktopRuntime, runAppUpdateCheck } from '@/lib/app-updater';
 import { isEditableTarget, OPEN_DIALOG_SELECTOR } from '@/lib/dom';
 import { bindAppNavigate, navigateApp, recordLocationEntry } from '@/lib/navigation';
+import { isPlayerRoutePath } from '@/lib/player-navigation';
 import {
   PlayerHost,
   PlayerRouteRegistrar,
@@ -162,7 +163,7 @@ function LastLocationRecorder() {
       pendingLocationRef.current = null;
       return;
     }
-    if (location.pathname.startsWith('/player')) {
+    if (isPlayerRoutePath(location.pathname)) {
       flushLocation();
       return;
     }
@@ -308,7 +309,7 @@ function AppUpdateManager() {
     () =>
       document.hidden ||
       hasPlayerSession ||
-      window.location.pathname.startsWith('/player') ||
+      isPlayerRoutePath(window.location.pathname) ||
       !navigator.onLine,
   );
 

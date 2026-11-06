@@ -1346,7 +1346,12 @@ export function StreamPackEpisodeList({
               {packTitle}
             </p>
             {packMeta && (
-              <p className='mt-0.5 truncate text-[11px] leading-snug text-zinc-400'>{packMeta}</p>
+              <p
+                className='mt-0.5 truncate text-[11px] leading-snug text-zinc-400'
+                title={packMeta}
+              >
+                {packMeta}
+              </p>
             )}
           </div>
         </div>

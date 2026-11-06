@@ -4,8 +4,8 @@ use super::ttl_cache::{
 use super::{
     addon_manifest::{AddonCatalogCapability, AddonManifest},
     bound_optional, build_provider_http_client, encode_uri_component, normalize_media_year,
-    strip_manifest_suffix, trim_to_max, Episode, MediaDetails, MediaItem, MediaSeason, Trailer,
-    ADDON_URL_INVALID_MESSAGE, MAGNET_PREFIX,
+    strip_manifest_suffix, trim_to_max, DiskEnvelope, Episode, MediaDetails, MediaItem,
+    MediaSeason, Trailer, ADDON_URL_INVALID_MESSAGE, MAGNET_PREFIX,
 };
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -39,7 +39,7 @@ const MAX_EXTRA_NAME_CHARS: usize = 64;
 const MAX_EXTRA_VALUE_CHARS: usize = 256;
 const MAX_EXTRAS: usize = 16;
 const MAX_SUBTITLE_LABEL_CHARS: usize = 256;
-pub(crate) const MAX_SUBTITLES_PER_ADDON: usize = 50;
+const MAX_SUBTITLES_PER_ADDON: usize = 50;
 
 /// Addon payloads are stable for minutes; empty answers get the shorter window so new content surfaces fast.
 const RESOURCE_CACHE_TTL: Duration = Duration::from_secs(180);
@@ -64,18 +64,12 @@ fn resource_cache_key(resource: &str, url: &str) -> String {
     format!("{resource}:{}", hash_segment(url))
 }
 
-#[derive(Serialize, Deserialize)]
-struct SubtitleDiskEntry {
-    expires_at: SystemTime,
-    response: Box<RawValue>,
-}
-
-fn read_subtitle_disk(path: &Path) -> Option<Arc<[AddonSubtitle]>> {
+fn read_subtitle_disk(path: &Path) -> Option<(Arc<[AddonSubtitle]>, SystemTime)> {
     let bytes = {
         let _guard = super::lock_or_recover(&SUBTITLE_DISK_GATE);
         super::read_cache_file(path, SUBTITLE_DISK_MAX_BYTES)?
     };
-    let entry: SubtitleDiskEntry = serde_json::from_slice(&bytes).ok()?;
+    let entry: DiskEnvelope = serde_json::from_slice(&bytes).ok()?;
     let remaining = entry.expires_at.duration_since(SystemTime::now()).ok()?;
     if remaining > RESOURCE_CACHE_TTL {
         return None;
@@ -83,7 +77,8 @@ fn read_subtitle_disk(path: &Path) -> Option<Arc<[AddonSubtitle]>> {
     // Disk is untrusted too: reapply the URL, item-count and field validation.
     let response = serde_json::from_str(entry.response.get()).ok()?;
     let subtitles = parse_subtitle_items(response);
-    (!subtitles.is_empty() && SystemTime::now() < entry.expires_at).then_some(subtitles)
+    (!subtitles.is_empty() && SystemTime::now() < entry.expires_at)
+        .then_some((subtitles, entry.expires_at))
 }
 
 fn write_subtitle_disk(
@@ -93,7 +88,8 @@ fn write_subtitle_disk(
     generation: &AtomicU64,
     expected: u64,
 ) -> Option<()> {
-    let bytes = serde_json::to_vec(&SubtitleDiskEntry {
+    let bytes = serde_json::to_vec(&DiskEnvelope {
+        key: None,
         expires_at,
         response: serde_json::from_slice(bytes).ok()?,
     })
@@ -507,9 +503,14 @@ impl AddonResourceClient {
             if self.cache_generation() != generation {
                 return Err("Addon request was superseded. Please try again.".to_string());
             }
-            if let Some(subtitles) = cached {
-                // Never promote disk hits into a fresh 180s memory window or rewrite them.
-                return Ok(subtitles.to_vec());
+            if let Some((subtitles, expires_at)) = cached {
+                if let Ok(ttl) = expires_at.duration_since(SystemTime::now()) {
+                    self.subtitle_cache
+                        .put_for(&cache_key, subtitles.clone(), ttl, || {
+                            self.cache_generation() == generation
+                        });
+                    return Ok(subtitles.to_vec());
+                }
             }
         }
         let subtitles = self
@@ -923,7 +924,7 @@ fn is_youtube_video_token(source: &str) -> bool {
 
 /// Image fields reach the webview `<img>`, so they share the subtitle/stream
 /// ingress gate; a rejected URL degrades to no artwork, not a dropped row.
-fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
+pub(crate) fn sanitize_image_url(value: Option<&Value>) -> Option<String> {
     normalize_image_url(value?.as_str()?)
 }
 

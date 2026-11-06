@@ -244,19 +244,22 @@ export function usePlayerViewportMode(
       void waitForViewportTransition()
         .then(syncPlayerPip)
         .catch(() => undefined);
-    document.addEventListener('fullscreenchange', sync);
-    if (appWindow) {
-      void appWindow
-        .onResized(() => {
-          if (!isActive || !expandedRef.current) return;
-          clearTimeout(resizeTimer);
-          resizeTimer = setTimeout(sync, 60);
-        })
-        .then((dispose) => {
-          if (!isActive) dispose();
-          else disposeWindowListener = dispose;
-        })
-        .catch(() => undefined);
+    // Docked mounts keep no chrome in sync — the PiP drain above still runs.
+    if (expanded) {
+      document.addEventListener('fullscreenchange', sync);
+      if (appWindow) {
+        void appWindow
+          .onResized(() => {
+            if (!isActive || !expandedRef.current) return;
+            clearTimeout(resizeTimer);
+            resizeTimer = setTimeout(sync, 60);
+          })
+          .then((dispose) => {
+            if (!isActive) dispose();
+            else disposeWindowListener = dispose;
+          })
+          .catch(() => undefined);
+      }
     }
     return () => {
       isActive = false;
@@ -265,7 +268,7 @@ export function usePlayerViewportMode(
       disposeWindowListener?.();
       document.removeEventListener('fullscreenchange', sync);
     };
-  }, [appWindow, syncFullscreenState]);
+  }, [appWindow, expanded, syncFullscreenState]);
 
   useEffect(() => {
     expandedRef.current = expanded;

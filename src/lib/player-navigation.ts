@@ -6,21 +6,17 @@ import {
   type PreferredStreamIdentity,
   primePlayerStream,
 } from '@/lib/resolve-player-stream';
+import { createGeneration } from '@/lib/utils';
 
 export type PlayerRouteMediaType = 'movie' | 'series' | 'anime';
 
 // Positive but below the resume threshold: suppress saved history without seeking.
 export const PLAYER_RESTART_START_TIME = 1;
 
-let playbackLaunchGeneration = 0;
+const playbackLaunch = createGeneration();
 
-export function claimPlaybackLaunch(): number {
-  return ++playbackLaunchGeneration;
-}
-
-export function isCurrentPlaybackLaunch(generation: number): boolean {
-  return generation === playbackLaunchGeneration;
-}
+export const claimPlaybackLaunch = playbackLaunch.bump;
+export const isCurrentPlaybackLaunch = playbackLaunch.isCurrent;
 
 // Route state persists for the session — cap `from` so an unbounded value can't linger in memory/history.
 const PLAYER_ROUTE_FROM_MAX_CHARS = 2048;
@@ -181,7 +177,7 @@ export function resolvePlayerLaunch(launch: {
 }
 // The player owns one history slot: in-player hops replace, page launches push — a push
 // inside /player would leave stale coordinates for a later POP to resurrect. Evaluated at navigate time.
-function isPlayerRoutePath(pathname: string): boolean {
+export function isPlayerRoutePath(pathname: string): boolean {
   return pathname === '/player' || pathname.startsWith('/player/');
 }
 

@@ -1,14 +1,13 @@
 #[cfg(test)]
 use super::merge_sorted_unique;
 use super::{
-    load_advisory_index, merge_presorted_unique, prune_index_to_cap, PlaybackStateService,
+    load_advisory_index, merge_presorted_unique, normalize_title_scope, prune_index_to_cap,
+    PlaybackStateService,
 };
 use crate::commands::episode_navigation::{
     additional_episode_video_id, build_source_episode_coordinates, SourceEpisodeCoordinates,
 };
-use crate::commands::{
-    normalize_media_id, normalize_watch_progress_type, now_unix_millis, DurableStore,
-};
+use crate::commands::{normalize_media_id, now_unix_millis, DurableStore};
 use crate::providers::Episode;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -380,10 +379,7 @@ impl PlaybackStateService {
         fallback_lookup_id: Option<&str>,
         episodes: &[Episode],
     ) -> Result<Option<Vec<PlaybackEpisodeMappingSnapshot>>, String> {
-        let Some(media_type) = normalize_watch_progress_type(media_type) else {
-            return Ok(None);
-        };
-        let Some(media_id) = normalize_media_id(media_id) else {
+        let Some((media_type, media_id)) = normalize_title_scope(media_type, media_id) else {
             return Ok(None);
         };
 
@@ -493,10 +489,7 @@ impl PlaybackStateService {
         season: u32,
         episode: u32,
     ) -> Result<Option<String>, String> {
-        let Some(media_type) = normalize_watch_progress_type(media_type) else {
-            return Ok(None);
-        };
-        let Some(media_id) = normalize_media_id(media_id) else {
+        let Some((media_type, media_id)) = normalize_title_scope(media_type, media_id) else {
             return Ok(None);
         };
         let store = self.open_state_store(app)?;
@@ -519,10 +512,7 @@ impl PlaybackStateService {
         canonical_season: u32,
         canonical_episode: u32,
     ) -> Result<Option<PlaybackEpisodeMappingSnapshot>, String> {
-        let Some(media_type) = normalize_watch_progress_type(media_type) else {
-            return Ok(None);
-        };
-        let Some(media_id) = normalize_media_id(media_id) else {
+        let Some((media_type, media_id)) = normalize_title_scope(media_type, media_id) else {
             return Ok(None);
         };
 

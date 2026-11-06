@@ -1,7 +1,6 @@
 use super::ttl_cache::{hash_segment, InFlight, TtlCache};
-use super::{lock_or_recover, read_bounded_body};
+use super::{lock_or_recover, read_bounded_body, DiskEnvelope};
 use reqwest::{Client, RequestBuilder, StatusCode};
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -81,13 +80,6 @@ struct CachedBody {
     expires_at: SystemTime,
 }
 
-#[derive(Serialize, Deserialize)]
-struct DiskEnvelope {
-    key: String,
-    expires_at: SystemTime,
-    response: Box<serde_json::value::RawValue>,
-}
-
 /// One managed enrichment transport: bounded memory + disk caches, per-key
 /// single-flight, per-source pacing and cooldowns. Fixed provider roots only.
 pub(crate) struct EnrichmentClient {
@@ -102,6 +94,11 @@ pub(crate) struct EnrichmentClient {
 }
 
 impl EnrichmentClient {
+    pub(crate) fn purge_expired_caches(&self) {
+        self.cache.purge_expired();
+        self.failures.purge_expired();
+    }
+
     pub(crate) fn new(cache_dir: Option<PathBuf>) -> Self {
         Self {
             client: super::build_provider_http_client(Some(2)),
@@ -220,7 +217,12 @@ impl EnrichmentClient {
                 });
                 let value = decode(&entry.bytes).map(|(value, is_empty)| (entry, value, is_empty));
                 if let Ok((entry, value, is_empty)) = value {
-                    self.cache.put(key, entry, is_empty, || true);
+                    let ttl = entry
+                        .expires_at
+                        .duration_since(SystemTime::now())
+                        .unwrap_or_default()
+                        .min(if is_empty { EMPTY_TTL } else { FULL_TTL });
+                    self.cache.put_for(key, entry, ttl, || true);
                     return Ok(value);
                 }
                 // Undecodable disk bytes: fall through to a fresh fetch.
@@ -277,7 +279,7 @@ impl EnrichmentClient {
                             is_empty,
                             || true,
                         );
-                        self.write_disk(key, &body, expires_at).await;
+                        self.write_disk(key, body, expires_at).await;
                         Ok(value)
                     }
                     Err(error) => failed(error),
@@ -370,25 +372,24 @@ impl EnrichmentClient {
         )
     }
 
-    async fn write_disk(&self, key: &str, body: &[u8], expires_at: SystemTime) {
+    async fn write_disk(&self, key: &str, body: Arc<[u8]>, expires_at: SystemTime) {
         let Some(path) = self.disk_path(key) else {
             return;
         };
-        let Ok(response) = serde_json::from_slice::<Box<serde_json::value::RawValue>>(body) else {
-            return;
-        };
-        let envelope = DiskEnvelope {
-            key: key.to_string(),
-            expires_at,
-            response,
-        };
-        let Ok(bytes) = serde_json::to_vec(&envelope) else {
-            return;
-        };
-        if bytes.len() > DISK_MAX_BYTES {
-            return;
-        }
-        let _ = tokio::task::spawn_blocking(move || write_disk_envelope(&path, &bytes)).await;
+        let key = key.to_string();
+        let _ = tokio::task::spawn_blocking(move || {
+            let response = serde_json::from_slice(&body).ok()?;
+            let bytes = serde_json::to_vec(&DiskEnvelope {
+                key: Some(key),
+                expires_at,
+                response,
+            })
+            .ok()?;
+            (bytes.len() <= DISK_MAX_BYTES)
+                .then(|| write_disk_envelope(&path, &bytes))
+                .flatten()
+        })
+        .await;
     }
 }
 
@@ -462,7 +463,7 @@ fn read_disk_envelope(path: &Path, key: &str) -> Option<(Arc<[u8]>, SystemTime)>
         super::read_cache_file(path, DISK_MAX_BYTES)?
     };
     let envelope: DiskEnvelope = serde_json::from_slice(&bytes).ok()?;
-    if envelope.key != key || envelope.response.get().len() > MAX_BODY_BYTES {
+    if envelope.key.as_deref() != Some(key) || envelope.response.get().len() > MAX_BODY_BYTES {
         return None;
     }
     let remaining = envelope.expires_at.duration_since(SystemTime::now()).ok()?;

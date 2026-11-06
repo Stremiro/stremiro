@@ -4,7 +4,8 @@ import { memo } from 'react';
 import { PosterThumb } from '@/components/poster-thumb';
 import { Button } from '@/components/ui/button';
 import { WatchProgressCard } from '@/components/watch-progress-card';
-import { SelectionCheck } from '@/components/watch-status-icon';
+import { SelectionCheck, WatchStatusIcon } from '@/components/watch-status-icon';
+import { CollectionRowActions } from '@/components/collection-row-actions';
 import { WindowVirtualizedStack } from '@/components/window-virtualized-stack';
 import { useHistoryPlayback } from '@/hooks/use-history-playback';
 import {
@@ -76,58 +77,72 @@ const LibraryListRow = memo(function LibraryListRow({
   const prefetchDetails = usePrefetchDetails(item.id, item.type);
 
   return (
-    <button
-      type='button'
-      aria-label={selectionMode ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}` : undefined}
+    <div
       className={cn(
-        'w-full flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none text-left group focus-visible:outline-hidden focus-visible:ring-2 focus-visible:ring-white/30',
+        'group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
         selectionMode && isSelected
           ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
-          : 'bg-white/[0.015] border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] focus-visible:bg-white/[0.04] focus-visible:border-white/[0.12]',
+          : 'bg-white/[0.015] border-white/[0.05] hover:bg-white/[0.04] hover:border-white/[0.10] focus-within:bg-white/[0.04] focus-within:border-white/[0.12]',
       )}
-      onPointerDown={selectionMode ? undefined : prefetchDetails}
-      onFocus={selectionMode ? undefined : prefetchDetails}
-      onClick={(event) => {
-        if (selectionMode) {
-          event.preventDefault();
-          onToggleSelect?.(item, event.shiftKey);
-          return;
-        }
-        navigateToDetails(item.type, item.id);
-      }}
     >
-      {selectionMode && (
-        <SelectionCheck
-          selected={isSelected}
-          className={cn(
-            'transition-colors',
-            !isSelected && 'bg-black/30 group-hover:border-white/50',
-          )}
-        />
-      )}
-      <PosterThumb poster={item.poster} title={item.title} mediaType={item.type} />
+      <button
+        type='button'
+        aria-label={
+          selectionMode
+            ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}`
+            : `Open details for ${item.title}`
+        }
+        aria-pressed={selectionMode ? isSelected : undefined}
+        className='flex flex-1 min-w-0 items-center gap-3 rounded-lg text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-white/30'
+        onPointerDown={selectionMode ? undefined : prefetchDetails}
+        onFocus={selectionMode ? undefined : prefetchDetails}
+        onClick={(event) => {
+          if (selectionMode) {
+            event.preventDefault();
+            onToggleSelect?.(item, event.shiftKey);
+            return;
+          }
+          navigateToDetails(item.type, item.id);
+        }}
+      >
+        {selectionMode && (
+          <SelectionCheck
+            selected={isSelected}
+            className={cn(
+              'transition-colors',
+              !isSelected && 'bg-black/30 group-hover:border-white/50',
+            )}
+          />
+        )}
+        <PosterThumb poster={item.poster} title={item.title} mediaType={item.type} />
 
-      <div className='flex-1 min-w-0'>
-        <p
-          dir='auto'
-          title={item.title}
-          className='text-[13px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
-        >
-          {item.title}
-        </p>
-        <div className='flex items-center gap-1.5 mt-1 flex-wrap'>
-          {item.displayYear && (
-            <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
-          )}
-          <span className='text-[11px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
-          {status && (
-            <span className={cn('text-[11px] font-medium', WATCH_STATUS_COLORS[status].text)}>
-              {WATCH_STATUS_LABELS[status]}
-            </span>
-          )}
+        <div className='flex-1 min-w-0'>
+          <p
+            dir='auto'
+            title={item.title}
+            className='text-[13px] font-medium text-zinc-100 truncate group-hover:text-white transition-colors'
+          >
+            {item.title}
+          </p>
+          <div className='flex items-center gap-1.5 mt-1 flex-wrap'>
+            {item.displayYear && (
+              <span className='text-[11px] text-zinc-500'>{item.displayYear}</span>
+            )}
+            <span className='text-[11px] text-zinc-400'>{mediaTypeLabel(item.type)}</span>
+            {status && (
+              <span className='flex items-center gap-1'>
+                <WatchStatusIcon status={status} className='size-3' />
+                <span className={cn('text-[11px] font-medium', WATCH_STATUS_COLORS[status].text)}>
+                  {WATCH_STATUS_LABELS[status]}
+                </span>
+              </span>
+            )}
+          </div>
         </div>
-      </div>
-    </button>
+      </button>
+
+      {!selectionMode && <CollectionRowActions item={item} />}
+    </div>
   );
 });
 
@@ -199,7 +214,7 @@ const HistoryListRow = memo(function HistoryListRow({
   return (
     <div
       className={cn(
-        'group/hrow flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
+        'group flex items-center gap-3 px-3 py-2.5 rounded-lg border transition-colors duration-150 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none',
         selectionMode && isSelected
           ? 'border-(--accent-nav)/35 bg-(--accent-nav)/[0.06]'
           : 'bg-white/[0.02] border-white/[0.05] hover:bg-white/[0.05] hover:border-white/[0.10] focus-within:bg-white/[0.04] focus-within:border-white/[0.12]',
@@ -212,6 +227,7 @@ const HistoryListRow = memo(function HistoryListRow({
             ? `${isSelected ? 'Deselect' : 'Select'} ${item.title}`
             : `Open details for ${item.title}`
         }
+        aria-pressed={selectionMode ? isSelected : undefined}
         onClick={(event) =>
           selectionMode
             ? onToggleSelect?.(item, event.shiftKey)
@@ -269,11 +285,12 @@ const HistoryListRow = memo(function HistoryListRow({
               <Play className='w-3 h-3 fill-current' />
             )}
           </Button>
+          <CollectionRowActions item={watchProgressMediaItem(item)} />
           <Button
             size='icon'
             variant='ghost'
             data-history-remove={index}
-            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-[color,background-color,opacity] duration-150 opacity-100 md:opacity-0 md:group-hover/hrow:opacity-100 md:group-focus-within/hrow:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none'
+            className='h-8 w-8 rounded-md text-zinc-500 hover:text-red-400 hover:bg-red-500/10 transition-[color,background-color,opacity] duration-150 opacity-100 md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:opacity-100 motion-reduce:transition-none'
             onClick={(e) => {
               e.stopPropagation();
               if (removeItem.isPending) return;

@@ -1,6 +1,6 @@
 import { useQuery } from '@tanstack/react-query';
-import { Puzzle, WifiOff, X } from 'lucide-react';
-import { type ReactNode, useState } from 'react';
+import { Bookmark, Flame, Puzzle, Sparkles, WifiOff, X } from 'lucide-react';
+import { useState } from 'react';
 import { Link } from 'react-router';
 import { Hero } from '@/components/hero';
 import {
@@ -18,12 +18,11 @@ import { ResumeSection } from '@/components/resume-section';
 import { RetryBanner } from '@/components/retry-banner';
 import { ScrollToTop } from '@/components/scroll-to-top';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useAddonConfigs, useBrowseGenres } from '@/hooks/use-addon-configs';
+import { useAddonConfigs } from '@/hooks/use-addon-configs';
 import { useNearViewport } from '@/hooks/use-near-viewport';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { api } from '@/lib/api';
 import { similarTitlesQueryKey } from '@/lib/api-discovery';
-import { handleRadioGroupKeyDown } from '@/lib/dom';
 import {
   MEDIA_ROW_STALE_TIME_MS,
   RECENT_WATCH_SEED_QUERY_KEY,
@@ -31,32 +30,14 @@ import {
   WATCHLIST_QUERY_KEY,
   trendingRowQueryKey,
 } from '@/lib/query-invalidation';
-import { sameSearchGenre, searchGenrePath, type SearchMediaType } from '@/lib/search-page-state';
-import { cn, queryNeedsRetry } from '@/lib/utils';
+import { cn, PAGE_NOTICE_CLASS, queryNeedsRetry } from '@/lib/utils';
 
 const ALL_GENRES = 'All';
-const TRENDING_TYPES = [
-  { type: 'movie', label: 'Movies' },
-  { type: 'series', label: 'Series' },
-  { type: 'anime', label: 'Animation' },
-] as const;
 
-// Home rails use the shared browse pipeline and render only the first page.
-function fetchCatalogItems(options: {
-  mediaType: Exclude<SearchMediaType, 'all'>;
-  genre?: string;
-}) {
-  return api
-    .querySearchCatalogPage({
-      mediaType: options.mediaType,
-      genres: options.genre ? [options.genre] : undefined,
-    })
-    .then((page) => page.items);
-}
-
-export const homeTrendingMoviesQueryOptions = {
-  queryKey: trendingRowQueryKey('movies', ALL_GENRES),
-  queryFn: () => fetchCatalogItems({ mediaType: 'movie' }),
+// The 'all' catalog unions every type server-side — one mixed Trending feed.
+export const homeTrendingQueryOptions = {
+  queryKey: trendingRowQueryKey('all', ALL_GENRES),
+  queryFn: () => api.querySearchCatalogPage({}).then((page) => page.items),
   staleTime: MEDIA_ROW_STALE_TIME_MS,
 };
 
@@ -67,14 +48,8 @@ const recentWatchSeedQueryOptions = {
   retry: false,
 };
 
-const HOME_NOTICE_CLASS =
-  'mb-4 flex items-center gap-2.5 rounded-lg border border-white/[0.07] bg-white/[0.025] px-4 py-3 text-sm leading-relaxed text-zinc-300';
-
 // Session-scoped: the hint returns on next launch until a stream addon is installed.
 let streamAddonHintDismissed = false;
-
-// Session-scoped: coming back to Home keeps the Trending tab and genre.
-const trendingSelection = { type: 'movie' as Exclude<SearchMediaType, 'all'>, genre: ALL_GENRES };
 
 function StreamAddonHint() {
   const [dismissed, setDismissed] = useState(streamAddonHintDismissed);
@@ -88,7 +63,7 @@ function StreamAddonHint() {
 
   return (
     <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
-      <div role='status' className={HOME_NOTICE_CLASS}>
+      <div role='status' className={cn(PAGE_NOTICE_CLASS, 'mb-4')}>
         <Puzzle aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
         <p className='min-w-0 flex-1'>
           Add a stream addon to start watching.{' '}
@@ -136,12 +111,6 @@ function HomeRowPlaceholder() {
   );
 }
 
-function DeferredHomeRow({ children }: { children: ReactNode }) {
-  const { anchorRef, nearViewport } = useNearViewport();
-
-  return <div ref={anchorRef}>{nearViewport ? children : <HomeRowPlaceholder />}</div>;
-}
-
 // Local-only rail: no skeleton or error surface, so it never appears for an empty watchlist.
 function WatchlistRail() {
   const { data: watchlist } = useQuery({
@@ -153,6 +122,7 @@ function WatchlistRail() {
 
   return (
     <HorizontalMediaRail
+      icon={Bookmark}
       title={<RailTitleLink to='/profile?status=plan_to_watch' title='Watchlist' />}
       railId='watchlist'
       items={watchlist}
@@ -170,6 +140,7 @@ function RecentWatchRecommendations() {
     enabled: isOnline,
   });
   const { data: recentWatchSeed } = recentWatchSeedQuery;
+  const { anchorRef, nearViewport } = useNearViewport(Boolean(recentWatchSeed));
 
   return (
     <>
@@ -184,16 +155,21 @@ function RecentWatchRecommendations() {
         </div>
       )}
       {recentWatchSeed && (
-        <DeferredHomeRow>
-          <MediaRow
-            key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
-            title={`Because you watched ${recentWatchSeed.title}`}
-            queryKey={similarTitlesQueryKey(recentWatchSeed)}
-            queryFn={() => api.querySimilarTitles(recentWatchSeed)}
-            enabled={isOnline}
-            minItems={4}
-          />
-        </DeferredHomeRow>
+        <div ref={anchorRef}>
+          {nearViewport ? (
+            <MediaRow
+              key={`${recentWatchSeed.type}:${recentWatchSeed.id}`}
+              icon={Sparkles}
+              title={`Because you watched ${recentWatchSeed.title}`}
+              queryKey={similarTitlesQueryKey(recentWatchSeed)}
+              queryFn={() => api.querySimilarTitles(recentWatchSeed)}
+              enabled={isOnline}
+              minItems={4}
+            />
+          ) : (
+            <HomeRowPlaceholder />
+          )}
+        </div>
       )}
     </>
   );
@@ -201,34 +177,14 @@ function RecentWatchRecommendations() {
 
 export function Home() {
   const isOnline = useOnlineStatus();
-  const [selectedGenre, setSelectedGenre] = useState(trendingSelection.genre);
-  const [trendingType, setTrendingType] = useState(trendingSelection.type);
 
-  // Same manifest-driven genre list as the search filter.
-  const browseGenresQuery = useBrowseGenres({ enabled: isOnline });
-  const { data: browseGenres } = browseGenresQuery;
-  // A manifest genre literally named "All" would render a second tab for the
-  // same unfiltered state — drop it.
-  const genreOptions = [
-    ALL_GENRES,
-    ...(browseGenres?.[trendingType] ?? []).filter(
-      (option) => !sameSearchGenre(option, ALL_GENRES),
-    ),
-  ];
-
-  // Same key/queryFn/staleTime as the `All` movie row — hero and row share one fetch.
+  // Same key/queryFn/staleTime as the Trending rail — hero and row share one fetch.
   const { data: heroItems, isPending: isHeroPending } = useQuery({
-    ...homeTrendingMoviesQueryOptions,
+    ...homeTrendingQueryOptions,
     enabled: isOnline,
   });
 
   const heroSlice = (heroItems ?? []).slice(0, 5);
-
-  // Until the genre list loads, keep the saved pick rather than fetching All first.
-  const genre = browseGenres
-    ? (genreOptions.find((option) => sameSearchGenre(option, selectedGenre)) ?? ALL_GENRES)
-    : selectedGenre;
-  const activeGenre = genre === ALL_GENRES ? undefined : genre;
   const showHero = heroSlice.length > 0 || (isOnline && isHeroPending);
 
   return (
@@ -254,7 +210,7 @@ export function Home() {
       >
         {!isOnline && (
           <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
-            <div role='status' className={HOME_NOTICE_CLASS}>
+            <div role='status' className={cn(PAGE_NOTICE_CLASS, 'mb-4')}>
               <WifiOff aria-hidden='true' className='h-4 w-4 shrink-0 text-zinc-500' />
               <p>You're offline. Reconnect to refresh titles or find streams.</p>
             </div>
@@ -266,65 +222,14 @@ export function Home() {
 
         <RecentWatchRecommendations />
 
-        {isOnline && queryNeedsRetry(browseGenresQuery) && (
-          <div className={HORIZONTAL_MEDIA_RAIL_CONTENT_INSETS}>
-            <RetryBanner
-              className='px-2.5 py-2'
-              message="Couldn't load genres."
-              isRetrying={browseGenresQuery.isFetching}
-              onRetry={() => void browseGenresQuery.refetch()}
-            />
-          </div>
-        )}
         <MediaRow
+          icon={Flame}
           title='Trending'
-          titleHref={
-            activeGenre
-              ? searchGenrePath(trendingType, activeGenre)
-              : `/search?type=${trendingType}`
-          }
-          queryKey={trendingRowQueryKey(trendingType === 'movie' ? 'movies' : trendingType, genre)}
-          queryFn={() => fetchCatalogItems({ mediaType: trendingType, genre: activeGenre })}
+          titleHref='/search'
+          primary
+          queryKey={homeTrendingQueryOptions.queryKey}
+          queryFn={homeTrendingQueryOptions.queryFn}
           enabled={isOnline}
-          headerActions={
-            <div
-              role='radiogroup'
-              aria-label='Trending category'
-              className='flex shrink-0 items-center gap-5'
-            >
-              {TRENDING_TYPES.map(({ type, label }) => (
-                <button
-                  key={type}
-                  type='button'
-                  role='radio'
-                  aria-checked={trendingType === type}
-                  tabIndex={trendingType === type ? 0 : -1}
-                  onKeyDown={handleRadioGroupKeyDown}
-                  onClick={() => {
-                    trendingSelection.type = type;
-                    setTrendingType(type);
-                  }}
-                  className={cn(
-                    'inline-flex min-h-10 items-center border-b-2 px-0.5 text-sm font-medium transition-colors duration-150 focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-(--accent-nav) motion-reduce:transition-none',
-                    trendingType === type
-                      ? 'border-(--accent-nav) text-white'
-                      : 'border-transparent text-zinc-400 hover:border-white/20 hover:text-zinc-100',
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-          }
-          genreFilter={{
-            options: genreOptions,
-            allOption: ALL_GENRES,
-            active: genre,
-            onChange: (next) => {
-              trendingSelection.genre = next;
-              setSelectedGenre(next);
-            },
-          }}
         />
       </div>
     </div>

@@ -10,7 +10,7 @@ use super::config_store::{
 };
 use super::history_helpers::is_near_completion_watch_progress;
 use super::language::build_mpv_language_selection_options;
-use super::player_track_commands::property_flag;
+use super::player_track_commands::{mpv_property, property_flag};
 use super::streaming_helpers::parse_playback_url;
 use crate::providers::fetch_policy::same_origin_for_proxy_headers;
 use serde::Serialize;
@@ -388,10 +388,7 @@ pub async fn player_mpv_add_subtitle(
     let context_label = label.clone();
     let subtitle_url = url.clone();
     let (path, headers) = run_mpv_op("subtitle context", move || {
-        let path = context_app
-            .mpv()
-            .get_property("path".to_string(), "string".to_string(), &context_label)
-            .ok()
+        let path = mpv_property(&context_app, &context_label, "path".to_string(), "string")
             .and_then(|value| value.as_str().map(str::to_owned))
             .filter(|path| !path.is_empty())
             .ok_or_else(|| "No active playback for subtitle selection.".to_string())?;
@@ -411,9 +408,8 @@ pub async fn player_mpv_add_subtitle(
     run_mpv_op("subtitle add", move || {
         request.ensure_current()?;
         let mpv = app.mpv();
-        if !mpv
-            .get_property("path".to_string(), "string".to_string(), &label)
-            .is_ok_and(|current| current.as_str() == Some(path.as_str()))
+        if !mpv_property(&app, &label, "path".to_string(), "string")
+            .is_some_and(|current| current.as_str() == Some(path.as_str()))
         {
             return Err("Playback changed during subtitle download.".to_string());
         }
@@ -557,6 +553,16 @@ fn mpv_audio_properties(
     properties
 }
 
+fn set_native_property_batch(
+    app: &AppHandle,
+    window_label: &str,
+    properties: &[(String, Value)],
+) -> Result<(), String> {
+    apply_mpv_properties(properties, None, |name, value| {
+        set_native_mpv_property(app, window_label, name, value)
+    })
+}
+
 #[command]
 pub async fn player_mpv_set_audio_settings(
     app: AppHandle,
@@ -566,9 +572,7 @@ pub async fn player_mpv_set_audio_settings(
 ) -> Result<(), String> {
     let properties = mpv_audio_properties(audio_delay, night_mode);
     run_mpv_op("audio settings", move || {
-        apply_mpv_properties(&properties, None, |name, value| {
-            set_native_mpv_property(&app, window.label(), name, value)
-        })
+        set_native_property_batch(&app, window.label(), &properties)
     })
     .await
 }
@@ -647,9 +651,7 @@ pub async fn player_mpv_set_subtitle_appearance(
 ) -> Result<(), String> {
     let properties = mpv_subtitle_appearance_properties(font, color, edge, bold, italic);
     run_mpv_op("subtitle appearance", move || {
-        apply_mpv_properties(&properties, None, |name, value| {
-            set_native_mpv_property(&app, window.label(), name, value)
-        })
+        set_native_property_batch(&app, window.label(), &properties)
     })
     .await
 }
@@ -695,6 +697,7 @@ pub struct PlaybackPositionProbe {
     next_episode_prefetch_due: bool,
     seek_failure_window_secs: Option<f64>,
     premature_eof: bool,
+    eof_reached: bool,
 }
 
 fn read_playback_position(
@@ -703,26 +706,36 @@ fn read_playback_position(
     check_eof: bool,
     get_property: impl Fn(&str, &str) -> Option<Value>,
 ) -> PlaybackPositionProbe {
-    let time_pos = get_property("time-pos", "double").and_then(|value| value.as_f64());
-    let premature_eof = check_eof
+    let mut time_pos = get_property("time-pos", "double").and_then(|value| value.as_f64());
+    // Property reads can straddle a seek; only a settled, idle core can confirm terminal EOF.
+    let native_eof = (check_eof || seek_target_secs.is_some())
+        && property_flag(get_property("eof-reached", "flag"));
+    let eof_reached = native_eof
+        && check_eof
+        && !property_flag(get_property("seeking", "flag"))
+        && property_flag(get_property("core-idle", "flag"));
+    if native_eof && !eof_reached {
+        time_pos = None;
+    }
+    let premature_eof = eof_reached
         && duration_secs.is_finite()
         && duration_secs > 0.0
         && time_pos.is_some_and(|position| {
             position.is_finite() && position >= 0.0 && position < duration_secs - 2.0
-        })
-        && property_flag(get_property("eof-reached", "flag"));
+        });
     // A failed HTTP range seek can report EOF at duration even when the requested target was mid-file.
     let seek_failure_window_secs = seek_target_secs
         .filter(|target| {
-            duration_secs.is_finite()
+            eof_reached
+                && duration_secs.is_finite()
                 && target.is_finite()
                 && *target >= 0.0
                 && *target < duration_secs - 2.0
                 && time_pos.is_some_and(|position| position >= duration_secs - 2.0)
-                && property_flag(get_property("eof-reached", "flag"))
         })
         .map(|target| (duration_secs - target - 2.0) / PLAYER_SPEED_MAX);
     PlaybackPositionProbe {
+        eof_reached,
         premature_eof,
         seek_failure_window_secs,
         time_pos,
@@ -758,11 +771,7 @@ pub async fn player_mpv_get_playback_position(
             duration_secs,
             seek_target_secs,
             check_eof.unwrap_or(false),
-            |name, format| {
-                app.mpv()
-                    .get_property(name.to_string(), format.to_string(), window.label())
-                    .ok()
-            },
+            |name, format| mpv_property(&app, window.label(), name.to_string(), format),
         ))
     })
     .await
@@ -770,11 +779,7 @@ pub async fn player_mpv_get_playback_position(
 
 pub(crate) async fn is_playback_active(app: AppHandle) -> bool {
     run_mpv_op("activity probe", move || {
-        let read = |name: &str| {
-            app.mpv()
-                .get_property(name.to_string(), "flag".to_string(), "main")
-                .ok()
-        };
+        let read = |name: &str| mpv_property(&app, "main", name.to_string(), "flag");
         let pause = read("pause");
         Ok(pause.is_some() && !property_flag(pause) && !property_flag(read("idle-active")))
     })

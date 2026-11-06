@@ -6,14 +6,13 @@ import {
   Clapperboard,
   Compass,
   Languages,
-  Minus,
-  Plus,
   RotateCcw,
   Search,
   Volume2,
 } from 'lucide-react';
 import { type KeyboardEvent, useId, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { AudioSyncStepper } from '@/components/audio-sync-stepper';
 import { RetryBanner } from '@/components/retry-banner';
 import { Button } from '@/components/ui/button';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
@@ -30,10 +29,11 @@ import {
   SUBTITLE_APPEARANCE_RESET,
   type SupportedLanguage,
 } from '@/lib/api';
-import { clamp, cn, queryNeedsRetry } from '@/lib/utils';
+import { cn, queryNeedsRetry } from '@/lib/utils';
 import {
   SETTINGS_OUTLINE_BUTTON_CLASS,
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -158,10 +158,7 @@ function LanguageSelector({
   };
 
   return (
-    <SettingsRow
-      label={label}
-      description="Auto reuses this title's remembered choice, or lets the player choose."
-    >
+    <SettingsRow label={label}>
       <Popover
         open={open}
         onOpenChange={(next) => {
@@ -407,28 +404,30 @@ export function PlaybackSettings() {
   const subtitleAppearanceChanged = hasSubtitleAppearance(preferences);
 
   return (
-    <div className='@container/playback space-y-4'>
+    <div className='@container/playback space-y-8'>
       <SettingsQueryError
         query={appUiPreferences.preferencesQuery}
         message="Couldn't load your preferences."
       />
-      <div className='grid items-start gap-4 @min-[54rem]/playback:grid-cols-2'>
-        <div className='min-w-0 space-y-4'>
+      <div className='grid items-start gap-x-5 gap-y-8 @min-[54rem]/playback:grid-cols-2'>
+        <div className='min-w-0 space-y-8'>
           <SettingsGroup>
             <SettingsGroupHeader
               icon={Languages}
               title='Languages'
-              description='Preferred tracks for every stream.'
+              description="Preferred tracks for every stream. Auto reuses the title's remembered pick."
             />
-            <SettingsBody rows>
-              <PlaybackLanguageConfig />
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='autoLoadAddonSubtitles'
-                label='Load addon subtitles automatically'
-                description='Use a matching addon subtitle when the stream has none in your preferred language.'
-              />
-            </SettingsBody>
+            <SettingsCard>
+              <SettingsBody rows>
+                <PlaybackLanguageConfig />
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='autoLoadAddonSubtitles'
+                  label='Load addon subtitles automatically'
+                  description='Use a matching addon subtitle when the stream has none in your preferred language.'
+                />
+              </SettingsBody>
+            </SettingsCard>
           </SettingsGroup>
           <SettingsGroup>
             <SettingsGroupHeader
@@ -436,88 +435,55 @@ export function PlaybackSettings() {
               title='Sound'
               description='Applied to all videos.'
             />
-            <SettingsBody rows>
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='nightMode'
-                label='Night mode'
-                description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
-              />
-              <SettingsRow
-                label='Audio sync'
-                description='Positive delays audio; negative plays it earlier.'
-              >
-                <span className='flex max-w-full items-center gap-2.5'>
-                  <button
-                    type='button'
-                    aria-label='Play audio 0.1 seconds earlier'
-                    aria-disabled={isHydrating || preferences.audioDelay <= -5 || undefined}
-                    onClick={() => {
-                      if (!isHydrating && preferences.audioDelay > -5)
-                        updatePreferences({
-                          audioDelay:
-                            Math.round(clamp(preferences.audioDelay - 0.1, -5, 5) * 10) / 10,
-                        });
-                    }}
-                    className={STEP_BUTTON_CLASS}
-                  >
-                    <Minus aria-hidden='true' className='size-3.5' />
-                  </button>
-                  <output className='w-12 shrink-0 text-center text-[13px] font-medium tabular-nums text-zinc-100'>
-                    {preferences.audioDelay > 0 ? '+' : ''}
-                    {preferences.audioDelay.toFixed(1)}s
-                  </output>
-                  <button
-                    type='button'
-                    aria-label='Play audio 0.1 seconds later'
-                    aria-disabled={isHydrating || preferences.audioDelay >= 5 || undefined}
-                    onClick={() => {
-                      if (!isHydrating && preferences.audioDelay < 5)
-                        updatePreferences({
-                          audioDelay:
-                            Math.round(clamp(preferences.audioDelay + 0.1, -5, 5) * 10) / 10,
-                        });
-                    }}
-                    className={STEP_BUTTON_CLASS}
-                  >
-                    <Plus aria-hidden='true' className='size-3.5' />
-                  </button>
-                  <button
-                    type='button'
-                    aria-label='Reset audio sync'
-                    title='Reset audio sync'
-                    aria-disabled={isHydrating || preferences.audioDelay === 0 || undefined}
-                    onClick={() => {
-                      if (!isHydrating && preferences.audioDelay !== 0)
-                        updatePreferences({ audioDelay: 0 });
-                    }}
-                    className={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
-                  >
-                    <RotateCcw aria-hidden='true' className='size-3.5' />
-                  </button>
-                </span>
-              </SettingsRow>
-            </SettingsBody>
+            <SettingsCard>
+              <SettingsBody rows>
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='nightMode'
+                  label='Night mode'
+                  description='Boost quiet audio and smooth volume changes. Off keeps the original sound.'
+                />
+                <SettingsRow
+                  label='Audio sync'
+                  description='Positive delays audio; negative plays it earlier.'
+                >
+                  <span className='flex max-w-full items-center gap-2.5'>
+                    <AudioSyncStepper
+                      audioDelay={preferences.audioDelay}
+                      isHydrating={isHydrating}
+                      updatePreferences={updatePreferences}
+                      buttonClassName={STEP_BUTTON_CLASS}
+                      resetClassName={cn(STEP_BUTTON_CLASS, 'ml-0.5')}
+                      outputClassName='w-12 shrink-0 text-center text-[13px] font-medium tabular-nums text-zinc-100'
+                      resetContent={<RotateCcw aria-hidden='true' className='size-3.5' />}
+                      resetTitle='Reset audio sync'
+                    />
+                  </span>
+                </SettingsRow>
+              </SettingsBody>
+            </SettingsCard>
           </SettingsGroup>
           <SettingsGroup>
             <SettingsGroupHeader icon={Compass} title='Browsing' />
-            <SettingsBody rows>
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='spoilerProtection'
-                label='Spoiler protection'
-                description='Blur unwatched episode thumbnails and descriptions.'
-              />
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='trailerPreviews'
-                label='Trailer previews'
-                description='Play a muted trailer when hovering a title card.'
-              />
-            </SettingsBody>
+            <SettingsCard>
+              <SettingsBody rows>
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='spoilerProtection'
+                  label='Spoiler protection'
+                  description='Blur unwatched episode thumbnails and descriptions.'
+                />
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='trailerPreviews'
+                  label='Trailer previews'
+                  description='Play a muted trailer when hovering a title card.'
+                />
+              </SettingsBody>
+            </SettingsCard>
           </SettingsGroup>
         </div>
-        <div className='min-w-0 space-y-4'>
+        <div className='min-w-0 space-y-8'>
           <SettingsGroup>
             <SettingsGroupHeader
               icon={Captions}
@@ -539,56 +505,60 @@ export function PlaybackSettings() {
                 </Button>
               }
             />
-            <SettingsBody>
-              <div id={settingsControlId('Subtitle appearance')}>
-                <SubtitleAppearanceControls
-                  subtitleFont={preferences.subtitleFont}
-                  subtitleColor={preferences.subtitleColor}
-                  subtitleEdge={preferences.subtitleEdge}
-                  subtitleBold={preferences.subtitleBold}
-                  subtitleItalic={preferences.subtitleItalic}
-                  disabled={isHydrating}
-                  onPatch={updatePreferences}
-                />
-              </div>
-            </SettingsBody>
+            <SettingsCard>
+              <SettingsBody>
+                <div id={settingsControlId('Subtitle appearance')}>
+                  <SubtitleAppearanceControls
+                    subtitleFont={preferences.subtitleFont}
+                    subtitleColor={preferences.subtitleColor}
+                    subtitleEdge={preferences.subtitleEdge}
+                    subtitleBold={preferences.subtitleBold}
+                    subtitleItalic={preferences.subtitleItalic}
+                    disabled={isHydrating}
+                    onPatch={updatePreferences}
+                  />
+                </div>
+              </SettingsBody>
+            </SettingsCard>
           </SettingsGroup>
           <SettingsGroup>
             <SettingsGroupHeader icon={Clapperboard} title='While watching' />
-            <SettingsBody rows>
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='autoPlayNext'
-                label='Auto-play next episode'
-                description='Start the next episode after the countdown.'
-              />
-              <SecondsSelect
-                label='Next episode countdown'
-                description={
-                  preferences.autoPlayNext
-                    ? undefined
-                    : 'Turn on Auto-play next episode to change this.'
-                }
-                seconds={preferences.nextEpisodeCountdownSecs}
-                options={COUNTDOWN_SECONDS}
-                disabled={isHydrating || !preferences.autoPlayNext}
-                onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
-              />
-              <SecondsSelect
-                label='Hide controls after keyboard input'
-                description='After mouse movement, controls hide after 1.2 seconds of inactivity.'
-                seconds={preferences.controlsHideDelayMs / 1000}
-                options={CONTROLS_HIDE_SECONDS}
-                disabled={isHydrating}
-                onChange={(seconds) => updatePreferences({ controlsHideDelayMs: seconds * 1000 })}
-              />
-              <AppUiPreferenceToggle
-                appUiPreferences={appUiPreferences}
-                field='autoSkipIntro'
-                label='Auto-skip intros & recaps'
-                description='Skip detected intros and recaps. Outros stay manual.'
-              />
-            </SettingsBody>
+            <SettingsCard>
+              <SettingsBody rows>
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='autoPlayNext'
+                  label='Auto-play next episode'
+                  description='Start the next episode after the countdown.'
+                />
+                <SecondsSelect
+                  label='Next episode countdown'
+                  description={
+                    preferences.autoPlayNext
+                      ? undefined
+                      : 'Turn on Auto-play next episode to change this.'
+                  }
+                  seconds={preferences.nextEpisodeCountdownSecs}
+                  options={COUNTDOWN_SECONDS}
+                  disabled={isHydrating || !preferences.autoPlayNext}
+                  onChange={(seconds) => updatePreferences({ nextEpisodeCountdownSecs: seconds })}
+                />
+                <SecondsSelect
+                  label='Hide controls after keyboard input'
+                  description='After mouse movement, controls hide after 2.4 seconds of inactivity.'
+                  seconds={preferences.controlsHideDelayMs / 1000}
+                  options={CONTROLS_HIDE_SECONDS}
+                  disabled={isHydrating}
+                  onChange={(seconds) => updatePreferences({ controlsHideDelayMs: seconds * 1000 })}
+                />
+                <AppUiPreferenceToggle
+                  appUiPreferences={appUiPreferences}
+                  field='autoSkipIntro'
+                  label='Auto-skip intros & recaps'
+                  description='Skip detected intros and recaps. Outros stay manual.'
+                />
+              </SettingsBody>
+            </SettingsCard>
           </SettingsGroup>
         </div>
       </div>

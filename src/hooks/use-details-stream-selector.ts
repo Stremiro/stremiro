@@ -16,11 +16,6 @@ import { currentPathWithSearch, navigateApp, takeDetailsReturnState } from '@/li
 import type { StreamSelectorTarget } from '@/lib/stream-selector-target';
 import { getEpisodeTitle } from '@/lib/utils';
 
-interface DetailsStreamSelectorTarget extends StreamSelectorTarget {
-  /** Resume position for the picked stream — surfaced via `getStartTime`. */
-  startTime?: number;
-}
-
 // Stream-selector state for the details page. The player's Back hands over a
 // "reopen selector" payload — inline on a replace, or via the path-keyed stash
 // on a POP (which can't write history state). The effect consumes it once.
@@ -43,7 +38,7 @@ export function useDetailsStreamSelector({
   titleProgress: TitleWatchProgress | undefined;
 }) {
   const [streamSelectorOpen, setStreamSelectorOpen] = useState(false);
-  const [streamTarget, setStreamTarget] = useState<DetailsStreamSelectorTarget | null>(null);
+  const [streamTarget, setStreamTarget] = useState<StreamSelectorTarget | null>(null);
   // One-shot latch, not render state — it's only read inside the effect.
   const reopenSelectorConsumedRef = useRef(false);
 
@@ -58,7 +53,7 @@ export function useDetailsStreamSelector({
     item?.type === 'movie' ? 'movie' : baseRouteType === 'anime' ? 'anime' : 'series';
 
   // One builder for the fields every details-launched target shares.
-  const buildBaseTarget = (): DetailsStreamSelectorTarget => ({
+  const buildBaseTarget = (): StreamSelectorTarget => ({
     type: streamSelectorType,
     id: item?.id ?? '',
     originFrom: detailsOriginFrom,

@@ -196,7 +196,6 @@ pub(super) const DECODED_STREAMS_MAX: usize = 512;
 const STREAM_MAX_BYTES: usize = 512 * 1024;
 /// Feeds both the client `.timeout` and the retry loop's burned-timeout check.
 const STREAM_REQUEST_TIMEOUT_SECS: u64 = 35;
-/// Shared with the retry loop: size-limit rejections are recognized by identity, not substring.
 const STREAM_BODY_TOO_LARGE: &str = "Addon stream response exceeds the size limit.";
 
 /// Cooldown message served while an addon sits inside its failure window.

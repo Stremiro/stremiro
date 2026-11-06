@@ -66,26 +66,27 @@ export function reinsertSnapshotRows<T>(
 }
 
 // Serialize native writes per query key; only the newest write owns the cache.
-const writeTails = new Map<string, Promise<unknown>>();
-// Monotonic write generations: a racing refetch can overwrite the optimistic marker, so ownership is "latest write", never payload identity.
-const writeGenerations = new Map<string, number>();
+// Monotonic generations: a racing refetch can overwrite the optimistic marker, so ownership is "latest write", never payload identity.
+const writeStates = new Map<string, { generation: number; tail?: Promise<unknown> }>();
 let nextWriteGeneration = 0;
 
-function bumpWriteGeneration(queryKey: QueryKey): number {
+function bumpWriteGeneration(queueId: string): number {
   const generation = ++nextWriteGeneration;
-  writeGenerations.set(JSON.stringify(queryKey), generation);
+  const state = writeStates.get(queueId);
+  if (state) state.generation = generation;
+  else writeStates.set(queueId, { generation });
   return generation;
 }
 
 /** Buffered edits take cache ownership before their native write is queued. */
 export function claimOptimisticQueryWrite(queryKey: QueryKey): void {
-  bumpWriteGeneration(queryKey);
+  bumpWriteGeneration(JSON.stringify(queryKey));
 }
 
 /** Wait for writes already queued before a backup reads or restores settings. */
 export async function settleOptimisticQueryWrites(queryKeys: readonly QueryKey[]): Promise<void> {
   const tails = queryKeys
-    .map((key) => writeTails.get(JSON.stringify(key)))
+    .map((key) => writeStates.get(JSON.stringify(key))?.tail)
     .filter((tail): tail is Promise<unknown> => tail !== undefined);
   await settlePendingAppWrites(tails);
 }
@@ -101,9 +102,9 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
   if (optimisticData !== undefined) queryClient.setQueryData<TData>(queryKey, optimisticData);
 
   const queueId = JSON.stringify(queryKey);
-  const generation = bumpWriteGeneration(queryKey);
-  const isNewestWrite = () => writeGenerations.get(queueId) === generation;
-  const previous = writeTails.get(queueId) ?? Promise.resolve();
+  const generation = bumpWriteGeneration(queueId);
+  const isNewestWrite = () => writeStates.get(queueId)?.generation === generation;
+  const previous = writeStates.get(queueId)?.tail ?? Promise.resolve();
   const current = previous
     .catch(() => {})
     .then(async () => {
@@ -120,11 +121,10 @@ export async function runOptimisticQueryMutation<TData, TVariables>({
         throw error;
       }
     });
-  writeTails.set(queueId, current);
+  writeStates.get(queueId)!.tail = current;
   const cleanup = () => {
-    if (writeTails.get(queueId) === current) {
-      writeTails.delete(queueId);
-      writeGenerations.delete(queueId);
+    if (writeStates.get(queueId)?.tail === current) {
+      writeStates.delete(queueId);
     }
   };
   void current.then(cleanup, cleanup);

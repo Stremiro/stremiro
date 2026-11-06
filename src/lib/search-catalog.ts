@@ -34,29 +34,26 @@ export function searchCatalogQueryOptions(facets: SearchFacets, localYear: numbe
     readonly unknown[],
     SearchCatalogContinuation | undefined
   >({
-    // Browse and text search share paging; the key head matches the invalidation sweep.
     queryKey: [
       ...SEARCH_CATALOG_QUERY_KEY,
       normalizedQuery ?? null,
       facets.type,
       browseFeed ?? null,
-      normalizedGenre ?? null,
+      normalizedGenre ? foldAsciiCase(normalizedGenre) : null,
       // `new` pins a year; key it so a rollover can't serve a stale catalog.
       newFeedYear ?? null,
     ],
-    queryFn: ({ pageParam }): Promise<SearchCatalogPage> => {
-      const feed = browseFeed === 'featured' ? 'featured' : undefined;
-      return api.querySearchCatalogPage({
+    queryFn: ({ pageParam }) =>
+      api.querySearchCatalogPage({
         query: normalizedQuery,
         mediaType: facets.type === 'all' ? undefined : facets.type,
-        feed,
+        feed: browseFeed === 'featured' ? 'featured' : undefined,
         genres: normalizedGenre ? [normalizedGenre] : undefined,
         yearFrom: newFeedYear,
         yearTo: newFeedYear,
         continuation: pageParam,
-      });
-    },
-    initialPageParam: undefined as SearchCatalogContinuation | undefined,
+      }),
+    initialPageParam: undefined,
     getNextPageParam: (lastPage) => (lastPage.exhausted ? undefined : lastPage.continuation),
     structuralSharing: (previous, next) => {
       const data = next as CachedSearchCatalogData | undefined;

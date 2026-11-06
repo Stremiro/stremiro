@@ -52,7 +52,7 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
           className='mx-auto w-12 h-12 text-red-400/90 mb-4'
           strokeWidth={1.5}
         />
-        <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback Error</h2>
+        <h2 className='text-2xl font-bold mb-2 tracking-tight'>Playback interrupted</h2>
         <p className='mx-auto text-zinc-400 mb-6 max-w-sm wrap-anywhere text-sm leading-relaxed'>
           {message}
         </p>
@@ -62,7 +62,7 @@ export const PlayerErrorOverlay = memo(function PlayerErrorOverlay({
             onClick={onRetry}
             className='rounded-lg bg-white px-4 py-2 text-sm font-semibold text-black transition-colors hover:bg-white/85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/60'
           >
-            Try again
+            Retry playback
           </button>
           <button type='button' onClick={onChooseStream} className={ERROR_SECONDARY_BUTTON_CLASS}>
             Choose stream

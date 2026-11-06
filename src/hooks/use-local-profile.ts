@@ -32,7 +32,7 @@ const DEFAULT_PROFILE: LocalProfile = {
   accentTargets: DEFAULT_ACCENT_TARGETS,
 };
 
-const DEFAULT_PROFILE_PREFERENCES: ProfilePreferences = {
+export const DEFAULT_PROFILE_PREFERENCES: ProfilePreferences = {
   profile: DEFAULT_PROFILE,
   viewMode: 'grid',
 };

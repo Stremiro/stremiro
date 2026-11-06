@@ -208,7 +208,7 @@ export function HoverTrailerPreview({
         <div
           aria-hidden
           className={cn(
-            'pointer-events-none absolute inset-x-0 top-0 z-10 h-0.5 origin-left bg-(--accent-prog) shadow-[0_0_8px_rgb(var(--accent-prog-rgb)/0.6)] transition-opacity duration-300',
+            'pointer-events-none absolute inset-x-0 top-0 z-10 h-[3px] origin-left bg-(--accent-prog) transition-opacity duration-300 motion-reduce:transition-none',
             revealed && 'opacity-0',
           )}
           style={{ animation: `watch-progress-entrance ${REVEAL_SETTLE_MS}ms linear both` }}

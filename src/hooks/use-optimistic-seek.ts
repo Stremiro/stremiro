@@ -1,5 +1,5 @@
 import { type RefObject, useCallback, useEffect, useRef } from 'react';
-import { mpvCommand, seekAbsoluteSeconds, type PlayerSeekTarget } from '@/lib/player-mpv';
+import { seekAbsoluteSeconds, type PlayerSeekTarget } from '@/lib/player-mpv';
 
 import type { PlayerOsdAction } from '@/components/player-osd-overlay';
 import type { PlaybackClock } from '@/lib/player-clock';
@@ -93,9 +93,8 @@ export function useOptimisticSeek({
         0,
         effectiveDuration > 0 ? Math.min(effectiveDuration, targetTime) : targetTime,
       );
-
       pendingSeekTargetRef.current = boundedTarget;
-      seekTargetRef.current = { seconds: boundedTarget, startedAt: now };
+      seekTargetRef.current = { seconds: boundedTarget, startedAt: now, commandPending: true };
       pendingSeekDeadlineRef.current = now + OPTIMISTIC_SEEK_ACK_TIMEOUT_MS;
       seekGenerationRef.current += 1;
       seekAnnounceEpochRef.current += 1;
@@ -109,7 +108,6 @@ export function useOptimisticSeek({
   const runSeek = useCallback(
     async (
       targetTime: number,
-      command: (boundedTarget: number) => Promise<void>,
       osd: (boundedTarget: number) => PlayerOsdAction,
       source: 'user' | 'automatic' = 'user',
       onComplete?: () => void,
@@ -120,9 +118,12 @@ export function useOptimisticSeek({
       const boundedTarget = primeOptimisticSeek(targetTime);
       const generation = seekGenerationRef.current;
       const announceEpoch = seekAnnounceEpochRef.current;
+      const seekTarget = seekTargetRef.current;
 
       try {
-        await command(boundedTarget);
+        await seekAbsoluteSeconds(boundedTarget).finally(() => {
+          if (seekTarget) seekTarget.commandPending = false;
+        });
       } catch (seekError) {
         // Roll back only while this seek still owns the pending slot — publishing the pre-seek time would stomp a newer prime.
         if (seekGenerationRef.current === generation) {
@@ -160,7 +161,6 @@ export function useOptimisticSeek({
       seekStreakRef.current = null;
       return runSeek(
         seconds,
-        seekAbsoluteSeconds,
         // Absolute jumps (percent keys, bar release, skips) had no feedback — show the landing point.
         (boundedTarget) => ({ kind: 'seek', target: boundedTarget }),
         source,
@@ -181,23 +181,27 @@ export function useOptimisticSeek({
           ? { ...previousStreak, at: now }
           : { direction, origin: baseTime, at: now };
       seekStreakRef.current = streak;
-      return runSeek(
-        baseTime + seconds,
-        (boundedTarget) => mpvCommand('seek', [(boundedTarget - baseTime).toString(), 'relative']),
-        (boundedTarget) => ({
-          kind: 'seek',
-          direction: seconds > 0 ? 'forward' : 'backward',
-          // Offset travelled since the streak began so end-clamping never reports seconds that didn't happen.
-          seconds: Math.round(Math.abs(boundedTarget - streak.origin)),
-          target: boundedTarget,
-        }),
-      );
+      return runSeek(baseTime + seconds, (boundedTarget) => ({
+        kind: 'seek',
+        direction: seconds > 0 ? 'forward' : 'backward',
+        // Offset travelled since the streak began so end-clamping never reports seconds that didn't happen.
+        seconds: Math.round(Math.abs(boundedTarget - streak.origin)),
+        target: boundedTarget,
+      }));
     },
     [runSeek, currentTimeRef],
   );
 
   // Position-probe gate: a pending seek means position is about to move — the paused poll must keep ticking until settle or hold lapse.
-  const isSeekPending = useCallback(() => pendingSeekTargetRef.current !== null, []);
+  const isSeekPending = useCallback(() => {
+    if (
+      pendingSeekTargetRef.current !== null &&
+      performance.now() >= pendingSeekDeadlineRef.current
+    ) {
+      clearOptimisticSeek();
+    }
+    return pendingSeekTargetRef.current !== null;
+  }, [clearOptimisticSeek]);
   const getSeekTarget = useCallback(() => seekTargetRef.current, []);
   const confirmSeek = useCallback(() => {
     seekTargetRef.current = null;

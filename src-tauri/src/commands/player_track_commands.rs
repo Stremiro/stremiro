@@ -48,7 +48,7 @@ pub(crate) struct ObservedTrackIds {
     sub: Option<i64>,
 }
 
-fn mpv_property(
+pub(crate) fn mpv_property(
     app: &AppHandle,
     window_label: &str,
     name: String,

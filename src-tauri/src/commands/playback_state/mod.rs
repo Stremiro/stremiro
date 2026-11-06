@@ -108,6 +108,21 @@ impl PlaybackStateService {
         Self::default()
     }
 
+    /// Owns the clone + blocking-pool hop for command handlers reaching the
+    /// service off the async worker.
+    pub(crate) async fn run_store_op<T>(
+        &self,
+        app: &AppHandle,
+        operation: impl FnOnce(&Self, &AppHandle) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String>
+    where
+        T: Send + 'static,
+    {
+        let service = self.clone();
+        let app = app.clone();
+        crate::commands::run_blocking_store_op(move || operation(&service, &app)).await
+    }
+
     pub(crate) fn history_generation(&self) -> u64 {
         self.history_generation.load(Ordering::SeqCst)
     }
@@ -505,10 +520,7 @@ impl PlaybackStateService {
 
     pub(crate) fn clear(&self, app: &AppHandle) -> Result<(), String> {
         // A failed JSON open must not leave cached snapshots suppressing re-saves.
-        {
-            let mut persisted = lock_or_recover(&self.persisted_history);
-            persisted.clear();
-        }
+        lock_or_recover(&self.persisted_history).clear();
 
         let store = self.open_state_store(app)?;
         self.bump_history_reset_epoch();
@@ -542,11 +554,16 @@ impl PlaybackStateService {
     }
 }
 
-fn playback_title_scope_key(media_type: Option<&str>, media_id: Option<&str>) -> Option<String> {
-    let media_type = normalize_watch_progress_type(media_type?)?;
-    let media_id = normalize_media_id(media_id?)?;
+fn normalize_title_scope(media_type: &str, media_id: &str) -> Option<(&'static str, String)> {
+    Some((
+        normalize_watch_progress_type(media_type)?,
+        normalize_media_id(media_id)?,
+    ))
+}
 
-    Some(format!("{}:{}", media_type, media_id))
+fn playback_title_scope_key(media_type: Option<&str>, media_id: Option<&str>) -> Option<String> {
+    let (media_type, media_id) = normalize_title_scope(media_type?, media_id?)?;
+    Some(format!("{media_type}:{media_id}"))
 }
 
 /// Evicts oldest index entries past `cap` by each snapshot's `updated_at` — keeps

@@ -2,6 +2,7 @@ import { Channel } from '@tauri-apps/api/core';
 import { replaceEqualDeep, useQuery, useQueryClient } from '@tanstack/react-query';
 import { useEffect, useRef, useState } from 'react';
 import { useDebounce } from '@/hooks/use-debounce';
+import { ITEM_SEARCH_DEBOUNCE_MS } from '@/hooks/use-item-search';
 import { useOnlineStatus } from '@/hooks/use-online-status';
 import { useTitleWatchProgress } from '@/hooks/use-media-library';
 import { useSelectorPreferencesState } from '@/hooks/use-selector-preferences';
@@ -40,7 +41,7 @@ const EMPTY_STREAM_STATS: StreamSelectorStats = {
 function shareStreamSelectorData(previousData: unknown, nextData: unknown): StreamSelectorData {
   const previous = previousData as StreamSelectorData | undefined;
   const next = nextData as StreamSelectorData;
-  if (!previous) return next;
+  if (!previous || previous === next) return next;
 
   const { streams: previousStreams, ...previousFields } = previous;
   const { streams: nextStreams, ...nextFields } = next;
@@ -104,7 +105,7 @@ export function useStreamSelectorController({
   });
   const [searchQuery, setSearchQuery] = useState('');
   const normalizedSearchQuery = searchQuery.trim();
-  const debouncedSearchQuery = useDebounce(normalizedSearchQuery, 180);
+  const debouncedSearchQuery = useDebounce(normalizedSearchQuery, ITEM_SEARCH_DEBOUNCE_MS);
   const requestedSearchQuery = normalizedSearchQuery ? debouncedSearchQuery : '';
   useEffect(() => {
     setSearchQuery('');

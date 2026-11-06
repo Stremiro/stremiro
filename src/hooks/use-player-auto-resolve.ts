@@ -2,6 +2,7 @@ import { type RefObject, useEffect, useEffectEvent, useRef } from 'react';
 
 import type { PlayerStreamSession } from '@/hooks/use-player-stream-session';
 import type { PlayerRouteMediaType } from '@/lib/player-navigation';
+import { clearProviderDataCaches } from '@/lib/api-cache';
 import { applyResolvedStreamToSession, resolvePlayerStream } from '@/lib/resolve-player-stream';
 import { withTimeout } from '@/lib/utils';
 
@@ -149,4 +150,11 @@ export function usePlayerAutoResolve({
     setError,
     setResolveStatus,
   ]);
+
+  return () => {
+    autoResolveGenRef.current += 1;
+    clearProviderDataCaches();
+    stream.setActiveStreamUrl(undefined);
+    setError(null);
+  };
 }

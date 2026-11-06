@@ -15,6 +15,7 @@ import { applyAccentVars, cn } from '@/lib/utils';
 import {
   SETTINGS_INSET_SURFACE_CLASS,
   SettingsBody,
+  SettingsCard,
   SettingsGroup,
   SettingsGroupHeader,
   SettingsQueryError,
@@ -160,12 +161,12 @@ export function AppearanceSettings() {
   };
 
   return (
-    <div className='@container/appearance space-y-4'>
+    <div className='@container/appearance space-y-8'>
       <SettingsQueryError
         query={profilePreferencesQuery}
         message="Couldn't load your appearance preferences."
       />
-      <div className='grid items-start gap-4 @min-[54rem]/appearance:grid-cols-2'>
+      <div className='grid items-start gap-x-5 gap-y-8 @min-[54rem]/appearance:grid-cols-2'>
         <SettingsGroup>
           <SettingsGroupHeader
             icon={Palette}
@@ -185,29 +186,31 @@ export function AppearanceSettings() {
               </Button>
             }
           />
-          <SettingsBody className='@container/appearance-controls space-y-5'>
-            <TintPreview />
-            <fieldset
-              disabled={isHydrating}
-              inert={isHydrating}
-              className='grid min-w-0 items-start gap-6 disabled:opacity-50 @min-[36rem]/appearance-controls:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]'
-            >
-              <AccentControls
-                idPrefix='setting-appearance'
-                accentColor={draftAccentColor ?? profile.accentColor}
-                committedColor={profile.accentColor}
-                intensity={draftIntensity ?? profile.accentIntensity}
-                committedIntensity={profile.accentIntensity}
-                onAccentColorChange={setDraftAccentColor}
-                onAccentColorCommit={commitAccentColor}
-                onIntensityChange={setDraftIntensity}
-                onIntensityCommit={(value) => {
-                  setDraftIntensity(undefined);
-                  saveProfile({ accentIntensity: value });
-                }}
-              />
-            </fieldset>
-          </SettingsBody>
+          <SettingsCard>
+            <SettingsBody className='@container/appearance-controls space-y-5'>
+              <TintPreview />
+              <fieldset
+                disabled={isHydrating}
+                inert={isHydrating}
+                className='grid min-w-0 items-start gap-6 disabled:opacity-50 @min-[36rem]/appearance-controls:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]'
+              >
+                <AccentControls
+                  idPrefix='setting-appearance'
+                  accentColor={draftAccentColor ?? profile.accentColor}
+                  committedColor={profile.accentColor}
+                  intensity={draftIntensity ?? profile.accentIntensity}
+                  committedIntensity={profile.accentIntensity}
+                  onAccentColorChange={setDraftAccentColor}
+                  onAccentColorCommit={commitAccentColor}
+                  onIntensityChange={setDraftIntensity}
+                  onIntensityCommit={(value) => {
+                    setDraftIntensity(undefined);
+                    saveProfile({ accentIntensity: value });
+                  }}
+                />
+              </fieldset>
+            </SettingsBody>
+          </SettingsCard>
         </SettingsGroup>
         <SettingsGroup>
           <SettingsGroupHeader
@@ -215,18 +218,24 @@ export function AppearanceSettings() {
             title='Tint targets'
             description='Choose where your accent appears. Off areas stay neutral.'
           />
-          <SettingsBody rows>
-            {TINT_TARGETS.map((target) => (
-              <SettingsRow key={target.field} label={target.label} description={target.description}>
-                <SettingsSwitch
-                  ariaLabel={target.label}
-                  checked={profile.accentTargets[target.field]}
-                  disabled={isHydrating}
-                  onChange={() => toggleTarget(target.field)}
-                />
-              </SettingsRow>
-            ))}
-          </SettingsBody>
+          <SettingsCard>
+            <SettingsBody rows>
+              {TINT_TARGETS.map((target) => (
+                <SettingsRow
+                  key={target.field}
+                  label={target.label}
+                  description={target.description}
+                >
+                  <SettingsSwitch
+                    ariaLabel={target.label}
+                    checked={profile.accentTargets[target.field]}
+                    disabled={isHydrating}
+                    onChange={() => toggleTarget(target.field)}
+                  />
+                </SettingsRow>
+              ))}
+            </SettingsBody>
+          </SettingsCard>
         </SettingsGroup>
       </div>
     </div>

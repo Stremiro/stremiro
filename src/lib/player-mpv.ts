@@ -87,6 +87,7 @@ export interface PlayerSeekTarget {
   seconds: number;
   startedAt: number;
   failed?: boolean;
+  commandPending?: boolean;
 }
 
 interface PlaybackPositionProbe {
@@ -96,6 +97,7 @@ interface PlaybackPositionProbe {
   nextEpisodePrefetchDue: boolean;
   seekFailed: boolean;
   prematureEof: boolean;
+  eofReached: boolean;
 }
 
 /** One IPC reads playhead seconds + demuxer cache ahead; IPC failure is a silent no-op during teardown. */
@@ -131,6 +133,7 @@ export async function readPlaybackPositionProbe(
       nextEpisodePrefetchDue: false,
       seekFailed: false,
       prematureEof: false,
+      eofReached: false,
     };
   }
 }

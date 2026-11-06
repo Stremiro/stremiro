@@ -370,12 +370,9 @@ export function usePlayerTrackController({
       type,
       () => changePlayerTrack(type, 'cycle'),
       (fresh) => {
-        const landedId = fresh.find((track) => track.type === type && track.selected)?.id ?? 'no';
-        persistTrackSelection(
-          type,
-          landedId,
-          fresh.find((track) => track.type === type && track.id === landedId),
-        );
+        const landed = fresh.find((track) => track.type === type && track.selected);
+        const landedId = landed?.id ?? 'no';
+        persistTrackSelection(type, landedId, landed);
         return landedId;
       },
     ).catch(() => null);

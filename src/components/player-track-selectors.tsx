@@ -8,6 +8,7 @@ import {
   CHROME_MENU_ROW_FOCUS_CLASS,
   CHROME_POPOVER_CLASS,
 } from '@/components/player-chrome-styles';
+import { AudioSyncStepper, StepButton } from '@/components/audio-sync-stepper';
 import { PlayerSlider } from '@/components/player-slider';
 import { SubtitleAppearanceControls } from '@/components/subtitle-appearance-controls';
 import { RetryBanner } from '@/components/retry-banner';
@@ -202,6 +203,7 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
               'flex min-h-10 items-center justify-between gap-3',
               isHydrating ? 'cursor-wait' : 'cursor-pointer',
             )}
+            title='Boosts quiet audio and smooths volume changes.'
           >
             <span className='text-[13px] font-medium text-zinc-200'>Night mode</span>
             <span id={`${headingId}-night-description`} className='sr-only'>
@@ -223,52 +225,16 @@ export const AudioTrackSelector = memo(function AudioTrackSelector({
             title='Adjust only if sound and picture are out of sync.'
           >
             <span className='mr-auto text-[13px] font-medium text-zinc-300'>Audio sync</span>
-            <button
-              type='button'
-              className={TRACK_NUDGE_BUTTON_CLASS}
-              aria-label='Play audio 0.1 seconds earlier'
-              aria-disabled={isHydrating || audioDelay <= -5 || undefined}
-              onClick={() => {
-                if (!isHydrating && audioDelay > -5)
-                  updatePreferences({
-                    audioDelay: Math.round(clamp(audioDelay - 0.1, -5, 5) * 10) / 10,
-                  });
-              }}
-            >
-              <Minus aria-hidden='true' className='h-3.5 w-3.5' />
-            </button>
-            <output
-              className='w-14 shrink-0 text-center text-[13px] tabular-nums text-zinc-100'
-              aria-live='polite'
-            >
-              {audioDelay > 0 ? '+' : ''}
-              {audioDelay.toFixed(1)}s
-            </output>
-            <button
-              type='button'
-              className={TRACK_NUDGE_BUTTON_CLASS}
-              aria-label='Play audio 0.1 seconds later'
-              aria-disabled={isHydrating || audioDelay >= 5 || undefined}
-              onClick={() => {
-                if (!isHydrating && audioDelay < 5)
-                  updatePreferences({
-                    audioDelay: Math.round(clamp(audioDelay + 0.1, -5, 5) * 10) / 10,
-                  });
-              }}
-            >
-              <Plus aria-hidden='true' className='h-3.5 w-3.5' />
-            </button>
-            <button
-              type='button'
-              className={TRACK_RESET_BUTTON_CLASS}
-              aria-label='Reset audio sync'
-              aria-disabled={isHydrating || audioDelay === 0 || undefined}
-              onClick={() => {
-                if (!isHydrating && audioDelay !== 0) updatePreferences({ audioDelay: 0 });
-              }}
-            >
-              Reset
-            </button>
+            <AudioSyncStepper
+              audioDelay={audioDelay}
+              isHydrating={isHydrating}
+              updatePreferences={updatePreferences}
+              buttonClassName={TRACK_NUDGE_BUTTON_CLASS}
+              resetClassName={TRACK_RESET_BUTTON_CLASS}
+              outputClassName='w-14 shrink-0 text-center text-[13px] tabular-nums text-zinc-100'
+              resetContent='Reset'
+              live
+            />
           </div>
         </div>
       </PopoverContent>
@@ -400,17 +366,14 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
           <h4 id={headingId} className='text-[13px] font-semibold text-zinc-200'>
             Subtitles
           </h4>
-          <button
-            type='button'
+          <StepButton
             className={TRACK_RESET_BUTTON_CLASS}
-            aria-label='Reset subtitle settings'
-            aria-disabled={!canResetSubtitleSettings || undefined}
-            onClick={() => {
-              if (canResetSubtitleSettings) resetSubtitleSettings();
-            }}
+            label='Reset subtitle settings'
+            disabled={!canResetSubtitleSettings}
+            onStep={resetSubtitleSettings}
           >
             Reset
-          </button>
+          </StepButton>
         </div>
 
         {hasPreferencesError && (
@@ -659,23 +622,19 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                       </span>
                     </div>
                     <div className='flex items-center gap-1.5'>
-                      <button
-                        type='button'
-                        aria-label={row.decreaseLabel}
-                        title={row.decreaseLabel}
+                      <StepButton
                         className={TRACK_NUDGE_BUTTON_CLASS}
-                        aria-disabled={isHydrating || row.current <= row.min || undefined}
-                        onClick={() => {
-                          if (!isHydrating && row.current > row.min)
-                            row.onApply(clamp(row.current - row.nudge, row.min, row.max));
-                        }}
+                        label={row.decreaseLabel}
+                        title={row.decreaseLabel}
+                        disabled={isHydrating || row.current <= row.min}
+                        onStep={() => row.onApply(clamp(row.current - row.nudge, row.min, row.max))}
                       >
                         <Minus
                           aria-hidden='true'
                           className='h-3 w-3'
                           strokeWidth={CHROME_ICON_STROKE}
                         />
-                      </button>
+                      </StepButton>
                       <PlayerSlider
                         disabled={isHydrating}
                         value={[row.current]}
@@ -687,23 +646,19 @@ export const SubtitleTrackSelector = memo(function SubtitleTrackSelector({
                         onValueChange={(values) => row.onApply(values[0])}
                         className='h-6 min-w-0 flex-1'
                       />
-                      <button
-                        type='button'
-                        aria-label={row.increaseLabel}
-                        title={row.increaseLabel}
+                      <StepButton
                         className={TRACK_NUDGE_BUTTON_CLASS}
-                        aria-disabled={isHydrating || row.current >= row.max || undefined}
-                        onClick={() => {
-                          if (!isHydrating && row.current < row.max)
-                            row.onApply(clamp(row.current + row.nudge, row.min, row.max));
-                        }}
+                        label={row.increaseLabel}
+                        title={row.increaseLabel}
+                        disabled={isHydrating || row.current >= row.max}
+                        onStep={() => row.onApply(clamp(row.current + row.nudge, row.min, row.max))}
                       >
                         <Plus
                           aria-hidden='true'
                           className='h-3 w-3'
                           strokeWidth={CHROME_ICON_STROKE}
                         />
-                      </button>
+                      </StepButton>
                     </div>
                   </div>
                 ))}

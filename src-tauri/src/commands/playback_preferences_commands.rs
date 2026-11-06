@@ -182,18 +182,18 @@ pub async fn get_effective_playback_language_preferences(
 
     // One blocking round-trip for defaults plus the scoped merge — a two-hop
     // form could mix defaults from one instant with a snapshot from another.
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
-        let defaults = read_playback_language_preferences_from_store(&store);
-        service.get_effective_playback_language_preferences(
-            &app,
-            media_id.as_deref(),
-            media_type.as_deref(),
-            defaults,
-        )
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            let store = super::open_store(app, SETTINGS_STORE_FILE)?;
+            let defaults = read_playback_language_preferences_from_store(&store);
+            service.get_effective_playback_language_preferences(
+                app,
+                media_id.as_deref(),
+                media_type.as_deref(),
+                defaults,
+            )
+        })
+        .await
 }
 
 /// Bound on the candidate list: real files carry tens of tracks, so a larger
@@ -243,51 +243,51 @@ pub async fn save_selected_playback_language_preference(
     let (media_id, media_type) =
         normalize_playback_preference_scope(media_id.as_deref(), media_type.as_deref())?;
 
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        let store = super::open_store(&app, SETTINGS_STORE_FILE)?;
-        let mut preferences = read_playback_language_preferences_from_store(&store);
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            let store = super::open_store(app, SETTINGS_STORE_FILE)?;
+            let mut preferences = read_playback_language_preferences_from_store(&store);
 
-        let track = track.map(normalize_track_language_candidate);
-        let selected_language = infer_selected_playback_language_preference(
-            preference_kind,
-            track.as_ref(),
-            subtitles_off.unwrap_or(false),
-        );
-        let should_persist = selected_language.is_some();
-        if let Some(selected_language) = selected_language {
-            match preference_kind {
-                PlaybackLanguagePreferenceKind::Audio => {
-                    preferences.preferred_audio_language = Some(selected_language);
-                }
-                PlaybackLanguagePreferenceKind::Sub => {
-                    preferences.preferred_subtitle_language = Some(selected_language);
+            let track = track.map(normalize_track_language_candidate);
+            let selected_language = infer_selected_playback_language_preference(
+                preference_kind,
+                track.as_ref(),
+                subtitles_off.unwrap_or(false),
+            );
+            let should_persist = selected_language.is_some();
+            if let Some(selected_language) = selected_language {
+                match preference_kind {
+                    PlaybackLanguagePreferenceKind::Audio => {
+                        preferences.preferred_audio_language = Some(selected_language);
+                    }
+                    PlaybackLanguagePreferenceKind::Sub => {
+                        preferences.preferred_subtitle_language = Some(selected_language);
+                    }
                 }
             }
-        }
 
-        // Read the scoped store before committing globals so a failed merge cannot report a persisted save as rejected.
-        let effective = match (media_id.as_deref(), media_type.as_deref()) {
-            (Some(media_id), Some(media_type)) => {
-                Some(service.get_effective_playback_language_preferences(
-                    &app,
-                    Some(media_id),
-                    Some(media_type),
-                    preferences.clone(),
-                )?)
+            // Read the scoped store before committing globals so a failed merge cannot report a persisted save as rejected.
+            let effective = match (media_id.as_deref(), media_type.as_deref()) {
+                (Some(media_id), Some(media_type)) => {
+                    Some(service.get_effective_playback_language_preferences(
+                        app,
+                        Some(media_id),
+                        Some(media_type),
+                        preferences.clone(),
+                    )?)
+                }
+                _ => None,
+            };
+            if should_persist {
+                persist_playback_language_preferences(&store, &preferences)?;
             }
-            _ => None,
-        };
-        if should_persist {
-            persist_playback_language_preferences(&store, &preferences)?;
-        }
 
-        Ok(SavedPlaybackLanguagePreference {
-            preferences,
-            effective,
+            Ok(SavedPlaybackLanguagePreference {
+                preferences,
+                effective,
+            })
         })
-    })
-    .await
+        .await
 }
 
 #[command]
@@ -321,19 +321,19 @@ pub async fn save_playback_language_preference_outcome_from_tracks(
     // languages drops its per-title override and falls back to globals.
 
     // Blocking store/file IO — routed through the dedicated pool like the other playback_state save paths.
-    let service = playback_state.inner().clone();
-    super::run_blocking_store_op(move || {
-        service.record_playback_language_preference_outcome(
-            &app,
-            &media_id,
-            &media_type,
-            preferred_audio_language,
-            preferred_subtitle_language,
-            now_unix_millis(),
-            expected_generation,
-        )
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            service.record_playback_language_preference_outcome(
+                app,
+                &media_id,
+                &media_type,
+                preferred_audio_language,
+                preferred_subtitle_language,
+                now_unix_millis(),
+                expected_generation,
+            )
+        })
+        .await
 }
 
 /// The closed language set, exposed once so the settings UI never carries a

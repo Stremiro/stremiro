@@ -257,7 +257,7 @@ fn matching_title_key(title: &str, query: &str) -> Option<String> {
     title.contains(query).then_some(title)
 }
 
-#[command]
+#[command(async)]
 pub fn search_titles(titles: Vec<String>, query: String) -> Result<Vec<u32>, String> {
     if titles.len() > TITLE_SEARCH_MAX_TITLES {
         return Err("Too many titles.".to_string());
@@ -389,27 +389,28 @@ pub async fn get_watchlist(
     app: AppHandle,
     playback_state: State<'_, PlaybackStateService>,
 ) -> Result<Vec<MediaItem>, String> {
-    let service = playback_state.inner().clone();
-    run_blocking_store_op(move || {
-        let store = super::open_store(&app, LIBRARY_STORE_FILE)?;
-        let index = load_index(&store, LIBRARY_INDEX_KEY)?;
-        let statuses =
-            read_watch_status_snapshot(&super::open_store(&app, WATCH_STATUS_STORE_FILE)?)?.items;
-        let selected = statuses
-            .iter()
-            .filter(|(_, status)| status.as_str() == "plan_to_watch")
-            .map(|(id, _)| id.as_str())
-            .collect();
-        let items = read_library_selection(&store, index, &selected);
-        let planned: Vec<_> = items.keys().map(String::as_str).collect();
-        let started = service
-            .load_latest_resume_title_identities(&app, &planned)?
-            .into_iter()
-            .map(|title| title.id)
-            .collect();
-        Ok(watchlist_items(items.into_values(), &statuses, &started))
-    })
-    .await
+    playback_state
+        .run_store_op(&app, move |service, app| {
+            let store = super::open_store(app, LIBRARY_STORE_FILE)?;
+            let index = load_index(&store, LIBRARY_INDEX_KEY)?;
+            let statuses =
+                read_watch_status_snapshot(&super::open_store(app, WATCH_STATUS_STORE_FILE)?)?
+                    .items;
+            let selected = statuses
+                .iter()
+                .filter(|(_, status)| status.as_str() == "plan_to_watch")
+                .map(|(id, _)| id.as_str())
+                .collect();
+            let items = read_library_selection(&store, index, &selected);
+            let planned: Vec<_> = items.keys().map(String::as_str).collect();
+            let started = service
+                .load_latest_resume_title_identities(app, &planned)?
+                .into_iter()
+                .map(|title| title.id)
+                .collect();
+            Ok(watchlist_items(items.into_values(), &statuses, &started))
+        })
+        .await
 }
 
 #[cfg(test)]

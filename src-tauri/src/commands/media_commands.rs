@@ -103,7 +103,7 @@ fn episode_search_indices(query: &str, episodes: &[EpisodeSearchFields]) -> Vec<
         .collect()
 }
 
-#[command]
+#[command(async)]
 pub fn search_episodes(
     query: String,
     episodes: Vec<EpisodeSearchFields>,
@@ -286,22 +286,22 @@ pub async fn get_media_details(
 
     if let Some(episodes) = details.episodes.take() {
         let fallback_lookup_id = details.imdb_id.as_deref().unwrap_or(id.as_str());
-        let service = playback_state.inner().clone();
         let cache_id = id.clone();
         let fallback_owned = fallback_lookup_id.to_string();
         // Retain the payload across a failed hop without deep-cloning it on success.
         let episodes = Arc::new(episodes);
         let cache_episodes = Arc::clone(&episodes);
-        let snapshots = super::run_blocking_store_op(move || {
-            service.cache_episode_mappings(
-                &app,
-                media_type,
-                &cache_id,
-                Some(fallback_owned.as_str()),
-                &cache_episodes,
-            )
-        })
-        .await;
+        let snapshots = playback_state
+            .run_store_op(&app, move |service, app| {
+                service.cache_episode_mappings(
+                    app,
+                    media_type,
+                    &cache_id,
+                    Some(fallback_owned.as_str()),
+                    &cache_episodes,
+                )
+            })
+            .await;
         details.episodes = Some(enrich_episode_targets(
             Arc::unwrap_or_clone(episodes),
             fallback_lookup_id,
@@ -637,19 +637,18 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
 
     // Single point read off the async worker.
     let cached = {
-        let app_owned = app.clone();
-        let service = playback_state.clone();
         let id_owned = id.clone();
-        super::run_blocking_store_op(move || {
-            service.get_episode_mapping(
-                &app_owned,
-                media_type,
-                &id_owned,
-                canonical_season,
-                canonical_episode,
-            )
-        })
-        .await?
+        playback_state
+            .run_store_op(&app, move |service, app| {
+                service.get_episode_mapping(
+                    app,
+                    media_type,
+                    &id_owned,
+                    canonical_season,
+                    canonical_episode,
+                )
+            })
+            .await?
     };
     if let Some(mapping) = cached {
         return Ok(Some(mapping));
@@ -658,19 +657,18 @@ pub(crate) async fn resolve_episode_stream_mapping_inner(
     let details = fetch_media_details_shared_inner(&app, client, media_type, &id).await?;
 
     if details.episodes.is_some() {
-        let app_owned = app.clone();
-        let service = playback_state.clone();
         let id_owned = id.clone();
-        let snapshots = super::run_blocking_store_op(move || {
-            service.cache_episode_mappings(
-                &app_owned,
-                media_type,
-                &id_owned,
-                Some(details.imdb_id.as_deref().unwrap_or(id_owned.as_str())),
-                details.episodes.as_deref().unwrap_or_default(),
-            )
-        })
-        .await?;
+        let snapshots = playback_state
+            .run_store_op(&app, move |service, app| {
+                service.cache_episode_mappings(
+                    app,
+                    media_type,
+                    &id_owned,
+                    Some(details.imdb_id.as_deref().unwrap_or(id_owned.as_str())),
+                    details.episodes.as_deref().unwrap_or_default(),
+                )
+            })
+            .await?;
         if let Some(mapping) = snapshots.and_then(|snapshots| {
             snapshots.into_iter().find(|snapshot| {
                 snapshot.canonical_season == canonical_season

@@ -58,24 +58,25 @@ pub(crate) struct AnimeIds {
     pub tmdb_season: Option<u32>,
 }
 
+fn numeric_field(value: Option<&serde_json::Value>) -> Option<u64> {
+    match value? {
+        serde_json::Value::Number(number) => number.as_u64(),
+        serde_json::Value::String(text) => text.trim().parse::<u64>().ok(),
+        _ => None,
+    }
+}
+
 fn bounded_u32(value: Option<&serde_json::Value>) -> Option<u32> {
-    let raw = match value? {
-        serde_json::Value::Number(number) => number.as_u64()?,
-        serde_json::Value::String(text) => text.trim().parse::<u64>().ok()?,
-        _ => return None,
-    };
+    let raw = numeric_field(value)?;
     (raw > 0 && raw <= ANIME_ID_MAX).then_some(raw as u32)
 }
 
 /// Seasons include 0 (specials numbering) - a conflicting 0 must disagree
 /// with a requested 1, not silently become "missing".
 fn bounded_season(value: Option<&serde_json::Value>) -> Option<u32> {
-    let raw = match value? {
-        serde_json::Value::Number(number) => number.as_u64()?,
-        serde_json::Value::String(text) => text.trim().parse::<u64>().ok()?,
-        _ => return None,
-    };
-    (raw <= SEASON_MAX).then_some(raw as u32)
+    numeric_field(value)
+        .filter(|raw| *raw <= SEASON_MAX)
+        .map(|raw| raw as u32)
 }
 
 fn row_from_object(object: &serde_json::Map<String, serde_json::Value>) -> Option<AnimeIds> {

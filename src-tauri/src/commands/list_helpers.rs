@@ -43,13 +43,11 @@ pub struct UserListSummary {
     pub contains_item: bool,
 }
 
-// Validate the snapshot's wire shape without allocating its artwork, description or genres.
+// Match MediaItem's field order for sequence decoding without allocating optional metadata.
 #[derive(Deserialize)]
 pub(super) struct ListItemIdentity {
     id: String,
     title: String,
-    #[serde(rename = "type")]
-    type_: String,
     #[serde(
         default,
         rename = "poster",
@@ -92,6 +90,8 @@ pub(super) struct ListItemIdentity {
         deserialize_with = "validate_optional_genres"
     )]
     _genres: (),
+    #[serde(rename = "type")]
+    type_: String,
 }
 
 fn validate_optional_string<'de, D: serde::Deserializer<'de>>(

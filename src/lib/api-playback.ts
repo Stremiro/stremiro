@@ -24,10 +24,10 @@ import type {
 } from '@/lib/api';
 import {
   buildStreamCacheKey,
-  bumpWatchProgressEpoch,
-  bumpWatchProgressSnapshotRevision,
   primeBestStreamRequest,
   runBestStreamRequest,
+  trackWatchProgressEpochWrite,
+  trackWatchProgressSave,
   withStreamingCacheClear,
 } from '@/lib/api-cache';
 import { safeInvoke } from '@/lib/api-core';
@@ -294,15 +294,9 @@ export const playbackApi = {
       withStreamingCacheClear(safeInvoke<void>('report_playback_stream_outcome', { ...report })),
     ),
   saveWatchProgress: (progress: WatchProgressSave) =>
-    trackPendingAppWrite(
-      safeInvoke<void>('save_watch_progress', { progress }).then(bumpWatchProgressSnapshotRevision),
-    ),
+    trackWatchProgressSave(safeInvoke<void>('save_watch_progress', { progress })),
   saveWatchProgressBatch: (rows: WatchProgress[]) =>
-    trackPendingAppWrite(
-      safeInvoke<void>('save_watch_progress_batch', { rows }).then(
-        bumpWatchProgressSnapshotRevision,
-      ),
-    ),
+    trackWatchProgressSave(safeInvoke<void>('save_watch_progress_batch', { rows })),
   getWatchHistory: () => safeInvoke<WatchProgress[]>('get_watch_history'),
   // Progressive rail: `onProgress` gets the local half early; the result is the merged rail.
   getResumeRail: (
@@ -329,24 +323,20 @@ export const playbackApi = {
       season,
       episode,
     }),
-  // Bump before the IPC lands — a queued save must not resurrect the row. Delete returns removed rows for the Undo snapshot.
-  removeAllFromWatchHistory: (id: string, type: string) => {
-    bumpWatchProgressEpoch();
-    return trackPendingAppWrite(
+  // Delete returns removed rows for the Undo snapshot.
+  removeAllFromWatchHistory: (id: string, type: string) =>
+    trackWatchProgressEpochWrite(
       safeInvoke<WatchProgress[]>('remove_all_from_watch_history', { id, type }),
-    );
-  },
+    ),
   // Hides the title from the home rail (false restores it); history rows stay.
   setContinueWatchingDismissed: (id: string, type: string, dismissed: boolean) =>
     trackPendingAppWrite(
       safeInvoke<void>('set_continue_watching_dismissed', { id, type, dismissed }),
     ),
-  bulkRemoveFromWatchHistory: (items: { id: string; type: string }[]) => {
-    bumpWatchProgressEpoch();
-    return trackPendingAppWrite(
+  bulkRemoveFromWatchHistory: (items: { id: string; type: string }[]) =>
+    trackWatchProgressEpochWrite(
       safeInvoke<WatchProgress[]>('bulk_remove_from_watch_history', { items }),
-    );
-  },
+    ),
   getSkipTimes: (request: {
     mediaType: string;
     id: string;

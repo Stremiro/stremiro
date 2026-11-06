@@ -13,9 +13,9 @@ use crate::providers::{
 };
 use futures_util::stream::{FuturesOrdered, StreamExt};
 use std::collections::{hash_map::Entry, BTreeSet, HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
-use tauri::{command, AppHandle, Manager, State};
+use tauri::{command, AppHandle, State};
 
 const MAX_SIMILAR_TITLES: usize = 20;
 const MAX_SEED_GENRES: usize = 3;
@@ -332,13 +332,6 @@ fn similar_titles_seed_genres(source: &MediaItem, supported: &[String]) -> Vec<S
     seeds
 }
 
-fn resume_store_path(app: &AppHandle) -> Result<PathBuf, String> {
-    app.path()
-        .app_data_dir()
-        .map(|dir| dir.join(PLAYBACK_RESUME_STORE_FILE))
-        .map_err(|error| error.to_string())
-}
-
 fn watch_seed(details: MediaDetails) -> Option<MediaItem> {
     let seed = normalize_media_item(MediaItem {
         id: details.id,
@@ -368,7 +361,7 @@ pub async fn get_recent_watch_seed(
     app: AppHandle,
     client: State<'_, AddonResourceClient>,
 ) -> Result<Option<MediaItem>, String> {
-    let resume_path = resume_store_path(&app)?;
+    let resume_path = super::resolve_store_path(&app, PLAYBACK_RESUME_STORE_FILE)?;
     let titles = super::run_blocking_op(
         tokio::time::Instant::now() + super::BLOCKING_OP_TIMEOUT,
         "Recent watch history read timed out.",
@@ -442,7 +435,7 @@ pub async fn query_similar_titles(
     if seed_genres.is_empty() {
         return Ok(Vec::new());
     }
-    let resume_path = resume_store_path(&app);
+    let resume_path = super::resolve_store_path(&app, PLAYBACK_RESUME_STORE_FILE);
     let source_type = source.type_.clone();
     let store_app = app.clone();
     let mut watched = std::pin::pin!(super::run_blocking_store_op(move || {
