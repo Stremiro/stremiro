@@ -6,8 +6,9 @@ The two DLLs in this directory are the packaged libmpv pair
 scripts/build-tauri.ps1 fails packaging if this pair is missing, duplicated,
 locked, or diverges from a dev-time copy at src-tauri/.
 That packaging consistency check does not authenticate either binary.
-Publication remains blocked until the complete runtime is attributable,
-licensed for distribution and passes native TLS/origin-isolation checks.
+Known TLS/origin-isolation defects remain in this native runtime.
+mpv provenance and distribution obligations are still unresolved; the
+v0.9.3-beta release uses these unchanged binaries, not a hardened rebuild.
 
 libmpv-2.dll
   Product      : mpv (libmpv client API)
